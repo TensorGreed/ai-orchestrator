@@ -1,0 +1,92 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-rag-flow",
+    "name": "RAG Flow",
+    "description": "Text Input -> Connector Source -> RAG Retrieve -> Prompt Template -> LLM -> Output",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "text_1",
+        "type": "text_input",
+        "name": "Question",
+        "position": { "x": 70, "y": 220 },
+        "config": {
+          "text": "How does MCP fit into an AI workflow builder?"
+        }
+      },
+      {
+        "id": "connector_1",
+        "type": "connector_source",
+        "name": "Google Drive Connector",
+        "position": { "x": 360, "y": 80 },
+        "config": {
+          "connectorId": "google-drive",
+          "connectorConfig": {
+            "folderId": "demo",
+            "staticDocuments": [
+              "MCP lets agent runtimes discover and call tools from attached servers.",
+              "A visual workflow builder can configure MCP servers per agent node."
+            ]
+          }
+        }
+      },
+      {
+        "id": "rag_1",
+        "type": "rag_retrieve",
+        "name": "RAG Retrieve",
+        "position": { "x": 670, "y": 160 },
+        "config": {
+          "queryTemplate": "{{user_prompt}}",
+          "topK": 3
+        }
+      },
+      {
+        "id": "template_1",
+        "type": "prompt_template",
+        "name": "Grounded Prompt",
+        "position": { "x": 980, "y": 160 },
+        "config": {
+          "template": "Use the context to answer.\n\nContext:\n{{context}}\n\nQuestion:\n{{user_prompt}}",
+          "outputKey": "prompt"
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "LLM",
+        "position": { "x": 1270, "y": 160 },
+        "config": {
+          "provider": {
+            "providerId": "ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "model": "llama3.1",
+            "temperature": 0.1
+          },
+          "promptKey": "prompt"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 1540, "y": 160 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "edge_1", "source": "text_1", "target": "rag_1" },
+      { "id": "edge_2", "source": "connector_1", "target": "rag_1" },
+      { "id": "edge_3", "source": "rag_1", "target": "template_1" },
+      { "id": "edge_4", "source": "text_1", "target": "template_1" },
+      { "id": "edge_5", "source": "template_1", "target": "llm_1" },
+      { "id": "edge_6", "source": "llm_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-03-30T00:00:00.000Z"
+}

@@ -1,0 +1,7 @@
+node_modules
+**/node_modules
+.git
+.gitignore
+apps/web/dist
+apps/api/data
+coverage

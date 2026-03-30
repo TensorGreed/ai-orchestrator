@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-basic-llm",
+    "name": "Basic LLM Flow",
+    "description": "Text Input -> Prompt Template -> LLM Call -> Output",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "text_1",
+        "type": "text_input",
+        "name": "Text Input",
+        "position": { "x": 80, "y": 140 },
+        "config": {
+          "text": "Explain what MCP is in one paragraph."
+        }
+      },
+      {
+        "id": "template_1",
+        "type": "prompt_template",
+        "name": "Prompt Template",
+        "position": { "x": 380, "y": 140 },
+        "config": {
+          "template": "User request: {{user_prompt}}\n\nReturn a concise answer with one bullet list.",
+          "outputKey": "prompt"
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "LLM Call",
+        "position": { "x": 700, "y": 140 },
+        "config": {
+          "provider": {
+            "providerId": "ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "model": "llama3.1",
+            "temperature": 0.2
+          },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 1000, "y": 140 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "text_1",
+        "target": "template_1"
+      },
+      {
+        "id": "edge_2",
+        "source": "template_1",
+        "target": "llm_1"
+      },
+      {
+        "id": "edge_3",
+        "source": "llm_1",
+        "target": "output_1"
+      }
+    ]
+  },
+  "exportedAt": "2026-03-30T00:00:00.000Z"
+}

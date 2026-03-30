@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@ai-orchestrator/shared": ["packages/shared/src/index.ts"],
+      "@ai-orchestrator/provider-sdk": ["packages/provider-sdk/src/index.ts"],
+      "@ai-orchestrator/mcp-sdk": ["packages/mcp-sdk/src/index.ts"],
+      "@ai-orchestrator/connector-sdk": ["packages/connector-sdk/src/index.ts"],
+      "@ai-orchestrator/agent-runtime": ["packages/agent-runtime/src/index.ts"],
+      "@ai-orchestrator/workflow-engine": ["packages/workflow-engine/src/index.ts"]
+    }
+  }
+}

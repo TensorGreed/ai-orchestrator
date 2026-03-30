@@ -1,0 +1,246 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap");
+
+:root {
+  --bg-a: #08101a;
+  --bg-b: #132d40;
+  --panel: rgba(10, 20, 30, 0.88);
+  --panel-border: #2a3b49;
+  --text: #eef4ff;
+  --text-muted: #9ab2c7;
+  --accent: #ffd166;
+  --accent-2: #2dd4bf;
+  --danger: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: radial-gradient(circle at 15% 20%, #1a3448 0%, transparent 40%),
+    radial-gradient(circle at 85% 75%, #11465a 0%, transparent 38%),
+    linear-gradient(130deg, var(--bg-a), var(--bg-b));
+}
+
+.loading-screen {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  font-size: 1.2rem;
+}
+
+.layout-root {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 320px 1fr 360px;
+}
+
+.sidebar {
+  overflow-y: auto;
+  border-right: 1px solid var(--panel-border);
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  padding: 16px;
+}
+
+.right-sidebar {
+  border-left: 1px solid var(--panel-border);
+  border-right: none;
+}
+
+h1 {
+  margin: 0 0 14px;
+  font-size: 1.4rem;
+  letter-spacing: 0.02em;
+}
+
+h2 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+h3 {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.panel-section {
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: rgba(8, 15, 24, 0.8);
+}
+
+.label {
+  display: block;
+  font-size: 0.78rem;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+}
+
+.text-input,
+textarea,
+button,
+input[type="file"] {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #38556b;
+  background: #07101a;
+  color: var(--text);
+  font-family: inherit;
+}
+
+.text-input,
+textarea {
+  padding: 10px;
+  margin-bottom: 8px;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+button {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 600;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.danger {
+  border-color: #7b2f33;
+  color: #ffd2d2;
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.import-label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.import-label input {
+  margin-top: 6px;
+}
+
+.workflow-list {
+  display: grid;
+  gap: 8px;
+}
+
+.workflow-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+}
+
+.workflow-item.active {
+  border-color: var(--accent-2);
+}
+
+.category-group {
+  margin-bottom: 10px;
+}
+
+.palette-item {
+  border: 1px solid #355068;
+  border-radius: 10px;
+  padding: 8px;
+  margin-bottom: 6px;
+  cursor: grab;
+  background: rgba(12, 25, 38, 0.9);
+}
+
+.palette-item small {
+  color: var(--text-muted);
+  display: block;
+}
+
+.canvas-area {
+  position: relative;
+}
+
+.mono-block,
+pre {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.75rem;
+  background: #08121d;
+  border: 1px solid #30495f;
+  border-radius: 8px;
+  padding: 8px;
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.status-list {
+  display: grid;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  border: 1px solid #30495f;
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.empty-note {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.error-banner {
+  border: 1px solid #7d3b3b;
+  border-radius: 10px;
+  padding: 10px;
+  color: #ffd7d7;
+  background: rgba(71, 26, 26, 0.7);
+}
+
+@media (max-width: 1200px) {
+  .layout-root {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(50vh, 1fr) auto;
+  }
+
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--panel-border);
+    max-height: 34vh;
+  }
+
+  .right-sidebar {
+    border-left: none;
+    border-top: 1px solid var(--panel-border);
+  }
+}

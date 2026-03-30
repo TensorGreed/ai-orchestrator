@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-agent-mcp-webhook",
+    "name": "Agentic MCP Webhook Flow",
+    "description": "Webhook Input -> Agent Orchestrator -> Output",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "webhook_1",
+        "type": "webhook_input",
+        "name": "Webhook Input",
+        "position": { "x": 100, "y": 180 },
+        "config": {
+          "passThroughFields": ["system_prompt", "user_prompt", "session_id", "variables"]
+        }
+      },
+      {
+        "id": "agent_1",
+        "type": "agent_orchestrator",
+        "name": "Agent Orchestrator",
+        "position": { "x": 460, "y": 180 },
+        "config": {
+          "provider": {
+            "providerId": "ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "model": "qwen2.5:7b",
+            "temperature": 0.2
+          },
+          "systemPromptTemplate": "{{system_prompt}}",
+          "userPromptTemplate": "{{user_prompt}}",
+          "maxIterations": 6,
+          "toolCallingEnabled": true,
+          "mcpServers": [
+            {
+              "serverId": "mock-mcp",
+              "allowedTools": ["get_current_time", "calculator", "lookup_kb"]
+            }
+          ]
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 860, "y": 180 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "webhook_1",
+        "target": "agent_1"
+      },
+      {
+        "id": "edge_2",
+        "source": "agent_1",
+        "target": "output_1"
+      }
+    ]
+  },
+  "exportedAt": "2026-03-30T00:00:00.000Z"
+}
