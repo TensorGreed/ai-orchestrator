@@ -1,11 +1,12 @@
-import type { Workflow, WorkflowExecutionResult, WorkflowListItem } from "@ai-orchestrator/shared";
+import type { MCPToolDefinition, Workflow, WorkflowExecutionResult, WorkflowListItem } from "@ai-orchestrator/shared";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 export class ApiError extends Error {
   constructor(
     message: string,
-    public readonly status: number
+    public readonly status: number,
+    public readonly payload?: Record<string, unknown>
   ) {
     super(message);
   }
@@ -30,7 +31,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const payload = json && typeof json === "object" ? (json as Record<string, unknown>) : {};
-    throw new ApiError(String(payload.error ?? "API request failed"), response.status);
+    throw new ApiError(String(payload.error ?? "API request failed"), response.status, payload);
   }
 
   return (json ?? {}) as T;
@@ -139,8 +140,24 @@ export async function fetchDefinitions() {
     }>;
     providers: unknown[];
     connectors: unknown[];
-    mcpServers: unknown[];
+    mcpServers: Array<{ id: string; label: string; description: string }>;
   }>("/api/definitions");
+}
+
+export async function discoverMcpTools(payload: {
+  serverId: string;
+  label?: string;
+  connection?: Record<string, unknown>;
+  secretRef?: { secretId: string };
+  allowedTools?: string[];
+}) {
+  return apiRequest<{
+    serverId: string;
+    tools: MCPToolDefinition[];
+  }>("/api/mcp/discover-tools", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }
 
 export interface SecretListItem {

@@ -59,6 +59,12 @@ interface DefinitionNode {
   sampleConfig: Record<string, unknown>;
 }
 
+interface MCPServerDefinition {
+  id: string;
+  label: string;
+  description: string;
+}
+
 type LogsTab = "logs" | "inputs";
 
 const statusColors: Record<string, string> = {
@@ -74,6 +80,37 @@ const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
 
 function stringifyPretty(value: unknown) {
   return JSON.stringify(value, null, 2);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function getValidationMessages(payload?: Record<string, unknown>): string[] {
+  const validation = asRecord(payload?.validation);
+  const issues = validation?.issues;
+  if (!Array.isArray(issues)) {
+    return [];
+  }
+
+  return issues
+    .map((issue) => {
+      const issueRecord = asRecord(issue);
+      return issueRecord && typeof issueRecord.message === "string" ? issueRecord.message : "";
+    })
+    .filter((message) => message.length > 0);
+}
+
+function buildExecutionErrorResult(workflowId: string, message: string): WorkflowExecutionResult {
+  const now = new Date().toISOString();
+  return {
+    workflowId,
+    status: "error",
+    startedAt: now,
+    completedAt: now,
+    nodeResults: [],
+    error: message
+  };
 }
 
 function getNodeStatusMap(result: WorkflowExecutionResult | null) {
@@ -150,6 +187,7 @@ export default function App() {
   const [workflowList, setWorkflowList] = useState<WorkflowListItem[]>([]);
   const [currentWorkflow, setCurrentWorkflow] = useState<Workflow>(createBlankWorkflow());
   const [definitions, setDefinitions] = useState<DefinitionNode[]>(nodeDefinitions as unknown as DefinitionNode[]);
+  const [mcpServerDefinitions, setMcpServerDefinitions] = useState<MCPServerDefinition[]>([]);
   const [secrets, setSecrets] = useState<SecretListItem[]>([]);
 
   const [loading, setLoading] = useState(false);
@@ -341,6 +379,7 @@ export default function App() {
 
       setWorkflowList(workflowItems);
       setDefinitions(definitionPayload.nodes);
+      setMcpServerDefinitions(definitionPayload.mcpServers);
       setSecrets(secretItems);
 
       const wipWorkflow = readWipWorkflow();
@@ -424,13 +463,23 @@ export default function App() {
     }
   }, [authUser, currentWorkflow, edges, loading, nodes]);
 
-  const handleApiError = useCallback((apiError: unknown, fallbackMessage: string) => {
+  const handleApiError = useCallback((apiError: unknown, fallbackMessage: string): string => {
     if (apiError instanceof ApiError && apiError.status === 401) {
       setAuthUser(null);
       setAuthError("Session expired. Sign in again.");
-      return;
+      return "Session expired. Sign in again.";
     }
-    setError(apiError instanceof Error ? apiError.message : fallbackMessage);
+
+    let message = apiError instanceof Error ? apiError.message : fallbackMessage;
+    if (apiError instanceof ApiError) {
+      const validationMessages = getValidationMessages(apiError.payload);
+      if (validationMessages.length) {
+        message = `${message}: ${validationMessages.join("; ")}`;
+      }
+    }
+
+    setError(message);
+    return message;
   }, []);
 
   const loadWorkflowById = useCallback(
@@ -487,11 +536,14 @@ export default function App() {
       setLogsTab("logs");
       setActiveMode("editor");
     } catch (execError) {
-      handleApiError(execError, "Execution failed");
+      const message = handleApiError(execError, "Execution failed");
+      setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
+      setLogsTab("logs");
+      setActiveMode("editor");
     } finally {
       setBusy(false);
     }
-  }, [handleApiError, persistWorkflow, sessionId, systemPrompt, userPrompt]);
+  }, [currentWorkflow.id, handleApiError, persistWorkflow, sessionId, systemPrompt, userPrompt]);
 
   const handleWebhookExecute = useCallback(async () => {
     try {
@@ -508,11 +560,14 @@ export default function App() {
       setLogsTab("logs");
       setActiveMode("editor");
     } catch (execError) {
-      handleApiError(execError, "Webhook execution failed");
+      const message = handleApiError(execError, "Webhook execution failed");
+      setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
+      setLogsTab("logs");
+      setActiveMode("editor");
     } finally {
       setBusy(false);
     }
-  }, [handleApiError, persistWorkflow, sessionId, systemPrompt, userPrompt]);
+  }, [currentWorkflow.id, handleApiError, persistWorkflow, sessionId, systemPrompt, userPrompt]);
 
   const handleExport = useCallback(() => {
     const workflow = buildCurrentWorkflow();
@@ -622,7 +677,35 @@ export default function App() {
       const target = connection.target;
       const sourceNode = nodes.find((node) => node.id === source);
       const targetNode = nodes.find((node) => node.id === target);
-      const sourceHandle = connection.sourceHandle ?? "";
+      const expectedTargetType: Record<string, EditorNodeData["nodeType"]> = {
+        chat_model: "llm_call",
+        memory: "local_memory",
+        tool: "mcp_tool"
+      };
+      const expectedHandleByTargetType: Partial<Record<EditorNodeData["nodeType"], string>> = {
+        llm_call: "chat_model",
+        local_memory: "memory",
+        mcp_tool: "tool"
+      };
+
+      let sourceHandle = connection.sourceHandle ?? "";
+      if (sourceNode?.data.nodeType === "agent_orchestrator" && !sourceHandle && targetNode) {
+        const inferred = expectedHandleByTargetType[targetNode.data.nodeType];
+        if (inferred) {
+          sourceHandle = inferred;
+        }
+      }
+
+      if (targetNode?.data.nodeType === "agent_orchestrator" && sourceNode) {
+        const requiredHandle = expectedHandleByTargetType[sourceNode.data.nodeType];
+        if (requiredHandle) {
+          setError(
+            `Attach '${sourceNode.data.label}' from the Agent '${requiredHandle}' port (drag edge from Agent to node).`
+          );
+          return;
+        }
+      }
+
       const isAgentAttachmentHandle = auxiliaryHandles.has(sourceHandle);
 
       if (isAgentAttachmentHandle) {
@@ -631,11 +714,6 @@ export default function App() {
           return;
         }
 
-        const expectedTargetType: Record<string, EditorNodeData["nodeType"]> = {
-          chat_model: "llm_call",
-          memory: "local_memory",
-          tool: "mcp_tool"
-        };
         const requiredType = expectedTargetType[sourceHandle];
         if (requiredType && targetNode?.data.nodeType !== requiredType) {
           setError(`Invalid attachment. '${sourceHandle}' must connect to a '${requiredType}' node.`);
@@ -647,6 +725,7 @@ export default function App() {
         const edge = decorateEdge(
           {
             ...connection,
+            sourceHandle: sourceHandle || undefined,
             source,
             target,
             id: createEdgeId(source, target)
@@ -752,6 +831,7 @@ export default function App() {
     setWorkflowList([]);
     setCurrentWorkflow(createBlankWorkflow());
     setDefinitions(nodeDefinitions as unknown as DefinitionNode[]);
+    setMcpServerDefinitions([]);
     setSecrets([]);
     setExecutionResult(null);
     setNodes([]);
@@ -1151,6 +1231,7 @@ export default function App() {
           node={editingNode}
           inputOptions={editingNodeInputOptions}
           secrets={secrets}
+          mcpServerDefinitions={mcpServerDefinitions}
           onClose={() => setEditingNodeId(null)}
           onSave={saveNodeConfig}
           onExecuteStep={() => {

@@ -49,6 +49,11 @@ const mcpDiscoverSchema = z.object({
   serverId: z.string().min(1),
   label: z.string().optional(),
   connection: z.record(z.string(), z.unknown()).optional(),
+  secretRef: z
+    .object({
+      secretId: z.string().min(1)
+    })
+    .optional(),
   allowedTools: z.array(z.string()).optional()
 });
 
@@ -421,7 +426,7 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
     if (!validation.valid) {
       reply.code(400);
       return {
-        error: "Workflow validation failed",
+        error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
         validation
       };
     }
@@ -453,7 +458,7 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
     if (!validation.valid) {
       reply.code(400);
       return {
-        error: "Workflow validation failed",
+        error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
         validation
       };
     }
@@ -497,7 +502,7 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       if (!validation.valid) {
         reply.code(400);
         return {
-          error: "Workflow validation failed",
+          error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
           validation
         };
       }
@@ -728,6 +733,7 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
         serverId: parsed.data.serverId,
         label: parsed.data.label,
         connection: parsed.data.connection,
+        secretRef: parsed.data.secretRef,
         allowedTools: parsed.data.allowedTools
       };
 

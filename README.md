@@ -11,7 +11,9 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
   - OpenAI-compatible endpoints (real)
   - OpenAI cloud (real)
   - Gemini (basic)
-- MCP adapter model with a runnable demo MCP server (`mock-mcp`) and tool discovery/invocation
+- MCP adapter model with:
+  - `http_mcp` (real remote MCP endpoint over HTTP streamable)
+  - `mock-mcp` (local demo tools)
 - Agent Orchestrator node with iterative tool-calling loop (zero/one/many tool calls)
 - Agent port attachments:
   - `chat_model` -> attach `LLM Call` node
@@ -275,6 +277,22 @@ The AI Agent node supports dedicated attachment ports. These are auxiliary edges
   - attached tool configs are converted into available MCP tools for the agent loop
 
 Attachment-only helper nodes are marked as skipped in execution traces because they are consumed by the agent runtime rather than executed as direct steps.
+
+## MCP Node Setup (real endpoint)
+
+Use an `MCP Tool` node attached to the Agent `tool` port.
+
+1. Open MCP node config.
+2. Set `MCP Server Adapter` to `HTTP MCP Server (http_mcp)`.
+3. Set `Endpoint` to your MCP server URL.
+4. Set `Authentication` (`None` / `Bearer` / `Basic`) and choose `Auth Secret` if needed.
+5. Click `Discover Tools`, then select the discovered tool.
+6. To expose every discovered tool to the agent, set `Tools To Include` to `All discovered tools (agent decides)`.
+
+Notes:
+- `mock-mcp` is a demo adapter and always returns demo tools (`get_current_time`, `calculator`, `lookup_kb`).
+- If you want a brand-new adapter implementation, select `Custom Adapter ID` and register that adapter in `packages/mcp-sdk/src/index.ts`.
+- If your MCP server exposes many large tool schemas, model context limits can be hit. The runtime now compacts tool schemas, truncates oversized tool outputs in conversation memory, and caps tool metadata sent to the model.
 
 ## Simple Memory Node
 

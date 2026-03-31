@@ -1294,6 +1294,13 @@ select {
   gap: 10px;
 }
 
+.cfg-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .cfg-tip {
   border: 1px solid #d9e3fb;
   border-radius: 10px;

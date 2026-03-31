@@ -89,8 +89,7 @@ export const nodeDefinitions: NodeDefinition[] = [
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
         maxIterations: { type: "number" },
-        toolCallingEnabled: { type: "boolean" },
-        mcpServers: { type: "array", items: { type: "object" } }
+        toolCallingEnabled: { type: "boolean" }
       },
       required: ["provider", "maxIterations"]
     },
@@ -100,8 +99,7 @@ export const nodeDefinitions: NodeDefinition[] = [
       userPromptTemplate: "{{user_prompt}}",
       sessionIdTemplate: "{{session_id}}",
       maxIterations: 6,
-      toolCallingEnabled: true,
-      mcpServers: [{ serverId: "mock-mcp" }]
+      toolCallingEnabled: true
     }
   },
   {

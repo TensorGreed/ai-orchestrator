@@ -1,6 +1,7 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { MCPToolDefinition } from "@ai-orchestrator/shared";
 import type { EditorNode } from "../lib/workflow";
-import type { SecretListItem } from "../lib/api";
+import { discoverMcpTools, type SecretListItem } from "../lib/api";
 
 export interface NodeInputOption {
   id: string;
@@ -11,6 +12,7 @@ interface NodeConfigModalProps {
   node: EditorNode;
   inputOptions: NodeInputOption[];
   secrets: SecretListItem[];
+  mcpServerDefinitions: Array<{ id: string; label: string; description: string }>;
   onClose: () => void;
   onSave: (payload: { label: string; config: Record<string, unknown> }) => void;
   onExecuteStep: () => void;
@@ -134,17 +136,19 @@ function TextAreaField({
   label,
   value,
   onChange,
-  rows = 4
+  rows = 4,
+  readOnly = false
 }: {
   label: string;
   value: string;
   onChange: (next: string) => void;
   rows?: number;
+  readOnly?: boolean;
 }) {
   return (
     <label className="cfg-field">
       <span>{label}</span>
-      <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={rows} />
+      <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={rows} readOnly={readOnly} />
     </label>
   );
 }
@@ -162,20 +166,84 @@ function getApiBaseUrl(): string {
   return "";
 }
 
-export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, onExecuteStep }: NodeConfigModalProps) {
+export function NodeConfigModal({
+  node,
+  inputOptions,
+  secrets,
+  mcpServerDefinitions,
+  onClose,
+  onSave,
+  onExecuteStep
+}: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
   const [activeTab, setActiveTab] = useState<"parameters" | "settings">("parameters");
   const [selectedInputId, setSelectedInputId] = useState(inputOptions[0]?.id ?? "none");
+  const [discoveredTools, setDiscoveredTools] = useState<MCPToolDefinition[]>([]);
+  const [discoverBusy, setDiscoverBusy] = useState(false);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
+  const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    const initialConfig = asRecord(node.data.config);
+    if (node.data.nodeType === "mcp_tool") {
+      const baseConnection = asRecord(initialConfig.connection);
+      setConfig({
+        ...initialConfig,
+        serverId:
+          typeof initialConfig.serverId === "string" && initialConfig.serverId.trim()
+            ? initialConfig.serverId
+            : (mcpServerDefinitions[0]?.id ?? "mock-mcp"),
+        toolName:
+          typeof initialConfig.toolName === "string" && initialConfig.toolName.trim()
+            ? initialConfig.toolName
+            : "__all__",
+        connection: {
+          endpoint:
+            typeof baseConnection.endpoint === "string" && baseConnection.endpoint.trim()
+              ? baseConnection.endpoint
+              : "http://127.0.0.1:7001/mcp",
+          transport:
+            typeof baseConnection.transport === "string" && baseConnection.transport.trim()
+              ? baseConnection.transport
+              : "http_streamable",
+          authType:
+            typeof baseConnection.authType === "string" && baseConnection.authType.trim()
+              ? baseConnection.authType
+              : "none",
+          ...baseConnection
+        }
+      });
+    } else {
+      setConfig(initialConfig);
+    }
+
     setLabel(node.data.label);
-    setConfig(asRecord(node.data.config));
     setActiveTab("parameters");
     setSelectedInputId(inputOptions[0]?.id ?? "none");
-  }, [inputOptions, node]);
+    setDiscoveredTools([]);
+    setDiscoverBusy(false);
+    setDiscoverError(null);
+    setDiscoverMessage(null);
+  }, [inputOptions, mcpServerDefinitions, node]);
 
   const provider = useMemo(() => asRecord(config.provider), [config.provider]);
+  const discoveredToolByName = useMemo(
+    () => new Map(discoveredTools.map((tool) => [tool.name, tool])),
+    [discoveredTools]
+  );
+  const mcpServerIdOptions = useMemo(() => {
+    const base = mcpServerDefinitions.map((server) => ({
+      value: server.id,
+      label: `${server.label} (${server.id})`
+    }));
+
+    if (!base.length) {
+      return [{ value: "mock-mcp", label: "Mock MCP Server (mock-mcp)" }];
+    }
+
+    return base;
+  }, [mcpServerDefinitions]);
 
   const setProvider = (patch: Record<string, unknown>) => {
     setConfig((current) => ({
@@ -187,26 +255,83 @@ export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, 
     }));
   };
 
-  const setPrimaryMcpServer = (patch: Record<string, unknown>) => {
-    setConfig((current) => {
-      const existingServers = Array.isArray(current.mcpServers) ? [...current.mcpServers] : [];
-      const first = asRecord(existingServers[0]);
-      existingServers[0] = {
-        ...first,
-        ...patch
-      };
+  const discoverToolsForMcpNode = useCallback(
+    async (params?: { serverId?: string; connection?: Record<string, unknown>; currentToolName?: string }) => {
+      const serverId = (params?.serverId ?? toStringValue(config.serverId)).trim();
+      const connection = params?.connection ?? asRecord(config.connection);
+      const currentToolName = params?.currentToolName ?? toStringValue(config.toolName).trim();
 
-      return {
-        ...current,
-        mcpServers: existingServers
-      };
+      if (!serverId) {
+        setDiscoverError("Set MCP Server Id before discovering tools.");
+        setDiscoverMessage(null);
+        setDiscoveredTools([]);
+        return;
+      }
+
+      try {
+        setDiscoverBusy(true);
+        setDiscoverError(null);
+        setDiscoverMessage(null);
+
+        const response = await discoverMcpTools({
+          serverId,
+          connection,
+          secretRef:
+            typeof asRecord(config.secretRef).secretId === "string"
+              ? { secretId: String(asRecord(config.secretRef).secretId) }
+              : undefined
+        });
+
+        setDiscoveredTools(response.tools);
+        setDiscoverMessage(
+          response.tools.length
+            ? `Discovered ${response.tools.length} tools from '${serverId}'.`
+            : `No tools found for '${serverId}'.`
+        );
+
+        if (!currentToolName && response.tools[0]?.name) {
+          const firstToolName = response.tools[0].name;
+          setConfig((current) => ({
+            ...current,
+            toolName: firstToolName,
+            allowedTools: [firstToolName]
+          }));
+        }
+      } catch (error) {
+        setDiscoverError(error instanceof Error ? error.message : "Failed to discover MCP tools");
+        setDiscoverMessage(null);
+        setDiscoveredTools([]);
+      } finally {
+        setDiscoverBusy(false);
+      }
+    },
+    [config.connection, config.secretRef, config.serverId, config.toolName]
+  );
+
+  useEffect(() => {
+    if (node.data.nodeType !== "mcp_tool") {
+      return;
+    }
+    const serverId = toStringValue(config.serverId).trim();
+    if (!serverId) {
+      return;
+    }
+    if (discoveredTools.length > 0) {
+      return;
+    }
+    void discoverToolsForMcpNode({
+      serverId,
+      connection: asRecord(config.connection),
+      currentToolName: toStringValue(config.toolName).trim()
     });
-  };
-
-  const primaryMcpServer = useMemo(() => {
-    const servers = Array.isArray(config.mcpServers) ? config.mcpServers : [];
-    return asRecord(servers[0]);
-  }, [config.mcpServers]);
+  }, [
+    config.connection,
+    config.serverId,
+    config.toolName,
+    discoverToolsForMcpNode,
+    discoveredTools.length,
+    node.data.nodeType
+  ]);
 
   const renderProviderSection = () => {
     return (
@@ -267,13 +392,11 @@ export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, 
   };
 
   const renderAgentParameters = () => {
-    const toolsCsv = Array.isArray(primaryMcpServer.allowedTools)
-      ? primaryMcpServer.allowedTools.map((item) => String(item)).join(",")
-      : "";
-
     return (
       <>
-        <div className="cfg-tip">Tip: Define prompts and attach Chat Model, Memory, and Tools using dedicated ports.</div>
+        <div className="cfg-tip">
+          Tip: Define prompts and attach Chat Model, Memory, and one or more MCP Tool nodes using the dedicated agent ports.
+        </div>
 
         <SelectField
           label="Source for Prompt (User Message)"
@@ -334,39 +457,6 @@ export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, 
         </div>
 
         {renderProviderSection()}
-
-        <div className="cfg-group">
-          <h4>Tool Connector (MCP)</h4>
-          <TextField
-            label="MCP Server Id"
-            value={toStringValue(primaryMcpServer.serverId, "mock-mcp")}
-            onChange={(next) => setPrimaryMcpServer({ serverId: next })}
-          />
-          <TextField
-            label="Endpoint"
-            value={toStringValue(asRecord(primaryMcpServer.connection).endpoint, "http://127.0.0.1:7001/mcp")}
-            onChange={(next) =>
-              setPrimaryMcpServer({
-                connection: {
-                  ...asRecord(primaryMcpServer.connection),
-                  endpoint: next
-                }
-              })
-            }
-          />
-          <TextField
-            label="Tools to include (comma-separated)"
-            value={toolsCsv}
-            onChange={(next) =>
-              setPrimaryMcpServer({
-                allowedTools: next
-                  .split(",")
-                  .map((item) => item.trim())
-                  .filter(Boolean)
-              })
-            }
-          />
-        </div>
       </>
     );
   };
@@ -405,9 +495,58 @@ export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, 
 
   const renderMcpParameters = () => {
     const connection = asRecord(config.connection);
+    const selectedServerId = toStringValue(config.serverId).trim();
+    const hasKnownServerId = mcpServerIdOptions.some((option) => option.value === selectedServerId);
+    const serverSelectValue = hasKnownServerId ? selectedServerId : "__custom__";
+    const selectedServerLabel =
+      mcpServerDefinitions.find((entry) => entry.id === selectedServerId)?.label ??
+      (selectedServerId ? `Custom (${selectedServerId})` : "Custom");
+    const authType = toStringValue(connection.authType, "none");
+    const selectedToolName = toStringValue(config.toolName).trim();
+    const includeAllDiscoveredTools = selectedToolName === "__all__";
+    const selectedTool = discoveredToolByName.get(selectedToolName);
 
     return (
       <>
+        <div className="cfg-tip">
+          Configure MCP only on this node. Attach this MCP Tool node to an AI Agent <code>Tool</code> port to expose it.
+        </div>
+
+        <SelectField
+          label="MCP Server Adapter"
+          value={serverSelectValue}
+          onChange={(next) => {
+            setConfig((current) => ({
+              ...current,
+              serverId: next === "__custom__" ? "" : next,
+              toolName: "__all__",
+              allowedTools: undefined
+            }));
+            setDiscoveredTools([]);
+            setDiscoverMessage(null);
+            setDiscoverError(null);
+          }}
+          options={[...mcpServerIdOptions, { value: "__custom__", label: "Custom Adapter ID" }]}
+        />
+
+        {!hasKnownServerId && (
+          <TextField
+            label="Custom Adapter ID"
+            value={selectedServerId}
+            onChange={(next) => setConfig((current) => ({ ...current, serverId: next }))}
+            placeholder="my_custom_mcp_adapter"
+          />
+        )}
+
+        <div className="cfg-tip">
+          Active adapter: <code>{selectedServerLabel}</code>
+          {selectedServerId === "mock-mcp" ? (
+            <div style={{ marginTop: "6px" }}>
+              <strong>Note:</strong> Mock adapter always returns demo tools and ignores endpoint/auth values.
+            </div>
+          ) : null}
+        </div>
+
         <SelectField
           label="Server Transport"
           value={toStringValue(connection.transport, "http_streamable")}
@@ -443,7 +582,7 @@ export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, 
 
         <SelectField
           label="Authentication"
-          value={toStringValue(connection.authType, "none")}
+          value={authType}
           onChange={(next) =>
             setConfig((current) => ({
               ...current,
@@ -460,17 +599,121 @@ export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, 
           ]}
         />
 
-        <TextField
-          label="MCP Server Id"
-          value={toStringValue(config.serverId, "mock-mcp")}
-          onChange={(next) => setConfig((current) => ({ ...current, serverId: next }))}
+        {authType === "basic" && (
+          <TextField
+            label="Basic Auth Username"
+            value={toStringValue(connection.username)}
+            onChange={(next) =>
+              setConfig((current) => ({
+                ...current,
+                connection: {
+                  ...asRecord(current.connection),
+                  username: next
+                }
+              }))
+            }
+            placeholder="api-user"
+          />
+        )}
+
+        <SelectField
+          label="Auth Secret"
+          value={toStringValue(asRecord(config.secretRef).secretId)}
+          onChange={(next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+          }
+          options={[{ value: "", label: "None" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
         />
 
-        <TextField
-          label="Tool Name"
-          value={toStringValue(config.toolName)}
-          onChange={(next) => setConfig((current) => ({ ...current, toolName: next }))}
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() =>
+              void discoverToolsForMcpNode({
+                serverId: toStringValue(config.serverId),
+                connection: asRecord(config.connection),
+                currentToolName: selectedToolName
+              })
+            }
+            disabled={discoverBusy}
+          >
+            {discoverBusy ? "Discovering..." : "Discover Tools"}
+          </button>
+          {discoverMessage && <span className="muted">{discoverMessage}</span>}
+        </div>
+        {discoverError && <div className="error-banner">{discoverError}</div>}
+
+        <SelectField
+          label="Tools To Include"
+          value={includeAllDiscoveredTools ? "all" : "single"}
+          onChange={(next) =>
+            setConfig((current) => ({
+              ...current,
+              toolName: next === "all" ? "__all__" : toStringValue(current.toolName).trim() || "",
+              allowedTools:
+                next === "all"
+                  ? undefined
+                  : toStringValue(current.toolName).trim() && toStringValue(current.toolName).trim() !== "__all__"
+                    ? [toStringValue(current.toolName).trim()]
+                    : undefined
+            }))
+          }
+          options={[
+            { value: "all", label: "All discovered tools (agent decides)" },
+            { value: "single", label: "Single tool only" }
+          ]}
         />
+
+        {includeAllDiscoveredTools ? (
+          <div className="cfg-tip">
+            {discoveredTools.length
+              ? `Agent can call any of: ${discoveredTools.map((tool) => tool.name).join(", ")}`
+              : "Discover tools first to preview what will be exposed to the agent."}
+          </div>
+        ) : discoveredTools.length > 0 ? (
+          <SelectField
+            label="Tool Name"
+            value={selectedToolName || discoveredTools[0]?.name || ""}
+            onChange={(next) =>
+              setConfig((current) => ({
+                ...current,
+                toolName: next,
+                allowedTools: next ? [next] : undefined
+              }))
+            }
+            options={discoveredTools.map((tool) => ({ value: tool.name, label: tool.name }))}
+          />
+        ) : (
+          <TextField
+            label="Tool Name"
+            value={toStringValue(config.toolName)}
+            onChange={(next) =>
+              setConfig((current) => ({
+                ...current,
+                toolName: next,
+                allowedTools: next ? [next] : undefined
+              }))
+            }
+          />
+        )}
+
+        {selectedTool && (
+          <div className="cfg-group">
+            <h4>Discovered Tool Metadata</h4>
+            <div className="cfg-tip">{selectedTool.description || "No description provided."}</div>
+            <TextAreaField
+              label="Input Schema (read-only)"
+              value={JSON.stringify(selectedTool.inputSchema ?? {}, null, 2)}
+              onChange={() => undefined}
+              rows={5}
+              readOnly
+            />
+          </div>
+        )}
 
         <TextAreaField
           label="Tool Args Template"

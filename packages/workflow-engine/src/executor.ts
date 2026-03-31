@@ -49,6 +49,7 @@ interface NodeRuntimeContext {
 
 type AgentAttachmentHandle = "chat_model" | "memory" | "tool";
 const AGENT_ATTACHMENT_HANDLES = new Set<AgentAttachmentHandle>(["chat_model", "memory", "tool"]);
+const ALL_MCP_TOOLS_SENTINEL = "__all__";
 
 function nowIso() {
   return new Date().toISOString();
@@ -416,6 +417,9 @@ async function executeNode(
     case "mcp_tool": {
       const serverId = String(config.serverId ?? "");
       const toolName = String(config.toolName ?? "");
+      if (toolName.trim() === ALL_MCP_TOOLS_SENTINEL) {
+        throw new Error("Direct MCP Tool execution requires a specific tool name (single-tool mode).");
+      }
       const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
       const args = tryParseJson(renderTemplate(argsTemplate, templateData));
       const serverConfig: MCPServerConfig = {
@@ -516,7 +520,7 @@ async function executeNode(
         }
 
         const toolName = String(attachedConfig.toolName ?? "").trim();
-        if (toolName) {
+        if (toolName && toolName !== ALL_MCP_TOOLS_SENTINEL) {
           allowedTools.add(toolName);
         }
 
@@ -529,10 +533,12 @@ async function executeNode(
       }
 
       const serverConfigs = mergeMCPServerConfigs(inlineServerConfigs, attachedToolServerConfigs);
+      const mcpExecutionContext = {
+        resolveSecret: dependencies.resolveSecret,
+        runtimeState: new Map<string, unknown>()
+      };
 
-      const resolvedTools = await resolveMCPTools(serverConfigs, dependencies.mcpRegistry, {
-        resolveSecret: dependencies.resolveSecret
-      });
+      const resolvedTools = await resolveMCPTools(serverConfigs, dependencies.mcpRegistry, mcpExecutionContext);
 
       const attachedMemoryNode = getAttachedNodes("memory").find((attached) => attached.type === "local_memory");
       let memory: { namespace?: string; maxMessages?: number; persistToolMessages?: boolean } | undefined;

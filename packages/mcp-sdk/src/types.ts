@@ -9,6 +9,7 @@ import type {
 
 export interface MCPExecutionContext {
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
+  runtimeState?: Map<string, unknown>;
 }
 
 export interface MCPServerAdapter {
