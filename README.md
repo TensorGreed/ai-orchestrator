@@ -13,6 +13,10 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
   - Gemini (basic)
 - MCP adapter model with a runnable demo MCP server (`mock-mcp`) and tool discovery/invocation
 - Agent Orchestrator node with iterative tool-calling loop (zero/one/many tool calls)
+- Agent port attachments:
+  - `chat_model` -> attach `LLM Call` node
+  - `memory` -> attach `Simple Memory` node
+  - `tool` -> attach one or more `MCP Tool` nodes
 - RAG path with connector source + in-memory retriever/vector similarity
 - Connector SDK + sample connectors (`google-drive`, `sql-db`, `nosql-db`)
 - Webhook execution endpoint (`system_prompt` + `user_prompt` payload)
@@ -37,31 +41,31 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 ```text
 .
 +- apps/
-¦  +- api/
-¦  ¦  +- src/
-¦  ¦  ¦  +- app.ts
-¦  ¦  ¦  +- index.ts
-¦  ¦  ¦  +- db/database.ts
-¦  ¦  ¦  +- services/
-¦  ¦  +- Dockerfile
-¦  +- web/
-¦     +- src/
-¦     ¦  +- App.tsx
-¦     ¦  +- styles.css
-¦     ¦  +- lib/
-¦     +- Dockerfile
-¦     +- nginx.conf
+Â¦  +- api/
+Â¦  Â¦  +- src/
+Â¦  Â¦  Â¦  +- app.ts
+Â¦  Â¦  Â¦  +- index.ts
+Â¦  Â¦  Â¦  +- db/database.ts
+Â¦  Â¦  Â¦  +- services/
+Â¦  Â¦  +- Dockerfile
+Â¦  +- web/
+Â¦     +- src/
+Â¦     Â¦  +- App.tsx
+Â¦     Â¦  +- styles.css
+Â¦     Â¦  +- lib/
+Â¦     +- Dockerfile
+Â¦     +- nginx.conf
 +- packages/
-¦  +- shared/
-¦  +- provider-sdk/
-¦  +- mcp-sdk/
-¦  +- connector-sdk/
-¦  +- agent-runtime/
-¦  +- workflow-engine/
+Â¦  +- shared/
+Â¦  +- provider-sdk/
+Â¦  +- mcp-sdk/
+Â¦  +- connector-sdk/
+Â¦  +- agent-runtime/
+Â¦  +- workflow-engine/
 +- samples/workflows/
-¦  +- basic-flow.json
-¦  +- rag-flow.json
-¦  +- agentic-mcp-flow.json
+Â¦  +- basic-flow.json
+Â¦  +- rag-flow.json
+Â¦  +- agentic-mcp-flow.json
 +- docker-compose.yml
 +- .env.example
 +- README.md
@@ -93,7 +97,9 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 pnpm install
 ```
 
-### 3) Start API + Web
+### 3) Start servers
+
+Start both API and UI together:
 
 ```bash
 pnpm dev
@@ -101,6 +107,18 @@ pnpm dev
 
 - API: `http://localhost:4000`
 - Web UI: `http://localhost:5173`
+
+Start API only:
+
+```bash
+pnpm --filter @ai-orchestrator/api start
+```
+
+Start UI only:
+
+```bash
+pnpm --filter @ai-orchestrator/web dev
+```
 
 ### 4) Run tests
 
@@ -180,6 +198,35 @@ curl -X POST http://localhost:4000/api/webhooks/execute \
 7. Stop on final answer or `maxIterations`
 
 The runtime supports zero, one, or multiple tool calls per iteration.
+
+## Agent Port Attachments (Chat Model / Memory / Tool)
+
+The AI Agent node supports dedicated attachment ports. These are auxiliary edges and are not part of linear DAG execution.
+
+- `chat_model` port:
+  - attach an `LLM Call` node
+  - its `provider` config is used by the agent runtime (overrides inline agent provider if both are present)
+- `memory` port:
+  - attach a `Simple Memory` node
+  - memory persists conversation turns in SQLite by `namespace + session_id`
+- `tool` port:
+  - attach one or more `MCP Tool` nodes
+  - attached tool configs are converted into available MCP tools for the agent loop
+
+Attachment-only helper nodes are marked as skipped in execution traces because they are consumed by the agent runtime rather than executed as direct steps.
+
+## Simple Memory Node
+
+`Simple Memory` (`local_memory`) is a real SQLite-backed session memory node.
+
+Config:
+- `namespace`: memory bucket key (default `default`)
+- `sessionIdTemplate`: defaults to `{{session_id}}`
+- `maxMessages`: max persisted turns retained
+- `persistToolMessages`: whether tool messages are saved in memory
+
+DB storage table:
+- `session_memory(namespace, session_id, messages_json, created_at, updated_at)`
 
 ## Secrets handling
 

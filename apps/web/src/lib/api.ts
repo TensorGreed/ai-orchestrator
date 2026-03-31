@@ -91,3 +91,25 @@ export async function fetchDefinitions() {
     mcpServers: unknown[];
   }>("/api/definitions");
 }
+
+export interface SecretListItem {
+  id: string;
+  name: string;
+  provider: string;
+  createdAt: string;
+}
+
+export async function fetchSecrets() {
+  return apiRequest<SecretListItem[]>("/api/secrets");
+}
+
+export async function createSecret(payload: { name: string; provider: string; value: string }) {
+  return apiRequest<{
+    id: string;
+    name: string;
+    provider: string;
+  }>("/api/secrets", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}

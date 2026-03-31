@@ -2,18 +2,52 @@ import type { AgentRunRequest, AgentRunState, ChatMessage } from "@ai-orchestrat
 import type { AgentRuntimeAdapter, AgentRuntimeContext, AgentToolRuntime, InternalToolResult } from "./types";
 import { createToolErrorResult } from "./types";
 
+function normalizeMaxMessages(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
+    return 20;
+  }
+  return Math.floor(value);
+}
+
+function normalizeStoredMessages(messages: ChatMessage[], maxMessages: number): ChatMessage[] {
+  return messages
+    .filter((message) => message.role === "user" || message.role === "assistant" || message.role === "tool")
+    .slice(-maxMessages);
+}
+
 export class DefaultAgentRuntime implements AgentRuntimeAdapter {
   readonly id = "default-agent-runtime";
 
   async run(request: AgentRunRequest, tools: AgentToolRuntime, context: AgentRuntimeContext): Promise<AgentRunState> {
     const providerAdapter = context.providerRegistry.get(request.provider.providerId);
-    const messages: ChatMessage[] = [
-      { role: "system", content: request.systemPrompt },
-      { role: "user", content: request.userPrompt }
-    ];
+    const memoryEnabled = Boolean(context.memoryStore && request.sessionId);
+    const memoryNamespace = request.memory?.namespace?.trim() || "default";
+    const memoryMaxMessages = normalizeMaxMessages(request.memory?.maxMessages);
+    const persistToolMessages = request.memory?.persistToolMessages !== false;
+
+    let memoryMessages: ChatMessage[] = [];
+    if (memoryEnabled && request.sessionId) {
+      const loaded = await context.memoryStore!.loadMessages(memoryNamespace, request.sessionId);
+      memoryMessages = normalizeStoredMessages(loaded, memoryMaxMessages);
+    }
+
+    const messages: ChatMessage[] = [{ role: "system", content: request.systemPrompt }, ...memoryMessages, { role: "user", content: request.userPrompt }];
 
     const steps: AgentRunState["steps"] = [];
     let lastAssistantMessage = "";
+
+    const persistConversation = async () => {
+      if (!memoryEnabled || !request.sessionId || !context.memoryStore) {
+        return;
+      }
+
+      const persistable = messages
+        .filter((message, index) => !(index === 0 && message.role === "system"))
+        .filter((message) => (persistToolMessages ? true : message.role !== "tool"))
+        .slice(-memoryMaxMessages);
+
+      await context.memoryStore.saveMessages(memoryNamespace, request.sessionId, persistable);
+    };
 
     try {
       for (let iteration = 1; iteration <= request.maxIterations; iteration += 1) {
@@ -85,30 +119,36 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
           toolResults: []
         });
 
-        return {
+        const result: AgentRunState = {
           finalAnswer: modelResponse.content,
           stopReason: "final_answer",
           iterations: iteration,
           messages,
           steps
         };
+        await persistConversation();
+        return result;
       }
 
-      return {
+      const result: AgentRunState = {
         finalAnswer: lastAssistantMessage || "Agent stopped after reaching iteration limit.",
         stopReason: "max_iterations",
         iterations: request.maxIterations,
         messages,
         steps
       };
+      await persistConversation();
+      return result;
     } catch (error) {
-      return {
+      const result: AgentRunState = {
         finalAnswer: error instanceof Error ? error.message : "Agent runtime failed",
         stopReason: "error",
         iterations: steps.length,
         messages,
         steps
       };
+      await persistConversation();
+      return result;
     }
   }
 }

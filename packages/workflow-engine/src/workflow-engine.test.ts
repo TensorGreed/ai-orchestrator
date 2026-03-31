@@ -38,6 +38,22 @@ class FakeAgentRuntime implements AgentRuntimeAdapter {
   }
 }
 
+class CapturingAgentRuntime implements AgentRuntimeAdapter {
+  readonly id = "capturing-agent";
+  lastRequest: AgentRunRequest | null = null;
+
+  async run(request: AgentRunRequest): Promise<AgentRunState> {
+    this.lastRequest = request;
+    return {
+      finalAnswer: `captured:${request.userPrompt}`,
+      stopReason: "final_answer",
+      iterations: 1,
+      messages: [],
+      steps: []
+    };
+  }
+}
+
 function createProviderRegistry() {
   const registry = new ProviderRegistry();
   registry.register(new FakeProvider());
@@ -125,5 +141,110 @@ describe("workflow engine", () => {
     expect(imported.id).toBe(workflow.id);
     expect(imported.nodes[0]?.position.x).toBe(0);
     expect(imported.schemaVersion).toBe("1.0.0");
+  });
+
+  it("uses auxiliary agent attachments for chat model, memory, and tools", async () => {
+    const runtime = new CapturingAgentRuntime();
+    const workflow: Workflow = {
+      id: "wf-agent-attachments",
+      name: "Agent attachments",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "webhook",
+          type: "webhook_input",
+          name: "Webhook",
+          position: { x: 0, y: 0 },
+          config: {}
+        },
+        {
+          id: "agent",
+          type: "agent_orchestrator",
+          name: "Agent",
+          position: { x: 240, y: 0 },
+          config: {
+            systemPromptTemplate: "{{system_prompt}}",
+            userPromptTemplate: "{{user_prompt}}",
+            sessionIdTemplate: "{{session_id}}",
+            maxIterations: 4,
+            toolCallingEnabled: true
+          }
+        },
+        {
+          id: "model",
+          type: "llm_call",
+          name: "Model",
+          position: { x: 260, y: 180 },
+          config: {
+            provider: { providerId: "fake", model: "fake-model" }
+          }
+        },
+        {
+          id: "memory",
+          type: "local_memory",
+          name: "Memory",
+          position: { x: 380, y: 180 },
+          config: {
+            namespace: "default",
+            sessionIdTemplate: "{{session_id}}",
+            maxMessages: 12,
+            persistToolMessages: false
+          }
+        },
+        {
+          id: "tool",
+          type: "mcp_tool",
+          name: "Tool",
+          position: { x: 500, y: 180 },
+          config: {
+            serverId: "mock-mcp",
+            toolName: "calculator",
+            argsTemplate: "{\"expression\":\"2+2\"}"
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 520, y: 0 },
+          config: {}
+        }
+      ],
+      edges: [
+        { id: "e-main-1", source: "webhook", target: "agent" },
+        { id: "e-main-2", source: "agent", target: "output" },
+        { id: "e-attach-model", source: "agent", sourceHandle: "chat_model", target: "model" },
+        { id: "e-attach-memory", source: "agent", sourceHandle: "memory", target: "memory" },
+        { id: "e-attach-tool", source: "agent", sourceHandle: "tool", target: "tool" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        webhookPayload: {
+          system_prompt: "S",
+          user_prompt: "U",
+          session_id: "session-abc"
+        }
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: runtime,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(runtime.lastRequest?.provider.providerId).toBe("fake");
+    expect(runtime.lastRequest?.tools.length).toBeGreaterThan(0);
+    expect(runtime.lastRequest?.memory?.namespace).toBe("default");
+    expect(runtime.lastRequest?.sessionId).toBe("session-abc");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "model")?.status).toBe("skipped");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "memory")?.status).toBe("skipped");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "tool")?.status).toBe("skipped");
   });
 });

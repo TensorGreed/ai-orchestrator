@@ -238,6 +238,12 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
         connectorRegistry,
         mcpRegistry,
         agentRuntime,
+        memoryStore: {
+          loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
+          saveMessages: async (namespace, sessionId, messages) => {
+            store.saveSessionMemory(namespace, sessionId, messages);
+          }
+        },
         resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
       }
     );
@@ -284,6 +290,12 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
         connectorRegistry,
         mcpRegistry,
         agentRuntime,
+        memoryStore: {
+          loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
+          saveMessages: async (namespace, sessionId, messages) => {
+            store.saveSessionMemory(namespace, sessionId, messages);
+          }
+        },
         resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
       }
     );

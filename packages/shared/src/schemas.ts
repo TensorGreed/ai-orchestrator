@@ -25,6 +25,7 @@ export const workflowNodeSchema = z.object({
     "prompt_template",
     "llm_call",
     "agent_orchestrator",
+    "local_memory",
     "mcp_tool",
     "rag_retrieve",
     "connector_source",

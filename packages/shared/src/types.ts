@@ -18,6 +18,7 @@ export type WorkflowNodeType =
   | "prompt_template"
   | "llm_call"
   | "agent_orchestrator"
+  | "local_memory"
   | "mcp_tool"
   | "rag_retrieve"
   | "connector_source"
@@ -221,6 +222,12 @@ export interface ConnectorDefinition {
   authSchema: Record<string, unknown>;
 }
 
+export interface AgentMemoryConfig {
+  namespace?: string;
+  maxMessages?: number;
+  persistToolMessages?: boolean;
+}
+
 export interface AgentRunRequest {
   provider: LLMProviderConfig;
   systemPrompt: string;
@@ -229,6 +236,7 @@ export interface AgentRunRequest {
   maxIterations: number;
   toolCallingEnabled: boolean;
   sessionId?: string;
+  memory?: AgentMemoryConfig;
 }
 
 export interface AgentRunStep {

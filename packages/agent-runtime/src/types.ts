@@ -1,4 +1,4 @@
-import type { AgentRunRequest, AgentRunState, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
+import type { AgentRunRequest, AgentRunState, ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 
 export interface AgentToolRuntime {
@@ -9,6 +9,7 @@ export interface AgentToolRuntime {
 export interface AgentRuntimeContext {
   providerRegistry: ProviderRegistry;
   resolveSecret: (secretRef?: { secretId: string }) => Promise<string | undefined>;
+  memoryStore?: AgentSessionMemoryStore;
 }
 
 export interface AgentRuntimeAdapter {
@@ -21,6 +22,11 @@ export interface InternalToolResult {
   toolName: string;
   output: unknown;
   error?: string;
+}
+
+export interface AgentSessionMemoryStore {
+  loadMessages(namespace: string, sessionId: string): Promise<ChatMessage[]>;
+  saveMessages(namespace: string, sessionId: string, messages: ChatMessage[]): Promise<void>;
 }
 
 export function createToolErrorResult(call: ToolCall, error: unknown): InternalToolResult {

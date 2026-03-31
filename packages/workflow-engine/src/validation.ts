@@ -1,4 +1,5 @@
 import { workflowSchema, type Workflow, type WorkflowValidationIssue, type WorkflowValidationResult } from "@ai-orchestrator/shared";
+import { isAgentAttachmentEdge, isExecutionEdge } from "./graph";
 
 interface GraphMetadata {
   inDegree: Map<string, number>;
@@ -14,7 +15,7 @@ function buildGraph(workflow: Workflow): GraphMetadata {
     outgoing.set(node.id, []);
   }
 
-  for (const edge of workflow.edges) {
+  for (const edge of workflow.edges.filter(isExecutionEdge)) {
     const sourceOut = outgoing.get(edge.source);
     if (sourceOut) {
       sourceOut.push(edge.target);
@@ -66,6 +67,7 @@ function topoSort(workflow: Workflow): { order: string[]; cyclic: boolean } {
 
 function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
   const issues: WorkflowValidationIssue[] = [];
+  const nodeById = new Map(workflow.nodes.map((node) => [node.id, node]));
 
   for (const node of workflow.nodes) {
     const config = (node.config ?? {}) as Record<string, unknown>;
@@ -91,10 +93,17 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
 
     if (node.type === "agent_orchestrator") {
       const provider = config.provider as Record<string, unknown> | undefined;
-      if (!provider || typeof provider.providerId !== "string" || typeof provider.model !== "string") {
+      const hasInlineProvider = Boolean(
+        provider && typeof provider.providerId === "string" && typeof provider.model === "string"
+      );
+      const hasAttachedChatModel = workflow.edges.some(
+        (edge) => edge.source === node.id && edge.sourceHandle === "chat_model"
+      );
+
+      if (!hasInlineProvider && !hasAttachedChatModel) {
         issues.push({
           code: "missing_agent_provider",
-          message: "Agent Orchestrator node requires provider.providerId and provider.model.",
+          message: "Agent Orchestrator node requires either inline provider config or an attached Chat Model node.",
           nodeId: node.id
         });
       }
@@ -102,6 +111,17 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_max_iterations",
           message: "Agent Orchestrator node requires maxIterations >= 1.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "local_memory" && config.maxMessages !== undefined) {
+      const parsed = Number(config.maxMessages);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        issues.push({
+          code: "invalid_memory_max_messages",
+          message: "Simple Memory node requires maxMessages >= 1 when set.",
           nodeId: node.id
         });
       }
@@ -122,6 +142,52 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         code: "missing_connector_id",
         message: "Connector Source node requires connectorId.",
         nodeId: node.id
+      });
+    }
+  }
+
+  for (const edge of workflow.edges) {
+    if (!isAgentAttachmentEdge(edge)) {
+      continue;
+    }
+
+    const sourceNode = nodeById.get(edge.source);
+    const targetNode = nodeById.get(edge.target);
+
+    if (!sourceNode || !targetNode) {
+      continue;
+    }
+
+    if (sourceNode.type !== "agent_orchestrator") {
+      issues.push({
+        code: "invalid_attachment_source",
+        message: "Attachment handles chat_model/memory/tool are only valid when source is an Agent Orchestrator node.",
+        edgeId: edge.id
+      });
+      continue;
+    }
+
+    if (edge.sourceHandle === "chat_model" && targetNode.type !== "llm_call") {
+      issues.push({
+        code: "invalid_chat_model_attachment",
+        message: "Agent chat_model attachment must target an LLM Call node.",
+        edgeId: edge.id
+      });
+    }
+
+    if (edge.sourceHandle === "memory" && targetNode.type !== "local_memory") {
+      issues.push({
+        code: "invalid_memory_attachment",
+        message: "Agent memory attachment must target a Simple Memory node.",
+        edgeId: edge.id
+      });
+    }
+
+    if (edge.sourceHandle === "tool" && targetNode.type !== "mcp_tool") {
+      issues.push({
+        code: "invalid_tool_attachment",
+        message: "Agent tool attachment must target an MCP Tool node.",
+        edgeId: edge.id
       });
     }
   }

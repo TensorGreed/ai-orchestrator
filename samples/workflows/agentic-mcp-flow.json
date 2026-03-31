@@ -3,8 +3,8 @@
   "workflowVersion": 1,
   "workflow": {
     "id": "wf-agent-mcp-webhook",
-    "name": "Agentic MCP Webhook Flow",
-    "description": "Webhook Input -> Agent Orchestrator -> Output",
+    "name": "Agentic MCP + Memory Webhook Flow",
+    "description": "Webhook Input -> Agent Orchestrator -> Output, with attached Chat Model, Memory, and MCP Tools.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [
@@ -23,22 +23,69 @@
         "name": "Agent Orchestrator",
         "position": { "x": 460, "y": 180 },
         "config": {
+          "systemPromptTemplate": "{{system_prompt}}",
+          "userPromptTemplate": "{{user_prompt}}",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxIterations": 6,
+          "toolCallingEnabled": true
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "OpenAI Chat Model",
+        "position": { "x": 520, "y": 340 },
+        "config": {
           "provider": {
             "providerId": "ollama",
             "baseUrl": "http://localhost:11434/v1",
             "model": "qwen2.5:7b",
             "temperature": 0.2
           },
-          "systemPromptTemplate": "{{system_prompt}}",
-          "userPromptTemplate": "{{user_prompt}}",
-          "maxIterations": 6,
-          "toolCallingEnabled": true,
-          "mcpServers": [
-            {
-              "serverId": "mock-mcp",
-              "allowedTools": ["get_current_time", "calculator", "lookup_kb"]
-            }
-          ]
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "memory_1",
+        "type": "local_memory",
+        "name": "Simple Memory",
+        "position": { "x": 700, "y": 340 },
+        "config": {
+          "namespace": "default",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxMessages": 20,
+          "persistToolMessages": false
+        }
+      },
+      {
+        "id": "tool_time_1",
+        "type": "mcp_tool",
+        "name": "MCP Time Tool",
+        "position": { "x": 870, "y": 320 },
+        "config": {
+          "serverId": "mock-mcp",
+          "toolName": "get_current_time",
+          "argsTemplate": "{\"tz\":\"America/Toronto\"}",
+          "connection": {
+            "transport": "http_streamable",
+            "endpoint": "http://127.0.0.1:7001/mcp"
+          }
+        }
+      },
+      {
+        "id": "tool_calc_1",
+        "type": "mcp_tool",
+        "name": "MCP Calculator Tool",
+        "position": { "x": 1010, "y": 320 },
+        "config": {
+          "serverId": "mock-mcp",
+          "toolName": "calculator",
+          "argsTemplate": "{\"expression\":\"12*7\"}",
+          "connection": {
+            "transport": "http_streamable",
+            "endpoint": "http://127.0.0.1:7001/mcp"
+          }
         }
       },
       {
@@ -62,6 +109,30 @@
         "id": "edge_2",
         "source": "agent_1",
         "target": "output_1"
+      },
+      {
+        "id": "edge_aux_chat_model",
+        "source": "agent_1",
+        "sourceHandle": "chat_model",
+        "target": "llm_1"
+      },
+      {
+        "id": "edge_aux_memory",
+        "source": "agent_1",
+        "sourceHandle": "memory",
+        "target": "memory_1"
+      },
+      {
+        "id": "edge_aux_tool_time",
+        "source": "agent_1",
+        "sourceHandle": "tool",
+        "target": "tool_time_1"
+      },
+      {
+        "id": "edge_aux_tool_calc",
+        "source": "agent_1",
+        "sourceHandle": "tool",
+        "target": "tool_calc_1"
       }
     ]
   },

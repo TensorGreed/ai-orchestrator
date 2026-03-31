@@ -79,6 +79,7 @@ export const nodeDefinitions: NodeDefinition[] = [
         provider: { type: "object" },
         systemPromptTemplate: { type: "string" },
         userPromptTemplate: { type: "string" },
+        sessionIdTemplate: { type: "string" },
         maxIterations: { type: "number" },
         toolCallingEnabled: { type: "boolean" },
         mcpServers: { type: "array", items: { type: "object" } }
@@ -89,9 +90,31 @@ export const nodeDefinitions: NodeDefinition[] = [
       provider: { providerId: "ollama", model: "qwen2.5:7b", baseUrl: "http://localhost:11434/v1" },
       systemPromptTemplate: "{{system_prompt}}",
       userPromptTemplate: "{{user_prompt}}",
+      sessionIdTemplate: "{{session_id}}",
       maxIterations: 6,
       toolCallingEnabled: true,
       mcpServers: [{ serverId: "mock-mcp" }]
+    }
+  },
+  {
+    type: "local_memory",
+    label: "Simple Memory",
+    category: "Utility",
+    description: "SQLite-backed session memory that can be attached to an Agent Orchestrator node.",
+    configSchema: {
+      type: "object",
+      properties: {
+        namespace: { type: "string" },
+        sessionIdTemplate: { type: "string" },
+        maxMessages: { type: "number" },
+        persistToolMessages: { type: "boolean" }
+      }
+    },
+    sampleConfig: {
+      namespace: "default",
+      sessionIdTemplate: "{{session_id}}",
+      maxMessages: 20,
+      persistToolMessages: false
     }
   },
   {

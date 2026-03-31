@@ -1,8 +1,9 @@
-import type { AgentRuntimeAdapter } from "@ai-orchestrator/agent-runtime";
+import type { AgentRuntimeAdapter, AgentSessionMemoryStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { invokeDirectMCPTool, resolveMCPTools, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type {
+  ChatMessage,
   ConnectorDocument,
   LLMProviderConfig,
   MCPServerConfig,
@@ -12,6 +13,7 @@ import type {
   WorkflowExecutionResult,
   WorkflowNode
 } from "@ai-orchestrator/shared";
+import { isExecutionEdge } from "./graph";
 import { InMemoryRetrieverAdapter } from "./rag-adapters";
 import { renderTemplate, tryParseJson } from "./template";
 import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
@@ -21,6 +23,7 @@ export interface WorkflowExecutionDependencies {
   mcpRegistry: MCPRegistry;
   connectorRegistry: ConnectorRegistry;
   agentRuntime: AgentRuntimeAdapter;
+  memoryStore?: AgentSessionMemoryStore;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   logger?: (message: string, metadata?: unknown) => void;
 }
@@ -39,7 +42,13 @@ interface NodeRuntimeContext {
   globals: Record<string, unknown>;
   merged: Record<string, unknown>;
   parentOutputs: Record<string, unknown>;
+  workflow: Workflow;
+  nodeById: Map<string, WorkflowNode>;
+  attachmentsBySource: Map<string, Map<AgentAttachmentHandle, string[]>>;
 }
+
+type AgentAttachmentHandle = "chat_model" | "memory" | "tool";
+const AGENT_ATTACHMENT_HANDLES = new Set<AgentAttachmentHandle>(["chat_model", "memory", "tool"]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -50,6 +59,68 @@ function toRecord(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+function getAttachmentHandle(sourceHandle: string | undefined): AgentAttachmentHandle | undefined {
+  if (!sourceHandle || !AGENT_ATTACHMENT_HANDLES.has(sourceHandle as AgentAttachmentHandle)) {
+    return undefined;
+  }
+
+  return sourceHandle as AgentAttachmentHandle;
+}
+
+function normalizeProvider(value: unknown): LLMProviderConfig | undefined {
+  const provider = toRecord(value);
+  if (typeof provider.providerId !== "string" || typeof provider.model !== "string") {
+    return undefined;
+  }
+
+  return provider as unknown as LLMProviderConfig;
+}
+
+function buildServerConfigKey(server: MCPServerConfig): string {
+  const connection = JSON.stringify(server.connection ?? {});
+  const secretId = server.secretRef?.secretId ?? "";
+  return `${server.serverId}::${secretId}::${connection}`;
+}
+
+function mergeMCPServerConfigs(base: MCPServerConfig[], additional: MCPServerConfig[]): MCPServerConfig[] {
+  const grouped = new Map<
+    string,
+    {
+      server: MCPServerConfig;
+      allowedTools?: Set<string>;
+    }
+  >();
+
+  for (const entry of [...base, ...additional]) {
+    const key = buildServerConfigKey(entry);
+    const current = grouped.get(key);
+
+    if (!current) {
+      grouped.set(key, {
+        server: {
+          ...entry,
+          allowedTools: entry.allowedTools ? [...entry.allowedTools] : undefined
+        },
+        allowedTools: entry.allowedTools ? new Set(entry.allowedTools) : undefined
+      });
+      continue;
+    }
+
+    if (!current.allowedTools || !entry.allowedTools) {
+      current.allowedTools = undefined;
+      current.server.allowedTools = undefined;
+      continue;
+    }
+
+    for (const tool of entry.allowedTools) {
+      current.allowedTools.add(tool);
+    }
+    current.server.allowedTools = [...current.allowedTools];
+  }
+
+  return [...grouped.values()].map((entry) => entry.server);
 }
 
 function mergeParentOutputs(parentOutputs: Record<string, unknown>): Record<string, unknown> {
@@ -108,6 +179,70 @@ function buildTemplateData(context: NodeRuntimeContext): Record<string, unknown>
     ...context.globals,
     ...context.merged,
     parent_outputs: context.parentOutputs
+  };
+}
+
+interface GraphIndexes {
+  nodeById: Map<string, WorkflowNode>;
+  incomingExecution: Map<string, string[]>;
+  outgoingExecution: Map<string, string[]>;
+  incomingAttachments: Map<string, string[]>;
+  attachmentsBySource: Map<string, Map<AgentAttachmentHandle, string[]>>;
+}
+
+function buildGraphIndexes(workflow: Workflow): GraphIndexes {
+  const nodeById = new Map(workflow.nodes.map((node) => [node.id, node]));
+  const incomingExecution = new Map<string, string[]>();
+  const outgoingExecution = new Map<string, string[]>();
+  const incomingAttachments = new Map<string, string[]>();
+  const attachmentsBySource = new Map<string, Map<AgentAttachmentHandle, string[]>>();
+
+  for (const node of workflow.nodes) {
+    incomingExecution.set(node.id, []);
+    outgoingExecution.set(node.id, []);
+    incomingAttachments.set(node.id, []);
+  }
+
+  for (const edge of workflow.edges) {
+    const attachmentHandle = getAttachmentHandle(edge.sourceHandle);
+    if (attachmentHandle) {
+      const incoming = incomingAttachments.get(edge.target);
+      if (incoming) {
+        incoming.push(edge.source);
+      }
+
+      let sourceMap = attachmentsBySource.get(edge.source);
+      if (!sourceMap) {
+        sourceMap = new Map<AgentAttachmentHandle, string[]>();
+        attachmentsBySource.set(edge.source, sourceMap);
+      }
+      const targets = sourceMap.get(attachmentHandle) ?? [];
+      targets.push(edge.target);
+      sourceMap.set(attachmentHandle, targets);
+      continue;
+    }
+
+    if (!isExecutionEdge(edge)) {
+      continue;
+    }
+
+    const incoming = incomingExecution.get(edge.target);
+    if (incoming) {
+      incoming.push(edge.source);
+    }
+
+    const outgoing = outgoingExecution.get(edge.source);
+    if (outgoing) {
+      outgoing.push(edge.target);
+    }
+  }
+
+  return {
+    nodeById,
+    incomingExecution,
+    outgoingExecution,
+    incomingAttachments,
+    attachmentsBySource
   };
 }
 
@@ -250,6 +385,34 @@ async function executeNode(
       };
     }
 
+    case "local_memory": {
+      const namespaceTemplate =
+        typeof config.namespace === "string" && config.namespace.trim()
+          ? config.namespace
+          : `${context.workflow.id}:${node.id}`;
+      const sessionTemplate = typeof config.sessionIdTemplate === "string" ? config.sessionIdTemplate : "{{session_id}}";
+      const maxMessages = typeof config.maxMessages === "number" && config.maxMessages > 0 ? Math.floor(config.maxMessages) : 20;
+      const sessionId = renderTemplate(sessionTemplate, templateData).trim();
+      const namespace = renderTemplate(namespaceTemplate, templateData).trim() || `${context.workflow.id}:${node.id}`;
+
+      if (!sessionId || !dependencies.memoryStore) {
+        return {
+          namespace,
+          sessionId,
+          maxMessages,
+          messages: []
+        };
+      }
+
+      const messages = await dependencies.memoryStore.loadMessages(namespace, sessionId);
+      return {
+        namespace,
+        sessionId,
+        maxMessages,
+        messages: messages.slice(-maxMessages)
+      };
+    }
+
     case "mcp_tool": {
       const serverId = String(config.serverId ?? "");
       const toolName = String(config.toolName ?? "");
@@ -285,17 +448,38 @@ async function executeNode(
     }
 
     case "agent_orchestrator": {
-      const provider = config.provider as LLMProviderConfig;
+      const attachedByHandle = context.attachmentsBySource.get(node.id);
+      const getAttachedNodes = (handle: AgentAttachmentHandle) => {
+        const ids = attachedByHandle?.get(handle) ?? [];
+        return ids
+          .map((id) => context.nodeById.get(id))
+          .filter((attached): attached is WorkflowNode => Boolean(attached));
+      };
+
+      const attachedModelNode = getAttachedNodes("chat_model").find((attached) => attached.type === "llm_call");
+      const attachedProvider = attachedModelNode
+        ? normalizeProvider(toRecord(attachedModelNode.config).provider)
+        : undefined;
+      const inlineProvider = normalizeProvider(config.provider);
+      const provider = attachedProvider ?? inlineProvider;
+      if (!provider) {
+        throw new Error("Agent Orchestrator requires inline provider config or an attached LLM Call node on chat_model.");
+      }
+
       const maxIterations = typeof config.maxIterations === "number" ? Math.max(1, Math.floor(config.maxIterations)) : 4;
       const toolCallingEnabled = config.toolCallingEnabled !== false;
 
       const systemTemplate =
         typeof config.systemPromptTemplate === "string" ? config.systemPromptTemplate : "{{system_prompt}}";
       const userTemplate = typeof config.userPromptTemplate === "string" ? config.userPromptTemplate : "{{user_prompt}}";
+      const sessionTemplate = typeof config.sessionIdTemplate === "string" ? config.sessionIdTemplate : "{{session_id}}";
       const systemPrompt = renderTemplate(systemTemplate, templateData);
       const userPrompt = renderTemplate(userTemplate, templateData);
+      const resolvedSessionId = renderTemplate(sessionTemplate, templateData).trim();
+      const sessionId =
+        resolvedSessionId || (typeof templateData.session_id === "string" ? String(templateData.session_id) : undefined);
 
-      const serverConfigs = Array.isArray(config.mcpServers)
+      const inlineServerConfigs = Array.isArray(config.mcpServers)
         ? config.mcpServers
             .map((entry) => toRecord(entry))
             .filter((entry) => typeof entry.serverId === "string")
@@ -307,15 +491,69 @@ async function executeNode(
                   connection: toRecord(entry.connection),
                   secretRef: entry.secretRef as SecretReference | undefined,
                   allowedTools: Array.isArray(entry.allowedTools)
-                    ? entry.allowedTools.map((tool) => String(tool))
-                    : undefined
+                      ? entry.allowedTools.map((tool) => String(tool))
+                      : undefined
                 }) satisfies MCPServerConfig
             )
         : [];
 
+      const attachedToolServerConfigs: MCPServerConfig[] = [];
+      for (const attached of getAttachedNodes("tool").filter((entry) => entry.type === "mcp_tool")) {
+        const attachedConfig = toRecord(attached.config);
+        const serverId = String(attachedConfig.serverId ?? "").trim();
+        if (!serverId) {
+          continue;
+        }
+
+        const allowedTools = new Set<string>();
+        if (Array.isArray(attachedConfig.allowedTools)) {
+          for (const tool of attachedConfig.allowedTools) {
+            const normalized = String(tool ?? "").trim();
+            if (normalized) {
+              allowedTools.add(normalized);
+            }
+          }
+        }
+
+        const toolName = String(attachedConfig.toolName ?? "").trim();
+        if (toolName) {
+          allowedTools.add(toolName);
+        }
+
+        attachedToolServerConfigs.push({
+          serverId,
+          connection: toRecord(attachedConfig.connection),
+          secretRef: attachedConfig.secretRef as SecretReference | undefined,
+          allowedTools: allowedTools.size ? [...allowedTools] : undefined
+        });
+      }
+
+      const serverConfigs = mergeMCPServerConfigs(inlineServerConfigs, attachedToolServerConfigs);
+
       const resolvedTools = await resolveMCPTools(serverConfigs, dependencies.mcpRegistry, {
         resolveSecret: dependencies.resolveSecret
       });
+
+      const attachedMemoryNode = getAttachedNodes("memory").find((attached) => attached.type === "local_memory");
+      let memory: { namespace?: string; maxMessages?: number; persistToolMessages?: boolean } | undefined;
+      if (attachedMemoryNode) {
+        const memoryConfig = toRecord(attachedMemoryNode.config);
+        const namespaceTemplate =
+          typeof memoryConfig.namespace === "string" && memoryConfig.namespace.trim()
+            ? memoryConfig.namespace
+            : `${context.workflow.id}:${node.id}`;
+        const namespace = renderTemplate(namespaceTemplate, templateData).trim() || `${context.workflow.id}:${node.id}`;
+        const maxMessages =
+          typeof memoryConfig.maxMessages === "number" && memoryConfig.maxMessages > 0
+            ? Math.floor(memoryConfig.maxMessages)
+            : 20;
+        const persistToolMessages = memoryConfig.persistToolMessages !== false;
+        memory = {
+          namespace,
+          maxMessages,
+          persistToolMessages
+        };
+      }
 
       const agentState = await dependencies.agentRuntime.run(
         {
@@ -330,7 +568,8 @@ async function executeNode(
             description: entry.definition.description,
             inputSchema: entry.definition.inputSchema
           })),
-          sessionId: typeof templateData.session_id === "string" ? templateData.session_id : undefined
+          sessionId,
+          memory
         },
         {
           tools: resolvedTools.tools,
@@ -338,7 +577,8 @@ async function executeNode(
         },
         {
           providerRegistry: dependencies.providerRegistry,
-          resolveSecret: dependencies.resolveSecret
+          resolveSecret: dependencies.resolveSecret,
+          memoryStore: dependencies.memoryStore
         }
       );
 
@@ -398,18 +638,7 @@ export async function executeWorkflow(
   }
 
   const nodeOrder = validation.orderedNodeIds ?? sortWorkflowNodes(request.workflow);
-  const nodeById = new Map(request.workflow.nodes.map((node) => [node.id, node]));
-  const incoming = new Map<string, string[]>();
-
-  for (const node of request.workflow.nodes) {
-    incoming.set(node.id, []);
-  }
-  for (const edge of request.workflow.edges) {
-    const items = incoming.get(edge.target);
-    if (items) {
-      items.push(edge.source);
-    }
-  }
+  const graphIndexes = buildGraphIndexes(request.workflow);
 
   const globals: Record<string, unknown> = {
     ...(request.input ?? {}),
@@ -433,8 +662,28 @@ export async function executeWorkflow(
 
   for (let index = 0; index < nodeOrder.length; index += 1) {
     const nodeId = nodeOrder[index];
-    const node = nodeById.get(nodeId);
+    const node = graphIndexes.nodeById.get(nodeId);
     if (!node) {
+      continue;
+    }
+
+    const hasExecutionIncoming = (graphIndexes.incomingExecution.get(node.id)?.length ?? 0) > 0;
+    const hasExecutionOutgoing = (graphIndexes.outgoingExecution.get(node.id)?.length ?? 0) > 0;
+    const hasAttachmentIncoming = (graphIndexes.incomingAttachments.get(node.id)?.length ?? 0) > 0;
+    const isAttachmentOnlyNode = hasAttachmentIncoming && !hasExecutionIncoming && !hasExecutionOutgoing;
+
+    if (isAttachmentOnlyNode) {
+      nodeResults.push({
+        nodeId: node.id,
+        status: "skipped",
+        startedAt: nowIso(),
+        completedAt: nowIso(),
+        durationMs: 0,
+        output: {
+          reason: "attachment_only_node",
+          message: "Node is attached to an agent port and is not part of the execution DAG."
+        }
+      });
       continue;
     }
 
@@ -442,7 +691,7 @@ export async function executeWorkflow(
     const startedAtNode = nowIso();
 
     try {
-      const parentIds = incoming.get(node.id) ?? [];
+      const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
       const parentOutputs: Record<string, unknown> = {};
       for (const parentId of parentIds) {
         if (nodeOutputs.has(parentId)) {
@@ -456,7 +705,10 @@ export async function executeWorkflow(
         {
           globals,
           merged,
-          parentOutputs
+          parentOutputs,
+          workflow: request.workflow,
+          nodeById: graphIndexes.nodeById,
+          attachmentsBySource: graphIndexes.attachmentsBySource
         },
         dependencies
       );

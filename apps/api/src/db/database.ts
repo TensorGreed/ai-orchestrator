@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import initSqlJs, { type BindParams, type Database as SQLDatabase } from "sql.js";
-import type { Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
+import type { ChatMessage, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
 
 const require = createRequire(import.meta.url);
 
@@ -24,6 +24,14 @@ interface SecretRow {
   auth_tag: string;
   ciphertext: string;
   created_at: string;
+}
+
+interface SessionMemoryRow {
+  namespace: string;
+  session_id: string;
+  messages_json: string;
+  created_at: string;
+  updated_at: string;
 }
 
 function toString(value: unknown): string {
@@ -77,6 +85,15 @@ export class SqliteStore {
         auth_tag TEXT NOT NULL,
         ciphertext TEXT NOT NULL,
         created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS session_memory (
+        namespace TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        messages_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (namespace, session_id)
       );
     `);
 
@@ -257,6 +274,51 @@ export class SqliteStore {
         input.ciphertext,
         new Date().toISOString()
       ]
+    );
+
+    this.persist();
+  }
+
+  loadSessionMemory(namespace: string, sessionId: string): ChatMessage[] {
+    const row = this.queryOne<SessionMemoryRow>(
+      `SELECT namespace, session_id, messages_json, created_at, updated_at
+       FROM session_memory
+       WHERE namespace = ? AND session_id = ?`,
+      [namespace, sessionId]
+    );
+
+    if (!row) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(toString(row.messages_json));
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed as ChatMessage[];
+    } catch {
+      return [];
+    }
+  }
+
+  saveSessionMemory(namespace: string, sessionId: string, messages: ChatMessage[]): void {
+    const existing = this.queryOne<SessionMemoryRow>(
+      `SELECT namespace, session_id, messages_json, created_at, updated_at
+       FROM session_memory
+       WHERE namespace = ? AND session_id = ?`,
+      [namespace, sessionId]
+    );
+    const now = new Date().toISOString();
+    const createdAt = existing ? toString(existing.created_at) : now;
+
+    this.db.run(
+      `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(namespace, session_id) DO UPDATE SET
+         messages_json = excluded.messages_json,
+         updated_at = excluded.updated_at`,
+      [namespace, sessionId, JSON.stringify(messages), createdAt, now]
     );
 
     this.persist();

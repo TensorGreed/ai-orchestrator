@@ -3,12 +3,12 @@ import path from "node:path";
 import { importWorkflowFromJson } from "@ai-orchestrator/workflow-engine";
 import { SqliteStore } from "../db/database";
 
-export function seedWorkflowsIfEmpty(store: SqliteStore): void {
+export function seedWorkflowsIfEmpty(store: SqliteStore, workspaceRoot: string): void {
   if (store.countWorkflows() > 0) {
     return;
   }
 
-  const sampleDir = path.resolve(process.cwd(), "samples", "workflows");
+  const sampleDir = path.resolve(workspaceRoot, "samples", "workflows");
   if (!fs.existsSync(sampleDir)) {
     return;
   }

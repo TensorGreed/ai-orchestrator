@@ -5,6 +5,7 @@ export interface EditorNodeData {
   label: string;
   nodeType: WorkflowNodeType;
   config: Record<string, unknown>;
+  executionStatus?: "pending" | "running" | "success" | "error" | "skipped";
 }
 
 export type EditorNode = Node<EditorNodeData>;
@@ -25,7 +26,7 @@ export function createBlankWorkflow(): Workflow {
 export function workflowToEditor(workflow: Workflow): { nodes: EditorNode[]; edges: Edge[] } {
   const nodes: EditorNode[] = workflow.nodes.map((node) => ({
     id: node.id,
-    type: "default",
+    type: "workflowNode",
     position: node.position,
     data: {
       label: node.name,
