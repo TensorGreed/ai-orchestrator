@@ -9,7 +9,10 @@ const MAX_TOOL_DESCRIPTION_CHARS = 280;
 const MAX_TOOL_SCHEMA_PROPERTIES = 12;
 const MAX_TOOL_SCHEMA_ENUM_VALUES = 20;
 const MAX_TOOL_SCHEMA_DEPTH = 2;
-const MAX_TOOL_COUNT = 64;
+const MAX_TOOL_COUNT = 24;
+const MAX_TOOLS_WITH_MATCH = 8;
+const MAX_TOOLS_NO_MATCH = 12;
+const STRONG_MATCH_SCORE = 2;
 
 function normalizeMaxMessages(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
@@ -112,10 +115,6 @@ function normalizeToolsForModel(input: ToolDefinition[], prompt: string): ToolDe
     inputSchema: simplifySchema(tool.inputSchema)
   }));
 
-  if (deduped.length <= MAX_TOOL_COUNT) {
-    return deduped;
-  }
-
   const ranked = deduped
     .map((tool, index) => ({
       tool,
@@ -129,7 +128,18 @@ function normalizeToolsForModel(input: ToolDefinition[], prompt: string): ToolDe
       return a.index - b.index;
     });
 
-  return ranked.slice(0, MAX_TOOL_COUNT).map((entry) => entry.tool);
+  const strongestScore = ranked[0]?.score ?? 0;
+  if (strongestScore >= STRONG_MATCH_SCORE) {
+    const strongest = ranked.filter((entry) => entry.score === strongestScore);
+    return strongest.slice(0, Math.min(MAX_TOOLS_WITH_MATCH, MAX_TOOL_COUNT)).map((entry) => entry.tool);
+  }
+
+  const positive = ranked.filter((entry) => entry.score > 0);
+  if (positive.length > 0) {
+    return positive.slice(0, Math.min(MAX_TOOLS_WITH_MATCH, MAX_TOOL_COUNT)).map((entry) => entry.tool);
+  }
+
+  return ranked.slice(0, Math.min(MAX_TOOLS_NO_MATCH, MAX_TOOL_COUNT)).map((entry) => entry.tool);
 }
 
 function serializeToolMessage(ok: boolean, payload: unknown): string {

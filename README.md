@@ -293,6 +293,7 @@ Notes:
 - `mock-mcp` is a demo adapter and always returns demo tools (`get_current_time`, `calculator`, `lookup_kb`).
 - If you want a brand-new adapter implementation, select `Custom Adapter ID` and register that adapter in `packages/mcp-sdk/src/index.ts`.
 - If your MCP server exposes many large tool schemas, model context limits can be hit. The runtime now compacts tool schemas, truncates oversized tool outputs in conversation memory, and caps tool metadata sent to the model.
+- In all-tools mode, runtime also shortlists tools by prompt relevance to reduce wrong tool picks across similarly named endpoints.
 
 ## Simple Memory Node
 

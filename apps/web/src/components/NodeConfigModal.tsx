@@ -651,16 +651,25 @@ export function NodeConfigModal({
           label="Tools To Include"
           value={includeAllDiscoveredTools ? "all" : "single"}
           onChange={(next) =>
-            setConfig((current) => ({
-              ...current,
-              toolName: next === "all" ? "__all__" : toStringValue(current.toolName).trim() || "",
-              allowedTools:
-                next === "all"
-                  ? undefined
-                  : toStringValue(current.toolName).trim() && toStringValue(current.toolName).trim() !== "__all__"
-                    ? [toStringValue(current.toolName).trim()]
-                    : undefined
-            }))
+            setConfig((current) => {
+              if (next === "all") {
+                return {
+                  ...current,
+                  toolName: "__all__",
+                  allowedTools: undefined
+                };
+              }
+
+              const currentToolName = toStringValue(current.toolName).trim();
+              const resolvedSingleTool =
+                currentToolName && currentToolName !== "__all__" ? currentToolName : (discoveredTools[0]?.name ?? "");
+
+              return {
+                ...current,
+                toolName: resolvedSingleTool,
+                allowedTools: resolvedSingleTool ? [resolvedSingleTool] : undefined
+              };
+            })
           }
           options={[
             { value: "all", label: "All discovered tools (agent decides)" },
