@@ -1,7 +1,7 @@
-import type { ChangeEvent, RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type RefObject } from "react";
 import type { WorkflowListItem } from "@ai-orchestrator/shared";
 import type { AuthUser } from "../lib/api";
-import type { EdgePathMode, StudioMode } from "./studio-layout-types";
+import type { StudioMode } from "./studio-layout-types";
 
 interface TopBarProps {
   activeMode: StudioMode;
@@ -13,7 +13,6 @@ interface TopBarProps {
   authUser: AuthUser;
   busy: boolean;
   secretBusy: boolean;
-  edgePathMode: EdgePathMode;
   importFileRef: RefObject<HTMLInputElement | null>;
   onWorkflowNameChange: (name: string) => void;
   onLoadWorkflowById: (id: string) => void;
@@ -22,7 +21,6 @@ interface TopBarProps {
   onExport: () => void;
   onImportClick: () => void;
   onImportFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
-  onEdgePathModeChange: (mode: EdgePathMode) => void;
   onRefreshSecrets: () => void;
   onLogout: () => void;
 }
@@ -37,7 +35,6 @@ export function TopBar({
   authUser,
   busy,
   secretBusy,
-  edgePathMode,
   importFileRef,
   onWorkflowNameChange,
   onLoadWorkflowById,
@@ -46,10 +43,30 @@ export function TopBar({
   onExport,
   onImportClick,
   onImportFileChange,
-  onEdgePathModeChange,
   onRefreshSecrets,
   onLogout
 }: TopBarProps) {
+  const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+  const displayName = useMemo(() => authUser.email.split("@")[0] || authUser.email, [authUser.email]);
+
+  useEffect(() => {
+    const handleOutsideClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (!accountMenuRef.current?.contains(target)) {
+        setIsAccountMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, []);
+
   return (
     <header className="top-header">
       <div className="header-left">
@@ -79,10 +96,6 @@ export function TopBar({
       </div>
 
       <div className="header-actions">
-        <div className="auth-user-pill" title={authUser.email}>
-          <span>{authUser.email}</span>
-          <strong>{authUser.role}</strong>
-        </div>
         {(activeMode === "editor" || activeMode === "executions" || activeMode === "evaluations") && (
           <>
             <button className="header-btn" onClick={onSave} disabled={busy}>
@@ -96,25 +109,38 @@ export function TopBar({
             </button>
           </>
         )}
-        {activeMode === "editor" && (
-          <select
-            className="workflow-select edge-mode-select"
-            value={edgePathMode}
-            onChange={(event) => onEdgePathModeChange(event.target.value as EdgePathMode)}
-            title="Edge path style"
-          >
-            <option value="bezier">Curved Edges</option>
-            <option value="smoothstep">Stepped Edges</option>
-          </select>
-        )}
         {activeMode === "secrets" && canManageSecrets && (
           <button className="header-btn" onClick={onRefreshSecrets} disabled={secretBusy || busy}>
             Refresh Secrets
           </button>
         )}
-        <button className="header-btn" onClick={onLogout}>
-          Logout
-        </button>
+        <div className="account-menu" ref={accountMenuRef}>
+          <button
+            className="account-trigger"
+            onClick={() => setIsAccountMenuOpen((value) => !value)}
+            aria-haspopup="menu"
+            aria-expanded={isAccountMenuOpen}
+            title={authUser.email}
+          >
+            <span className="account-name">{displayName}</span>
+            <span className="account-caret">▾</span>
+          </button>
+          {isAccountMenuOpen && (
+            <div className="account-dropdown" role="menu">
+              <div className="account-email">{authUser.email}</div>
+              <button
+                className="account-logout"
+                role="menuitem"
+                onClick={() => {
+                  setIsAccountMenuOpen(false);
+                  onLogout();
+                }}
+              >
+                Logout
+              </button>
+            </div>
+          )}
+        </div>
         <input ref={importFileRef} type="file" accept="application/json" hidden onChange={onImportFileChange} />
       </div>
     </header>

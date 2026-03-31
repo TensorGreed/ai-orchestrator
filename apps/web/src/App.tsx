@@ -49,7 +49,7 @@ import { WorkflowCanvasNode } from "./components/WorkflowCanvasNode";
 import { NodeConfigModal, type NodeInputOption } from "./components/NodeConfigModal";
 import { LeftMenuBar } from "./components/LeftMenuBar";
 import { TopBar } from "./components/TopBar";
-import type { EdgePathMode, StudioMode } from "./components/studio-layout-types";
+import type { StudioMode } from "./components/studio-layout-types";
 
 interface DefinitionNode {
   type: string;
@@ -71,7 +71,6 @@ const statusColors: Record<string, string> = {
 const auxiliaryHandles = new Set(["chat_model", "memory", "tool"]);
 const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
 const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
-const EDGE_PATH_MODE_STORAGE_KEY = "ai-orchestrator:edge-path-mode";
 
 function stringifyPretty(value: unknown) {
   return JSON.stringify(value, null, 2);
@@ -89,16 +88,7 @@ function getNodeStatusMap(result: WorkflowExecutionResult | null) {
   return map;
 }
 
-function readEdgePathMode(): EdgePathMode {
-  if (typeof window === "undefined") {
-    return "bezier";
-  }
-
-  const stored = localStorage.getItem(EDGE_PATH_MODE_STORAGE_KEY);
-  return stored === "smoothstep" ? "smoothstep" : "bezier";
-}
-
-function decorateEdge(edge: Edge, nodes: EditorNode[], mode: EdgePathMode): Edge {
+function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
   const source = nodes.find((node) => node.id === edge.source);
   const target = nodes.find((node) => node.id === edge.target);
   const isAuxiliary =
@@ -112,7 +102,7 @@ function decorateEdge(edge: Edge, nodes: EditorNode[], mode: EdgePathMode): Edge
   const stroke = isAuxiliary ? "#aab0bc" : "#6e7789";
   return {
     ...edge,
-    type: mode,
+    type: "bezier",
     animated: Boolean(isAuxiliary),
     markerEnd: {
       type: MarkerType.ArrowClosed,
@@ -130,6 +120,23 @@ function decorateEdge(edge: Edge, nodes: EditorNode[], mode: EdgePathMode): Edge
       targetType: target?.data.nodeType
     }
   };
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.isContentEditable) {
+    return true;
+  }
+
+  const tagName = target.tagName.toLowerCase();
+  if (tagName === "input" || tagName === "textarea" || tagName === "select") {
+    return true;
+  }
+
+  return Boolean(target.closest(".node-modal-shell"));
 }
 
 export default function App() {
@@ -165,7 +172,6 @@ export default function App() {
   const [activeMode, setActiveMode] = useState<StudioMode>("editor");
   const [logsTab, setLogsTab] = useState<LogsTab>("logs");
   const [isLogsPanelCollapsed, setIsLogsPanelCollapsed] = useState(false);
-  const [edgePathMode, setEdgePathMode] = useState<EdgePathMode>(readEdgePathMode);
 
   const flowWrapperRef = useRef<HTMLDivElement>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
@@ -228,12 +234,8 @@ export default function App() {
   }, [executionStatuses, setNodes]);
 
   useEffect(() => {
-    setEdges((currentEdges) => currentEdges.map((edge) => decorateEdge(edge, nodes as EditorNode[], edgePathMode)));
-  }, [edgePathMode, nodes, setEdges]);
-
-  useEffect(() => {
-    localStorage.setItem(EDGE_PATH_MODE_STORAGE_KEY, edgePathMode);
-  }, [edgePathMode]);
+    setEdges((currentEdges) => currentEdges.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
+  }, [nodes, setEdges]);
 
   useEffect(() => {
     if (!editingNodeId) {
@@ -245,6 +247,42 @@ export default function App() {
       setEditingNodeId(null);
     }
   }, [editingNodeId, nodes]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Delete" && event.key !== "Backspace") {
+        return;
+      }
+
+      if (isTypingTarget(event.target)) {
+        return;
+      }
+
+      const selectedNodeIds = new Set(nodes.filter((node) => node.selected).map((node) => node.id));
+      const selectedEdgeIds = new Set(edges.filter((edge) => edge.selected).map((edge) => edge.id));
+      if (selectedNodeIds.size === 0 && selectedEdgeIds.size === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      setNodes((currentNodes) => currentNodes.filter((node) => !selectedNodeIds.has(node.id)));
+      setEdges((currentEdges) =>
+        currentEdges.filter(
+          (edge) =>
+            !selectedEdgeIds.has(edge.id) && !selectedNodeIds.has(edge.source) && !selectedNodeIds.has(edge.target)
+        )
+      );
+
+      if (editingNodeId && selectedNodeIds.has(editingNodeId)) {
+        setEditingNodeId(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [editingNodeId, edges, nodes, setEdges, setNodes]);
 
   const refreshSecrets = useCallback(async () => {
     if (!canManageSecrets) {
@@ -281,7 +319,7 @@ export default function App() {
   const hydrateWorkflow = useCallback(
     (workflow: Workflow) => {
       const editor = workflowToEditor(workflow);
-      const decoratedEdges = editor.edges.map((edge) => decorateEdge(edge, editor.nodes as EditorNode[], edgePathMode));
+      const decoratedEdges = editor.edges.map((edge) => decorateEdge(edge, editor.nodes as EditorNode[]));
 
       setCurrentWorkflow(workflow);
       setNodes(editor.nodes as EditorNode[]);
@@ -289,7 +327,7 @@ export default function App() {
       setExecutionResult(null);
       setEditingNodeId(null);
     },
-    [edgePathMode, setEdges, setNodes]
+    [setEdges, setNodes]
   );
 
   const loadData = useCallback(async () => {
@@ -613,15 +651,14 @@ export default function App() {
             target,
             id: createEdgeId(source, target)
           },
-          nodes as EditorNode[],
-          edgePathMode
+          nodes as EditorNode[]
         );
 
         return addEdge(edge, existing);
       });
       setError(null);
     },
-    [edgePathMode, nodes, setEdges]
+    [nodes, setEdges]
   );
 
   const onDrop = useCallback(
@@ -770,10 +807,6 @@ export default function App() {
       <LeftMenuBar
         activeMode={activeMode}
         canManageSecrets={canManageSecrets}
-        onToggleNodeDrawer={() => {
-          setActiveMode("editor");
-          setShowNodeDrawer((value) => !value);
-        }}
         onModeChange={setActiveMode}
       />
 
@@ -788,7 +821,6 @@ export default function App() {
           authUser={authUser}
           busy={busy}
           secretBusy={secretBusy}
-          edgePathMode={edgePathMode}
           importFileRef={importFileRef}
           onWorkflowNameChange={(name) =>
             setCurrentWorkflow((current) => ({
@@ -804,7 +836,6 @@ export default function App() {
           onExport={handleExport}
           onImportClick={() => importFileRef.current?.click()}
           onImportFileChange={handleImportFile}
-          onEdgePathModeChange={setEdgePathMode}
           onRefreshSecrets={() => {
             void refreshSecrets();
           }}
@@ -823,7 +854,17 @@ export default function App() {
                 <div className="canvas-pane" ref={flowWrapperRef} onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
                   {showNodeDrawer && (
                     <div className="node-drawer">
-                      <div className="node-drawer-header">Node Library</div>
+                      <div className="node-drawer-header-row">
+                        <div className="node-drawer-header">Node Library</div>
+                        <button
+                          className="node-drawer-close-btn"
+                          onClick={() => setShowNodeDrawer(false)}
+                          title="Close node library"
+                          aria-label="Close node library"
+                        >
+                          ×
+                        </button>
+                      </div>
                       {[...groupedDefinitions.entries()].map(([category, items]) => (
                         <div key={category} className="node-category">
                           <div className="node-category-title">{category}</div>
@@ -857,7 +898,7 @@ export default function App() {
                     onNodesChange={onNodesChange}
                     onEdgesChange={(changes) => {
                       onEdgesChange(changes);
-                      setEdges((current) => current.map((edge) => decorateEdge(edge, nodes as EditorNode[], edgePathMode)));
+                      setEdges((current) => current.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
                     }}
                     onConnect={onConnect}
                     onInit={setReactFlowInstance}
@@ -883,13 +924,16 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="canvas-controls-right">
-                    <button onClick={() => setShowNodeDrawer((value) => !value)}>Nodes</button>
-                    <button onClick={() => setEdgePathMode((value) => (value === "bezier" ? "smoothstep" : "bezier"))}>
-                      {edgePathMode === "bezier" ? "Curved" : "Stepped"}
+                  {!showNodeDrawer && (
+                    <button
+                      className="node-drawer-open-btn"
+                      onClick={() => setShowNodeDrawer(true)}
+                      title="Open node library"
+                      aria-label="Open node library"
+                    >
+                      +
                     </button>
-                    {canManageSecrets && <button onClick={() => setActiveMode("secrets")}>Secrets</button>}
-                  </div>
+                  )}
 
                   <div className="execute-strip">
                     <button className="execute-btn" onClick={handleExecute} disabled={busy}>

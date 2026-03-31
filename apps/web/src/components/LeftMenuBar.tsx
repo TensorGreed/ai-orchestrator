@@ -3,21 +3,12 @@ import type { StudioMode } from "./studio-layout-types";
 interface LeftMenuBarProps {
   activeMode: StudioMode;
   canManageSecrets: boolean;
-  onToggleNodeDrawer: () => void;
   onModeChange: (mode: StudioMode) => void;
 }
 
-export function LeftMenuBar({ activeMode, canManageSecrets, onToggleNodeDrawer, onModeChange }: LeftMenuBarProps) {
+export function LeftMenuBar({ activeMode, canManageSecrets, onModeChange }: LeftMenuBarProps) {
   return (
     <aside className="app-rail">
-      <button
-        className="rail-btn"
-        onClick={onToggleNodeDrawer}
-        title="Node drawer"
-        aria-pressed={activeMode === "editor"}
-      >
-        +
-      </button>
       <button
         className="rail-btn"
         onClick={() => onModeChange("editor")}

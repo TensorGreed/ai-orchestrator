@@ -211,34 +211,72 @@ select {
   align-items: center;
 }
 
-.auth-user-pill {
+.account-menu {
+  position: relative;
+}
+
+.account-trigger {
+  border: 1px solid #d7deeb;
+  border-radius: 999px;
+  background: #f8f9fc;
+  color: #334157;
+  height: 36px;
+  padding: 0 12px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid #d7deeb;
-  background: #f8f9fc;
-  border-radius: 999px;
-  padding: 6px 10px;
-  max-width: 260px;
+  cursor: pointer;
+  font-weight: 600;
 }
 
-.auth-user-pill span {
-  color: #3a445a;
-  font-size: 0.82rem;
+.account-name {
+  max-width: 160px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.auth-user-pill strong {
+.account-caret {
+  color: #6f7a90;
   font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #5b6780;
-  border: 1px solid #cdd6e6;
-  border-radius: 999px;
-  padding: 2px 6px;
+}
+
+.account-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  min-width: 240px;
+  border: 1px solid #d7deeb;
+  border-radius: 10px;
   background: #fff;
+  box-shadow: var(--shadow);
+  padding: 8px;
+  z-index: 15;
+}
+
+.account-email {
+  color: #4b5975;
+  font-size: 0.84rem;
+  padding: 8px;
+  border-bottom: 1px solid #e8edf6;
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+.account-logout {
+  width: 100%;
+  border: 1px solid #d5ddeb;
+  border-radius: 8px;
+  background: #fff;
+  color: #324057;
+  font-weight: 600;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.account-logout:hover,
+.account-trigger:hover {
+  border-color: #b9c4d8;
 }
 
 .header-btn {
@@ -258,10 +296,6 @@ select {
 .header-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-.edge-mode-select {
-  min-width: 140px;
 }
 
 .main-content {
@@ -332,7 +366,47 @@ select {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #7d8597;
+}
+
+.node-drawer-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   margin-bottom: 10px;
+}
+
+.node-drawer-close-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid #d4dbe9;
+  border-radius: 8px;
+  background: #fff;
+  color: #657088;
+  cursor: pointer;
+  line-height: 1;
+  font-size: 1rem;
+}
+
+.node-drawer-open-btn {
+  position: absolute;
+  z-index: 5;
+  right: 14px;
+  top: 14px;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: #fff;
+  color: #364154;
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.node-drawer-open-btn:hover,
+.node-drawer-close-btn:hover {
+  border-color: #bcc6d8;
+  color: #33445f;
 }
 
 .node-category {
@@ -374,8 +448,7 @@ select {
   border-color: #b8c2d5;
 }
 
-.canvas-controls-left,
-.canvas-controls-right {
+.canvas-controls-left {
   position: absolute;
   z-index: 5;
   display: flex;
@@ -387,14 +460,7 @@ select {
   bottom: 14px;
 }
 
-.canvas-controls-right {
-  right: 14px;
-  top: 14px;
-  flex-direction: column;
-}
-
-.canvas-controls-left button,
-.canvas-controls-right button {
+.canvas-controls-left button {
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   background: #fff;
