@@ -8,9 +8,17 @@ export const nodeDefinitions: NodeDefinition[] = [
     description: "Injects webhook payload into workflow context.",
     configSchema: {
       type: "object",
-      properties: { passThroughFields: { type: "array", items: { type: "string" } } }
+      properties: {
+        path: { type: "string" },
+        method: { type: "string", enum: ["POST", "GET", "PUT", "PATCH", "DELETE"] },
+        passThroughFields: { type: "array", items: { type: "string" } }
+      }
     },
-    sampleConfig: { passThroughFields: ["system_prompt", "user_prompt", "session_id"] }
+    sampleConfig: {
+      path: "agent-demo",
+      method: "POST",
+      passThroughFields: ["system_prompt", "user_prompt", "session_id", "variables"]
+    }
   },
   {
     type: "text_input",

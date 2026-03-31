@@ -149,6 +149,19 @@ function TextAreaField({
   );
 }
 
+function getApiBaseUrl(): string {
+  const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
+  if (envBase) {
+    return envBase.replace(/\/+$/, "");
+  }
+
+  if (typeof window !== "undefined") {
+    return window.location.origin.replace(/\/+$/, "");
+  }
+
+  return "";
+}
+
 export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, onExecuteStep }: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
@@ -505,6 +518,70 @@ export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, 
     );
   };
 
+  const renderWebhookParameters = () => {
+    const pathValue = toStringValue(config.path, node.id);
+    const normalizedPath = pathValue.trim().replace(/^\/+/, "").replace(/\/+$/, "") || node.id;
+    const method = toStringValue(config.method, "POST").trim().toUpperCase() || "POST";
+    const passThroughCsv = Array.isArray(config.passThroughFields)
+      ? config.passThroughFields.map((item) => String(item)).join(",")
+      : "system_prompt,user_prompt,session_id,variables";
+    const apiBase = getApiBaseUrl();
+    const testUrl = `${apiBase}/webhook-test/${normalizedPath}`;
+    const productionUrl = `${apiBase}/webhook/${normalizedPath}`;
+
+    return (
+      <>
+        <SelectField
+          label="HTTP Method"
+          value={method}
+          onChange={(next) => setConfig((current) => ({ ...current, method: next }))}
+          options={[
+            { value: "POST", label: "POST" },
+            { value: "GET", label: "GET" },
+            { value: "PUT", label: "PUT" },
+            { value: "PATCH", label: "PATCH" },
+            { value: "DELETE", label: "DELETE" }
+          ]}
+        />
+        <TextField
+          label="Path"
+          value={pathValue}
+          onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
+          placeholder="agent-demo"
+        />
+        <TextField
+          label="Pass-through Fields (comma-separated)"
+          value={passThroughCsv}
+          onChange={(next) =>
+            setConfig((current) => ({
+              ...current,
+              passThroughFields: next
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean)
+            }))
+          }
+        />
+
+        <div className="cfg-tip">
+          <div>
+            <strong>Test URL</strong>
+          </div>
+          <code>{`${method} ${testUrl}`}</code>
+          <div style={{ marginTop: "8px" }}>
+            <strong>Production URL</strong>
+          </div>
+          <code>{`${method} ${productionUrl}`}</code>
+        </div>
+
+        <div className="cfg-tip">
+          Send JSON body with at least <code>user_prompt</code> (or <code>prompt</code>). Optional:
+          <code>system_prompt</code>, <code>session_id</code>, <code>variables</code>.
+        </div>
+      </>
+    );
+  };
+
   const renderConnectorParameters = () => {
     return (
       <>
@@ -537,6 +614,8 @@ export function NodeConfigModal({ node, inputOptions, secrets, onClose, onSave, 
 
   const renderParameters = () => {
     switch (node.data.nodeType) {
+      case "webhook_input":
+        return renderWebhookParameters();
       case "agent_orchestrator":
         return renderAgentParameters();
       case "mcp_tool":

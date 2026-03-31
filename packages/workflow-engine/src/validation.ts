@@ -6,6 +6,14 @@ interface GraphMetadata {
   outgoing: Map<string, string[]>;
 }
 
+const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+
+function normalizeWebhookPath(value: unknown, fallback: string): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  const withFallback = raw || fallback;
+  return withFallback.replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
 function buildGraph(workflow: Workflow): GraphMetadata {
   const inDegree = new Map<string, number>();
   const outgoing = new Map<string, string[]>();
@@ -68,6 +76,7 @@ function topoSort(workflow: Workflow): { order: string[]; cyclic: boolean } {
 function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
   const issues: WorkflowValidationIssue[] = [];
   const nodeById = new Map(workflow.nodes.map((node) => [node.id, node]));
+  const webhookRoutes = new Map<string, string>();
 
   for (const node of workflow.nodes) {
     const config = (node.config ?? {}) as Record<string, unknown>;
@@ -78,6 +87,40 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         message: "Prompt Template node requires a string template config.",
         nodeId: node.id
       });
+    }
+
+    if (node.type === "webhook_input") {
+      const path = normalizeWebhookPath(config.path, node.id);
+      const methodValue = typeof config.method === "string" ? config.method.trim().toUpperCase() : "POST";
+      const method = methodValue || "POST";
+
+      if (!allowedWebhookMethods.has(method)) {
+        issues.push({
+          code: "invalid_webhook_method",
+          message: "Webhook Input node method must be one of GET, POST, PUT, PATCH, DELETE.",
+          nodeId: node.id
+        });
+      }
+
+      if (!path) {
+        issues.push({
+          code: "invalid_webhook_path",
+          message: "Webhook Input node path cannot be empty.",
+          nodeId: node.id
+        });
+      } else {
+        const routeKey = `${method}:${path.toLowerCase()}`;
+        const duplicateNodeId = webhookRoutes.get(routeKey);
+        if (duplicateNodeId) {
+          issues.push({
+            code: "duplicate_webhook_route",
+            message: `Webhook route '${method} /webhook/${path}' is duplicated by node '${duplicateNodeId}'.`,
+            nodeId: node.id
+          });
+        } else {
+          webhookRoutes.set(routeKey, node.id);
+        }
+      }
     }
 
     if (node.type === "llm_call") {

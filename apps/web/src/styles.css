@@ -21,10 +21,13 @@ html,
 body,
 #root {
   margin: 0;
-  height: 100%;
+  width: 100%;
+  height: 100dvh;
+  min-height: 100dvh;
   font-family: "Manrope", "Segoe UI", sans-serif;
   color: var(--text);
   background: var(--app-bg);
+  overflow: hidden;
 }
 
 button,
@@ -43,9 +46,11 @@ select {
 }
 
 .studio-shell {
-  height: 100%;
+  width: 100%;
+  height: 100dvh;
+  min-height: 100dvh;
   display: grid;
-  grid-template-columns: 52px 1fr;
+  grid-template-columns: 76px 1fr;
 }
 
 .app-rail {
@@ -59,7 +64,7 @@ select {
 }
 
 .rail-btn {
-  width: 34px;
+  width: 58px;
   height: 34px;
   border-radius: 8px;
   border: 1px solid var(--panel-border);
@@ -67,6 +72,8 @@ select {
   color: #4c5670;
   cursor: pointer;
   font-weight: 600;
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
 }
 
 .rail-btn:hover {
@@ -77,6 +84,7 @@ select {
 .studio-main {
   display: grid;
   grid-template-rows: 74px 1fr;
+  min-height: 0;
 }
 
 .top-header {
@@ -185,8 +193,10 @@ select {
 
 .main-content {
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
 }
 
 .global-banner {
@@ -204,19 +214,27 @@ select {
 .editor-layout {
   display: grid;
   grid-template-columns: 1fr;
+  flex: 1 1 auto;
+  height: 100%;
   min-height: 0;
 }
 
 .canvas-and-logs {
   min-height: 0;
+  height: 100%;
   display: grid;
   grid-template-rows: minmax(280px, 1fr) 210px;
+}
+
+.canvas-and-logs.logs-collapsed {
+  grid-template-rows: minmax(280px, 1fr) 46px;
 }
 
 .canvas-pane {
   position: relative;
   border-bottom: 1px solid var(--panel-border);
   background: #f8f9fc;
+  min-height: 0;
 }
 
 .node-drawer {
@@ -353,6 +371,15 @@ select {
   display: grid;
   grid-template-rows: 46px 1fr;
   background: #fff;
+  min-height: 0;
+}
+
+.canvas-and-logs.logs-collapsed .logs-pane {
+  grid-template-rows: 46px;
+}
+
+.canvas-and-logs.logs-collapsed .logs-header {
+  border-bottom: none;
 }
 
 .logs-header {
@@ -363,11 +390,40 @@ select {
   justify-content: space-between;
 }
 
+.logs-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .logs-header button {
   border: none;
   background: transparent;
   color: #697287;
   cursor: pointer;
+}
+
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d4dbe9;
+  border-radius: 8px;
+  background: #fff;
+  color: #64708a;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.icon-btn:hover {
+  border-color: #bcc6d8;
+  color: #33445f;
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
 }
 
 .logs-tabs {
@@ -599,6 +655,8 @@ select {
   border-radius: 12px;
   background: #fff;
   padding: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -614,6 +672,7 @@ select {
   padding: 16px;
   display: grid;
   gap: 12px;
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
 }

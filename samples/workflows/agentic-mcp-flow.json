@@ -14,6 +14,8 @@
         "name": "Webhook Input",
         "position": { "x": 100, "y": 180 },
         "config": {
+          "path": "agent-demo",
+          "method": "POST",
           "passThroughFields": ["system_prompt", "user_prompt", "session_id", "variables"]
         }
       },

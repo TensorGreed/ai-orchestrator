@@ -56,12 +56,130 @@ async function selectWebhookWorkflow(store: SqliteStore, workflowId?: string): P
   return workflows.length ? store.getWorkflow(workflows[0].id) : null;
 }
 
+const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function normalizeWebhookPath(value: unknown, fallback: string): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  const withFallback = raw || fallback;
+  return withFallback.replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+function normalizeWebhookMethod(value: unknown): string {
+  const method = typeof value === "string" ? value.trim().toUpperCase() : "POST";
+  return allowedWebhookMethods.has(method) ? method : "POST";
+}
+
+function listWebhookEndpoints(workflow: Workflow): Array<{ nodeId: string; path: string; method: string }> {
+  return workflow.nodes
+    .filter((node) => node.type === "webhook_input")
+    .map((node) => {
+      const config = asRecord(node.config);
+      const path = normalizeWebhookPath(config.path, node.id);
+      const method = normalizeWebhookMethod(config.method);
+      return {
+        nodeId: node.id,
+        path,
+        method
+      };
+    });
+}
+
+async function selectWebhookByPath(
+  store: SqliteStore,
+  path: string,
+  method: string
+): Promise<{ workflow: Workflow; endpoint: { nodeId: string; path: string; method: string } } | null> {
+  const normalizedPath = normalizeWebhookPath(path, "").toLowerCase();
+  const normalizedMethod = normalizeWebhookMethod(method);
+
+  const workflows = store.listWorkflows();
+  for (const workflowSummary of workflows) {
+    const workflow = store.getWorkflow(workflowSummary.id);
+    if (!workflow) {
+      continue;
+    }
+
+    const endpoints = listWebhookEndpoints(workflow);
+    const endpoint = endpoints.find(
+      (entry) => entry.path.toLowerCase() === normalizedPath && entry.method === normalizedMethod
+    );
+    if (endpoint) {
+      return { workflow, endpoint };
+    }
+  }
+
+  return null;
+}
+
 export function createApp(config: AppConfig, store: SqliteStore, secretService: SecretService) {
   const app = Fastify({ logger: true });
   const providerRegistry = createDefaultProviderRegistry();
   const connectorRegistry = createDefaultConnectorRegistry();
   const mcpRegistry = createDefaultMCPRegistry();
   const agentRuntime = createDefaultAgentRuntime();
+
+  const runWorkflowExecution = async (input: {
+    workflow: Workflow;
+    webhookPayload?: Record<string, unknown>;
+    variables?: Record<string, unknown>;
+    systemPrompt?: string;
+    userPrompt?: string;
+    sessionId?: string;
+    directInput?: Record<string, unknown>;
+  }) => {
+    return executeWorkflow(
+      {
+        workflow: input.workflow,
+        input: input.directInput,
+        webhookPayload: input.webhookPayload,
+        variables: input.variables,
+        systemPrompt: input.systemPrompt,
+        userPrompt: input.userPrompt,
+        sessionId: input.sessionId
+      },
+      {
+        providerRegistry,
+        connectorRegistry,
+        mcpRegistry,
+        agentRuntime,
+        memoryStore: {
+          loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
+          saveMessages: async (namespace, sessionId, messages) => {
+            store.saveSessionMemory(namespace, sessionId, messages);
+          }
+        },
+        resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
+      }
+    );
+  };
+
+  const parseWebhookRunInput = (payload: unknown) => {
+    const body = asRecord(payload);
+    const userPromptRaw =
+      typeof body.user_prompt === "string"
+        ? body.user_prompt
+        : typeof body.prompt === "string"
+          ? body.prompt
+          : "";
+    const userPrompt = userPromptRaw.trim();
+    const systemPrompt = typeof body.system_prompt === "string" ? body.system_prompt : "";
+    const sessionId = typeof body.session_id === "string" ? body.session_id : undefined;
+    const variables = body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
+      ? (body.variables as Record<string, unknown>)
+      : undefined;
+
+    return {
+      body,
+      userPrompt,
+      systemPrompt,
+      sessionId,
+      variables
+    };
+  };
 
   app.register(cors, {
     origin: config.WEB_ORIGIN
@@ -224,29 +342,14 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       };
     }
 
-    const result = await executeWorkflow(
-      {
-        workflow,
-        input: parsed.data.input,
-        variables: parsed.data.variables,
-        systemPrompt: parsed.data.system_prompt,
-        userPrompt: parsed.data.user_prompt,
-        sessionId: parsed.data.sessionId
-      },
-      {
-        providerRegistry,
-        connectorRegistry,
-        mcpRegistry,
-        agentRuntime,
-        memoryStore: {
-          loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
-          saveMessages: async (namespace, sessionId, messages) => {
-            store.saveSessionMemory(namespace, sessionId, messages);
-          }
-        },
-        resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
-      }
-    );
+    const result = await runWorkflowExecution({
+      workflow,
+      directInput: parsed.data.input,
+      variables: parsed.data.variables,
+      systemPrompt: parsed.data.system_prompt,
+      userPrompt: parsed.data.user_prompt,
+      sessionId: parsed.data.sessionId
+    });
 
     if (result.status === "error") {
       reply.code(400);
@@ -271,34 +374,19 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       return { error: "No workflows available" };
     }
 
-    const result = await executeWorkflow(
-      {
-        workflow,
-        webhookPayload: {
-          system_prompt: parsed.data.system_prompt,
-          user_prompt: parsed.data.user_prompt,
-          session_id: parsed.data.session_id,
-          variables: parsed.data.variables
-        },
-        variables: parsed.data.variables,
-        systemPrompt: parsed.data.system_prompt,
-        userPrompt: parsed.data.user_prompt,
-        sessionId: parsed.data.session_id
+    const result = await runWorkflowExecution({
+      workflow,
+      webhookPayload: {
+        system_prompt: parsed.data.system_prompt,
+        user_prompt: parsed.data.user_prompt,
+        session_id: parsed.data.session_id,
+        variables: parsed.data.variables
       },
-      {
-        providerRegistry,
-        connectorRegistry,
-        mcpRegistry,
-        agentRuntime,
-        memoryStore: {
-          loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
-          saveMessages: async (namespace, sessionId, messages) => {
-            store.saveSessionMemory(namespace, sessionId, messages);
-          }
-        },
-        resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
-      }
-    );
+      variables: parsed.data.variables,
+      systemPrompt: parsed.data.system_prompt,
+      userPrompt: parsed.data.user_prompt,
+      sessionId: parsed.data.session_id
+    });
 
     if (result.status === "error") {
       reply.code(400);
@@ -309,6 +397,57 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       selectedWorkflowId: workflow.id
     };
   });
+
+  const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
+    app.all<{ Params: { path: string }; Body: unknown }>(routePath, async (request, reply) => {
+      const match = await selectWebhookByPath(store, request.params.path, request.method);
+      if (!match) {
+        reply.code(404);
+        return {
+          error: "No webhook endpoint matches this path and method",
+          path: request.params.path,
+          method: request.method
+        };
+      }
+
+      const parsedInput = parseWebhookRunInput(request.body);
+      if (!parsedInput.userPrompt) {
+        reply.code(400);
+        return {
+          error: "Webhook payload must include 'user_prompt' (or 'prompt')."
+        };
+      }
+
+      const result = await runWorkflowExecution({
+        workflow: match.workflow,
+        webhookPayload: {
+          ...parsedInput.body,
+          system_prompt: parsedInput.systemPrompt,
+          user_prompt: parsedInput.userPrompt,
+          session_id: parsedInput.sessionId,
+          variables: parsedInput.variables
+        },
+        variables: parsedInput.variables,
+        systemPrompt: parsedInput.systemPrompt,
+        userPrompt: parsedInput.userPrompt,
+        sessionId: parsedInput.sessionId
+      });
+
+      if (result.status === "error") {
+        reply.code(400);
+      }
+
+      return {
+        ...result,
+        selectedWorkflowId: match.workflow.id,
+        webhookPath: match.endpoint.path,
+        webhookMethod: match.endpoint.method
+      };
+    });
+  };
+
+  registerConfiguredWebhookRoute("/webhook/:path");
+  registerConfiguredWebhookRoute("/webhook-test/:path");
 
   app.post<{ Body: unknown }>("/api/secrets", async (request, reply) => {
     const parsed = secretCreateSchema.safeParse(request.body);

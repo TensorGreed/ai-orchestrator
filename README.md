@@ -154,17 +154,26 @@ docker compose up --build
 - `POST /api/workflows/:id/validate`
 - `POST /api/workflows/:id/execute`
 - `POST /api/webhooks/execute`
+- `ANY /webhook/:path` (configured production webhook URL)
+- `ANY /webhook-test/:path` (configured test webhook URL)
 - `POST /api/secrets`
 - `GET /api/secrets`
 - `POST /api/mcp/discover-tools`
 
 ## Webhook execution
 
+Configure the `Webhook Input` node with:
+- `method` (default `POST`)
+- `path` (example: `agent-demo`)
+
+Then call the generated URL from Postman:
+- Test URL: `http://localhost:4000/webhook-test/<path>`
+- Production URL: `http://localhost:4000/webhook/<path>`
+
 Webhook payload (minimum):
 
 ```json
 {
-  "workflow_id": "wf-agent-mcp-webhook",
   "session_id": "demo-session-1",
   "system_prompt": "You are a tool-using agent. Use tools when required.",
   "user_prompt": "What time is it in America/Toronto and what is 12*7?",
@@ -177,15 +186,16 @@ Webhook payload (minimum):
 Example curl:
 
 ```bash
-curl -X POST http://localhost:4000/api/webhooks/execute \
+curl -X POST http://localhost:4000/webhook/agent-demo \
   -H "Content-Type: application/json" \
   -d '{
-    "workflow_id": "wf-agent-mcp-webhook",
     "session_id": "demo-session-1",
     "system_prompt": "You are a tool-using agent. Use tools when required.",
     "user_prompt": "What time is it in America/Toronto and what is 12*7?"
   }'
 ```
+
+Compatibility endpoint (still supported): `POST /api/webhooks/execute` with `workflow_id`.
 
 ## Agent loop behavior (Agent Orchestrator node)
 
