@@ -1,5 +1,5 @@
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -20,15 +20,20 @@ import {
   type WorkflowListItem
 } from "@ai-orchestrator/shared";
 import {
+  ApiError,
   createSecret,
   executeWorkflow,
+  fetchAuthMe,
   fetchDefinitions,
   fetchSecrets,
   fetchWorkflow,
   fetchWorkflows,
   importWorkflow,
+  loginUser,
+  logoutUser,
   runWebhook,
   saveWorkflow,
+  type AuthUser,
   type SecretListItem
 } from "./lib/api";
 import {
@@ -42,6 +47,9 @@ import {
 } from "./lib/workflow";
 import { WorkflowCanvasNode } from "./components/WorkflowCanvasNode";
 import { NodeConfigModal, type NodeInputOption } from "./components/NodeConfigModal";
+import { LeftMenuBar } from "./components/LeftMenuBar";
+import { TopBar } from "./components/TopBar";
+import type { EdgePathMode, StudioMode } from "./components/studio-layout-types";
 
 interface DefinitionNode {
   type: string;
@@ -51,9 +59,7 @@ interface DefinitionNode {
   sampleConfig: Record<string, unknown>;
 }
 
-type EdgePathMode = "smoothstep" | "bezier";
 type LogsTab = "logs" | "inputs";
-type StudioMode = "editor" | "executions" | "evaluations" | "secrets";
 
 const statusColors: Record<string, string> = {
   success: "#18a35f",
@@ -127,12 +133,19 @@ function decorateEdge(edge: Edge, nodes: EditorNode[], mode: EdgePathMode): Edge
 }
 
 export default function App() {
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+
   const [workflowList, setWorkflowList] = useState<WorkflowListItem[]>([]);
   const [currentWorkflow, setCurrentWorkflow] = useState<Workflow>(createBlankWorkflow());
   const [definitions, setDefinitions] = useState<DefinitionNode[]>(nodeDefinitions as unknown as DefinitionNode[]);
   const [secrets, setSecrets] = useState<SecretListItem[]>([]);
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [secretBusy, setSecretBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -200,6 +213,7 @@ export default function App() {
 
   const executionStatuses = useMemo(() => getNodeStatusMap(executionResult), [executionResult]);
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
+  const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
 
   useEffect(() => {
     setNodes((currentNodes) =>
@@ -233,10 +247,14 @@ export default function App() {
   }, [editingNodeId, nodes]);
 
   const refreshSecrets = useCallback(async () => {
+    if (!canManageSecrets) {
+      setSecrets([]);
+      return [];
+    }
     const items = await fetchSecrets();
     setSecrets(items);
     return items;
-  }, []);
+  }, [canManageSecrets]);
 
   const readWipWorkflow = useCallback((): Workflow | null => {
     try {
@@ -280,7 +298,7 @@ export default function App() {
       const [workflowItems, definitionPayload, secretItems] = await Promise.all([
         fetchWorkflows(),
         fetchDefinitions(),
-        fetchSecrets()
+        canManageSecrets ? fetchSecrets() : Promise.resolve([])
       ]);
 
       setWorkflowList(workflowItems);
@@ -301,18 +319,62 @@ export default function App() {
         hydrateWorkflow(workflow);
       }
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load app data");
+      if (loadError instanceof ApiError && loadError.status === 401) {
+        setAuthUser(null);
+        setAuthError("Session expired. Sign in again.");
+      } else {
+        setError(loadError instanceof Error ? loadError.message : "Failed to load app data");
+      }
     } finally {
       setLoading(false);
     }
-  }, [hydrateWorkflow, readWipWorkflow]);
+  }, [canManageSecrets, hydrateWorkflow, readWipWorkflow]);
 
   useEffect(() => {
+    let cancelled = false;
+    const checkSession = async () => {
+      try {
+        const { user } = await fetchAuthMe();
+        if (!cancelled) {
+          setAuthUser(user);
+          setAuthError(null);
+        }
+      } catch (sessionError) {
+        if (!cancelled) {
+          if (sessionError instanceof ApiError && sessionError.status === 401) {
+            setAuthUser(null);
+          } else {
+            setAuthError(sessionError instanceof Error ? sessionError.message : "Unable to verify session");
+          }
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthChecking(false);
+        }
+      }
+    };
+
+    void checkSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authUser) {
+      return;
+    }
     void loadData();
-  }, [loadData]);
+  }, [authUser, loadData]);
 
   useEffect(() => {
-    if (loading) {
+    if (activeMode === "secrets" && !canManageSecrets) {
+      setActiveMode("editor");
+    }
+  }, [activeMode, canManageSecrets]);
+
+  useEffect(() => {
+    if (loading || !authUser) {
       return;
     }
 
@@ -322,7 +384,16 @@ export default function App() {
     } catch {
       // localStorage may fail in private mode or quota edge cases.
     }
-  }, [currentWorkflow, edges, loading, nodes]);
+  }, [authUser, currentWorkflow, edges, loading, nodes]);
+
+  const handleApiError = useCallback((apiError: unknown, fallbackMessage: string) => {
+    if (apiError instanceof ApiError && apiError.status === 401) {
+      setAuthUser(null);
+      setAuthError("Session expired. Sign in again.");
+      return;
+    }
+    setError(apiError instanceof Error ? apiError.message : fallbackMessage);
+  }, []);
 
   const loadWorkflowById = useCallback(
     async (id: string) => {
@@ -331,10 +402,10 @@ export default function App() {
         hydrateWorkflow(workflow);
         localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, id);
       } catch (loadError) {
-        setError(loadError instanceof Error ? loadError.message : "Failed to load workflow");
+        handleApiError(loadError, "Failed to load workflow");
       }
     },
-    [hydrateWorkflow]
+    [handleApiError, hydrateWorkflow]
   );
 
   const buildCurrentWorkflow = useCallback(() => {
@@ -358,11 +429,11 @@ export default function App() {
       setError(null);
       await persistWorkflow();
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Failed to save workflow");
+      handleApiError(saveError, "Failed to save workflow");
     } finally {
       setBusy(false);
     }
-  }, [persistWorkflow]);
+  }, [handleApiError, persistWorkflow]);
 
   const handleExecute = useCallback(async () => {
     try {
@@ -378,11 +449,11 @@ export default function App() {
       setLogsTab("logs");
       setActiveMode("editor");
     } catch (execError) {
-      setError(execError instanceof Error ? execError.message : "Execution failed");
+      handleApiError(execError, "Execution failed");
     } finally {
       setBusy(false);
     }
-  }, [persistWorkflow, sessionId, systemPrompt, userPrompt]);
+  }, [handleApiError, persistWorkflow, sessionId, systemPrompt, userPrompt]);
 
   const handleWebhookExecute = useCallback(async () => {
     try {
@@ -399,11 +470,11 @@ export default function App() {
       setLogsTab("logs");
       setActiveMode("editor");
     } catch (execError) {
-      setError(execError instanceof Error ? execError.message : "Webhook execution failed");
+      handleApiError(execError, "Webhook execution failed");
     } finally {
       setBusy(false);
     }
-  }, [persistWorkflow, sessionId, systemPrompt, userPrompt]);
+  }, [handleApiError, persistWorkflow, sessionId, systemPrompt, userPrompt]);
 
   const handleExport = useCallback(() => {
     const workflow = buildCurrentWorkflow();
@@ -441,13 +512,13 @@ export default function App() {
         localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, imported.id);
         localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(imported));
       } catch (importError) {
-        setError(importError instanceof Error ? importError.message : "Failed to import workflow");
+        handleApiError(importError, "Failed to import workflow");
       } finally {
         setBusy(false);
         event.target.value = "";
       }
     },
-    [hydrateWorkflow]
+    [handleApiError, hydrateWorkflow]
   );
 
   const openNodeConfig = useCallback((nodeId: string) => {
@@ -596,11 +667,11 @@ export default function App() {
       setSecretValue("");
       setSecretMessage("Secret created.");
     } catch (createError) {
-      setError(createError instanceof Error ? createError.message : "Failed to create secret");
+      handleApiError(createError, "Failed to create secret");
     } finally {
       setSecretBusy(false);
     }
-  }, [refreshSecrets, secretName, secretProvider, secretValue]);
+  }, [handleApiError, refreshSecrets, secretName, secretProvider, secretValue]);
 
   const copySecretId = useCallback(async (secretId: string) => {
     try {
@@ -611,124 +682,136 @@ export default function App() {
     }
   }, []);
 
+  const handleLogin = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      try {
+        setAuthBusy(true);
+        setAuthError(null);
+        const result = await loginUser({
+          email: loginEmail.trim(),
+          password: loginPassword
+        });
+        setAuthUser(result.user);
+        setError(null);
+        setLoginPassword("");
+      } catch (loginError) {
+        setAuthError(loginError instanceof Error ? loginError.message : "Login failed");
+      } finally {
+        setAuthBusy(false);
+      }
+    },
+    [loginEmail, loginPassword]
+  );
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await logoutUser();
+    } catch {
+      // Ignore logout API failures and clear local app state.
+    }
+
+    setAuthUser(null);
+    setWorkflowList([]);
+    setCurrentWorkflow(createBlankWorkflow());
+    setDefinitions(nodeDefinitions as unknown as DefinitionNode[]);
+    setSecrets([]);
+    setExecutionResult(null);
+    setNodes([]);
+    setEdges([]);
+    setEditingNodeId(null);
+    setActiveMode("editor");
+    setLoading(false);
+    setError(null);
+    setSecretMessage(null);
+  }, [setEdges, setNodes]);
+
+  if (authChecking) {
+    return <div className="loading-screen">Checking session...</div>;
+  }
+
+  if (!authUser) {
+    return (
+      <div className="auth-shell">
+        <form className="auth-card" onSubmit={handleLogin}>
+          <h1>AI Orchestrator</h1>
+          <p>Sign in to view, edit, and run workflows.</p>
+          {authError && <div className="error-banner">{authError}</div>}
+          <label>Email</label>
+          <input
+            type="email"
+            value={loginEmail}
+            onChange={(event) => setLoginEmail(event.target.value)}
+            autoComplete="username"
+            required
+          />
+          <label>Password</label>
+          <input
+            type="password"
+            value={loginPassword}
+            onChange={(event) => setLoginPassword(event.target.value)}
+            autoComplete="current-password"
+            required
+          />
+          <button className="execute-btn" type="submit" disabled={authBusy}>
+            {authBusy ? "Signing in..." : "Sign in"}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
   if (loading) {
     return <div className="loading-screen">Loading AI Orchestrator...</div>;
   }
 
   return (
     <div className="studio-shell">
-      <aside className="app-rail">
-        <button
-          className="rail-btn"
-          onClick={() => {
-            setActiveMode("editor");
-            setShowNodeDrawer((value) => !value);
-          }}
-          title="Node drawer"
-        >
-          +
-        </button>
-        <button className="rail-btn" onClick={() => setActiveMode("editor")} title="Editor">
-          Editor
-        </button>
-        <button className="rail-btn" onClick={() => setActiveMode("executions")} title="Executions">
-          Runs
-        </button>
-        <button className="rail-btn" onClick={() => setActiveMode("evaluations")} title="Evaluations">
-          Eval
-        </button>
-        <button className="rail-btn" onClick={() => setActiveMode("secrets")} title="Secrets">
-          Secrets
-        </button>
-      </aside>
+      <LeftMenuBar
+        activeMode={activeMode}
+        canManageSecrets={canManageSecrets}
+        onToggleNodeDrawer={() => {
+          setActiveMode("editor");
+          setShowNodeDrawer((value) => !value);
+        }}
+        onModeChange={setActiveMode}
+      />
 
       <div className="studio-main">
-        <header className="top-header">
-          <div className="header-left">
-            <span className="crumbs">Personal /</span>
-            <input
-              className="workflow-name-input"
-              value={currentWorkflow.name}
-              onChange={(event) =>
-                setCurrentWorkflow((current) => ({
-                  ...current,
-                  name: event.target.value
-                }))
-              }
-            />
-            <select
-              className="workflow-select"
-              value={currentWorkflowExists ? currentWorkflow.id : ""}
-              onChange={(event) => {
-                const selectedId = event.target.value;
-                if (selectedId) {
-                  void loadWorkflowById(selectedId);
-                }
-              }}
-            >
-              {!currentWorkflowExists && <option value="">Current (unsaved)</option>}
-              {workflowList.map((workflow) => (
-                <option key={workflow.id} value={workflow.id}>
-                  {workflow.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="header-tabs">
-            <button className={activeMode === "editor" ? "tab active" : "tab"} onClick={() => setActiveMode("editor")}>
-              Editor
-            </button>
-            <button
-              className={activeMode === "executions" ? "tab active" : "tab"}
-              onClick={() => setActiveMode("executions")}
-            >
-              Executions
-            </button>
-            <button
-              className={activeMode === "evaluations" ? "tab active" : "tab"}
-              onClick={() => setActiveMode("evaluations")}
-            >
-              Evaluations
-            </button>
-            <button className={activeMode === "secrets" ? "tab active" : "tab"} onClick={() => setActiveMode("secrets")}>
-              Secrets
-            </button>
-          </div>
-
-          <div className="header-actions">
-            {(activeMode === "editor" || activeMode === "executions" || activeMode === "evaluations") && (
-              <>
-                <button className="header-btn" onClick={handleSave} disabled={busy}>
-                  Save
-                </button>
-                <button className="header-btn" onClick={handleExport}>
-                  Export
-                </button>
-                <button className="header-btn" onClick={() => importFileRef.current?.click()}>
-                  Import
-                </button>
-              </>
-            )}
-            {activeMode === "editor" && (
-              <select
-                className="workflow-select edge-mode-select"
-                value={edgePathMode}
-                onChange={(event) => setEdgePathMode(event.target.value as EdgePathMode)}
-                title="Edge path style"
-              >
-                <option value="bezier">Curved Edges</option>
-                <option value="smoothstep">Stepped Edges</option>
-              </select>
-            )}
-            {activeMode === "secrets" && (
-              <button className="header-btn" onClick={() => void refreshSecrets()} disabled={secretBusy || busy}>
-                Refresh Secrets
-              </button>
-            )}
-            <input ref={importFileRef} type="file" accept="application/json" hidden onChange={handleImportFile} />
-          </div>
-        </header>
+        <TopBar
+          activeMode={activeMode}
+          canManageSecrets={canManageSecrets}
+          currentWorkflowName={currentWorkflow.name}
+          currentWorkflowId={currentWorkflow.id}
+          currentWorkflowExists={currentWorkflowExists}
+          workflowList={workflowList}
+          authUser={authUser}
+          busy={busy}
+          secretBusy={secretBusy}
+          edgePathMode={edgePathMode}
+          importFileRef={importFileRef}
+          onWorkflowNameChange={(name) =>
+            setCurrentWorkflow((current) => ({
+              ...current,
+              name
+            }))
+          }
+          onLoadWorkflowById={(id) => {
+            void loadWorkflowById(id);
+          }}
+          onModeChange={setActiveMode}
+          onSave={handleSave}
+          onExport={handleExport}
+          onImportClick={() => importFileRef.current?.click()}
+          onImportFileChange={handleImportFile}
+          onEdgePathModeChange={setEdgePathMode}
+          onRefreshSecrets={() => {
+            void refreshSecrets();
+          }}
+          onLogout={() => {
+            void handleLogout();
+          }}
+        />
 
         <main className="main-content">
           {error && <div className="error-banner global-banner">{error}</div>}
@@ -805,7 +888,7 @@ export default function App() {
                     <button onClick={() => setEdgePathMode((value) => (value === "bezier" ? "smoothstep" : "bezier"))}>
                       {edgePathMode === "bezier" ? "Curved" : "Stepped"}
                     </button>
-                    <button onClick={() => setActiveMode("secrets")}>Secrets</button>
+                    {canManageSecrets && <button onClick={() => setActiveMode("secrets")}>Secrets</button>}
                   </div>
 
                   <div className="execute-strip">

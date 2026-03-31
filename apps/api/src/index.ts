@@ -7,6 +7,7 @@ import { SqliteStore } from "./db/database";
 import { createApp } from "./app";
 import { seedWorkflowsIfEmpty } from "./services/seed-service";
 import { SecretService } from "./services/secret-service";
+import { AuthService } from "./services/auth-service";
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const apiRoot = path.resolve(path.dirname(currentFilePath), "..");
@@ -26,10 +27,17 @@ async function bootstrap() {
   const dbPath = path.resolve(apiRoot, "data", "orchestrator.db");
   const store = await SqliteStore.create(dbPath);
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
+  const authService = new AuthService(store, config.SESSION_TTL_HOURS);
+
+  const bootstrapUser = authService.bootstrapAdmin(config.BOOTSTRAP_ADMIN_EMAIL, config.BOOTSTRAP_ADMIN_PASSWORD);
+  if (bootstrapUser) {
+    // eslint-disable-next-line no-console
+    console.log(`Bootstrapped admin user '${bootstrapUser.email}'`);
+  }
 
   seedWorkflowsIfEmpty(store, workspaceRoot);
 
-  const app = createApp(config, store, secretService);
+  const app = createApp(config, store, secretService, authService);
   await app.listen({
     host: config.API_HOST,
     port: config.API_PORT

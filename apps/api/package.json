@@ -17,6 +17,7 @@
     "@ai-orchestrator/provider-sdk": "workspace:*",
     "@ai-orchestrator/shared": "workspace:*",
     "@ai-orchestrator/workflow-engine": "workspace:*",
+    "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^11.1.0",
     "dotenv": "^17.2.2",
     "fastify": "^5.6.0",

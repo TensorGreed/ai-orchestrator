@@ -1,5 +1,6 @@
 import cors from "@fastify/cors";
-import Fastify from "fastify";
+import cookie from "@fastify/cookie";
+import Fastify, { type FastifyReply } from "fastify";
 import { z } from "zod";
 import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
@@ -17,11 +18,26 @@ import { executeWorkflow, exportWorkflowToJson, importWorkflowFromJson, validate
 import { SqliteStore } from "./db/database";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
+import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 
 const secretCreateSchema = z.object({
   name: z.string().min(1),
   provider: z.string().min(1),
   value: z.string().min(1)
+});
+
+const userRoleSchema = z.enum(["admin", "builder", "operator", "viewer"]);
+
+const authRegisterSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  role: userRoleSchema.optional(),
+  admin: z.boolean().optional()
+});
+
+const authLoginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1)
 });
 
 const workflowImportSchema = z.object({
@@ -115,7 +131,7 @@ async function selectWebhookByPath(
   return null;
 }
 
-export function createApp(config: AppConfig, store: SqliteStore, secretService: SecretService) {
+export function createApp(config: AppConfig, store: SqliteStore, secretService: SecretService, authService: AuthService) {
   const app = Fastify({ logger: true });
   const providerRegistry = createDefaultProviderRegistry();
   const connectorRegistry = createDefaultConnectorRegistry();
@@ -181,9 +197,76 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
     };
   };
 
+  const rolePriority: Record<UserRole, number> = {
+    viewer: 1,
+    operator: 2,
+    builder: 3,
+    admin: 4
+  };
+
+  const hasRequiredRole = (user: SafeUser, allowedRoles: UserRole[]) => {
+    return allowedRoles.some((role) => rolePriority[user.role] >= rolePriority[role]);
+  };
+
+  const getSessionIdFromRequest = (request: { cookies: Record<string, string | undefined> }) => {
+    return request.cookies[config.SESSION_COOKIE_NAME] ?? "";
+  };
+
+  const setSessionCookie = (reply: FastifyReply, sessionId: string) => {
+    reply.setCookie(config.SESSION_COOKIE_NAME, sessionId, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: config.COOKIE_SECURE,
+      maxAge: config.SESSION_TTL_HOURS * 60 * 60
+    });
+  };
+
+  const clearSessionCookie = (reply: FastifyReply) => {
+    reply.clearCookie(config.SESSION_COOKIE_NAME, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: config.COOKIE_SECURE
+    });
+  };
+
+  const deny = (reply: FastifyReply, code: 401 | 403, message: string) => {
+    reply.code(code).send({ error: message });
+  };
+
+  const requireRole = async (
+    request: { cookies: Record<string, string | undefined> },
+    reply: FastifyReply,
+    allowedRoles: UserRole[]
+  ): Promise<SafeUser | null> => {
+    const sessionId = getSessionIdFromRequest(request);
+    if (!sessionId) {
+      deny(reply, 401, "Authentication required");
+      return null;
+    }
+
+    const user = authService.getSessionUser(sessionId);
+    if (!user) {
+      clearSessionCookie(reply);
+      deny(reply, 401, "Session expired or invalid");
+      return null;
+    }
+
+    if (!hasRequiredRole(user, allowedRoles)) {
+      deny(reply, 403, "Insufficient permissions");
+      return null;
+    }
+
+    return user;
+  };
+
   app.register(cors, {
-    origin: config.WEB_ORIGIN
+    origin: config.WEB_ORIGIN,
+    credentials: true
   });
+
+  app.register(cookie);
 
   app.get("/health", async () => {
     return {
@@ -192,7 +275,102 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
     };
   });
 
-  app.get("/api/definitions", async () => {
+  app.post<{ Body: unknown }>("/api/auth/register", async (request, reply) => {
+    const parsed = authRegisterSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid registration payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const existingUsers = authService.countUsers();
+    let actor: SafeUser | null = null;
+
+    if (existingUsers > 0 && !config.AUTH_ALLOW_PUBLIC_REGISTER) {
+      actor = await requireRole(request, reply, ["admin"]);
+      if (!actor) {
+        return;
+      }
+    } else if (existingUsers > 0 && config.AUTH_ALLOW_PUBLIC_REGISTER) {
+      actor = authService.getSessionUser(getSessionIdFromRequest(request));
+    }
+
+    const requestedRole: UserRole = parsed.data.role ?? (parsed.data.admin ? "admin" : "viewer");
+    let role: UserRole = requestedRole;
+    if (existingUsers === 0) {
+      role = parsed.data.role ?? "admin";
+    } else if (!actor) {
+      role = "viewer";
+    } else if (role === "admin" && actor.role !== "admin") {
+      reply.code(403);
+      return { error: "Only admins can create admin users" };
+    }
+
+    try {
+      const user = authService.register({
+        email: parsed.data.email,
+        password: parsed.data.password,
+        role
+      });
+      return { user };
+    } catch (error) {
+      reply.code(400);
+      return {
+        error: error instanceof Error ? error.message : "Registration failed"
+      };
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/auth/login", async (request, reply) => {
+    const parsed = authLoginSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid login payload",
+        details: parsed.error.issues
+      };
+    }
+
+    try {
+      const result = authService.login(parsed.data.email, parsed.data.password);
+      setSessionCookie(reply, result.sessionId);
+      return {
+        user: result.user,
+        expiresAt: result.expiresAt
+      };
+    } catch (error) {
+      reply.code(401);
+      return {
+        error: error instanceof Error ? error.message : "Invalid credentials"
+      };
+    }
+  });
+
+  app.post("/api/auth/logout", async (request, reply) => {
+    const sessionId = getSessionIdFromRequest(request);
+    if (sessionId) {
+      authService.logout(sessionId);
+    }
+    clearSessionCookie(reply);
+    return { ok: true };
+  });
+
+  app.get("/api/auth/me", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+    return { user };
+  });
+
+  app.get("/api/definitions", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+
     return {
       nodes: nodeDefinitions,
       providers: providerRegistry.listDefinitions(),
@@ -201,11 +379,20 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
     };
   });
 
-  app.get("/api/workflows", async () => {
+  app.get("/api/workflows", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
     return store.listWorkflows();
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+
     const workflow = store.getWorkflow(request.params.id);
     if (!workflow) {
       reply.code(404);
@@ -216,6 +403,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   });
 
   app.post<{ Body: unknown }>("/api/workflows", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     const parsed = workflowSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -238,6 +430,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     const parsed = workflowSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -265,6 +462,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   });
 
   app.delete<{ Params: { id: string } }>("/api/workflows/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     const deleted = store.deleteWorkflow(request.params.id);
     if (!deleted) {
       reply.code(404);
@@ -275,6 +477,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   });
 
   app.post<{ Body: unknown }>("/api/workflows/import", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     const parsed = workflowImportSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -305,6 +512,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/export", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+
     const workflow = store.getWorkflow(request.params.id);
     if (!workflow) {
       reply.code(404);
@@ -317,6 +529,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   });
 
   app.post<{ Params: { id: string } }>("/api/workflows/:id/validate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+
     const workflow = store.getWorkflow(request.params.id);
     if (!workflow) {
       reply.code(404);
@@ -327,6 +544,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     const workflow = store.getWorkflow(request.params.id);
     if (!workflow) {
       reply.code(404);
@@ -359,6 +581,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   });
 
   app.post<{ Body: unknown }>("/api/webhooks/execute", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     const parsed = agentWebhookPayloadSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -450,6 +677,11 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   registerConfiguredWebhookRoute("/webhook-test/:path");
 
   app.post<{ Body: unknown }>("/api/secrets", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     const parsed = secretCreateSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -467,11 +699,21 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
     };
   });
 
-  app.get("/api/secrets", async () => {
+  app.get("/api/secrets", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     return secretService.listSecrets();
   });
 
   app.post<{ Body: unknown }>("/api/mcp/discover-tools", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
     const parsed = mcpDiscoverSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);

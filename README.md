@@ -21,6 +21,7 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 - Connector SDK + sample connectors (`google-drive`, `sql-db`, `nosql-db`)
 - Webhook execution endpoint (`system_prompt` + `user_prompt` payload)
 - Secret abstraction with encrypted server-side storage (AES-256-GCM)
+- Session-based authentication (`httpOnly` cookie) with RBAC (`admin`, `builder`, `operator`, `viewer`)
 - Monorepo with shared schemas/types and package-level extension points
 
 ## Architecture overview
@@ -91,6 +92,13 @@ Generate a master key and put it in `.env` as `SECRET_MASTER_KEY_BASE64`:
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
+Set bootstrap admin credentials in `.env` (recommended for local dev):
+
+```bash
+BOOTSTRAP_ADMIN_EMAIL=admin@example.com
+BOOTSTRAP_ADMIN_PASSWORD=ChangeThisPassword123!
+```
+
 ### 2) Install
 
 ```bash
@@ -141,8 +149,51 @@ docker compose up --build
 - Web: `http://localhost:5173`
 - API: `http://localhost:4000`
 
+## Authentication and RBAC
+
+Session model:
+- Login creates a server-side `sessions` record and sets `SESSION_COOKIE_NAME` as an `httpOnly` cookie.
+- Frontend uses `credentials: "include"` for API calls.
+- Session state is persisted in SQLite (`users`, `sessions` tables).
+
+Auth endpoints:
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+
+`POST /api/auth/register` payload:
+- `email` (required)
+- `password` (required, min 8)
+- `role` (optional: `admin|builder|operator|viewer`)
+- `admin` (optional boolean shortcut; equivalent to `role: "admin"`)
+
+Bootstrap credentials strategy:
+- If `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` are set and there are no users yet, API bootstraps the first admin account on startup.
+- If bootstrap values are not set, you can create the first user with `POST /api/auth/register`; first user defaults to `admin`.
+- Keep `AUTH_ALLOW_PUBLIC_REGISTER=false` in non-dev environments.
+
+Role permissions:
+
+| Area | viewer | operator | builder | admin |
+| --- | --- | --- | --- | --- |
+| Workflow list/get/export/validate | yes | yes | yes | yes |
+| Workflow create/update/delete | no | no | yes | yes |
+| Execute workflow | no | no | yes | yes |
+| Execute `/api/webhooks/execute` | no | no | yes | yes |
+| Secrets list/create | no | no | yes | yes |
+| Register users | first-user only or when public register enabled | first-user only or when public register enabled | no (except public register viewer-level) | yes |
+
+API error behavior:
+- `401` for missing/invalid/expired session
+- `403` for authenticated users without required role
+
 ## Core API endpoints
 
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
 - `GET /api/definitions`
 - `GET /api/workflows`
 - `GET /api/workflows/:id`
@@ -299,4 +350,4 @@ The seed service auto-loads these into DB when the workflow table is empty.
 ## Notes
 
 - V1 is intentionally a working vertical slice with clear extension seams.
-- Auth/RBAC/scheduling/distributed execution are out of V1 scope.
+- Scheduling/distributed execution/multi-tenant auth remain out of V1 scope.

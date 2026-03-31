@@ -7,3 +7,4 @@ coverage
 *.log
 *.tsbuildinfo
 apps/api/data
+SprintPlan.md

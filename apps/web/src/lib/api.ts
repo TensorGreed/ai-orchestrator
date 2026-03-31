@@ -2,8 +2,18 @@ import type { Workflow, WorkflowExecutionResult, WorkflowListItem } from "@ai-or
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+  }
+}
+
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
+    credentials: "include",
     headers: {
       "content-type": "application/json",
       ...(init?.headers ?? {})
@@ -11,12 +21,53 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     ...init
   });
 
-  const json = await response.json();
-  if (!response.ok) {
-    throw new Error(json.error ?? "API request failed");
+  let json: unknown = null;
+  try {
+    json = await response.json();
+  } catch {
+    json = null;
   }
 
-  return json as T;
+  if (!response.ok) {
+    const payload = json && typeof json === "object" ? (json as Record<string, unknown>) : {};
+    throw new ApiError(String(payload.error ?? "API request failed"), response.status);
+  }
+
+  return (json ?? {}) as T;
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  role: "admin" | "builder" | "operator" | "viewer";
+}
+
+export async function registerUser(payload: {
+  email: string;
+  password: string;
+  role?: "admin" | "builder" | "operator" | "viewer";
+}) {
+  return apiRequest<{ user: AuthUser }>("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function loginUser(payload: { email: string; password: string }) {
+  return apiRequest<{ user: AuthUser; expiresAt: string }>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function logoutUser() {
+  return apiRequest<{ ok: boolean }>("/api/auth/logout", {
+    method: "POST"
+  });
+}
+
+export async function fetchAuthMe() {
+  return apiRequest<{ user: AuthUser }>("/api/auth/me");
 }
 
 export async function fetchWorkflows() {
