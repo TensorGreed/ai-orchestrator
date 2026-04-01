@@ -355,21 +355,23 @@ export function NodeConfigModal({
           onChange={(next) => setProvider({ model: next })}
           placeholder="gpt-4.1-mini / llama3.1"
         />
-        <TextField
-          label="Base URL"
-          value={toStringValue(provider.baseUrl)}
-          onChange={(next) => setProvider({ baseUrl: next })}
-          placeholder="http://localhost:11434/v1"
-        />
+        {provider.providerId !== "openai" && provider.providerId !== "gemini" && provider.providerId !== "anthropic" && (
+          <TextField
+            label="Base URL"
+            value={toStringValue(provider.baseUrl)}
+            onChange={(next) => setProvider({ baseUrl: next })}
+            placeholder="http://localhost:11434/v1"
+          />
+        )}
         <SelectField
-          label="Secret"
+          label="API Key Secret"
           value={toStringValue(asRecord(provider.secretRef).secretId, "")}
           onChange={(next) =>
             setProvider({
               secretRef: next ? { secretId: next } : undefined
             })
           }
-          options={[{ value: "", label: "None" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
+          options={[{ value: "", label: "None / Environmental Variable" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
         />
         <div className="cfg-grid-2">
           <NumberField
