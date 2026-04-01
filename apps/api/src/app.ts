@@ -15,9 +15,15 @@ import {
   workflowSchema,
   type MCPServerConfig,
   type SecretReference,
-  type Workflow
+  type Workflow,
+  type WorkflowExecutionState
 } from "@ai-orchestrator/shared";
-import { executeWorkflow, exportWorkflowToJson, importWorkflowFromJson, validateWorkflowGraph } from "@ai-orchestrator/workflow-engine";
+import {
+  executeWorkflow,
+  exportWorkflowToJson,
+  importWorkflowFromJson,
+  validateWorkflowGraph
+} from "@ai-orchestrator/workflow-engine";
 import { SqliteStore } from "./db/database";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
@@ -58,6 +64,10 @@ const mcpDiscoverSchema = z.object({
     })
     .optional(),
   allowedTools: z.array(z.string()).optional()
+});
+
+const approvalDecisionSchema = z.object({
+  reason: z.string().optional()
 });
 
 type WebhookAuthMode = "none" | "bearer_token" | "hmac_sha256";
@@ -181,6 +191,43 @@ function safeEqualSecret(expected: string, provided: string): boolean {
 
 function computeSha256Hex(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function redactSensitiveInput(value: unknown): unknown {
+  const sensitiveKeyPattern = /(api[-_]?key|token|password|secret|authorization)/i;
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSensitiveInput(entry));
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  const redacted: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(record)) {
+    if (key === "secretId") {
+      redacted[key] = nestedValue;
+      continue;
+    }
+    if (sensitiveKeyPattern.test(key)) {
+      redacted[key] = typeof nestedValue === "string" && nestedValue.length > 0 ? "***redacted***" : nestedValue;
+      continue;
+    }
+    redacted[key] = redactSensitiveInput(nestedValue);
+  }
+
+  return redacted;
+}
+
+function toDurationMs(startedAt: string, completedAt: string): number | undefined {
+  const started = Date.parse(startedAt);
+  const completed = Date.parse(completedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(completed)) {
+    return undefined;
+  }
+  return Math.max(0, Math.floor(completed - started));
 }
 
 async function selectWebhookWorkflow(store: SqliteStore, workflowId?: string): Promise<Workflow | null> {
@@ -415,6 +462,15 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
     userPrompt?: string;
     sessionId?: string;
     directInput?: Record<string, unknown>;
+    executionId?: string;
+    triggerType?: string;
+    triggeredBy?: string;
+    resumeState?: WorkflowExecutionState;
+    approvalDecision?: {
+      decision: "approve" | "reject";
+      actedBy?: string;
+      reason?: string;
+    };
   }) => {
     return executeWorkflow(
       {
@@ -424,7 +480,12 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
         variables: input.variables,
         systemPrompt: input.systemPrompt,
         userPrompt: input.userPrompt,
-        sessionId: input.sessionId
+        sessionId: input.sessionId,
+        executionId: input.executionId,
+        triggerType: input.triggerType,
+        triggeredBy: input.triggeredBy,
+        resumeState: input.resumeState,
+        approvalDecision: input.approvalDecision
       },
       {
         providerRegistry,
@@ -437,7 +498,22 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
             store.saveSessionMemory(namespace, sessionId, messages);
           }
         },
-        resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
+        resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+        persistPausedExecution: async (paused) => {
+          store.saveWorkflowExecutionState({
+            id: paused.executionId,
+            workflowId: paused.workflowId,
+            workflowName: paused.workflowName,
+            status: "waiting_approval",
+            waitingNodeId: paused.waitingNodeId,
+            approvalMessage: paused.approvalMessage,
+            timeoutMinutes: paused.timeoutMinutes,
+            triggerType: paused.triggerType,
+            triggeredBy: paused.triggeredBy,
+            startedAt: paused.startedAt,
+            state: paused.state
+          });
+        }
       }
     );
   };
@@ -464,6 +540,37 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       sessionId,
       variables
     };
+  };
+
+  const persistExecutionHistory = (input: {
+    executionId: string;
+    workflow: Workflow;
+    result: Awaited<ReturnType<typeof runWorkflowExecution>>;
+    triggerType?: string;
+    triggeredBy?: string;
+    requestInput?: unknown;
+  }) => {
+    if (input.result.status === "waiting_approval") {
+      return;
+    }
+
+    store.saveExecutionHistory({
+      id: input.executionId,
+      workflowId: input.workflow.id,
+      workflowName: input.workflow.name,
+      status: input.result.status,
+      startedAt: input.result.startedAt,
+      completedAt: input.result.completedAt,
+      durationMs: toDurationMs(input.result.startedAt, input.result.completedAt),
+      triggerType: input.triggerType,
+      triggeredBy: input.triggeredBy,
+      inputJson: redactSensitiveInput(input.requestInput),
+      outputJson: input.result.output,
+      nodeResultsJson: input.result.nodeResults,
+      error: input.result.error
+    });
+
+    store.deleteWorkflowExecution(input.executionId);
   };
 
   const rolePriority: Record<UserRole, number> = {
@@ -839,13 +946,174 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       };
     }
 
+    const executionId = crypto.randomUUID();
     const result = await runWorkflowExecution({
       workflow,
       directInput: parsed.data.input,
       variables: parsed.data.variables,
       systemPrompt: parsed.data.system_prompt,
       userPrompt: parsed.data.user_prompt,
-      sessionId: parsed.data.sessionId
+      sessionId: parsed.data.sessionId,
+      executionId,
+      triggerType: "manual",
+      triggeredBy: user.email
+    });
+
+    persistExecutionHistory({
+      executionId,
+      workflow,
+      result,
+      triggerType: "manual",
+      triggeredBy: user.email,
+      requestInput: parsed.data
+    });
+
+    if (result.status === "error") {
+      reply.code(400);
+    }
+
+    return result;
+  });
+
+  app.get<{ Querystring: Record<string, unknown> }>("/api/executions", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+
+    const query = asRecord(request.query);
+    const page = Number(query.page);
+    const pageSize = Number(query.pageSize);
+
+    return store.listExecutionHistory({
+      page: Number.isFinite(page) ? page : 1,
+      pageSize: Number.isFinite(pageSize) ? pageSize : 20,
+      status: typeof query.status === "string" && query.status.trim() ? query.status.trim() : undefined,
+      workflowId: typeof query.workflowId === "string" && query.workflowId.trim() ? query.workflowId.trim() : undefined,
+      triggerType:
+        typeof query.triggerType === "string" && query.triggerType.trim() ? query.triggerType.trim() : undefined
+    });
+  });
+
+  app.get<{ Params: { id: string } }>("/api/executions/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+
+    const execution = store.getExecutionHistory(request.params.id);
+    if (!execution) {
+      reply.code(404);
+      return { error: "Execution not found" };
+    }
+
+    return execution;
+  });
+
+  app.get("/api/approvals", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator"]);
+    if (!user) {
+      return;
+    }
+
+    return {
+      items: store.listPendingApprovals()
+    };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/approvals/:id/approve", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator"]);
+    if (!user) {
+      return;
+    }
+
+    const pending = store.getWorkflowExecutionState(request.params.id);
+    if (!pending || pending.status !== "waiting_approval") {
+      reply.code(404);
+      return { error: "Pending approval not found" };
+    }
+
+    const state = pending.state as WorkflowExecutionState | null;
+    if (!state || typeof state !== "object" || !state.workflow) {
+      reply.code(400);
+      return { error: "Stored execution state is invalid and cannot be resumed" };
+    }
+
+    const result = await runWorkflowExecution({
+      workflow: state.workflow,
+      executionId: pending.id,
+      triggerType: "approval_resume",
+      triggeredBy: user.email,
+      resumeState: state,
+      approvalDecision: {
+        decision: "approve",
+        actedBy: user.email
+      }
+    });
+
+    persistExecutionHistory({
+      executionId: pending.id,
+      workflow: state.workflow,
+      result,
+      triggerType: "approval_resume",
+      triggeredBy: user.email,
+      requestInput: { decision: "approve", approvalId: pending.id }
+    });
+
+    if (result.status === "error") {
+      reply.code(400);
+    }
+
+    return result;
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/approvals/:id/reject", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator"]);
+    if (!user) {
+      return;
+    }
+
+    const pending = store.getWorkflowExecutionState(request.params.id);
+    if (!pending || pending.status !== "waiting_approval") {
+      reply.code(404);
+      return { error: "Pending approval not found" };
+    }
+
+    const parsed = approvalDecisionSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid rejection payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const state = pending.state as WorkflowExecutionState | null;
+    if (!state || typeof state !== "object" || !state.workflow) {
+      reply.code(400);
+      return { error: "Stored execution state is invalid and cannot be resumed" };
+    }
+
+    const result = await runWorkflowExecution({
+      workflow: state.workflow,
+      executionId: pending.id,
+      triggerType: "approval_resume",
+      triggeredBy: user.email,
+      resumeState: state,
+      approvalDecision: {
+        decision: "reject",
+        actedBy: user.email,
+        reason: parsed.data.reason
+      }
+    });
+
+    persistExecutionHistory({
+      executionId: pending.id,
+      workflow: state.workflow,
+      result,
+      triggerType: "approval_resume",
+      triggeredBy: user.email,
+      requestInput: { decision: "reject", approvalId: pending.id, reason: parsed.data.reason }
     });
 
     if (result.status === "error") {
@@ -876,6 +1144,7 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       return { error: "No workflows available" };
     }
 
+    const executionId = crypto.randomUUID();
     const result = await runWorkflowExecution({
       workflow,
       webhookPayload: {
@@ -887,7 +1156,19 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       variables: parsed.data.variables,
       systemPrompt: parsed.data.system_prompt,
       userPrompt: parsed.data.user_prompt,
-      sessionId: parsed.data.session_id
+      sessionId: parsed.data.session_id,
+      executionId,
+      triggerType: "webhook_api",
+      triggeredBy: user.email
+    });
+
+    persistExecutionHistory({
+      executionId,
+      workflow,
+      result,
+      triggerType: "webhook_api",
+      triggeredBy: user.email,
+      requestInput: parsed.data
     });
 
     if (result.status === "error") {
@@ -1028,6 +1309,7 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
           }
         }
 
+        const executionId = crypto.randomUUID();
         const result = await runWorkflowExecution({
           workflow: match.workflow,
           webhookPayload: {
@@ -1040,7 +1322,19 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
           variables: parsedInput.variables,
           systemPrompt: parsedInput.systemPrompt,
           userPrompt: parsedInput.userPrompt,
-          sessionId: parsedInput.sessionId
+          sessionId: parsedInput.sessionId,
+          executionId,
+          triggerType: isTestRoute ? "webhook_test" : "webhook",
+          triggeredBy: "webhook"
+        });
+
+        persistExecutionHistory({
+          executionId,
+          workflow: match.workflow,
+          result,
+          triggerType: isTestRoute ? "webhook_test" : "webhook",
+          triggeredBy: "webhook",
+          requestInput: parsedInput.body
         });
 
         if (result.status === "error") {

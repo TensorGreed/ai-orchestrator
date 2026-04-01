@@ -271,6 +271,87 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
+    if (node.type === "human_approval") {
+      if (typeof config.approvalMessage !== "string" || !config.approvalMessage.trim()) {
+        issues.push({
+          code: "missing_human_approval_message",
+          message: "Human Approval node requires a non-empty approvalMessage.",
+          nodeId: node.id
+        });
+      }
+      if (typeof config.timeoutMinutes !== "number" || !Number.isFinite(config.timeoutMinutes) || config.timeoutMinutes < 1) {
+        issues.push({
+          code: "invalid_human_approval_timeout",
+          message: "Human Approval node requires timeoutMinutes >= 1.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "input_validator") {
+      if (!Array.isArray(config.rules) || config.rules.length === 0) {
+        issues.push({
+          code: "missing_input_validator_rules",
+          message: "Input Validator node requires at least one validation rule.",
+          nodeId: node.id
+        });
+      } else {
+        for (const [ruleIndex, rawRule] of config.rules.entries()) {
+          const rule = (rawRule ?? {}) as Record<string, unknown>;
+          const check = typeof rule.check === "string" ? rule.check : "";
+          if (typeof rule.field !== "string" || !rule.field.trim()) {
+            issues.push({
+              code: "invalid_input_validator_rule_field",
+              message: `Input Validator rule #${ruleIndex + 1} requires a non-empty field value.`,
+              nodeId: node.id
+            });
+          }
+          if (check !== "required" && check !== "max_length" && check !== "regex") {
+            issues.push({
+              code: "invalid_input_validator_rule_check",
+              message: `Input Validator rule #${ruleIndex + 1} check must be one of required, max_length, regex.`,
+              nodeId: node.id
+            });
+          }
+        }
+      }
+      if (config.onFail !== "error" && config.onFail !== "branch") {
+        issues.push({
+          code: "invalid_input_validator_on_fail",
+          message: "Input Validator node onFail must be either 'error' or 'branch'.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "output_guardrail") {
+      if (!Array.isArray(config.checks) || config.checks.length === 0) {
+        issues.push({
+          code: "missing_output_guardrail_checks",
+          message: "Output Guardrail node requires at least one check.",
+          nodeId: node.id
+        });
+      } else {
+        for (const check of config.checks) {
+          if (check !== "no_pii" && check !== "no_profanity" && check !== "must_contain_json") {
+            issues.push({
+              code: "invalid_output_guardrail_check",
+              message: "Output Guardrail checks must be one of no_pii, no_profanity, must_contain_json.",
+              nodeId: node.id
+            });
+            break;
+          }
+        }
+      }
+      if (config.onFail !== "retry" && config.onFail !== "error") {
+        issues.push({
+          code: "invalid_output_guardrail_on_fail",
+          message: "Output Guardrail node onFail must be either 'retry' or 'error'.",
+          nodeId: node.id
+        });
+      }
+    }
+
     if (node.type === "if_node") {
       if (typeof config.condition !== "string" || !config.condition.trim()) {
         issues.push({

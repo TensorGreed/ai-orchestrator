@@ -70,6 +70,39 @@ interface WebhookIdempotencyRow {
   expires_at: string;
 }
 
+interface ExecutionHistoryRow {
+  id: string;
+  workflow_id: string;
+  workflow_name: string | null;
+  status: string;
+  started_at: string;
+  completed_at: string | null;
+  duration_ms: number | null;
+  trigger_type: string | null;
+  triggered_by: string | null;
+  input_json: string | null;
+  output_json: string | null;
+  node_results_json: string | null;
+  error: string | null;
+  created_at: string;
+}
+
+interface WorkflowExecutionRow {
+  id: string;
+  workflow_id: string;
+  workflow_name: string | null;
+  status: string;
+  waiting_node_id: string;
+  approval_message: string | null;
+  timeout_minutes: number | null;
+  trigger_type: string | null;
+  triggered_by: string | null;
+  started_at: string;
+  state_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
 function toString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
@@ -175,6 +208,45 @@ export class SqliteStore {
 
       CREATE INDEX IF NOT EXISTS idx_webhook_idempotency_expires_at
       ON webhook_idempotency(expires_at);
+
+      CREATE TABLE IF NOT EXISTS execution_history (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        duration_ms INTEGER,
+        trigger_type TEXT,
+        triggered_by TEXT,
+        input_json TEXT,
+        output_json TEXT,
+        node_results_json TEXT,
+        error TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_execution_history_started_at
+      ON execution_history(started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS workflow_executions (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        status TEXT NOT NULL,
+        waiting_node_id TEXT NOT NULL,
+        approval_message TEXT,
+        timeout_minutes INTEGER,
+        trigger_type TEXT,
+        triggered_by TEXT,
+        started_at TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_executions_status
+      ON workflow_executions(status);
     `);
 
     this.persist();
@@ -686,7 +758,7 @@ export class SqliteStore {
   saveWebhookIdempotencyResult(input: {
     endpointKey: string;
     idempotencyKey: string;
-    status: "success" | "error" | "partial";
+    status: "success" | "error" | "partial" | "waiting_approval";
     result: unknown;
   }): void {
     const now = new Date().toISOString();
@@ -697,5 +769,404 @@ export class SqliteStore {
       [input.status, JSON.stringify(input.result ?? null), now, input.endpointKey, input.idempotencyKey]
     );
     this.persist();
+  }
+
+  saveExecutionHistory(input: {
+    id: string;
+    workflowId: string;
+    workflowName?: string;
+    status: string;
+    startedAt: string;
+    completedAt?: string;
+    durationMs?: number;
+    triggerType?: string;
+    triggeredBy?: string;
+    inputJson?: unknown;
+    outputJson?: unknown;
+    nodeResultsJson?: unknown;
+    error?: string;
+  }): void {
+    this.db.run(
+      `INSERT INTO execution_history (
+          id,
+          workflow_id,
+          workflow_name,
+          status,
+          started_at,
+          completed_at,
+          duration_ms,
+          trigger_type,
+          triggered_by,
+          input_json,
+          output_json,
+          node_results_json,
+          error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.workflowId,
+        input.workflowName ?? null,
+        input.status,
+        input.startedAt,
+        input.completedAt ?? null,
+        typeof input.durationMs === "number" ? Math.floor(input.durationMs) : null,
+        input.triggerType ?? null,
+        input.triggeredBy ?? null,
+        input.inputJson === undefined ? null : JSON.stringify(input.inputJson),
+        input.outputJson === undefined ? null : JSON.stringify(input.outputJson),
+        input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
+        input.error ?? null
+      ]
+    );
+    this.persist();
+  }
+
+  listExecutionHistory(input: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+    workflowId?: string;
+    triggerType?: string;
+  }): {
+    total: number;
+    page: number;
+    pageSize: number;
+    items: Array<{
+      id: string;
+      workflowId: string;
+      workflowName: string | null;
+      status: string;
+      startedAt: string;
+      completedAt: string | null;
+      durationMs: number | null;
+      triggerType: string | null;
+      triggeredBy: string | null;
+      error: string | null;
+      createdAt: string;
+    }>;
+  } {
+    const page = Math.max(1, Math.floor(input.page ?? 1));
+    const pageSize = Math.min(100, Math.max(1, Math.floor(input.pageSize ?? 20)));
+    const offset = (page - 1) * pageSize;
+
+    const whereParts: string[] = [];
+    const whereParams: Array<string> = [];
+
+    if (input.status) {
+      whereParts.push("status = ?");
+      whereParams.push(input.status);
+    }
+    if (input.workflowId) {
+      whereParts.push("workflow_id = ?");
+      whereParams.push(input.workflowId);
+    }
+    if (input.triggerType) {
+      whereParts.push("trigger_type = ?");
+      whereParams.push(input.triggerType);
+    }
+
+    const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+    const countRow = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM execution_history ${whereClause}`,
+      whereParams
+    );
+    const total = countRow ? toNumber(countRow.count) : 0;
+
+    const rows = this.queryAll<ExecutionHistoryRow>(
+      `SELECT
+         id,
+         workflow_id,
+         workflow_name,
+         status,
+         started_at,
+         completed_at,
+         duration_ms,
+         trigger_type,
+         triggered_by,
+         input_json,
+         output_json,
+         node_results_json,
+         error,
+         created_at
+       FROM execution_history
+       ${whereClause}
+       ORDER BY started_at DESC
+       LIMIT ? OFFSET ?`,
+      [...whereParams, pageSize, offset]
+    );
+
+    return {
+      total,
+      page,
+      pageSize,
+      items: rows.map((row) => ({
+        id: toString(row.id),
+        workflowId: toString(row.workflow_id),
+        workflowName: row.workflow_name ? toString(row.workflow_name) : null,
+        status: toString(row.status),
+        startedAt: toString(row.started_at),
+        completedAt: row.completed_at ? toString(row.completed_at) : null,
+        durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : toNumber(row.duration_ms),
+        triggerType: row.trigger_type ? toString(row.trigger_type) : null,
+        triggeredBy: row.triggered_by ? toString(row.triggered_by) : null,
+        error: row.error ? toString(row.error) : null,
+        createdAt: toString(row.created_at)
+      }))
+    };
+  }
+
+  getExecutionHistory(id: string): {
+    id: string;
+    workflowId: string;
+    workflowName: string | null;
+    status: string;
+    startedAt: string;
+    completedAt: string | null;
+    durationMs: number | null;
+    triggerType: string | null;
+    triggeredBy: string | null;
+    input: unknown;
+    output: unknown;
+    nodeResults: unknown;
+    error: string | null;
+    createdAt: string;
+  } | null {
+    const row = this.queryOne<ExecutionHistoryRow>(
+      `SELECT
+         id,
+         workflow_id,
+         workflow_name,
+         status,
+         started_at,
+         completed_at,
+         duration_ms,
+         trigger_type,
+         triggered_by,
+         input_json,
+         output_json,
+         node_results_json,
+         error,
+         created_at
+       FROM execution_history
+       WHERE id = ?`,
+      [id]
+    );
+
+    if (!row) {
+      return null;
+    }
+
+    const parseJson = (value: string | null) => {
+      if (!value) {
+        return null;
+      }
+      try {
+        return JSON.parse(value);
+      } catch {
+        return null;
+      }
+    };
+
+    return {
+      id: toString(row.id),
+      workflowId: toString(row.workflow_id),
+      workflowName: row.workflow_name ? toString(row.workflow_name) : null,
+      status: toString(row.status),
+      startedAt: toString(row.started_at),
+      completedAt: row.completed_at ? toString(row.completed_at) : null,
+      durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : toNumber(row.duration_ms),
+      triggerType: row.trigger_type ? toString(row.trigger_type) : null,
+      triggeredBy: row.triggered_by ? toString(row.triggered_by) : null,
+      input: parseJson(row.input_json),
+      output: parseJson(row.output_json),
+      nodeResults: parseJson(row.node_results_json),
+      error: row.error ? toString(row.error) : null,
+      createdAt: toString(row.created_at)
+    };
+  }
+
+  saveWorkflowExecutionState(input: {
+    id: string;
+    workflowId: string;
+    workflowName?: string;
+    status: string;
+    waitingNodeId: string;
+    approvalMessage?: string;
+    timeoutMinutes?: number;
+    triggerType?: string;
+    triggeredBy?: string;
+    startedAt: string;
+    state: unknown;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO workflow_executions (
+          id,
+          workflow_id,
+          workflow_name,
+          status,
+          waiting_node_id,
+          approval_message,
+          timeout_minutes,
+          trigger_type,
+          triggered_by,
+          started_at,
+          state_json,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          workflow_id = excluded.workflow_id,
+          workflow_name = excluded.workflow_name,
+          status = excluded.status,
+          waiting_node_id = excluded.waiting_node_id,
+          approval_message = excluded.approval_message,
+          timeout_minutes = excluded.timeout_minutes,
+          trigger_type = excluded.trigger_type,
+          triggered_by = excluded.triggered_by,
+          started_at = excluded.started_at,
+          state_json = excluded.state_json,
+          updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.workflowId,
+        input.workflowName ?? null,
+        input.status,
+        input.waitingNodeId,
+        input.approvalMessage ?? null,
+        typeof input.timeoutMinutes === "number" ? Math.floor(input.timeoutMinutes) : null,
+        input.triggerType ?? null,
+        input.triggeredBy ?? null,
+        input.startedAt,
+        JSON.stringify(input.state),
+        now,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  getWorkflowExecutionState(id: string): {
+    id: string;
+    workflowId: string;
+    workflowName: string | null;
+    status: string;
+    waitingNodeId: string;
+    approvalMessage: string | null;
+    timeoutMinutes: number | null;
+    triggerType: string | null;
+    triggeredBy: string | null;
+    startedAt: string;
+    state: unknown;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.queryOne<WorkflowExecutionRow>(
+      `SELECT
+         id,
+         workflow_id,
+         workflow_name,
+         status,
+         waiting_node_id,
+         approval_message,
+         timeout_minutes,
+         trigger_type,
+         triggered_by,
+         started_at,
+         state_json,
+         created_at,
+         updated_at
+       FROM workflow_executions
+       WHERE id = ?`,
+      [id]
+    );
+
+    if (!row) {
+      return null;
+    }
+
+    let state: unknown = null;
+    try {
+      state = JSON.parse(toString(row.state_json));
+    } catch {
+      state = null;
+    }
+
+    return {
+      id: toString(row.id),
+      workflowId: toString(row.workflow_id),
+      workflowName: row.workflow_name ? toString(row.workflow_name) : null,
+      status: toString(row.status),
+      waitingNodeId: toString(row.waiting_node_id),
+      approvalMessage: row.approval_message ? toString(row.approval_message) : null,
+      timeoutMinutes:
+        row.timeout_minutes === null || row.timeout_minutes === undefined ? null : toNumber(row.timeout_minutes),
+      triggerType: row.trigger_type ? toString(row.trigger_type) : null,
+      triggeredBy: row.triggered_by ? toString(row.triggered_by) : null,
+      startedAt: toString(row.started_at),
+      state,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  listPendingApprovals(): Array<{
+    id: string;
+    workflowId: string;
+    workflowName: string | null;
+    waitingNodeId: string;
+    approvalMessage: string | null;
+    timeoutMinutes: number | null;
+    triggerType: string | null;
+    triggeredBy: string | null;
+    startedAt: string;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const rows = this.queryAll<WorkflowExecutionRow>(
+      `SELECT
+         id,
+         workflow_id,
+         workflow_name,
+         status,
+         waiting_node_id,
+         approval_message,
+         timeout_minutes,
+         trigger_type,
+         triggered_by,
+         started_at,
+         state_json,
+         created_at,
+         updated_at
+       FROM workflow_executions
+       WHERE status = 'waiting_approval'
+       ORDER BY created_at DESC`
+    );
+
+    return rows.map((row) => ({
+      id: toString(row.id),
+      workflowId: toString(row.workflow_id),
+      workflowName: row.workflow_name ? toString(row.workflow_name) : null,
+      waitingNodeId: toString(row.waiting_node_id),
+      approvalMessage: row.approval_message ? toString(row.approval_message) : null,
+      timeoutMinutes:
+        row.timeout_minutes === null || row.timeout_minutes === undefined ? null : toNumber(row.timeout_minutes),
+      triggerType: row.trigger_type ? toString(row.trigger_type) : null,
+      triggeredBy: row.triggered_by ? toString(row.triggered_by) : null,
+      startedAt: toString(row.started_at),
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  deleteWorkflowExecution(id: string): boolean {
+    const before = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflow_executions WHERE id = ?", [id]);
+    this.db.run("DELETE FROM workflow_executions WHERE id = ?", [id]);
+    const after = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflow_executions WHERE id = ?", [id]);
+    const deleted = (before ? toNumber(before.count) : 0) > (after ? toNumber(after.count) : 0);
+    if (deleted) {
+      this.persist();
+    }
+    return deleted;
   }
 }

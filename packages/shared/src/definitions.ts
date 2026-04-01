@@ -229,6 +229,82 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "human_approval",
+    label: "Human Approval",
+    category: "Utility",
+    description: "Pauses execution and waits for a human approve/reject action before resuming.",
+    configSchema: {
+      type: "object",
+      properties: {
+        approvalMessage: { type: "string" },
+        timeoutMinutes: { type: "number" }
+      },
+      required: ["approvalMessage", "timeoutMinutes"]
+    },
+    sampleConfig: {
+      approvalMessage: "Approve before sending this response to the customer?",
+      timeoutMinutes: 60
+    }
+  },
+  {
+    type: "input_validator",
+    label: "Input Validator",
+    category: "Utility",
+    description: "Validates input fields against deterministic rules before downstream execution.",
+    configSchema: {
+      type: "object",
+      properties: {
+        rules: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string" },
+              check: { type: "string", enum: ["required", "max_length", "regex"] },
+              value: { type: "string" }
+            },
+            required: ["field", "check"]
+          }
+        },
+        onFail: { type: "string", enum: ["error", "branch"] }
+      },
+      required: ["rules", "onFail"]
+    },
+    sampleConfig: {
+      rules: [
+        { field: "email", check: "required", value: "" },
+        { field: "message", check: "max_length", value: "1200" }
+      ],
+      onFail: "branch"
+    }
+  },
+  {
+    type: "output_guardrail",
+    label: "Output Guardrail",
+    category: "Utility",
+    description: "Validates and optionally retries model output when guardrail checks fail.",
+    configSchema: {
+      type: "object",
+      properties: {
+        checks: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["no_pii", "no_profanity", "must_contain_json"]
+          }
+        },
+        onFail: { type: "string", enum: ["retry", "error"] },
+        inputKey: { type: "string" }
+      },
+      required: ["checks", "onFail"]
+    },
+    sampleConfig: {
+      checks: ["no_pii", "must_contain_json"],
+      onFail: "retry",
+      inputKey: "answer"
+    }
+  },
+  {
     type: "if_node",
     label: "IF",
     category: "Utility",

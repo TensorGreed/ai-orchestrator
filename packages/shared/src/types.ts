@@ -24,6 +24,9 @@ export type WorkflowNodeType =
   | "connector_source"
   | "document_chunker"
   | "output_parser"
+  | "human_approval"
+  | "input_validator"
+  | "output_guardrail"
   | "if_node"
   | "switch_node"
   | "try_catch"
@@ -81,7 +84,9 @@ export interface NodeDefinition {
   sampleConfig: Record<string, unknown>;
 }
 
-export type NodeExecutionStatus = "pending" | "running" | "success" | "error" | "skipped";
+export type NodeExecutionStatus = "pending" | "running" | "success" | "error" | "skipped" | "waiting_approval";
+
+export type WorkflowExecutionStatus = "success" | "error" | "partial" | "waiting_approval";
 
 export interface NodeExecutionResult {
   nodeId: string;
@@ -96,12 +101,32 @@ export interface NodeExecutionResult {
 
 export interface WorkflowExecutionResult {
   workflowId: string;
-  status: "success" | "error" | "partial";
+  status: WorkflowExecutionStatus;
   startedAt: string;
   completedAt: string;
+  executionId?: string;
   nodeResults: NodeExecutionResult[];
   output?: unknown;
   error?: string;
+}
+
+export interface WorkflowExecutionState {
+  workflow: Workflow;
+  nodeOrder: string[];
+  nextNodeIndex: number;
+  waitingNodeId: string;
+  startedAt: string;
+  globals: Record<string, unknown>;
+  nodeOutputs: Record<string, unknown>;
+  nodeResults: NodeExecutionResult[];
+  skippedByBranch: string[];
+  tryCatchScopes: Array<{
+    nodeId: string;
+    errorTargets: string[];
+    successDescendants: string[];
+  }>;
+  hadContinuedErrors: boolean;
+  finalOutput?: unknown;
 }
 
 export interface WorkflowValidationIssue {

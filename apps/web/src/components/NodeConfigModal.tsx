@@ -1238,6 +1238,87 @@ export function NodeConfigModal({
             )}
           </>
         );
+      case "human_approval":
+        return (
+          <>
+            <TextAreaField
+              label="Approval Message"
+              value={toStringValue(config.approvalMessage, "Approve this action?")}
+              onChange={(next) => setConfig((current) => ({ ...current, approvalMessage: next }))}
+              rows={3}
+            />
+            <NumberField
+              label="Timeout (minutes)"
+              value={toNumberValue(config.timeoutMinutes, 60)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, timeoutMinutes: next }))}
+            />
+          </>
+        );
+      case "input_validator":
+        return (
+          <>
+            <SelectField
+              label="On Fail"
+              value={toStringValue(config.onFail, "error")}
+              onChange={(next) => setConfig((current) => ({ ...current, onFail: next }))}
+              options={[
+                { value: "error", label: "Stop with Error" },
+                { value: "branch", label: "Return valid=false for branching" }
+              ]}
+            />
+            <TextAreaField
+              label="Rules (JSON Array)"
+              value={JSON.stringify(Array.isArray(config.rules) ? config.rules : [], null, 2)}
+              onChange={(next) => {
+                try {
+                  const parsed = JSON.parse(next);
+                  if (Array.isArray(parsed)) {
+                    setConfig((current) => ({ ...current, rules: parsed }));
+                  }
+                } catch {
+                  // ignore JSON parsing while typing
+                }
+              }}
+              rows={8}
+            />
+          </>
+        );
+      case "output_guardrail":
+        return (
+          <>
+            <SelectField
+              label="On Fail"
+              value={toStringValue(config.onFail, "error")}
+              onChange={(next) => setConfig((current) => ({ ...current, onFail: next }))}
+              options={[
+                { value: "error", label: "Stop with Error" },
+                { value: "retry", label: "Retry with LLM (max 3)" }
+              ]}
+            />
+            <TextField
+              label="Input Key"
+              value={toStringValue(config.inputKey, "answer")}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+              placeholder="answer"
+            />
+            <TextField
+              label="Checks (comma-separated)"
+              value={Array.isArray(config.checks) ? config.checks.map(String).join(", ") : "no_pii"}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  checks: next
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean)
+                }))
+              }
+              placeholder="no_pii, no_profanity, must_contain_json"
+            />
+          </>
+        );
       case "if_node":
         return (
           <>

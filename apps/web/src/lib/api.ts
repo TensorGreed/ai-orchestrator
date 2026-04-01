@@ -181,3 +181,60 @@ export async function createSecret(payload: { name: string; provider: string; va
     body: JSON.stringify(payload)
   });
 }
+
+export interface ExecutionHistorySummary {
+  id: string;
+  workflowId: string;
+  workflowName: string | null;
+  status: string;
+  startedAt: string;
+  completedAt: string | null;
+  durationMs: number | null;
+  triggerType: string | null;
+  triggeredBy: string | null;
+  error: string | null;
+  createdAt: string;
+}
+
+export interface ExecutionHistoryDetail extends ExecutionHistorySummary {
+  input: unknown;
+  output: unknown;
+  nodeResults: unknown;
+}
+
+export async function fetchExecutions(input?: {
+  page?: number;
+  pageSize?: number;
+  status?: string;
+  workflowId?: string;
+  triggerType?: string;
+}) {
+  const params = new URLSearchParams();
+  if (typeof input?.page === "number") {
+    params.set("page", String(input.page));
+  }
+  if (typeof input?.pageSize === "number") {
+    params.set("pageSize", String(input.pageSize));
+  }
+  if (input?.status) {
+    params.set("status", input.status);
+  }
+  if (input?.workflowId) {
+    params.set("workflowId", input.workflowId);
+  }
+  if (input?.triggerType) {
+    params.set("triggerType", input.triggerType);
+  }
+
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{
+    total: number;
+    page: number;
+    pageSize: number;
+    items: ExecutionHistorySummary[];
+  }>(`/api/executions${suffix}`);
+}
+
+export async function fetchExecutionById(id: string) {
+  return apiRequest<ExecutionHistoryDetail>(`/api/executions/${id}`);
+}

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { invokeDirectMCPTool, resolveMCPTools, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
@@ -11,6 +12,7 @@ import type {
   SecretReference,
   Workflow,
   WorkflowExecutionResult,
+  WorkflowExecutionState,
   WorkflowNode
 } from "@ai-orchestrator/shared";
 import { isAuxiliaryEdge, isExecutionEdge } from "./graph";
@@ -37,6 +39,18 @@ export interface WorkflowExecutionDependencies {
   agentRuntime: AgentRuntimeAdapter;
   memoryStore?: AgentSessionMemoryStore;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
+  persistPausedExecution?: (input: {
+    executionId: string;
+    workflowId: string;
+    workflowName: string;
+    triggerType?: string;
+    triggeredBy?: string;
+    waitingNodeId: string;
+    approvalMessage: string;
+    timeoutMinutes: number;
+    startedAt: string;
+    state: WorkflowExecutionState;
+  }) => Promise<void>;
   logger?: (message: string, metadata?: unknown) => void;
 }
 
@@ -48,6 +62,23 @@ export interface ExecuteWorkflowRequest {
   systemPrompt?: string;
   userPrompt?: string;
   sessionId?: string;
+  executionId?: string;
+  triggerType?: string;
+  triggeredBy?: string;
+  resumeState?: WorkflowExecutionState;
+  approvalDecision?: {
+    decision: "approve" | "reject";
+    actedBy?: string;
+    reason?: string;
+  };
+}
+
+export interface ResumeWorkflowRequest {
+  executionId: string;
+  state: WorkflowExecutionState;
+  decision: "approve" | "reject";
+  actedBy?: string;
+  reason?: string;
 }
 
 interface NodeRuntimeContext {
@@ -195,6 +226,76 @@ function buildTemplateData(context: NodeRuntimeContext): Record<string, unknown>
   };
 }
 
+function getValueByPath(input: Record<string, unknown>, path: string): unknown {
+  const parts = path
+    .split(".")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (!parts.length) {
+    return undefined;
+  }
+
+  let current: unknown = input;
+  for (const part of parts) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+
+  return current;
+}
+
+function extractJsonFromText(text: string): string {
+  const trimmed = text.trim();
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch?.[1]) {
+    return fenceMatch[1].trim();
+  }
+  return trimmed;
+}
+
+function validateGuardrailChecks(text: string, checks: string[]): string[] {
+  const failures: string[] = [];
+  const normalizedText = String(text ?? "");
+
+  for (const check of checks) {
+    if (check === "no_pii") {
+      const piiPatterns = [
+        /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+        /\b(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/,
+        /\b\d{3}-\d{2}-\d{4}\b/,
+        /\b(?:\d[ -]*?){13,16}\b/
+      ];
+      if (piiPatterns.some((pattern) => pattern.test(normalizedText))) {
+        failures.push("no_pii");
+      }
+      continue;
+    }
+
+    if (check === "no_profanity") {
+      const profanityTokens = ["damn", "shit", "fuck", "bitch", "bastard"];
+      const lower = normalizedText.toLowerCase();
+      if (profanityTokens.some((token) => lower.includes(token))) {
+        failures.push("no_profanity");
+      }
+      continue;
+    }
+
+    if (check === "must_contain_json") {
+      const candidate = extractJsonFromText(normalizedText);
+      try {
+        JSON.parse(candidate);
+      } catch {
+        failures.push("must_contain_json");
+      }
+    }
+  }
+
+  return failures;
+}
+
 interface GraphIndexes {
   nodeById: Map<string, WorkflowNode>;
   incomingExecution: Map<string, string[]>;
@@ -323,6 +424,86 @@ async function executeNode(
       };
     }
 
+    case "input_validator": {
+      const rules = Array.isArray(config.rules)
+        ? config.rules.map((entry) => toRecord(entry))
+        : [];
+      const onFail = config.onFail === "branch" ? "branch" : "error";
+      const payloadSources = [
+        toRecord(context.globals.webhook),
+        toRecord(context.globals),
+        toRecord(templateData.input)
+      ];
+      const payload = Object.assign({}, ...payloadSources);
+      const errors: Array<{ field: string; check: string; message: string }> = [];
+
+      for (const rule of rules) {
+        const field = String(rule.field ?? "").trim();
+        const check = String(rule.check ?? "").trim();
+        const expectedValue = String(rule.value ?? "");
+        if (!field || !check) {
+          continue;
+        }
+
+        const actualValue = getValueByPath(payload, field);
+        if (check === "required") {
+          const missing =
+            actualValue === undefined ||
+            actualValue === null ||
+            (typeof actualValue === "string" && actualValue.trim() === "");
+          if (missing) {
+            errors.push({
+              field,
+              check,
+              message: `Field '${field}' is required.`
+            });
+          }
+          continue;
+        }
+
+        if (check === "max_length") {
+          const maxLength = Number(expectedValue);
+          const currentLength = String(actualValue ?? "").length;
+          if (Number.isFinite(maxLength) && currentLength > maxLength) {
+            errors.push({
+              field,
+              check,
+              message: `Field '${field}' exceeds max length of ${maxLength}.`
+            });
+          }
+          continue;
+        }
+
+        if (check === "regex") {
+          try {
+            const pattern = new RegExp(expectedValue);
+            if (!pattern.test(String(actualValue ?? ""))) {
+              errors.push({
+                field,
+                check,
+                message: `Field '${field}' does not match regex '${expectedValue}'.`
+              });
+            }
+          } catch {
+            errors.push({
+              field,
+              check,
+              message: `Invalid regex for field '${field}'.`
+            });
+          }
+        }
+      }
+
+      if (errors.length > 0 && onFail === "error") {
+        throw new Error(`Input validation failed: ${errors.map((error) => error.message).join(" ")}`);
+      }
+
+      return {
+        valid: errors.length === 0,
+        errors
+      };
+    }
+
     case "prompt_template": {
       const template = typeof config.template === "string" ? config.template : "{{user_prompt}}";
       const outputKey = typeof config.outputKey === "string" && config.outputKey ? config.outputKey : "prompt";
@@ -362,7 +543,8 @@ async function executeNode(
         text: response.content,
         answer: response.content,
         toolCalls: response.toolCalls,
-        raw: response.raw
+        raw: response.raw,
+        _provider: provider
       };
     }
 
@@ -788,6 +970,64 @@ async function executeNode(
       return { parsed: result.parsed, raw: rawInput, retries };
     }
 
+    case "output_guardrail": {
+      const checks = Array.isArray(config.checks)
+        ? config.checks.map((value) => String(value)).filter(Boolean)
+        : [];
+      const onFail = config.onFail === "retry" ? "retry" : "error";
+      const inputKey = typeof config.inputKey === "string" && config.inputKey ? config.inputKey : "answer";
+      let candidate = String(templateData[inputKey] ?? templateData.answer ?? templateData.text ?? "");
+      let failures = validateGuardrailChecks(candidate, checks);
+      let attempts = 0;
+
+      if (failures.length > 0 && onFail === "retry") {
+        const provider = normalizeProvider(templateData._provider);
+        if (!provider) {
+          throw new Error("Output Guardrail retry requested but no upstream provider context was found.");
+        }
+
+        const providerAdapter = dependencies.providerRegistry.get(provider.providerId);
+        while (attempts < 3 && failures.length > 0) {
+          attempts += 1;
+          const retryResponse = await providerAdapter.generate(
+            {
+              provider,
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You must rewrite the assistant output so it passes all guardrail checks. Return revised content only."
+                },
+                {
+                  role: "user",
+                  content: `Failed checks: ${failures.join(", ")}\n\nOriginal output:\n${candidate}`
+                }
+              ]
+            },
+            {
+              resolveSecret: dependencies.resolveSecret
+            }
+          );
+          candidate = retryResponse.content;
+          failures = validateGuardrailChecks(candidate, checks);
+        }
+      }
+
+      if (failures.length > 0) {
+        throw new Error(`Output guardrail checks failed: ${failures.join(", ")}`);
+      }
+
+      return {
+        answer: candidate,
+        text: candidate,
+        guardrail: {
+          checks,
+          attempts,
+          passed: true
+        }
+      };
+    }
+
     case "if_node": {
       const conditionTemplate = typeof config.condition === "string" ? config.condition : "";
       const evaluated = renderTemplate(conditionTemplate, templateData).trim();
@@ -821,6 +1061,12 @@ async function executeNode(
     case "try_catch": {
       // try_catch is structural — execution routing is handled by the executor loop
       return { _branchHandle: "success" };
+    }
+
+    case "human_approval": {
+      return {
+        waiting: true
+      };
     }
 
     case "output": {
@@ -931,58 +1177,132 @@ function collectDescendants(
   return descendants;
 }
 
+function serializeNodeOutputs(nodeOutputs: Map<string, unknown>): Record<string, unknown> {
+  const serialized: Record<string, unknown> = {};
+  for (const [nodeId, output] of nodeOutputs.entries()) {
+    serialized[nodeId] = output;
+  }
+  return serialized;
+}
+
+function deserializeNodeOutputs(nodeOutputs: Record<string, unknown>): Map<string, unknown> {
+  const restored = new Map<string, unknown>();
+  for (const [nodeId, output] of Object.entries(nodeOutputs ?? {})) {
+    restored.set(nodeId, output);
+  }
+  return restored;
+}
+
+function serializeTryCatchScopes(
+  scopes: Map<string, { errorTargets: string[]; successDescendants: Set<string> }>
+): WorkflowExecutionState["tryCatchScopes"] {
+  return [...scopes.entries()].map(([nodeId, scope]) => ({
+    nodeId,
+    errorTargets: scope.errorTargets,
+    successDescendants: [...scope.successDescendants]
+  }));
+}
+
+function deserializeTryCatchScopes(
+  serialized: WorkflowExecutionState["tryCatchScopes"]
+): Map<string, { errorTargets: string[]; successDescendants: Set<string> }> {
+  const scopes = new Map<string, { errorTargets: string[]; successDescendants: Set<string> }>();
+  for (const entry of serialized ?? []) {
+    scopes.set(entry.nodeId, {
+      errorTargets: Array.isArray(entry.errorTargets) ? entry.errorTargets : [],
+      successDescendants: new Set(Array.isArray(entry.successDescendants) ? entry.successDescendants : [])
+    });
+  }
+  return scopes;
+}
+
+function appendSkippedNodes(nodeOrder: string[], startIndex: number, nodeResults: NodeExecutionResult[]): void {
+  for (let index = startIndex; index < nodeOrder.length; index += 1) {
+    nodeResults.push({
+      nodeId: nodeOrder[index],
+      status: "skipped",
+      startedAt: nowIso(),
+      completedAt: nowIso(),
+      durationMs: 0
+    });
+  }
+}
+
 export async function executeWorkflow(
   request: ExecuteWorkflowRequest,
   dependencies: WorkflowExecutionDependencies
 ): Promise<WorkflowExecutionResult> {
-  const startedAt = nowIso();
-  const validation = validateWorkflowGraph(request.workflow);
+  const workflow = request.resumeState?.workflow ?? request.workflow;
+  const startedAt = request.resumeState?.startedAt ?? nowIso();
+  const validation = validateWorkflowGraph(workflow);
 
   if (!validation.valid) {
     return {
-      workflowId: request.workflow.id,
+      workflowId: workflow.id,
       status: "error",
       startedAt,
       completedAt: nowIso(),
+      executionId: request.executionId,
       nodeResults: [],
       error: validation.issues.map((issue) => issue.message).join("; ")
     };
   }
 
-  const nodeOrder = validation.orderedNodeIds ?? sortWorkflowNodes(request.workflow);
-  const graphIndexes = buildGraphIndexes(request.workflow);
+  const nodeOrder =
+    request.resumeState?.nodeOrder?.length ? request.resumeState.nodeOrder : validation.orderedNodeIds ?? sortWorkflowNodes(workflow);
+  const graphIndexes = buildGraphIndexes(workflow);
 
-  const globals: Record<string, unknown> = {
-    ...(request.input ?? {}),
-    ...(request.variables ?? {}),
-    webhook: request.webhookPayload ?? {},
-    system_prompt:
-      request.systemPrompt ??
-      (typeof request.webhookPayload?.system_prompt === "string" ? request.webhookPayload.system_prompt : ""),
-    user_prompt:
-      request.userPrompt ?? (typeof request.webhookPayload?.user_prompt === "string" ? request.webhookPayload.user_prompt : ""),
-    session_id:
-      request.sessionId ??
-      (typeof request.webhookPayload?.session_id === "string" ? request.webhookPayload.session_id : undefined)
-  };
+  const globals: Record<string, unknown> = request.resumeState
+    ? toRecord(request.resumeState.globals)
+    : {
+        ...(request.input ?? {}),
+        ...(request.variables ?? {}),
+        webhook: request.webhookPayload ?? {},
+        system_prompt:
+          request.systemPrompt ??
+          (typeof request.webhookPayload?.system_prompt === "string" ? request.webhookPayload.system_prompt : ""),
+        user_prompt:
+          request.userPrompt ??
+          (typeof request.webhookPayload?.user_prompt === "string" ? request.webhookPayload.user_prompt : ""),
+        session_id:
+          request.sessionId ??
+          (typeof request.webhookPayload?.session_id === "string" ? request.webhookPayload.session_id : undefined)
+      };
 
-  const nodeOutputs = new Map<string, unknown>();
-  const nodeResults: NodeExecutionResult[] = [];
-  let finalOutput: unknown;
+  const nodeOutputs = request.resumeState
+    ? deserializeNodeOutputs(toRecord(request.resumeState.nodeOutputs))
+    : new Map<string, unknown>();
+  const nodeResults: NodeExecutionResult[] = request.resumeState ? [...request.resumeState.nodeResults] : [];
+  let finalOutput: unknown = request.resumeState?.finalOutput;
   let failedError: string | undefined;
-  let hadContinuedErrors = false;
+  let hadContinuedErrors = request.resumeState?.hadContinuedErrors === true;
+  let startIndex = request.resumeState?.nextNodeIndex ?? 0;
 
   // Branch-aware skip tracking:
   // When a branching node (if_node, switch_node, try_catch) runs, we add
   // all nodes on non-taken branches to this set.
-  const skippedByBranch = new Set<string>();
+  const skippedByBranch = new Set<string>(request.resumeState?.skippedByBranch ?? []);
 
   // try_catch error routing: maps try_catch nodeId -> error branch target nodeIds
-  const tryCatchScopes = new Map<string, { errorTargets: string[]; successDescendants: Set<string> }>();
+  const tryCatchScopes = request.resumeState
+    ? deserializeTryCatchScopes(request.resumeState.tryCatchScopes)
+    : new Map<string, { errorTargets: string[]; successDescendants: Set<string> }>();
+
+  if (request.resumeState && !request.approvalDecision) {
+    return {
+      workflowId: workflow.id,
+      status: "error",
+      startedAt,
+      completedAt: nowIso(),
+      executionId: request.executionId,
+      nodeResults,
+      error: "Resume execution requires an approval decision."
+    };
+  }
 
   // Build a map of sourceHandle -> target nodeIds for branching edges
   const branchTargets = new Map<string, Map<string, string[]>>();
-  for (const edge of request.workflow.edges) {
+  for (const edge of workflow.edges) {
     if (!edge.sourceHandle || isAuxiliaryEdge(edge)) {
       continue;
     }
@@ -996,7 +1316,144 @@ export async function executeWorkflow(
     handleMap.set(edge.sourceHandle, targets);
   }
 
-  for (let index = 0; index < nodeOrder.length; index += 1) {
+  if (request.resumeState && request.approvalDecision) {
+    const waitingNode = graphIndexes.nodeById.get(request.resumeState.waitingNodeId);
+    if (!waitingNode) {
+      return {
+        workflowId: workflow.id,
+        status: "error",
+        startedAt,
+        completedAt: nowIso(),
+        executionId: request.executionId,
+        nodeResults,
+        error: "Unable to resume: waiting approval node is missing from the workflow."
+      };
+    }
+
+    const filteredNodeResults = nodeResults.filter(
+      (entry) => !(entry.nodeId === waitingNode.id && entry.status === "waiting_approval")
+    );
+    nodeResults.splice(0, nodeResults.length, ...filteredNodeResults);
+
+    const decidedAt = nowIso();
+    const decisionPayload = {
+      approved: request.approvalDecision.decision === "approve",
+      rejected: request.approvalDecision.decision === "reject",
+      timestamp: decidedAt,
+      actedBy: request.approvalDecision.actedBy
+    };
+
+    if (request.approvalDecision.decision === "approve") {
+      nodeOutputs.set(waitingNode.id, decisionPayload);
+      nodeResults.push({
+        nodeId: waitingNode.id,
+        status: "success",
+        startedAt: decidedAt,
+        completedAt: decidedAt,
+        durationMs: 0,
+        output: decisionPayload
+      });
+    } else {
+      const rejectionError = request.approvalDecision.reason?.trim() || "Human approval rejected";
+      nodeResults.push({
+        nodeId: waitingNode.id,
+        status: "error",
+        startedAt: decidedAt,
+        completedAt: decidedAt,
+        durationMs: 0,
+        output: decisionPayload,
+        error: rejectionError
+      });
+
+      let caughtByTryCatch = false;
+      for (const [tryCatchId, scope] of tryCatchScopes.entries()) {
+        if (scope.successDescendants.has(waitingNode.id)) {
+          for (const desc of scope.successDescendants) {
+            if (desc !== waitingNode.id) {
+              skippedByBranch.add(desc);
+            }
+          }
+          for (const errorTarget of scope.errorTargets) {
+            skippedByBranch.delete(errorTarget);
+            for (const desc of collectDescendants(errorTarget, graphIndexes.outgoingExecution, workflow)) {
+              skippedByBranch.delete(desc);
+            }
+          }
+          nodeOutputs.set(tryCatchId, {
+            error: rejectionError,
+            failedNodeId: waitingNode.id,
+            failedNodeType: waitingNode.type,
+            caught: true
+          });
+          hadContinuedErrors = true;
+          caughtByTryCatch = true;
+          break;
+        }
+      }
+
+      if (!caughtByTryCatch) {
+        const onError = getOnError(toRecord(waitingNode.config));
+        if (onError === "continue") {
+          nodeOutputs.set(waitingNode.id, {
+            ...decisionPayload,
+            error: rejectionError
+          });
+          hadContinuedErrors = true;
+        } else if (onError === "branch" && branchTargets.has(waitingNode.id)) {
+          const handleMap = branchTargets.get(waitingNode.id)!;
+          const errorBranchTargets = handleMap.get("error") ?? [];
+          if (errorBranchTargets.length > 0) {
+            for (const [handle, targets] of handleMap.entries()) {
+              if (handle === "error") {
+                for (const target of targets) {
+                  skippedByBranch.delete(target);
+                  for (const desc of collectDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+                    skippedByBranch.delete(desc);
+                  }
+                }
+              } else {
+                for (const target of targets) {
+                  skippedByBranch.add(target);
+                  for (const desc of collectDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+                    skippedByBranch.add(desc);
+                  }
+                }
+              }
+            }
+            nodeOutputs.set(waitingNode.id, {
+              ...decisionPayload,
+              error: rejectionError
+            });
+            hadContinuedErrors = true;
+          } else {
+            appendSkippedNodes(nodeOrder, startIndex, nodeResults);
+            return {
+              workflowId: workflow.id,
+              status: "error",
+              startedAt,
+              completedAt: nowIso(),
+              executionId: request.executionId,
+              nodeResults,
+              error: rejectionError
+            };
+          }
+        } else {
+          appendSkippedNodes(nodeOrder, startIndex, nodeResults);
+          return {
+            workflowId: workflow.id,
+            status: "error",
+            startedAt,
+            completedAt: nowIso(),
+            executionId: request.executionId,
+            nodeResults,
+            error: rejectionError
+          };
+        }
+      }
+    }
+  }
+
+  for (let index = startIndex; index < nodeOrder.length; index += 1) {
     const nodeId = nodeOrder[index];
     const node = graphIndexes.nodeById.get(nodeId);
     if (!node) {
@@ -1051,13 +1508,87 @@ export async function executeWorkflow(
       }
 
       const merged = mergeParentOutputs(parentOutputs);
+      if (node.type === "human_approval") {
+        const approvalMessageTemplate =
+          typeof nodeConfig.approvalMessage === "string" && nodeConfig.approvalMessage.trim()
+            ? nodeConfig.approvalMessage
+            : "Approval required to continue.";
+        const timeoutMinutes =
+          typeof nodeConfig.timeoutMinutes === "number" && Number.isFinite(nodeConfig.timeoutMinutes) && nodeConfig.timeoutMinutes > 0
+            ? Math.floor(nodeConfig.timeoutMinutes)
+            : 60;
+        const approvalMessage = renderTemplate(approvalMessageTemplate, {
+          ...globals,
+          ...merged,
+          parent_outputs: parentOutputs
+        });
+
+        nodeResults.push({
+          nodeId: node.id,
+          status: "waiting_approval",
+          startedAt: startedAtNode,
+          completedAt: nowIso(),
+          durationMs: Date.now() - started,
+          output: {
+            message: approvalMessage,
+            timeoutMinutes
+          }
+        });
+
+        const executionId = request.executionId ?? randomUUID();
+        const stateSnapshot: WorkflowExecutionState = {
+          workflow,
+          nodeOrder,
+          nextNodeIndex: index + 1,
+          waitingNodeId: node.id,
+          startedAt,
+          globals,
+          nodeOutputs: serializeNodeOutputs(nodeOutputs),
+          nodeResults,
+          skippedByBranch: [...skippedByBranch],
+          tryCatchScopes: serializeTryCatchScopes(tryCatchScopes),
+          hadContinuedErrors,
+          finalOutput
+        };
+
+        if (dependencies.persistPausedExecution) {
+          await dependencies.persistPausedExecution({
+            executionId,
+            workflowId: workflow.id,
+            workflowName: workflow.name,
+            triggerType: request.triggerType,
+            triggeredBy: request.triggeredBy,
+            waitingNodeId: node.id,
+            approvalMessage,
+            timeoutMinutes,
+            startedAt,
+            state: stateSnapshot
+          });
+        }
+
+        return {
+          workflowId: workflow.id,
+          status: "waiting_approval",
+          startedAt,
+          completedAt: nowIso(),
+          executionId,
+          nodeResults,
+          output: {
+            waitingForApproval: true,
+            waitingNodeId: node.id,
+            approvalMessage,
+            timeoutMinutes
+          }
+        };
+      }
+
       const { output, attempts } = await executeNodeWithRetry(
         node,
         {
           globals,
           merged,
           parentOutputs,
-          workflow: request.workflow,
+          workflow,
           nodeById: graphIndexes.nodeById,
           attachmentsBySource: graphIndexes.attachmentsBySource
         },
@@ -1092,7 +1623,7 @@ export async function executeWorkflow(
           }
           // Mark all nodes on non-taken branches as skipped
           for (const target of targets) {
-            const descendants = collectDescendants(target, graphIndexes.outgoingExecution, request.workflow);
+            const descendants = collectDescendants(target, graphIndexes.outgoingExecution, workflow);
             skippedByBranch.add(target);
             for (const desc of descendants) {
               skippedByBranch.add(desc);
@@ -1109,7 +1640,7 @@ export async function executeWorkflow(
         const successDescendants = new Set<string>();
         for (const t of successTargets) {
           successDescendants.add(t);
-          for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, request.workflow)) {
+          for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, workflow)) {
             successDescendants.add(desc);
           }
         }
@@ -1131,7 +1662,7 @@ export async function executeWorkflow(
           // Un-skip error branch targets (they were initially skipped by branch routing)
           for (const errorTarget of scope.errorTargets) {
             skippedByBranch.delete(errorTarget);
-            for (const desc of collectDescendants(errorTarget, graphIndexes.outgoingExecution, request.workflow)) {
+            for (const desc of collectDescendants(errorTarget, graphIndexes.outgoingExecution, workflow)) {
               skippedByBranch.delete(desc);
             }
           }
@@ -1181,14 +1712,14 @@ export async function executeWorkflow(
               if (handle === "error") {
                 for (const t of targets) {
                   skippedByBranch.delete(t);
-                  for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, request.workflow)) {
+                  for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, workflow)) {
                     skippedByBranch.delete(desc);
                   }
                 }
               } else {
                 for (const t of targets) {
                   skippedByBranch.add(t);
-                  for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, request.workflow)) {
+                  for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, workflow)) {
                     skippedByBranch.add(desc);
                   }
                 }
@@ -1232,10 +1763,11 @@ export async function executeWorkflow(
         }
 
         return {
-          workflowId: request.workflow.id,
+          workflowId: workflow.id,
           status: "error",
           startedAt,
           completedAt: nowIso(),
+          executionId: request.executionId,
           nodeResults,
           error: failedError
         };
@@ -1248,12 +1780,34 @@ export async function executeWorkflow(
   }
 
   return {
-    workflowId: request.workflow.id,
+    workflowId: workflow.id,
     status: hadContinuedErrors ? "partial" : "success",
     startedAt,
     completedAt: nowIso(),
+    executionId: request.executionId,
     nodeResults,
     output: finalOutput
   };
+}
+
+export async function resumeWorkflowExecution(
+  request: ResumeWorkflowRequest,
+  dependencies: WorkflowExecutionDependencies
+): Promise<WorkflowExecutionResult> {
+  return executeWorkflow(
+    {
+      workflow: request.state.workflow,
+      executionId: request.executionId,
+      triggerType: "approval_resume",
+      triggeredBy: request.actedBy,
+      resumeState: request.state,
+      approvalDecision: {
+        decision: request.decision,
+        actedBy: request.actedBy,
+        reason: request.reason
+      }
+    },
+    dependencies
+  );
 }
 

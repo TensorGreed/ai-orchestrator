@@ -24,6 +24,8 @@ import {
   createSecret,
   executeWorkflow,
   fetchAuthMe,
+  fetchExecutionById,
+  fetchExecutions,
   fetchDefinitions,
   fetchSecrets,
   fetchWorkflow,
@@ -34,6 +36,8 @@ import {
   runWebhook,
   saveWorkflow,
   type AuthUser,
+  type ExecutionHistoryDetail,
+  type ExecutionHistorySummary,
   type SecretListItem
 } from "./lib/api";
 import {
@@ -72,7 +76,8 @@ const statusColors: Record<string, string> = {
   error: "#d64545",
   skipped: "#7f8797",
   running: "#d68f16",
-  pending: "#5b7bd8"
+  pending: "#5b7bd8",
+  waiting_approval: "#a154f2"
 };
 const auxiliaryHandles = new Set(["chat_model", "memory", "tool"]);
 const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
@@ -83,6 +88,16 @@ const MAX_LOGS_PANEL_HEIGHT = 620;
 
 function stringifyPretty(value: unknown) {
   return JSON.stringify(value, null, 2);
+}
+
+function formatDuration(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return "—";
+  }
+  if (value < 1000) {
+    return `${value}ms`;
+  }
+  return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 2)}s`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -326,6 +341,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [secretMessage, setSecretMessage] = useState<string | null>(null);
   const [executionResult, setExecutionResult] = useState<WorkflowExecutionResult | null>(null);
+  const [executionHistoryItems, setExecutionHistoryItems] = useState<ExecutionHistorySummary[]>([]);
+  const [executionHistoryTotal, setExecutionHistoryTotal] = useState(0);
+  const [executionsLoading, setExecutionsLoading] = useState(false);
+  const [executionsError, setExecutionsError] = useState<string | null>(null);
+  const [expandedExecutionIds, setExpandedExecutionIds] = useState<string[]>([]);
+  const [executionDetailById, setExecutionDetailById] = useState<Record<string, ExecutionHistoryDetail | undefined>>({});
 
   const [systemPrompt, setSystemPrompt] = useState("You are a precise tool-using AI assistant.");
   const [userPrompt, setUserPrompt] = useState("What time is it in America/Toronto? Use tools when needed.");
@@ -532,6 +553,46 @@ export default function App() {
     return items;
   }, [canManageSecrets]);
 
+  const refreshExecutionHistory = useCallback(async () => {
+    try {
+      setExecutionsLoading(true);
+      setExecutionsError(null);
+      const payload = await fetchExecutions({ page: 1, pageSize: 40 });
+      setExecutionHistoryItems(payload.items);
+      setExecutionHistoryTotal(payload.total);
+    } catch (historyError) {
+      if (historyError instanceof ApiError && historyError.status === 401) {
+        setAuthUser(null);
+        setAuthError("Session expired. Sign in again.");
+      } else {
+        setExecutionsError(historyError instanceof Error ? historyError.message : "Failed to load executions");
+      }
+    } finally {
+      setExecutionsLoading(false);
+    }
+  }, []);
+
+  const toggleExecutionRow = useCallback(async (executionId: string) => {
+    const isExpanded = expandedExecutionIds.includes(executionId);
+    setExpandedExecutionIds((current) =>
+      current.includes(executionId) ? current.filter((value) => value !== executionId) : [...current, executionId]
+    );
+
+    if (isExpanded || executionDetailById[executionId]) {
+      return;
+    }
+
+    try {
+      const detail = await fetchExecutionById(executionId);
+      setExecutionDetailById((current) => ({
+        ...current,
+        [executionId]: detail
+      }));
+    } catch (detailError) {
+      setExecutionsError(detailError instanceof Error ? detailError.message : "Failed to load execution detail");
+    }
+  }, [executionDetailById, expandedExecutionIds]);
+
   const readWipWorkflow = useCallback((): Workflow | null => {
     try {
       const raw = localStorage.getItem(WIP_WORKFLOW_STORAGE_KEY);
@@ -573,16 +634,19 @@ export default function App() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [workflowItems, definitionPayload, secretItems] = await Promise.all([
+      const [workflowItems, definitionPayload, secretItems, executionPayload] = await Promise.all([
         fetchWorkflows(),
         fetchDefinitions(),
-        canManageSecrets ? fetchSecrets() : Promise.resolve([])
+        canManageSecrets ? fetchSecrets() : Promise.resolve([]),
+        fetchExecutions({ page: 1, pageSize: 40 })
       ]);
 
       setWorkflowList(workflowItems);
       setDefinitions(definitionPayload.nodes);
       setMcpServerDefinitions(definitionPayload.mcpServers);
       setSecrets(secretItems);
+      setExecutionHistoryItems(executionPayload.items);
+      setExecutionHistoryTotal(executionPayload.total);
 
       const wipWorkflow = readWipWorkflow();
       if (wipWorkflow) {
@@ -651,6 +715,13 @@ export default function App() {
       setActiveMode("editor");
     }
   }, [activeMode, canManageSecrets]);
+
+  useEffect(() => {
+    if (activeMode !== "executions" || !authUser) {
+      return;
+    }
+    void refreshExecutionHistory();
+  }, [activeMode, authUser, refreshExecutionHistory]);
 
   useEffect(() => {
     if (loading || !authUser) {
@@ -821,6 +892,7 @@ export default function App() {
       setExecutionResult(result);
       setLogsTab("logs");
       setActiveMode("editor");
+      void refreshExecutionHistory();
     } catch (execError) {
       const message = handleApiError(execError, "Execution failed");
       setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
@@ -830,7 +902,17 @@ export default function App() {
       stopVisualRun();
       setBusy(false);
     }
-  }, [currentWorkflow.id, handleApiError, persistWorkflow, sessionId, startVisualRun, stopVisualRun, systemPrompt, userPrompt]);
+  }, [
+    currentWorkflow.id,
+    handleApiError,
+    persistWorkflow,
+    refreshExecutionHistory,
+    sessionId,
+    startVisualRun,
+    stopVisualRun,
+    systemPrompt,
+    userPrompt
+  ]);
 
   const handleWebhookExecute = useCallback(async () => {
     try {
@@ -848,6 +930,7 @@ export default function App() {
       setExecutionResult(result);
       setLogsTab("logs");
       setActiveMode("editor");
+      void refreshExecutionHistory();
     } catch (execError) {
       const message = handleApiError(execError, "Webhook execution failed");
       setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
@@ -857,7 +940,17 @@ export default function App() {
       stopVisualRun();
       setBusy(false);
     }
-  }, [currentWorkflow.id, handleApiError, persistWorkflow, sessionId, startVisualRun, stopVisualRun, systemPrompt, userPrompt]);
+  }, [
+    currentWorkflow.id,
+    handleApiError,
+    persistWorkflow,
+    refreshExecutionHistory,
+    sessionId,
+    startVisualRun,
+    stopVisualRun,
+    systemPrompt,
+    userPrompt
+  ]);
 
   const handleExport = useCallback(() => {
     const workflow = buildCurrentWorkflow();
@@ -1124,6 +1217,11 @@ export default function App() {
     setMcpServerDefinitions([]);
     setSecrets([]);
     setExecutionResult(null);
+    setExecutionHistoryItems([]);
+    setExecutionHistoryTotal(0);
+    setExecutionDetailById({});
+    setExpandedExecutionIds([]);
+    setExecutionsError(null);
     stopVisualRun();
     setNodes([]);
     setEdges([]);
@@ -1446,10 +1544,98 @@ export default function App() {
           )}
 
           {activeMode === "executions" && (
-            <section className="placeholder-pane">
-              <h2>Executions</h2>
-              {!executionResult && <p>No runs yet. Execute a workflow from the editor.</p>}
-              {executionResult && <pre className="result-block">{stringifyPretty(executionResult)}</pre>}
+            <section className="executions-pane">
+              <div className="executions-header-row">
+                <div>
+                  <h2>Runs</h2>
+                  <p className="muted">Execution history and node-level traces ({executionHistoryTotal} total)</p>
+                </div>
+                <button className="header-btn" onClick={() => void refreshExecutionHistory()} disabled={executionsLoading}>
+                  {executionsLoading ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+
+              {executionsError && <div className="error-banner">{executionsError}</div>}
+
+              {!executionsLoading && executionHistoryItems.length === 0 && (
+                <div className="logs-placeholder">No executions yet. Run a workflow from the editor to populate history.</div>
+              )}
+
+              {executionHistoryItems.length > 0 && (
+                <div className="executions-table-wrap">
+                  <table className="executions-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Workflow</th>
+                        <th>Status</th>
+                        <th>Trigger</th>
+                        <th>Duration</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {executionHistoryItems.map((item) => {
+                        const expanded = expandedExecutionIds.includes(item.id);
+                        const detail = executionDetailById[item.id];
+                        const nodeResults = Array.isArray(detail?.nodeResults) ? detail?.nodeResults : [];
+
+                        return [
+                          <tr
+                            key={`${item.id}-summary`}
+                            className={expanded ? "execution-row expanded" : "execution-row"}
+                            onClick={() => {
+                              void toggleExecutionRow(item.id);
+                            }}
+                          >
+                            <td className="mono-cell">{item.id.slice(0, 8)}</td>
+                            <td>{item.workflowName ?? item.workflowId}</td>
+                            <td>
+                              <strong style={{ color: statusColors[item.status] ?? "#657087" }}>{item.status}</strong>
+                            </td>
+                            <td>{item.triggerType ?? "unknown"}</td>
+                            <td>{formatDuration(item.durationMs)}</td>
+                          </tr>,
+                          expanded ? (
+                            <tr key={`${item.id}-detail`} className="execution-detail-row">
+                              <td colSpan={5}>
+                                {!detail && <div className="muted">Loading full trace...</div>}
+                                {detail && (
+                                  <div className="execution-trace">
+                                    <div className="execution-trace-grid">
+                                      {nodeResults.length === 0 && <div className="muted">No node-by-node trace available.</div>}
+                                      {nodeResults.map((entry, index) => {
+                                        const trace = asRecord(entry);
+                                        const nodeId =
+                                          typeof trace?.nodeId === "string" ? trace.nodeId : `node-${index + 1}`;
+                                        const status =
+                                          typeof trace?.status === "string" ? trace.status : "unknown";
+                                        const durationMs =
+                                          typeof trace?.durationMs === "number" ? trace.durationMs : null;
+                                        const errorMessage =
+                                          typeof trace?.error === "string" ? trace.error : "";
+
+                                        return (
+                                          <div key={`${item.id}-${nodeId}-${index}`} className="execution-trace-item">
+                                            <span>{nodeId}</span>
+                                            <strong style={{ color: statusColors[status] ?? "#657087" }}>{status}</strong>
+                                            <span>{formatDuration(durationMs)}</span>
+                                            {errorMessage && <span className="trace-error">{errorMessage}</span>}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                    <pre className="result-block">{stringifyPretty(detail.output ?? detail.error ?? detail)}</pre>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          ) : null
+                        ];
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
           )}
 
