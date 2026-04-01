@@ -140,10 +140,42 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     target?.data.nodeType === "connector_source";
 
   const stroke = isAuxiliary ? "#aab0bc" : "#6e7789";
+  
+  // Create an explicit label for structural branches
+  let label: string | undefined = undefined;
+  if (!isAuxiliary && edge.sourceHandle) {
+    if (edge.sourceHandle === "true") label = "True";
+    else if (edge.sourceHandle === "false") label = "False";
+    else if (edge.sourceHandle === "success") label = "Try (Success)";
+    else if (edge.sourceHandle === "error") label = "Catch (Error)";
+    else if (edge.sourceHandle === "default") label = "Default";
+    else if (edge.sourceHandle.startsWith("case_")) {
+      const caseIdx = parseInt(edge.sourceHandle.split("_")[1] ?? "0", 10);
+      const nodeConfig = source?.data.config;
+      if (nodeConfig && Array.isArray(nodeConfig.cases)) {
+         const c = nodeConfig.cases[caseIdx] as any;
+         if (typeof c === "string") {
+            label = c;
+         } else if (c && typeof c === "object") {
+            label = c.label || c.value || `Case ${caseIdx + 1}`;
+         } else {
+            label = `Case ${caseIdx + 1}`;
+         }
+      } else {
+         label = `Case ${caseIdx + 1}`;
+      }
+    }
+  }
+
   return {
     ...edge,
     type: "bezier",
     animated: Boolean(isAuxiliary),
+    label,
+    labelBgPadding: [8, 4],
+    labelBgBorderRadius: 4,
+    labelBgStyle: { fill: '#f8f9fc', color: '#5f6b84', border: '1px solid #e1e5f0' },
+    labelStyle: { fill: '#5f6b84', fontWeight: 600, fontSize: 10 },
     markerEnd: {
       type: MarkerType.ArrowClosed,
       color: stroke

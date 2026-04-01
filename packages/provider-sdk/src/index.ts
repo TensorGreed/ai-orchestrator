@@ -3,6 +3,7 @@ import { GeminiProviderAdapter } from "./providers/gemini";
 import { OllamaProviderAdapter } from "./providers/ollama";
 import { OpenAICompatibleProviderAdapter } from "./providers/openai-compatible";
 import { OpenAICloudProviderAdapter } from "./providers/openai";
+import { AnthropicProviderAdapter } from "./providers/anthropic";
 
 export * from "./types";
 export * from "./registry";
@@ -10,6 +11,7 @@ export * from "./providers/openai-compatible";
 export * from "./providers/openai";
 export * from "./providers/ollama";
 export * from "./providers/gemini";
+export * from "./providers/anthropic";
 
 export function createDefaultProviderRegistry(): ProviderRegistry {
   const registry = new ProviderRegistry();
@@ -17,5 +19,6 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
   registry.register(new OpenAICompatibleProviderAdapter());
   registry.register(new OpenAICloudProviderAdapter());
   registry.register(new GeminiProviderAdapter());
+  registry.register(new AnthropicProviderAdapter());
   return registry;
 }

@@ -156,16 +156,35 @@ export const nodeDefinitions: NodeDefinition[] = [
     type: "rag_retrieve",
     label: "RAG Retrieve",
     category: "RAG",
-    description: "Retrieves context chunks from provided documents.",
+    description: "Retrieves context chunks from provided documents or vector store.",
     configSchema: {
       type: "object",
       properties: {
         queryTemplate: { type: "string" },
         topK: { type: "number" },
-        documents: { type: "array", items: { type: "string" } }
+        documents: { type: "array", items: { type: "string" } },
+        embedderId: { type: "string" },
+        vectorStoreId: { type: "string" },
+        vectorStoreConfig: { type: "object" },
+        embeddingSecretRef: { type: "object" }
       }
     },
-    sampleConfig: { queryTemplate: "{{user_prompt}}", topK: 3 }
+    sampleConfig: { queryTemplate: "{{user_prompt}}", topK: 3, embedderId: "token-embedder", vectorStoreId: "in-memory-vector-store" }
+  },
+  {
+    type: "document_chunker",
+    label: "Document Chunker",
+    category: "RAG",
+    description: "Splits documents into smaller chunks for embeddings.",
+    configSchema: {
+      type: "object",
+      properties: {
+        chunkSize: { type: "number" },
+        chunkOverlap: { type: "number" },
+        separator: { type: "string" }
+      }
+    },
+    sampleConfig: { chunkSize: 500, chunkOverlap: 50, separator: "\\n\\n" }
   },
   {
     type: "connector_source",

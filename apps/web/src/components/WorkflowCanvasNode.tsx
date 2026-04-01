@@ -21,7 +21,12 @@ function nodeToken(nodeType: string): string {
     mcp_tool: "MCP",
     rag_retrieve: "RAG",
     connector_source: "DB",
-    output: "OUT"
+    output: "OUT",
+    output_parser: "PRS",
+    if_node: "IF",
+    switch_node: "SW",
+    try_catch: "TC",
+    document_chunker: "CHK"
   };
 
   return map[nodeType] ?? "ND";
@@ -131,7 +136,46 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
             <div className="wf-node-title">{data.label}</div>
             <div className="wf-node-subtitle">{subtitle}</div>
           </div>
-          <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
+          {data.nodeType === "if_node" ? (
+             <div className="wf-structural-ports">
+               <div className="wf-structural-port" style={{ marginTop: 2 }}>
+                  <span className="port-label">True</span>
+                  <Handle id="true" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "30%" }} />
+               </div>
+               <div className="wf-structural-port" style={{ marginBottom: 2 }}>
+                  <span className="port-label">False</span>
+                  <Handle id="false" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "70%" }} />
+               </div>
+             </div>
+          ) : data.nodeType === "try_catch" ? (
+             <div className="wf-structural-ports">
+               <div className="wf-structural-port" style={{ marginTop: 2 }}>
+                  <span className="port-label">Try</span>
+                  <Handle id="success" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "30%" }} />
+               </div>
+               <div className="wf-structural-port" style={{ marginBottom: 2 }}>
+                  <span className="port-label">Catch</span>
+                  <Handle id="error" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "70%" }} />
+               </div>
+             </div>
+          ) : data.nodeType === "switch_node" ? (
+             <div className="wf-structural-ports">
+               {(Array.isArray(data.config?.cases) ? data.config.cases : []).map((c: any, i: number) => {
+                  const lbl = typeof c === "string" ? c : (c?.label || c?.value || `Case ${i+1}`);
+                  return (
+                  <div key={i} className="wf-structural-port">
+                     <span className="port-label" title={lbl}>{lbl.length > 8 ? lbl.substring(0,6) + ".." : lbl}</span>
+                     <Handle id={`case_${i}`} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: (20 + (i * 15)) + "%" }} />
+                  </div>
+               )})}
+               <div className="wf-structural-port">
+                  <span className="port-label">Default</span>
+                  <Handle id="default" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: (20 + ((Array.isArray(data.config?.cases) ? data.config.cases.length : 0) * 15)) + "%" }} />
+               </div>
+             </div>
+          ) : (
+             <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
+          )}
         </>
       )}
     </div>

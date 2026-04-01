@@ -13,6 +13,10 @@
     "@ai-orchestrator/connector-sdk": "workspace:*",
     "@ai-orchestrator/mcp-sdk": "workspace:*",
     "@ai-orchestrator/provider-sdk": "workspace:*",
-    "@ai-orchestrator/shared": "workspace:*"
+    "@ai-orchestrator/shared": "workspace:*",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0"
   }
 }

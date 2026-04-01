@@ -1053,6 +1053,36 @@ select {
   left: 56px;
 }
 
+.wf-structural-ports {
+  position: absolute;
+  right: -6px;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.wf-structural-port {
+  position: relative;
+  text-align: right;
+  color: #7d8798;
+  font-size: 0.70rem;
+  font-weight: 600;
+  min-height: 18px;
+  padding-right: 18px;
+}
+
+.wf-structural-port .react-flow__handle {
+  pointer-events: all;
+}
+
+.port-label {
+  padding-right: 4px;
+}
+
 .wf-agent-ports {
   position: absolute;
   left: 10px;

@@ -29,6 +29,7 @@ export const workflowNodeSchema = z.object({
     "mcp_tool",
     "rag_retrieve",
     "connector_source",
+    "document_chunker",
     "output_parser",
     "if_node",
     "switch_node",

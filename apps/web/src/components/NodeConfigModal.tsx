@@ -345,7 +345,8 @@ export function NodeConfigModal({
             { value: "ollama", label: "Ollama" },
             { value: "openai_compatible", label: "OpenAI Compatible" },
             { value: "openai", label: "OpenAI" },
-            { value: "gemini", label: "Gemini" }
+            { value: "gemini", label: "Gemini" },
+            { value: "anthropic", label: "Anthropic" }
           ]}
         />
         <TextField
@@ -1127,6 +1128,152 @@ export function NodeConfigModal({
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, topK: next }))}
             />
+            <SelectField
+              label="Embedder"
+              value={toStringValue(config.embedderId, "openai-embedder")}
+              onChange={(next) => setConfig((current) => ({ ...current, embedderId: next }))}
+              options={[
+                { value: "openai-embedder", label: "OpenAI Embeddings" },
+                { value: "token-embedder", label: "Token Based (Local Demo)" }
+              ]}
+            />
+            <SelectField
+              label="Vector Store"
+              value={toStringValue(config.vectorStoreId, "pinecone-vector-store")}
+              onChange={(next) => setConfig((current) => ({ ...current, vectorStoreId: next }))}
+              options={[
+                { value: "pinecone-vector-store", label: "Pinecone Vector Store" },
+                { value: "pgvector-store", label: "Postgres PGVector Store" },
+                { value: "in-memory-vector-store", label: "In Memory (Local Demo)" }
+              ]}
+            />
+            <SelectField
+              label="API Key / Connection String Secret"
+              value={toStringValue(asRecord(config.embeddingSecretRef).secretId)}
+              onChange={(next) =>
+                setConfig((current) => ({ ...current, embeddingSecretRef: next ? { secretId: next } : undefined }))
+              }
+              options={[{ value: "", label: "None / Env Var" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name}` }))]}
+            />
+            <TextAreaField
+              label="Vector Store Extra Config (JSON)"
+              value={JSON.stringify(asRecord(config.vectorStoreConfig), null, 2)}
+              onChange={(next) => {
+                try {
+                   const parsed = JSON.parse(next);
+                   setConfig(current => ({...current, vectorStoreConfig: parsed}));
+                } catch { /* ignore typing errors */ }
+              }}
+              rows={3}
+            />
+          </>
+        );
+      case "document_chunker":
+        return (
+          <>
+            <NumberField
+              label="Chunk Size"
+              value={toNumberValue(config.chunkSize, 500)}
+              min={10}
+              step={50}
+              onChange={(next) => setConfig((current) => ({ ...current, chunkSize: next }))}
+            />
+            <NumberField
+              label="Chunk Overlap"
+              value={toNumberValue(config.chunkOverlap, 50)}
+              min={0}
+              step={10}
+              onChange={(next) => setConfig((current) => ({ ...current, chunkOverlap: next }))}
+            />
+            <TextField
+              label="Separator"
+              value={toStringValue(config.separator, "\\n\\n")}
+              onChange={(next) => setConfig((current) => ({ ...current, separator: next }))}
+            />
+          </>
+        );
+      case "output_parser":
+        return (
+          <>
+            <SelectField
+              label="Parser Mode"
+              value={toStringValue(config.mode, "json_schema")}
+              onChange={(next) => setConfig((current) => ({ ...current, mode: next }))}
+              options={[
+                { value: "json_schema", label: "Strict JSON Schema" },
+                { value: "item_list", label: "Item List" },
+                { value: "auto_fix", label: "Auto Fix JSON" }
+              ]}
+            />
+            <TextField
+              label="Input Key"
+              value={toStringValue(config.inputKey, "answer")}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+            />
+            {config.mode === "item_list" && (
+              <TextField
+                label="Item Separator"
+                value={toStringValue(config.itemSeparator, "\\n")}
+                onChange={(next) => setConfig((current) => ({ ...current, itemSeparator: next }))}
+              />
+            )}
+            {(config.mode === "json_schema" || config.mode === "auto_fix") && (
+              <>
+                <NumberField
+                  label="LLM Max Auto-Retries"
+                  value={toNumberValue(config.maxRetries, 2)}
+                  min={0}
+                  step={1}
+                  onChange={(next) => setConfig((current) => ({ ...current, maxRetries: next }))}
+                />
+                <TextAreaField
+                  label="JSON Schema (Required for strict mode)"
+                  value={toStringValue(config.jsonSchema, "{}")}
+                  onChange={(next) => setConfig((current) => ({ ...current, jsonSchema: next }))}
+                  rows={8}
+                />
+              </>
+            )}
+          </>
+        );
+      case "if_node":
+        return (
+          <>
+            <TextField
+              label="Condition Statement"
+              value={toStringValue(config.condition, "{{answer}} === 'true'")}
+              onChange={(next) => setConfig((current) => ({ ...current, condition: next }))}
+            />
+            <div className="cfg-tip">A javascript expression that returns true or false. Example: <code>{`{{userScore}} > 90`}</code></div>
+          </>
+        );
+      case "switch_node":
+        return (
+          <>
+            <TextField
+              label="Switch Evaluation Value"
+              value={toStringValue(config.switchValue, "{{answer}}")}
+              onChange={(next) => setConfig((current) => ({ ...current, switchValue: next }))}
+            />
+            <TextAreaField
+              label="Cases array (JSON)"
+              value={JSON.stringify(Array.isArray(config.cases) ? config.cases : [], null, 2)}
+              onChange={(next) => {
+                try {
+                  const arr = JSON.parse(next);
+                  if (Array.isArray(arr)) {
+                     setConfig(current => ({ ...current, cases: arr }));
+                  }
+                } catch { /* typing error ignore */ }
+              }}
+              rows={5}
+            />
+            <TextField
+              label="Default Output Label"
+              value={toStringValue(config.defaultLabel, "default")}
+              onChange={(next) => setConfig((current) => ({ ...current, defaultLabel: next }))}
+            />
+            <div className="cfg-tip">Define an array of strings in JSON to create branching outputs that match Switch Evaluation Value.</div>
           </>
         );
       case "output":
@@ -1158,6 +1305,33 @@ export function NodeConfigModal({
         <TextField label="Node Label" value={label} onChange={setLabel} />
         <div className="cfg-tip">
           Node ID: <code>{node.id}</code>
+        </div>
+        <div style={{ marginTop: 14 }}>
+            <h3>Advanced Resiliency</h3>
+            <NumberField
+               label="Retries on Failure"
+               value={toNumberValue(config.retryCount, 0)}
+               min={0}
+               step={1}
+               onChange={(next) => setConfig(current => ({ ...current, retryCount: next }))}
+            />
+            <NumberField
+               label="Delay between Retries (ms)"
+               value={toNumberValue(config.retryDelayMs, 1000)}
+               min={0}
+               step={500}
+               onChange={(next) => setConfig(current => ({ ...current, retryDelayMs: next }))}
+            />
+            <SelectField
+              label="On Error Behavior"
+              value={toStringValue(config.onError, "stop")}
+              onChange={(next) => setConfig((current) => ({ ...current, onError: next }))}
+              options={[
+                { value: "stop", label: "Stop Execution" },
+                { value: "continue", label: "Continue Anyway" },
+                { value: "branch", label: "Execute Fallback Branch" }
+              ]}
+            />
         </div>
       </>
     );

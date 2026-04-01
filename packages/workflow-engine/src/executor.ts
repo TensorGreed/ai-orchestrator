@@ -14,7 +14,17 @@ import type {
   WorkflowNode
 } from "@ai-orchestrator/shared";
 import { isAuxiliaryEdge, isExecutionEdge } from "./graph";
-import { InMemoryRetrieverAdapter } from "./rag-adapters";
+import {
+  type RetrieverAdapter,
+  InMemoryRetrieverAdapter,
+  TokenEmbeddingAdapter,
+  OpenAIEmbeddingAdapter,
+  InMemoryVectorStoreAdapter,
+  PineconeVectorStoreAdapter,
+  PGVectorStoreAdapter,
+  type EmbeddingRegistry,
+  type VectorStoreRegistry
+} from "./rag-adapters";
 import { renderTemplate, tryParseJson } from "./template";
 import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
 
@@ -22,6 +32,8 @@ export interface WorkflowExecutionDependencies {
   providerRegistry: ProviderRegistry;
   mcpRegistry: MCPRegistry;
   connectorRegistry: ConnectorRegistry;
+  embeddingRegistry?: EmbeddingRegistry;
+  vectorStoreRegistry?: VectorStoreRegistry;
   agentRuntime: AgentRuntimeAdapter;
   memoryStore?: AgentSessionMemoryStore;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
@@ -368,8 +380,54 @@ async function executeNode(
       };
     }
 
+    case "document_chunker": {
+      const chunkSize = typeof config.chunkSize === "number" && config.chunkSize > 0 ? Math.floor(config.chunkSize) : 500;
+      const chunkOverlap = typeof config.chunkOverlap === "number" && config.chunkOverlap >= 0 ? Math.floor(config.chunkOverlap) : 50;
+      const separator = typeof config.separator === "string" ? config.separator : "\n\n";
+
+      const upstreamDocs = normalizeDocuments(templateData.documents);
+      const chunkedDocs: ConnectorDocument[] = [];
+
+      for (const doc of upstreamDocs) {
+        const text = doc.text.trim();
+        if (!text) continue;
+
+        const chunks = text.split(separator).filter(Boolean);
+        let currentChunk = "";
+        let index = 0;
+
+        for (const chunk of chunks) {
+          if ((currentChunk + separator + chunk).length > chunkSize && currentChunk.length > 0) {
+            chunkedDocs.push({
+              id: `${doc.id}-chunk-${index++}`,
+              text: currentChunk,
+              metadata: { ...toRecord(doc.metadata), chunkIndex: index - 1, originalId: doc.id }
+            });
+
+            // Very naive overlap implementation for string lengths
+            const overlapAmount = Math.min(chunkOverlap, currentChunk.length);
+            currentChunk = currentChunk.slice(-overlapAmount) + separator + chunk;
+          } else {
+            currentChunk = currentChunk ? currentChunk + separator + chunk : chunk;
+          }
+        }
+
+        if (currentChunk) {
+          chunkedDocs.push({
+             id: `${doc.id}-chunk-${index}`,
+             text: currentChunk,
+             metadata: { ...toRecord(doc.metadata), chunkIndex: index, originalId: doc.id }
+          });
+        }
+      }
+
+      return {
+        documents: chunkedDocs,
+        count: chunkedDocs.length
+      };
+    }
+
     case "rag_retrieve": {
-      const retriever = new InMemoryRetrieverAdapter();
       const queryTemplate = typeof config.queryTemplate === "string" ? config.queryTemplate : "{{user_prompt}}";
       const query = renderTemplate(queryTemplate, templateData).trim();
       const topK = typeof config.topK === "number" && config.topK > 0 ? Math.floor(config.topK) : 3;
@@ -377,7 +435,38 @@ async function executeNode(
       const inlineDocs = normalizeDocuments(config.documents);
       const upstreamDocs = normalizeDocuments(templateData.documents);
       const allDocs = [...upstreamDocs, ...inlineDocs];
-      const documents = retriever.retrieve(query, allDocs, topK);
+
+      const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
+      const vectorStoreId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
+
+      let embedder = dependencies.embeddingRegistry?.get(embedderId);
+      if (!embedder) {
+        if (embedderId === "token-embedder") embedder = new TokenEmbeddingAdapter();
+        else if (embedderId === "openai-embedder") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.OPENAI_API_KEY;
+           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...toRecord(config.vectorStoreConfig) });
+        }
+        else throw new Error(`Unknown embedder ID: ${embedderId}`);
+      }
+
+      let store = dependencies.vectorStoreRegistry?.get(vectorStoreId);
+      if (!store) {
+         if (vectorStoreId === "in-memory-vector-store") store = new InMemoryVectorStoreAdapter();
+         else if (vectorStoreId === "pinecone-vector-store") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.PINECONE_API_KEY;
+           store = new PineconeVectorStoreAdapter({ apiKey: apiKey || "", indexName: typeof toRecord(config.vectorStoreConfig).indexName === "string" ? toRecord(config.vectorStoreConfig).indexName as string : "" });
+         } else if (vectorStoreId === "pgvector-store") {
+           const connRef = config.embeddingSecretRef;
+           const connStr = typeof connRef === "object" && connRef ? await dependencies.resolveSecret(connRef as SecretReference) : process.env.DATABASE_URL;
+           store = new PGVectorStoreAdapter({ connectionString: connStr || "", tableName: typeof toRecord(config.vectorStoreConfig).tableName === "string" ? toRecord(config.vectorStoreConfig).tableName as string : "vectors" });
+         }
+         else throw new Error(`Unknown vector store ID: ${vectorStoreId}`);
+      }
+
+      await store.upsert(allDocs, embedder);
+      const documents = await store.similaritySearch(query, topK, embedder);
 
       return {
         query,

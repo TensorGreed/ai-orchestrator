@@ -686,7 +686,7 @@ export class SqliteStore {
   saveWebhookIdempotencyResult(input: {
     endpointKey: string;
     idempotencyKey: string;
-    status: "success" | "error";
+    status: "success" | "error" | "partial";
     result: unknown;
   }): void {
     const now = new Date().toISOString();

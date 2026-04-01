@@ -1,8 +1,13 @@
 import type { ConnectorDocument } from "@ai-orchestrator/shared";
+import pg from "pg";
 
 export interface EmbeddingAdapter {
   id: string;
-  embed(text: string): number[];
+  embed(text: string): Promise<number[]>;
+}
+
+export interface SyncEmbeddingAdapter extends EmbeddingAdapter {
+  embedSync(text: string): number[];
 }
 
 export interface VectorStoreItem {
@@ -12,13 +17,13 @@ export interface VectorStoreItem {
 
 export interface VectorStoreAdapter {
   id: string;
-  upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): void;
-  similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): ConnectorDocument[];
+  upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void>;
+  similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]>;
 }
 
 export interface RetrieverAdapter {
   id: string;
-  retrieve(query: string, documents: ConnectorDocument[], topK: number): ConnectorDocument[];
+  retrieve(query: string, documents: ConnectorDocument[], topK: number): Promise<ConnectorDocument[]>;
 }
 
 function tokenize(text: string): string[] {
@@ -29,10 +34,10 @@ function tokenize(text: string): string[] {
     .filter(Boolean);
 }
 
-export class TokenEmbeddingAdapter implements EmbeddingAdapter {
+export class TokenEmbeddingAdapter implements SyncEmbeddingAdapter {
   readonly id = "token-embedder";
 
-  embed(text: string): number[] {
+  embedSync(text: string): number[] {
     const tokens = tokenize(text);
     const buckets = new Array<number>(64).fill(0);
 
@@ -45,6 +50,37 @@ export class TokenEmbeddingAdapter implements EmbeddingAdapter {
     }
 
     return buckets;
+  }
+
+  async embed(text: string): Promise<number[]> {
+    return this.embedSync(text);
+  }
+}
+
+export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
+  readonly id = "openai-embedder";
+
+  constructor(private config: { baseUrl?: string; model?: string; apiKey: string }) {}
+
+  async embed(text: string): Promise<number[]> {
+    const baseUrl = this.config.baseUrl || "https://api.openai.com/v1";
+    const model = this.config.model || "text-embedding-3-small";
+    
+    const response = await fetch(`${baseUrl}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.config.apiKey}`
+      },
+      body: JSON.stringify({ model, input: text })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI Embedding API error: ${response.statusText} - ${await response.text()}`);
+    }
+
+    const data = (await response.json()) as { data: Array<{ embedding: number[] }> };
+    return data.data[0]?.embedding || [];
   }
 }
 
@@ -74,17 +110,18 @@ export class InMemoryVectorStoreAdapter implements VectorStoreAdapter {
 
   private items: VectorStoreItem[] = [];
 
-  upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): void {
-    const mapped = documents.map((document) => ({
-      document,
-      vector: embedder.embed(document.text)
-    }));
-
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    const mapped = await Promise.all(
+      documents.map(async (document) => ({
+        document,
+        vector: await embedder.embed(document.text)
+      }))
+    );
     this.items = mapped;
   }
 
-  similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): ConnectorDocument[] {
-    const queryVector = embedder.embed(query);
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    const queryVector = await embedder.embed(query);
     return this.items
       .map((item) => ({
         item,
@@ -96,13 +133,179 @@ export class InMemoryVectorStoreAdapter implements VectorStoreAdapter {
   }
 }
 
+export class PineconeVectorStoreAdapter implements VectorStoreAdapter {
+  readonly id = "pinecone-vector-store";
+
+  constructor(
+    private config: { apiKey: string; indexName: string; environment?: string; namespace?: string }
+  ) {}
+
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    // simplified version for REST invocation
+    const vectors = await Promise.all(
+      documents.map(async (doc) => {
+        const values = await embedder.embed(doc.text);
+        return {
+          id: doc.id,
+          values,
+          metadata: { text: doc.text, ...doc.metadata }
+        };
+      })
+    );
+
+    const baseUrl = `https://api.pinecone.io/indexes/${this.config.indexName}`; // generic, robust resolution required for prod
+    
+    // Using v1 data plane REST API 
+    // Usually Pinecone requires host from describeIndex, mocking a simplified direct call format
+    const response = await fetch(`${baseUrl}/vectors/upsert`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Api-Key": this.config.apiKey
+      },
+      body: JSON.stringify({
+        vectors,
+        namespace: this.config.namespace
+      })
+    });
+
+    if (!response.ok) {
+       throw new Error(`Pinecone upsert failed: ${await response.text()}`);
+    }
+  }
+
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    const vector = await embedder.embed(query);
+    const baseUrl = `https://api.pinecone.io/indexes/${this.config.indexName}`;
+    
+    const response = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Api-Key": this.config.apiKey
+      },
+      body: JSON.stringify({
+        vector,
+        topK,
+        namespace: this.config.namespace,
+        includeMetadata: true
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Pinecone query failed: ${await response.text()}`);
+    }
+
+    const json = (await response.json()) as any;
+    return json.matches.map((match: any) => ({
+      id: match.id,
+      text: match.metadata.text,
+      metadata: match.metadata,
+      source: "pinecone"
+    }));
+  }
+}
+
+export class PGVectorStoreAdapter implements VectorStoreAdapter {
+  readonly id = "pgvector-store";
+
+  constructor(
+    private config: { connectionString: string; tableName: string; embeddingDimension?: number }
+  ) {}
+
+  private async getClient() {
+     const client = new pg.Client({ connectionString: this.config.connectionString });
+     await client.connect();
+     return client;
+  }
+
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    const dim = this.config.embeddingDimension || 1536;
+    const client = await this.getClient();
+    
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS ${this.config.tableName} (
+          id TEXT PRIMARY KEY,
+          content TEXT,
+          metadata JSONB,
+          embedding vector(${dim})
+        )
+      `);
+
+      for (const doc of documents) {
+        const vector = await embedder.embed(doc.text);
+        const vectorString = `[${vector.join(",")}]`;
+        await client.query(`
+          INSERT INTO ${this.config.tableName} (id, content, metadata, embedding) 
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT (id) DO UPDATE SET 
+            content = EXCLUDED.content, 
+            metadata = EXCLUDED.metadata, 
+            embedding = EXCLUDED.embedding
+        `, [doc.id, doc.text, JSON.stringify(doc.metadata), vectorString]);
+      }
+    } finally {
+      await client.end();
+    }
+  }
+
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    const vector = await embedder.embed(query);
+    const vectorString = `[${vector.join(",")}]`;
+    const client = await this.getClient();
+    
+    try {
+      const res = await client.query(`
+        SELECT id, content, metadata
+        FROM ${this.config.tableName}
+        ORDER BY embedding <=> $1
+        LIMIT $2
+      `, [vectorString, topK]);
+
+      return res.rows.map(row => ({
+        id: row.id,
+        text: row.content,
+        metadata: row.metadata,
+        source: "pgvector"
+      }));
+    } finally {
+      await client.end();
+    }
+  }
+}
+
 export class InMemoryRetrieverAdapter implements RetrieverAdapter {
   readonly id = "in-memory-retriever";
 
-  retrieve(query: string, documents: ConnectorDocument[], topK: number): ConnectorDocument[] {
+  async retrieve(query: string, documents: ConnectorDocument[], topK: number): Promise<ConnectorDocument[]> {
     const embedder = new TokenEmbeddingAdapter();
     const store = new InMemoryVectorStoreAdapter();
-    store.upsert(documents, embedder);
+    await store.upsert(documents, embedder);
     return store.similaritySearch(query, topK, embedder);
+  }
+}
+
+export class EmbeddingRegistry {
+  private adapters = new Map<string, EmbeddingAdapter>();
+
+  register(adapter: EmbeddingAdapter): void {
+    this.adapters.set(adapter.id, adapter);
+  }
+
+  get(id: string): EmbeddingAdapter | undefined {
+    return this.adapters.get(id);
+  }
+}
+
+export class VectorStoreRegistry {
+  private adapters = new Map<string, VectorStoreAdapter>();
+
+  register(adapter: VectorStoreAdapter): void {
+    this.adapters.set(adapter.id, adapter);
+  }
+
+  get(id: string): VectorStoreAdapter | undefined {
+    return this.adapters.get(id);
   }
 }

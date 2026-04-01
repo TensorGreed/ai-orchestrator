@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-rag-pinecone",
+    "name": "RAG via Pinecone",
+    "description": "Text Input -> Document Chunker -> RAG Retrieve (Pinecone + OpenAI) -> Output",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "input_1",
+        "type": "text_input",
+        "name": "Knowledge Document",
+        "position": { "x": 100, "y": 180 },
+        "config": { "text": "The company's PTO policy allows 20 days per year." }
+      },
+      {
+        "id": "chunker_1",
+        "type": "document_chunker",
+        "name": "Chunk Document",
+        "position": { "x": 380, "y": 180 },
+        "config": {
+          "chunkSize": 500,
+          "chunkOverlap": 50,
+          "separator": "\\n"
+        }
+      },
+      {
+        "id": "retrieve_1",
+        "type": "rag_retrieve",
+        "name": "Pinecone Retriever",
+        "position": { "x": 660, "y": 180 },
+        "config": {
+          "queryTemplate": "What is the PTO policy?",
+          "topK": 2,
+          "embedderId": "openai-embedder",
+          "vectorStoreId": "pinecone-vector-store",
+          "vectorStoreConfig": {
+            "indexName": "ai-orchestrator-demo"
+          }
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output Context",
+        "position": { "x": 940, "y": 180 },
+        "config": {
+          "responseTemplate": "{{context}}"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "e1", "source": "input_1", "target": "chunker_1" },
+      { "id": "e2", "source": "chunker_1", "target": "retrieve_1" },
+      { "id": "e3", "source": "retrieve_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-04-01T00:00:00.000Z"
+}
