@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-conditional",
+    "name": "Conditional Branching Flow",
+    "description": "Webhook Input -> LLM Call -> IF Node (check for error) -> [true: Error Output] / [false: Success Output]",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "webhook_1",
+        "type": "webhook_input",
+        "name": "Webhook Input",
+        "position": { "x": 100, "y": 180 },
+        "config": {
+          "path": "conditional-demo",
+          "method": "POST",
+          "passThroughFields": ["system_prompt", "user_prompt", "session_id"]
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "LLM Call",
+        "position": { "x": 380, "y": 180 },
+        "config": {
+          "provider": {
+            "providerId": "ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "model": "llama3.1",
+            "temperature": 0.2
+          }
+        }
+      },
+      {
+        "id": "if_1",
+        "type": "if_node",
+        "name": "Check Answer",
+        "position": { "x": 660, "y": 180 },
+        "config": {
+          "condition": "{{answer}}"
+        }
+      },
+      {
+        "id": "output_success",
+        "type": "output",
+        "name": "Success Output",
+        "position": { "x": 940, "y": 100 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      },
+      {
+        "id": "output_error",
+        "type": "output",
+        "name": "Error Output",
+        "position": { "x": 940, "y": 260 },
+        "config": {
+          "responseTemplate": "No answer generated",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "e1", "source": "webhook_1", "target": "llm_1" },
+      { "id": "e2", "source": "llm_1", "target": "if_1" },
+      { "id": "e3", "source": "if_1", "sourceHandle": "true", "target": "output_success" },
+      { "id": "e4", "source": "if_1", "sourceHandle": "false", "target": "output_error" }
+    ]
+  },
+  "exportedAt": "2026-04-01T00:00:00.000Z"
+}

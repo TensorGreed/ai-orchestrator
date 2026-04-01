@@ -292,4 +292,301 @@ describe("workflow engine", () => {
     expect(result.nodeResults.find((entry) => entry.nodeId === "memory")?.status).toBe("skipped");
     expect(result.nodeResults.find((entry) => entry.nodeId === "tool")?.status).toBe("skipped");
   });
+
+  it("output_parser: item_list mode splits text into items", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-list",
+      name: "Parser item list",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "apple\nbanana\ncherry" } },
+        { id: "n2", type: "output_parser", name: "Parser", position: { x: 200, y: 0 }, config: { mode: "item_list", inputKey: "text", itemSeparator: "\n" } },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    expect(parserOutput.items).toEqual(["apple", "banana", "cherry"]);
+    expect(parserOutput.count).toBe(3);
+  });
+
+  it("output_parser: json_schema mode validates valid JSON", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-schema",
+      name: "Parser schema",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: '{"name":"Alice","sentiment":"positive"}' } },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            inputKey: "text",
+            jsonSchema: '{"type":"object","properties":{"name":{"type":"string"},"sentiment":{"type":"string","enum":["positive","negative","neutral"]}},"required":["name","sentiment"]}'
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    expect((parserOutput.parsed as Record<string, unknown>).name).toBe("Alice");
+    expect(parserOutput.retries).toBe(0);
+  });
+
+  it("if_node: routes to true branch when condition is truthy", async () => {
+    const workflow: Workflow = {
+      id: "wf-if-true",
+      name: "IF true branch",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "hello" } },
+        { id: "n2", type: "if_node", name: "IF", position: { x: 200, y: 0 }, config: { condition: "{{text}}" } },
+        { id: "n3", type: "output", name: "True Output", position: { x: 400, y: -50 }, config: { responseTemplate: "was true" } },
+        { id: "n4", type: "output", name: "False Output", position: { x: 400, y: 50 }, config: { responseTemplate: "was false" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", sourceHandle: "true", target: "n3" },
+        { id: "e3", source: "n2", sourceHandle: "false", target: "n4" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n4")?.status).toBe("skipped");
+  });
+
+  it("if_node: routes to false branch when condition is falsy", async () => {
+    const workflow: Workflow = {
+      id: "wf-if-false",
+      name: "IF false branch",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "" } },
+        { id: "n2", type: "if_node", name: "IF", position: { x: 200, y: 0 }, config: { condition: "{{text}}" } },
+        { id: "n3", type: "output", name: "True Output", position: { x: 400, y: -50 }, config: { responseTemplate: "was true" } },
+        { id: "n4", type: "output", name: "False Output", position: { x: 400, y: 50 }, config: { responseTemplate: "was false" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", sourceHandle: "true", target: "n3" },
+        { id: "e3", source: "n2", sourceHandle: "false", target: "n4" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("skipped");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n4")?.status).toBe("success");
+  });
+
+  it("switch_node: routes to matching case", async () => {
+    const workflow: Workflow = {
+      id: "wf-switch",
+      name: "Switch routing",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "negative" } },
+        {
+          id: "n2",
+          type: "switch_node",
+          name: "Switch",
+          position: { x: 200, y: 0 },
+          config: {
+            switchValue: "{{text}}",
+            cases: [
+              { value: "positive", label: "positive" },
+              { value: "negative", label: "negative" }
+            ],
+            defaultLabel: "default"
+          }
+        },
+        { id: "n3", type: "output", name: "Positive", position: { x: 400, y: -50 }, config: { responseTemplate: "pos" } },
+        { id: "n4", type: "output", name: "Negative", position: { x: 400, y: 0 }, config: { responseTemplate: "neg" } },
+        { id: "n5", type: "output", name: "Default", position: { x: 400, y: 50 }, config: { responseTemplate: "def" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", sourceHandle: "positive", target: "n3" },
+        { id: "e3", source: "n2", sourceHandle: "negative", target: "n4" },
+        { id: "e4", source: "n2", sourceHandle: "default", target: "n5" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("skipped");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n4")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n5")?.status).toBe("skipped");
+  });
+
+  it("onError continue: failing node does not halt execution", async () => {
+    const workflow: Workflow = {
+      id: "wf-continue",
+      name: "Continue on error",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "hello" } },
+        { id: "n2", type: "connector_source", name: "Bad Source", position: { x: 200, y: 0 }, config: { connectorId: "nonexistent", onError: "continue" } },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("partial");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n2")?.status).toBe("error");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("success");
+  });
+
+  it("retry: succeeds after re-attempts", async () => {
+    let callCount = 0;
+
+    class FlakeyProvider implements LLMProviderAdapter {
+      readonly definition = {
+        id: "flakey",
+        label: "Flakey",
+        supportsTools: false,
+        configSchema: {}
+      };
+
+      async generate() {
+        callCount += 1;
+        if (callCount < 3) {
+          throw new Error("temporary failure");
+        }
+        return { content: "success-after-retry", toolCalls: [] };
+      }
+    }
+
+    const registry = new ProviderRegistry();
+    registry.register(new FlakeyProvider());
+
+    const workflow: Workflow = {
+      id: "wf-retry",
+      name: "Retry flow",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "hello" } },
+        {
+          id: "n2",
+          type: "llm_call",
+          name: "LLM",
+          position: { x: 200, y: 0 },
+          config: {
+            provider: { providerId: "flakey", model: "test" },
+            retry: { enabled: true, maxAttempts: 3, delayMs: 0, backoffMultiplier: 1 }
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: { responseTemplate: "{{answer}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: registry,
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n2")?.attempts).toBe(3);
+    const output = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    expect(output.answer).toBe("success-after-retry");
+  });
 });

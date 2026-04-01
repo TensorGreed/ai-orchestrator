@@ -252,6 +252,51 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         nodeId: node.id
       });
     }
+
+    if (node.type === "output_parser") {
+      const mode = config.mode;
+      if (mode !== "json_schema" && mode !== "item_list" && mode !== "auto_fix") {
+        issues.push({
+          code: "invalid_output_parser_mode",
+          message: "Output Parser node requires mode to be one of json_schema, item_list, auto_fix.",
+          nodeId: node.id
+        });
+      }
+      if (mode === "json_schema" && typeof config.jsonSchema !== "string") {
+        issues.push({
+          code: "missing_output_parser_schema",
+          message: "Output Parser node in json_schema mode requires a jsonSchema string.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "if_node") {
+      if (typeof config.condition !== "string" || !config.condition.trim()) {
+        issues.push({
+          code: "missing_if_condition",
+          message: "IF node requires a condition expression.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "switch_node") {
+      if (typeof config.switchValue !== "string" || !config.switchValue.trim()) {
+        issues.push({
+          code: "missing_switch_value",
+          message: "Switch node requires a switchValue expression.",
+          nodeId: node.id
+        });
+      }
+      if (!Array.isArray(config.cases) || config.cases.length === 0) {
+        issues.push({
+          code: "missing_switch_cases",
+          message: "Switch node requires at least one case.",
+          nodeId: node.id
+        });
+      }
+    }
   }
 
   for (const edge of workflow.edges) {

@@ -13,7 +13,7 @@ import type {
   WorkflowExecutionResult,
   WorkflowNode
 } from "@ai-orchestrator/shared";
-import { isExecutionEdge } from "./graph";
+import { isAuxiliaryEdge, isExecutionEdge } from "./graph";
 import { InMemoryRetrieverAdapter } from "./rag-adapters";
 import { renderTemplate, tryParseJson } from "./template";
 import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
@@ -593,6 +593,147 @@ async function executeNode(
       };
     }
 
+    case "output_parser": {
+      const mode = typeof config.mode === "string" ? config.mode : "json_schema";
+      const inputKey = typeof config.inputKey === "string" && config.inputKey ? config.inputKey : "answer";
+      const rawInput = String(templateData[inputKey] ?? templateData.text ?? templateData.answer ?? "");
+      const maxRetries = typeof config.maxRetries === "number" && config.maxRetries > 0 ? Math.floor(config.maxRetries) : 2;
+
+      if (mode === "item_list") {
+        const separator = typeof config.itemSeparator === "string" ? config.itemSeparator : "\n";
+        const items = rawInput.split(separator).map((item) => item.trim()).filter(Boolean);
+        return { items, count: items.length, raw: rawInput };
+      }
+
+      // json_schema and auto_fix modes
+      let schemaObj: Record<string, unknown> | undefined;
+      if (mode === "json_schema" && typeof config.jsonSchema === "string") {
+        try {
+          schemaObj = JSON.parse(config.jsonSchema) as Record<string, unknown>;
+        } catch {
+          throw new Error("Output Parser: jsonSchema config is not valid JSON.");
+        }
+      }
+
+      const validateJsonOutput = (text: string): { ok: boolean; parsed?: unknown; error?: string } => {
+        // Extract JSON from text (handle markdown code fences)
+        let jsonText = text.trim();
+        const fenceMatch = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (fenceMatch) {
+          jsonText = fenceMatch[1].trim();
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(jsonText);
+        } catch (parseError) {
+          return { ok: false, error: `Invalid JSON: ${parseError instanceof Error ? parseError.message : "parse error"}` };
+        }
+
+        if (mode === "auto_fix") {
+          return { ok: true, parsed };
+        }
+
+        // json_schema mode: validate required fields and types
+        if (schemaObj && parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const record = parsed as Record<string, unknown>;
+          const required = Array.isArray(schemaObj.required) ? schemaObj.required.map(String) : [];
+          for (const field of required) {
+            if (!(field in record)) {
+              return { ok: false, parsed, error: `Missing required field: ${field}` };
+            }
+          }
+          const properties = toRecord(schemaObj.properties);
+          for (const [key, propSchema] of Object.entries(properties)) {
+            if (!(key in record)) continue;
+            const prop = toRecord(propSchema);
+            if (typeof prop.type === "string" && record[key] !== undefined && record[key] !== null) {
+              const actualType = typeof record[key];
+              if (prop.type === "string" && actualType !== "string") return { ok: false, parsed, error: `Field '${key}' should be string, got ${actualType}` };
+              if (prop.type === "number" && actualType !== "number") return { ok: false, parsed, error: `Field '${key}' should be number, got ${actualType}` };
+              if (prop.type === "boolean" && actualType !== "boolean") return { ok: false, parsed, error: `Field '${key}' should be boolean, got ${actualType}` };
+            }
+            if (Array.isArray(prop.enum) && record[key] !== undefined) {
+              if (!prop.enum.includes(record[key])) return { ok: false, parsed, error: `Field '${key}' value '${String(record[key])}' not in enum: ${prop.enum.join(", ")}` };
+            }
+          }
+        }
+        return { ok: true, parsed };
+      };
+
+      let result = validateJsonOutput(rawInput);
+      let retries = 0;
+
+      if (!result.ok) {
+        // Find a provider to use for retry calls from templateData or upstream llm_call
+        const upstreamProvider = (templateData as Record<string, unknown>).__output_parser_provider as Record<string, unknown> | undefined;
+        const providerId = typeof upstreamProvider?.providerId === "string" ? upstreamProvider.providerId : undefined;
+
+        if (providerId) {
+          const providerAdapter = dependencies.providerRegistry.get(providerId);
+          for (let attempt = 0; attempt < maxRetries && !result.ok; attempt += 1) {
+            const correctionPrompt = mode === "json_schema" && schemaObj
+              ? `Your previous output was invalid. Error: ${result.error}. Required schema: ${JSON.stringify(schemaObj)}. Original output: ${rawInput}. Please output ONLY valid JSON matching the schema, with no other text.`
+              : `Your previous output was not valid JSON. Error: ${result.error}. Original output: ${rawInput}. Please output ONLY valid JSON with no other text.`;
+
+            const retryResponse = await providerAdapter.generate(
+              {
+                provider: upstreamProvider as unknown as Parameters<typeof providerAdapter.generate>[0]["provider"],
+                messages: [
+                  { role: "system", content: "You are a JSON formatting assistant. Output ONLY valid JSON." },
+                  { role: "user", content: correctionPrompt }
+                ]
+              },
+              { resolveSecret: dependencies.resolveSecret }
+            );
+            result = validateJsonOutput(retryResponse.content);
+            retries += 1;
+          }
+        }
+      }
+
+      if (!result.ok) {
+        throw new Error(`Output Parser failed after ${retries} retries: ${result.error}`);
+      }
+
+      return { parsed: result.parsed, raw: rawInput, retries };
+    }
+
+    case "if_node": {
+      const conditionTemplate = typeof config.condition === "string" ? config.condition : "";
+      const evaluated = renderTemplate(conditionTemplate, templateData).trim();
+      const isTruthy = Boolean(evaluated) && evaluated !== "false" && evaluated !== "0" && evaluated !== "null" && evaluated !== "undefined";
+      return {
+        result: isTruthy,
+        evaluatedValue: evaluated,
+        _branchHandle: isTruthy ? "true" : "false"
+      };
+    }
+
+    case "switch_node": {
+      const switchTemplate = typeof config.switchValue === "string" ? config.switchValue : "";
+      const evaluated = renderTemplate(switchTemplate, templateData).trim();
+      const cases = Array.isArray(config.cases) ? config.cases as Array<{ value: string; label: string }> : [];
+      const defaultLabel = typeof config.defaultLabel === "string" ? config.defaultLabel : "default";
+      let matchedLabel = defaultLabel;
+      for (const switchCase of cases) {
+        if (String(switchCase.value).trim() === evaluated) {
+          matchedLabel = switchCase.label;
+          break;
+        }
+      }
+      return {
+        matched: matchedLabel,
+        evaluatedValue: evaluated,
+        _branchHandle: matchedLabel
+      };
+    }
+
+    case "try_catch": {
+      // try_catch is structural — execution routing is handled by the executor loop
+      return { _branchHandle: "success" };
+    }
+
     case "output": {
       const outputKey = typeof config.outputKey === "string" && config.outputKey ? config.outputKey : "result";
       const responseTemplate = typeof config.responseTemplate === "string" ? config.responseTemplate : undefined;
@@ -619,6 +760,86 @@ async function executeNode(
     default:
       throw new Error(`Unsupported node type '${String(node.type)}'`);
   }
+}
+
+interface RetryConfig {
+  enabled: boolean;
+  maxAttempts: number;
+  delayMs: number;
+  backoffMultiplier: number;
+}
+
+function getRetryConfig(config: Record<string, unknown>): RetryConfig | undefined {
+  const retry = toRecord(config.retry);
+  if (!retry || retry.enabled !== true) {
+    return undefined;
+  }
+  return {
+    enabled: true,
+    maxAttempts: typeof retry.maxAttempts === "number" && retry.maxAttempts >= 1 ? Math.floor(retry.maxAttempts) : 3,
+    delayMs: typeof retry.delayMs === "number" && retry.delayMs >= 0 ? Math.floor(retry.delayMs) : 1000,
+    backoffMultiplier: typeof retry.backoffMultiplier === "number" && retry.backoffMultiplier >= 1 ? retry.backoffMultiplier : 2
+  };
+}
+
+function getOnError(config: Record<string, unknown>): "stop" | "continue" | "branch" {
+  const value = config.onError;
+  if (value === "continue" || value === "branch") {
+    return value;
+  }
+  return "stop";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function executeNodeWithRetry(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies
+): Promise<{ output: unknown; attempts: number }> {
+  const config = toRecord(node.config);
+  const retry = getRetryConfig(config);
+  if (!retry) {
+    return { output: await executeNode(node, context, dependencies), attempts: 1 };
+  }
+
+  let lastError: Error | undefined;
+  for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
+    try {
+      const output = await executeNode(node, context, dependencies);
+      return { output, attempts: attempt };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Node execution failed");
+      if (attempt < retry.maxAttempts) {
+        const delay = retry.delayMs * Math.pow(retry.backoffMultiplier, attempt - 1);
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw lastError ?? new Error("Node execution failed after retries");
+}
+
+function collectDescendants(
+  nodeId: string,
+  outgoingExecution: Map<string, string[]>,
+  workflow: { edges: { source: string; target: string; sourceHandle?: string }[] }
+): Set<string> {
+  const descendants = new Set<string>();
+  const queue = [nodeId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const targets = outgoingExecution.get(current) ?? [];
+    for (const target of targets) {
+      if (!descendants.has(target)) {
+        descendants.add(target);
+        queue.push(target);
+      }
+    }
+  }
+  return descendants;
 }
 
 export async function executeWorkflow(
@@ -660,12 +881,49 @@ export async function executeWorkflow(
   const nodeResults: NodeExecutionResult[] = [];
   let finalOutput: unknown;
   let failedError: string | undefined;
-  let failedIndex = -1;
+  let hadContinuedErrors = false;
+
+  // Branch-aware skip tracking:
+  // When a branching node (if_node, switch_node, try_catch) runs, we add
+  // all nodes on non-taken branches to this set.
+  const skippedByBranch = new Set<string>();
+
+  // try_catch error routing: maps try_catch nodeId -> error branch target nodeIds
+  const tryCatchScopes = new Map<string, { errorTargets: string[]; successDescendants: Set<string> }>();
+
+  // Build a map of sourceHandle -> target nodeIds for branching edges
+  const branchTargets = new Map<string, Map<string, string[]>>();
+  for (const edge of request.workflow.edges) {
+    if (!edge.sourceHandle || isAuxiliaryEdge(edge)) {
+      continue;
+    }
+    let handleMap = branchTargets.get(edge.source);
+    if (!handleMap) {
+      handleMap = new Map();
+      branchTargets.set(edge.source, handleMap);
+    }
+    const targets = handleMap.get(edge.sourceHandle) ?? [];
+    targets.push(edge.target);
+    handleMap.set(edge.sourceHandle, targets);
+  }
 
   for (let index = 0; index < nodeOrder.length; index += 1) {
     const nodeId = nodeOrder[index];
     const node = graphIndexes.nodeById.get(nodeId);
     if (!node) {
+      continue;
+    }
+
+    // Skip nodes on non-taken branches
+    if (skippedByBranch.has(node.id)) {
+      nodeResults.push({
+        nodeId: node.id,
+        status: "skipped",
+        startedAt: nowIso(),
+        completedAt: nowIso(),
+        durationMs: 0,
+        output: { reason: "branch_not_taken" }
+      });
       continue;
     }
 
@@ -691,6 +949,8 @@ export async function executeWorkflow(
 
     const started = Date.now();
     const startedAtNode = nowIso();
+    const nodeConfig = toRecord(node.config);
+    const onError = getOnError(nodeConfig);
 
     try {
       const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
@@ -702,7 +962,7 @@ export async function executeWorkflow(
       }
 
       const merged = mergeParentOutputs(parentOutputs);
-      const output = await executeNode(
+      const { output, attempts } = await executeNodeWithRetry(
         node,
         {
           globals,
@@ -723,47 +983,175 @@ export async function executeWorkflow(
         startedAt: startedAtNode,
         completedAt: nowIso(),
         durationMs: Date.now() - started,
-        output
+        output,
+        attempts: attempts > 1 ? attempts : undefined
       });
 
       if (node.type === "output") {
         finalOutput = output;
       }
+
+      // Handle branching: determine which branches to skip
+      const outputRecord = toRecord(output);
+      const activeBranch = typeof outputRecord._branchHandle === "string" ? outputRecord._branchHandle : undefined;
+
+      if (activeBranch && branchTargets.has(node.id)) {
+        const handleMap = branchTargets.get(node.id)!;
+        for (const [handle, targets] of handleMap.entries()) {
+          if (handle === activeBranch) {
+            continue; // This is the taken branch
+          }
+          // Mark all nodes on non-taken branches as skipped
+          for (const target of targets) {
+            const descendants = collectDescendants(target, graphIndexes.outgoingExecution, request.workflow);
+            skippedByBranch.add(target);
+            for (const desc of descendants) {
+              skippedByBranch.add(desc);
+            }
+          }
+        }
+      }
+
+      // try_catch: register scope for error routing
+      if (node.type === "try_catch") {
+        const handleMap = branchTargets.get(node.id);
+        const successTargets = handleMap?.get("success") ?? [];
+        const errorTargets = handleMap?.get("error") ?? [];
+        const successDescendants = new Set<string>();
+        for (const t of successTargets) {
+          successDescendants.add(t);
+          for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, request.workflow)) {
+            successDescendants.add(desc);
+          }
+        }
+        tryCatchScopes.set(node.id, { errorTargets, successDescendants });
+      }
     } catch (error) {
-      failedError = error instanceof Error ? error.message : "Node execution failed";
-      failedIndex = index;
-      nodeResults.push({
-        nodeId: node.id,
-        status: "error",
-        startedAt: startedAtNode,
-        completedAt: nowIso(),
-        durationMs: Date.now() - started,
-        error: failedError
-      });
-      break;
-    }
-  }
+      const errorMessage = error instanceof Error ? error.message : "Node execution failed";
 
-  if (failedError) {
-    for (let index = failedIndex + 1; index < nodeOrder.length; index += 1) {
-      const nodeId = nodeOrder[index];
-      nodeResults.push({
-        nodeId,
-        status: "skipped",
-        startedAt: nowIso(),
-        completedAt: nowIso(),
-        durationMs: 0
-      });
-    }
+      // Check if this node is inside a try_catch scope
+      let caughtByTryCatch = false;
+      for (const [tryCatchId, scope] of tryCatchScopes.entries()) {
+        if (scope.successDescendants.has(node.id)) {
+          // Skip remaining nodes in the success branch
+          for (const desc of scope.successDescendants) {
+            if (desc !== node.id) {
+              skippedByBranch.add(desc);
+            }
+          }
+          // Un-skip error branch targets (they were initially skipped by branch routing)
+          for (const errorTarget of scope.errorTargets) {
+            skippedByBranch.delete(errorTarget);
+            for (const desc of collectDescendants(errorTarget, graphIndexes.outgoingExecution, request.workflow)) {
+              skippedByBranch.delete(desc);
+            }
+          }
+          // Set error info as output for the error branch
+          nodeOutputs.set(tryCatchId, {
+            error: errorMessage,
+            failedNodeId: node.id,
+            failedNodeType: node.type,
+            caught: true
+          });
 
-    return {
-      workflowId: request.workflow.id,
-      status: "error",
-      startedAt,
-      completedAt: nowIso(),
-      nodeResults,
-      error: failedError
-    };
+          caughtByTryCatch = true;
+          nodeResults.push({
+            nodeId: node.id,
+            status: "error",
+            startedAt: startedAtNode,
+            completedAt: nowIso(),
+            durationMs: Date.now() - started,
+            error: errorMessage
+          });
+          hadContinuedErrors = true;
+          break;
+        }
+      }
+
+      if (!caughtByTryCatch) {
+        if (onError === "continue") {
+          nodeOutputs.set(node.id, { error: errorMessage });
+          nodeResults.push({
+            nodeId: node.id,
+            status: "error",
+            startedAt: startedAtNode,
+            completedAt: nowIso(),
+            durationMs: Date.now() - started,
+            error: errorMessage
+          });
+          hadContinuedErrors = true;
+          continue;
+        }
+
+        if (onError === "branch" && branchTargets.has(node.id)) {
+          const handleMap = branchTargets.get(node.id)!;
+          const errorBranchTargets = handleMap.get("error") ?? [];
+          if (errorBranchTargets.length > 0) {
+            // Skip non-error branches, un-skip error branch
+            for (const [handle, targets] of handleMap.entries()) {
+              if (handle === "error") {
+                for (const t of targets) {
+                  skippedByBranch.delete(t);
+                  for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, request.workflow)) {
+                    skippedByBranch.delete(desc);
+                  }
+                }
+              } else {
+                for (const t of targets) {
+                  skippedByBranch.add(t);
+                  for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, request.workflow)) {
+                    skippedByBranch.add(desc);
+                  }
+                }
+              }
+            }
+            nodeOutputs.set(node.id, { error: errorMessage });
+            nodeResults.push({
+              nodeId: node.id,
+              status: "error",
+              startedAt: startedAtNode,
+              completedAt: nowIso(),
+              durationMs: Date.now() - started,
+              error: errorMessage
+            });
+            hadContinuedErrors = true;
+            continue;
+          }
+        }
+
+        // Default: stop execution
+        failedError = errorMessage;
+        nodeResults.push({
+          nodeId: node.id,
+          status: "error",
+          startedAt: startedAtNode,
+          completedAt: nowIso(),
+          durationMs: Date.now() - started,
+          error: failedError
+        });
+
+        // Skip remaining nodes
+        for (let remaining = index + 1; remaining < nodeOrder.length; remaining += 1) {
+          const remainingId = nodeOrder[remaining];
+          nodeResults.push({
+            nodeId: remainingId,
+            status: "skipped",
+            startedAt: nowIso(),
+            completedAt: nowIso(),
+            durationMs: 0
+          });
+        }
+
+        return {
+          workflowId: request.workflow.id,
+          status: "error",
+          startedAt,
+          completedAt: nowIso(),
+          nodeResults,
+          error: failedError
+        };
+      }
+    }
   }
 
   if (finalOutput === undefined && nodeOrder.length > 0) {
@@ -772,10 +1160,11 @@ export async function executeWorkflow(
 
   return {
     workflowId: request.workflow.id,
-    status: "success",
+    status: hadContinuedErrors ? "partial" : "success",
     startedAt,
     completedAt: nowIso(),
     nodeResults,
     output: finalOutput
   };
 }
+

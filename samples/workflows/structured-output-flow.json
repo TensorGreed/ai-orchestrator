@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-structured-output",
+    "name": "Structured Output Parser Flow",
+    "description": "Text Input -> LLM Call -> Output Parser (json_schema mode) -> Output",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "input_1",
+        "type": "text_input",
+        "name": "Text Input",
+        "position": { "x": 100, "y": 180 },
+        "config": { "text": "Analyze the sentiment of: 'I love this product!'" }
+      },
+      {
+        "id": "system_1",
+        "type": "system_prompt",
+        "name": "System Prompt",
+        "position": { "x": 100, "y": 60 },
+        "config": { "text": "You are a sentiment analysis assistant. Always respond with valid JSON containing 'name' and 'sentiment' fields." }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "LLM Call",
+        "position": { "x": 380, "y": 180 },
+        "config": {
+          "provider": {
+            "providerId": "ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "model": "llama3.1",
+            "temperature": 0.1
+          },
+          "promptKey": "user_prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "parser_1",
+        "type": "output_parser",
+        "name": "Output Parser",
+        "position": { "x": 660, "y": 180 },
+        "config": {
+          "mode": "json_schema",
+          "inputKey": "answer",
+          "maxRetries": 2,
+          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"sentiment\":{\"type\":\"string\",\"enum\":[\"positive\",\"negative\",\"neutral\"]}},\"required\":[\"name\",\"sentiment\"]}"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 940, "y": 180 },
+        "config": {
+          "responseTemplate": "{{parsed}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "e1", "source": "system_1", "target": "llm_1" },
+      { "id": "e2", "source": "input_1", "target": "llm_1" },
+      { "id": "e3", "source": "llm_1", "target": "parser_1" },
+      { "id": "e4", "source": "parser_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-04-01T00:00:00.000Z"
+}

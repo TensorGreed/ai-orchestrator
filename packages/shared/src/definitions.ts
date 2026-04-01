@@ -187,6 +187,83 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "output_parser",
+    label: "Output Parser",
+    category: "Utility",
+    description: "Validates and transforms LLM output into structured data using JSON Schema, item list parsing, or auto-fix retry.",
+    configSchema: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["json_schema", "item_list", "auto_fix"] },
+        jsonSchema: { type: "string" },
+        itemSeparator: { type: "string" },
+        maxRetries: { type: "number" },
+        inputKey: { type: "string" }
+      },
+      required: ["mode"]
+    },
+    sampleConfig: {
+      mode: "json_schema",
+      jsonSchema: "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"sentiment\":{\"type\":\"string\",\"enum\":[\"positive\",\"negative\",\"neutral\"]}},\"required\":[\"name\",\"sentiment\"]}",
+      maxRetries: 2,
+      inputKey: "answer"
+    }
+  },
+  {
+    type: "if_node",
+    label: "IF",
+    category: "Utility",
+    description: "Evaluates a condition and routes execution to the true or false branch.",
+    configSchema: {
+      type: "object",
+      properties: {
+        condition: { type: "string" },
+        trueLabel: { type: "string" },
+        falseLabel: { type: "string" }
+      },
+      required: ["condition"]
+    },
+    sampleConfig: {
+      condition: "{{answer}}",
+      trueLabel: "True",
+      falseLabel: "False"
+    }
+  },
+  {
+    type: "switch_node",
+    label: "Switch",
+    category: "Utility",
+    description: "Routes execution to one of several branches based on a matched value.",
+    configSchema: {
+      type: "object",
+      properties: {
+        switchValue: { type: "string" },
+        cases: { type: "array", items: { type: "object", properties: { value: { type: "string" }, label: { type: "string" } } } },
+        defaultLabel: { type: "string" }
+      },
+      required: ["switchValue", "cases"]
+    },
+    sampleConfig: {
+      switchValue: "{{sentiment}}",
+      cases: [
+        { value: "positive", label: "positive" },
+        { value: "negative", label: "negative" }
+      ],
+      defaultLabel: "default"
+    }
+  },
+  {
+    type: "try_catch",
+    label: "Try / Catch",
+    category: "Utility",
+    description: "Wraps downstream execution in a try/catch block. Routes to an error branch on failure.",
+    configSchema: {
+      type: "object",
+      properties: {}
+    },
+    sampleConfig: {}
+  },
+  {
     type: "output",
     label: "Output",
     category: "Output",

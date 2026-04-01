@@ -22,6 +22,10 @@ export type WorkflowNodeType =
   | "mcp_tool"
   | "rag_retrieve"
   | "connector_source"
+  | "output_parser"
+  | "if_node"
+  | "switch_node"
+  | "try_catch"
   | "output";
 
 export interface WorkflowNodePosition {
@@ -86,11 +90,12 @@ export interface NodeExecutionResult {
   durationMs?: number;
   output?: unknown;
   error?: string;
+  attempts?: number;
 }
 
 export interface WorkflowExecutionResult {
   workflowId: string;
-  status: "success" | "error";
+  status: "success" | "error" | "partial";
   startedAt: string;
   completedAt: string;
   nodeResults: NodeExecutionResult[];
