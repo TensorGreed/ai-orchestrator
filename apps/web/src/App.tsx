@@ -23,6 +23,7 @@ import {
   ApiError,
   createSecret,
   executeWorkflow,
+  executeWorkflowStream,
   fetchAuthMe,
   fetchExecutionById,
   fetchExecutions,
@@ -70,6 +71,13 @@ interface MCPServerDefinition {
 }
 
 type LogsTab = "logs" | "inputs";
+
+interface ChatMessageEntry {
+  id: string;
+  role: "assistant" | "user";
+  text: string;
+  status?: "streaming" | "done" | "error";
+}
 
 const statusColors: Record<string, string> = {
   success: "#18a35f",
@@ -129,6 +137,41 @@ function buildExecutionErrorResult(workflowId: string, message: string): Workflo
     nodeResults: [],
     error: message
   };
+}
+
+function createChatSessionId(workflowId: string): string {
+  const sanitized = workflowId.trim() || "workflow";
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `chat-${sanitized}-${crypto.randomUUID()}`;
+  }
+  const randomPart = Math.random().toString(36).slice(2, 10);
+  return `chat-${sanitized}-${Date.now().toString(36)}-${randomPart}`;
+}
+
+function extractAssistantText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const candidates = [record.result, record.answer, record.text, record.content];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate;
+      }
+    }
+  }
+
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function getNodeStatusMap(result: WorkflowExecutionResult | null) {
@@ -351,6 +394,13 @@ export default function App() {
   const [systemPrompt, setSystemPrompt] = useState("You are a precise tool-using AI assistant.");
   const [userPrompt, setUserPrompt] = useState("What time is it in America/Toronto? Use tools when needed.");
   const [sessionId, setSessionId] = useState("session-local-dev");
+  const [chatInput, setChatInput] = useState("");
+  const [chatSystemPrompt, setChatSystemPrompt] = useState("You are a precise tool-using AI assistant.");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [chatMessagesByWorkflow, setChatMessagesByWorkflow] = useState<Record<string, ChatMessageEntry[]>>({});
+  const [chatSessionsByWorkflow, setChatSessionsByWorkflow] = useState<Record<string, string>>({});
+  const [chatNodeTrace, setChatNodeTrace] = useState<Array<{ nodeId: string; status: string; at: string }>>([]);
 
   const [secretName, setSecretName] = useState("Default LLM Key");
   const [secretProvider, setSecretProvider] = useState("openai");
@@ -366,6 +416,10 @@ export default function App() {
   const [visualRunActiveIndex, setVisualRunActiveIndex] = useState<number | null>(null);
 
   const flowWrapperRef = useRef<HTMLDivElement>(null);
+  const chatHistoryRef = useRef<HTMLDivElement>(null);
+  const chatDeltaBufferRef = useRef("");
+  const chatDeltaIntervalRef = useRef<number | null>(null);
+  const activeAssistantMessageIdRef = useRef<string | null>(null);
   const logsResizeAbortRef = useRef<AbortController | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
@@ -409,6 +463,8 @@ export default function App() {
     }
     return grouped;
   }, [definitions]);
+  const currentChatMessages = chatMessagesByWorkflow[currentWorkflow.id] ?? [];
+  const currentChatSessionId = chatSessionsByWorkflow[currentWorkflow.id] ?? "";
 
   const executionStatuses = useMemo(() => {
     const resultStatuses = getNodeStatusMap(executionResult);
@@ -724,6 +780,37 @@ export default function App() {
   }, [activeMode, authUser, refreshExecutionHistory]);
 
   useEffect(() => {
+    setChatSessionsByWorkflow((current) => {
+      if (current[currentWorkflow.id]) {
+        return current;
+      }
+      return {
+        ...current,
+        [currentWorkflow.id]: createChatSessionId(currentWorkflow.id)
+      };
+    });
+  }, [currentWorkflow.id]);
+
+  useEffect(() => {
+    if (!chatHistoryRef.current) {
+      return;
+    }
+    chatHistoryRef.current.scrollTo({
+      top: chatHistoryRef.current.scrollHeight,
+      behavior: "smooth"
+    });
+  }, [currentChatMessages]);
+
+  useEffect(() => {
+    return () => {
+      if (chatDeltaIntervalRef.current !== null) {
+        window.clearInterval(chatDeltaIntervalRef.current);
+        chatDeltaIntervalRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (loading || !authUser) {
       return;
     }
@@ -754,6 +841,86 @@ export default function App() {
     setError(message);
     return message;
   }, []);
+
+  const appendChatMessage = useCallback(
+    (workflowId: string, message: ChatMessageEntry) => {
+      setChatMessagesByWorkflow((current) => ({
+        ...current,
+        [workflowId]: [...(current[workflowId] ?? []), message]
+      }));
+    },
+    []
+  );
+
+  const updateChatMessageText = useCallback((workflowId: string, messageId: string, deltaText: string, status?: ChatMessageEntry["status"]) => {
+    setChatMessagesByWorkflow((current) => {
+      const nextMessages = (current[workflowId] ?? []).map((entry) =>
+        entry.id === messageId
+          ? {
+              ...entry,
+              text: `${entry.text}${deltaText}`,
+              status: status ?? entry.status
+            }
+          : entry
+      );
+      return {
+        ...current,
+        [workflowId]: nextMessages
+      };
+    });
+  }, []);
+
+  const setChatMessageStatus = useCallback((workflowId: string, messageId: string, status: ChatMessageEntry["status"]) => {
+    setChatMessagesByWorkflow((current) => {
+      const nextMessages = (current[workflowId] ?? []).map((entry) =>
+        entry.id === messageId
+          ? {
+              ...entry,
+              status
+            }
+          : entry
+      );
+      return {
+        ...current,
+        [workflowId]: nextMessages
+      };
+    });
+  }, []);
+
+  const stopChatDeltaFlusher = useCallback(() => {
+    if (chatDeltaIntervalRef.current !== null) {
+      window.clearInterval(chatDeltaIntervalRef.current);
+      chatDeltaIntervalRef.current = null;
+    }
+  }, []);
+
+  const startChatDeltaFlusher = useCallback(
+    (workflowId: string) => {
+      if (chatDeltaIntervalRef.current !== null) {
+        return;
+      }
+
+      chatDeltaIntervalRef.current = window.setInterval(() => {
+        const targetMessageId = activeAssistantMessageIdRef.current;
+        if (!targetMessageId) {
+          return;
+        }
+
+        if (!chatDeltaBufferRef.current.length) {
+          return;
+        }
+
+        const nextChunk = chatDeltaBufferRef.current.slice(0, 5);
+        chatDeltaBufferRef.current = chatDeltaBufferRef.current.slice(nextChunk.length);
+        updateChatMessageText(workflowId, targetMessageId, nextChunk);
+
+        if (!chatDeltaBufferRef.current.length && !chatBusy) {
+          stopChatDeltaFlusher();
+        }
+      }, 18);
+    },
+    [chatBusy, stopChatDeltaFlusher, updateChatMessageText]
+  );
 
   const loadWorkflowById = useCallback(
     async (id: string) => {
@@ -951,6 +1118,148 @@ export default function App() {
     systemPrompt,
     userPrompt
   ]);
+
+  const handleChatSend = useCallback(async () => {
+    if (!chatInput.trim() || chatBusy) {
+      return;
+    }
+
+    const message = chatInput.trim();
+    setChatInput("");
+    setChatBusy(true);
+    setChatError(null);
+    setChatNodeTrace([]);
+    let activeWorkflowId = currentWorkflow.id;
+
+    let streamedAnyDelta = false;
+
+    try {
+      const savedWorkflow = await persistWorkflow();
+      const workflowId = savedWorkflow.id;
+      activeWorkflowId = workflowId;
+      const sessionForWorkflow = chatSessionsByWorkflow[workflowId] ?? createChatSessionId(workflowId);
+      setChatSessionsByWorkflow((current) =>
+        current[workflowId]
+          ? current
+          : {
+              ...current,
+              [workflowId]: sessionForWorkflow
+            }
+      );
+
+      appendChatMessage(workflowId, {
+        id: `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        role: "user",
+        text: message,
+        status: "done"
+      });
+
+      const assistantMessageId = `assistant-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      appendChatMessage(workflowId, {
+        id: assistantMessageId,
+        role: "assistant",
+        text: "",
+        status: "streaming"
+      });
+
+      activeAssistantMessageIdRef.current = assistantMessageId;
+      chatDeltaBufferRef.current = "";
+      startChatDeltaFlusher(workflowId);
+
+      const result = await executeWorkflowStream(
+        workflowId,
+        {
+          user_prompt: message,
+          system_prompt: chatSystemPrompt,
+          sessionId: sessionForWorkflow,
+          session_id: sessionForWorkflow
+        },
+        {
+          onNodeStart: (event) => {
+            setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: "running", at: event.startedAt }].slice(-40));
+          },
+          onNodeComplete: (event) => {
+            setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: event.status, at: event.completedAt }].slice(-40));
+          },
+          onLlmDelta: (event) => {
+            streamedAnyDelta = true;
+            chatDeltaBufferRef.current += event.delta;
+          },
+          onError: (event) => {
+            setChatError(event.message);
+          }
+        }
+      );
+
+      if (chatDeltaBufferRef.current.length && activeAssistantMessageIdRef.current) {
+        updateChatMessageText(workflowId, activeAssistantMessageIdRef.current, chatDeltaBufferRef.current);
+        chatDeltaBufferRef.current = "";
+      }
+
+      if (!streamedAnyDelta) {
+        const fallbackAnswer = extractAssistantText(result.output ?? result.error ?? "");
+        if (fallbackAnswer && activeAssistantMessageIdRef.current) {
+          updateChatMessageText(workflowId, activeAssistantMessageIdRef.current, fallbackAnswer);
+        }
+      }
+
+      if (activeAssistantMessageIdRef.current) {
+        setChatMessageStatus(
+          workflowId,
+          activeAssistantMessageIdRef.current,
+          result.status === "error" ? "error" : "done"
+        );
+      }
+
+      if (result.status === "error") {
+        setChatError(result.error ?? "Workflow execution failed");
+      }
+      void refreshExecutionHistory();
+    } catch (error) {
+      const messageText = handleApiError(error, "Failed to stream chat response");
+      setChatError(messageText);
+      if (activeAssistantMessageIdRef.current) {
+        setChatMessageStatus(activeWorkflowId, activeAssistantMessageIdRef.current, "error");
+      } else {
+        appendChatMessage(activeWorkflowId, {
+          id: `assistant-error-${Date.now().toString(36)}`,
+          role: "assistant",
+          text: messageText,
+          status: "error"
+        });
+      }
+    } finally {
+      if (chatDeltaBufferRef.current.length && activeAssistantMessageIdRef.current) {
+        updateChatMessageText(activeWorkflowId, activeAssistantMessageIdRef.current, chatDeltaBufferRef.current);
+        chatDeltaBufferRef.current = "";
+      }
+      stopChatDeltaFlusher();
+      activeAssistantMessageIdRef.current = null;
+      setChatBusy(false);
+    }
+  }, [
+    appendChatMessage,
+    chatBusy,
+    chatInput,
+    chatSessionsByWorkflow,
+    chatSystemPrompt,
+    currentWorkflow.id,
+    handleApiError,
+    persistWorkflow,
+    refreshExecutionHistory,
+    setChatMessageStatus,
+    startChatDeltaFlusher,
+    stopChatDeltaFlusher,
+    updateChatMessageText
+  ]);
+
+  const handleChatSubmit = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      void handleChatSend();
+    },
+    [handleChatSend]
+  );
 
   const handleExport = useCallback(() => {
     const workflow = buildCurrentWorkflow();
@@ -1636,6 +1945,70 @@ export default function App() {
                   </table>
                 </div>
               )}
+            </section>
+          )}
+
+          {activeMode === "chat" && (
+            <section className="chat-pane">
+              <div className="chat-pane-header">
+                <div>
+                  <h2>Chat</h2>
+                  <p className="muted">
+                    Streaming assistant bound to <strong>{currentWorkflow.name}</strong>
+                  </p>
+                </div>
+                <div className="chat-session-chip">
+                  <span>Session</span>
+                  <code>{currentChatSessionId || "initializing..."}</code>
+                </div>
+              </div>
+
+              <div className="chat-stream-shell">
+                <div className="chat-history" ref={chatHistoryRef}>
+                  {currentChatMessages.length === 0 && (
+                    <div className="logs-placeholder">Start a conversation. Responses stream token-by-token from the workflow LLM nodes.</div>
+                  )}
+
+                  {currentChatMessages.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className={entry.role === "user" ? "chat-bubble chat-bubble-user" : "chat-bubble chat-bubble-assistant"}
+                    >
+                      <div className="chat-bubble-label">{entry.role === "user" ? "You" : "Assistant"}</div>
+                      <div className="chat-bubble-text">{entry.text || (entry.status === "streaming" ? "..." : "")}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="chat-side-trace">
+                  <h4>Node Trace</h4>
+                  {chatNodeTrace.length === 0 && <div className="muted">Waiting for execution events.</div>}
+                  {chatNodeTrace.map((trace, index) => (
+                    <div key={`${trace.nodeId}-${trace.at}-${index}`} className="chat-trace-item">
+                      <span>{trace.nodeId}</span>
+                      <strong style={{ color: statusColors[trace.status] ?? "#657087" }}>{trace.status}</strong>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <form className="chat-input-row" onSubmit={handleChatSubmit}>
+                <textarea
+                  value={chatSystemPrompt}
+                  onChange={(event) => setChatSystemPrompt(event.target.value)}
+                  rows={2}
+                  placeholder="System prompt"
+                />
+                <input
+                  value={chatInput}
+                  onChange={(event) => setChatInput(event.target.value)}
+                  placeholder="Ask something..."
+                />
+                <button type="submit" disabled={chatBusy || !chatInput.trim()}>
+                  {chatBusy ? "Streaming..." : "Send"}
+                </button>
+              </form>
+              {chatError && <div className="error-banner">{chatError}</div>}
             </section>
           )}
 

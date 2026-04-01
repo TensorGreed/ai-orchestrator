@@ -1,6 +1,6 @@
 import type { ProviderDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { callOpenAICompatible } from "./openai-compatible-base";
+import { callOpenAICompatible, callOpenAICompatibleStream } from "./openai-compatible-base";
 
 export class OpenAICompatibleProviderAdapter implements LLMProviderAdapter {
   readonly definition: ProviderDefinition = {
@@ -20,6 +20,15 @@ export class OpenAICompatibleProviderAdapter implements LLMProviderAdapter {
 
   generate(request: ProviderCallRequest, context: ProviderExecutionContext) {
     return callOpenAICompatible(request, context, {
+      id: this.definition.id,
+      label: this.definition.label,
+      supportsTools: true,
+      requiresApiKey: false
+    });
+  }
+
+  generateStream(request: ProviderCallRequest, context: ProviderExecutionContext) {
+    return callOpenAICompatibleStream(request, context, {
       id: this.definition.id,
       label: this.definition.label,
       supportsTools: true,

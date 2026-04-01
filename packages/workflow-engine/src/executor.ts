@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import vm from "node:vm";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { invokeDirectMCPTool, resolveMCPTools, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
@@ -51,6 +52,25 @@ export interface WorkflowExecutionDependencies {
     startedAt: string;
     state: WorkflowExecutionState;
   }) => Promise<void>;
+  onNodeStart?: (event: {
+    nodeId: string;
+    nodeType: string;
+    startedAt: string;
+  }) => Promise<void> | void;
+  onNodeComplete?: (event: {
+    nodeId: string;
+    nodeType: string;
+    status: NodeExecutionResult["status"];
+    completedAt: string;
+    durationMs: number;
+    output?: unknown;
+    error?: string;
+  }) => Promise<void> | void;
+  onLLMDelta?: (event: {
+    nodeId: string;
+    delta: string;
+    index: number;
+  }) => Promise<void> | void;
   logger?: (message: string, metadata?: unknown) => void;
 }
 
@@ -296,6 +316,89 @@ function validateGuardrailChecks(text: string, checks: string[]): string[] {
   return failures;
 }
 
+export interface CodeNodeExecutionInput {
+  code: string;
+  input: Record<string, unknown>;
+  timeoutMs?: number;
+}
+
+export interface CodeNodeExecutionOutput {
+  result: unknown;
+  logs: string[];
+}
+
+function toJsonSafeValue(value: unknown): unknown {
+  if (value === undefined) {
+    return null;
+  }
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return String(value);
+  }
+}
+
+export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput): Promise<CodeNodeExecutionOutput> {
+  const code = String(input.code ?? "");
+  const timeoutMs =
+    typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0
+      ? Math.floor(input.timeoutMs)
+      : 1500;
+  const logs: string[] = [];
+
+  const sandboxConsole = {
+    log: (...args: unknown[]) => {
+      logs.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "));
+    },
+    error: (...args: unknown[]) => {
+      logs.push(`ERROR: ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`);
+    },
+    warn: (...args: unknown[]) => {
+      logs.push(`WARN: ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`);
+    },
+    info: (...args: unknown[]) => {
+      logs.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "));
+    }
+  };
+
+  const contextObject: Record<string, unknown> = {
+    input: toJsonSafeValue(input.input),
+    JSON,
+    Math,
+    Number,
+    String,
+    Boolean,
+    Array,
+    Object,
+    Date,
+    console: sandboxConsole,
+    require: undefined,
+    process: undefined,
+    fs: undefined,
+    fetch: undefined,
+    globalThis: undefined,
+    Function: undefined,
+    eval: undefined
+  };
+
+  const context = vm.createContext(contextObject);
+  const wrappedCode = `(async () => {\n${code}\n})()`;
+
+  try {
+    const runResult = vm.runInContext(wrappedCode, context, {
+      timeout: timeoutMs
+    });
+    const resolvedResult = await Promise.resolve(runResult);
+    return {
+      result: toJsonSafeValue(resolvedResult),
+      logs
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Code node execution failed.";
+    throw new Error(`Code node sandbox error: ${message}`);
+  }
+}
+
 interface GraphIndexes {
   nodeById: Map<string, WorkflowNode>;
   incomingExecution: Map<string, string[]>;
@@ -504,6 +607,40 @@ async function executeNode(
       };
     }
 
+    case "code_node": {
+      const timeout =
+        typeof config.timeout === "number" && Number.isFinite(config.timeout) && config.timeout > 0
+          ? Math.floor(config.timeout)
+          : 1500;
+      const code = typeof config.code === "string" ? config.code : "";
+      if (!code.trim()) {
+        throw new Error("Code Node requires a non-empty code script.");
+      }
+
+      const sandboxInput = {
+        ...templateData,
+        input: templateData
+      };
+      const result = await executeCodeNodeSandbox({
+        code,
+        input: sandboxInput,
+        timeoutMs: timeout
+      });
+
+      if (result.result && typeof result.result === "object" && !Array.isArray(result.result)) {
+        return {
+          ...(result.result as Record<string, unknown>),
+          code_result: result.result,
+          code_logs: result.logs
+        };
+      }
+
+      return {
+        code_result: result.result,
+        code_logs: result.logs
+      };
+    }
+
     case "prompt_template": {
       const template = typeof config.template === "string" ? config.template : "{{user_prompt}}";
       const outputKey = typeof config.outputKey === "string" && config.outputKey ? config.outputKey : "prompt";
@@ -527,9 +664,72 @@ async function executeNode(
       }
       messages.push({ role: "user", content: userPrompt });
 
-      const response = await dependencies.providerRegistry
-        .get(provider.providerId)
-        .generate(
+      const providerAdapter = dependencies.providerRegistry.get(provider.providerId);
+      if (dependencies.onLLMDelta && providerAdapter.generateStream) {
+        let streamedText = "";
+        const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
+        let llmDeltaIndex = 0;
+
+        for await (const chunk of providerAdapter.generateStream(
+          {
+            provider,
+            messages
+          },
+          {
+            resolveSecret: dependencies.resolveSecret
+          }
+        )) {
+          if (chunk.type === "text_delta" && chunk.textDelta) {
+            streamedText += chunk.textDelta;
+            await dependencies.onLLMDelta({
+              nodeId: node.id,
+              delta: chunk.textDelta,
+              index: llmDeltaIndex
+            });
+            llmDeltaIndex += 1;
+          } else if (chunk.type === "tool_call_delta") {
+            const toolCallId = chunk.toolCallId ?? `toolcall_${toolCallById.size}`;
+            const existing = toolCallById.get(toolCallId) ?? {
+              id: toolCallId,
+              name: chunk.name ?? `tool_${toolCallById.size}`,
+              argumentsText: ""
+            };
+            if (typeof chunk.name === "string" && chunk.name) {
+              existing.name = chunk.name;
+            }
+            if (typeof chunk.argumentsDelta === "string") {
+              existing.argumentsText += chunk.argumentsDelta;
+            }
+            toolCallById.set(toolCallId, existing);
+          }
+        }
+
+        const toolCalls = [...toolCallById.values()].map((entry) => {
+          let parsedArguments: Record<string, unknown> = {};
+          try {
+            parsedArguments = JSON.parse(entry.argumentsText || "{}") as Record<string, unknown>;
+          } catch {
+            parsedArguments = {};
+          }
+          return {
+            id: entry.id,
+            name: entry.name,
+            arguments: parsedArguments
+          };
+        });
+
+        return {
+          text: streamedText,
+          answer: streamedText,
+          toolCalls,
+          raw: {
+            streamed: true
+          },
+          _provider: provider
+        };
+      }
+
+      const response = await providerAdapter.generate(
           {
             provider,
             messages
@@ -1497,6 +1697,11 @@ export async function executeWorkflow(
     const startedAtNode = nowIso();
     const nodeConfig = toRecord(node.config);
     const onError = getOnError(nodeConfig);
+    await dependencies.onNodeStart?.({
+      nodeId: node.id,
+      nodeType: node.type,
+      startedAt: startedAtNode
+    });
 
     try {
       const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
@@ -1527,6 +1732,17 @@ export async function executeWorkflow(
           nodeId: node.id,
           status: "waiting_approval",
           startedAt: startedAtNode,
+          completedAt: nowIso(),
+          durationMs: Date.now() - started,
+          output: {
+            message: approvalMessage,
+            timeoutMinutes
+          }
+        });
+        await dependencies.onNodeComplete?.({
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "waiting_approval",
           completedAt: nowIso(),
           durationMs: Date.now() - started,
           output: {
@@ -1606,6 +1822,14 @@ export async function executeWorkflow(
         output,
         attempts: attempts > 1 ? attempts : undefined
       });
+      await dependencies.onNodeComplete?.({
+        nodeId: node.id,
+        nodeType: node.type,
+        status: "success",
+        completedAt: nowIso(),
+        durationMs: Date.now() - started,
+        output
+      });
 
       if (node.type === "output") {
         finalOutput = output;
@@ -1683,6 +1907,14 @@ export async function executeWorkflow(
             durationMs: Date.now() - started,
             error: errorMessage
           });
+          await dependencies.onNodeComplete?.({
+            nodeId: node.id,
+            nodeType: node.type,
+            status: "error",
+            completedAt: nowIso(),
+            durationMs: Date.now() - started,
+            error: errorMessage
+          });
           hadContinuedErrors = true;
           break;
         }
@@ -1695,6 +1927,14 @@ export async function executeWorkflow(
             nodeId: node.id,
             status: "error",
             startedAt: startedAtNode,
+            completedAt: nowIso(),
+            durationMs: Date.now() - started,
+            error: errorMessage
+          });
+          await dependencies.onNodeComplete?.({
+            nodeId: node.id,
+            nodeType: node.type,
+            status: "error",
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             error: errorMessage
@@ -1734,6 +1974,14 @@ export async function executeWorkflow(
               durationMs: Date.now() - started,
               error: errorMessage
             });
+            await dependencies.onNodeComplete?.({
+              nodeId: node.id,
+              nodeType: node.type,
+              status: "error",
+              completedAt: nowIso(),
+              durationMs: Date.now() - started,
+              error: errorMessage
+            });
             hadContinuedErrors = true;
             continue;
           }
@@ -1745,6 +1993,14 @@ export async function executeWorkflow(
           nodeId: node.id,
           status: "error",
           startedAt: startedAtNode,
+          completedAt: nowIso(),
+          durationMs: Date.now() - started,
+          error: failedError
+        });
+        await dependencies.onNodeComplete?.({
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "error",
           completedAt: nowIso(),
           durationMs: Date.now() - started,
           error: failedError

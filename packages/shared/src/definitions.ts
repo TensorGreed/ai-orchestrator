@@ -60,6 +60,24 @@ export const nodeDefinitions: NodeDefinition[] = [
     sampleConfig: { text: "Summarize this context." }
   },
   {
+    type: "code_node",
+    label: "Code Node",
+    category: "Utility",
+    description: "Runs custom JavaScript transformation logic in a sandboxed VM context.",
+    configSchema: {
+      type: "object",
+      properties: {
+        code: { type: "string" },
+        timeout: { type: "number" }
+      },
+      required: ["code"]
+    },
+    sampleConfig: {
+      timeout: 1500,
+      code: "const name = String(input.user_prompt ?? 'World');\nconst upper = name.toUpperCase();\nconsole.log('Transformed prompt to uppercase');\nreturn { transformed: upper, length: upper.length };"
+    }
+  },
+  {
     type: "prompt_template",
     label: "Prompt Template",
     category: "Utility",

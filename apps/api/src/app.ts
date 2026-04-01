@@ -1,4 +1,7 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import fastifyRawBody from "fastify-raw-body";
@@ -19,6 +22,7 @@ import {
   type WorkflowExecutionState
 } from "@ai-orchestrator/shared";
 import {
+  executeCodeNodeSandbox,
   executeWorkflow,
   exportWorkflowToJson,
   importWorkflowFromJson,
@@ -68,6 +72,12 @@ const mcpDiscoverSchema = z.object({
 
 const approvalDecisionSchema = z.object({
   reason: z.string().optional()
+});
+
+const codeNodeTestSchema = z.object({
+  code: z.string().min(1),
+  timeout: z.number().int().positive().max(60_000).optional(),
+  input: z.record(z.string(), z.unknown()).optional()
 });
 
 type WebhookAuthMode = "none" | "bearer_token" | "hmac_sha256";
@@ -228,6 +238,18 @@ function toDurationMs(startedAt: string, completedAt: string): number | undefine
     return undefined;
   }
   return Math.max(0, Math.floor(completed - started));
+}
+
+function normalizeSessionId(sessionId?: string, sessionIdSnakeCase?: string): string | undefined {
+  const camel = typeof sessionId === "string" && sessionId.trim() ? sessionId.trim() : undefined;
+  const snake = typeof sessionIdSnakeCase === "string" && sessionIdSnakeCase.trim() ? sessionIdSnakeCase.trim() : undefined;
+  return camel ?? snake;
+}
+
+function resolveWidgetBundlePath(): string {
+  const appFilePath = fileURLToPath(import.meta.url);
+  const appDirectory = path.dirname(appFilePath);
+  return path.resolve(appDirectory, "../../web/dist-widget/widget.js");
 }
 
 async function selectWebhookWorkflow(store: SqliteStore, workflowId?: string): Promise<Workflow | null> {
@@ -454,6 +476,20 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   const mcpRegistry = createDefaultMCPRegistry();
   const agentRuntime = createDefaultAgentRuntime();
 
+  type WorkflowExecutionEventHooks = {
+    onNodeStart?: (event: { nodeId: string; nodeType: string; startedAt: string }) => Promise<void> | void;
+    onNodeComplete?: (event: {
+      nodeId: string;
+      nodeType: string;
+      status: string;
+      completedAt: string;
+      durationMs: number;
+      output?: unknown;
+      error?: string;
+    }) => Promise<void> | void;
+    onLLMDelta?: (event: { nodeId: string; delta: string; index: number }) => Promise<void> | void;
+  };
+
   const runWorkflowExecution = async (input: {
     workflow: Workflow;
     webhookPayload?: Record<string, unknown>;
@@ -471,6 +507,7 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       actedBy?: string;
       reason?: string;
     };
+    hooks?: WorkflowExecutionEventHooks;
   }) => {
     return executeWorkflow(
       {
@@ -513,13 +550,24 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
             startedAt: paused.startedAt,
             state: paused.state
           });
-        }
+        },
+        onNodeStart: input.hooks?.onNodeStart,
+        onNodeComplete: input.hooks?.onNodeComplete,
+        onLLMDelta: input.hooks?.onLLMDelta
       }
     );
   };
 
   const parseWebhookRunInput = (payload: unknown) => {
-    const body = asRecord(payload);
+    let body = asRecord(payload);
+    if (typeof payload === "string" && payload.trim()) {
+      try {
+        const parsed = JSON.parse(payload);
+        body = asRecord(parsed);
+      } catch {
+        body = {};
+      }
+    }
     const userPromptRaw =
       typeof body.user_prompt === "string"
         ? body.user_prompt
@@ -528,7 +576,10 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
           : "";
     const userPrompt = userPromptRaw.trim();
     const systemPrompt = typeof body.system_prompt === "string" ? body.system_prompt : "";
-    const sessionId = typeof body.session_id === "string" ? body.session_id : undefined;
+    const sessionId = normalizeSessionId(
+      typeof body.sessionId === "string" ? body.sessionId : undefined,
+      typeof body.session_id === "string" ? body.session_id : undefined
+    );
     const variables = body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
       ? (body.variables as Record<string, unknown>)
       : undefined;
@@ -655,6 +706,22 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       ok: true,
       now: new Date().toISOString()
     };
+  });
+
+  app.get("/widget.js", async (_request, reply) => {
+    const widgetBundlePath = resolveWidgetBundlePath();
+    if (!fs.existsSync(widgetBundlePath)) {
+      reply.code(404);
+      return {
+        error: "widget.js is not available. Build apps/web in widget mode first."
+      };
+    }
+
+    const bundle = fs.readFileSync(widgetBundlePath, "utf8");
+    reply.header("content-type", "application/javascript; charset=utf-8");
+    reply.header("cache-control", "public, max-age=300");
+    reply.header("Access-Control-Allow-Origin", "*");
+    return reply.send(bundle);
   });
 
   app.post<{ Body: unknown }>("/api/auth/register", async (request, reply) => {
@@ -953,7 +1020,7 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       variables: parsed.data.variables,
       systemPrompt: parsed.data.system_prompt,
       userPrompt: parsed.data.user_prompt,
-      sessionId: parsed.data.sessionId,
+      sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
       executionId,
       triggerType: "manual",
       triggeredBy: user.email
@@ -973,6 +1040,132 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
     }
 
     return result;
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute/stream", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+
+    const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid execution payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const executionId = crypto.randomUUID();
+    let streamClosed = false;
+    request.raw.on("close", () => {
+      streamClosed = true;
+    });
+
+    const sendSseEvent = (event: string, payload: unknown) => {
+      if (streamClosed) {
+        return;
+      }
+      reply.raw.write(`event: ${event}\n`);
+      const serialized = JSON.stringify(payload ?? null);
+      for (const line of serialized.split("\n")) {
+        reply.raw.write(`data: ${line}\n`);
+      }
+      reply.raw.write("\n");
+    };
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive"
+    });
+    if (typeof reply.raw.flushHeaders === "function") {
+      reply.raw.flushHeaders();
+    }
+
+    try {
+      const result = await runWorkflowExecution({
+        workflow,
+        directInput: parsed.data.input,
+        variables: parsed.data.variables,
+        systemPrompt: parsed.data.system_prompt,
+        userPrompt: parsed.data.user_prompt,
+        sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
+        executionId,
+        triggerType: "manual_stream",
+        triggeredBy: user.email,
+        hooks: {
+          onNodeStart: (event) => {
+            sendSseEvent("node_start", event);
+          },
+          onNodeComplete: (event) => {
+            sendSseEvent("node_complete", event);
+          },
+          onLLMDelta: (event) => {
+            sendSseEvent("llm_delta", event);
+          }
+        }
+      });
+
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "manual_stream",
+        triggeredBy: user.email,
+        requestInput: parsed.data
+      });
+
+      sendSseEvent("result", result);
+      if (result.status === "error") {
+        sendSseEvent("error", { message: result.error ?? "Execution failed" });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Execution failed";
+      sendSseEvent("error", { message });
+    } finally {
+      if (!streamClosed) {
+        reply.raw.end();
+      }
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/code-node/test", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const parsed = codeNodeTestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid Code Node test payload",
+        details: parsed.error.issues
+      };
+    }
+
+    try {
+      const result = await executeCodeNodeSandbox({
+        code: parsed.data.code,
+        timeoutMs: parsed.data.timeout,
+        input: parsed.data.input ?? {}
+      });
+      return result;
+    } catch (error) {
+      reply.code(400);
+      return {
+        error: error instanceof Error ? error.message : "Code node test failed"
+      };
+    }
   });
 
   app.get<{ Querystring: Record<string, unknown> }>("/api/executions", async (request, reply) => {
@@ -1184,12 +1377,24 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
     const isTestRoute = routePath.startsWith("/webhook-test");
     app.route<{ Params: { path: string }; Body: unknown }>({
-      method: ["DELETE", "GET", "PATCH", "POST", "PUT"],
+      method: ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
       url: routePath,
       config: {
         rawBody: true
       },
       handler: async (request, reply) => {
+        reply.header("Access-Control-Allow-Origin", "*");
+        reply.header("Access-Control-Allow-Methods", "DELETE, GET, OPTIONS, PATCH, POST, PUT");
+        reply.header(
+          "Access-Control-Allow-Headers",
+          "content-type,authorization,x-webhook-signature,x-webhook-timestamp,idempotency-key"
+        );
+
+        if (request.method === "OPTIONS") {
+          reply.code(204);
+          return null;
+        }
+
         const match = await selectWebhookByPath(store, request.params.path, request.method);
         if (!match) {
           reply.code(404);

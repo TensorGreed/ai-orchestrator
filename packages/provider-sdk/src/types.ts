@@ -17,7 +17,23 @@ export interface ProviderCallRequest {
   tools?: ToolDefinition[];
 }
 
+export type LLMStreamChunk =
+  | {
+      type: "text_delta";
+      textDelta: string;
+    }
+  | {
+      type: "tool_call_delta";
+      toolCallId?: string;
+      name?: string;
+      argumentsDelta?: string;
+    };
+
 export interface LLMProviderAdapter {
   definition: ProviderDefinition;
   generate(request: ProviderCallRequest, context: ProviderExecutionContext): Promise<LLMCallResponse>;
+  generateStream?(
+    request: ProviderCallRequest,
+    context: ProviderExecutionContext
+  ): AsyncGenerator<LLMStreamChunk>;
 }

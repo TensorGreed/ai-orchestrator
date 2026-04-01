@@ -14,6 +14,7 @@ function nodeToken(nodeType: string): string {
     text_input: "TXT",
     system_prompt: "SYS",
     user_prompt: "USR",
+    code_node: "CODE",
     prompt_template: "TPL",
     llm_call: "LLM",
     agent_orchestrator: "AG",

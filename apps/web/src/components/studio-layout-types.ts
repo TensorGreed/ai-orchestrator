@@ -1,1 +1,1 @@
-export type StudioMode = "editor" | "executions" | "evaluations" | "secrets";
+export type StudioMode = "editor" | "executions" | "chat" | "evaluations" | "secrets";

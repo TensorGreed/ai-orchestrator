@@ -1,6 +1,6 @@
 import type { ProviderDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { callOpenAICompatible } from "./openai-compatible-base";
+import { callOpenAICompatible, callOpenAICompatibleStream } from "./openai-compatible-base";
 
 export class OllamaProviderAdapter implements LLMProviderAdapter {
   readonly definition: ProviderDefinition = {
@@ -19,6 +19,16 @@ export class OllamaProviderAdapter implements LLMProviderAdapter {
 
   generate(request: ProviderCallRequest, context: ProviderExecutionContext) {
     return callOpenAICompatible(request, context, {
+      id: this.definition.id,
+      label: this.definition.label,
+      supportsTools: true,
+      defaultBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1",
+      requiresApiKey: false
+    });
+  }
+
+  generateStream(request: ProviderCallRequest, context: ProviderExecutionContext) {
+    return callOpenAICompatibleStream(request, context, {
       id: this.definition.id,
       label: this.definition.label,
       supportsTools: true,

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MCPToolDefinition } from "@ai-orchestrator/shared";
 import type { EditorNode } from "../lib/workflow";
-import { discoverMcpTools, type SecretListItem } from "../lib/api";
+import { discoverMcpTools, testCodeNode, type SecretListItem } from "../lib/api";
 
 export interface NodeInputOption {
   id: string;
@@ -183,6 +183,10 @@ export function NodeConfigModal({
   const [discoverBusy, setDiscoverBusy] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
+  const [codeTestInput, setCodeTestInput] = useState("{\n  \"user_prompt\": \"Hello from code node\"\n}");
+  const [codeTestBusy, setCodeTestBusy] = useState(false);
+  const [codeTestError, setCodeTestError] = useState<string | null>(null);
+  const [codeTestResult, setCodeTestResult] = useState<{ result: unknown; logs: string[] } | null>(null);
 
   useEffect(() => {
     const initialConfig = asRecord(node.data.config);
@@ -225,6 +229,10 @@ export function NodeConfigModal({
     setDiscoverBusy(false);
     setDiscoverError(null);
     setDiscoverMessage(null);
+    setCodeTestInput("{\n  \"user_prompt\": \"Hello from code node\"\n}");
+    setCodeTestBusy(false);
+    setCodeTestError(null);
+    setCodeTestResult(null);
   }, [inputOptions, mcpServerDefinitions, node]);
 
   const provider = useMemo(() => asRecord(config.provider), [config.provider]);
@@ -332,6 +340,49 @@ export function NodeConfigModal({
     discoveredTools.length,
     node.data.nodeType
   ]);
+
+  const handleCodeNodeTestRun = useCallback(async () => {
+    const code = toStringValue(config.code);
+    if (!code.trim()) {
+      setCodeTestError("Code script cannot be empty.");
+      setCodeTestResult(null);
+      return;
+    }
+
+    let parsedInput: Record<string, unknown> = {};
+    try {
+      const raw = codeTestInput.trim();
+      if (raw) {
+        const candidate = JSON.parse(raw);
+        if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+          parsedInput = candidate as Record<string, unknown>;
+        } else {
+          throw new Error("Test input must be a JSON object.");
+        }
+      }
+    } catch (error) {
+      setCodeTestError(error instanceof Error ? error.message : "Test input must be valid JSON.");
+      setCodeTestResult(null);
+      return;
+    }
+
+    try {
+      setCodeTestBusy(true);
+      setCodeTestError(null);
+      const timeout = toNumberValue(config.timeout, 1500);
+      const response = await testCodeNode({
+        code,
+        timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 1500,
+        input: parsedInput
+      });
+      setCodeTestResult(response);
+    } catch (error) {
+      setCodeTestResult(null);
+      setCodeTestError(error instanceof Error ? error.message : "Code node test failed.");
+    } finally {
+      setCodeTestBusy(false);
+    }
+  }, [codeTestInput, config.code, config.timeout]);
 
   const renderProviderSection = () => {
     return (
@@ -887,6 +938,50 @@ export function NodeConfigModal({
     );
   };
 
+  const renderCodeNodeParameters = () => {
+    return (
+      <>
+        <label className="cfg-field">
+          <span>JavaScript Code</span>
+          <textarea
+            className="cfg-code-editor"
+            value={toStringValue(config.code)}
+            onChange={(event) => setConfig((current) => ({ ...current, code: event.target.value }))}
+            rows={12}
+            spellCheck={false}
+          />
+        </label>
+
+        <NumberField
+          label="Timeout (ms)"
+          value={toNumberValue(config.timeout, 1500)}
+          min={1}
+          step={100}
+          onChange={(next) => setConfig((current) => ({ ...current, timeout: next }))}
+        />
+
+        <label className="cfg-field">
+          <span>Test Input (JSON Object)</span>
+          <textarea
+            className="cfg-code-editor cfg-code-editor-secondary"
+            value={codeTestInput}
+            onChange={(event) => setCodeTestInput(event.target.value)}
+            rows={7}
+            spellCheck={false}
+          />
+        </label>
+
+        <div className="cfg-inline-actions">
+          <button type="button" className="node-btn" onClick={() => void handleCodeNodeTestRun()} disabled={codeTestBusy}>
+            {codeTestBusy ? "Testing..." : "Test Run"}
+          </button>
+          {codeTestResult && <span className="muted">Test completed. Inspect output panel for logs/result.</span>}
+        </div>
+        {codeTestError && <div className="error-banner">{codeTestError}</div>}
+      </>
+    );
+  };
+
   const renderWebhookParameters = () => {
     const pathValue = toStringValue(config.path, node.id);
     const normalizedPath = pathValue.trim().replace(/^\/+/, "").replace(/\/+$/, "") || node.id;
@@ -1102,6 +1197,8 @@ export function NodeConfigModal({
         return renderLlmParameters();
       case "prompt_template":
         return renderPromptTemplateParameters();
+      case "code_node":
+        return renderCodeNodeParameters();
       case "connector_source":
         return renderConnectorParameters();
       case "text_input":
@@ -1493,7 +1590,26 @@ export function NodeConfigModal({
 
           <section className="node-modal-panel">
             <h3>OUTPUT</h3>
-            <div className="node-modal-placeholder">Output appears after executing this step.</div>
+            {node.data.nodeType === "code_node" && codeTestResult ? (
+              <div className="cfg-group">
+                <TextAreaField
+                  label="Result"
+                  value={JSON.stringify(codeTestResult.result, null, 2)}
+                  onChange={() => undefined}
+                  rows={8}
+                  readOnly
+                />
+                <TextAreaField
+                  label="Console Logs"
+                  value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
+                  onChange={() => undefined}
+                  rows={6}
+                  readOnly
+                />
+              </div>
+            ) : (
+              <div className="node-modal-placeholder">Output appears after executing this step.</div>
+            )}
           </section>
         </div>
 

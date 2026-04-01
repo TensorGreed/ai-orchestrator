@@ -15,6 +15,7 @@ export type WorkflowNodeType =
   | "text_input"
   | "system_prompt"
   | "user_prompt"
+  | "code_node"
   | "prompt_template"
   | "llm_call"
   | "agent_orchestrator"
@@ -293,6 +294,7 @@ export interface AgentRunState {
 export interface WorkflowExecuteRequest {
   workflowId?: string;
   sessionId?: string;
+  session_id?: string;
   system_prompt?: string;
   user_prompt?: string;
   variables?: Record<string, unknown>;

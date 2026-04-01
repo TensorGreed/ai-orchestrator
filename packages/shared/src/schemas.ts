@@ -22,6 +22,7 @@ export const workflowNodeSchema = z.object({
     "text_input",
     "system_prompt",
     "user_prompt",
+    "code_node",
     "prompt_template",
     "llm_call",
     "agent_orchestrator",
@@ -68,6 +69,7 @@ export const workflowSchema = z.object({
 export const workflowExecuteRequestSchema = z.object({
   workflowId: z.string().optional(),
   sessionId: z.string().optional(),
+  session_id: z.string().optional(),
   system_prompt: z.string().optional(),
   user_prompt: z.string().optional(),
   variables: z.record(z.string(), z.unknown()).optional(),

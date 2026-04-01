@@ -95,8 +95,48 @@ export function TopBar({
         </select>
       </div>
 
+      <div className="header-tabs" role="tablist" aria-label="Studio modes">
+        <button
+          className={activeMode === "editor" ? "tab active" : "tab"}
+          type="button"
+          onClick={() => onModeChange("editor")}
+        >
+          Editor
+        </button>
+        <button
+          className={activeMode === "executions" ? "tab active" : "tab"}
+          type="button"
+          onClick={() => onModeChange("executions")}
+        >
+          Runs
+        </button>
+        <button
+          className={activeMode === "chat" ? "tab active" : "tab"}
+          type="button"
+          onClick={() => onModeChange("chat")}
+        >
+          Chat
+        </button>
+        <button
+          className={activeMode === "evaluations" ? "tab active" : "tab"}
+          type="button"
+          onClick={() => onModeChange("evaluations")}
+        >
+          Eval
+        </button>
+        {canManageSecrets && (
+          <button
+            className={activeMode === "secrets" ? "tab active" : "tab"}
+            type="button"
+            onClick={() => onModeChange("secrets")}
+          >
+            Secrets
+          </button>
+        )}
+      </div>
+
       <div className="header-actions">
-        {(activeMode === "editor" || activeMode === "executions" || activeMode === "evaluations") && (
+        {(activeMode === "editor" || activeMode === "executions" || activeMode === "chat" || activeMode === "evaluations") && (
           <>
             <button className="header-btn" onClick={onSave} disabled={busy}>
               Save

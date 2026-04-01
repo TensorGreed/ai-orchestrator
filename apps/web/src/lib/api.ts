@@ -108,12 +108,180 @@ export async function executeWorkflow(
     system_prompt?: string;
     user_prompt?: string;
     sessionId?: string;
+    session_id?: string;
   }
 ) {
   return apiRequest<WorkflowExecutionResult>(`/api/workflows/${workflowId}/execute`, {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+interface StreamNodeStartEvent {
+  nodeId: string;
+  nodeType: string;
+  startedAt: string;
+}
+
+interface StreamNodeCompleteEvent {
+  nodeId: string;
+  nodeType: string;
+  status: string;
+  completedAt: string;
+  durationMs: number;
+  output?: unknown;
+  error?: string;
+}
+
+interface StreamLlmDeltaEvent {
+  nodeId: string;
+  delta: string;
+  index: number;
+}
+
+interface StreamErrorEvent {
+  message: string;
+}
+
+interface WorkflowExecuteStreamHandlers {
+  onNodeStart?: (event: StreamNodeStartEvent) => void;
+  onNodeComplete?: (event: StreamNodeCompleteEvent) => void;
+  onLlmDelta?: (event: StreamLlmDeltaEvent) => void;
+  onError?: (event: StreamErrorEvent) => void;
+}
+
+function parseSseFrame(frame: string): { event: string; data: string } | null {
+  const lines = frame.split(/\r?\n/);
+  let event = "message";
+  const dataLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim() || "message";
+      continue;
+    }
+
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+
+  if (!dataLines.length) {
+    return null;
+  }
+
+  return {
+    event,
+    data: dataLines.join("\n")
+  };
+}
+
+export async function executeWorkflowStream(
+  workflowId: string,
+  payload: {
+    input?: Record<string, unknown>;
+    variables?: Record<string, unknown>;
+    system_prompt?: string;
+    user_prompt?: string;
+    sessionId?: string;
+    session_id?: string;
+  },
+  handlers: WorkflowExecuteStreamHandlers = {}
+): Promise<WorkflowExecutionResult> {
+  const response = await fetch(`${API_BASE}/api/workflows/${workflowId}/execute/stream`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    let payloadJson: unknown = null;
+    try {
+      payloadJson = await response.json();
+    } catch {
+      payloadJson = null;
+    }
+    const normalized = payloadJson && typeof payloadJson === "object" ? (payloadJson as Record<string, unknown>) : {};
+    throw new ApiError(String(normalized.error ?? "Streaming request failed"), response.status, normalized);
+  }
+
+  if (!response.body) {
+    throw new Error("Streaming response body was empty.");
+  }
+
+  const decoder = new TextDecoder("utf-8");
+  const reader = response.body.getReader();
+  let buffer = "";
+  let finalResult: WorkflowExecutionResult | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+
+    while (true) {
+      const boundary = buffer.indexOf("\n\n");
+      if (boundary < 0) {
+        break;
+      }
+
+      const rawFrame = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const parsedFrame = parseSseFrame(rawFrame);
+      if (!parsedFrame) {
+        continue;
+      }
+
+      let data: unknown = null;
+      try {
+        data = JSON.parse(parsedFrame.data);
+      } catch {
+        data = null;
+      }
+
+      if (parsedFrame.event === "node_start" && data && typeof data === "object") {
+        handlers.onNodeStart?.(data as StreamNodeStartEvent);
+        continue;
+      }
+
+      if (parsedFrame.event === "node_complete" && data && typeof data === "object") {
+        handlers.onNodeComplete?.(data as StreamNodeCompleteEvent);
+        continue;
+      }
+
+      if (parsedFrame.event === "llm_delta" && data && typeof data === "object") {
+        handlers.onLlmDelta?.(data as StreamLlmDeltaEvent);
+        continue;
+      }
+
+      if (parsedFrame.event === "error") {
+        const streamError: StreamErrorEvent = {
+          message:
+            data && typeof data === "object" && typeof (data as Record<string, unknown>).message === "string"
+              ? String((data as Record<string, unknown>).message)
+              : "Streaming request failed"
+        };
+        handlers.onError?.(streamError);
+        continue;
+      }
+
+      if (parsedFrame.event === "result" && data && typeof data === "object") {
+        finalResult = data as WorkflowExecutionResult;
+      }
+    }
+  }
+
+  if (!finalResult) {
+    throw new Error("Streaming request completed without a final result event.");
+  }
+
+  return finalResult;
 }
 
 export async function runWebhook(payload: {
@@ -237,4 +405,18 @@ export async function fetchExecutions(input?: {
 
 export async function fetchExecutionById(id: string) {
   return apiRequest<ExecutionHistoryDetail>(`/api/executions/${id}`);
+}
+
+export async function testCodeNode(payload: {
+  code: string;
+  timeout?: number;
+  input?: Record<string, unknown>;
+}) {
+  return apiRequest<{
+    result: unknown;
+    logs: string[];
+  }>("/api/code-node/test", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:widget": "vite build --mode widget",
     "preview": "vite preview",
     "test": "vitest run --passWithNoTests"
   },

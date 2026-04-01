@@ -90,6 +90,26 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       });
     }
 
+    if (node.type === "code_node") {
+      if (typeof config.code !== "string" || !config.code.trim()) {
+        issues.push({
+          code: "missing_code_node_script",
+          message: "Code Node requires a non-empty code string.",
+          nodeId: node.id
+        });
+      }
+      if (
+        config.timeout !== undefined &&
+        (typeof config.timeout !== "number" || !Number.isFinite(config.timeout) || config.timeout < 1)
+      ) {
+        issues.push({
+          code: "invalid_code_node_timeout",
+          message: "Code Node timeout must be a number >= 1 when provided.",
+          nodeId: node.id
+        });
+      }
+    }
+
     if (node.type === "webhook_input") {
       const path = normalizeWebhookPath(config.path, node.id);
       const methodValue = typeof config.method === "string" ? config.method.trim().toUpperCase() : "POST";
