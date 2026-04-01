@@ -133,6 +133,51 @@ describe("workflow engine", () => {
     expect(result.nodeResults.length).toBe(4);
   });
 
+  it("requires chat_model attachment for agent orchestrator nodes", () => {
+    const workflow: Workflow = {
+      id: "wf-agent-no-model",
+      name: "Agent missing chat model",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "webhook",
+          type: "webhook_input",
+          name: "Webhook",
+          position: { x: 0, y: 0 },
+          config: {}
+        },
+        {
+          id: "agent",
+          type: "agent_orchestrator",
+          name: "Agent",
+          position: { x: 240, y: 0 },
+          config: {
+            systemPromptTemplate: "{{system_prompt}}",
+            userPromptTemplate: "{{user_prompt}}",
+            maxIterations: 4,
+            toolCallingEnabled: true
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 480, y: 0 },
+          config: { responseTemplate: "{{answer}}" }
+        }
+      ],
+      edges: [
+        { id: "e-main-1", source: "webhook", target: "agent" },
+        { id: "e-main-2", source: "agent", target: "output" }
+      ]
+    };
+
+    const validation = validateWorkflowGraph(workflow);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.some((issue) => issue.code === "missing_agent_chat_model")).toBe(true);
+  });
+
   it("round-trips import/export", () => {
     const workflow = basicWorkflow();
     const json = exportWorkflowToJson(workflow);

@@ -7,6 +7,7 @@ interface GraphMetadata {
 }
 
 const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+const allowedWebhookAuthModes = new Set(["none", "bearer_token", "hmac_sha256"]);
 
 function normalizeWebhookPath(value: unknown, fallback: string): string {
   const raw = typeof value === "string" ? value.trim() : "";
@@ -93,6 +94,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       const path = normalizeWebhookPath(config.path, node.id);
       const methodValue = typeof config.method === "string" ? config.method.trim().toUpperCase() : "POST";
       const method = methodValue || "POST";
+      const authMode = typeof config.authMode === "string" ? config.authMode.trim() : "none";
 
       if (!allowedWebhookMethods.has(method)) {
         issues.push({
@@ -121,6 +123,73 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           webhookRoutes.set(routeKey, node.id);
         }
       }
+
+      if (!allowedWebhookAuthModes.has(authMode)) {
+        issues.push({
+          code: "invalid_webhook_auth_mode",
+          message: "Webhook Input node authMode must be one of none, bearer_token, hmac_sha256.",
+          nodeId: node.id
+        });
+      }
+
+      if (authMode === "bearer_token" || authMode === "hmac_sha256") {
+        const secretRef = (config.secretRef ?? {}) as Record<string, unknown>;
+        if (typeof secretRef.secretId !== "string" || !secretRef.secretId.trim()) {
+          issues.push({
+            code: "missing_webhook_auth_secret",
+            message: "Webhook Input node requires secretRef.secretId when authMode is bearer_token or hmac_sha256.",
+            nodeId: node.id
+          });
+        }
+      }
+
+      if (authMode === "bearer_token") {
+        const authHeaderName = typeof config.authHeaderName === "string" ? config.authHeaderName.trim() : "";
+        if (!authHeaderName) {
+          issues.push({
+            code: "missing_webhook_auth_header_name",
+            message: "Webhook Input node requires authHeaderName for bearer_token mode.",
+            nodeId: node.id
+          });
+        }
+      }
+
+      if (authMode === "hmac_sha256") {
+        const signatureHeaderName =
+          typeof config.signatureHeaderName === "string" ? config.signatureHeaderName.trim() : "";
+        const timestampHeaderName =
+          typeof config.timestampHeaderName === "string" ? config.timestampHeaderName.trim() : "";
+        if (!signatureHeaderName || !timestampHeaderName) {
+          issues.push({
+            code: "missing_webhook_signature_headers",
+            message: "Webhook Input node requires signatureHeaderName and timestampHeaderName for hmac_sha256 mode.",
+            nodeId: node.id
+          });
+        }
+
+        if (config.replayToleranceSeconds !== undefined) {
+          const replayTolerance = Number(config.replayToleranceSeconds);
+          if (!Number.isFinite(replayTolerance) || replayTolerance < 1) {
+            issues.push({
+              code: "invalid_webhook_replay_tolerance",
+              message: "Webhook Input node replayToleranceSeconds must be >= 1.",
+              nodeId: node.id
+            });
+          }
+        }
+      }
+
+      if (config.idempotencyEnabled === true) {
+        const idempotencyHeaderName =
+          typeof config.idempotencyHeaderName === "string" ? config.idempotencyHeaderName.trim() : "";
+        if (!idempotencyHeaderName) {
+          issues.push({
+            code: "missing_idempotency_header_name",
+            message: "Webhook Input node requires idempotencyHeaderName when idempotency is enabled.",
+            nodeId: node.id
+          });
+        }
+      }
     }
 
     if (node.type === "llm_call") {
@@ -135,18 +204,14 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     }
 
     if (node.type === "agent_orchestrator") {
-      const provider = config.provider as Record<string, unknown> | undefined;
-      const hasInlineProvider = Boolean(
-        provider && typeof provider.providerId === "string" && typeof provider.model === "string"
-      );
       const hasAttachedChatModel = workflow.edges.some(
         (edge) => edge.source === node.id && edge.sourceHandle === "chat_model"
       );
 
-      if (!hasInlineProvider && !hasAttachedChatModel) {
+      if (!hasAttachedChatModel) {
         issues.push({
-          code: "missing_agent_provider",
-          message: "Agent Orchestrator node requires either inline provider config or an attached Chat Model node.",
+          code: "missing_agent_chat_model",
+          message: "Agent Orchestrator node requires an attached Chat Model node on chat_model.",
           nodeId: node.id
         });
       }

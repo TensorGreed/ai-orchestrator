@@ -11,13 +11,28 @@ export const nodeDefinitions: NodeDefinition[] = [
       properties: {
         path: { type: "string" },
         method: { type: "string", enum: ["POST", "GET", "PUT", "PATCH", "DELETE"] },
-        passThroughFields: { type: "array", items: { type: "string" } }
+        passThroughFields: { type: "array", items: { type: "string" } },
+        authMode: { type: "string", enum: ["none", "bearer_token", "hmac_sha256"] },
+        authHeaderName: { type: "string" },
+        signatureHeaderName: { type: "string" },
+        timestampHeaderName: { type: "string" },
+        secretRef: { type: "object" },
+        replayToleranceSeconds: { type: "number" },
+        idempotencyEnabled: { type: "boolean" },
+        idempotencyHeaderName: { type: "string" }
       }
     },
     sampleConfig: {
       path: "agent-demo",
       method: "POST",
-      passThroughFields: ["system_prompt", "user_prompt", "session_id", "variables"]
+      passThroughFields: ["system_prompt", "user_prompt", "session_id", "variables"],
+      authMode: "none",
+      authHeaderName: "authorization",
+      signatureHeaderName: "x-webhook-signature",
+      timestampHeaderName: "x-webhook-timestamp",
+      replayToleranceSeconds: 300,
+      idempotencyEnabled: false,
+      idempotencyHeaderName: "idempotency-key"
     }
   },
   {
@@ -84,17 +99,15 @@ export const nodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
-        provider: { type: "object" },
         systemPromptTemplate: { type: "string" },
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
         maxIterations: { type: "number" },
         toolCallingEnabled: { type: "boolean" }
       },
-      required: ["provider", "maxIterations"]
+      required: ["maxIterations"]
     },
     sampleConfig: {
-      provider: { providerId: "ollama", model: "qwen2.5:7b", baseUrl: "http://localhost:11434/v1" },
       systemPromptTemplate: "{{system_prompt}}",
       userPromptTemplate: "{{user_prompt}}",
       sessionIdTemplate: "{{session_id}}",

@@ -461,13 +461,9 @@ async function executeNode(
       };
 
       const attachedModelNode = getAttachedNodes("chat_model").find((attached) => attached.type === "llm_call");
-      const attachedProvider = attachedModelNode
-        ? normalizeProvider(toRecord(attachedModelNode.config).provider)
-        : undefined;
-      const inlineProvider = normalizeProvider(config.provider);
-      const provider = attachedProvider ?? inlineProvider;
+      const provider = attachedModelNode ? normalizeProvider(toRecord(attachedModelNode.config).provider) : undefined;
       if (!provider) {
-        throw new Error("Agent Orchestrator requires inline provider config or an attached LLM Call node on chat_model.");
+        throw new Error("Agent Orchestrator requires an attached LLM Call node on chat_model.");
       }
 
       const maxIterations = typeof config.maxIterations === "number" ? Math.max(1, Math.floor(config.maxIterations)) : 4;

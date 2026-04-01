@@ -250,6 +250,61 @@ curl -X POST http://localhost:4000/webhook/agent-demo \
 
 Compatibility endpoint (still supported): `POST /api/webhooks/execute` with `workflow_id`.
 
+### Webhook security modes
+
+Webhook Input node now supports:
+- `none`
+- `bearer_token`
+- `hmac_sha256`
+
+Configure these in the Webhook node modal:
+- auth mode
+- header names
+- secret reference
+- idempotency toggle + header name
+
+#### Postman example: bearer token
+
+Headers:
+- `Authorization: Bearer <token>`
+
+Body:
+
+```json
+{
+  "user_prompt": "hello",
+  "system_prompt": "You are concise."
+}
+```
+
+#### Postman example: HMAC SHA256
+
+Assume:
+- timestamp header: `x-webhook-timestamp`
+- signature header: `x-webhook-signature`
+- signing secret: `<shared_secret>`
+
+Signature formula:
+- `signature = hex(HMAC_SHA256(secret, timestamp + "." + raw_body))`
+
+Headers:
+- `x-webhook-timestamp: <unix_seconds_or_iso>`
+- `x-webhook-signature: <hex_signature>` (or `sha256=<hex_signature>`)
+
+Body (raw JSON):
+
+```json
+{
+  "user_prompt": "hello",
+  "system_prompt": "You are concise."
+}
+```
+
+Replay/idempotency behavior:
+- signed requests require timestamp and are rejected outside tolerance window (default 5 minutes)
+- duplicate signed fingerprint within TTL is rejected as replay (`403`)
+- when idempotency is enabled, repeated `Idempotency-Key` for same endpoint returns cached result instead of re-running
+
 ## Agent loop behavior (Agent Orchestrator node)
 
 1. Resolve system prompt + user prompt templates
@@ -268,7 +323,7 @@ The AI Agent node supports dedicated attachment ports. These are auxiliary edges
 
 - `chat_model` port:
   - attach an `LLM Call` node
-  - its `provider` config is used by the agent runtime (overrides inline agent provider if both are present)
+  - this attachment is required; the agent runtime always uses this node's `provider` config
 - `memory` port:
   - attach a `Simple Memory` node
   - memory persists conversation turns in SQLite by `namespace + session_id`

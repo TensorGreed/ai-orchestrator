@@ -52,6 +52,24 @@ interface SessionRow {
   revoked_at: string | null;
 }
 
+interface WebhookReplayRow {
+  replay_key: string;
+  endpoint_key: string;
+  created_at: string;
+  expires_at: string;
+}
+
+interface WebhookIdempotencyRow {
+  endpoint_key: string;
+  idempotency_key: string;
+  request_hash: string;
+  status: string;
+  result_json: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+}
+
 function toString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
@@ -132,6 +150,31 @@ export class SqliteStore {
         revoked_at TEXT NULL,
         FOREIGN KEY (user_id) REFERENCES users(id)
       );
+
+      CREATE TABLE IF NOT EXISTS webhook_replay_keys (
+        replay_key TEXT PRIMARY KEY,
+        endpoint_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_replay_expires_at
+      ON webhook_replay_keys(expires_at);
+
+      CREATE TABLE IF NOT EXISTS webhook_idempotency (
+        endpoint_key TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        PRIMARY KEY (endpoint_key, idempotency_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_idempotency_expires_at
+      ON webhook_idempotency(expires_at);
     `);
 
     this.persist();
@@ -545,6 +588,114 @@ export class SqliteStore {
       [namespace, sessionId, JSON.stringify(messages), createdAt, now]
     );
 
+    this.persist();
+  }
+
+  clearExpiredWebhookSecurityState(nowIso = new Date().toISOString()): void {
+    this.db.run(`DELETE FROM webhook_replay_keys WHERE expires_at <= ?`, [nowIso]);
+    this.db.run(`DELETE FROM webhook_idempotency WHERE expires_at <= ?`, [nowIso]);
+    this.persist();
+  }
+
+  hasWebhookReplayKey(replayKey: string): boolean {
+    const row = this.queryOne<WebhookReplayRow>(
+      `SELECT replay_key, endpoint_key, created_at, expires_at
+       FROM webhook_replay_keys
+       WHERE replay_key = ?`,
+      [replayKey]
+    );
+    return Boolean(row);
+  }
+
+  saveWebhookReplayKey(input: { replayKey: string; endpointKey: string; expiresAt: string }): void {
+    this.db.run(
+      `INSERT INTO webhook_replay_keys (replay_key, endpoint_key, created_at, expires_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(replay_key) DO NOTHING`,
+      [input.replayKey, input.endpointKey, new Date().toISOString(), input.expiresAt]
+    );
+    this.persist();
+  }
+
+  getWebhookIdempotency(input: { endpointKey: string; idempotencyKey: string }): {
+    endpointKey: string;
+    idempotencyKey: string;
+    requestHash: string;
+    status: string;
+    result: unknown;
+    createdAt: string;
+    updatedAt: string;
+    expiresAt: string;
+  } | null {
+    const row = this.queryOne<WebhookIdempotencyRow>(
+      `SELECT endpoint_key, idempotency_key, request_hash, status, result_json, created_at, updated_at, expires_at
+       FROM webhook_idempotency
+       WHERE endpoint_key = ? AND idempotency_key = ?`,
+      [input.endpointKey, input.idempotencyKey]
+    );
+
+    if (!row) {
+      return null;
+    }
+
+    let parsedResult: unknown = null;
+    if (row.result_json) {
+      try {
+        parsedResult = JSON.parse(toString(row.result_json));
+      } catch {
+        parsedResult = null;
+      }
+    }
+
+    return {
+      endpointKey: toString(row.endpoint_key),
+      idempotencyKey: toString(row.idempotency_key),
+      requestHash: toString(row.request_hash),
+      status: toString(row.status),
+      result: parsedResult,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at),
+      expiresAt: toString(row.expires_at)
+    };
+  }
+
+  saveWebhookIdempotencyPending(input: {
+    endpointKey: string;
+    idempotencyKey: string;
+    requestHash: string;
+    expiresAt: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO webhook_idempotency (
+          endpoint_key,
+          idempotency_key,
+          request_hash,
+          status,
+          result_json,
+          created_at,
+          updated_at,
+          expires_at
+        )
+       VALUES (?, ?, ?, 'pending', NULL, ?, ?, ?)`,
+      [input.endpointKey, input.idempotencyKey, input.requestHash, now, now, input.expiresAt]
+    );
+    this.persist();
+  }
+
+  saveWebhookIdempotencyResult(input: {
+    endpointKey: string;
+    idempotencyKey: string;
+    status: "success" | "error";
+    result: unknown;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `UPDATE webhook_idempotency
+       SET status = ?, result_json = ?, updated_at = ?
+       WHERE endpoint_key = ? AND idempotency_key = ?`,
+      [input.status, JSON.stringify(input.result ?? null), now, input.endpointKey, input.idempotencyKey]
+    );
     this.persist();
   }
 }

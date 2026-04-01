@@ -522,6 +522,43 @@ export default function App() {
     }
   }, [handleApiError, persistWorkflow]);
 
+  useEffect(() => {
+    const handleSaveShortcut = (event: KeyboardEvent) => {
+      const isSaveShortcut = event.key.toLowerCase() === "s" && (event.ctrlKey || event.metaKey);
+      if (!isSaveShortcut) {
+        return;
+      }
+
+      event.preventDefault();
+      if (event.repeat || !authUser || loading || busy) {
+        return;
+      }
+
+      void handleSave();
+    };
+
+    window.addEventListener("keydown", handleSaveShortcut);
+    return () => {
+      window.removeEventListener("keydown", handleSaveShortcut);
+    };
+  }, [authUser, busy, handleSave, loading]);
+
+  useEffect(() => {
+    const handleEscapeToCloseNodeConfig = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !editingNodeId) {
+        return;
+      }
+
+      event.preventDefault();
+      setEditingNodeId(null);
+    };
+
+    window.addEventListener("keydown", handleEscapeToCloseNodeConfig);
+    return () => {
+      window.removeEventListener("keydown", handleEscapeToCloseNodeConfig);
+    };
+  }, [editingNodeId]);
+
   const handleExecute = useCallback(async () => {
     try {
       setBusy(true);

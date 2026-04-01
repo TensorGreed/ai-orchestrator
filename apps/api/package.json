@@ -21,6 +21,7 @@
     "@fastify/cors": "^11.1.0",
     "dotenv": "^17.2.2",
     "fastify": "^5.6.0",
+    "fastify-raw-body": "5.0.0",
     "nanoid": "^5.1.5",
     "sql.js": "^1.13.0",
     "zod": "^4.1.0"

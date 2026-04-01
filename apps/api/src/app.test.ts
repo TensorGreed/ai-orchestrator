@@ -14,6 +14,7 @@ import { SecretService } from "./services/secret-service";
 interface TestContext {
   app: FastifyInstance;
   authService: AuthService;
+  secretService: SecretService;
   config: AppConfig;
   tempDir: string;
 }
@@ -41,6 +42,49 @@ function createValidWorkflow(id: string): Workflow {
   };
 }
 
+function createWebhookWorkflow(
+  id: string,
+  webhookConfig: Record<string, unknown>
+): Workflow {
+  return {
+    id,
+    name: `Webhook ${id}`,
+    schemaVersion: WORKFLOW_SCHEMA_VERSION,
+    workflowVersion: 1,
+    nodes: [
+      {
+        id: "webhook-node",
+        type: "webhook_input",
+        name: "Webhook",
+        position: { x: 40, y: 80 },
+        config: {
+          path: `secure-${id}`,
+          method: "POST",
+          passThroughFields: ["user_prompt", "system_prompt", "session_id", "variables"],
+          ...webhookConfig
+        }
+      },
+      {
+        id: "output-node",
+        type: "output",
+        name: "Output",
+        position: { x: 260, y: 80 },
+        config: {
+          outputKey: "result",
+          responseTemplate: "{{user_prompt}}"
+        }
+      }
+    ],
+    edges: [
+      {
+        id: "edge-webhook-output",
+        source: "webhook-node",
+        target: "output-node"
+      }
+    ]
+  };
+}
+
 function extractCookie(setCookieHeader: string | string[] | undefined, cookieName: string): string {
   const values = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader ?? ""];
   const cookie = values.find((value) => value.startsWith(`${cookieName}=`));
@@ -53,6 +97,25 @@ function extractCookie(setCookieHeader: string | string[] | undefined, cookieNam
     throw new Error(`Cookie '${cookieName}' is malformed`);
   }
   return firstPart;
+}
+
+async function createRoleSession(
+  context: TestContext,
+  input: { email: string; password: string; role: "admin" | "builder" | "operator" | "viewer" }
+): Promise<string> {
+  context.authService.register(input);
+  const login = await context.app.inject({
+    method: "POST",
+    url: "/api/auth/login",
+    payload: {
+      email: input.email,
+      password: input.password
+    }
+  });
+  if (login.statusCode !== 200) {
+    throw new Error(`Unable to login test role '${input.role}': ${login.body}`);
+  }
+  return extractCookie(login.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
 }
 
 async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<TestContext> {
@@ -86,6 +149,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   const context: TestContext = {
     app,
     authService,
+    secretService,
     config,
     tempDir
   };
@@ -321,5 +385,217 @@ describe("auth + rbac API", () => {
       }
     });
     expect(builderCreateAdmin.statusCode).toBe(403);
+  });
+});
+
+describe("secured webhook execution", () => {
+  it("supports bearer token auth and rejects invalid token", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-webhook@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const token = "bearer-secret-token";
+    const secretRef = context.secretService.createSecret({
+      name: "webhook-bearer-token",
+      provider: "webhook",
+      value: token
+    });
+
+    const workflow = createWebhookWorkflow("wf-webhook-bearer", {
+      authMode: "bearer_token",
+      authHeaderName: "authorization",
+      secretRef
+    });
+
+    const saveResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: workflow
+    });
+    expect(saveResponse.statusCode).toBe(200);
+
+    const validResponse = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-bearer",
+      headers: {
+        authorization: `Bearer ${token}`
+      },
+      payload: {
+        user_prompt: "hello bearer"
+      }
+    });
+    expect(validResponse.statusCode).toBe(200);
+    expect(validResponse.json<{ output?: { result?: string } }>().output?.result).toBe("hello bearer");
+
+    const invalidResponse = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-bearer",
+      headers: {
+        authorization: "Bearer wrong-token"
+      },
+      payload: {
+        user_prompt: "hello bearer"
+      }
+    });
+    expect(invalidResponse.statusCode).toBe(401);
+  });
+
+  it("supports hmac auth and rejects invalid signatures and replay", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-hmac@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const hmacSecret = "hmac-shared-key";
+    const secretRef = context.secretService.createSecret({
+      name: "webhook-hmac-key",
+      provider: "webhook",
+      value: hmacSecret
+    });
+
+    const workflow = createWebhookWorkflow("wf-webhook-hmac", {
+      authMode: "hmac_sha256",
+      signatureHeaderName: "x-webhook-signature",
+      timestampHeaderName: "x-webhook-timestamp",
+      replayToleranceSeconds: 300,
+      secretRef
+    });
+
+    const saveResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: workflow
+    });
+    expect(saveResponse.statusCode).toBe(200);
+
+    const rawBody = JSON.stringify({
+      user_prompt: "hello hmac"
+    });
+    const timestamp = `${Math.floor(Date.now() / 1000)}`;
+    const signature = crypto.createHmac("sha256", hmacSecret).update(`${timestamp}.${rawBody}`).digest("hex");
+
+    const success = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-hmac",
+      headers: {
+        "content-type": "application/json",
+        "x-webhook-timestamp": timestamp,
+        "x-webhook-signature": signature
+      },
+      payload: rawBody
+    });
+    expect(success.statusCode).toBe(200);
+
+    const badSignature = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-hmac",
+      headers: {
+        "content-type": "application/json",
+        "x-webhook-timestamp": `${Math.floor(Date.now() / 1000)}`,
+        "x-webhook-signature": "deadbeef"
+      },
+      payload: rawBody
+    });
+    expect(badSignature.statusCode).toBe(403);
+
+    const staleTimestamp = `${Math.floor(Date.now() / 1000) - 3600}`;
+    const staleSignature = crypto.createHmac("sha256", hmacSecret).update(`${staleTimestamp}.${rawBody}`).digest("hex");
+    const staleRequest = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-hmac",
+      headers: {
+        "content-type": "application/json",
+        "x-webhook-timestamp": staleTimestamp,
+        "x-webhook-signature": staleSignature
+      },
+      payload: rawBody
+    });
+    expect(staleRequest.statusCode).toBe(403);
+
+    const replay = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-hmac",
+      headers: {
+        "content-type": "application/json",
+        "x-webhook-timestamp": timestamp,
+        "x-webhook-signature": signature
+      },
+      payload: rawBody
+    });
+    expect(replay.statusCode).toBe(403);
+  });
+
+  it("returns cached result for duplicate idempotency key and 409 for conflicts", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-idempotency@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const workflow = createWebhookWorkflow("wf-webhook-idempotent", {
+      authMode: "none",
+      idempotencyEnabled: true,
+      idempotencyHeaderName: "idempotency-key"
+    });
+
+    const saveResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: workflow
+    });
+    expect(saveResponse.statusCode).toBe(200);
+
+    const first = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-idempotent",
+      headers: {
+        "idempotency-key": "idem-1"
+      },
+      payload: {
+        user_prompt: "first run"
+      }
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json<{ idempotency?: { reused?: boolean } }>().idempotency?.reused).toBe(false);
+
+    const duplicate = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-idempotent",
+      headers: {
+        "idempotency-key": "idem-1"
+      },
+      payload: {
+        user_prompt: "first run"
+      }
+    });
+    expect(duplicate.statusCode).toBe(200);
+    expect(duplicate.json<{ idempotency?: { reused?: boolean } }>().idempotency?.reused).toBe(true);
+
+    const conflicting = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-idempotent",
+      headers: {
+        "idempotency-key": "idem-1"
+      },
+      payload: {
+        user_prompt: "changed payload"
+      }
+    });
+    expect(conflicting.statusCode).toBe(409);
   });
 });

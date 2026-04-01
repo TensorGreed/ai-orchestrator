@@ -395,18 +395,8 @@ export function NodeConfigModal({
     return (
       <>
         <div className="cfg-tip">
-          Tip: Define prompts and attach Chat Model, Memory, and one or more MCP Tool nodes using the dedicated agent ports.
+          Tip: Attach a Chat Model on the <code>chat_model</code> port. Optionally attach Memory and one or more MCP Tool nodes on their dedicated ports.
         </div>
-
-        <SelectField
-          label="Source for Prompt (User Message)"
-          value={toStringValue(config.sourceUserPrompt, "define")}
-          onChange={(next) => setConfig((current) => ({ ...current, sourceUserPrompt: next }))}
-          options={[
-            { value: "define", label: "Define below" },
-            { value: "webhook", label: "From webhook input" }
-          ]}
-        />
 
         <TextAreaField
           label="Prompt (User Message)"
@@ -455,8 +445,6 @@ export function NodeConfigModal({
             onChange={(next) => setConfig((current) => ({ ...current, toolCallingEnabled: next }))}
           />
         </div>
-
-        {renderProviderSection()}
       </>
     );
   };
@@ -774,6 +762,14 @@ export function NodeConfigModal({
     const pathValue = toStringValue(config.path, node.id);
     const normalizedPath = pathValue.trim().replace(/^\/+/, "").replace(/\/+$/, "") || node.id;
     const method = toStringValue(config.method, "POST").trim().toUpperCase() || "POST";
+    const authMode = toStringValue(config.authMode, "none");
+    const authHeaderName = toStringValue(config.authHeaderName, "authorization");
+    const signatureHeaderName = toStringValue(config.signatureHeaderName, "x-webhook-signature");
+    const timestampHeaderName = toStringValue(config.timestampHeaderName, "x-webhook-timestamp");
+    const replayToleranceSeconds = toNumberValue(config.replayToleranceSeconds, 300);
+    const secretId = toStringValue(asRecord(config.secretRef).secretId);
+    const idempotencyEnabled = toBooleanValue(config.idempotencyEnabled, false);
+    const idempotencyHeaderName = toStringValue(config.idempotencyHeaderName, "idempotency-key");
     const passThroughCsv = Array.isArray(config.passThroughFields)
       ? config.passThroughFields.map((item) => String(item)).join(",")
       : "system_prompt,user_prompt,session_id,variables";
@@ -815,6 +811,89 @@ export function NodeConfigModal({
           }
         />
 
+        <SelectField
+          label="Auth Mode"
+          value={authMode}
+          onChange={(next) => setConfig((current) => ({ ...current, authMode: next }))}
+          options={[
+            { value: "none", label: "None" },
+            { value: "bearer_token", label: "Bearer Token" },
+            { value: "hmac_sha256", label: "HMAC SHA256" }
+          ]}
+        />
+
+        {authMode === "bearer_token" && (
+          <>
+            <TextField
+              label="Auth Header Name"
+              value={authHeaderName}
+              onChange={(next) => setConfig((current) => ({ ...current, authHeaderName: next }))}
+              placeholder="authorization"
+            />
+            <SelectField
+              label="Token Secret"
+              value={secretId}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+              }
+              options={[{ value: "", label: "Select secret" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
+            />
+          </>
+        )}
+
+        {authMode === "hmac_sha256" && (
+          <>
+            <TextField
+              label="Signature Header"
+              value={signatureHeaderName}
+              onChange={(next) => setConfig((current) => ({ ...current, signatureHeaderName: next }))}
+              placeholder="x-webhook-signature"
+            />
+            <TextField
+              label="Timestamp Header"
+              value={timestampHeaderName}
+              onChange={(next) => setConfig((current) => ({ ...current, timestampHeaderName: next }))}
+              placeholder="x-webhook-timestamp"
+            />
+            <NumberField
+              label="Replay Tolerance (seconds)"
+              value={replayToleranceSeconds}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, replayToleranceSeconds: next }))}
+            />
+            <SelectField
+              label="HMAC Secret"
+              value={secretId}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+              }
+              options={[{ value: "", label: "Select secret" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
+            />
+          </>
+        )}
+
+        <ToggleField
+          label="Idempotency Enabled"
+          checked={idempotencyEnabled}
+          onChange={(next) => setConfig((current) => ({ ...current, idempotencyEnabled: next }))}
+        />
+
+        {idempotencyEnabled && (
+          <TextField
+            label="Idempotency Header"
+            value={idempotencyHeaderName}
+            onChange={(next) => setConfig((current) => ({ ...current, idempotencyHeaderName: next }))}
+            placeholder="idempotency-key"
+          />
+        )}
+
         <div className="cfg-tip">
           <div>
             <strong>Test URL</strong>
@@ -829,6 +908,22 @@ export function NodeConfigModal({
         <div className="cfg-tip">
           Send JSON body with at least <code>user_prompt</code> (or <code>prompt</code>). Optional:
           <code>system_prompt</code>, <code>session_id</code>, <code>variables</code>.
+          {authMode === "bearer_token" ? (
+            <div style={{ marginTop: "6px" }}>
+              Include header <code>{authHeaderName || "authorization"}</code> with your token value.
+            </div>
+          ) : null}
+          {authMode === "hmac_sha256" ? (
+            <div style={{ marginTop: "6px" }}>
+              Include <code>{timestampHeaderName || "x-webhook-timestamp"}</code> and <code>{signatureHeaderName || "x-webhook-signature"}</code> where signature is HMAC-SHA256 of
+              <code>timestamp.raw_body</code>.
+            </div>
+          ) : null}
+          {idempotencyEnabled ? (
+            <div style={{ marginTop: "6px" }}>
+              Include <code>{idempotencyHeaderName || "idempotency-key"}</code> to dedupe retries safely.
+            </div>
+          ) : null}
         </div>
       </>
     );
@@ -942,6 +1037,15 @@ export function NodeConfigModal({
     );
   };
 
+  const getConfigForSave = () => {
+    const nextConfig: Record<string, unknown> = { ...config };
+    if (node.data.nodeType === "agent_orchestrator") {
+      delete nextConfig.provider;
+      delete nextConfig.sourceUserPrompt;
+    }
+    return nextConfig;
+  };
+
   return (
     <div className="node-modal-backdrop" role="dialog" aria-modal="true">
       <div className="node-modal-shell">
@@ -1017,7 +1121,7 @@ export function NodeConfigModal({
           <button
             type="button"
             className="node-btn primary"
-            onClick={() => onSave({ label, config })}
+            onClick={() => onSave({ label, config: getConfigForSave() })}
           >
             Save changes
           </button>
