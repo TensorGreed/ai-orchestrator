@@ -55,9 +55,23 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
   const variant = nodeVariant(data.nodeType);
   const badge = nodeToken(data.nodeType);
   const subtitle = toTitle(data.nodeType);
+  const currentStatus = data.executionStatus;
+  const showSuccessBadge = currentStatus === "success";
+  const showRunningBadge = currentStatus === "running";
 
   return (
     <div className={`wf-node wf-node-${variant} ${statusClass(data.executionStatus)} ${selected ? "selected" : ""}`}>
+      {showSuccessBadge && (
+        <span className="wf-node-status-badge wf-node-status-success" title="Completed" aria-label="Completed">
+          ✓
+        </span>
+      )}
+      {showRunningBadge && (
+        <span className="wf-node-status-badge wf-node-status-running" title="Running" aria-label="Running">
+          ●
+        </span>
+      )}
+
       {variant === "agent" ? (
         <>
           <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />

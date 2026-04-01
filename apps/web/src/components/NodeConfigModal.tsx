@@ -492,7 +492,26 @@ export function NodeConfigModal({
     const authType = toStringValue(connection.authType, "none");
     const selectedToolName = toStringValue(config.toolName).trim();
     const includeAllDiscoveredTools = selectedToolName === "__all__";
-    const selectedTool = discoveredToolByName.get(selectedToolName);
+    const normalizedAllowedTools = Array.isArray(config.allowedTools)
+      ? Array.from(
+          new Set(
+            config.allowedTools
+              .map((tool) => String(tool ?? "").trim())
+              .filter((toolName) => toolName.length > 0)
+          )
+        )
+      : [];
+    const selectedToolNames = includeAllDiscoveredTools
+      ? []
+      : normalizedAllowedTools.length
+        ? normalizedAllowedTools
+        : selectedToolName
+          ? [selectedToolName]
+          : [];
+    const selectedToolNameSet = new Set(selectedToolNames);
+    const toolSelectionMode = includeAllDiscoveredTools ? "all" : selectedToolNames.length > 1 ? "multi" : "single";
+    const primarySelectedToolName = selectedToolNames[0] ?? "";
+    const selectedTool = primarySelectedToolName ? discoveredToolByName.get(primarySelectedToolName) : undefined;
 
     return (
       <>
@@ -637,7 +656,7 @@ export function NodeConfigModal({
 
         <SelectField
           label="Tools To Include"
-          value={includeAllDiscoveredTools ? "all" : "single"}
+          value={toolSelectionMode}
           onChange={(next) =>
             setConfig((current) => {
               if (next === "all") {
@@ -648,9 +667,33 @@ export function NodeConfigModal({
                 };
               }
 
+              const existingAllowedTools = Array.isArray(current.allowedTools)
+                ? Array.from(
+                    new Set(
+                      current.allowedTools
+                        .map((tool) => String(tool ?? "").trim())
+                        .filter((toolName) => toolName.length > 0)
+                    )
+                  )
+                : [];
               const currentToolName = toStringValue(current.toolName).trim();
-              const resolvedSingleTool =
-                currentToolName && currentToolName !== "__all__" ? currentToolName : (discoveredTools[0]?.name ?? "");
+              const fallbackSelection =
+                existingAllowedTools.length > 0
+                  ? existingAllowedTools
+                  : currentToolName && currentToolName !== "__all__"
+                    ? [currentToolName]
+                    : discoveredTools.slice(0, 2).map((tool) => tool.name);
+
+              if (next === "multi") {
+                const uniqueSelection = Array.from(new Set(fallbackSelection.filter((toolName) => toolName.length > 0)));
+                return {
+                  ...current,
+                  toolName: uniqueSelection[0] ?? "",
+                  allowedTools: uniqueSelection.length ? uniqueSelection : undefined
+                };
+              }
+
+              const resolvedSingleTool = fallbackSelection[0] ?? discoveredTools[0]?.name ?? "";
 
               return {
                 ...current,
@@ -661,7 +704,8 @@ export function NodeConfigModal({
           }
           options={[
             { value: "all", label: "All discovered tools (agent decides)" },
-            { value: "single", label: "Single tool only" }
+            { value: "single", label: "Single tool only" },
+            { value: "multi", label: "Select multiple tools" }
           ]}
         />
 
@@ -671,10 +715,10 @@ export function NodeConfigModal({
               ? `Agent can call any of: ${discoveredTools.map((tool) => tool.name).join(", ")}`
               : "Discover tools first to preview what will be exposed to the agent."}
           </div>
-        ) : discoveredTools.length > 0 ? (
+        ) : toolSelectionMode === "single" && discoveredTools.length > 0 ? (
           <SelectField
             label="Tool Name"
-            value={selectedToolName || discoveredTools[0]?.name || ""}
+            value={primarySelectedToolName || discoveredTools[0]?.name || ""}
             onChange={(next) =>
               setConfig((current) => ({
                 ...current,
@@ -684,7 +728,7 @@ export function NodeConfigModal({
             }
             options={discoveredTools.map((tool) => ({ value: tool.name, label: tool.name }))}
           />
-        ) : (
+        ) : toolSelectionMode === "single" ? (
           <TextField
             label="Tool Name"
             value={toStringValue(config.toolName)}
@@ -696,9 +740,91 @@ export function NodeConfigModal({
               }))
             }
           />
+        ) : discoveredTools.length > 0 ? (
+          <>
+            <div className="cfg-field">
+              <span>Select Tools</span>
+              <details className="cfg-multi-select">
+                <summary>
+                  {selectedToolNames.length
+                    ? `${selectedToolNames.length} selected`
+                    : "Choose one or more discovered tools"}
+                </summary>
+                <div className="cfg-multi-select-menu">
+                  {discoveredTools.map((tool) => (
+                    <label key={tool.name} className="cfg-multi-option">
+                      <input
+                        type="checkbox"
+                        checked={selectedToolNameSet.has(tool.name)}
+                        onChange={(event) => {
+                          const checked = event.target.checked;
+                          setConfig((current) => {
+                            const currentToolName = toStringValue(current.toolName).trim();
+                            const currentAllowed = Array.isArray(current.allowedTools)
+                              ? Array.from(
+                                  new Set(
+                                    current.allowedTools
+                                      .map((entry) => String(entry ?? "").trim())
+                                      .filter((entryName) => entryName.length > 0)
+                                  )
+                                )
+                              : currentToolName && currentToolName !== "__all__"
+                                ? [currentToolName]
+                                : [];
+                            const nextSet = new Set(currentAllowed);
+                            if (checked) {
+                              nextSet.add(tool.name);
+                            } else {
+                              nextSet.delete(tool.name);
+                            }
+                            const nextAllowed = discoveredTools
+                              .map((entry) => entry.name)
+                              .filter((entryName) => nextSet.has(entryName));
+                            return {
+                              ...current,
+                              toolName: nextAllowed[0] ?? "",
+                              allowedTools: nextAllowed.length ? nextAllowed : undefined
+                            };
+                          });
+                        }}
+                      />
+                      <span>{tool.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </details>
+            </div>
+            <div className="cfg-tip">
+              {selectedToolNames.length
+                ? `Agent can call selected tools: ${selectedToolNames.join(", ")}`
+                : "No tools selected yet. Pick one or more tools from the dropdown."}
+            </div>
+          </>
+        ) : (
+          <TextField
+            label="Selected Tools (comma-separated)"
+            value={selectedToolNames.join(",")}
+            onChange={(next) =>
+              setConfig((current) => {
+                const parsed = Array.from(
+                  new Set(
+                    next
+                      .split(",")
+                      .map((tool) => tool.trim())
+                      .filter((tool) => tool.length > 0)
+                  )
+                );
+                return {
+                  ...current,
+                  toolName: parsed[0] ?? "",
+                  allowedTools: parsed.length ? parsed : undefined
+                };
+              })
+            }
+          />
         )}
 
-        {selectedTool && (
+        {toolSelectionMode === "single" && selectedTool && (
           <div className="cfg-group">
             <h4>Discovered Tool Metadata</h4>
             <div className="cfg-tip">{selectedTool.description || "No description provided."}</div>

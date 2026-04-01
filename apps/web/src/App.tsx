@@ -1,5 +1,5 @@
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -77,6 +77,9 @@ const statusColors: Record<string, string> = {
 const auxiliaryHandles = new Set(["chat_model", "memory", "tool"]);
 const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
 const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
+const DEFAULT_LOGS_PANEL_HEIGHT = 210;
+const MIN_LOGS_PANEL_HEIGHT = 140;
+const MAX_LOGS_PANEL_HEIGHT = 620;
 
 function stringifyPretty(value: unknown) {
   return JSON.stringify(value, null, 2);
@@ -159,6 +162,101 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
   };
 }
 
+function isExecutionEdgeForVisual(edge: Edge): boolean {
+  return !(
+    (edge.sourceHandle && auxiliaryHandles.has(edge.sourceHandle)) ||
+    (edge.targetHandle && auxiliaryHandles.has(edge.targetHandle)) ||
+    edge.sourceHandle?.startsWith("aux") ||
+    edge.targetHandle?.startsWith("aux")
+  );
+}
+
+function computeExecutionOrderForVisual(nodes: EditorNode[], edges: Edge[]): string[] {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const incomingExecution = new Map<string, number>();
+  const outgoingExecution = new Map<string, string[]>();
+  const incomingAttachment = new Map<string, number>();
+  const outgoingExecutionCount = new Map<string, number>();
+
+  for (const node of nodes) {
+    incomingExecution.set(node.id, 0);
+    outgoingExecution.set(node.id, []);
+    incomingAttachment.set(node.id, 0);
+    outgoingExecutionCount.set(node.id, 0);
+  }
+
+  for (const edge of edges) {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) {
+      continue;
+    }
+
+    if (!isExecutionEdgeForVisual(edge)) {
+      incomingAttachment.set(edge.target, (incomingAttachment.get(edge.target) ?? 0) + 1);
+      continue;
+    }
+
+    incomingExecution.set(edge.target, (incomingExecution.get(edge.target) ?? 0) + 1);
+    outgoingExecutionCount.set(edge.source, (outgoingExecutionCount.get(edge.source) ?? 0) + 1);
+    const currentTargets = outgoingExecution.get(edge.source) ?? [];
+    currentTargets.push(edge.target);
+    outgoingExecution.set(edge.source, currentTargets);
+  }
+
+  const attachmentOnlyNodeIds = new Set(
+    nodes
+      .filter((node) => {
+        const incomingAttach = incomingAttachment.get(node.id) ?? 0;
+        const incomingExec = incomingExecution.get(node.id) ?? 0;
+        const outgoingExec = outgoingExecutionCount.get(node.id) ?? 0;
+        return incomingAttach > 0 && incomingExec === 0 && outgoingExec === 0;
+      })
+      .map((node) => node.id)
+  );
+
+  const filteredNodeIds = nodes
+    .map((node) => node.id)
+    .filter((nodeId) => !attachmentOnlyNodeIds.has(nodeId));
+
+  const filteredSet = new Set(filteredNodeIds);
+  const filteredInDegree = new Map<string, number>();
+  const filteredOutgoing = new Map<string, string[]>();
+  for (const nodeId of filteredNodeIds) {
+    filteredInDegree.set(nodeId, 0);
+    filteredOutgoing.set(nodeId, []);
+  }
+
+  for (const edge of edges) {
+    if (!isExecutionEdgeForVisual(edge) || !filteredSet.has(edge.source) || !filteredSet.has(edge.target)) {
+      continue;
+    }
+
+    filteredInDegree.set(edge.target, (filteredInDegree.get(edge.target) ?? 0) + 1);
+    const targets = filteredOutgoing.get(edge.source) ?? [];
+    targets.push(edge.target);
+    filteredOutgoing.set(edge.source, targets);
+  }
+
+  const queue = filteredNodeIds.filter((nodeId) => (filteredInDegree.get(nodeId) ?? 0) === 0);
+  const order: string[] = [];
+  while (queue.length > 0) {
+    const nodeId = queue.shift()!;
+    order.push(nodeId);
+    for (const targetId of filteredOutgoing.get(nodeId) ?? []) {
+      const nextDegree = (filteredInDegree.get(targetId) ?? 0) - 1;
+      filteredInDegree.set(targetId, nextDegree);
+      if (nextDegree === 0) {
+        queue.push(targetId);
+      }
+    }
+  }
+
+  if (order.length !== filteredNodeIds.length) {
+    return filteredNodeIds;
+  }
+
+  return order;
+}
+
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -210,8 +308,12 @@ export default function App() {
   const [activeMode, setActiveMode] = useState<StudioMode>("editor");
   const [logsTab, setLogsTab] = useState<LogsTab>("logs");
   const [isLogsPanelCollapsed, setIsLogsPanelCollapsed] = useState(false);
+  const [logsPanelHeight, setLogsPanelHeight] = useState(DEFAULT_LOGS_PANEL_HEIGHT);
+  const [visualRunOrder, setVisualRunOrder] = useState<string[]>([]);
+  const [visualRunActiveIndex, setVisualRunActiveIndex] = useState<number | null>(null);
 
   const flowWrapperRef = useRef<HTMLDivElement>(null);
+  const logsResizeAbortRef = useRef<AbortController | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
 
@@ -255,9 +357,56 @@ export default function App() {
     return grouped;
   }, [definitions]);
 
-  const executionStatuses = useMemo(() => getNodeStatusMap(executionResult), [executionResult]);
+  const executionStatuses = useMemo(() => {
+    const resultStatuses = getNodeStatusMap(executionResult);
+    if (resultStatuses.size > 0) {
+      return resultStatuses;
+    }
+
+    if (visualRunActiveIndex === null || visualRunOrder.length === 0) {
+      return resultStatuses;
+    }
+
+    const simulated = new Map<string, string>();
+    for (let index = 0; index < visualRunOrder.length; index += 1) {
+      const nodeId = visualRunOrder[index];
+      if (index < visualRunActiveIndex) {
+        simulated.set(nodeId, "success");
+      } else if (index === visualRunActiveIndex) {
+        simulated.set(nodeId, "running");
+      } else {
+        simulated.set(nodeId, "pending");
+      }
+    }
+
+    return simulated;
+  }, [executionResult, visualRunActiveIndex, visualRunOrder]);
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
+  const canvasAndLogsStyle = useMemo(
+    () => ({
+      gridTemplateRows: isLogsPanelCollapsed
+        ? "minmax(280px, 1fr) 0px 46px"
+        : `minmax(280px, 1fr) 8px ${logsPanelHeight}px`
+    }),
+    [isLogsPanelCollapsed, logsPanelHeight]
+  );
+
+  const startVisualRun = useCallback(() => {
+    const order = computeExecutionOrderForVisual(nodes as EditorNode[], edges as Edge[]);
+    if (!order.length) {
+      setVisualRunOrder([]);
+      setVisualRunActiveIndex(null);
+      return;
+    }
+    setVisualRunOrder(order);
+    setVisualRunActiveIndex(0);
+  }, [edges, nodes]);
+
+  const stopVisualRun = useCallback(() => {
+    setVisualRunOrder([]);
+    setVisualRunActiveIndex(null);
+  }, []);
 
   useEffect(() => {
     setNodes((currentNodes) =>
@@ -274,6 +423,25 @@ export default function App() {
   useEffect(() => {
     setEdges((currentEdges) => currentEdges.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
   }, [nodes, setEdges]);
+
+  useEffect(() => {
+    if (visualRunActiveIndex === null || visualRunOrder.length === 0) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setVisualRunActiveIndex((current) => {
+        if (current === null) {
+          return current;
+        }
+        return Math.min(current + 1, visualRunOrder.length - 1);
+      });
+    }, 850);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [visualRunActiveIndex, visualRunOrder.length]);
 
   useEffect(() => {
     if (!editingNodeId) {
@@ -363,6 +531,8 @@ export default function App() {
       setNodes(editor.nodes as EditorNode[]);
       setEdges(decoratedEdges);
       setExecutionResult(null);
+      setVisualRunOrder([]);
+      setVisualRunActiveIndex(null);
       setEditingNodeId(null);
     },
     [setEdges, setNodes]
@@ -559,10 +729,57 @@ export default function App() {
     };
   }, [editingNodeId]);
 
+  const handleLogsResizeStart = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (isLogsPanelCollapsed) {
+        return;
+      }
+
+      event.preventDefault();
+      const startY = event.clientY;
+      const startHeight = logsPanelHeight;
+      logsResizeAbortRef.current?.abort();
+      const controller = new AbortController();
+      logsResizeAbortRef.current = controller;
+      document.body.classList.add("resizing-logs");
+      const handleMouseMove = (moveEvent: MouseEvent) => {
+        const delta = startY - moveEvent.clientY;
+        const viewportBoundedMax = Math.max(
+          MIN_LOGS_PANEL_HEIGHT,
+          Math.min(MAX_LOGS_PANEL_HEIGHT, Math.floor(window.innerHeight * 0.75))
+        );
+        const nextHeight = Math.max(MIN_LOGS_PANEL_HEIGHT, Math.min(viewportBoundedMax, startHeight + delta));
+        setLogsPanelHeight(nextHeight);
+      };
+
+      const handleMouseUp = () => {
+        controller.abort();
+        if (logsResizeAbortRef.current === controller) {
+          logsResizeAbortRef.current = null;
+        }
+        document.body.classList.remove("resizing-logs");
+      };
+
+      window.addEventListener("mousemove", handleMouseMove, { signal: controller.signal });
+      window.addEventListener("mouseup", handleMouseUp, { signal: controller.signal });
+    },
+    [isLogsPanelCollapsed, logsPanelHeight]
+  );
+
+  useEffect(() => {
+    return () => {
+      logsResizeAbortRef.current?.abort();
+      logsResizeAbortRef.current = null;
+      document.body.classList.remove("resizing-logs");
+    };
+  }, []);
+
   const handleExecute = useCallback(async () => {
     try {
       setBusy(true);
       setError(null);
+      setExecutionResult(null);
+      startVisualRun();
       const saved = await persistWorkflow();
       const result = await executeWorkflow(saved.id, {
         system_prompt: systemPrompt,
@@ -578,14 +795,17 @@ export default function App() {
       setLogsTab("logs");
       setActiveMode("editor");
     } finally {
+      stopVisualRun();
       setBusy(false);
     }
-  }, [currentWorkflow.id, handleApiError, persistWorkflow, sessionId, systemPrompt, userPrompt]);
+  }, [currentWorkflow.id, handleApiError, persistWorkflow, sessionId, startVisualRun, stopVisualRun, systemPrompt, userPrompt]);
 
   const handleWebhookExecute = useCallback(async () => {
     try {
       setBusy(true);
       setError(null);
+      setExecutionResult(null);
+      startVisualRun();
       const saved = await persistWorkflow();
       const result = await runWebhook({
         workflow_id: saved.id,
@@ -602,9 +822,10 @@ export default function App() {
       setLogsTab("logs");
       setActiveMode("editor");
     } finally {
+      stopVisualRun();
       setBusy(false);
     }
-  }, [currentWorkflow.id, handleApiError, persistWorkflow, sessionId, systemPrompt, userPrompt]);
+  }, [currentWorkflow.id, handleApiError, persistWorkflow, sessionId, startVisualRun, stopVisualRun, systemPrompt, userPrompt]);
 
   const handleExport = useCallback(() => {
     const workflow = buildCurrentWorkflow();
@@ -871,6 +1092,7 @@ export default function App() {
     setMcpServerDefinitions([]);
     setSecrets([]);
     setExecutionResult(null);
+    stopVisualRun();
     setNodes([]);
     setEdges([]);
     setEditingNodeId(null);
@@ -878,7 +1100,7 @@ export default function App() {
     setLoading(false);
     setError(null);
     setSecretMessage(null);
-  }, [setEdges, setNodes]);
+  }, [setEdges, setNodes, stopVisualRun]);
 
   if (authChecking) {
     return <div className="loading-screen">Checking session...</div>;
@@ -967,7 +1189,10 @@ export default function App() {
 
           {activeMode === "editor" && (
             <div className="editor-layout">
-              <section className={isLogsPanelCollapsed ? "canvas-and-logs logs-collapsed" : "canvas-and-logs"}>
+              <section
+                className={isLogsPanelCollapsed ? "canvas-and-logs logs-collapsed" : "canvas-and-logs"}
+                style={canvasAndLogsStyle}
+              >
                 <div className="canvas-pane" ref={flowWrapperRef} onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
                   {showNodeDrawer && (
                     <div className="node-drawer">
@@ -1061,6 +1286,14 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+
+                <div
+                  className={isLogsPanelCollapsed ? "logs-resize-handle disabled" : "logs-resize-handle"}
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label="Resize logs panel"
+                  onMouseDown={handleLogsResizeStart}
+                />
 
                 <div className="logs-pane">
                   <div className="logs-header">
