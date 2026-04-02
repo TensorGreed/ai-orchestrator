@@ -916,13 +916,20 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       return;
     }
 
-    const deleted = store.deleteWorkflow(request.params.id);
-    if (!deleted) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    try {
+      const deleted = store.deleteWorkflow(request.params.id);
+      if (!deleted) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
 
-    return { ok: true };
+      return { ok: true };
+    } catch (error) {
+      reply.code(400);
+      return {
+        error: error instanceof Error ? error.message : "Failed to delete workflow"
+      };
+    }
   });
 
   app.post<{ Body: unknown }>("/api/workflows/import", async (request, reply) => {

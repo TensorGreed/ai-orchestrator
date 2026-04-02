@@ -386,6 +386,39 @@ describe("auth + rbac API", () => {
     });
     expect(builderCreateAdmin.statusCode).toBe(403);
   });
+
+  it("allows builder to delete a workflow and returns 404 for repeat delete", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-delete@example.com",
+      password: "BuilderDelete123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-delete-target";
+    const createResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie: builderCookie },
+      payload: createValidWorkflow(workflowId)
+    });
+    expect(createResponse.statusCode).toBe(200);
+
+    const deleteResponse = await context.app.inject({
+      method: "DELETE",
+      url: `/api/workflows/${workflowId}`,
+      headers: { cookie: builderCookie }
+    });
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleteResponse.json<{ ok: boolean }>().ok).toBe(true);
+
+    const secondDeleteResponse = await context.app.inject({
+      method: "DELETE",
+      url: `/api/workflows/${workflowId}`,
+      headers: { cookie: builderCookie }
+    });
+    expect(secondDeleteResponse.statusCode).toBe(404);
+  });
 });
 
 describe("secured webhook execution", () => {

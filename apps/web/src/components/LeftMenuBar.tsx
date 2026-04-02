@@ -11,6 +11,14 @@ export function LeftMenuBar({ activeMode, canManageSecrets, onModeChange }: Left
     <aside className="app-rail">
       <button
         className="rail-btn"
+        onClick={() => onModeChange("dashboard")}
+        title="Dashboard"
+        aria-pressed={activeMode === "dashboard"}
+      >
+        Home
+      </button>
+      <button
+        className="rail-btn"
         onClick={() => onModeChange("editor")}
         title="Editor"
         aria-pressed={activeMode === "editor"}

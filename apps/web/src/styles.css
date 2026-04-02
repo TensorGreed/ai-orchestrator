@@ -75,6 +75,19 @@ select {
   font-size: 1.5rem;
 }
 
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-brand-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
 .auth-card p {
   margin: 0 0 6px;
   color: #667287;
@@ -154,10 +167,40 @@ select {
   min-width: 0;
 }
 
-.crumbs {
-  color: var(--muted);
+.brand-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 8px;
+  margin-right: 4px;
+  border-right: 1px solid #e2e6f0;
+  min-width: max-content;
+}
+
+.brand-badge-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.brand-badge-copy {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.05;
+  color: #2d3a51;
+}
+
+.brand-badge-copy strong {
   font-size: 0.92rem;
-  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.brand-badge-copy span {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #7a8498;
 }
 
 .workflow-name-input {
@@ -189,6 +232,7 @@ select {
   align-items: center;
   justify-content: center;
   gap: 6px;
+  flex-wrap: wrap;
   padding: 4px;
   background: #f2f4f8;
   border: 1px solid #e4e8f2;
@@ -303,6 +347,16 @@ select {
 .header-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.header-btn.danger {
+  border-color: #efc7c7;
+  color: #a13d3d;
+  background: #fff8f8;
+}
+
+.header-btn.danger:hover {
+  border-color: #e6b4b4;
 }
 
 .main-content {
@@ -839,6 +893,112 @@ select {
 
 .placeholder-pane h2 {
   margin-top: 0;
+}
+
+.dashboard-pane {
+  margin: 14px;
+  border: 1px solid #dbe2ef;
+  border-radius: 12px;
+  background: #fff;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.dashboard-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.dashboard-header-row h2 {
+  margin: 0;
+}
+
+.dashboard-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.dashboard-toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.dashboard-search {
+  min-width: min(460px, 100%);
+  border: 1px solid #d4dbe8;
+  border-radius: 8px;
+  background: #fff;
+  color: #2a3650;
+  padding: 8px 10px;
+}
+
+.dashboard-create-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dashboard-create-controls label {
+  font-size: 0.78rem;
+  color: #5f6b84;
+}
+
+.dashboard-create-controls input {
+  width: 72px;
+  border: 1px solid #d4dbe8;
+  border-radius: 8px;
+  background: #fff;
+  color: #2a3650;
+  padding: 8px 10px;
+}
+
+.dashboard-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.dashboard-card {
+  border: 1px solid #dce3ef;
+  border-radius: 12px;
+  background: #fcfdff;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.dashboard-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.dashboard-card-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.dashboard-card-meta {
+  display: grid;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: #667287;
+}
+
+.dashboard-card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .executions-pane {

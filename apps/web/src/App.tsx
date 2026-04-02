@@ -22,6 +22,7 @@ import {
 import {
   ApiError,
   createSecret,
+  deleteWorkflow,
   executeWorkflow,
   executeWorkflowStream,
   fetchAuthMe,
@@ -106,6 +107,14 @@ function formatDuration(value: number | null | undefined): string {
     return `${value}ms`;
   }
   return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 2)}s`;
+}
+
+function formatWhen(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return value;
+  }
+  return new Date(timestamp).toLocaleString();
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -405,10 +414,11 @@ export default function App() {
   const [secretName, setSecretName] = useState("Default LLM Key");
   const [secretProvider, setSecretProvider] = useState("openai");
   const [secretValue, setSecretValue] = useState("");
+  const [dashboardFilter, setDashboardFilter] = useState("");
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(true);
-  const [activeMode, setActiveMode] = useState<StudioMode>("editor");
+  const [activeMode, setActiveMode] = useState<StudioMode>("dashboard");
   const [logsTab, setLogsTab] = useState<LogsTab>("logs");
   const [isLogsPanelCollapsed, setIsLogsPanelCollapsed] = useState(false);
   const [logsPanelHeight, setLogsPanelHeight] = useState(DEFAULT_LOGS_PANEL_HEIGHT);
@@ -491,7 +501,20 @@ export default function App() {
     return simulated;
   }, [executionResult, visualRunActiveIndex, visualRunOrder]);
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
+  const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
+  const filteredWorkflowItems = useMemo(() => {
+    const query = dashboardFilter.trim().toLowerCase();
+    if (!query) {
+      return workflowList;
+    }
+    return workflowList.filter((workflow) => {
+      return (
+        workflow.name.toLowerCase().includes(query) ||
+        workflow.id.toLowerCase().includes(query)
+      );
+    });
+  }, [dashboardFilter, workflowList]);
   const canvasAndLogsStyle = useMemo(
     () => ({
       gridTemplateRows: isLogsPanelCollapsed
@@ -1306,6 +1329,128 @@ export default function App() {
     [handleApiError, hydrateWorkflow]
   );
 
+  const handleCreateWorkflow = useCallback(async () => {
+    if (!canManageWorkflows) {
+      setError("You do not have permission to create workflows.");
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setError(null);
+      const draft = createBlankWorkflow();
+      const userPromptNodeId = createNodeId("user_prompt");
+      const outputNodeId = createNodeId("output");
+      const savedDraft = await saveWorkflow({
+        ...draft,
+        name: `Workflow ${workflowList.length + 1}`,
+        nodes: [
+          {
+            id: userPromptNodeId,
+            type: "user_prompt",
+            name: "User Prompt",
+            position: { x: 140, y: 180 },
+            config: {
+              text: "What should I help with?"
+            }
+          },
+          {
+            id: outputNodeId,
+            type: "output",
+            name: "Output",
+            position: { x: 420, y: 180 },
+            config: {
+              responseTemplate: "{{user_prompt}}",
+              outputKey: "result"
+            }
+          }
+        ],
+        edges: [
+          {
+            id: createEdgeId(userPromptNodeId, outputNodeId),
+            source: userPromptNodeId,
+            target: outputNodeId
+          }
+        ]
+      });
+      const workflows = await fetchWorkflows();
+      setWorkflowList(workflows);
+      hydrateWorkflow(savedDraft);
+      setActiveMode("editor");
+      localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, savedDraft.id);
+      localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(savedDraft));
+    } catch (createError) {
+      handleApiError(createError, "Failed to create workflow");
+    } finally {
+      setBusy(false);
+    }
+  }, [canManageWorkflows, handleApiError, hydrateWorkflow, workflowList.length]);
+
+  const handleDeleteWorkflow = useCallback(
+    async (workflowId: string) => {
+      if (!canManageWorkflows) {
+        setError("You do not have permission to delete workflows.");
+        return;
+      }
+
+      const candidate = workflowList.find((workflow) => workflow.id === workflowId);
+      const confirmed = window.confirm(`Delete workflow '${candidate?.name ?? workflowId}'? This cannot be undone.`);
+      if (!confirmed) {
+        return;
+      }
+
+      try {
+        setBusy(true);
+        setError(null);
+        await deleteWorkflow(workflowId);
+        const workflows = await fetchWorkflows();
+        setWorkflowList(workflows);
+
+        if (currentWorkflow.id === workflowId) {
+          const fallback = workflows[0];
+          if (fallback) {
+            const workflow = await fetchWorkflow(fallback.id);
+            hydrateWorkflow(workflow);
+          } else {
+            const blank = createBlankWorkflow();
+            setCurrentWorkflow(blank);
+            setNodes([]);
+            setEdges([]);
+          }
+        }
+      } catch (deleteError) {
+        handleApiError(deleteError, "Failed to delete workflow");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [canManageWorkflows, currentWorkflow.id, handleApiError, hydrateWorkflow, setEdges, setNodes, workflowList]
+  );
+
+  const handleExecuteSavedWorkflow = useCallback(
+    async (workflowId: string) => {
+      try {
+        setBusy(true);
+        setError(null);
+        const result = await executeWorkflow(workflowId, {
+          system_prompt: systemPrompt,
+          user_prompt: userPrompt,
+          sessionId
+        });
+        setExecutionResult(result);
+        setLogsTab("logs");
+        setActiveMode("executions");
+        void refreshExecutionHistory();
+      } catch (executionError) {
+        const message = handleApiError(executionError, "Execution failed");
+        setExecutionResult(buildExecutionErrorResult(workflowId, message));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [handleApiError, refreshExecutionHistory, sessionId, systemPrompt, userPrompt]
+  );
+
   const openNodeConfig = useCallback((nodeId: string) => {
     setEditingNodeId(nodeId);
   }, []);
@@ -1535,7 +1680,7 @@ export default function App() {
     setNodes([]);
     setEdges([]);
     setEditingNodeId(null);
-    setActiveMode("editor");
+    setActiveMode("dashboard");
     setLoading(false);
     setError(null);
     setSecretMessage(null);
@@ -1549,7 +1694,10 @@ export default function App() {
     return (
       <div className="auth-shell">
         <form className="auth-card" onSubmit={handleLogin}>
-          <h1>AI Orchestrator</h1>
+          <div className="auth-brand">
+            <img src="/lsquarem-logo.svg" alt="LsquareM logo" className="auth-brand-logo" />
+            <h1>LsquareM</h1>
+          </div>
           <p>Sign in to view, edit, and run workflows.</p>
           {authError && <div className="error-banner">{authError}</div>}
           <label>Email</label>
@@ -1577,7 +1725,7 @@ export default function App() {
   }
 
   if (loading) {
-    return <div className="loading-screen">Loading AI Orchestrator...</div>;
+    return <div className="loading-screen">Loading LsquareM...</div>;
   }
 
   return (
@@ -1625,6 +1773,101 @@ export default function App() {
         <main className="main-content">
           {error && <div className="error-banner global-banner">{error}</div>}
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}
+
+          {activeMode === "dashboard" && (
+            <section className="dashboard-pane">
+              <div className="dashboard-header-row">
+                <div>
+                  <h2>Workflow Dashboard</h2>
+                  <p className="muted">Manage saved workflows, reopen them later, and execute any workflow on demand.</p>
+                </div>
+                <div className="dashboard-actions">
+                  <button className="header-btn" onClick={() => void loadData()} disabled={busy}>
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              <div className="dashboard-toolbar">
+                <input
+                  className="dashboard-search"
+                  value={dashboardFilter}
+                  onChange={(event) => setDashboardFilter(event.target.value)}
+                  placeholder="Search by workflow name or ID"
+                />
+                <div className="dashboard-create-controls">
+                  <button className="header-btn" onClick={() => void handleCreateWorkflow()} disabled={busy || !canManageWorkflows}>
+                    {busy ? "Creating..." : "New Workflow"}
+                  </button>
+                </div>
+              </div>
+
+              {filteredWorkflowItems.length === 0 && (
+                <div className="logs-placeholder">
+                  {workflowList.length === 0
+                    ? "No workflows saved yet. Create one from this dashboard."
+                    : "No workflows match your search."}
+                </div>
+              )}
+
+              {filteredWorkflowItems.length > 0 && (
+                <div className="dashboard-grid">
+                  {filteredWorkflowItems.map((workflow) => (
+                    <article key={workflow.id} className="dashboard-card">
+                      <div className="dashboard-card-head">
+                        <h3>{workflow.name}</h3>
+                        <span className="mono-cell">{workflow.id.slice(0, 8)}</span>
+                      </div>
+                      <div className="dashboard-card-meta">
+                        <span>Updated: {formatWhen(workflow.updatedAt)}</span>
+                        <span>Version: {workflow.workflowVersion}</span>
+                      </div>
+                      <div className="dashboard-card-actions">
+                        <button
+                          className="header-btn"
+                          onClick={() => {
+                            void loadWorkflowById(workflow.id);
+                            setActiveMode("editor");
+                          }}
+                        >
+                          Open Editor
+                        </button>
+                        <button
+                          className="header-btn"
+                          onClick={() => {
+                            void loadWorkflowById(workflow.id);
+                            setActiveMode("chat");
+                          }}
+                        >
+                          Open Chat
+                        </button>
+                        <button
+                          className="header-btn"
+                          onClick={() => {
+                            void handleExecuteSavedWorkflow(workflow.id);
+                          }}
+                          disabled={busy}
+                        >
+                          Execute
+                        </button>
+                        {canManageWorkflows && (
+                          <button
+                            className="header-btn danger"
+                            onClick={() => {
+                              void handleDeleteWorkflow(workflow.id);
+                            }}
+                            disabled={busy}
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
 
           {activeMode === "editor" && (
             <div className="editor-layout">

@@ -351,14 +351,42 @@ export class SqliteStore {
   }
 
   deleteWorkflow(id: string): boolean {
-    const before = this.countWorkflows();
-    this.db.run("DELETE FROM workflows WHERE id = ?", [id]);
-    const after = this.countWorkflows();
-    const changed = after < before;
-    if (changed) {
+    const hasTable = (tableName: string): boolean => {
+      const row = this.queryOne<{ count: number }>(
+        `SELECT COUNT(*) as count FROM sqlite_master WHERE type = 'table' AND name = ?`,
+        [tableName]
+      );
+      return (row ? toNumber(row.count) : 0) > 0;
+    };
+
+    const hadForeignKeysEnabled = this.queryOne<{ enabled: number }>("PRAGMA foreign_keys")?.enabled;
+    const foreignKeysWereOn = Number(hadForeignKeysEnabled) === 1;
+
+    try {
+      // Defensive mode for older / migrated DBs where constraints can block deletes.
+      if (foreignKeysWereOn) {
+        this.db.run("PRAGMA foreign_keys = OFF");
+      }
+
+      if (hasTable("execution_history")) {
+        this.db.run("DELETE FROM execution_history WHERE workflow_id = ?", [id]);
+      }
+
+      if (hasTable("workflow_executions")) {
+        this.db.run("DELETE FROM workflow_executions WHERE workflow_id = ?", [id]);
+      }
+
+      this.db.run("DELETE FROM workflows WHERE id = ?", [id]);
+
+      const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
+      const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
       this.persist();
+      return changed;
+    } finally {
+      if (foreignKeysWereOn) {
+        this.db.run("PRAGMA foreign_keys = ON");
+      }
     }
-    return changed;
   }
 
   countWorkflows(): number {

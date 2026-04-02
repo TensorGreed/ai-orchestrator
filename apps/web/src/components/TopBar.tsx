@@ -70,7 +70,13 @@ export function TopBar({
   return (
     <header className="top-header">
       <div className="header-left">
-        <span className="crumbs">Personal /</span>
+        <div className="brand-badge">
+          <img src="/lsquarem-logo.svg" alt="LsquareM logo" className="brand-badge-logo" />
+          <div className="brand-badge-copy">
+            <strong>LsquareM</strong>
+            <span>Studio</span>
+          </div>
+        </div>
         <input
           className="workflow-name-input"
           value={currentWorkflowName}
@@ -96,6 +102,13 @@ export function TopBar({
       </div>
 
       <div className="header-tabs" role="tablist" aria-label="Studio modes">
+        <button
+          className={activeMode === "dashboard" ? "tab active" : "tab"}
+          type="button"
+          onClick={() => onModeChange("dashboard")}
+        >
+          Dashboard
+        </button>
         <button
           className={activeMode === "editor" ? "tab active" : "tab"}
           type="button"
@@ -163,7 +176,7 @@ export function TopBar({
             title={authUser.email}
           >
             <span className="account-name">{displayName}</span>
-            <span className="account-caret">▾</span>
+            <span className="account-caret">&#9662;</span>
           </button>
           {isAccountMenuOpen && (
             <div className="account-dropdown" role="menu">

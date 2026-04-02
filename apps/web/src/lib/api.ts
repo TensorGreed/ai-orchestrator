@@ -93,6 +93,12 @@ export async function updateWorkflow(workflow: Workflow) {
   });
 }
 
+export async function deleteWorkflow(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/workflows/${id}`, {
+    method: "DELETE"
+  });
+}
+
 export async function importWorkflow(payload: { json?: string; workflow?: unknown }) {
   return apiRequest<Workflow>("/api/workflows/import", {
     method: "POST",
