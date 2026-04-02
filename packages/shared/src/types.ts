@@ -11,6 +11,7 @@ export type NodeCategory =
   | "Output";
 
 export type WorkflowNodeType =
+  | "schedule_trigger"
   | "webhook_input"
   | "text_input"
   | "system_prompt"

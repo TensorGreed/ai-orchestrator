@@ -23,6 +23,7 @@
     "fastify": "^5.6.0",
     "fastify-raw-body": "5.0.0",
     "nanoid": "^5.1.5",
+    "node-cron": "^4.2.1",
     "sql.js": "^1.13.0",
     "zod": "^4.1.0"
   },

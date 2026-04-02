@@ -8,6 +8,7 @@ import { createApp } from "./app";
 import { seedWorkflowsIfEmpty } from "./services/seed-service";
 import { SecretService } from "./services/secret-service";
 import { AuthService } from "./services/auth-service";
+import { SchedulerService } from "./services/scheduler-service";
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const apiRoot = path.resolve(path.dirname(currentFilePath), "..");
@@ -37,7 +38,9 @@ async function bootstrap() {
 
   seedWorkflowsIfEmpty(store, workspaceRoot);
 
-  const app = createApp(config, store, secretService, authService);
+  const schedulerService = new SchedulerService(store);
+  const app = createApp(config, store, secretService, authService, schedulerService);
+  schedulerService.initialize();
   await app.listen({
     host: config.API_HOST,
     port: config.API_PORT

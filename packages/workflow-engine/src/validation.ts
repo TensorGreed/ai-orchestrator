@@ -9,6 +9,15 @@ interface GraphMetadata {
 const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const allowedWebhookAuthModes = new Set(["none", "bearer_token", "hmac_sha256"]);
 
+function isValidTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeWebhookPath(value: unknown, fallback: string): string {
   const raw = typeof value === "string" ? value.trim() : "";
   const withFallback = raw || fallback;
@@ -81,6 +90,44 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
 
   for (const node of workflow.nodes) {
     const config = (node.config ?? {}) as Record<string, unknown>;
+
+    if (node.type === "schedule_trigger") {
+      const cronExpression = typeof config.cronExpression === "string" ? config.cronExpression.trim() : "";
+      const timezone = typeof config.timezone === "string" ? config.timezone.trim() : "";
+
+      if (!cronExpression) {
+        issues.push({
+          code: "missing_schedule_cron_expression",
+          message: "Schedule Trigger node requires a non-empty cronExpression.",
+          nodeId: node.id
+        });
+      } else {
+        const tokenCount = cronExpression.split(/\s+/).filter(Boolean).length;
+        if (tokenCount < 5 || tokenCount > 6) {
+          issues.push({
+            code: "invalid_schedule_cron_expression",
+            message: "Schedule Trigger node cronExpression must use 5 or 6 cron fields.",
+            nodeId: node.id
+          });
+        }
+      }
+
+      if (!timezone || !isValidTimeZone(timezone)) {
+        issues.push({
+          code: "invalid_schedule_timezone",
+          message: "Schedule Trigger node requires a valid IANA timezone.",
+          nodeId: node.id
+        });
+      }
+
+      if (config.active !== undefined && typeof config.active !== "boolean") {
+        issues.push({
+          code: "invalid_schedule_active",
+          message: "Schedule Trigger node active must be a boolean when provided.",
+          nodeId: node.id
+        });
+      }
+    }
 
     if (node.type === "prompt_template" && typeof config.template !== "string") {
       issues.push({

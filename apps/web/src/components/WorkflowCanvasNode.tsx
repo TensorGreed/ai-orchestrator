@@ -10,6 +10,7 @@ function toTitle(nodeType: string): string {
 
 function nodeToken(nodeType: string): string {
   const map: Record<string, string> = {
+    schedule_trigger: "CRON",
     webhook_input: "WH",
     text_input: "TXT",
     system_prompt: "SYS",
@@ -41,7 +42,7 @@ function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "a
     return "agent";
   }
 
-  if (nodeType === "webhook_input" || nodeType === "output") {
+  if (nodeType === "schedule_trigger" || nodeType === "webhook_input" || nodeType === "output") {
     return "terminal";
   }
 

@@ -2,6 +2,26 @@ import type { NodeDefinition } from "./types";
 
 export const nodeDefinitions: NodeDefinition[] = [
   {
+    type: "schedule_trigger",
+    label: "Schedule Trigger",
+    category: "Input",
+    description: "Triggers workflow execution automatically from a cron schedule.",
+    configSchema: {
+      type: "object",
+      properties: {
+        cronExpression: { type: "string" },
+        timezone: { type: "string" },
+        active: { type: "boolean" }
+      },
+      required: ["cronExpression", "timezone", "active"]
+    },
+    sampleConfig: {
+      cronExpression: "0 9 * * *",
+      timezone: "America/Toronto",
+      active: true
+    }
+  },
+  {
     type: "webhook_input",
     label: "Webhook Input",
     category: "Input",

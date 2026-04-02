@@ -16,8 +16,7 @@ import {
   WORKFLOW_SCHEMA_VERSION,
   nodeDefinitions,
   type Workflow,
-  type WorkflowExecutionResult,
-  type WorkflowListItem
+  type WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
 import {
   ApiError,
@@ -38,8 +37,6 @@ import {
   runWebhook,
   saveWorkflow,
   type AuthUser,
-  type ExecutionHistoryDetail,
-  type ExecutionHistorySummary,
   type SecretListItem
 } from "./lib/api";
 import {
@@ -54,8 +51,10 @@ import {
 import { WorkflowCanvasNode } from "./components/WorkflowCanvasNode";
 import { NodeConfigModal, type NodeInputOption } from "./components/NodeConfigModal";
 import { LeftMenuBar } from "./components/LeftMenuBar";
-import { TopBar } from "./components/TopBar";
-import type { StudioMode } from "./components/studio-layout-types";
+import { StudioHeader } from "./components/StudioHeader";
+import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
+import { WorkflowCanvasArea } from "./components/WorkflowCanvasArea";
+import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
 
 interface DefinitionNode {
   type: string;
@@ -270,6 +269,14 @@ function isExecutionEdgeForVisual(edge: Edge): boolean {
   );
 }
 
+export default function App() {
+  return (
+    <StudioProvider>
+      <StudioApp />
+    </StudioProvider>
+  );
+}
+
 function computeExecutionOrderForVisual(nodes: EditorNode[], edges: Edge[]): string[] {
   const nodeIds = new Set(nodes.map((node) => node.id));
   const incomingExecution = new Map<string, number>();
@@ -373,7 +380,24 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return Boolean(target.closest(".node-modal-shell"));
 }
 
-export default function App() {
+function StudioApp() {
+  const {
+    workflowList,
+    setWorkflowList,
+    currentWorkflow,
+    setCurrentWorkflow,
+    activeMode,
+    setActiveMode,
+    executionHistoryItems,
+    setExecutionHistoryItems,
+    executionHistoryTotal,
+    setExecutionHistoryTotal,
+    expandedExecutionIds,
+    setExpandedExecutionIds,
+    executionDetailById,
+    setExecutionDetailById
+  } = useStudioContext();
+
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authChecking, setAuthChecking] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
@@ -381,8 +405,6 @@ export default function App() {
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
 
-  const [workflowList, setWorkflowList] = useState<WorkflowListItem[]>([]);
-  const [currentWorkflow, setCurrentWorkflow] = useState<Workflow>(createBlankWorkflow());
   const [definitions, setDefinitions] = useState<DefinitionNode[]>(nodeDefinitions as unknown as DefinitionNode[]);
   const [mcpServerDefinitions, setMcpServerDefinitions] = useState<MCPServerDefinition[]>([]);
   const [secrets, setSecrets] = useState<SecretListItem[]>([]);
@@ -393,12 +415,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [secretMessage, setSecretMessage] = useState<string | null>(null);
   const [executionResult, setExecutionResult] = useState<WorkflowExecutionResult | null>(null);
-  const [executionHistoryItems, setExecutionHistoryItems] = useState<ExecutionHistorySummary[]>([]);
-  const [executionHistoryTotal, setExecutionHistoryTotal] = useState(0);
   const [executionsLoading, setExecutionsLoading] = useState(false);
   const [executionsError, setExecutionsError] = useState<string | null>(null);
-  const [expandedExecutionIds, setExpandedExecutionIds] = useState<string[]>([]);
-  const [executionDetailById, setExecutionDetailById] = useState<Record<string, ExecutionHistoryDetail | undefined>>({});
 
   const [systemPrompt, setSystemPrompt] = useState("You are a precise tool-using AI assistant.");
   const [userPrompt, setUserPrompt] = useState("What time is it in America/Toronto? Use tools when needed.");
@@ -418,7 +436,6 @@ export default function App() {
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(true);
-  const [activeMode, setActiveMode] = useState<StudioMode>("dashboard");
   const [logsTab, setLogsTab] = useState<LogsTab>("logs");
   const [isLogsPanelCollapsed, setIsLogsPanelCollapsed] = useState(false);
   const [logsPanelHeight, setLogsPanelHeight] = useState(DEFAULT_LOGS_PANEL_HEIGHT);
@@ -1737,7 +1754,7 @@ export default function App() {
       />
 
       <div className="studio-main">
-        <TopBar
+        <StudioHeader
           activeMode={activeMode}
           canManageSecrets={canManageSecrets}
           currentWorkflowName={currentWorkflow.name}
@@ -1870,6 +1887,55 @@ export default function App() {
           )}
 
           {activeMode === "editor" && (
+            <WorkflowCanvasArea
+              isLogsPanelCollapsed={isLogsPanelCollapsed}
+              canvasAndLogsStyle={canvasAndLogsStyle}
+              flowWrapperRef={flowWrapperRef}
+              onDrop={onDrop}
+              onDragOver={(event) => event.preventDefault()}
+              showNodeDrawer={showNodeDrawer}
+              onCloseNodeDrawer={() => setShowNodeDrawer(false)}
+              onOpenNodeDrawer={() => setShowNodeDrawer(true)}
+              groupedDefinitions={groupedDefinitions}
+              onCreateNodeFromDefinition={(definition) => createNodeFromDefinition(definition)}
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={nodeTypes}
+              onNodesChange={onNodesChange}
+              onEdgesChange={(changes) => {
+                onEdgesChange(changes);
+                setEdges((current) => current.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
+              }}
+              onConnect={onConnect}
+              onInit={setReactFlowInstance}
+              onOpenNodeConfig={openNodeConfig}
+              reactFlowInstance={reactFlowInstance}
+              onClearCanvas={() => {
+                setNodes([]);
+                setEdges([]);
+                setExecutionResult(null);
+                setEditingNodeId(null);
+              }}
+              onExecute={handleExecute}
+              onWebhookExecute={handleWebhookExecute}
+              busy={busy}
+              onLogsResizeStart={handleLogsResizeStart}
+              logsTab={logsTab}
+              onLogsTabChange={setLogsTab}
+              onClearLogs={() => setExecutionResult(null)}
+              onToggleLogsPanel={() => setIsLogsPanelCollapsed((value) => !value)}
+              executionResult={executionResult}
+              statusColors={statusColors}
+              systemPrompt={systemPrompt}
+              onSystemPromptChange={setSystemPrompt}
+              userPrompt={userPrompt}
+              onUserPromptChange={setUserPrompt}
+              sessionId={sessionId}
+              onSessionIdChange={setSessionId}
+            />
+          )}
+
+          {false && activeMode === "editor" && (
             <div className="editor-layout">
               <section
                 className={isLogsPanelCollapsed ? "canvas-and-logs logs-collapsed" : "canvas-and-logs"}
@@ -2072,20 +2138,20 @@ export default function App() {
                         <>
                           <div className="log-summary">
                             <span>
-                              Status: <strong>{executionResult.status}</strong>
+                              Status: <strong>{executionResult!.status}</strong>
                             </span>
-                            <span>Started: {new Date(executionResult.startedAt).toLocaleString()}</span>
-                            <span>Completed: {new Date(executionResult.completedAt).toLocaleString()}</span>
+                            <span>Started: {new Date(executionResult!.startedAt).toLocaleString()}</span>
+                            <span>Completed: {new Date(executionResult!.completedAt).toLocaleString()}</span>
                           </div>
                           <div className="node-status-list">
-                            {executionResult.nodeResults.map((result) => (
+                            {executionResult!.nodeResults.map((result) => (
                               <div key={result.nodeId} className="node-status-item">
                                 <span>{result.nodeId}</span>
                                 <strong style={{ color: statusColors[result.status] ?? "#657087" }}>{result.status}</strong>
                               </div>
                             ))}
                           </div>
-                          <pre className="result-block">{stringifyPretty(executionResult.output ?? executionResult.error ?? "")}</pre>
+                          <pre className="result-block">{stringifyPretty(executionResult!.output ?? executionResult!.error ?? "")}</pre>
                         </>
                       )}
                     </div>
@@ -2096,6 +2162,22 @@ export default function App() {
           )}
 
           {activeMode === "executions" && (
+            <ExecutionHistoryPanel
+              executionHistoryTotal={executionHistoryTotal}
+              executionsLoading={executionsLoading}
+              executionsError={executionsError}
+              executionHistoryItems={executionHistoryItems}
+              expandedExecutionIds={expandedExecutionIds}
+              executionDetailById={executionDetailById}
+              statusColors={statusColors}
+              onRefresh={() => {
+                void refreshExecutionHistory();
+              }}
+              onToggleRow={(executionId) => toggleExecutionRow(executionId)}
+            />
+          )}
+
+          {false && activeMode === "executions" && (
             <section className="executions-pane">
               <div className="executions-header-row">
                 <div>

@@ -18,6 +18,7 @@ export const llmProviderConfigSchema = z.object({
 export const workflowNodeSchema = z.object({
   id: z.string().min(1),
   type: z.enum([
+    "schedule_trigger",
     "webhook_input",
     "text_input",
     "system_prompt",

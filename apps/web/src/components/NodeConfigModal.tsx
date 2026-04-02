@@ -1185,6 +1185,35 @@ export function NodeConfigModal({
 
   const renderParameters = () => {
     switch (node.data.nodeType) {
+      case "schedule_trigger":
+        return (
+          <>
+            <TextField
+              label="Cron Expression"
+              value={toStringValue(config.cronExpression, "0 9 * * *")}
+              onChange={(next) => setConfig((current) => ({ ...current, cronExpression: next }))}
+              placeholder="*/15 * * * *"
+            />
+            <TextField
+              label="Timezone"
+              value={toStringValue(config.timezone, "America/Toronto")}
+              onChange={(next) => setConfig((current) => ({ ...current, timezone: next }))}
+              placeholder="America/Toronto"
+            />
+            <SelectField
+              label="Active"
+              value={String(config.active !== false)}
+              onChange={(next) => setConfig((current) => ({ ...current, active: next === "true" }))}
+              options={[
+                { value: "true", label: "Enabled" },
+                { value: "false", label: "Disabled" }
+              ]}
+            />
+            <div className="cfg-tip">
+              The scheduler only runs this workflow when this node is an entry point and connected to downstream execution nodes.
+            </div>
+          </>
+        );
       case "webhook_input":
         return renderWebhookParameters();
       case "agent_orchestrator":

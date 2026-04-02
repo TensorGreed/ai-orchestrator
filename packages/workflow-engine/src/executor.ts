@@ -472,6 +472,18 @@ async function executeNode(
   const templateData = buildTemplateData(context);
 
   switch (node.type) {
+    case "schedule_trigger": {
+      return {
+        trigger_type: context.globals.trigger_type ?? "manual",
+        scheduled_at: context.globals.scheduled_at ?? nowIso(),
+        schedule: {
+          cronExpression: typeof config.cronExpression === "string" ? config.cronExpression : "",
+          timezone: typeof config.timezone === "string" ? config.timezone : "UTC",
+          active: config.active !== false
+        }
+      };
+    }
+
     case "webhook_input": {
       const webhook = toRecord(context.globals.webhook);
       const passThrough = Array.isArray(config.passThroughFields)
@@ -1466,7 +1478,9 @@ export async function executeWorkflow(
           (typeof request.webhookPayload?.user_prompt === "string" ? request.webhookPayload.user_prompt : ""),
         session_id:
           request.sessionId ??
-          (typeof request.webhookPayload?.session_id === "string" ? request.webhookPayload.session_id : undefined)
+          (typeof request.webhookPayload?.session_id === "string" ? request.webhookPayload.session_id : undefined),
+        trigger_type: request.triggerType ?? "manual",
+        scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
 
   const nodeOutputs = request.resumeState

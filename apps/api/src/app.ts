@@ -32,6 +32,7 @@ import { SqliteStore } from "./db/database";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
+import { SchedulerService } from "./services/scheduler-service";
 
 const secretCreateSchema = z.object({
   name: z.string().min(1),
@@ -469,7 +470,13 @@ async function verifyWebhookRequestAuth(input: {
   return { ok: true };
 }
 
-export function createApp(config: AppConfig, store: SqliteStore, secretService: SecretService, authService: AuthService) {
+export function createApp(
+  config: AppConfig,
+  store: SqliteStore,
+  secretService: SecretService,
+  authService: AuthService,
+  schedulerService?: SchedulerService
+) {
   const app = Fastify({ logger: true });
   const providerRegistry = createDefaultProviderRegistry();
   const connectorRegistry = createDefaultConnectorRegistry();
@@ -623,6 +630,77 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
 
     store.deleteWorkflowExecution(input.executionId);
   };
+
+  const executeScheduledWorkflow = async (input: {
+    workflowId: string;
+    workflowName: string;
+    scheduleNodeId: string;
+    cronExpression: string;
+    timezone: string;
+    firedAt: string;
+  }) => {
+    const workflow = store.getWorkflow(input.workflowId);
+    if (!workflow) {
+      app.log.warn(
+        {
+          workflowId: input.workflowId,
+          scheduleNodeId: input.scheduleNodeId
+        },
+        "Skipped scheduled execution because workflow was not found"
+      );
+      return;
+    }
+
+    const executionId = crypto.randomUUID();
+    const requestInput = {
+      triggerType: "cron",
+      scheduleNodeId: input.scheduleNodeId,
+      cronExpression: input.cronExpression,
+      timezone: input.timezone,
+      firedAt: input.firedAt
+    } as const;
+
+    const result = await runWorkflowExecution({
+      workflow,
+      directInput: {
+        trigger_type: "cron",
+        scheduled_at: input.firedAt,
+        schedule_node_id: input.scheduleNodeId,
+        cron_expression: input.cronExpression,
+        timezone: input.timezone
+      },
+      executionId,
+      triggerType: "cron",
+      triggeredBy: "scheduler"
+    });
+
+    persistExecutionHistory({
+      executionId,
+      workflow,
+      result,
+      triggerType: "cron",
+      triggeredBy: "scheduler",
+      requestInput
+    });
+
+    if (result.status === "error") {
+      app.log.warn(
+        {
+          workflowId: workflow.id,
+          executionId,
+          error: result.error
+        },
+        "Scheduled execution completed with error"
+      );
+    }
+  };
+
+  if (schedulerService) {
+    schedulerService.setExecutionHandler((input) => executeScheduledWorkflow(input));
+    app.addHook("onClose", async () => {
+      schedulerService.stop();
+    });
+  }
 
   const rolePriority: Record<UserRole, number> = {
     viewer: 1,
@@ -875,7 +953,9 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       };
     }
 
-    return store.upsertWorkflow(parsed.data);
+    const savedWorkflow = store.upsertWorkflow(parsed.data);
+    schedulerService?.reloadWorkflow(savedWorkflow.id);
+    return savedWorkflow;
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id", async (request, reply) => {
@@ -907,7 +987,9 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
       };
     }
 
-    return store.upsertWorkflow(parsed.data);
+    const savedWorkflow = store.upsertWorkflow(parsed.data);
+    schedulerService?.reloadWorkflow(savedWorkflow.id);
+    return savedWorkflow;
   });
 
   app.delete<{ Params: { id: string } }>("/api/workflows/:id", async (request, reply) => {
@@ -922,6 +1004,8 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
         reply.code(404);
         return { error: "Workflow not found" };
       }
+
+      schedulerService?.removeWorkflow(request.params.id);
 
       return { ok: true };
     } catch (error) {
@@ -958,7 +1042,9 @@ export function createApp(config: AppConfig, store: SqliteStore, secretService: 
         };
       }
 
-      return store.upsertWorkflow(workflow);
+      const savedWorkflow = store.upsertWorkflow(workflow);
+      schedulerService?.reloadWorkflow(savedWorkflow.id);
+      return savedWorkflow;
     } catch (error) {
       reply.code(400);
       return {
