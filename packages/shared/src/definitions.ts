@@ -80,6 +80,85 @@ export const nodeDefinitions: NodeDefinition[] = [
     sampleConfig: { text: "Summarize this context." }
   },
   {
+    type: "loop_node",
+    label: "Loop / ForEach",
+    category: "Utility",
+    description: "Iterates over an input array and executes direct downstream nodes once per item.",
+    configSchema: {
+      type: "object",
+      properties: {
+        inputKey: { type: "string" },
+        itemVariable: { type: "string" },
+        maxIterations: { type: "number" }
+      },
+      required: ["inputKey", "itemVariable"]
+    },
+    sampleConfig: {
+      inputKey: "documents",
+      itemVariable: "item",
+      maxIterations: 100
+    }
+  },
+  {
+    type: "merge_node",
+    label: "Merge / Join",
+    category: "Utility",
+    description: "Merges outputs from multiple parent branches after fan-in.",
+    configSchema: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["append", "combine_by_key", "choose_branch"] },
+        combineKey: { type: "string" }
+      },
+      required: ["mode"]
+    },
+    sampleConfig: {
+      mode: "append",
+      combineKey: "id"
+    }
+  },
+  {
+    type: "execute_workflow",
+    label: "Execute Workflow",
+    category: "Utility",
+    description: "Executes another workflow as a reusable sub-workflow.",
+    configSchema: {
+      type: "object",
+      properties: {
+        workflowId: { type: "string" },
+        inputMapping: {
+          type: "object",
+          additionalProperties: { type: "string" }
+        }
+      },
+      required: ["workflowId"]
+    },
+    sampleConfig: {
+      workflowId: "",
+      inputMapping: {
+        user_prompt: "user_prompt",
+        session_id: "session_id"
+      }
+    }
+  },
+  {
+    type: "wait_node",
+    label: "Wait / Delay",
+    category: "Utility",
+    description: "Pauses execution for a bounded amount of time before continuing.",
+    configSchema: {
+      type: "object",
+      properties: {
+        delayMs: { type: "number" },
+        maxDelayMs: { type: "number" }
+      }
+    },
+    sampleConfig: {
+      delayMs: 1000,
+      maxDelayMs: 30000
+    }
+  },
+  {
     type: "code_node",
     label: "Code Node",
     category: "Utility",

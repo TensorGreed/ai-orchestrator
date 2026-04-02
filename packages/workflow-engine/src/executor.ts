@@ -39,6 +39,7 @@ export interface WorkflowExecutionDependencies {
   vectorStoreRegistry?: VectorStoreRegistry;
   agentRuntime: AgentRuntimeAdapter;
   memoryStore?: AgentSessionMemoryStore;
+  loadWorkflow?: (workflowId: string) => Workflow | undefined;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   persistPausedExecution?: (input: {
     executionId: string;
@@ -85,6 +86,7 @@ export interface ExecuteWorkflowRequest {
   executionId?: string;
   triggerType?: string;
   triggeredBy?: string;
+  callStack?: string[];
   resumeState?: WorkflowExecutionState;
   approvalDecision?: {
     decision: "approve" | "reject";
@@ -108,6 +110,7 @@ interface NodeRuntimeContext {
   workflow: Workflow;
   nodeById: Map<string, WorkflowNode>;
   attachmentsBySource: Map<string, Map<AgentAttachmentHandle, string[]>>;
+  callStack: string[];
 }
 
 type AgentAttachmentHandle = "chat_model" | "memory" | "tool";
@@ -198,6 +201,14 @@ function mergeParentOutputs(parentOutputs: Record<string, unknown>): Record<stri
   }
 
   return merged;
+}
+
+function isErrorLikeOutput(output: unknown): boolean {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return false;
+  }
+  const asRecord = output as Record<string, unknown>;
+  return typeof asRecord.error === "string" && asRecord.error.trim().length > 0;
 }
 
 function normalizeDocuments(raw: unknown): ConnectorDocument[] {
@@ -617,6 +628,141 @@ async function executeNode(
         valid: errors.length === 0,
         errors
       };
+    }
+
+    case "merge_node": {
+      const mode =
+        config.mode === "append" || config.mode === "combine_by_key" || config.mode === "choose_branch"
+          ? config.mode
+          : "append";
+      const entries = Object.entries(context.parentOutputs);
+
+      if (mode === "append") {
+        const mergedOutput: Record<string, unknown> = {};
+        for (const [parentId, parentOutput] of entries) {
+          if (parentOutput && typeof parentOutput === "object" && !Array.isArray(parentOutput)) {
+            Object.assign(mergedOutput, parentOutput as Record<string, unknown>);
+          } else {
+            mergedOutput[parentId] = parentOutput;
+          }
+        }
+        return mergedOutput;
+      }
+
+      if (mode === "combine_by_key") {
+        const combineKey = typeof config.combineKey === "string" ? config.combineKey.trim() : "";
+        if (!combineKey) {
+          throw new Error("Merge node combine_by_key mode requires a combineKey.");
+        }
+
+        const grouped: Record<string, unknown[]> = {};
+        for (const [, parentOutput] of entries) {
+          const candidates = Array.isArray(parentOutput) ? parentOutput : [parentOutput];
+          for (const candidate of candidates) {
+            const candidateRecord = toRecord(candidate);
+            const keyValue = candidateRecord[combineKey];
+            const groupKey = keyValue === undefined || keyValue === null ? "__undefined__" : String(keyValue);
+            if (!grouped[groupKey]) {
+              grouped[groupKey] = [];
+            }
+            grouped[groupKey].push(candidate);
+          }
+        }
+
+        return grouped;
+      }
+
+      for (const [parentId, parentOutput] of entries) {
+        if (parentOutput !== undefined && parentOutput !== null && !isErrorLikeOutput(parentOutput)) {
+          if (parentOutput && typeof parentOutput === "object" && !Array.isArray(parentOutput)) {
+            return {
+              ...(parentOutput as Record<string, unknown>),
+              _selectedParentId: parentId
+            };
+          }
+          return {
+            value: parentOutput,
+            _selectedParentId: parentId
+          };
+        }
+      }
+
+      return {};
+    }
+
+    case "wait_node": {
+      const requestedDelay =
+        typeof config.delayMs === "number" && Number.isFinite(config.delayMs) && config.delayMs >= 0
+          ? Math.floor(config.delayMs)
+          : 1000;
+      const maxDelay =
+        typeof config.maxDelayMs === "number" && Number.isFinite(config.maxDelayMs) && config.maxDelayMs > 0
+          ? Math.floor(config.maxDelayMs)
+          : 30000;
+      const clampedDelay = Math.min(requestedDelay, maxDelay);
+      await sleep(clampedDelay);
+      return mergeParentOutputs(context.parentOutputs);
+    }
+
+    case "execute_workflow": {
+      const workflowId = typeof config.workflowId === "string" ? config.workflowId.trim() : "";
+      if (!workflowId) {
+        throw new Error("Execute Workflow node requires a workflowId.");
+      }
+
+      if (!dependencies.loadWorkflow) {
+        throw new Error("Execute Workflow node requires a loadWorkflow dependency.");
+      }
+
+      if (context.callStack.includes(workflowId)) {
+        throw new Error(
+          `Circular sub-workflow reference detected: ${[...context.callStack, workflowId].join(" -> ")}`
+        );
+      }
+
+      const targetWorkflow = dependencies.loadWorkflow(workflowId);
+      if (!targetWorkflow) {
+        throw new Error(`Sub-workflow '${workflowId}' was not found.`);
+      }
+
+      const inputMapping = toRecord(config.inputMapping);
+      const mappedInput: Record<string, unknown> = {};
+      for (const [parentKey, childKeyValue] of Object.entries(inputMapping)) {
+        const parentPath = String(parentKey ?? "").trim();
+        const childKey = String(childKeyValue ?? "").trim();
+        if (!parentPath || !childKey) {
+          continue;
+        }
+
+        let mappedValue = templateData[parentPath];
+        if (mappedValue === undefined) {
+          mappedValue = getValueByPath(templateData, parentPath);
+        }
+        mappedInput[childKey] = mappedValue;
+      }
+
+      const childResult = await executeWorkflow(
+        {
+          workflow: targetWorkflow,
+          input: mappedInput,
+          triggerType: "sub_workflow",
+          triggeredBy: context.workflow.id,
+          callStack: [...context.callStack]
+        },
+        dependencies
+      );
+
+      if (childResult.status === "error") {
+        throw new Error(childResult.error ?? `Sub-workflow '${workflowId}' execution failed.`);
+      }
+
+      if (childResult.status === "waiting_approval") {
+        throw new Error(
+          `Sub-workflow '${workflowId}' paused for approval. Waiting approvals are not supported inside Execute Workflow nodes.`
+        );
+      }
+
+      return childResult.output;
     }
 
     case "code_node": {
@@ -1460,6 +1606,20 @@ export async function executeWorkflow(
     };
   }
 
+  const callStack = request.callStack?.length ? [...request.callStack] : [];
+  if (callStack.includes(workflow.id)) {
+    return {
+      workflowId: workflow.id,
+      status: "error",
+      startedAt,
+      completedAt: nowIso(),
+      executionId: request.executionId,
+      nodeResults: [],
+      error: `Circular workflow execution detected: ${[...callStack, workflow.id].join(" -> ")}`
+    };
+  }
+  callStack.push(workflow.id);
+
   const nodeOrder =
     request.resumeState?.nodeOrder?.length ? request.resumeState.nodeOrder : validation.orderedNodeIds ?? sortWorkflowNodes(workflow);
   const graphIndexes = buildGraphIndexes(workflow);
@@ -1496,6 +1656,7 @@ export async function executeWorkflow(
   // When a branching node (if_node, switch_node, try_catch) runs, we add
   // all nodes on non-taken branches to this set.
   const skippedByBranch = new Set<string>(request.resumeState?.skippedByBranch ?? []);
+  const loopInlineExecutedNodes = new Set<string>();
 
   // try_catch error routing: maps try_catch nodeId -> error branch target nodeIds
   const tryCatchScopes = request.resumeState
@@ -1687,6 +1848,10 @@ export async function executeWorkflow(
       continue;
     }
 
+    if (loopInlineExecutedNodes.has(node.id)) {
+      continue;
+    }
+
     const hasExecutionIncoming = (graphIndexes.incomingExecution.get(node.id)?.length ?? 0) > 0;
     const hasExecutionOutgoing = (graphIndexes.outgoingExecution.get(node.id)?.length ?? 0) > 0;
     const hasAttachmentIncoming = (graphIndexes.incomingAttachments.get(node.id)?.length ?? 0) > 0;
@@ -1727,6 +1892,177 @@ export async function executeWorkflow(
       }
 
       const merged = mergeParentOutputs(parentOutputs);
+      if (node.type === "loop_node") {
+        const inputKey = typeof nodeConfig.inputKey === "string" ? nodeConfig.inputKey.trim() : "";
+        const itemVariable =
+          typeof nodeConfig.itemVariable === "string" && nodeConfig.itemVariable.trim()
+            ? nodeConfig.itemVariable.trim()
+            : "item";
+        const maxIterations =
+          typeof nodeConfig.maxIterations === "number" && Number.isFinite(nodeConfig.maxIterations) && nodeConfig.maxIterations > 0
+            ? Math.floor(nodeConfig.maxIterations)
+            : 100;
+        const templateData: Record<string, unknown> = {
+          ...globals,
+          ...merged,
+          parent_outputs: parentOutputs
+        };
+        let candidateItems = inputKey ? templateData[inputKey] : undefined;
+        if (candidateItems === undefined && inputKey) {
+          candidateItems = getValueByPath(templateData, inputKey);
+        }
+        const rawItems = Array.isArray(candidateItems) ? candidateItems : [candidateItems];
+        const scopedItems = rawItems.slice(0, maxIterations);
+        const downstreamNodeIds = graphIndexes.outgoingExecution.get(node.id) ?? [];
+        const downstreamNodes = downstreamNodeIds
+          .map((childId) => graphIndexes.nodeById.get(childId))
+          .filter((child): child is WorkflowNode => Boolean(child));
+
+        for (const child of downstreamNodes) {
+          const childParents = graphIndexes.incomingExecution.get(child.id) ?? [];
+          const isLoopScopedChild = childParents.length > 0 && childParents.every((parentId) => parentId === node.id);
+          if (isLoopScopedChild) {
+            loopInlineExecutedNodes.add(child.id);
+          }
+        }
+
+        const loopItems: Array<{
+          index: number;
+          item: unknown;
+          outputs: Record<string, unknown>;
+        }> = [];
+
+        for (let loopIndex = 0; loopIndex < scopedItems.length; loopIndex += 1) {
+          const loopItem = scopedItems[loopIndex];
+          const iterationGlobals: Record<string, unknown> = {
+            ...globals,
+            [itemVariable]: loopItem,
+            _loop_index: loopIndex
+          };
+          const iterationOutputs: Record<string, unknown> = {};
+
+          for (const childNode of downstreamNodes) {
+            const childStarted = Date.now();
+            const childStartedAt = nowIso();
+            await dependencies.onNodeStart?.({
+              nodeId: childNode.id,
+              nodeType: childNode.type,
+              startedAt: childStartedAt
+            });
+
+            try {
+              const childParentIds = graphIndexes.incomingExecution.get(childNode.id) ?? [];
+              const childParentOutputs: Record<string, unknown> = {};
+              for (const parentId of childParentIds) {
+                if (parentId === node.id) {
+                  childParentOutputs[parentId] = {
+                    [itemVariable]: loopItem,
+                    item: loopItem,
+                    _loop_index: loopIndex
+                  };
+                  continue;
+                }
+
+                if (nodeOutputs.has(parentId)) {
+                  childParentOutputs[parentId] = nodeOutputs.get(parentId);
+                }
+              }
+
+              const childMerged = mergeParentOutputs(childParentOutputs);
+              childMerged[itemVariable] = loopItem;
+              childMerged._loop_index = loopIndex;
+              const { output: childOutput, attempts: childAttempts } = await executeNodeWithRetry(
+                childNode,
+                {
+                  globals: iterationGlobals,
+                  merged: childMerged,
+                  parentOutputs: childParentOutputs,
+                  workflow,
+                  nodeById: graphIndexes.nodeById,
+                  attachmentsBySource: graphIndexes.attachmentsBySource,
+                  callStack
+                },
+                dependencies
+              );
+
+              iterationOutputs[childNode.id] = childOutput;
+              nodeOutputs.set(childNode.id, childOutput);
+              if (childNode.type === "output") {
+                finalOutput = childOutput;
+              }
+              nodeResults.push({
+                nodeId: childNode.id,
+                status: "success",
+                startedAt: childStartedAt,
+                completedAt: nowIso(),
+                durationMs: Date.now() - childStarted,
+                output: childOutput,
+                attempts: childAttempts > 1 ? childAttempts : undefined
+              });
+              await dependencies.onNodeComplete?.({
+                nodeId: childNode.id,
+                nodeType: childNode.type,
+                status: "success",
+                completedAt: nowIso(),
+                durationMs: Date.now() - childStarted,
+                output: childOutput
+              });
+            } catch (childError) {
+              const childErrorMessage = childError instanceof Error ? childError.message : "Loop iteration failed";
+              nodeResults.push({
+                nodeId: childNode.id,
+                status: "error",
+                startedAt: childStartedAt,
+                completedAt: nowIso(),
+                durationMs: Date.now() - childStarted,
+                error: childErrorMessage
+              });
+              await dependencies.onNodeComplete?.({
+                nodeId: childNode.id,
+                nodeType: childNode.type,
+                status: "error",
+                completedAt: nowIso(),
+                durationMs: Date.now() - childStarted,
+                error: childErrorMessage
+              });
+              throw new Error(
+                `Loop node '${node.id}' failed at iteration ${loopIndex} on child '${childNode.id}': ${childErrorMessage}`
+              );
+            }
+          }
+
+          loopItems.push({
+            index: loopIndex,
+            item: loopItem,
+            outputs: iterationOutputs
+          });
+        }
+
+        const output = {
+          items: loopItems,
+          count: loopItems.length
+        };
+
+        nodeOutputs.set(node.id, output);
+        nodeResults.push({
+          nodeId: node.id,
+          status: "success",
+          startedAt: startedAtNode,
+          completedAt: nowIso(),
+          durationMs: Date.now() - started,
+          output
+        });
+        await dependencies.onNodeComplete?.({
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "success",
+          completedAt: nowIso(),
+          durationMs: Date.now() - started,
+          output
+        });
+        continue;
+      }
+
       if (node.type === "human_approval") {
         const approvalMessageTemplate =
           typeof nodeConfig.approvalMessage === "string" && nodeConfig.approvalMessage.trim()
@@ -1820,7 +2156,8 @@ export async function executeWorkflow(
           parentOutputs,
           workflow,
           nodeById: graphIndexes.nodeById,
-          attachmentsBySource: graphIndexes.attachmentsBySource
+          attachmentsBySource: graphIndexes.attachmentsBySource,
+          callStack
         },
         dependencies
       );

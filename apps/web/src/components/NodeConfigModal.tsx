@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MCPToolDefinition } from "@ai-orchestrator/shared";
 import type { EditorNode } from "../lib/workflow";
-import { discoverMcpTools, testCodeNode, type SecretListItem } from "../lib/api";
+import { discoverMcpTools, fetchWorkflows, testCodeNode, type SecretListItem } from "../lib/api";
 
 export interface NodeInputOption {
   id: string;
@@ -187,6 +187,8 @@ export function NodeConfigModal({
   const [codeTestBusy, setCodeTestBusy] = useState(false);
   const [codeTestError, setCodeTestError] = useState<string | null>(null);
   const [codeTestResult, setCodeTestResult] = useState<{ result: unknown; logs: string[] } | null>(null);
+  const [workflowOptions, setWorkflowOptions] = useState<Array<{ id: string; name: string }>>([]);
+  const [workflowOptionsError, setWorkflowOptionsError] = useState<string | null>(null);
 
   useEffect(() => {
     const initialConfig = asRecord(node.data.config);
@@ -233,7 +235,39 @@ export function NodeConfigModal({
     setCodeTestBusy(false);
     setCodeTestError(null);
     setCodeTestResult(null);
+    setWorkflowOptions([]);
+    setWorkflowOptionsError(null);
   }, [inputOptions, mcpServerDefinitions, node]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (node.data.nodeType !== "execute_workflow") {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const loadWorkflowOptions = async () => {
+      try {
+        setWorkflowOptionsError(null);
+        const workflows = await fetchWorkflows();
+        if (cancelled) {
+          return;
+        }
+        setWorkflowOptions(workflows.map((workflow) => ({ id: workflow.id, name: workflow.name })));
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setWorkflowOptionsError(error instanceof Error ? error.message : "Failed to load workflows");
+      }
+    };
+
+    void loadWorkflowOptions();
+    return () => {
+      cancelled = true;
+    };
+  }, [node.data.nodeType]);
 
   const provider = useMemo(() => asRecord(config.provider), [config.provider]);
   const discoveredToolByName = useMemo(
@@ -1228,6 +1262,106 @@ export function NodeConfigModal({
         return renderPromptTemplateParameters();
       case "code_node":
         return renderCodeNodeParameters();
+      case "loop_node":
+        return (
+          <>
+            <TextField
+              label="Input Key"
+              value={toStringValue(config.inputKey, "items")}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+              placeholder="items"
+            />
+            <TextField
+              label="Item Variable"
+              value={toStringValue(config.itemVariable, "item")}
+              onChange={(next) => setConfig((current) => ({ ...current, itemVariable: next }))}
+              placeholder="item"
+            />
+            <NumberField
+              label="Max Iterations"
+              value={toNumberValue(config.maxIterations, 100)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, maxIterations: next }))}
+            />
+          </>
+        );
+      case "merge_node":
+        return (
+          <>
+            <SelectField
+              label="Merge Mode"
+              value={toStringValue(config.mode, "append")}
+              onChange={(next) => setConfig((current) => ({ ...current, mode: next }))}
+              options={[
+                { value: "append", label: "Append (flat merge)" },
+                { value: "combine_by_key", label: "Combine by Key" },
+                { value: "choose_branch", label: "Choose First Success Branch" }
+              ]}
+            />
+            {toStringValue(config.mode, "append") === "combine_by_key" && (
+              <TextField
+                label="Combine Key"
+                value={toStringValue(config.combineKey, "id")}
+                onChange={(next) => setConfig((current) => ({ ...current, combineKey: next }))}
+                placeholder="id"
+              />
+            )}
+          </>
+        );
+      case "execute_workflow":
+        return (
+          <>
+            <SelectField
+              label="Workflow"
+              value={toStringValue(config.workflowId)}
+              onChange={(next) => setConfig((current) => ({ ...current, workflowId: next }))}
+              options={[
+                { value: "", label: workflowOptions.length ? "Select workflow" : "No workflows available" },
+                ...workflowOptions.map((workflow) => ({
+                  value: workflow.id,
+                  label: `${workflow.name} (${workflow.id})`
+                }))
+              ]}
+            />
+            {workflowOptionsError ? <div className="cfg-tip">Failed to load workflows: {workflowOptionsError}</div> : null}
+            <TextAreaField
+              label="Input Mapping (JSON object)"
+              value={JSON.stringify(asRecord(config.inputMapping), null, 2)}
+              onChange={(next) => {
+                try {
+                  const parsed = JSON.parse(next) as Record<string, unknown>;
+                  setConfig((current) => ({ ...current, inputMapping: parsed }));
+                } catch {
+                  // ignore typing errors
+                }
+              }}
+              rows={6}
+            />
+            <div className="cfg-tip">
+              Use <code>{"{ \"parent.context.key\": \"child_input_key\" }"}</code> mapping to pass data into the sub-workflow.
+            </div>
+          </>
+        );
+      case "wait_node":
+        return (
+          <>
+            <NumberField
+              label="Delay (ms)"
+              value={toNumberValue(config.delayMs, 1000)}
+              min={0}
+              step={100}
+              onChange={(next) => setConfig((current) => ({ ...current, delayMs: next }))}
+            />
+            <NumberField
+              label="Max Delay (ms)"
+              value={toNumberValue(config.maxDelayMs, 30000)}
+              min={1}
+              step={100}
+              onChange={(next) => setConfig((current) => ({ ...current, maxDelayMs: next }))}
+            />
+          </>
+        );
       case "connector_source":
         return renderConnectorParameters();
       case "text_input":

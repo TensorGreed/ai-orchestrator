@@ -87,6 +87,14 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
   const issues: WorkflowValidationIssue[] = [];
   const nodeById = new Map(workflow.nodes.map((node) => [node.id, node]));
   const webhookRoutes = new Map<string, string>();
+  const incomingExecutionCount = new Map<string, number>();
+
+  for (const node of workflow.nodes) {
+    incomingExecutionCount.set(node.id, 0);
+  }
+  for (const edge of workflow.edges.filter(isExecutionEdge)) {
+    incomingExecutionCount.set(edge.target, (incomingExecutionCount.get(edge.target) ?? 0) + 1);
+  }
 
   for (const node of workflow.nodes) {
     const config = (node.config ?? {}) as Record<string, unknown>;
@@ -414,6 +422,112 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_output_guardrail_on_fail",
           message: "Output Guardrail node onFail must be either 'retry' or 'error'.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "loop_node") {
+      if (typeof config.inputKey !== "string" || !config.inputKey.trim()) {
+        issues.push({
+          code: "missing_loop_input_key",
+          message: "Loop / ForEach node requires a non-empty inputKey.",
+          nodeId: node.id
+        });
+      }
+
+      if (typeof config.itemVariable !== "string" || !config.itemVariable.trim()) {
+        issues.push({
+          code: "missing_loop_item_variable",
+          message: "Loop / ForEach node requires a non-empty itemVariable.",
+          nodeId: node.id
+        });
+      }
+
+      if (
+        config.maxIterations !== undefined &&
+        (typeof config.maxIterations !== "number" || !Number.isFinite(config.maxIterations) || config.maxIterations < 1)
+      ) {
+        issues.push({
+          code: "invalid_loop_max_iterations",
+          message: "Loop / ForEach node maxIterations must be >= 1 when provided.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "merge_node") {
+      if (config.mode !== "append" && config.mode !== "combine_by_key" && config.mode !== "choose_branch") {
+        issues.push({
+          code: "invalid_merge_mode",
+          message: "Merge node mode must be one of append, combine_by_key, choose_branch.",
+          nodeId: node.id
+        });
+      }
+
+      if (config.mode === "combine_by_key" && (typeof config.combineKey !== "string" || !config.combineKey.trim())) {
+        issues.push({
+          code: "missing_merge_combine_key",
+          message: "Merge node in combine_by_key mode requires combineKey.",
+          nodeId: node.id
+        });
+      }
+
+      if ((incomingExecutionCount.get(node.id) ?? 0) < 2) {
+        issues.push({
+          code: "merge_requires_multiple_parents",
+          message: "Merge node requires at least two incoming execution edges.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "execute_workflow") {
+      if (typeof config.workflowId !== "string" || !config.workflowId.trim()) {
+        issues.push({
+          code: "missing_execute_workflow_id",
+          message: "Execute Workflow node requires workflowId.",
+          nodeId: node.id
+        });
+      }
+
+      if (config.inputMapping !== undefined) {
+        const mapping = config.inputMapping;
+        if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+          issues.push({
+            code: "invalid_execute_workflow_input_mapping",
+            message: "Execute Workflow node inputMapping must be an object map of parentKey -> childKey.",
+            nodeId: node.id
+          });
+        } else {
+          for (const [parentKey, childKey] of Object.entries(mapping as Record<string, unknown>)) {
+            if (!parentKey.trim() || typeof childKey !== "string" || !childKey.trim()) {
+              issues.push({
+                code: "invalid_execute_workflow_mapping_entry",
+                message: "Execute Workflow inputMapping entries must be non-empty parentKey -> childKey string pairs.",
+                nodeId: node.id
+              });
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (node.type === "wait_node") {
+      const delayMs = Number(config.delayMs ?? 1000);
+      const maxDelayMs = Number(config.maxDelayMs ?? 30000);
+      if (!Number.isFinite(delayMs) || delayMs < 0) {
+        issues.push({
+          code: "invalid_wait_delay_ms",
+          message: "Wait node delayMs must be a number >= 0.",
+          nodeId: node.id
+        });
+      }
+      if (!Number.isFinite(maxDelayMs) || maxDelayMs < 1) {
+        issues.push({
+          code: "invalid_wait_max_delay_ms",
+          message: "Wait node maxDelayMs must be a number >= 1.",
           nodeId: node.id
         });
       }

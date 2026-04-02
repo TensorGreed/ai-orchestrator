@@ -542,6 +542,7 @@ export function createApp(
             store.saveSessionMemory(namespace, sessionId, messages);
           }
         },
+        loadWorkflow: (workflowId) => store.getWorkflow(workflowId) ?? undefined,
         resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
         persistPausedExecution: async (paused) => {
           store.saveWorkflowExecutionState({
