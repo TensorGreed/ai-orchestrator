@@ -30,12 +30,14 @@ import {
   fetchDefinitions,
   fetchSecrets,
   fetchWorkflow,
+  fetchWorkflowVariables,
   fetchWorkflows,
   importWorkflow,
   loginUser,
   logoutUser,
   runWebhook,
   saveWorkflow,
+  updateWorkflowVariables,
   type AuthUser,
   type SecretListItem
 } from "./lib/api";
@@ -77,6 +79,12 @@ interface ChatMessageEntry {
   role: "assistant" | "user";
   text: string;
   status?: "streaming" | "done" | "error";
+}
+
+interface WorkflowVariableRow {
+  id: string;
+  key: string;
+  value: string;
 }
 
 const statusColors: Record<string, string> = {
@@ -154,6 +162,37 @@ function createChatSessionId(workflowId: string): string {
   }
   const randomPart = Math.random().toString(36).slice(2, 10);
   return `chat-${sanitized}-${Date.now().toString(36)}-${randomPart}`;
+}
+
+function createVariableRowId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `var-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function workflowVariablesToRows(variables: Record<string, string> | undefined): WorkflowVariableRow[] {
+  if (!variables) {
+    return [];
+  }
+
+  return Object.entries(variables).map(([key, value]) => ({
+    id: createVariableRowId(),
+    key,
+    value
+  }));
+}
+
+function rowsToWorkflowVariables(rows: WorkflowVariableRow[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const row of rows) {
+    const normalizedKey = row.key.trim();
+    if (!normalizedKey) {
+      continue;
+    }
+    result[normalizedKey] = row.value;
+  }
+  return result;
 }
 
 function extractAssistantText(value: unknown): string {
@@ -433,9 +472,11 @@ function StudioApp() {
   const [secretProvider, setSecretProvider] = useState("openai");
   const [secretValue, setSecretValue] = useState("");
   const [dashboardFilter, setDashboardFilter] = useState("");
+  const [workflowVariableRows, setWorkflowVariableRows] = useState<WorkflowVariableRow[]>([]);
+  const [variablesBusy, setVariablesBusy] = useState(false);
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-  const [showNodeDrawer, setShowNodeDrawer] = useState(true);
+  const [showNodeDrawer, setShowNodeDrawer] = useState(false);
   const [logsTab, setLogsTab] = useState<LogsTab>("logs");
   const [isLogsPanelCollapsed, setIsLogsPanelCollapsed] = useState(false);
   const [logsPanelHeight, setLogsPanelHeight] = useState(DEFAULT_LOGS_PANEL_HEIGHT);
@@ -520,6 +561,11 @@ function StudioApp() {
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
+
+  useEffect(() => {
+    setWorkflowVariableRows(workflowVariablesToRows(currentWorkflow.variables));
+  }, [currentWorkflow.id, currentWorkflow.variables]);
+
   const filteredWorkflowItems = useMemo(() => {
     const query = dashboardFilter.trim().toLowerCase();
     if (!query) {
@@ -882,6 +928,44 @@ function StudioApp() {
     return message;
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (activeMode !== "variables" || !authUser || !currentWorkflowExists) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const loadWorkflowVariables = async () => {
+      try {
+        const response = await fetchWorkflowVariables(currentWorkflow.id);
+        if (cancelled) {
+          return;
+        }
+
+        setCurrentWorkflow((current) =>
+          current.id === response.workflowId
+            ? {
+                ...current,
+                variables: response.variables
+              }
+            : current
+        );
+        setWorkflowVariableRows(workflowVariablesToRows(response.variables));
+      } catch (loadError) {
+        if (cancelled) {
+          return;
+        }
+        handleApiError(loadError, "Failed to load workflow variables");
+      }
+    };
+
+    void loadWorkflowVariables();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeMode, authUser, currentWorkflow.id, currentWorkflowExists, handleApiError]);
+
   const appendChatMessage = useCallback(
     (workflowId: string, message: ChatMessageEntry) => {
       setChatMessagesByWorkflow((current) => ({
@@ -1001,6 +1085,89 @@ function StudioApp() {
       setBusy(false);
     }
   }, [handleApiError, persistWorkflow]);
+
+  const handleAddVariableRow = useCallback(() => {
+    setWorkflowVariableRows((current) => [
+      ...current,
+      {
+        id: createVariableRowId(),
+        key: "",
+        value: ""
+      }
+    ]);
+  }, []);
+
+  const handleRemoveVariableRow = useCallback((rowId: string) => {
+    setWorkflowVariableRows((current) => current.filter((row) => row.id !== rowId));
+  }, []);
+
+  const handleUpdateVariableRow = useCallback((rowId: string, field: "key" | "value", value: string) => {
+    setWorkflowVariableRows((current) =>
+      current.map((row) =>
+        row.id === rowId
+          ? {
+              ...row,
+              [field]: value
+            }
+          : row
+      )
+    );
+  }, []);
+
+  const handleSaveVariables = useCallback(async () => {
+    if (!currentWorkflowExists) {
+      setError("Save the workflow first before managing variables.");
+      return;
+    }
+    if (!canManageWorkflows) {
+      setError("You do not have permission to update workflow variables.");
+      return;
+    }
+
+    try {
+      setVariablesBusy(true);
+      setError(null);
+      const nextVariables = rowsToWorkflowVariables(workflowVariableRows);
+      const response = await updateWorkflowVariables(currentWorkflow.id, nextVariables);
+
+      setCurrentWorkflow((current) =>
+        current.id === response.workflowId
+          ? {
+              ...current,
+              variables: response.variables
+            }
+          : current
+      );
+      setWorkflowVariableRows(workflowVariablesToRows(response.variables));
+
+      try {
+        const snapshot = editorToWorkflow(
+          {
+            ...currentWorkflow,
+            variables: response.variables
+          },
+          nodes as EditorNode[],
+          edges as Edge[]
+        );
+        localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(snapshot));
+      } catch {
+        // localStorage can fail in private mode or due quota limits.
+      }
+    } catch (saveError) {
+      handleApiError(saveError, "Failed to save workflow variables");
+    } finally {
+      setVariablesBusy(false);
+    }
+  }, [
+    canManageWorkflows,
+    currentWorkflow,
+    currentWorkflow.id,
+    currentWorkflowExists,
+    edges,
+    handleApiError,
+    nodes,
+    workflowVariableRows
+  ]);
 
   useEffect(() => {
     const handleSaveShortcut = (event: KeyboardEvent) => {
@@ -1701,6 +1868,8 @@ function StudioApp() {
     setLoading(false);
     setError(null);
     setSecretMessage(null);
+    setWorkflowVariableRows([]);
+    setVariablesBusy(false);
   }, [setEdges, setNodes, stopVisualRun]);
 
   if (authChecking) {
@@ -1933,6 +2102,72 @@ function StudioApp() {
               sessionId={sessionId}
               onSessionIdChange={setSessionId}
             />
+          )}
+
+          {activeMode === "variables" && (
+            <section className="variables-pane">
+              <div className="variables-pane-header">
+                <div>
+                  <h2>Workflow Variables</h2>
+                  <p className="muted">
+                    Define reusable key/value pairs available in templates as <code>{`{{vars.KEY}}`}</code>.
+                  </p>
+                </div>
+                <div className="variables-pane-actions">
+                  <button className="header-btn" onClick={handleAddVariableRow} disabled={!canManageWorkflows}>
+                    Add Variable
+                  </button>
+                  <button
+                    className="header-btn"
+                    onClick={() => void handleSaveVariables()}
+                    disabled={!canManageWorkflows || variablesBusy || !currentWorkflowExists}
+                  >
+                    {variablesBusy ? "Saving..." : "Save Variables"}
+                  </button>
+                </div>
+              </div>
+
+              {!currentWorkflowExists && (
+                <div className="logs-placeholder">
+                  Save this workflow first from Editor, then return here to manage variables.
+                </div>
+              )}
+
+              {currentWorkflowExists && workflowVariableRows.length === 0 && (
+                <div className="logs-placeholder">No variables yet. Add your first variable to start templating.</div>
+              )}
+
+              {currentWorkflowExists && workflowVariableRows.length > 0 && (
+                <div className="variables-grid">
+                  {workflowVariableRows.map((row) => (
+                    <div key={row.id} className="variable-row">
+                      <label>Key</label>
+                      <input
+                        value={row.key}
+                        onChange={(event) => handleUpdateVariableRow(row.id, "key", event.target.value)}
+                        placeholder="API_BASE_URL"
+                        disabled={!canManageWorkflows}
+                      />
+                      <label>Value</label>
+                      <textarea
+                        value={row.value}
+                        onChange={(event) => handleUpdateVariableRow(row.id, "value", event.target.value)}
+                        rows={2}
+                        placeholder="https://example.com"
+                        disabled={!canManageWorkflows}
+                      />
+                      <button
+                        className="header-btn danger"
+                        onClick={() => handleRemoveVariableRow(row.id)}
+                        disabled={!canManageWorkflows}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
           )}
 
           {false && activeMode === "editor" && (

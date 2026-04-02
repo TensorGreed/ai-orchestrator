@@ -8,6 +8,7 @@ interface GraphMetadata {
 
 const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const allowedWebhookAuthModes = new Set(["none", "bearer_token", "hmac_sha256"]);
+const allowedHttpRequestMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
 function isValidTimeZone(value: string): boolean {
   try {
@@ -160,6 +161,44 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_code_node_timeout",
           message: "Code Node timeout must be a number >= 1 when provided.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "http_request") {
+      const method = typeof config.method === "string" ? config.method.trim().toUpperCase() : "";
+      if (!allowedHttpRequestMethods.has(method)) {
+        issues.push({
+          code: "invalid_http_request_method",
+          message: "HTTP Request node method must be one of GET, POST, PUT, PATCH, DELETE.",
+          nodeId: node.id
+        });
+      }
+
+      if (typeof config.urlTemplate !== "string" || !config.urlTemplate.trim()) {
+        issues.push({
+          code: "missing_http_request_url_template",
+          message: "HTTP Request node requires a non-empty urlTemplate.",
+          nodeId: node.id
+        });
+      }
+
+      if (config.responseType !== undefined && config.responseType !== "json" && config.responseType !== "text") {
+        issues.push({
+          code: "invalid_http_request_response_type",
+          message: "HTTP Request node responseType must be either 'json' or 'text'.",
+          nodeId: node.id
+        });
+      }
+
+      if (
+        config.timeoutMs !== undefined &&
+        (typeof config.timeoutMs !== "number" || !Number.isFinite(config.timeoutMs) || config.timeoutMs < 1)
+      ) {
+        issues.push({
+          code: "invalid_http_request_timeout_ms",
+          message: "HTTP Request node timeoutMs must be a number >= 1.",
           nodeId: node.id
         });
       }
@@ -528,6 +567,63 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_wait_max_delay_ms",
           message: "Wait node maxDelayMs must be a number >= 1.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "set_node") {
+      if (!Array.isArray(config.assignments) || config.assignments.length === 0) {
+        issues.push({
+          code: "missing_set_node_assignments",
+          message: "Set / Transform node requires at least one assignment.",
+          nodeId: node.id
+        });
+      } else {
+        for (const [assignmentIndex, assignment] of config.assignments.entries()) {
+          const entry = (assignment ?? {}) as Record<string, unknown>;
+          if (typeof entry.key !== "string" || !entry.key.trim()) {
+            issues.push({
+              code: "invalid_set_node_assignment_key",
+              message: `Set / Transform assignment #${assignmentIndex + 1} requires a non-empty key.`,
+              nodeId: node.id
+            });
+            break;
+          }
+          if (typeof entry.valueTemplate !== "string") {
+            issues.push({
+              code: "invalid_set_node_assignment_template",
+              message: `Set / Transform assignment #${assignmentIndex + 1} requires a valueTemplate string.`,
+              nodeId: node.id
+            });
+            break;
+          }
+        }
+      }
+    }
+
+    if (node.type === "webhook_response") {
+      if (
+        config.statusCode !== undefined &&
+        (typeof config.statusCode !== "number" || !Number.isFinite(config.statusCode) || config.statusCode < 100 || config.statusCode > 599)
+      ) {
+        issues.push({
+          code: "invalid_webhook_response_status_code",
+          message: "Webhook Response node statusCode must be between 100 and 599.",
+          nodeId: node.id
+        });
+      }
+      if (config.headersTemplate !== undefined && typeof config.headersTemplate !== "string") {
+        issues.push({
+          code: "invalid_webhook_response_headers_template",
+          message: "Webhook Response node headersTemplate must be a string.",
+          nodeId: node.id
+        });
+      }
+      if (config.bodyTemplate !== undefined && typeof config.bodyTemplate !== "string") {
+        issues.push({
+          code: "invalid_webhook_response_body_template",
+          message: "Webhook Response node bodyTemplate must be a string.",
           nodeId: node.id
         });
       }

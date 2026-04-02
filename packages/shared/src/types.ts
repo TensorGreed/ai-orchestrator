@@ -13,6 +13,7 @@ export type NodeCategory =
 export type WorkflowNodeType =
   | "schedule_trigger"
   | "webhook_input"
+  | "http_request"
   | "text_input"
   | "system_prompt"
   | "user_prompt"
@@ -20,6 +21,7 @@ export type WorkflowNodeType =
   | "merge_node"
   | "execute_workflow"
   | "wait_node"
+  | "set_node"
   | "code_node"
   | "prompt_template"
   | "llm_call"
@@ -36,6 +38,7 @@ export type WorkflowNodeType =
   | "if_node"
   | "switch_node"
   | "try_catch"
+  | "webhook_response"
   | "output";
 
 export interface WorkflowNodePosition {
@@ -66,6 +69,7 @@ export interface Workflow {
   description?: string;
   schemaVersion: string;
   workflowVersion: number;
+  variables?: Record<string, string>;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   createdAt?: string;

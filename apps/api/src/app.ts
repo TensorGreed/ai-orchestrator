@@ -81,6 +81,10 @@ const codeNodeTestSchema = z.object({
   input: z.record(z.string(), z.unknown()).optional()
 });
 
+const workflowVariablesSchema = z.object({
+  variables: z.record(z.string(), z.string())
+});
+
 type WebhookAuthMode = "none" | "bearer_token" | "hmac_sha256";
 
 interface NormalizedWebhookSecurityConfig {
@@ -99,6 +103,12 @@ interface WebhookEndpoint {
   path: string;
   method: string;
   config: Record<string, unknown>;
+}
+
+interface ParsedWebhookResponseOverride {
+  statusCode: number;
+  headers: Record<string, string>;
+  body: unknown;
 }
 
 const DEFAULT_WEBHOOK_AUTH_HEADER = "authorization";
@@ -288,6 +298,37 @@ function normalizeWebhookPath(value: unknown, fallback: string): string {
 function normalizeWebhookMethod(value: unknown): string {
   const method = typeof value === "string" ? value.trim().toUpperCase() : "POST";
   return allowedWebhookMethods.has(method) ? method : "POST";
+}
+
+function parseWebhookResponseOverride(output: unknown): ParsedWebhookResponseOverride | null {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return null;
+  }
+
+  const outputRecord = output as Record<string, unknown>;
+  const raw = outputRecord.__webhookResponse;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+
+  const responseRecord = raw as Record<string, unknown>;
+  const statusCode =
+    typeof responseRecord.statusCode === "number" && Number.isFinite(responseRecord.statusCode)
+      ? Math.max(100, Math.min(599, Math.floor(responseRecord.statusCode)))
+      : 200;
+
+  const normalizedHeaders: Record<string, string> = {};
+  if (responseRecord.headers && typeof responseRecord.headers === "object" && !Array.isArray(responseRecord.headers)) {
+    for (const [key, value] of Object.entries(responseRecord.headers as Record<string, unknown>)) {
+      normalizedHeaders[key] = String(value);
+    }
+  }
+
+  return {
+    statusCode,
+    headers: normalizedHeaders,
+    body: responseRecord.body
+  };
 }
 
 function listWebhookEndpoints(workflow: Workflow): WebhookEndpoint[] {
@@ -930,6 +971,58 @@ export function createApp(
     return workflow;
   });
 
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/variables", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+
+    return {
+      workflowId: workflow.id,
+      variables: workflow.variables ?? {}
+    };
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/variables", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+
+    const parsed = workflowVariablesSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid workflow variables payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const nextWorkflow: Workflow = {
+      ...workflow,
+      variables: parsed.data.variables
+    };
+    const saved = store.upsertWorkflow(nextWorkflow);
+    schedulerService?.reloadWorkflow(saved.id);
+
+    return {
+      workflowId: saved.id,
+      variables: saved.variables ?? {}
+    };
+  });
+
   app.post<{ Body: unknown }>("/api/workflows", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
@@ -1560,9 +1653,41 @@ export function createApp(
             }
 
             if (existing.result && typeof existing.result === "object") {
+              const existingResultRecord = existing.result as Record<string, unknown>;
+              const cachedWebhookResponse = (() => {
+                const raw = existingResultRecord.__webhookHttpResponse;
+                if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+                  return null;
+                }
+                const asRecord = raw as Record<string, unknown>;
+                const statusCode =
+                  typeof asRecord.statusCode === "number" && Number.isFinite(asRecord.statusCode)
+                    ? Math.max(100, Math.min(599, Math.floor(asRecord.statusCode)))
+                    : 200;
+                const headers: Record<string, string> = {};
+                if (asRecord.headers && typeof asRecord.headers === "object" && !Array.isArray(asRecord.headers)) {
+                  for (const [key, value] of Object.entries(asRecord.headers as Record<string, unknown>)) {
+                    headers[key] = String(value);
+                  }
+                }
+                return {
+                  statusCode,
+                  headers,
+                  body: asRecord.body
+                };
+              })();
+
               replayingExistingResult = true;
+              if (cachedWebhookResponse) {
+                reply.code(cachedWebhookResponse.statusCode);
+                for (const [headerName, headerValue] of Object.entries(cachedWebhookResponse.headers)) {
+                  reply.header(headerName, headerValue);
+                }
+                return cachedWebhookResponse.body;
+              }
+
               return {
-                ...(existing.result as Record<string, unknown>),
+                ...existingResultRecord,
                 idempotency: {
                   key: idempotencyKey,
                   reused: true
@@ -1597,8 +1722,40 @@ export function createApp(
               };
             }
             if (latest?.result && typeof latest.result === "object") {
+              const latestRecord = latest.result as Record<string, unknown>;
+              const cachedWebhookResponse = (() => {
+                const raw = latestRecord.__webhookHttpResponse;
+                if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+                  return null;
+                }
+                const asRecord = raw as Record<string, unknown>;
+                const statusCode =
+                  typeof asRecord.statusCode === "number" && Number.isFinite(asRecord.statusCode)
+                    ? Math.max(100, Math.min(599, Math.floor(asRecord.statusCode)))
+                    : 200;
+                const headers: Record<string, string> = {};
+                if (asRecord.headers && typeof asRecord.headers === "object" && !Array.isArray(asRecord.headers)) {
+                  for (const [key, value] of Object.entries(asRecord.headers as Record<string, unknown>)) {
+                    headers[key] = String(value);
+                  }
+                }
+                return {
+                  statusCode,
+                  headers,
+                  body: asRecord.body
+                };
+              })();
+
+              if (cachedWebhookResponse) {
+                reply.code(cachedWebhookResponse.statusCode);
+                for (const [headerName, headerValue] of Object.entries(cachedWebhookResponse.headers)) {
+                  reply.header(headerName, headerValue);
+                }
+                return cachedWebhookResponse.body;
+              }
+
               return {
-                ...(latest.result as Record<string, unknown>),
+                ...latestRecord,
                 idempotency: {
                   key: idempotencyKey,
                   reused: true
@@ -1636,11 +1793,7 @@ export function createApp(
           requestInput: parsedInput.body
         });
 
-        if (result.status === "error") {
-          reply.code(400);
-        }
-
-        const responsePayload = {
+        const defaultResponsePayload = {
           ...result,
           selectedWorkflowId: match.workflow.id,
           webhookPath: match.endpoint.path,
@@ -1653,12 +1806,34 @@ export function createApp(
             : undefined
         };
 
+        const webhookOverride = parseWebhookResponseOverride(result.output);
+        const responsePayload = webhookOverride
+          ? webhookOverride.body
+          : defaultResponsePayload;
+
+        if (webhookOverride) {
+          reply.code(webhookOverride.statusCode);
+          for (const [headerName, headerValue] of Object.entries(webhookOverride.headers)) {
+            reply.header(headerName, headerValue);
+          }
+        } else if (result.status === "error") {
+          reply.code(400);
+        }
+
         if (security.idempotencyEnabled && idempotencyKey) {
           store.saveWebhookIdempotencyResult({
             endpointKey,
             idempotencyKey,
             status: result.status,
-            result: responsePayload
+            result: webhookOverride
+              ? {
+                  __webhookHttpResponse: {
+                    statusCode: webhookOverride.statusCode,
+                    headers: webhookOverride.headers,
+                    body: webhookOverride.body
+                  }
+                }
+              : responsePayload
           });
         }
 

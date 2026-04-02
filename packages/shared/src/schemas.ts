@@ -20,6 +20,7 @@ export const workflowNodeSchema = z.object({
   type: z.enum([
     "schedule_trigger",
     "webhook_input",
+    "http_request",
     "text_input",
     "system_prompt",
     "user_prompt",
@@ -27,6 +28,7 @@ export const workflowNodeSchema = z.object({
     "merge_node",
     "execute_workflow",
     "wait_node",
+    "set_node",
     "code_node",
     "prompt_template",
     "llm_call",
@@ -43,6 +45,7 @@ export const workflowNodeSchema = z.object({
     "if_node",
     "switch_node",
     "try_catch",
+    "webhook_response",
     "output"
   ]),
   name: z.string().min(1),
@@ -65,6 +68,7 @@ export const workflowSchema = z.object({
   description: z.string().optional(),
   schemaVersion: z.string().default(WORKFLOW_SCHEMA_VERSION),
   workflowVersion: z.number().int().positive().default(1),
+  variables: z.record(z.string(), z.string()).optional(),
   nodes: z.array(workflowNodeSchema),
   edges: z.array(workflowEdgeSchema),
   createdAt: z.string().datetime().optional(),

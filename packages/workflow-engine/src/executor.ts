@@ -203,6 +203,29 @@ function mergeParentOutputs(parentOutputs: Record<string, unknown>): Record<stri
   return merged;
 }
 
+function looksLikeJson(input: string): boolean {
+  const trimmed = input.trim();
+  return (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  );
+}
+
+function parseTemplateValue(rendered: string): unknown {
+  const trimmed = rendered.trim();
+  if (!trimmed) {
+    return rendered;
+  }
+  if (!looksLikeJson(trimmed)) {
+    return rendered;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return rendered;
+  }
+}
+
 function isErrorLikeOutput(output: unknown): boolean {
   if (!output || typeof output !== "object" || Array.isArray(output)) {
     return false;
@@ -253,6 +276,7 @@ function buildTemplateData(context: NodeRuntimeContext): Record<string, unknown>
   return {
     ...context.globals,
     ...context.merged,
+    vars: toRecord(context.globals.vars),
     parent_outputs: context.parentOutputs
   };
 }
@@ -514,6 +538,94 @@ async function executeNode(
       return picked;
     }
 
+    case "http_request": {
+      const method = typeof config.method === "string" ? config.method.trim().toUpperCase() : "GET";
+      const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+      const safeMethod = allowedMethods.has(method) ? method : "GET";
+
+      const urlTemplate = typeof config.urlTemplate === "string" ? config.urlTemplate : "";
+      const renderedUrl = renderTemplate(urlTemplate, templateData).trim();
+      if (!renderedUrl) {
+        throw new Error("HTTP Request node requires a non-empty rendered URL.");
+      }
+
+      const headersTemplate = typeof config.headersTemplate === "string" ? config.headersTemplate : "{}";
+      const renderedHeaders = renderTemplate(headersTemplate, templateData);
+      let headersPayload: Record<string, unknown> = {};
+      try {
+        headersPayload = toRecord(JSON.parse(renderedHeaders || "{}"));
+      } catch {
+        throw new Error("HTTP Request node headersTemplate must render valid JSON object.");
+      }
+
+      const requestHeaders = new Headers();
+      for (const [key, value] of Object.entries(headersPayload)) {
+        requestHeaders.set(key, String(value));
+      }
+
+      const secretRef = toRecord(config.secretRef);
+      if (typeof secretRef.secretId === "string" && secretRef.secretId.trim()) {
+        const secretValue = await dependencies.resolveSecret({ secretId: secretRef.secretId.trim() });
+        if (!secretValue) {
+          throw new Error("HTTP Request node secretRef is set but secret value could not be resolved.");
+        }
+        requestHeaders.set("Authorization", `Bearer ${secretValue}`);
+      }
+
+      const bodyTemplate = typeof config.bodyTemplate === "string" ? config.bodyTemplate : "";
+      const renderedBody = renderTemplate(bodyTemplate, templateData);
+      const timeoutMs =
+        typeof config.timeoutMs === "number" && Number.isFinite(config.timeoutMs) && config.timeoutMs > 0
+          ? Math.floor(config.timeoutMs)
+          : 15000;
+      const responseType = config.responseType === "text" ? "text" : "json";
+
+      const controller = new AbortController();
+      const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const requestInit: RequestInit = {
+          method: safeMethod,
+          headers: requestHeaders,
+          signal: controller.signal
+        };
+
+        if (safeMethod !== "GET" && safeMethod !== "DELETE" && renderedBody.trim()) {
+          requestInit.body = renderedBody;
+        }
+
+        const response = await fetch(renderedUrl, requestInit);
+        const responseHeaders: Record<string, string> = {};
+        response.headers.forEach((value, key) => {
+          responseHeaders[key] = value;
+        });
+
+        let parsedBody: unknown = null;
+        if (responseType === "text") {
+          parsedBody = await response.text();
+        } else {
+          try {
+            parsedBody = await response.json();
+          } catch {
+            parsedBody = await response.text();
+          }
+        }
+
+        return {
+          status: response.status,
+          headers: responseHeaders,
+          body: parsedBody,
+          ok: response.ok
+        };
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`HTTP Request node timed out after ${timeoutMs}ms.`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+    }
+
     case "text_input": {
       const text =
         typeof config.text === "string"
@@ -702,6 +814,23 @@ async function executeNode(
       const clampedDelay = Math.min(requestedDelay, maxDelay);
       await sleep(clampedDelay);
       return mergeParentOutputs(context.parentOutputs);
+    }
+
+    case "set_node": {
+      const assignments = Array.isArray(config.assignments) ? config.assignments.map((entry) => toRecord(entry)) : [];
+      const output: Record<string, unknown> = {};
+
+      for (const assignment of assignments) {
+        const key = typeof assignment.key === "string" ? assignment.key.trim() : "";
+        const valueTemplate = typeof assignment.valueTemplate === "string" ? assignment.valueTemplate : "";
+        if (!key) {
+          continue;
+        }
+        const rendered = renderTemplate(valueTemplate, templateData);
+        output[key] = parseTemplateValue(rendered);
+      }
+
+      return output;
     }
 
     case "execute_workflow": {
@@ -1450,6 +1579,40 @@ async function executeNode(
       };
     }
 
+    case "webhook_response": {
+      const statusCode =
+        typeof config.statusCode === "number" && Number.isFinite(config.statusCode)
+          ? Math.max(100, Math.min(599, Math.floor(config.statusCode)))
+          : 200;
+      const headersTemplate = typeof config.headersTemplate === "string" ? config.headersTemplate : "{}";
+      const bodyTemplate = typeof config.bodyTemplate === "string" ? config.bodyTemplate : "{{result}}";
+
+      const renderedHeaders = renderTemplate(headersTemplate, templateData);
+      let headersRecord: Record<string, unknown> = {};
+      try {
+        headersRecord = toRecord(JSON.parse(renderedHeaders || "{}"));
+      } catch {
+        throw new Error("Webhook Response node headersTemplate must render valid JSON object.");
+      }
+
+      const normalizedHeaders: Record<string, string> = {};
+      for (const [key, value] of Object.entries(headersRecord)) {
+        normalizedHeaders[key] = String(value);
+      }
+
+      const renderedBody = renderTemplate(bodyTemplate, templateData);
+      const body = parseTemplateValue(renderedBody);
+
+      return {
+        __webhookResponse: {
+          statusCode,
+          headers: normalizedHeaders,
+          body
+        },
+        result: body
+      };
+    }
+
     default:
       throw new Error(`Unsupported node type '${String(node.type)}'`);
   }
@@ -1629,6 +1792,7 @@ export async function executeWorkflow(
     : {
         ...(request.input ?? {}),
         ...(request.variables ?? {}),
+        vars: toRecord(workflow.variables),
         webhook: request.webhookPayload ?? {},
         system_prompt:
           request.systemPrompt ??
@@ -1642,6 +1806,12 @@ export async function executeWorkflow(
         trigger_type: request.triggerType ?? "manual",
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
+
+  if (!request.resumeState) {
+    globals.vars = toRecord(workflow.variables);
+  } else if (!globals.vars || typeof globals.vars !== "object" || Array.isArray(globals.vars)) {
+    globals.vars = toRecord(workflow.variables);
+  }
 
   const nodeOutputs = request.resumeState
     ? deserializeNodeOutputs(toRecord(request.resumeState.nodeOutputs))

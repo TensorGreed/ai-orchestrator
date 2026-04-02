@@ -100,6 +100,33 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "http_request",
+    label: "HTTP Request",
+    category: "Connector",
+    description: "Performs a configurable HTTP request with templated URL, headers, and body.",
+    configSchema: {
+      type: "object",
+      properties: {
+        method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+        urlTemplate: { type: "string" },
+        headersTemplate: { type: "string" },
+        bodyTemplate: { type: "string" },
+        responseType: { type: "string", enum: ["json", "text"] },
+        secretRef: { type: "object" },
+        timeoutMs: { type: "number" }
+      },
+      required: ["method", "urlTemplate"]
+    },
+    sampleConfig: {
+      method: "GET",
+      urlTemplate: "https://api.example.com/v1/users/{{user_id}}",
+      headersTemplate: "{\n  \"Accept\": \"application/json\"\n}",
+      bodyTemplate: "{}",
+      responseType: "json",
+      timeoutMs: 15000
+    }
+  },
+  {
     type: "merge_node",
     label: "Merge / Join",
     category: "Utility",
@@ -156,6 +183,35 @@ export const nodeDefinitions: NodeDefinition[] = [
     sampleConfig: {
       delayMs: 1000,
       maxDelayMs: 30000
+    }
+  },
+  {
+    type: "set_node",
+    label: "Set / Transform",
+    category: "Utility",
+    description: "Builds a structured output object from key/template assignments.",
+    configSchema: {
+      type: "object",
+      properties: {
+        assignments: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              key: { type: "string" },
+              valueTemplate: { type: "string" }
+            },
+            required: ["key", "valueTemplate"]
+          }
+        }
+      }
+    },
+    sampleConfig: {
+      assignments: [
+        { key: "customerId", valueTemplate: "{{webhook.customer.id}}" },
+        { key: "status", valueTemplate: "active" },
+        { key: "metadata", valueTemplate: "{\"source\":\"workflow\",\"index\":{{_loop_index}}}" }
+      ]
     }
   },
   {
@@ -485,6 +541,25 @@ export const nodeDefinitions: NodeDefinition[] = [
       properties: { responseTemplate: { type: "string" }, outputKey: { type: "string" } }
     },
     sampleConfig: { responseTemplate: "{{answer}}", outputKey: "result" }
+  },
+  {
+    type: "webhook_response",
+    label: "Webhook Response",
+    category: "Output",
+    description: "Overrides the outgoing webhook HTTP response (status, headers, and body).",
+    configSchema: {
+      type: "object",
+      properties: {
+        statusCode: { type: "number" },
+        headersTemplate: { type: "string" },
+        bodyTemplate: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      statusCode: 200,
+      headersTemplate: "{\n  \"content-type\": \"application/json\"\n}",
+      bodyTemplate: "{\"ok\":true,\"result\":\"{{result}}\"}"
+    }
   }
 ];
 

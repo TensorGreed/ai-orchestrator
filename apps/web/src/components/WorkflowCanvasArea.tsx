@@ -1,4 +1,4 @@
-import type { CSSProperties, DragEvent, MouseEvent as ReactMouseEvent, RefObject } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -12,6 +12,7 @@ import ReactFlow, {
 } from "reactflow";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNodeData } from "../lib/workflow";
+import { NodeTypeIcon, PaletteIcon, type PaletteCategoryIconKey } from "./node-icons";
 
 interface DefinitionNode {
   type: string;
@@ -22,6 +23,90 @@ interface DefinitionNode {
 }
 
 type LogsTab = "logs" | "inputs";
+
+interface PaletteCategoryMeta {
+  key: string;
+  title: string;
+  description: string;
+  icon: PaletteCategoryIconKey;
+  match: (node: DefinitionNode) => boolean;
+}
+
+const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
+  {
+    key: "ai",
+    title: "AI",
+    description: "Build agents, prompt pipelines, RAG retrieval and guardrails.",
+    icon: "ai",
+    match: (node) =>
+      [
+        "llm_call",
+        "agent_orchestrator",
+        "prompt_template",
+        "rag_retrieve",
+        "local_memory",
+        "output_guardrail",
+        "output_parser"
+      ].includes(node.type)
+  },
+  {
+    key: "apps",
+    title: "Action in an App",
+    description: "Call connectors, MCP tools, or reusable sub-workflows.",
+    icon: "app",
+    match: (node) => ["connector_source", "mcp_tool", "http_request", "execute_workflow"].includes(node.type)
+  },
+  {
+    key: "transform",
+    title: "Data Transformation",
+    description: "Parse, validate, chunk, merge, and shape structured outputs.",
+    icon: "transform",
+    match: (node) =>
+      ["code_node", "document_chunker", "input_validator", "output_parser", "set_node", "merge_node"].includes(
+        node.type
+      )
+  },
+  {
+    key: "flow",
+    title: "Flow",
+    description: "Branch, merge, loop, wait, and handle fallback paths.",
+    icon: "flow",
+    match: (node) => ["if_node", "switch_node", "try_catch", "loop_node", "merge_node", "wait_node", "execute_workflow"].includes(node.type)
+  },
+  {
+    key: "core",
+    title: "Core",
+    description: "Input/output primitives and base workflow utilities.",
+    icon: "core",
+    match: (node) =>
+      [
+        "webhook_input",
+        "text_input",
+        "system_prompt",
+        "user_prompt",
+        "output",
+        "webhook_response",
+        "wait_node",
+        "code_node",
+        "schedule_trigger"
+      ].includes(node.type)
+  },
+  {
+    key: "human",
+    title: "Human in the Loop",
+    description: "Pause for human approvals before continuing execution.",
+    icon: "human",
+    match: (node) => node.type === "human_approval"
+  },
+  {
+    key: "trigger",
+    title: "Triggers",
+    description: "Start workflow runs from schedules or external webhook calls.",
+    icon: "trigger",
+    match: (node) => ["schedule_trigger", "webhook_input", "text_input"].includes(node.type)
+  }
+];
+
 
 interface WorkflowCanvasAreaProps {
   isLogsPanelCollapsed: boolean;
@@ -104,46 +189,227 @@ export function WorkflowCanvasArea({
   sessionId,
   onSessionIdChange
 }: WorkflowCanvasAreaProps) {
+  const [paletteSearch, setPaletteSearch] = useState("");
+  const [activePaletteCategory, setActivePaletteCategory] = useState<string | null>(null);
+
+  const allDefinitions = useMemo(() => {
+    const byType = new Map<string, DefinitionNode>();
+    for (const items of groupedDefinitions.values()) {
+      for (const item of items) {
+        byType.set(item.type, item);
+      }
+    }
+    return [...byType.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [groupedDefinitions]);
+
+  const paletteSections = useMemo(
+    () =>
+      PALETTE_CATEGORIES.map((section) => ({
+        ...section,
+        items: allDefinitions.filter((node) => section.match(node))
+      })).filter((section) => section.items.length > 0),
+    [allDefinitions]
+  );
+
+  const activeSection = useMemo(
+    () => paletteSections.find((section) => section.key === activePaletteCategory) ?? null,
+    [activePaletteCategory, paletteSections]
+  );
+
+  const searchResults = useMemo(() => {
+    const query = paletteSearch.trim().toLowerCase();
+    if (!query) {
+      return [];
+    }
+    return allDefinitions.filter((node) => {
+      return (
+        node.label.toLowerCase().includes(query) ||
+        node.type.toLowerCase().includes(query) ||
+        node.description.toLowerCase().includes(query)
+      );
+    });
+  }, [allDefinitions, paletteSearch]);
+
+  const handleAddNode = (definition: DefinitionNode) => {
+    onCreateNodeFromDefinition(definition);
+    onCloseNodeDrawer();
+    setPaletteSearch("");
+    setActivePaletteCategory(null);
+  };
+
+  useEffect(() => {
+    if (!showNodeDrawer) {
+      setPaletteSearch("");
+      setActivePaletteCategory(null);
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCloseNodeDrawer();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showNodeDrawer, onCloseNodeDrawer]);
+
   return (
     <div className="editor-layout">
       <section className={isLogsPanelCollapsed ? "canvas-and-logs logs-collapsed" : "canvas-and-logs"} style={canvasAndLogsStyle}>
         <div className="canvas-pane" ref={flowWrapperRef} onDrop={onDrop} onDragOver={onDragOver}>
           {showNodeDrawer && (
-            <div className="node-drawer">
-              <div className="node-drawer-header-row">
-                <div className="node-drawer-header">Node Library</div>
-                <button
-                  className="node-drawer-close-btn"
-                  onClick={onCloseNodeDrawer}
-                  title="Close node library"
-                  aria-label="Close node library"
-                >
-                  x
-                </button>
-              </div>
-              {[...groupedDefinitions.entries()].map(([category, items]) => (
-                <div key={category} className="node-category">
-                  <div className="node-category-title">{category}</div>
-                  <div className="node-list">
-                    {items.map((item) => (
+            <div className="node-palette-overlay" onClick={onCloseNodeDrawer}>
+              <aside
+                className="node-palette"
+                onClick={(event) => {
+                  event.stopPropagation();
+                }}
+              >
+                <div className="node-palette-header">
+                  <div className="node-palette-heading-row">
+                    {activeSection ? (
                       <button
-                        key={item.type}
-                        className="node-chip"
-                        draggable
-                        onDragStart={(event) => {
-                          event.dataTransfer.setData("application/reactflow", item.type);
-                          event.dataTransfer.effectAllowed = "move";
-                        }}
-                        onClick={() => onCreateNodeFromDefinition(item)}
-                        title={item.description}
+                        className="node-palette-back-btn"
+                        onClick={() => setActivePaletteCategory(null)}
+                        title="Back to categories"
+                        aria-label="Back to categories"
                       >
-                        <span>{item.label}</span>
-                        <small>{item.type}</small>
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path
+                            d="m14 6-6 6 6 6"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
                       </button>
-                    ))}
+                    ) : null}
+                    <div>
+                      <h3>{activeSection ? activeSection.title : "What happens next?"}</h3>
+                      <p>{activeSection ? `Select a ${activeSection.title} node to add` : "Pick a category or search directly"}</p>
+                    </div>
+                    <button
+                      className="node-palette-close-btn"
+                      onClick={onCloseNodeDrawer}
+                      title="Close node library"
+                      aria-label="Close node library"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="m7 7 10 10M17 7 7 17"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
                   </div>
+
+                  <label className="node-palette-search">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <circle cx="11" cy="11" r="6.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
+                      <path d="m16 16 4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                    </svg>
+                    <input
+                      placeholder="Search nodes..."
+                      value={paletteSearch}
+                      onChange={(event) => setPaletteSearch(event.target.value)}
+                      autoFocus
+                    />
+                  </label>
                 </div>
-              ))}
+
+                <div className="node-palette-body">
+                  {paletteSearch.trim() ? (
+                    <div className="node-palette-list">
+                      {searchResults.length === 0 && (
+                        <div className="node-palette-empty">No nodes match "{paletteSearch.trim()}".</div>
+                      )}
+                      {searchResults.map((item) => {
+                        const parentSection = paletteSections.find((section) => section.match(item));
+                        return (
+                          <button
+                            key={item.type}
+                            className="node-palette-node-row"
+                            draggable
+                            onDragStart={(event) => {
+                              event.dataTransfer.setData("application/reactflow", item.type);
+                              event.dataTransfer.effectAllowed = "move";
+                            }}
+                            onClick={() => handleAddNode(item)}
+                            title={item.description}
+                          >
+                            <span className="node-palette-icon-wrap">
+                              <NodeTypeIcon nodeType={item.type} fallbackIcon={parentSection?.icon ?? "core"} />
+                            </span>
+                            <span className="node-palette-row-copy">
+                              <strong>{item.label}</strong>
+                              <small>{item.description || item.type}</small>
+                            </span>
+                            <span className="node-palette-row-arrow" aria-hidden="true">
+                              +
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : activeSection ? (
+                    <div className="node-palette-list">
+                      {activeSection.items.map((item) => (
+                        <button
+                          key={item.type}
+                          className="node-palette-node-row"
+                          draggable
+                          onDragStart={(event) => {
+                            event.dataTransfer.setData("application/reactflow", item.type);
+                            event.dataTransfer.effectAllowed = "move";
+                          }}
+                          onClick={() => handleAddNode(item)}
+                          title={item.description}
+                        >
+                          <span className="node-palette-icon-wrap">
+                            <NodeTypeIcon nodeType={item.type} fallbackIcon={activeSection.icon} />
+                          </span>
+                          <span className="node-palette-row-copy">
+                            <strong>{item.label}</strong>
+                            <small>{item.description || item.type}</small>
+                          </span>
+                          <span className="node-palette-row-arrow" aria-hidden="true">
+                            +
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="node-palette-list">
+                      {paletteSections.map((section) => (
+                        <button
+                          key={section.key}
+                          className="node-palette-category-row"
+                          onClick={() => setActivePaletteCategory(section.key)}
+                        >
+                          <span className="node-palette-icon-wrap">
+                            <PaletteIcon icon={section.icon} />
+                          </span>
+                          <span className="node-palette-row-copy">
+                            <strong>{section.title}</strong>
+                            <small>{section.description}</small>
+                          </span>
+                          <span className="node-palette-row-arrow" aria-hidden="true">
+                            &rarr;
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </aside>
             </div>
           )}
 

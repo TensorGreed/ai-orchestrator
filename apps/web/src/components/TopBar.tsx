@@ -117,6 +117,13 @@ export function TopBar({
           Editor
         </button>
         <button
+          className={activeMode === "variables" ? "tab active" : "tab"}
+          type="button"
+          onClick={() => onModeChange("variables")}
+        >
+          Variables
+        </button>
+        <button
           className={activeMode === "executions" ? "tab active" : "tab"}
           type="button"
           onClick={() => onModeChange("executions")}
@@ -149,7 +156,11 @@ export function TopBar({
       </div>
 
       <div className="header-actions">
-        {(activeMode === "editor" || activeMode === "executions" || activeMode === "chat" || activeMode === "evaluations") && (
+        {(activeMode === "editor" ||
+          activeMode === "variables" ||
+          activeMode === "executions" ||
+          activeMode === "chat" ||
+          activeMode === "evaluations") && (
           <>
             <button className="header-btn" onClick={onSave} disabled={busy}>
               Save

@@ -27,6 +27,14 @@ export function LeftMenuBar({ activeMode, canManageSecrets, onModeChange }: Left
       </button>
       <button
         className="rail-btn"
+        onClick={() => onModeChange("variables")}
+        title="Variables"
+        aria-pressed={activeMode === "variables"}
+      >
+        Vars
+      </button>
+      <button
+        className="rail-btn"
         onClick={() => onModeChange("executions")}
         title="Executions"
         aria-pressed={activeMode === "executions"}

@@ -79,6 +79,23 @@ export async function fetchWorkflow(id: string) {
   return apiRequest<Workflow>(`/api/workflows/${id}`);
 }
 
+export async function fetchWorkflowVariables(workflowId: string) {
+  return apiRequest<{
+    workflowId: string;
+    variables: Record<string, string>;
+  }>(`/api/workflows/${workflowId}/variables`);
+}
+
+export async function updateWorkflowVariables(workflowId: string, variables: Record<string, string>) {
+  return apiRequest<{
+    workflowId: string;
+    variables: Record<string, string>;
+  }>(`/api/workflows/${workflowId}/variables`, {
+    method: "PUT",
+    body: JSON.stringify({ variables })
+  });
+}
+
 export async function saveWorkflow(workflow: Workflow) {
   return apiRequest<Workflow>("/api/workflows", {
     method: "POST",

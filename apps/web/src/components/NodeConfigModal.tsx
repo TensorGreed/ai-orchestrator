@@ -1362,6 +1362,214 @@ export function NodeConfigModal({
             />
           </>
         );
+      case "http_request":
+        return (
+          <>
+            <SelectField
+              label="Method"
+              value={toStringValue(config.method, "GET")}
+              onChange={(next) => setConfig((current) => ({ ...current, method: next }))}
+              options={[
+                { value: "GET", label: "GET" },
+                { value: "POST", label: "POST" },
+                { value: "PUT", label: "PUT" },
+                { value: "PATCH", label: "PATCH" },
+                { value: "DELETE", label: "DELETE" }
+              ]}
+            />
+            <TextField
+              label="URL Template"
+              value={toStringValue(config.urlTemplate, "https://api.example.com/resource/{{id}}")}
+              onChange={(next) => setConfig((current) => ({ ...current, urlTemplate: next }))}
+              placeholder="https://api.example.com/resource/{{id}}"
+            />
+            <SelectField
+              label="Authorization Secret (Bearer)"
+              value={toStringValue(asRecord(config.secretRef).secretId)}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+              }
+              options={[
+                { value: "", label: "None" },
+                ...secrets.map((secret) => ({
+                  value: secret.id,
+                  label: `${secret.name} (${secret.provider})`
+                }))
+              ]}
+            />
+            <TextAreaField
+              label="Headers Template (JSON)"
+              value={toStringValue(config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}")}
+              onChange={(next) => setConfig((current) => ({ ...current, headersTemplate: next }))}
+              rows={5}
+            />
+            <TextAreaField
+              label="Body Template"
+              value={toStringValue(config.bodyTemplate, "")}
+              onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
+              rows={5}
+            />
+            <div className="cfg-grid-2">
+              <SelectField
+                label="Response Type"
+                value={toStringValue(config.responseType, "json")}
+                onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
+                options={[
+                  { value: "json", label: "JSON" },
+                  { value: "text", label: "Text" }
+                ]}
+              />
+              <NumberField
+                label="Timeout (ms)"
+                value={toNumberValue(config.timeoutMs, 15000)}
+                min={1}
+                step={100}
+                onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
+              />
+            </div>
+            <div className="cfg-tip">
+              Templates support handlebars syntax like <code>{`{{user_prompt}}`}</code> and <code>{`{{vars.API_URL}}`}</code>.
+            </div>
+          </>
+        );
+      case "set_node": {
+        const assignments = Array.isArray(config.assignments)
+          ? config.assignments.map((entry) => asRecord(entry))
+          : [];
+
+        return (
+          <>
+            <div className="cfg-group">
+              <h4>Assignments</h4>
+              {assignments.length === 0 && (
+                <div className="cfg-tip">
+                  No assignments yet. Add one row to shape the output payload.
+                </div>
+              )}
+              {assignments.map((assignment, index) => (
+                <div key={`assignment-${index}`} className="cfg-assignment-row">
+                  <div className="cfg-grid-2">
+                    <TextField
+                      label="Key"
+                      value={toStringValue(assignment.key)}
+                      onChange={(next) =>
+                        setConfig((current) => {
+                          const currentAssignments = Array.isArray(current.assignments)
+                            ? current.assignments.map((item) => asRecord(item))
+                            : [];
+                          currentAssignments[index] = {
+                            ...asRecord(currentAssignments[index]),
+                            key: next
+                          };
+                          return {
+                            ...current,
+                            assignments: currentAssignments
+                          };
+                        })
+                      }
+                      placeholder="customerId"
+                    />
+                    <TextAreaField
+                      label="Value Template"
+                      value={toStringValue(assignment.valueTemplate)}
+                      onChange={(next) =>
+                        setConfig((current) => {
+                          const currentAssignments = Array.isArray(current.assignments)
+                            ? current.assignments.map((item) => asRecord(item))
+                            : [];
+                          currentAssignments[index] = {
+                            ...asRecord(currentAssignments[index]),
+                            valueTemplate: next
+                          };
+                          return {
+                            ...current,
+                            assignments: currentAssignments
+                          };
+                        })
+                      }
+                      rows={3}
+                    />
+                  </div>
+                  <div className="cfg-inline-actions">
+                    <button
+                      type="button"
+                      className="header-btn danger"
+                      onClick={() =>
+                        setConfig((current) => {
+                          const currentAssignments = Array.isArray(current.assignments)
+                            ? current.assignments.map((item) => asRecord(item))
+                            : [];
+                          currentAssignments.splice(index, 1);
+                          return {
+                            ...current,
+                            assignments: currentAssignments
+                          };
+                        })
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div className="cfg-inline-actions">
+                <button
+                  type="button"
+                  className="header-btn"
+                  onClick={() =>
+                    setConfig((current) => {
+                      const currentAssignments = Array.isArray(current.assignments)
+                        ? current.assignments.map((item) => asRecord(item))
+                        : [];
+                      currentAssignments.push({
+                        key: "",
+                        valueTemplate: ""
+                      });
+                      return {
+                        ...current,
+                        assignments: currentAssignments
+                      };
+                    })
+                  }
+                >
+                  Add Assignment
+                </button>
+              </div>
+            </div>
+          </>
+        );
+      }
+      case "webhook_response":
+        return (
+          <>
+            <NumberField
+              label="Status Code"
+              value={toNumberValue(config.statusCode, 200)}
+              min={100}
+              max={599}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, statusCode: next }))}
+            />
+            <TextAreaField
+              label="Headers Template (JSON)"
+              value={toStringValue(config.headersTemplate, "{\n  \"content-type\": \"application/json\"\n}")}
+              onChange={(next) => setConfig((current) => ({ ...current, headersTemplate: next }))}
+              rows={5}
+            />
+            <TextAreaField
+              label="Body Template"
+              value={toStringValue(config.bodyTemplate, "{\"ok\":true,\"result\":\"{{result}}\"}")}
+              onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
+              rows={5}
+            />
+            <div className="cfg-tip">
+              This node only affects responses for webhook-triggered executions.
+            </div>
+          </>
+        );
       case "connector_source":
         return renderConnectorParameters();
       case "text_input":

@@ -1,5 +1,6 @@
 import { Handle, Position, type NodeProps } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
+import { NodeTypeIcon } from "./node-icons";
 
 function toTitle(nodeType: string): string {
   return nodeType
@@ -8,49 +9,27 @@ function toTitle(nodeType: string): string {
     .join(" ");
 }
 
-function nodeToken(nodeType: string): string {
-  const map: Record<string, string> = {
-    schedule_trigger: "CRON",
-    webhook_input: "WH",
-    text_input: "TXT",
-    system_prompt: "SYS",
-    user_prompt: "USR",
-    loop_node: "LOOP",
-    merge_node: "MRG",
-    execute_workflow: "SUB",
-    wait_node: "WAIT",
-    code_node: "CODE",
-    prompt_template: "TPL",
-    llm_call: "LLM",
-    agent_orchestrator: "AG",
-    local_memory: "MEM",
-    mcp_tool: "MCP",
-    rag_retrieve: "RAG",
-    connector_source: "DB",
-    output: "OUT",
-    output_parser: "PRS",
-    human_approval: "APP",
-    input_validator: "VAL",
-    output_guardrail: "GRD",
-    if_node: "IF",
-    switch_node: "SW",
-    try_catch: "TC",
-    document_chunker: "CHK"
-  };
-
-  return map[nodeType] ?? "ND";
-}
-
 function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "agent" {
   if (nodeType === "agent_orchestrator") {
     return "agent";
   }
 
-  if (nodeType === "schedule_trigger" || nodeType === "webhook_input" || nodeType === "output") {
+  if (
+    nodeType === "schedule_trigger" ||
+    nodeType === "webhook_input" ||
+    nodeType === "output" ||
+    nodeType === "webhook_response"
+  ) {
     return "terminal";
   }
 
-  if (nodeType === "mcp_tool" || nodeType === "connector_source" || nodeType === "llm_call" || nodeType === "local_memory") {
+  if (
+    nodeType === "mcp_tool" ||
+    nodeType === "connector_source" ||
+    nodeType === "http_request" ||
+    nodeType === "llm_call" ||
+    nodeType === "local_memory"
+  ) {
     return "resource";
   }
 
@@ -67,7 +46,6 @@ function statusClass(status: EditorNodeData["executionStatus"]): string {
 
 export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>) {
   const variant = nodeVariant(data.nodeType);
-  const badge = nodeToken(data.nodeType);
   const subtitle = toTitle(data.nodeType);
   const currentStatus = data.executionStatus;
   const showSuccessBadge = currentStatus === "success";
@@ -89,7 +67,9 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
       {variant === "agent" ? (
         <>
           <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
-          <div className="wf-node-icon wf-node-agent-icon">{badge}</div>
+          <div className="wf-node-icon wf-node-agent-icon">
+            <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="ai" />
+          </div>
           <div className="wf-node-main">
             <div className="wf-node-title">{data.label}</div>
             <div className="wf-node-subtitle">AI Agent</div>
@@ -133,14 +113,18 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
       ) : variant === "resource" ? (
         <>
           <Handle type="target" position={Position.Top} className="wf-handle wf-handle-main" />
-          <div className="wf-node-resource-icon">{badge}</div>
+          <div className="wf-node-resource-icon">
+            <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="core" />
+          </div>
           <Handle type="source" position={Position.Bottom} className="wf-handle wf-handle-main" />
           <div className="wf-node-resource-title">{data.label}</div>
         </>
       ) : (
         <>
           <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
-          <div className="wf-node-icon">{badge}</div>
+          <div className="wf-node-icon">
+            <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="core" />
+          </div>
           <div className="wf-node-main">
             <div className="wf-node-title">{data.label}</div>
             <div className="wf-node-subtitle">{subtitle}</div>
