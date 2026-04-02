@@ -5,208 +5,200 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="LsquareM is an open-source AI orchestration studio for building, running, and automating production workflows."
+      content="L²M is a visual AI orchestration studio for building reliable workflows with guardrails, approvals, and automation."
     />
-    <meta property="og:title" content="LsquareM | AI Orchestration Studio" />
+    <meta property="og:title" content="L²M | Visual AI Orchestration" />
     <meta
       property="og:description"
-      content="Design visual AI workflows with branching, guardrails, human approvals, RAG, chat widgets, and cron automation."
+      content="Design and automate production AI workflows with branching, execution history, HITL, SSE streaming, and cron triggers."
     />
     <meta property="og:type" content="website" />
     <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="./styles.css" />
-    <title>LsquareM | AI Orchestration Studio</title>
+    <title>L²M | Visual AI Orchestration</title>
   </head>
   <body>
-    <div class="page-bg" aria-hidden="true">
-      <div class="orb orb-a"></div>
-      <div class="orb orb-b"></div>
-      <div class="grid-layer"></div>
-    </div>
+    <div class="surface-glow" aria-hidden="true"></div>
 
-    <header class="site-header">
-      <a class="brand" href="#home" aria-label="LsquareM home">
-        <img src="./assets/lsquarem-logo.svg" alt="LsquareM logo" />
-        <div class="brand-copy">
-          <strong>LsquareM</strong>
-          <span>AI Orchestration Studio</span>
-        </div>
-      </a>
+    <header class="topbar">
+      <div class="container topbar-inner">
+        <a class="brand" href="#home" aria-label="L2M home">
+          <img src="./assets/lsquarem-logo.svg" alt="L2M logo" />
+          <div>
+            <strong>L<sup>2</sup>M</strong>
+            <span>Orchestration Studio</span>
+          </div>
+        </a>
 
-      <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation" aria-expanded="false">
-        Menu
-      </button>
+        <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu" aria-expanded="false">Menu</button>
 
-      <nav class="site-nav" id="siteNav">
-        <a href="#features">Features</a>
-        <a href="#how-it-works">How It Works</a>
-        <a href="#automation">Automation</a>
-        <a href="#oss">Open Source</a>
-      </nav>
+        <nav class="nav" id="siteNav">
+          <a href="#features">Features</a>
+          <a href="#automation">Automation</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#oss">Open Source</a>
+        </nav>
 
-      <div class="header-ctas">
-        <a class="btn ghost" href="https://github.com/anurag/ai-orchestrator" target="_blank" rel="noreferrer">GitHub</a>
-        <a class="btn solid" href="#oss">Get Started</a>
+        <a class="btn btn-subtle" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">
+          GitHub
+        </a>
       </div>
     </header>
 
     <main id="home">
       <section class="hero reveal">
-        <div class="hero-copy">
-          <p class="eyebrow">Build. Branch. Guard. Deploy.</p>
-          <h1>Ship production-grade AI workflows without wrestling code first.</h1>
-          <p class="hero-text">
-            LsquareM gives teams a visual control center for AI orchestration with topological execution, human approvals,
-            execution history, guardrails, RAG, chat widgets, and now cron automation.
+        <div class="container hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">Visual AI Automation</p>
+            <h1>Stop stitching tools together. Build one reliable AI flow.</h1>
+            <p>
+              L<sup>2</sup>M helps teams design, execute, monitor, and automate production-ready AI workflows with deterministic
+              branching, guardrails, human approvals, and full execution traceability.
+            </p>
+            <div class="hero-actions">
+              <a class="btn btn-primary" href="#oss">Get Started</a>
+              <a class="btn btn-subtle" href="#features">Explore Features</a>
+            </div>
+          </div>
+
+          <aside class="hero-canvas" aria-label="Studio preview">
+            <div class="canvas-header">
+              <span class="dot"></span>
+              <span class="dot"></span>
+              <span class="dot"></span>
+              <code>studio / customer-ops</code>
+            </div>
+            <div class="canvas-grid">
+              <div class="flow-pill">schedule_trigger</div>
+              <div class="flow-pill">input_validator</div>
+              <div class="flow-pill">llm_call</div>
+              <div class="flow-pill">output_guardrail</div>
+              <div class="flow-pill">human_approval</div>
+              <div class="flow-pill">output</div>
+            </div>
+            <div class="canvas-footer">
+              <div><span class="status ok"></span>execution_history persisted</div>
+              <div><span class="status wait"></span>awaiting approval</div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="features" class="reveal">
+        <div class="container">
+          <header class="section-header">
+            <p class="eyebrow">Capabilities</p>
+            <h2>Everything your orchestration layer should have</h2>
+          </header>
+
+          <div class="cards">
+            <article>
+              <h3>Branching DAG Engine</h3>
+              <p>Topological execution with `if`, `switch`, and `try/catch` for controlled, readable AI logic.</p>
+            </article>
+            <article>
+              <h3>Execution History</h3>
+              <p>Persistent audit logs with node-by-node trace for debugging, compliance, and quality review.</p>
+            </article>
+            <article>
+              <h3>Human-in-the-Loop</h3>
+              <p>Pause on approval nodes, serialize state, and resume safely after approve or reject decisions.</p>
+            </article>
+            <article>
+              <h3>Guardrails</h3>
+              <p>Validate input and sanitize model output with deterministic checks and configurable failure behavior.</p>
+            </article>
+            <article>
+              <h3>Streaming Chat + Widget</h3>
+              <p>SSE-powered chat interface in-studio and an embeddable widget for external websites.</p>
+            </article>
+            <article>
+              <h3>Code Node Sandbox</h3>
+              <p>Run custom JavaScript transforms in a VM-isolated execution step with timeout controls.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="automation" class="reveal">
+        <div class="container split">
+          <div>
+            <p class="eyebrow">Batch 5</p>
+            <h2>Native cron scheduling for autonomous workflows</h2>
+            <p class="lead">
+              Add a `schedule_trigger` node to run workflows every day, every 15 minutes, or any cron interval with timezone
+              support.
+            </p>
+            <ul class="clean-list">
+              <li>Scheduler initializes active workflows on API startup</li>
+              <li>Each cron run executes with `triggerType: "cron"` and is saved in execution history</li>
+              <li>Schedules reload dynamically when workflows are saved, imported, or deleted</li>
+            </ul>
+          </div>
+
+          <div class="schedule-panel">
+            <h3>Common Schedules</h3>
+            <div class="schedule-row">
+              <code>0 9 * * *</code>
+              <span>Daily standup summary</span>
+            </div>
+            <div class="schedule-row">
+              <code>*/15 * * * *</code>
+              <span>Quarter-hour monitoring loop</span>
+            </div>
+            <div class="schedule-row">
+              <code>0 0 * * 1</code>
+              <span>Weekly Monday report</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="architecture" class="reveal">
+        <div class="container">
+          <header class="section-header">
+            <p class="eyebrow">Stack</p>
+            <h2>Practical architecture for fast iteration</h2>
+          </header>
+          <div class="stack">
+            <div><strong>Frontend</strong><span>Vite + React Studio</span></div>
+            <div><strong>Backend</strong><span>Fastify + SQLite</span></div>
+            <div><strong>Engine</strong><span>Workflow DAG Executor</span></div>
+            <div><strong>Integrations</strong><span>RAG, MCP, LLM Providers</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="oss" class="reveal cta">
+        <div class="container cta-inner">
+          <h2>From local prototype to production automation</h2>
+          <p>
+            L<sup>2</sup>M is open-source and built for teams that want transparent AI workflow logic instead of opaque chains.
           </p>
           <div class="hero-actions">
-            <a class="btn solid" href="#oss">Start Building</a>
-            <a class="btn ghost" href="#features">See Capabilities</a>
+            <a class="btn btn-primary" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">
+              View Repository
+            </a>
+            <a class="btn btn-subtle" href="#home">Back to Top</a>
           </div>
-          <div class="hero-metrics">
-            <div><strong>5</strong><span>Batches Delivered</span></div>
-            <div><strong>DAG</strong><span>Branching Engine</span></div>
-            <div><strong>SSE</strong><span>Streaming LLM UX</span></div>
-          </div>
-        </div>
-
-        <div class="hero-frame" aria-label="Workflow preview">
-          <div class="preview-toolbar">
-            <span class="dot"></span>
-            <span class="dot"></span>
-            <span class="dot"></span>
-            <code>workflow: customer-support-ops</code>
-          </div>
-          <div class="node-lane">
-            <div class="node n-input">schedule_trigger</div>
-            <div class="connector"></div>
-            <div class="node n-logic">input_validator</div>
-            <div class="connector"></div>
-            <div class="node n-llm">llm_call + guardrail</div>
-            <div class="connector"></div>
-            <div class="node n-gate">human_approval</div>
-            <div class="connector"></div>
-            <div class="node n-out">output</div>
-          </div>
-          <div class="preview-log">
-            <p><span class="ok">SUCCESS</span> cron execution #9f4e started</p>
-            <p><span class="ok">SUCCESS</span> validator checks passed</p>
-            <p><span class="warn">WAITING</span> approval requested from operator</p>
-          </div>
-        </div>
-      </section>
-
-      <section id="features" class="features reveal">
-        <div class="section-heading">
-          <p class="eyebrow">Core Platform</p>
-          <h2>Everything needed for real-world AI orchestration</h2>
-        </div>
-        <div class="feature-grid">
-          <article class="feature-card">
-            <h3>Structural Branching</h3>
-            <p>Topological execution with `if`, `switch`, and `try/catch` nodes for deterministic control flow.</p>
-          </article>
-          <article class="feature-card">
-            <h3>Execution History</h3>
-            <p>Persistent run traces with node-by-node audit data for debugging, observability, and compliance.</p>
-          </article>
-          <article class="feature-card">
-            <h3>Guardrails</h3>
-            <p>Input validation and output safety checks with retry-on-failure behavior where appropriate.</p>
-          </article>
-          <article class="feature-card">
-            <h3>HITL Approvals</h3>
-            <p>Pause workflows for human approval/rejection and resume from serialized state safely.</p>
-          </article>
-          <article class="feature-card">
-            <h3>Embeddable Chat</h3>
-            <p>Built-in chat mode plus website widget script for portable conversational workflow experiences.</p>
-          </article>
-          <article class="feature-card">
-            <h3>Code Node Sandbox</h3>
-            <p>Run custom JavaScript transformations in a controlled VM with execution-time safeguards.</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="how-it-works" class="how reveal">
-        <div class="section-heading">
-          <p class="eyebrow">Workflow Lifecycle</p>
-          <h2>From draft to autonomous operations</h2>
-        </div>
-        <div class="steps">
-          <article>
-            <span>01</span>
-            <h3>Design visually</h3>
-            <p>Create flows in the studio, configure node parameters, and connect logic in a clear DAG.</p>
-          </article>
-          <article>
-            <span>02</span>
-            <h3>Validate and run</h3>
-            <p>Execute manually, via webhook, or through streaming chat while inspecting execution traces live.</p>
-          </article>
-          <article>
-            <span>03</span>
-            <h3>Automate on schedule</h3>
-            <p>Activate cron triggers to run workflows periodically and track every autonomous execution.</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="automation" class="automation reveal">
-        <div class="automation-copy">
-          <p class="eyebrow">Batch 5 Highlight</p>
-          <h2>Cron automation that feels native to the orchestrator</h2>
-          <p>
-            `schedule_trigger` nodes let workflows run at precise intervals with timezone awareness. On startup, the scheduler
-            registers active schedules, executes workflows with `triggerType: "cron"`, persists execution history, and reloads
-            schedules whenever workflows change.
-          </p>
-          <ul>
-            <li>Supports expressions like `0 9 * * *` and `*/15 * * * *`</li>
-            <li>Only runs when the schedule node is a connected entry point</li>
-            <li>Dynamically updates jobs when workflows are saved, imported, or deleted</li>
-          </ul>
-        </div>
-        <div class="automation-panel">
-          <h3>Example Schedules</h3>
-          <div class="schedule-item">
-            <code>0 9 * * *</code>
-            <span>Daily morning digest</span>
-          </div>
-          <div class="schedule-item">
-            <code>*/15 * * * *</code>
-            <span>Quarter-hour sync and monitoring</span>
-          </div>
-          <div class="schedule-item">
-            <code>0 0 * * 1</code>
-            <span>Weekly Monday report run</span>
-          </div>
-        </div>
-      </section>
-
-      <section id="oss" class="oss reveal">
-        <h2>Built for teams that want speed and control</h2>
-        <p>
-          LsquareM is designed as a practical open platform for AI operations. Clone it, run it locally, customize the nodes,
-          and deploy your own orchestration workflows with confidence.
-        </p>
-        <div class="oss-actions">
-          <a class="btn solid" href="https://github.com/anurag/ai-orchestrator" target="_blank" rel="noreferrer">View Repository</a>
-          <a class="btn ghost" href="#home">Back to Top</a>
         </div>
       </section>
     </main>
 
-    <footer class="site-footer">
-      <p><strong>LsquareM</strong> <span id="year"></span></p>
-      <p>AI Orchestration Studio</p>
+    <footer class="footer">
+      <div class="container footer-inner">
+        <p><strong>L<sup>2</sup>M</strong> <span id="year"></span></p>
+        <p>
+          Powered by
+          <a href="https://tensorgreed.com" target="_blank" rel="noreferrer">tensorgreed.com</a>
+        </p>
+      </div>
     </footer>
 
     <script src="./main.js"></script>
