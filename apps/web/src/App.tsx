@@ -244,7 +244,7 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     target?.data.nodeType === "mcp_tool" ||
     target?.data.nodeType === "connector_source";
 
-  const stroke = isAuxiliary ? "#aab0bc" : "#6e7789";
+  const stroke = isAuxiliary ? "#a7bccc" : "#4f6881";
   
   // Create an explicit label for structural branches
   let label: string | undefined = undefined;
@@ -279,8 +279,8 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     label,
     labelBgPadding: [8, 4],
     labelBgBorderRadius: 4,
-    labelBgStyle: { fill: '#f8f9fc', color: '#5f6b84', border: '1px solid #e1e5f0' },
-    labelStyle: { fill: '#5f6b84', fontWeight: 600, fontSize: 10 },
+    labelBgStyle: { fill: "#f3faf9", color: "#2f5a67", border: "1px solid #cde3e2" },
+    labelStyle: { fill: "#2f5a67", fontWeight: 600, fontSize: 10 },
     markerEnd: {
       type: MarkerType.ArrowClosed,
       color: stroke
