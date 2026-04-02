@@ -1881,8 +1881,10 @@ function StudioApp() {
       <div className="auth-shell">
         <form className="auth-card" onSubmit={handleLogin}>
           <div className="auth-brand">
-            <img src="/lsquarem-logo.svg" alt="LsquareM logo" className="auth-brand-logo" />
-            <h1>LsquareM</h1>
+            <img src="/lsquarem-logo.svg" alt="L2M logo" className="auth-brand-logo" />
+            <h1>
+              L<sup>2</sup>M
+            </h1>
           </div>
           <p>Sign in to view, edit, and run workflows.</p>
           {authError && <div className="error-banner">{authError}</div>}
@@ -1911,7 +1913,7 @@ function StudioApp() {
   }
 
   if (loading) {
-    return <div className="loading-screen">Loading LsquareM...</div>;
+    return <div className="loading-screen">Loading L²M...</div>;
   }
 
   return (

@@ -75,6 +75,13 @@ select {
   font-size: 1.5rem;
 }
 
+.auth-card h1 sup,
+.brand-badge-copy strong sup {
+  font-size: 0.62em;
+  vertical-align: super;
+  line-height: 0;
+}
+
 .auth-brand {
   display: flex;
   align-items: center;

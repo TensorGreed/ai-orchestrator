@@ -71,10 +71,12 @@ export function TopBar({
     <header className="top-header">
       <div className="header-left">
         <div className="brand-badge">
-          <img src="/lsquarem-logo.svg" alt="LsquareM logo" className="brand-badge-logo" />
+          <img src="/lsquarem-logo.svg" alt="L2M logo" className="brand-badge-logo" />
           <div className="brand-badge-copy">
-            <strong>LsquareM</strong>
-            <span>Studio</span>
+            <strong>
+              L<sup>2</sup>M
+            </strong>
+            <span>STUDIO</span>
           </div>
         </div>
         <input
