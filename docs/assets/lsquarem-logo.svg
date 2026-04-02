@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">LsquareM Logo</title>
+  <desc id="desc">Teal abstract line mark with L2M monogram.</desc>
+  <defs>
+    <linearGradient id="lsquaremGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#17c6af"/>
+      <stop offset="100%" stop-color="#22b9a8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="#ffffff"/>
+  <g fill="none" stroke="url(#lsquaremGrad)" stroke-width="38" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M260 330 L500 90 Q540 54 580 90"/>
+    <path d="M260 520 L560 220"/>
+    <path d="M260 740 Q224 776 260 812"/>
+    <path d="M452 740 L722 470 Q760 432 796 470"/>
+    <path d="M452 930 L760 622"/>
+    <path d="M700 120 Q742 86 778 120 Q804 144 790 178"/>
+  </g>
+  <g fill="url(#lsquaremGrad)">
+    <text x="312" y="946" font-family="Manrope, Segoe UI, Arial, sans-serif" font-size="152" font-weight="600" letter-spacing="1">L</text>
+    <text x="494" y="946" font-family="Manrope, Segoe UI, Arial, sans-serif" font-size="152" font-weight="600" letter-spacing="1">M</text>
+    <text x="430" y="885" font-family="Manrope, Segoe UI, Arial, sans-serif" font-size="72" font-weight="700">2</text>
+  </g>
+</svg>
