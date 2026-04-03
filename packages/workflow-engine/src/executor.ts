@@ -281,6 +281,18 @@ function buildTemplateData(context: NodeRuntimeContext): Record<string, unknown>
   };
 }
 
+function captureNodeInputSnapshot(
+  globals: Record<string, unknown>,
+  merged: Record<string, unknown>,
+  parentOutputs: Record<string, unknown>
+): unknown {
+  return toJsonSafeValue({
+    ...globals,
+    ...merged,
+    parent_outputs: parentOutputs
+  });
+}
+
 function getValueByPath(input: Record<string, unknown>, path: string): unknown {
   const parts = path
     .split(".")
@@ -1887,6 +1899,11 @@ export async function executeWorkflow(
       timestamp: decidedAt,
       actedBy: request.approvalDecision.actedBy
     };
+    const decisionInput = toJsonSafeValue({
+      decision: request.approvalDecision.decision,
+      actedBy: request.approvalDecision.actedBy,
+      reason: request.approvalDecision.reason
+    });
 
     if (request.approvalDecision.decision === "approve") {
       nodeOutputs.set(waitingNode.id, decisionPayload);
@@ -1896,6 +1913,7 @@ export async function executeWorkflow(
         startedAt: decidedAt,
         completedAt: decidedAt,
         durationMs: 0,
+        input: decisionInput,
         output: decisionPayload
       });
     } else {
@@ -1906,6 +1924,7 @@ export async function executeWorkflow(
         startedAt: decidedAt,
         completedAt: decidedAt,
         durationMs: 0,
+        input: decisionInput,
         output: decisionPayload,
         error: rejectionError
       });
@@ -2052,6 +2071,7 @@ export async function executeWorkflow(
       startedAt: startedAtNode
     });
 
+    let nodeInput: unknown = null;
     try {
       const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
       const parentOutputs: Record<string, unknown> = {};
@@ -2062,6 +2082,7 @@ export async function executeWorkflow(
       }
 
       const merged = mergeParentOutputs(parentOutputs);
+      nodeInput = captureNodeInputSnapshot(globals, merged, parentOutputs);
       if (node.type === "loop_node") {
         const inputKey = typeof nodeConfig.inputKey === "string" ? nodeConfig.inputKey.trim() : "";
         const itemVariable =
@@ -2114,6 +2135,7 @@ export async function executeWorkflow(
           for (const childNode of downstreamNodes) {
             const childStarted = Date.now();
             const childStartedAt = nowIso();
+            let childInput: unknown = null;
             await dependencies.onNodeStart?.({
               nodeId: childNode.id,
               nodeType: childNode.type,
@@ -2141,6 +2163,7 @@ export async function executeWorkflow(
               const childMerged = mergeParentOutputs(childParentOutputs);
               childMerged[itemVariable] = loopItem;
               childMerged._loop_index = loopIndex;
+              childInput = captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
               const { output: childOutput, attempts: childAttempts } = await executeNodeWithRetry(
                 childNode,
                 {
@@ -2166,6 +2189,7 @@ export async function executeWorkflow(
                 startedAt: childStartedAt,
                 completedAt: nowIso(),
                 durationMs: Date.now() - childStarted,
+                input: childInput,
                 output: childOutput,
                 attempts: childAttempts > 1 ? childAttempts : undefined
               });
@@ -2185,6 +2209,7 @@ export async function executeWorkflow(
                 startedAt: childStartedAt,
                 completedAt: nowIso(),
                 durationMs: Date.now() - childStarted,
+                input: childInput,
                 error: childErrorMessage
               });
               await dependencies.onNodeComplete?.({
@@ -2220,6 +2245,7 @@ export async function executeWorkflow(
           startedAt: startedAtNode,
           completedAt: nowIso(),
           durationMs: Date.now() - started,
+          input: nodeInput,
           output
         });
         await dependencies.onNodeComplete?.({
@@ -2254,6 +2280,7 @@ export async function executeWorkflow(
           startedAt: startedAtNode,
           completedAt: nowIso(),
           durationMs: Date.now() - started,
+          input: nodeInput,
           output: {
             message: approvalMessage,
             timeoutMinutes
@@ -2340,6 +2367,7 @@ export async function executeWorkflow(
         startedAt: startedAtNode,
         completedAt: nowIso(),
         durationMs: Date.now() - started,
+        input: nodeInput,
         output,
         attempts: attempts > 1 ? attempts : undefined
       });
@@ -2426,6 +2454,7 @@ export async function executeWorkflow(
             startedAt: startedAtNode,
             completedAt: nowIso(),
             durationMs: Date.now() - started,
+            input: nodeInput,
             error: errorMessage
           });
           await dependencies.onNodeComplete?.({
@@ -2450,6 +2479,7 @@ export async function executeWorkflow(
             startedAt: startedAtNode,
             completedAt: nowIso(),
             durationMs: Date.now() - started,
+            input: nodeInput,
             error: errorMessage
           });
           await dependencies.onNodeComplete?.({
@@ -2493,6 +2523,7 @@ export async function executeWorkflow(
               startedAt: startedAtNode,
               completedAt: nowIso(),
               durationMs: Date.now() - started,
+              input: nodeInput,
               error: errorMessage
             });
             await dependencies.onNodeComplete?.({
@@ -2516,6 +2547,7 @@ export async function executeWorkflow(
           startedAt: startedAtNode,
           completedAt: nowIso(),
           durationMs: Date.now() - started,
+          input: nodeInput,
           error: failedError
         });
         await dependencies.onNodeComplete?.({

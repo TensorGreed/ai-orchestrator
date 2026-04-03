@@ -133,6 +133,30 @@ describe("workflow engine", () => {
     expect(result.nodeResults.length).toBe(4);
   });
 
+  it("captures node input snapshots for runtime inspection", async () => {
+    const workflow = basicWorkflow();
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    const promptNode = result.nodeResults.find((entry) => entry.nodeId === "n2");
+    const promptInput = (promptNode?.input ?? null) as Record<string, unknown> | null;
+    const promptParentOutputs = promptInput?.parent_outputs as Record<string, unknown> | undefined;
+    const textInputOutput = promptParentOutputs?.n1 as Record<string, unknown> | undefined;
+
+    expect(promptNode?.status).toBe("success");
+    expect(promptInput).toBeTruthy();
+    expect(textInputOutput?.text).toBe("hello");
+    expect(promptNode?.output).toBeTruthy();
+  });
+
   it("requires chat_model attachment for agent orchestrator nodes", () => {
     const workflow: Workflow = {
       id: "wf-agent-no-model",

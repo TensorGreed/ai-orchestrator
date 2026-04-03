@@ -2653,6 +2653,7 @@ function StudioApp() {
         <NodeConfigModal
           node={editingNode}
           inputOptions={editingNodeInputOptions}
+          executionResult={executionResult}
           secrets={secrets}
           mcpServerDefinitions={mcpServerDefinitions}
           onClose={() => setEditingNodeId(null)}

@@ -104,6 +104,7 @@ export interface NodeExecutionResult {
   startedAt: string;
   completedAt?: string;
   durationMs?: number;
+  input?: unknown;
   output?: unknown;
   error?: string;
   attempts?: number;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { MCPToolDefinition } from "@ai-orchestrator/shared";
+import type { MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNode } from "../lib/workflow";
 import { discoverMcpTools, fetchWorkflows, testCodeNode, type SecretListItem } from "../lib/api";
 
@@ -11,12 +11,15 @@ export interface NodeInputOption {
 interface NodeConfigModalProps {
   node: EditorNode;
   inputOptions: NodeInputOption[];
+  executionResult: WorkflowExecutionResult | null;
   secrets: SecretListItem[];
   mcpServerDefinitions: Array<{ id: string; label: string; description: string }>;
   onClose: () => void;
   onSave: (payload: { label: string; config: Record<string, unknown> }) => void;
   onExecuteStep: () => void;
 }
+
+const NODE_INPUT_OPTION_ID = "__node_input__";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -169,6 +172,7 @@ function getApiBaseUrl(): string {
 export function NodeConfigModal({
   node,
   inputOptions,
+  executionResult,
   secrets,
   mcpServerDefinitions,
   onClose,
@@ -178,7 +182,7 @@ export function NodeConfigModal({
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
   const [activeTab, setActiveTab] = useState<"parameters" | "settings">("parameters");
-  const [selectedInputId, setSelectedInputId] = useState(inputOptions[0]?.id ?? "none");
+  const [selectedInputId, setSelectedInputId] = useState(NODE_INPUT_OPTION_ID);
   const [discoveredTools, setDiscoveredTools] = useState<MCPToolDefinition[]>([]);
   const [discoverBusy, setDiscoverBusy] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
@@ -226,7 +230,7 @@ export function NodeConfigModal({
 
     setLabel(node.data.label);
     setActiveTab("parameters");
-    setSelectedInputId(inputOptions[0]?.id ?? "none");
+    setSelectedInputId(NODE_INPUT_OPTION_ID);
     setDiscoveredTools([]);
     setDiscoverBusy(false);
     setDiscoverError(null);
@@ -286,6 +290,49 @@ export function NodeConfigModal({
 
     return base;
   }, [mcpServerDefinitions]);
+  const nodeResultById = useMemo(() => {
+    const map = new Map<string, { input?: unknown; output?: unknown; error?: string; status?: string }>();
+    for (const result of executionResult?.nodeResults ?? []) {
+      map.set(result.nodeId, {
+        input: result.input,
+        output: result.output,
+        error: result.error,
+        status: result.status
+      });
+    }
+    return map;
+  }, [executionResult]);
+  const currentNodeResult = nodeResultById.get(node.id);
+
+  const resolvedInputPreview = useMemo(() => {
+    if (selectedInputId === NODE_INPUT_OPTION_ID) {
+      return currentNodeResult?.input;
+    }
+    if (!selectedInputId || selectedInputId === "none") {
+      return undefined;
+    }
+    return nodeResultById.get(selectedInputId)?.output;
+  }, [currentNodeResult, nodeResultById, selectedInputId]);
+
+  const resolvedOutputPreview = useMemo(() => {
+    if (!currentNodeResult) {
+      return undefined;
+    }
+    if (currentNodeResult.error) {
+      return {
+        error: currentNodeResult.error,
+        output: currentNodeResult.output ?? null
+      };
+    }
+    return currentNodeResult.output;
+  }, [currentNodeResult]);
+
+  useEffect(() => {
+    const validInputIds = new Set([NODE_INPUT_OPTION_ID, ...inputOptions.map((option) => option.id)]);
+    if (!validInputIds.has(selectedInputId)) {
+      setSelectedInputId(NODE_INPUT_OPTION_ID);
+    }
+  }, [inputOptions, selectedInputId]);
 
   const setProvider = (patch: Record<string, unknown>) => {
     setConfig((current) => ({
@@ -1918,11 +1965,21 @@ export function NodeConfigModal({
               value={selectedInputId}
               onChange={setSelectedInputId}
               options={[
-                { value: "none", label: "Select previous node" },
+                { value: NODE_INPUT_OPTION_ID, label: "This node input (last run)" },
                 ...inputOptions.map((option) => ({ value: option.id, label: option.label }))
               ]}
             />
-            <div className="node-modal-placeholder">No input data. Execute previous nodes to inspect payload.</div>
+            {resolvedInputPreview === undefined ? (
+              <div className="node-modal-placeholder">No input data yet. Execute the workflow to inspect payload.</div>
+            ) : (
+              <TextAreaField
+                label={selectedInputId === NODE_INPUT_OPTION_ID ? "Resolved Input JSON" : "Selected Source Output JSON"}
+                value={JSON.stringify(resolvedInputPreview, null, 2)}
+                onChange={() => undefined}
+                rows={14}
+                readOnly
+              />
+            )}
           </section>
 
           <section className="node-modal-panel center">
@@ -1961,7 +2018,20 @@ export function NodeConfigModal({
 
           <section className="node-modal-panel">
             <h3>OUTPUT</h3>
-            {node.data.nodeType === "code_node" && codeTestResult ? (
+            {resolvedOutputPreview !== undefined ? (
+              <div className="cfg-group">
+                <div className="cfg-tip">
+                  Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
+                </div>
+                <TextAreaField
+                  label="Output JSON"
+                  value={JSON.stringify(resolvedOutputPreview, null, 2)}
+                  onChange={() => undefined}
+                  rows={14}
+                  readOnly
+                />
+              </div>
+            ) : node.data.nodeType === "code_node" && codeTestResult ? (
               <div className="cfg-group">
                 <TextAreaField
                   label="Result"
