@@ -347,6 +347,64 @@ function listWebhookEndpoints(workflow: Workflow): WebhookEndpoint[] {
     });
 }
 
+async function listWebhookEndpointMatchesByPath(
+  store: SqliteStore,
+  path: string
+): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
+  const normalizedPath = normalizeWebhookPath(path, "").toLowerCase();
+  const matches: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
+
+  const workflows = store.listWorkflows();
+  for (const workflowSummary of workflows) {
+    const workflow = store.getWorkflow(workflowSummary.id);
+    if (!workflow) {
+      continue;
+    }
+
+    for (const endpoint of listWebhookEndpoints(workflow)) {
+      if (endpoint.path.toLowerCase() !== normalizedPath) {
+        continue;
+      }
+
+      matches.push({
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        nodeId: endpoint.nodeId,
+        path: endpoint.path,
+        method: endpoint.method
+      });
+    }
+  }
+
+  return matches;
+}
+
+async function listAllWebhookEndpoints(
+  store: SqliteStore
+): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
+  const endpoints: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
+  const workflows = store.listWorkflows();
+
+  for (const workflowSummary of workflows) {
+    const workflow = store.getWorkflow(workflowSummary.id);
+    if (!workflow) {
+      continue;
+    }
+
+    for (const endpoint of listWebhookEndpoints(workflow)) {
+      endpoints.push({
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        nodeId: endpoint.nodeId,
+        path: endpoint.path,
+        method: endpoint.method
+      });
+    }
+  }
+
+  return endpoints;
+}
+
 async function selectWebhookByPath(
   store: SqliteStore,
   path: string,
@@ -624,7 +682,7 @@ export function createApp(
           ? body.prompt
           : "";
     const userPrompt = userPromptRaw.trim();
-    const systemPrompt = typeof body.system_prompt === "string" ? body.system_prompt : "";
+    const systemPrompt = typeof body.system_prompt === "string" ? body.system_prompt.trim() : "";
     const sessionId = normalizeSessionId(
       typeof body.sessionId === "string" ? body.sessionId : undefined,
       typeof body.session_id === "string" ? body.session_id : undefined
@@ -635,8 +693,8 @@ export function createApp(
 
     return {
       body,
-      userPrompt,
-      systemPrompt,
+      userPrompt: userPrompt || undefined,
+      systemPrompt: systemPrompt || undefined,
       sessionId,
       variables
     };
@@ -1584,11 +1642,28 @@ export function createApp(
 
         const match = await selectWebhookByPath(store, request.params.path, request.method);
         if (!match) {
+          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path);
+          if (pathMatches.length > 0) {
+            const allowedMethods = [...new Set(pathMatches.map((entry) => entry.method))];
+            reply.code(405);
+            reply.header("Allow", allowedMethods.join(", "));
+            return {
+              error: "Webhook endpoint exists but method does not match.",
+              path: request.params.path,
+              method: request.method,
+              allowedMethods,
+              matches: pathMatches
+            };
+          }
+          const allEndpoints = await listAllWebhookEndpoints(store);
+          const methodMatches = allEndpoints.filter((entry) => entry.method === request.method).slice(0, 20);
           reply.code(404);
           return {
             error: "No webhook endpoint matches this path and method",
             path: request.params.path,
-            method: request.method
+            method: request.method,
+            hint: "Ensure workflow is saved and webhook node path/method match this request.",
+            availableEndpoints: methodMatches
           };
         }
 
@@ -1611,12 +1686,6 @@ export function createApp(
         }
 
         const parsedInput = parseWebhookRunInput(request.body);
-        if (!parsedInput.userPrompt) {
-          reply.code(400);
-          return {
-            error: "Webhook payload must include 'user_prompt' (or 'prompt')."
-          };
-        }
 
         let idempotencyKey: string | undefined;
         let replayingExistingResult = false;
@@ -1770,8 +1839,8 @@ export function createApp(
           workflow: match.workflow,
           webhookPayload: {
             ...parsedInput.body,
-            system_prompt: parsedInput.systemPrompt,
-            user_prompt: parsedInput.userPrompt,
+            ...(parsedInput.systemPrompt ? { system_prompt: parsedInput.systemPrompt } : {}),
+            ...(parsedInput.userPrompt ? { user_prompt: parsedInput.userPrompt } : {}),
             session_id: parsedInput.sessionId,
             variables: parsedInput.variables
           },

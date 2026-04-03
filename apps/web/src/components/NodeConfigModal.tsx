@@ -169,6 +169,30 @@ function getApiBaseUrl(): string {
   return "";
 }
 
+function getSuggestedDirectApiBaseUrl(currentBaseUrl: string): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
+  if (envBase) {
+    return null;
+  }
+
+  const hostname = window.location.hostname;
+  const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+  if (!isLocalhost) {
+    return null;
+  }
+
+  const suggested = `${window.location.protocol}//${hostname}:4001`;
+  if (suggested.replace(/\/+$/, "") === currentBaseUrl.replace(/\/+$/, "")) {
+    return null;
+  }
+
+  return suggested;
+}
+
 export function NodeConfigModal({
   node,
   inputOptions,
@@ -1079,8 +1103,11 @@ export function NodeConfigModal({
       ? config.passThroughFields.map((item) => String(item)).join(",")
       : "system_prompt,user_prompt,session_id,variables";
     const apiBase = getApiBaseUrl();
+    const suggestedApiBase = getSuggestedDirectApiBaseUrl(apiBase);
     const testUrl = `${apiBase}/webhook-test/${normalizedPath}`;
     const productionUrl = `${apiBase}/webhook/${normalizedPath}`;
+    const suggestedTestUrl = suggestedApiBase ? `${suggestedApiBase}/webhook-test/${normalizedPath}` : null;
+    const suggestedProductionUrl = suggestedApiBase ? `${suggestedApiBase}/webhook/${normalizedPath}` : null;
 
     return (
       <>
@@ -1208,10 +1235,21 @@ export function NodeConfigModal({
             <strong>Production URL</strong>
           </div>
           <code>{`${method} ${productionUrl}`}</code>
+          {suggestedTestUrl && suggestedProductionUrl ? (
+            <div style={{ marginTop: "8px" }}>
+              <div><strong>Direct API URL (fallback)</strong></div>
+              <code>{`${method} ${suggestedTestUrl}`}</code>
+              <div style={{ marginTop: "6px" }} />
+              <code>{`${method} ${suggestedProductionUrl}`}</code>
+              <div style={{ marginTop: "6px" }}>
+                If app-origin URL returns 404, call direct API URL or set <code>VITE_API_BASE_URL</code>.
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="cfg-tip">
-          Send JSON body with at least <code>user_prompt</code> (or <code>prompt</code>). Optional:
+          Send JSON body with event data. Common fields: <code>user_prompt</code> (or <code>prompt</code>),
           <code>system_prompt</code>, <code>session_id</code>, <code>variables</code>.
           {authMode === "bearer_token" ? (
             <div style={{ marginTop: "6px" }}>

@@ -44,6 +44,14 @@ export default defineConfig(({ mode }) => {
           target: `http://localhost:${targetPort}`,
           changeOrigin: true
         },
+        "/webhook": {
+          target: `http://localhost:${targetPort}`,
+          changeOrigin: true
+        },
+        "/webhook-test": {
+          target: `http://localhost:${targetPort}`,
+          changeOrigin: true
+        },
         "/health": {
           target: `http://localhost:${targetPort}`,
           changeOrigin: true
