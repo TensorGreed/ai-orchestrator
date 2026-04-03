@@ -1897,12 +1897,125 @@ export function NodeConfigModal({
     }
   };
 
+  const inputMappingRows = useMemo(() => {
+    const raw = asRecord(config.inputMapping);
+    return Object.entries(raw)
+      .filter(([key]) => key.trim())
+      .map(([sourceKey, targetKeyValue], index) => ({
+        id: `mapping-${index}`,
+        sourceKey,
+        targetKey: String(targetKeyValue ?? "")
+      }));
+  }, [config.inputMapping]);
+
+  const availableUpstreamKeys = useMemo(() => {
+    if (resolvedInputPreview === undefined || resolvedInputPreview === null) {
+      return [];
+    }
+    if (typeof resolvedInputPreview === "object" && !Array.isArray(resolvedInputPreview)) {
+      return Object.keys(resolvedInputPreview as Record<string, unknown>).filter((key) => key !== "parent_outputs");
+    }
+    return [];
+  }, [resolvedInputPreview]);
+
+  const handleAddInputMapping = useCallback(() => {
+    setConfig((current) => {
+      const currentMapping = asRecord(current.inputMapping);
+      const newKey = `source_key_${Object.keys(currentMapping).length + 1}`;
+      return { ...current, inputMapping: { ...currentMapping, [newKey]: "user_prompt" } };
+    });
+  }, []);
+
+  const handleRemoveInputMapping = useCallback((keyToRemove: string) => {
+    setConfig((current) => {
+      const currentMapping = { ...asRecord(current.inputMapping) };
+      delete currentMapping[keyToRemove];
+      return { ...current, inputMapping: Object.keys(currentMapping).length > 0 ? currentMapping : undefined };
+    });
+  }, []);
+
+  const handleUpdateInputMapping = useCallback(
+    (oldSourceKey: string, field: "sourceKey" | "targetKey", value: string) => {
+      setConfig((current) => {
+        const currentMapping = asRecord(current.inputMapping);
+        if (field === "sourceKey") {
+          const targetKey = String(currentMapping[oldSourceKey] ?? "");
+          const updated = { ...currentMapping };
+          delete updated[oldSourceKey];
+          updated[value] = targetKey;
+          return { ...current, inputMapping: updated };
+        }
+        return { ...current, inputMapping: { ...currentMapping, [oldSourceKey]: value } };
+      });
+    },
+    []
+  );
+
   const renderSettings = () => {
     return (
       <>
         <TextField label="Node Label" value={label} onChange={setLabel} />
         <div className="cfg-tip">
           Node ID: <code>{node.id}</code>
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <h3>Input Mapping</h3>
+          <div className="cfg-tip">
+            Map output keys from a previous node to input keys this node expects.
+            Example: mapping <code>answer</code> to <code>user_prompt</code> means
+            the upstream <code>answer</code> becomes <code>{"{{user_prompt}}"}</code>.
+          </div>
+          {availableUpstreamKeys.length > 0 && (
+            <div className="cfg-tip" style={{ marginTop: 6 }}>
+              Available keys from last run:{" "}
+              {availableUpstreamKeys.slice(0, 20).map((key, index) => (
+                <span key={key}>{index > 0 ? ", " : ""}<code>{key}</code></span>
+              ))}
+            </div>
+          )}
+          {inputMappingRows.length === 0 && (
+            <div className="cfg-tip" style={{ opacity: 0.7, fontStyle: "italic" }}>
+              No mappings configured. Parent node outputs are merged into context as-is.
+            </div>
+          )}
+          {inputMappingRows.map((row) => (
+            <div key={row.id} className="cfg-assignment-row">
+              <div className="cfg-grid-2">
+                {availableUpstreamKeys.length > 0 ? (
+                  <SelectField
+                    label="Source Key (from upstream)"
+                    value={row.sourceKey}
+                    onChange={(next) => handleUpdateInputMapping(row.sourceKey, "sourceKey", next)}
+                    options={[
+                      ...availableUpstreamKeys.map((key) => ({ value: key, label: key })),
+                      ...(availableUpstreamKeys.includes(row.sourceKey)
+                        ? []
+                        : [{ value: row.sourceKey, label: row.sourceKey + " (custom)" }])
+                    ]}
+                  />
+                ) : (
+                  <TextField
+                    label="Source Key (from upstream)"
+                    value={row.sourceKey}
+                    onChange={(next) => handleUpdateInputMapping(row.sourceKey, "sourceKey", next)}
+                    placeholder="answer"
+                  />
+                )}
+                <TextField
+                  label="Maps to"
+                  value={row.targetKey}
+                  onChange={(next) => handleUpdateInputMapping(row.sourceKey, "targetKey", next)}
+                  placeholder="user_prompt"
+                />
+              </div>
+              <div className="cfg-inline-actions">
+                <button type="button" className="header-btn danger" onClick={() => handleRemoveInputMapping(row.sourceKey)}>Remove</button>
+              </div>
+            </div>
+          ))}
+          <div className="cfg-inline-actions" style={{ marginTop: 6 }}>
+            <button type="button" className="header-btn" onClick={handleAddInputMapping}>Add Mapping</button>
+          </div>
         </div>
         <div style={{ marginTop: 14 }}>
             <h3>Advanced Resiliency</h3>

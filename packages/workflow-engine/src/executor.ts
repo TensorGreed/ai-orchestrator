@@ -272,13 +272,50 @@ function normalizeDocuments(raw: unknown): ConnectorDocument[] {
     .filter((document) => Boolean(document.text?.trim()));
 }
 
-function buildTemplateData(context: NodeRuntimeContext): Record<string, unknown> {
-  return {
+function applyInputMapping(
+  data: Record<string, unknown>,
+  inputMapping: Record<string, string> | undefined
+): Record<string, unknown> {
+  if (!inputMapping || typeof inputMapping !== "object") {
+    return data;
+  }
+
+  const remapped = { ...data };
+  for (const [sourceKey, targetKey] of Object.entries(inputMapping)) {
+    const src = String(sourceKey ?? "").trim();
+    const tgt = String(targetKey ?? "").trim();
+    if (!src || !tgt) {
+      continue;
+    }
+
+    let value = remapped[src];
+    if (value === undefined) {
+      value = getValueByPath(remapped, src);
+    }
+    if (value !== undefined) {
+      remapped[tgt] = value;
+    }
+  }
+  return remapped;
+}
+
+function buildTemplateData(
+  context: NodeRuntimeContext,
+  nodeConfig?: Record<string, unknown>
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
     ...context.globals,
     ...context.merged,
     vars: toRecord(context.globals.vars),
     parent_outputs: context.parentOutputs
   };
+
+  const inputMapping = nodeConfig
+    ? toRecord(nodeConfig.inputMapping) as Record<string, string>
+    : undefined;
+  const hasMapping = inputMapping && Object.keys(inputMapping).length > 0;
+
+  return hasMapping ? applyInputMapping(base, inputMapping) : base;
 }
 
 function captureNodeInputSnapshot(
@@ -516,7 +553,7 @@ async function executeNode(
   dependencies: WorkflowExecutionDependencies
 ): Promise<unknown> {
   const config = toRecord(node.config);
-  const templateData = buildTemplateData(context);
+  const templateData = buildTemplateData(context, config);
 
   switch (node.type) {
     case "schedule_trigger": {
