@@ -528,10 +528,11 @@ export function WorkflowCanvasArea({
             <div className="logs-body">
               {logsTab === "inputs" && (
                 <div className="run-inputs-panel">
-                  <label>System prompt</label>
+                  <label>Fallback system prompt</label>
                   <textarea value={systemPrompt} onChange={(event) => onSystemPromptChange(event.target.value)} rows={3} />
-                  <label>User prompt</label>
+                  <label>Fallback user prompt</label>
                   <textarea value={userPrompt} onChange={(event) => onUserPromptChange(event.target.value)} rows={3} />
+                  <div className="muted">Used only when no configured System/User Prompt input nodes provide those values.</div>
                   <label>Session id</label>
                   <input value={sessionId} onChange={(event) => onSessionIdChange(event.target.value)} />
                   <div className="row-actions">

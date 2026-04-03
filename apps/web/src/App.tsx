@@ -233,6 +233,16 @@ function getNodeStatusMap(result: WorkflowExecutionResult | null) {
   return map;
 }
 
+function hasConfiguredNodeText(node: EditorNode): boolean {
+  const config = node.data.config;
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    return false;
+  }
+
+  const text = (config as Record<string, unknown>).text;
+  return typeof text === "string" && text.trim().length > 0;
+}
+
 function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
   const source = nodes.find((node) => node.id === edge.source);
   const target = nodes.find((node) => node.id === edge.target);
@@ -521,6 +531,20 @@ function StudioApp() {
         };
       });
   }, [editingNode, edges, nodes]);
+
+  const promptNodeSources = useMemo(
+    () => ({
+      userPromptFromNodes: nodes.some(
+        (node) =>
+          (node.data.nodeType === "text_input" || node.data.nodeType === "user_prompt") &&
+          hasConfiguredNodeText(node as EditorNode)
+      ),
+      systemPromptFromNodes: nodes.some(
+        (node) => node.data.nodeType === "system_prompt" && hasConfiguredNodeText(node as EditorNode)
+      )
+    }),
+    [nodes]
+  );
 
   const groupedDefinitions = useMemo(() => {
     const grouped = new Map<string, DefinitionNode[]>();
@@ -1251,6 +1275,46 @@ function StudioApp() {
     };
   }, []);
 
+  const buildEditorExecutionPayload = useCallback(() => {
+    const payload: {
+      sessionId: string;
+      system_prompt?: string;
+      user_prompt?: string;
+    } = {
+      sessionId
+    };
+
+    if (!promptNodeSources.systemPromptFromNodes) {
+      payload.system_prompt = systemPrompt;
+    }
+
+    if (!promptNodeSources.userPromptFromNodes) {
+      payload.user_prompt = userPrompt;
+    }
+
+    return payload;
+  }, [promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
+
+  const buildWebhookExecutionPayload = useCallback(() => {
+    const payload: {
+      session_id: string;
+      system_prompt?: string;
+      user_prompt?: string;
+    } = {
+      session_id: sessionId
+    };
+
+    if (!promptNodeSources.systemPromptFromNodes) {
+      payload.system_prompt = systemPrompt;
+    }
+
+    if (!promptNodeSources.userPromptFromNodes) {
+      payload.user_prompt = userPrompt;
+    }
+
+    return payload;
+  }, [promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
+
   const handleExecute = useCallback(async () => {
     try {
       setBusy(true);
@@ -1258,11 +1322,7 @@ function StudioApp() {
       setExecutionResult(null);
       startVisualRun();
       const saved = await persistWorkflow();
-      const result = await executeWorkflow(saved.id, {
-        system_prompt: systemPrompt,
-        user_prompt: userPrompt,
-        sessionId
-      });
+      const result = await executeWorkflow(saved.id, buildEditorExecutionPayload());
       setExecutionResult(result);
       setLogsTab("logs");
       setActiveMode("editor");
@@ -1278,14 +1338,12 @@ function StudioApp() {
     }
   }, [
     currentWorkflow.id,
+    buildEditorExecutionPayload,
     handleApiError,
     persistWorkflow,
     refreshExecutionHistory,
-    sessionId,
     startVisualRun,
     stopVisualRun,
-    systemPrompt,
-    userPrompt
   ]);
 
   const handleWebhookExecute = useCallback(async () => {
@@ -1297,9 +1355,7 @@ function StudioApp() {
       const saved = await persistWorkflow();
       const result = await runWebhook({
         workflow_id: saved.id,
-        session_id: sessionId,
-        system_prompt: systemPrompt,
-        user_prompt: userPrompt
+        ...buildWebhookExecutionPayload()
       });
       setExecutionResult(result);
       setLogsTab("logs");
@@ -1316,14 +1372,12 @@ function StudioApp() {
     }
   }, [
     currentWorkflow.id,
+    buildWebhookExecutionPayload,
     handleApiError,
     persistWorkflow,
     refreshExecutionHistory,
-    sessionId,
     startVisualRun,
     stopVisualRun,
-    systemPrompt,
-    userPrompt
   ]);
 
   const handleChatSend = useCallback(async () => {
@@ -1373,14 +1427,23 @@ function StudioApp() {
       chatDeltaBufferRef.current = "";
       startChatDeltaFlusher(workflowId);
 
+      const chatExecutionPayload: {
+        user_prompt: string;
+        system_prompt?: string;
+        sessionId: string;
+        session_id: string;
+      } = {
+        user_prompt: message,
+        sessionId: sessionForWorkflow,
+        session_id: sessionForWorkflow
+      };
+      if (!promptNodeSources.systemPromptFromNodes) {
+        chatExecutionPayload.system_prompt = chatSystemPrompt;
+      }
+
       const result = await executeWorkflowStream(
         workflowId,
-        {
-          user_prompt: message,
-          system_prompt: chatSystemPrompt,
-          sessionId: sessionForWorkflow,
-          session_id: sessionForWorkflow
-        },
+        chatExecutionPayload,
         {
           onNodeStart: (event) => {
             setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: "running", at: event.startedAt }].slice(-40));
@@ -1453,6 +1516,7 @@ function StudioApp() {
     currentWorkflow.id,
     handleApiError,
     persistWorkflow,
+    promptNodeSources.systemPromptFromNodes,
     refreshExecutionHistory,
     setChatMessageStatus,
     startChatDeltaFlusher,
@@ -1616,11 +1680,7 @@ function StudioApp() {
       try {
         setBusy(true);
         setError(null);
-        const result = await executeWorkflow(workflowId, {
-          system_prompt: systemPrompt,
-          user_prompt: userPrompt,
-          sessionId
-        });
+        const result = await executeWorkflow(workflowId, buildEditorExecutionPayload());
         setExecutionResult(result);
         setLogsTab("logs");
         setActiveMode("executions");
@@ -1632,7 +1692,7 @@ function StudioApp() {
         setBusy(false);
       }
     },
-    [handleApiError, refreshExecutionHistory, sessionId, systemPrompt, userPrompt]
+    [buildEditorExecutionPayload, handleApiError, refreshExecutionHistory]
   );
 
   const openNodeConfig = useCallback((nodeId: string) => {
@@ -2559,7 +2619,7 @@ function StudioApp() {
                   value={chatSystemPrompt}
                   onChange={(event) => setChatSystemPrompt(event.target.value)}
                   rows={2}
-                  placeholder="System prompt"
+                  placeholder="Fallback system prompt (used when no System Prompt node sets one)"
                 />
                 <input
                   value={chatInput}

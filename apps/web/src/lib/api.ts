@@ -310,8 +310,8 @@ export async function executeWorkflowStream(
 export async function runWebhook(payload: {
   workflow_id?: string;
   session_id?: string;
-  system_prompt: string;
-  user_prompt: string;
+  system_prompt?: string;
+  user_prompt?: string;
   variables?: Record<string, unknown>;
 }) {
   return apiRequest<WorkflowExecutionResult & { workflowId: string }>("/api/webhooks/execute", {

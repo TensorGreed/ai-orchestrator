@@ -88,8 +88,8 @@ export const workflowExecuteRequestSchema = z.object({
 export const agentWebhookPayloadSchema = z.object({
   workflow_id: z.string().optional(),
   session_id: z.string().optional(),
-  system_prompt: z.string().min(1),
-  user_prompt: z.string().min(1),
+  system_prompt: z.string().optional(),
+  user_prompt: z.string().optional(),
   variables: z.record(z.string(), z.unknown()).optional()
 });
 
