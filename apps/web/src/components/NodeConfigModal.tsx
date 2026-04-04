@@ -156,6 +156,136 @@ function TextAreaField({
   );
 }
 
+interface KeyValueRow {
+  key: string;
+  value: string;
+}
+
+const PREVIEW_TABLE_MAX_ROWS = 250;
+const PREVIEW_TABLE_MAX_DEPTH = 5;
+
+function serializePreviewValue(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+  if (value === undefined) {
+    return "undefined";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized : String(value);
+  } catch {
+    return "[unserializable value]";
+  }
+}
+
+function toKeyValueRows(value: unknown): KeyValueRow[] {
+  const rows: KeyValueRow[] = [];
+  let truncated = false;
+
+  const appendRow = (key: string, rawValue: unknown) => {
+    if (rows.length >= PREVIEW_TABLE_MAX_ROWS) {
+      truncated = true;
+      return;
+    }
+    rows.push({
+      key: key || "value",
+      value: serializePreviewValue(rawValue)
+    });
+  };
+
+  const visit = (entry: unknown, path: string, depth: number) => {
+    if (rows.length >= PREVIEW_TABLE_MAX_ROWS) {
+      truncated = true;
+      return;
+    }
+    if (entry === null || typeof entry !== "object") {
+      appendRow(path, entry);
+      return;
+    }
+    if (depth >= PREVIEW_TABLE_MAX_DEPTH) {
+      appendRow(path, entry);
+      return;
+    }
+
+    if (Array.isArray(entry)) {
+      if (entry.length === 0) {
+        appendRow(path, []);
+        return;
+      }
+      entry.forEach((item, index) => {
+        visit(item, `${path}[${index}]`, depth + 1);
+      });
+      return;
+    }
+
+    const entries = Object.entries(entry as Record<string, unknown>);
+    if (entries.length === 0) {
+      appendRow(path, {});
+      return;
+    }
+    for (const [key, child] of entries) {
+      visit(child, path ? `${path}.${key}` : key, depth + 1);
+      if (rows.length >= PREVIEW_TABLE_MAX_ROWS) {
+        truncated = true;
+        return;
+      }
+    }
+  };
+
+  visit(value, "", 0);
+
+  if (!rows.length) {
+    appendRow("value", value);
+  }
+  if (truncated) {
+    rows.push({
+      key: "...",
+      value: `Preview truncated at ${PREVIEW_TABLE_MAX_ROWS} rows`
+    });
+  }
+
+  return rows;
+}
+
+function KeyValueTable({ label, value }: { label: string; value: unknown }) {
+  const rows = useMemo(() => toKeyValueRows(value), [value]);
+
+  return (
+    <div className="cfg-field node-kv-field">
+      <span>{label}</span>
+      <div className="node-kv-table-wrap">
+        <table className="node-kv-table">
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.key}-${index}`}>
+                <td className="node-kv-key">{row.key}</td>
+                <td className="node-kv-value">{row.value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function getApiBaseUrl(): string {
   const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
   if (envBase) {
@@ -2378,12 +2508,9 @@ export function NodeConfigModal({
             {resolvedInputPreview === undefined ? (
               <div className="node-modal-placeholder">No input data yet. Execute the workflow to inspect payload.</div>
             ) : (
-              <TextAreaField
-                label={selectedInputId === NODE_INPUT_OPTION_ID ? "Resolved Input JSON" : "Selected Source Output JSON"}
-                value={JSON.stringify(resolvedInputPreview, null, 2)}
-                onChange={() => undefined}
-                rows={14}
-                readOnly
+              <KeyValueTable
+                label={selectedInputId === NODE_INPUT_OPTION_ID ? "Resolved Input" : "Selected Source Output"}
+                value={resolvedInputPreview}
               />
             )}
           </section>
@@ -2429,13 +2556,7 @@ export function NodeConfigModal({
                 <div className="cfg-tip">
                   Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
                 </div>
-                <TextAreaField
-                  label="Output JSON"
-                  value={JSON.stringify(resolvedOutputPreview, null, 2)}
-                  onChange={() => undefined}
-                  rows={14}
-                  readOnly
-                />
+                <KeyValueTable label="Output" value={resolvedOutputPreview} />
               </div>
             ) : node.data.nodeType === "code_node" && codeTestResult ? (
               <div className="cfg-group">
