@@ -54,7 +54,10 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     title: "Action in an App",
     description: "Call connectors, MCP tools, or reusable sub-workflows.",
     icon: "app",
-    match: (node) => ["connector_source", "mcp_tool", "http_request", "execute_workflow"].includes(node.type)
+    match: (node) =>
+      ["connector_source", "google_drive_source", "mcp_tool", "http_request", "execute_workflow"].includes(
+        node.type
+      )
   },
   {
     key: "transform",

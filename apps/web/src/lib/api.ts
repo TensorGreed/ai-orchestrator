@@ -373,6 +373,19 @@ export async function createSecret(payload: { name: string; provider: string; va
   });
 }
 
+export async function testConnector(payload: {
+  connectorId: string;
+  connectorConfig?: Record<string, unknown>;
+}) {
+  return apiRequest<{
+    ok: boolean;
+    message: string;
+  }>("/api/connectors/test", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export interface ExecutionHistorySummary {
   id: string;
   workflowId: string;

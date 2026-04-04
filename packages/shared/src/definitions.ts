@@ -379,6 +379,34 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "google_drive_source",
+    label: "Google Drive Source",
+    category: "Connector",
+    description: "Fetches Google Drive files as documents for RAG retrieval.",
+    configSchema: {
+      type: "object",
+      properties: {
+        folderId: { type: "string" },
+        fileIds: { type: "array", items: { type: "string" } },
+        query: { type: "string" },
+        maxFiles: { type: "number" },
+        includeSharedDrives: { type: "boolean" },
+        includeNativeGoogleDocs: { type: "boolean" },
+        useDemoFallback: { type: "boolean" },
+        secretRef: { type: "object" }
+      }
+    },
+    sampleConfig: {
+      folderId: "",
+      fileIds: [],
+      query: "",
+      maxFiles: 10,
+      includeSharedDrives: true,
+      includeNativeGoogleDocs: true,
+      useDemoFallback: true
+    }
+  },
+  {
     type: "output_parser",
     label: "Output Parser",
     category: "Utility",

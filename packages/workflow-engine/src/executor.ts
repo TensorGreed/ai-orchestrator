@@ -1087,10 +1087,31 @@ async function executeNode(
     case "connector_source": {
       const connectorId = String(config.connectorId ?? "");
       const connector = dependencies.connectorRegistry.get(connectorId);
-      const connectorConfig = toRecord(config.connectorConfig ?? config);
+      const connectorConfig = {
+        ...toRecord(config.connectorConfig ?? config),
+        ...(config.authSecretRef ? { secretRef: config.authSecretRef } : {}),
+        ...(config.secretRef ? { secretRef: config.secretRef } : {})
+      };
       const output = await connector.fetchData(connectorConfig, {
         resolveSecret: dependencies.resolveSecret
       });
+
+      return {
+        documents: output.documents,
+        connectorRaw: output.raw
+      };
+    }
+
+    case "google_drive_source": {
+      const connector = dependencies.connectorRegistry.get("google-drive");
+      const output = await connector.fetchData(
+        {
+          ...config
+        },
+        {
+          resolveSecret: dependencies.resolveSecret
+        }
+      );
 
       return {
         documents: output.documents,

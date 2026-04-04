@@ -367,6 +367,17 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       });
     }
 
+    if (node.type === "google_drive_source" && config.maxFiles !== undefined) {
+      const parsed = Number(config.maxFiles);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        issues.push({
+          code: "invalid_google_drive_max_files",
+          message: "Google Drive Source node maxFiles must be >= 1 when set.",
+          nodeId: node.id
+        });
+      }
+    }
+
     if (node.type === "output_parser") {
       const mode = config.mode;
       if (mode !== "json_schema" && mode !== "item_list" && mode !== "auto_fix") {

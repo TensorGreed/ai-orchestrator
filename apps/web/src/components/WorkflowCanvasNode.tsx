@@ -26,6 +26,7 @@ function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "a
   if (
     nodeType === "mcp_tool" ||
     nodeType === "connector_source" ||
+    nodeType === "google_drive_source" ||
     nodeType === "http_request" ||
     nodeType === "llm_call" ||
     nodeType === "local_memory"

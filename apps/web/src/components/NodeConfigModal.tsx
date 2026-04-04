@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNode } from "../lib/workflow";
-import { discoverMcpTools, fetchWorkflows, testCodeNode, type SecretListItem } from "../lib/api";
+import { discoverMcpTools, fetchWorkflows, testCodeNode, testConnector, type SecretListItem } from "../lib/api";
 
 export interface NodeInputOption {
   id: string;
@@ -215,6 +215,9 @@ export function NodeConfigModal({
   const [codeTestBusy, setCodeTestBusy] = useState(false);
   const [codeTestError, setCodeTestError] = useState<string | null>(null);
   const [codeTestResult, setCodeTestResult] = useState<{ result: unknown; logs: string[] } | null>(null);
+  const [connectorTestBusy, setConnectorTestBusy] = useState(false);
+  const [connectorTestError, setConnectorTestError] = useState<string | null>(null);
+  const [connectorTestMessage, setConnectorTestMessage] = useState<string | null>(null);
   const [workflowOptions, setWorkflowOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [workflowOptionsError, setWorkflowOptionsError] = useState<string | null>(null);
 
@@ -263,6 +266,9 @@ export function NodeConfigModal({
     setCodeTestBusy(false);
     setCodeTestError(null);
     setCodeTestResult(null);
+    setConnectorTestBusy(false);
+    setConnectorTestError(null);
+    setConnectorTestMessage(null);
     setWorkflowOptions([]);
     setWorkflowOptionsError(null);
   }, [inputOptions, mcpServerDefinitions, node]);
@@ -488,6 +494,41 @@ export function NodeConfigModal({
       setCodeTestBusy(false);
     }
   }, [codeTestInput, config.code, config.timeout]);
+
+  const handleConnectorTestRun = useCallback(
+    async (payload: { connectorId: string; connectorConfig: Record<string, unknown> }) => {
+      const connectorId = payload.connectorId.trim();
+      if (!connectorId) {
+        setConnectorTestError("Connector ID is required.");
+        setConnectorTestMessage(null);
+        return;
+      }
+
+      try {
+        setConnectorTestBusy(true);
+        setConnectorTestError(null);
+        setConnectorTestMessage(null);
+        const result = await testConnector({
+          connectorId,
+          connectorConfig: payload.connectorConfig
+        });
+
+        if (result.ok) {
+          setConnectorTestMessage(result.message || "Connection successful.");
+          setConnectorTestError(null);
+        } else {
+          setConnectorTestError(result.message || "Connection test failed.");
+          setConnectorTestMessage(null);
+        }
+      } catch (error) {
+        setConnectorTestError(error instanceof Error ? error.message : "Connection test failed.");
+        setConnectorTestMessage(null);
+      } finally {
+        setConnectorTestBusy(false);
+      }
+    },
+    []
+  );
 
   const renderProviderSection = () => {
     return (
@@ -1273,11 +1314,35 @@ export function NodeConfigModal({
   };
 
   const renderConnectorParameters = () => {
+    const connectorId = toStringValue(config.connectorId, "google-drive");
+    const connectorConfig = asRecord(config.connectorConfig);
+    const connectorSecrets = [
+      { value: "", label: "None (demo fallback)" },
+      ...secrets.map((secret) => ({
+        value: secret.id,
+        label: `${secret.name} (${secret.provider})`
+      }))
+    ];
+
+    const updateConnectorConfig = (patch: Record<string, unknown>) => {
+      setConfig((current) => ({
+        ...current,
+        connectorConfig: {
+          ...asRecord(current.connectorConfig),
+          ...patch
+        }
+      }));
+    };
+
+    const fileIdsCsv = Array.isArray(connectorConfig.fileIds)
+      ? connectorConfig.fileIds.map((value) => String(value)).join(",")
+      : "";
+
     return (
       <>
         <SelectField
           label="Connector"
-          value={toStringValue(config.connectorId, "google-drive")}
+          value={connectorId}
           onChange={(next) => setConfig((current) => ({ ...current, connectorId: next }))}
           options={[
             { value: "google-drive", label: "Google Drive" },
@@ -1285,19 +1350,207 @@ export function NodeConfigModal({
             { value: "nosql-db", label: "NoSQL Database" }
           ]}
         />
-        <TextAreaField
-          label="Connector Config (JSON)"
-          value={JSON.stringify(asRecord(config.connectorConfig), null, 2)}
-          onChange={(next) => {
-            try {
-              const parsed = JSON.parse(next) as Record<string, unknown>;
-              setConfig((current) => ({ ...current, connectorConfig: parsed }));
-            } catch {
-              // keep current if invalid while typing
+
+        {connectorId === "google-drive" ? (
+          <>
+            <SelectField
+              label="Google Drive Credentials Secret"
+              value={toStringValue(asRecord(connectorConfig.secretRef).secretId)}
+              onChange={(next) =>
+                updateConnectorConfig({
+                  secretRef: next ? { secretId: next } : undefined
+                })
+              }
+              options={connectorSecrets}
+            />
+            <TextField
+              label="Folder ID (optional)"
+              value={toStringValue(connectorConfig.folderId)}
+              onChange={(next) => updateConnectorConfig({ folderId: next })}
+              placeholder="1AbC...xyz"
+            />
+            <TextField
+              label="Specific File IDs (comma separated, optional)"
+              value={fileIdsCsv}
+              onChange={(next) =>
+                updateConnectorConfig({
+                  fileIds: next
+                    .split(",")
+                    .map((item) => item.trim())
+                    .filter(Boolean)
+                })
+              }
+              placeholder="fileId1,fileId2"
+            />
+            <TextField
+              label="Drive Query (optional)"
+              value={toStringValue(connectorConfig.query)}
+              onChange={(next) => updateConnectorConfig({ query: next })}
+              placeholder="name contains 'policy' and mimeType = 'text/plain'"
+            />
+            <NumberField
+              label="Max Files"
+              value={toNumberValue(connectorConfig.maxFiles, 10)}
+              min={1}
+              max={100}
+              step={1}
+              onChange={(next) => updateConnectorConfig({ maxFiles: next })}
+            />
+            <ToggleField
+              label="Include Shared Drives"
+              checked={toBooleanValue(connectorConfig.includeSharedDrives, true)}
+              onChange={(next) => updateConnectorConfig({ includeSharedDrives: next })}
+            />
+            <ToggleField
+              label="Include Native Google Docs"
+              checked={toBooleanValue(connectorConfig.includeNativeGoogleDocs, true)}
+              onChange={(next) => updateConnectorConfig({ includeNativeGoogleDocs: next })}
+            />
+            <ToggleField
+              label="Use Demo Fallback If Unavailable"
+              checked={toBooleanValue(connectorConfig.useDemoFallback, true)}
+              onChange={(next) => updateConnectorConfig({ useDemoFallback: next })}
+            />
+            <div className="cfg-tip">
+              Secret value can be either:
+              <br />
+              1. OAuth access token string
+              <br />
+              2. Service-account JSON (client_email + private_key)
+            </div>
+          </>
+        ) : (
+          <TextAreaField
+            label="Connector Config (JSON)"
+            value={JSON.stringify(asRecord(config.connectorConfig), null, 2)}
+            onChange={(next) => {
+              try {
+                const parsed = JSON.parse(next) as Record<string, unknown>;
+                setConfig((current) => ({ ...current, connectorConfig: parsed }));
+              } catch {
+                // keep current if invalid while typing
+              }
+            }}
+            rows={5}
+          />
+        )}
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() =>
+              void handleConnectorTestRun({
+                connectorId,
+                connectorConfig: asRecord(connectorConfig)
+              })
             }
-          }}
-          rows={5}
+            disabled={connectorTestBusy}
+          >
+            {connectorTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {connectorTestMessage && <span className="muted">{connectorTestMessage}</span>}
+        </div>
+        {connectorTestError && <div className="error-banner">{connectorTestError}</div>}
+      </>
+    );
+  };
+
+  const renderGoogleDriveSourceParameters = () => {
+    const fileIdsCsv = Array.isArray(config.fileIds) ? config.fileIds.map((value) => String(value)).join(",") : "";
+    const secretOptions = [
+      { value: "", label: "None (demo fallback)" },
+      ...secrets.map((secret) => ({
+        value: secret.id,
+        label: `${secret.name} (${secret.provider})`
+      }))
+    ];
+
+    return (
+      <>
+        <SelectField
+          label="Google Drive Credentials Secret"
+          value={toStringValue(asRecord(config.secretRef).secretId)}
+          onChange={(next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+          }
+          options={secretOptions}
         />
+        <TextField
+          label="Folder ID (optional)"
+          value={toStringValue(config.folderId)}
+          onChange={(next) => setConfig((current) => ({ ...current, folderId: next }))}
+          placeholder="1AbC...xyz"
+        />
+        <TextField
+          label="Specific File IDs (comma separated, optional)"
+          value={fileIdsCsv}
+          onChange={(next) =>
+            setConfig((current) => ({
+              ...current,
+              fileIds: next
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean)
+            }))
+          }
+          placeholder="fileId1,fileId2"
+        />
+        <TextField
+          label="Drive Query (optional)"
+          value={toStringValue(config.query)}
+          onChange={(next) => setConfig((current) => ({ ...current, query: next }))}
+          placeholder="name contains 'policy' and mimeType = 'text/plain'"
+        />
+        <NumberField
+          label="Max Files"
+          value={toNumberValue(config.maxFiles, 10)}
+          min={1}
+          max={100}
+          step={1}
+          onChange={(next) => setConfig((current) => ({ ...current, maxFiles: next }))}
+        />
+        <ToggleField
+          label="Include Shared Drives"
+          checked={toBooleanValue(config.includeSharedDrives, true)}
+          onChange={(next) => setConfig((current) => ({ ...current, includeSharedDrives: next }))}
+        />
+        <ToggleField
+          label="Include Native Google Docs"
+          checked={toBooleanValue(config.includeNativeGoogleDocs, true)}
+          onChange={(next) => setConfig((current) => ({ ...current, includeNativeGoogleDocs: next }))}
+        />
+        <ToggleField
+          label="Use Demo Fallback If Unavailable"
+          checked={toBooleanValue(config.useDemoFallback, true)}
+          onChange={(next) => setConfig((current) => ({ ...current, useDemoFallback: next }))}
+        />
+        <div className="cfg-tip">
+          Secret value can be either:
+          <br />
+          1. OAuth access token string
+          <br />
+          2. Service-account JSON (client_email + private_key)
+        </div>
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() =>
+              void handleConnectorTestRun({
+                connectorId: "google-drive",
+                connectorConfig: asRecord(config)
+              })
+            }
+            disabled={connectorTestBusy}
+          >
+            {connectorTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {connectorTestMessage && <span className="muted">{connectorTestMessage}</span>}
+        </div>
+        {connectorTestError && <div className="error-banner">{connectorTestError}</div>}
       </>
     );
   };
@@ -1657,6 +1910,8 @@ export function NodeConfigModal({
         );
       case "connector_source":
         return renderConnectorParameters();
+      case "google_drive_source":
+        return renderGoogleDriveSourceParameters();
       case "text_input":
       case "system_prompt":
       case "user_prompt":

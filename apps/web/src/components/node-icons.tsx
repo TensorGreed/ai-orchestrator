@@ -16,6 +16,7 @@ export type NodePaletteIconKey =
   | "tool"
   | "memory"
   | "connector"
+  | "google_drive"
   | "webhook"
   | "schedule";
 
@@ -247,6 +248,15 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
       </svg>
     );
   }
+  if (icon === "google_drive") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M8.3 3.6h7.2l4.2 7.3h-7.2z" fill="#0F9D58" />
+        <path d="m4.2 10.9 3.6-6.2 3.6 6.2-3.6 6.2z" fill="#4285F4" />
+        <path d="M12.1 17.1h7.1l-3.6 6.2H8.5z" fill="#F4B400" />
+      </svg>
+    );
+  }
   if (icon === "webhook") {
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -285,6 +295,7 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   local_memory: "memory",
   mcp_tool: "tool",
   connector_source: "connector",
+  google_drive_source: "google_drive",
   http_request: "http",
   document_chunker: "transform",
   set_node: "set",

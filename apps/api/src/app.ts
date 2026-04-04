@@ -81,6 +81,11 @@ const codeNodeTestSchema = z.object({
   input: z.record(z.string(), z.unknown()).optional()
 });
 
+const connectorTestSchema = z.object({
+  connectorId: z.string().min(1),
+  connectorConfig: z.record(z.string(), z.unknown()).optional()
+});
+
 const workflowVariablesSchema = z.object({
   variables: z.record(z.string(), z.string())
 });
@@ -1409,6 +1414,35 @@ export function createApp(
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Code node test failed"
+      };
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/connectors/test", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const parsed = connectorTestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid connector test payload",
+        details: parsed.error.issues
+      };
+    }
+
+    try {
+      const connector = connectorRegistry.get(parsed.data.connectorId);
+      const result = await connector.testConnection(parsed.data.connectorConfig ?? {}, {
+        resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
+      });
+      return result;
+    } catch (error) {
+      reply.code(400);
+      return {
+        error: error instanceof Error ? error.message : "Connector test failed"
       };
     }
   });

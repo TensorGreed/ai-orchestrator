@@ -101,6 +101,107 @@ const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
 const DEFAULT_LOGS_PANEL_HEIGHT = 210;
 const MIN_LOGS_PANEL_HEIGHT = 140;
 const MAX_LOGS_PANEL_HEIGHT = 620;
+type SecretProviderPreset =
+  | "openai"
+  | "anthropic"
+  | "gemini"
+  | "google_drive"
+  | "webhook"
+  | "openai_compatible"
+  | "ollama"
+  | "pinecone"
+  | "postgres"
+  | "custom";
+const SECRET_PROVIDER_OPTIONS: Array<{ value: SecretProviderPreset; label: string }> = [
+  { value: "openai", label: "OpenAI" },
+  { value: "anthropic", label: "Anthropic" },
+  { value: "gemini", label: "Google Gemini" },
+  { value: "google_drive", label: "Google Drive" },
+  { value: "webhook", label: "Webhook Secret" },
+  { value: "openai_compatible", label: "OpenAI Compatible" },
+  { value: "ollama", label: "Ollama" },
+  { value: "pinecone", label: "Pinecone" },
+  { value: "postgres", label: "Postgres / PGVector" },
+  { value: "custom", label: "Custom" }
+];
+
+function buildSecretPayload(input: {
+  provider: string;
+  customProvider: string;
+  genericValue: string;
+  connectionString: string;
+  googleAuthMode: "access_token" | "service_account_json";
+  googleAccessToken: string;
+  googleServiceAccountJson: string;
+}): { provider?: string; value?: string; error?: string } {
+  const provider = input.provider.trim();
+  if (!provider) {
+    return { error: "Provider is required." };
+  }
+
+  if (provider === "custom") {
+    const customProvider = input.customProvider.trim();
+    const customValue = input.genericValue.trim();
+    if (!customProvider) {
+      return { error: "Custom provider name is required." };
+    }
+    if (!customValue) {
+      return { error: "Secret value is required." };
+    }
+    return {
+      provider: customProvider,
+      value: customValue
+    };
+  }
+
+  if (provider === "google_drive") {
+    if (input.googleAuthMode === "access_token") {
+      const token = input.googleAccessToken.trim();
+      if (!token) {
+        return { error: "Google Drive access token is required." };
+      }
+      return { provider, value: token };
+    }
+
+    const rawJson = input.googleServiceAccountJson.trim();
+    if (!rawJson) {
+      return { error: "Google Drive service account JSON is required." };
+    }
+
+    try {
+      const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+      if (typeof parsed.client_email !== "string" || !parsed.client_email.trim()) {
+        return { error: "Google service account JSON must include client_email." };
+      }
+      if (typeof parsed.private_key !== "string" || !parsed.private_key.trim()) {
+        return { error: "Google service account JSON must include private_key." };
+      }
+      return {
+        provider,
+        value: JSON.stringify(parsed)
+      };
+    } catch {
+      return { error: "Google service account must be valid JSON." };
+    }
+  }
+
+  if (provider === "postgres") {
+    const connectionString = input.connectionString.trim();
+    if (!connectionString) {
+      return { error: "Connection string is required." };
+    }
+    return { provider, value: connectionString };
+  }
+
+  const genericValue = input.genericValue.trim();
+  if (!genericValue) {
+    return { error: "Secret value is required." };
+  }
+  return {
+    provider,
+    value: genericValue
+  };
+}
 
 function stringifyPretty(value: unknown) {
   return JSON.stringify(value, null, 2);
@@ -259,7 +360,8 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     (edge.sourceHandle ? auxiliaryHandles.has(edge.sourceHandle) : false) ||
     (edge.targetHandle ? auxiliaryHandles.has(edge.targetHandle) : false) ||
     target?.data.nodeType === "mcp_tool" ||
-    target?.data.nodeType === "connector_source";
+    target?.data.nodeType === "connector_source" ||
+    target?.data.nodeType === "google_drive_source";
 
   const stroke = isAuxiliary ? "#a7bccc" : "#4f6881";
   
@@ -486,8 +588,13 @@ function StudioApp() {
   const [chatNodeTrace, setChatNodeTrace] = useState<Array<{ nodeId: string; status: string; at: string }>>([]);
 
   const [secretName, setSecretName] = useState("Default LLM Key");
-  const [secretProvider, setSecretProvider] = useState("openai");
-  const [secretValue, setSecretValue] = useState("");
+  const [secretProvider, setSecretProvider] = useState<SecretProviderPreset>("openai");
+  const [secretCustomProvider, setSecretCustomProvider] = useState("");
+  const [secretGenericValue, setSecretGenericValue] = useState("");
+  const [secretConnectionString, setSecretConnectionString] = useState("");
+  const [secretGoogleAuthMode, setSecretGoogleAuthMode] = useState<"access_token" | "service_account_json">("access_token");
+  const [secretGoogleAccessToken, setSecretGoogleAccessToken] = useState("");
+  const [secretGoogleServiceAccountJson, setSecretGoogleServiceAccountJson] = useState("");
   const [dashboardFilter, setDashboardFilter] = useState("");
   const [workflowVariableRows, setWorkflowVariableRows] = useState<WorkflowVariableRow[]>([]);
   const [variablesBusy, setVariablesBusy] = useState(false);
@@ -1858,8 +1965,22 @@ function StudioApp() {
   );
 
   const handleCreateSecret = useCallback(async () => {
-    if (!secretName.trim() || !secretProvider.trim() || !secretValue.trim()) {
-      setError("Secret name, provider, and value are required.");
+    if (!secretName.trim()) {
+      setError("Secret name is required.");
+      return;
+    }
+
+    const secretPayload = buildSecretPayload({
+      provider: secretProvider,
+      customProvider: secretCustomProvider,
+      genericValue: secretGenericValue,
+      connectionString: secretConnectionString,
+      googleAuthMode: secretGoogleAuthMode,
+      googleAccessToken: secretGoogleAccessToken,
+      googleServiceAccountJson: secretGoogleServiceAccountJson
+    });
+    if (secretPayload.error || !secretPayload.provider || !secretPayload.value) {
+      setError(secretPayload.error ?? "Invalid secret payload.");
       return;
     }
 
@@ -1869,18 +1990,32 @@ function StudioApp() {
       setSecretMessage(null);
       await createSecret({
         name: secretName.trim(),
-        provider: secretProvider.trim(),
-        value: secretValue
+        provider: secretPayload.provider,
+        value: secretPayload.value
       });
       await refreshSecrets();
-      setSecretValue("");
+      setSecretGenericValue("");
+      setSecretConnectionString("");
+      setSecretGoogleAccessToken("");
+      setSecretGoogleServiceAccountJson("");
       setSecretMessage("Secret created.");
     } catch (createError) {
       handleApiError(createError, "Failed to create secret");
     } finally {
       setSecretBusy(false);
     }
-  }, [handleApiError, refreshSecrets, secretName, secretProvider, secretValue]);
+  }, [
+    handleApiError,
+    refreshSecrets,
+    secretConnectionString,
+    secretCustomProvider,
+    secretGenericValue,
+    secretGoogleAccessToken,
+    secretGoogleAuthMode,
+    secretGoogleServiceAccountJson,
+    secretName,
+    secretProvider
+  ]);
 
   const copySecretId = useCallback(async (secretId: string) => {
     try {
@@ -2671,9 +2806,89 @@ function StudioApp() {
                   <label>Name</label>
                   <input value={secretName} onChange={(event) => setSecretName(event.target.value)} />
                   <label>Provider</label>
-                  <input value={secretProvider} onChange={(event) => setSecretProvider(event.target.value)} />
-                  <label>Secret value</label>
-                  <input type="password" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} />
+                  <select
+                    value={secretProvider}
+                    onChange={(event) => setSecretProvider(event.target.value as SecretProviderPreset)}
+                  >
+                    {SECRET_PROVIDER_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  {secretProvider === "custom" && (
+                    <>
+                      <label>Custom Provider Name</label>
+                      <input
+                        value={secretCustomProvider}
+                        onChange={(event) => setSecretCustomProvider(event.target.value)}
+                        placeholder="my-provider"
+                      />
+                    </>
+                  )}
+
+                  {secretProvider === "google_drive" ? (
+                    <>
+                      <label>Google Auth Mode</label>
+                      <select
+                        value={secretGoogleAuthMode}
+                        onChange={(event) =>
+                          setSecretGoogleAuthMode(event.target.value as "access_token" | "service_account_json")
+                        }
+                      >
+                        <option value="access_token">Access Token</option>
+                        <option value="service_account_json">Service Account JSON</option>
+                      </select>
+
+                      {secretGoogleAuthMode === "access_token" ? (
+                        <>
+                          <label>Google Drive Access Token</label>
+                          <input
+                            type="password"
+                            value={secretGoogleAccessToken}
+                            onChange={(event) => setSecretGoogleAccessToken(event.target.value)}
+                            placeholder="ya29..."
+                          />
+                        </>
+                      ) : (
+                        <>
+                          <label>Google Service Account JSON</label>
+                          <textarea
+                            rows={7}
+                            value={secretGoogleServiceAccountJson}
+                            onChange={(event) => setSecretGoogleServiceAccountJson(event.target.value)}
+                            placeholder='{"type":"service_account","client_email":"...","private_key":"..."}'
+                          />
+                        </>
+                      )}
+                    </>
+                  ) : secretProvider === "postgres" ? (
+                    <>
+                      <label>Connection String</label>
+                      <input
+                        type="password"
+                        value={secretConnectionString}
+                        onChange={(event) => setSecretConnectionString(event.target.value)}
+                        placeholder="postgresql://user:pass@host:5432/db"
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <label>
+                        {secretProvider === "webhook"
+                          ? "Shared Secret / Token"
+                          : secretProvider === "custom"
+                            ? "Secret Value"
+                            : "API Key / Token"}
+                      </label>
+                      <input
+                        type="password"
+                        value={secretGenericValue}
+                        onChange={(event) => setSecretGenericValue(event.target.value)}
+                      />
+                    </>
+                  )}
                   <div className="row-actions">
                     <button onClick={handleCreateSecret} disabled={secretBusy || busy}>
                       Create

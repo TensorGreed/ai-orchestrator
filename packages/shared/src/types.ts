@@ -30,6 +30,7 @@ export type WorkflowNodeType =
   | "mcp_tool"
   | "rag_retrieve"
   | "connector_source"
+  | "google_drive_source"
   | "document_chunker"
   | "output_parser"
   | "human_approval"
