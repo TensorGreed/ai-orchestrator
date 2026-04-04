@@ -1721,10 +1721,13 @@ export function createApp(
               };
             }
 
-            if (existing.result && typeof existing.result === "object") {
-              const existingResultRecord = existing.result as Record<string, unknown>;
+            if (existing.result !== undefined && existing.result !== null) {
+              const existingResultRecord =
+                existing.result && typeof existing.result === "object"
+                  ? (existing.result as Record<string, unknown>)
+                  : null;
               const cachedWebhookResponse = (() => {
-                const raw = existingResultRecord.__webhookHttpResponse;
+                const raw = existingResultRecord?.__webhookHttpResponse;
                 if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
                   return null;
                 }
@@ -1755,8 +1758,17 @@ export function createApp(
                 return cachedWebhookResponse.body;
               }
 
+              if (existingResultRecord) {
+                return {
+                  ...existingResultRecord,
+                  idempotency: {
+                    key: idempotencyKey,
+                    reused: true
+                  }
+                };
+              }
               return {
-                ...existingResultRecord,
+                output: existing.result,
                 idempotency: {
                   key: idempotencyKey,
                   reused: true
@@ -1790,10 +1802,13 @@ export function createApp(
                 error: "Request with this idempotency key is already in progress."
               };
             }
-            if (latest?.result && typeof latest.result === "object") {
-              const latestRecord = latest.result as Record<string, unknown>;
+            if (latest?.result !== undefined && latest.result !== null) {
+              const latestRecord =
+                latest.result && typeof latest.result === "object"
+                  ? (latest.result as Record<string, unknown>)
+                  : null;
               const cachedWebhookResponse = (() => {
-                const raw = latestRecord.__webhookHttpResponse;
+                const raw = latestRecord?.__webhookHttpResponse;
                 if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
                   return null;
                 }
@@ -1823,8 +1838,17 @@ export function createApp(
                 return cachedWebhookResponse.body;
               }
 
+              if (latestRecord) {
+                return {
+                  ...latestRecord,
+                  idempotency: {
+                    key: idempotencyKey,
+                    reused: true
+                  }
+                };
+              }
               return {
-                ...latestRecord,
+                output: latest.result,
                 idempotency: {
                   key: idempotencyKey,
                   reused: true
@@ -1863,10 +1887,8 @@ export function createApp(
         });
 
         const defaultResponsePayload = {
-          ...result,
-          selectedWorkflowId: match.workflow.id,
-          webhookPath: match.endpoint.path,
-          webhookMethod: match.endpoint.method,
+          output: result.output ?? null,
+          error: result.status === "error" ? (result.error ?? "Workflow execution failed") : undefined,
           idempotency: security.idempotencyEnabled
             ? {
                 key: idempotencyKey ?? null,

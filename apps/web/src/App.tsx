@@ -233,6 +233,13 @@ function getNodeStatusMap(result: WorkflowExecutionResult | null) {
   return map;
 }
 
+function normalizeEditorExecutionStatus(value: unknown): EditorNodeData["executionStatus"] {
+  if (value === "pending" || value === "running" || value === "success" || value === "error" || value === "skipped") {
+    return value;
+  }
+  return undefined;
+}
+
 function hasConfiguredNodeText(node: EditorNode): boolean {
   const config = node.data.config;
   if (!config || typeof config !== "object" || Array.isArray(config)) {
@@ -492,6 +499,7 @@ function StudioApp() {
   const [logsPanelHeight, setLogsPanelHeight] = useState(DEFAULT_LOGS_PANEL_HEIGHT);
   const [visualRunOrder, setVisualRunOrder] = useState<string[]>([]);
   const [visualRunActiveIndex, setVisualRunActiveIndex] = useState<number | null>(null);
+  const [liveNodeStatuses, setLiveNodeStatuses] = useState<Record<string, NonNullable<EditorNodeData["executionStatus"]>>>({});
 
   const flowWrapperRef = useRef<HTMLDivElement>(null);
   const chatHistoryRef = useRef<HTMLDivElement>(null);
@@ -559,29 +567,14 @@ function StudioApp() {
   const currentChatSessionId = chatSessionsByWorkflow[currentWorkflow.id] ?? "";
 
   const executionStatuses = useMemo(() => {
-    const resultStatuses = getNodeStatusMap(executionResult);
-    if (resultStatuses.size > 0) {
-      return resultStatuses;
-    }
-
-    if (visualRunActiveIndex === null || visualRunOrder.length === 0) {
-      return resultStatuses;
-    }
-
-    const simulated = new Map<string, string>();
-    for (let index = 0; index < visualRunOrder.length; index += 1) {
-      const nodeId = visualRunOrder[index];
-      if (index < visualRunActiveIndex) {
-        simulated.set(nodeId, "success");
-      } else if (index === visualRunActiveIndex) {
-        simulated.set(nodeId, "running");
-      } else {
-        simulated.set(nodeId, "pending");
+    const combined = getNodeStatusMap(executionResult);
+    for (const [nodeId, status] of Object.entries(liveNodeStatuses)) {
+      if (!combined.has(nodeId)) {
+        combined.set(nodeId, status);
       }
     }
-
-    return simulated;
-  }, [executionResult, visualRunActiveIndex, visualRunOrder]);
+    return combined;
+  }, [executionResult, liveNodeStatuses]);
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
@@ -1320,9 +1313,29 @@ function StudioApp() {
       setBusy(true);
       setError(null);
       setExecutionResult(null);
-      startVisualRun();
+      setLiveNodeStatuses({});
       const saved = await persistWorkflow();
-      const result = await executeWorkflow(saved.id, buildEditorExecutionPayload());
+      const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(), {
+        onNodeStart: (event) => {
+          setLiveNodeStatuses((current) => ({
+            ...current,
+            [event.nodeId]: "running"
+          }));
+        },
+        onNodeComplete: (event) => {
+          const normalizedStatus = normalizeEditorExecutionStatus(event.status);
+          if (!normalizedStatus) {
+            return;
+          }
+          setLiveNodeStatuses((current) => ({
+            ...current,
+            [event.nodeId]: normalizedStatus
+          }));
+        },
+        onError: (event) => {
+          setError((current) => current ?? event.message);
+        }
+      });
       setExecutionResult(result);
       setLogsTab("logs");
       setActiveMode("editor");
@@ -1333,17 +1346,16 @@ function StudioApp() {
       setLogsTab("logs");
       setActiveMode("editor");
     } finally {
-      stopVisualRun();
+      setLiveNodeStatuses({});
       setBusy(false);
     }
   }, [
     currentWorkflow.id,
     buildEditorExecutionPayload,
+    executeWorkflowStream,
     handleApiError,
     persistWorkflow,
     refreshExecutionHistory,
-    startVisualRun,
-    stopVisualRun,
   ]);
 
   const handleWebhookExecute = useCallback(async () => {
