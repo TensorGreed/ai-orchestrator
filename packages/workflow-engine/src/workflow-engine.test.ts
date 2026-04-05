@@ -54,6 +54,22 @@ class CapturingAgentRuntime implements AgentRuntimeAdapter {
   }
 }
 
+class CollectingAgentRuntime implements AgentRuntimeAdapter {
+  readonly id = "collecting-agent";
+  requests: AgentRunRequest[] = [];
+
+  async run(request: AgentRunRequest): Promise<AgentRunState> {
+    this.requests.push(request);
+    return {
+      finalAnswer: `collect:${request.userPrompt}`,
+      stopReason: "final_answer",
+      iterations: 1,
+      messages: [],
+      steps: []
+    };
+  }
+}
+
 function createProviderRegistry() {
   const registry = new ProviderRegistry();
   registry.register(new FakeProvider());
@@ -423,9 +439,116 @@ describe("workflow engine", () => {
     expect(runtime.lastRequest?.tools.length).toBeGreaterThan(0);
     expect(runtime.lastRequest?.memory?.namespace).toBe("default");
     expect(runtime.lastRequest?.sessionId).toBe("session-abc");
-    expect(result.nodeResults.find((entry) => entry.nodeId === "model")?.status).toBe("skipped");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "model")?.status).toBe("success");
+    expect(
+      (result.nodeResults.find((entry) => entry.nodeId === "model")?.output as Record<string, unknown>)?.reason
+    ).toBe("attachment_consumed_by_agent");
+    expect(
+      ((result.nodeResults.find((entry) => entry.nodeId === "model")?.output as Record<string, unknown>)
+        ?.details as Record<string, unknown>)?.answer
+    ).toBe("captured:U");
     expect(result.nodeResults.find((entry) => entry.nodeId === "memory")?.status).toBe("skipped");
     expect(result.nodeResults.find((entry) => entry.nodeId === "tool")?.status).toBe("skipped");
+  });
+
+  it("executes each agent with its own attached chat model", async () => {
+    const runtime = new CollectingAgentRuntime();
+    const workflow: Workflow = {
+      id: "wf-two-agents-two-models",
+      name: "Two agents two models",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "webhook",
+          type: "webhook_input",
+          name: "Webhook",
+          position: { x: 0, y: 0 },
+          config: {}
+        },
+        {
+          id: "agent-1",
+          type: "agent_orchestrator",
+          name: "Agent 1",
+          position: { x: 220, y: 0 },
+          config: {
+            systemPromptTemplate: "{{system_prompt}}",
+            userPromptTemplate: "{{user_prompt}}",
+            maxIterations: 2,
+            toolCallingEnabled: true
+          }
+        },
+        {
+          id: "agent-2",
+          type: "agent_orchestrator",
+          name: "Agent 2",
+          position: { x: 460, y: 0 },
+          config: {
+            systemPromptTemplate: "{{system_prompt}}",
+            userPromptTemplate: "{{answer}}",
+            maxIterations: 2,
+            toolCallingEnabled: true
+          }
+        },
+        {
+          id: "model-1",
+          type: "llm_call",
+          name: "Model 1",
+          position: { x: 220, y: 180 },
+          config: {
+            provider: { providerId: "fake", model: "model-one" }
+          }
+        },
+        {
+          id: "model-2",
+          type: "llm_call",
+          name: "Model 2",
+          position: { x: 460, y: 180 },
+          config: {
+            provider: { providerId: "fake", model: "model-two" }
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 700, y: 0 },
+          config: {
+            responseTemplate: "{{answer}}"
+          }
+        }
+      ],
+      edges: [
+        { id: "e-main-1", source: "webhook", target: "agent-1" },
+        { id: "e-main-2", source: "agent-1", target: "agent-2" },
+        { id: "e-main-3", source: "agent-2", target: "output" },
+        { id: "e-attach-1", source: "agent-1", sourceHandle: "chat_model", target: "model-1" },
+        { id: "e-attach-2", source: "agent-2", sourceHandle: "chat_model", target: "model-2" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        webhookPayload: {
+          user_prompt: "hello"
+        }
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: runtime,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(runtime.requests.length).toBe(2);
+    expect(runtime.requests[0]?.provider.model).toBe("model-one");
+    expect(runtime.requests[1]?.provider.model).toBe("model-two");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "model-1")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "model-2")?.status).toBe("success");
   });
 
   it("output_parser: item_list mode splits text into items", async () => {

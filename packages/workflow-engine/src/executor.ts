@@ -111,6 +111,16 @@ interface NodeRuntimeContext {
   nodeById: Map<string, WorkflowNode>;
   attachmentsBySource: Map<string, Map<AgentAttachmentHandle, string[]>>;
   callStack: string[];
+  recordAttachmentUsage?: (usage: {
+    attachedNodeId: string;
+    usedByNodeId: string;
+    handle: AgentAttachmentHandle;
+    input?: unknown;
+    output?: unknown;
+    startedAt?: string;
+    completedAt?: string;
+    durationMs?: number;
+  }) => void;
 }
 
 type AgentAttachmentHandle = "chat_model" | "memory" | "tool";
@@ -1307,7 +1317,8 @@ async function executeNode(
           .filter((attached): attached is WorkflowNode => Boolean(attached));
       };
 
-      const attachedModelNode = getAttachedNodes("chat_model").find((attached) => attached.type === "llm_call");
+      const attachedModelNodes = getAttachedNodes("chat_model").filter((attached) => attached.type === "llm_call");
+      const attachedModelNode = attachedModelNodes.length ? attachedModelNodes[attachedModelNodes.length - 1] : undefined;
       const provider = attachedModelNode ? normalizeProvider(toRecord(attachedModelNode.config).provider) : undefined;
       if (!provider) {
         throw new Error("Agent Orchestrator requires an attached LLM Call node on chat_model.");
@@ -1325,6 +1336,11 @@ async function executeNode(
       const resolvedSessionId = renderTemplate(sessionTemplate, templateData).trim();
       const sessionId =
         resolvedSessionId || (typeof templateData.session_id === "string" ? String(templateData.session_id) : undefined);
+      const modelMessages = [] as Array<{ role: "system" | "user"; content: string }>;
+      if (systemPrompt.trim()) {
+        modelMessages.push({ role: "system", content: systemPrompt });
+      }
+      modelMessages.push({ role: "user", content: userPrompt });
 
       const inlineServerConfigs = Array.isArray(config.mcpServers)
         ? config.mcpServers
@@ -1404,6 +1420,8 @@ async function executeNode(
         };
       }
 
+      const modelRunStarted = Date.now();
+      const modelRunStartedAt = nowIso();
       const agentState = await dependencies.agentRuntime.run(
         {
           provider,
@@ -1430,6 +1448,29 @@ async function executeNode(
           memoryStore: dependencies.memoryStore
         }
       );
+      const modelRunCompletedAt = nowIso();
+      if (attachedModelNode) {
+        const lastStep = agentState.steps.at(-1);
+        context.recordAttachmentUsage?.({
+          attachedNodeId: attachedModelNode.id,
+          usedByNodeId: node.id,
+          handle: "chat_model",
+          startedAt: modelRunStartedAt,
+          completedAt: modelRunCompletedAt,
+          durationMs: Math.max(0, Date.now() - modelRunStarted),
+          input: {
+            provider,
+            messages: modelMessages
+          },
+          output: {
+            stopReason: agentState.stopReason,
+            iterations: agentState.iterations,
+            answer: agentState.finalAnswer,
+            model_output: lastStep?.modelOutput ?? agentState.finalAnswer,
+            requested_tool_calls: lastStep?.requestedTools.length ?? 0
+          }
+        });
+      }
 
       return {
         answer: agentState.finalAnswer,
@@ -1906,6 +1947,79 @@ export async function executeWorkflow(
     ? deserializeNodeOutputs(toRecord(request.resumeState.nodeOutputs))
     : new Map<string, unknown>();
   const nodeResults: NodeExecutionResult[] = request.resumeState ? [...request.resumeState.nodeResults] : [];
+  const attachmentOnlyResultIndexByNodeId = new Map<string, number>();
+  const attachmentUsageByNodeId = new Map<
+    string,
+    {
+      attachedNodeId: string;
+      usedByNodeId: string;
+      handle: AgentAttachmentHandle;
+      input?: unknown;
+      output?: unknown;
+      startedAt: string;
+      completedAt: string;
+      durationMs: number;
+    }
+  >();
+  const toAttachmentConsumedResult = (
+    usage: {
+      attachedNodeId: string;
+      usedByNodeId: string;
+      handle: AgentAttachmentHandle;
+      input?: unknown;
+      output?: unknown;
+      startedAt: string;
+      completedAt: string;
+      durationMs: number;
+    }
+  ): NodeExecutionResult => ({
+    nodeId: usage.attachedNodeId,
+    status: "success",
+    startedAt: usage.startedAt,
+    completedAt: usage.completedAt,
+    durationMs: usage.durationMs,
+    input: toJsonSafeValue(usage.input),
+    output: {
+      reason: "attachment_consumed_by_agent",
+      message: "Node was consumed by an attached agent during execution.",
+      handle: usage.handle,
+      usedByNodeId: usage.usedByNodeId,
+      details: toJsonSafeValue(usage.output)
+    }
+  });
+  const recordAttachmentUsage = (usage: {
+    attachedNodeId: string;
+    usedByNodeId: string;
+    handle: AgentAttachmentHandle;
+    input?: unknown;
+    output?: unknown;
+    startedAt?: string;
+    completedAt?: string;
+    durationMs?: number;
+  }) => {
+    const completedAt = usage.completedAt ?? nowIso();
+    const startedAt = usage.startedAt ?? completedAt;
+    const durationMs =
+      typeof usage.durationMs === "number" && Number.isFinite(usage.durationMs) && usage.durationMs >= 0
+        ? Math.floor(usage.durationMs)
+        : 0;
+    const normalized = {
+      attachedNodeId: usage.attachedNodeId,
+      usedByNodeId: usage.usedByNodeId,
+      handle: usage.handle,
+      input: usage.input,
+      output: usage.output,
+      startedAt,
+      completedAt,
+      durationMs
+    };
+    attachmentUsageByNodeId.set(usage.attachedNodeId, normalized);
+
+    const existingIndex = attachmentOnlyResultIndexByNodeId.get(usage.attachedNodeId);
+    if (existingIndex !== undefined) {
+      nodeResults[existingIndex] = toAttachmentConsumedResult(normalized);
+    }
+  };
   let finalOutput: unknown = request.resumeState?.finalOutput;
   let failedError: string | undefined;
   let hadContinuedErrors = request.resumeState?.hadContinuedErrors === true;
@@ -2124,17 +2238,23 @@ export async function executeWorkflow(
     const isAttachmentOnlyNode = hasAttachmentIncoming && !hasExecutionIncoming && !hasExecutionOutgoing;
 
     if (isAttachmentOnlyNode) {
-      nodeResults.push({
-        nodeId: node.id,
-        status: "skipped",
-        startedAt: nowIso(),
-        completedAt: nowIso(),
-        durationMs: 0,
-        output: {
-          reason: "attachment_only_node",
-          message: "Node is attached to an agent port and is not part of the execution DAG."
-        }
-      });
+      const consumedUsage = attachmentUsageByNodeId.get(node.id);
+      if (consumedUsage) {
+        nodeResults.push(toAttachmentConsumedResult(consumedUsage));
+      } else {
+        nodeResults.push({
+          nodeId: node.id,
+          status: "skipped",
+          startedAt: nowIso(),
+          completedAt: nowIso(),
+          durationMs: 0,
+          output: {
+            reason: "attachment_only_node",
+            message: "Node is attached to an agent port and is not part of the execution DAG."
+          }
+        });
+      }
+      attachmentOnlyResultIndexByNodeId.set(node.id, nodeResults.length - 1);
       continue;
     }
 
@@ -2250,7 +2370,8 @@ export async function executeWorkflow(
                   workflow,
                   nodeById: graphIndexes.nodeById,
                   attachmentsBySource: graphIndexes.attachmentsBySource,
-                  callStack
+                  callStack,
+                  recordAttachmentUsage
                 },
                 dependencies
               );
@@ -2431,7 +2552,8 @@ export async function executeWorkflow(
           workflow,
           nodeById: graphIndexes.nodeById,
           attachmentsBySource: graphIndexes.attachmentsBySource,
-          callStack
+          callStack,
+          recordAttachmentUsage
         },
         dependencies
       );
