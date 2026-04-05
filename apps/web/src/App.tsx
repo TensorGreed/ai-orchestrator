@@ -35,12 +35,14 @@ import {
   importWorkflow,
   loginUser,
   logoutUser,
-  runWebhook,
+  runWebhookStream,
   saveWorkflow,
   updateWorkflowVariables,
   type AuthUser,
   type ExecutionHistoryDetail,
-  type SecretListItem
+  type SecretListItem,
+  type StreamNodeCompleteEvent,
+  type StreamNodeStartEvent
 } from "./lib/api";
 import {
   createBlankWorkflow,
@@ -269,6 +271,74 @@ function toWorkflowExecutionResult(detail: ExecutionHistoryDetail): WorkflowExec
     nodeResults: Array.isArray(detail.nodeResults) ? (detail.nodeResults as WorkflowExecutionResult["nodeResults"]) : [],
     output: detail.output,
     error: detail.error ?? undefined
+  };
+}
+
+function createPartialExecutionResult(workflowId: string, at: string): WorkflowExecutionResult {
+  return {
+    workflowId,
+    status: "partial",
+    startedAt: at,
+    completedAt: at,
+    nodeResults: []
+  };
+}
+
+function upsertNodeResult(
+  nodeResults: WorkflowExecutionResult["nodeResults"],
+  next: WorkflowExecutionResult["nodeResults"][number]
+): WorkflowExecutionResult["nodeResults"] {
+  const existingIndex = nodeResults.findIndex((entry) => entry.nodeId === next.nodeId);
+  if (existingIndex < 0) {
+    return [...nodeResults, next];
+  }
+  const updated = [...nodeResults];
+  updated[existingIndex] = {
+    ...updated[existingIndex],
+    ...next
+  };
+  return updated;
+}
+
+function applyNodeStartToExecutionResult(
+  current: WorkflowExecutionResult,
+  event: StreamNodeStartEvent
+): WorkflowExecutionResult {
+  const nextNodeResult: WorkflowExecutionResult["nodeResults"][number] = {
+    nodeId: event.nodeId,
+    status: "running",
+    startedAt: event.startedAt
+  };
+
+  return {
+    ...current,
+    status: "partial",
+    completedAt: event.startedAt,
+    nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult)
+  };
+}
+
+function applyNodeCompleteToExecutionResult(
+  current: WorkflowExecutionResult,
+  event: StreamNodeCompleteEvent
+): WorkflowExecutionResult {
+  const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId);
+  const nextNodeResult: WorkflowExecutionResult["nodeResults"][number] = {
+    nodeId: event.nodeId,
+    status: event.status as WorkflowExecutionResult["nodeResults"][number]["status"],
+    startedAt: existing?.startedAt ?? event.completedAt,
+    completedAt: event.completedAt,
+    durationMs: event.durationMs,
+    input: event.input ?? existing?.input,
+    output: event.output ?? existing?.output,
+    error: event.error
+  };
+
+  return {
+    ...current,
+    status: "partial",
+    completedAt: event.completedAt,
+    nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult)
   };
 }
 
@@ -812,6 +882,17 @@ function StudioApp() {
           return;
         }
 
+        // New external execution detected (e.g., REST client / webhook call).
+        // Reset previous debug trace immediately before loading full details.
+        setExecutionResult(
+          createPartialExecutionResult(
+            latest.workflowId || currentWorkflow.id,
+            typeof latest.startedAt === "string" && latest.startedAt ? latest.startedAt : new Date().toISOString()
+          )
+        );
+        setLiveNodeStatuses({});
+        setLogsTab("logs");
+
         const detail = await fetchExecutionById(latest.id);
         if (cancelled) {
           return;
@@ -819,8 +900,6 @@ function StudioApp() {
 
         latestDebugExecutionIdRef.current = latest.id;
         setExecutionResult(toWorkflowExecutionResult(detail));
-        setLogsTab("logs");
-        setLiveNodeStatuses({});
       } catch {
         // Polling failures should not interrupt editor usage.
       }
@@ -1529,33 +1608,53 @@ function StudioApp() {
     try {
       setBusy(true);
       setError(null);
-      if (isDebugMode) {
-        setExecutionResult(null);
-      }
-      setLiveNodeStatuses({});
+      let initializedTrace = false;
+      let initializedStatuses = false;
       const saved = await persistWorkflow();
       const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(), {
         onNodeStart: (event) => {
           if (!isDebugMode) {
             return;
           }
-          setLiveNodeStatuses((current) => ({
-            ...current,
-            [event.nodeId]: "running"
-          }));
+          setExecutionResult((current) => {
+            const base = initializedTrace ? (current ?? createPartialExecutionResult(saved.id, event.startedAt)) : createPartialExecutionResult(saved.id, event.startedAt);
+            initializedTrace = true;
+            return applyNodeStartToExecutionResult(base, event);
+          });
+          setLiveNodeStatuses((current) => {
+            if (!initializedStatuses) {
+              initializedStatuses = true;
+              return { [event.nodeId]: "running" };
+            }
+            return {
+              ...current,
+              [event.nodeId]: "running"
+            };
+          });
         },
         onNodeComplete: (event) => {
           if (!isDebugMode) {
             return;
           }
+          setExecutionResult((current) => {
+            const base = initializedTrace ? (current ?? createPartialExecutionResult(saved.id, event.completedAt)) : createPartialExecutionResult(saved.id, event.completedAt);
+            initializedTrace = true;
+            return applyNodeCompleteToExecutionResult(base, event);
+          });
           const normalizedStatus = normalizeEditorExecutionStatus(event.status);
           if (!normalizedStatus) {
             return;
           }
-          setLiveNodeStatuses((current) => ({
-            ...current,
-            [event.nodeId]: normalizedStatus
-          }));
+          setLiveNodeStatuses((current) => {
+            if (!initializedStatuses) {
+              initializedStatuses = true;
+              return { [event.nodeId]: normalizedStatus };
+            }
+            return {
+              ...current,
+              [event.nodeId]: normalizedStatus
+            };
+          });
         },
         onError: (event) => {
           setError((current) => current ?? event.message);
@@ -1595,14 +1694,61 @@ function StudioApp() {
     try {
       setBusy(true);
       setError(null);
-      if (isDebugMode) {
-        setExecutionResult(null);
-      }
       startVisualRun();
+      let initializedTrace = false;
+      let initializedStatuses = false;
       const saved = await persistWorkflow();
-      const result = await runWebhook({
+      const result = await runWebhookStream({
         workflow_id: saved.id,
         ...buildWebhookExecutionPayload()
+      }, {
+        onNodeStart: (event) => {
+          if (!isDebugMode) {
+            return;
+          }
+          setExecutionResult((current) => {
+            const base = initializedTrace ? (current ?? createPartialExecutionResult(saved.id, event.startedAt)) : createPartialExecutionResult(saved.id, event.startedAt);
+            initializedTrace = true;
+            return applyNodeStartToExecutionResult(base, event);
+          });
+          setLiveNodeStatuses((current) => {
+            if (!initializedStatuses) {
+              initializedStatuses = true;
+              return { [event.nodeId]: "running" };
+            }
+            return {
+              ...current,
+              [event.nodeId]: "running"
+            };
+          });
+        },
+        onNodeComplete: (event) => {
+          if (!isDebugMode) {
+            return;
+          }
+          setExecutionResult((current) => {
+            const base = initializedTrace ? (current ?? createPartialExecutionResult(saved.id, event.completedAt)) : createPartialExecutionResult(saved.id, event.completedAt);
+            initializedTrace = true;
+            return applyNodeCompleteToExecutionResult(base, event);
+          });
+          const normalizedStatus = normalizeEditorExecutionStatus(event.status);
+          if (!normalizedStatus) {
+            return;
+          }
+          setLiveNodeStatuses((current) => {
+            if (!initializedStatuses) {
+              initializedStatuses = true;
+              return { [event.nodeId]: normalizedStatus };
+            }
+            return {
+              ...current,
+              [event.nodeId]: normalizedStatus
+            };
+          });
+        },
+        onError: (event) => {
+          setError((current) => current ?? event.message);
+        }
       });
       if (isDebugMode) {
         setExecutionResult(result);
@@ -1631,6 +1777,7 @@ function StudioApp() {
     isDebugMode,
     persistWorkflow,
     refreshExecutionHistory,
+    runWebhookStream,
     startVisualRun,
     stopVisualRun,
   ]);
@@ -1645,10 +1792,8 @@ function StudioApp() {
     setChatBusy(true);
     setChatError(null);
     setChatNodeTrace([]);
-    if (isDebugMode) {
-      setExecutionResult(null);
-      setLiveNodeStatuses({});
-    }
+    let initializedTrace = false;
+    let initializedStatuses = false;
     let activeWorkflowId = currentWorkflow.id;
 
     let streamedAnyDelta = false;
@@ -1706,21 +1851,37 @@ function StudioApp() {
         {
           onNodeStart: (event) => {
             if (isDebugMode) {
+              setExecutionResult((current) => {
+                const base = initializedTrace
+                  ? (current ?? createPartialExecutionResult(workflowId, event.startedAt))
+                  : createPartialExecutionResult(workflowId, event.startedAt);
+                initializedTrace = true;
+                return applyNodeStartToExecutionResult(base, event);
+              });
               setLiveNodeStatuses((current) => ({
-                ...current,
+                ...(initializedStatuses ? current : {}),
                 [event.nodeId]: "running"
               }));
+              initializedStatuses = true;
             }
             setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: "running", at: event.startedAt }].slice(-40));
           },
           onNodeComplete: (event) => {
             if (isDebugMode) {
+              setExecutionResult((current) => {
+                const base = initializedTrace
+                  ? (current ?? createPartialExecutionResult(workflowId, event.completedAt))
+                  : createPartialExecutionResult(workflowId, event.completedAt);
+                initializedTrace = true;
+                return applyNodeCompleteToExecutionResult(base, event);
+              });
               const normalizedStatus = normalizeEditorExecutionStatus(event.status);
               if (normalizedStatus) {
                 setLiveNodeStatuses((current) => ({
-                  ...current,
+                  ...(initializedStatuses ? current : {}),
                   [event.nodeId]: normalizedStatus
                 }));
+                initializedStatuses = true;
               }
             }
             setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: event.status, at: event.completedAt }].slice(-40));
@@ -3142,6 +3303,7 @@ function StudioApp() {
           executionResult={isDebugMode ? executionResult : null}
           showRuntimeInspection={isDebugMode}
           secrets={secrets}
+          onRefreshSecrets={refreshSecrets}
           mcpServerDefinitions={mcpServerDefinitions}
           onClose={() => setEditingNodeId(null)}
           onSave={saveNodeConfig}

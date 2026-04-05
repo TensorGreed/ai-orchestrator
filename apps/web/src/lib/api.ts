@@ -140,29 +140,30 @@ export async function executeWorkflow(
   });
 }
 
-interface StreamNodeStartEvent {
+export interface StreamNodeStartEvent {
   nodeId: string;
   nodeType: string;
   startedAt: string;
 }
 
-interface StreamNodeCompleteEvent {
+export interface StreamNodeCompleteEvent {
   nodeId: string;
   nodeType: string;
   status: string;
   completedAt: string;
   durationMs: number;
+  input?: unknown;
   output?: unknown;
   error?: string;
 }
 
-interface StreamLlmDeltaEvent {
+export interface StreamLlmDeltaEvent {
   nodeId: string;
   delta: string;
   index: number;
 }
 
-interface StreamErrorEvent {
+export interface StreamErrorEvent {
   message: string;
 }
 
@@ -199,19 +200,12 @@ function parseSseFrame(frame: string): { event: string; data: string } | null {
   };
 }
 
-export async function executeWorkflowStream(
-  workflowId: string,
-  payload: {
-    input?: Record<string, unknown>;
-    variables?: Record<string, unknown>;
-    system_prompt?: string;
-    user_prompt?: string;
-    sessionId?: string;
-    session_id?: string;
-  },
+async function streamWorkflowExecutionRequest(
+  path: string,
+  payload: Record<string, unknown>,
   handlers: WorkflowExecuteStreamHandlers = {}
 ): Promise<WorkflowExecutionResult> {
-  const response = await fetch(`${API_BASE}/api/workflows/${workflowId}/execute/stream`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     credentials: "include",
     headers: {
@@ -307,6 +301,21 @@ export async function executeWorkflowStream(
   return finalResult;
 }
 
+export async function executeWorkflowStream(
+  workflowId: string,
+  payload: {
+    input?: Record<string, unknown>;
+    variables?: Record<string, unknown>;
+    system_prompt?: string;
+    user_prompt?: string;
+    sessionId?: string;
+    session_id?: string;
+  },
+  handlers: WorkflowExecuteStreamHandlers = {}
+): Promise<WorkflowExecutionResult> {
+  return streamWorkflowExecutionRequest(`/api/workflows/${workflowId}/execute/stream`, payload, handlers);
+}
+
 export async function runWebhook(payload: {
   workflow_id?: string;
   session_id?: string;
@@ -318,6 +327,19 @@ export async function runWebhook(payload: {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+export async function runWebhookStream(
+  payload: {
+    workflow_id?: string;
+    session_id?: string;
+    system_prompt?: string;
+    user_prompt?: string;
+    variables?: Record<string, unknown>;
+  },
+  handlers: WorkflowExecuteStreamHandlers = {}
+) {
+  return streamWorkflowExecutionRequest("/api/webhooks/execute/stream", payload, handlers);
 }
 
 export async function fetchDefinitions() {

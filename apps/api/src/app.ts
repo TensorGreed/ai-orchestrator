@@ -595,6 +595,7 @@ export function createApp(
       status: string;
       completedAt: string;
       durationMs: number;
+      input?: unknown;
       output?: unknown;
       error?: string;
     }) => Promise<void> | void;
@@ -1651,6 +1652,107 @@ export function createApp(
       ...result,
       selectedWorkflowId: workflow.id
     };
+  });
+
+  app.post<{ Body: unknown }>("/api/webhooks/execute/stream", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const parsed = agentWebhookPayloadSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid webhook payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const workflow = await selectWebhookWorkflow(store, parsed.data.workflow_id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "No workflows available" };
+    }
+
+    const executionId = crypto.randomUUID();
+    let streamClosed = false;
+    request.raw.on("close", () => {
+      streamClosed = true;
+    });
+
+    const sendSseEvent = (event: string, payload: unknown) => {
+      if (streamClosed) {
+        return;
+      }
+      reply.raw.write(`event: ${event}\n`);
+      const serialized = JSON.stringify(payload ?? null);
+      for (const line of serialized.split("\n")) {
+        reply.raw.write(`data: ${line}\n`);
+      }
+      reply.raw.write("\n");
+    };
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive"
+    });
+    if (typeof reply.raw.flushHeaders === "function") {
+      reply.raw.flushHeaders();
+    }
+
+    try {
+      const result = await runWorkflowExecution({
+        workflow,
+        webhookPayload: {
+          system_prompt: parsed.data.system_prompt,
+          user_prompt: parsed.data.user_prompt,
+          session_id: parsed.data.session_id,
+          variables: parsed.data.variables
+        },
+        variables: parsed.data.variables,
+        systemPrompt: parsed.data.system_prompt,
+        userPrompt: parsed.data.user_prompt,
+        sessionId: parsed.data.session_id,
+        executionId,
+        triggerType: "webhook_api_stream",
+        triggeredBy: user.email,
+        hooks: {
+          onNodeStart: (event) => {
+            sendSseEvent("node_start", event);
+          },
+          onNodeComplete: (event) => {
+            sendSseEvent("node_complete", event);
+          },
+          onLLMDelta: (event) => {
+            sendSseEvent("llm_delta", event);
+          }
+        }
+      });
+
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "webhook_api_stream",
+        triggeredBy: user.email,
+        requestInput: parsed.data
+      });
+
+      sendSseEvent("result", result);
+      if (result.status === "error") {
+        sendSseEvent("error", { message: result.error ?? "Execution failed" });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Execution failed";
+      sendSseEvent("error", { message });
+    } finally {
+      if (!streamClosed) {
+        reply.raw.end();
+      }
+    }
   });
 
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {

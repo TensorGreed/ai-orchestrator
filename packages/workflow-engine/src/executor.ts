@@ -64,6 +64,7 @@ export interface WorkflowExecutionDependencies {
     status: NodeExecutionResult["status"];
     completedAt: string;
     durationMs: number;
+    input?: unknown;
     output?: unknown;
     error?: string;
   }) => Promise<void> | void;
@@ -2397,6 +2398,7 @@ export async function executeWorkflow(
                 status: "success",
                 completedAt: nowIso(),
                 durationMs: Date.now() - childStarted,
+                input: childInput,
                 output: childOutput
               });
             } catch (childError) {
@@ -2416,6 +2418,7 @@ export async function executeWorkflow(
                 status: "error",
                 completedAt: nowIso(),
                 durationMs: Date.now() - childStarted,
+                input: childInput,
                 error: childErrorMessage
               });
               throw new Error(
@@ -2452,6 +2455,7 @@ export async function executeWorkflow(
           status: "success",
           completedAt: nowIso(),
           durationMs: Date.now() - started,
+          input: nodeInput,
           output
         });
         continue;
@@ -2490,6 +2494,7 @@ export async function executeWorkflow(
           status: "waiting_approval",
           completedAt: nowIso(),
           durationMs: Date.now() - started,
+          input: nodeInput,
           output: {
             message: approvalMessage,
             timeoutMinutes
@@ -2576,6 +2581,7 @@ export async function executeWorkflow(
         status: "success",
         completedAt: nowIso(),
         durationMs: Date.now() - started,
+        input: nodeInput,
         output
       });
 
@@ -2662,6 +2668,7 @@ export async function executeWorkflow(
             status: "error",
             completedAt: nowIso(),
             durationMs: Date.now() - started,
+            input: nodeInput,
             error: errorMessage
           });
           hadContinuedErrors = true;
@@ -2687,6 +2694,7 @@ export async function executeWorkflow(
             status: "error",
             completedAt: nowIso(),
             durationMs: Date.now() - started,
+            input: nodeInput,
             error: errorMessage
           });
           hadContinuedErrors = true;
@@ -2731,6 +2739,7 @@ export async function executeWorkflow(
               status: "error",
               completedAt: nowIso(),
               durationMs: Date.now() - started,
+              input: nodeInput,
               error: errorMessage
             });
             hadContinuedErrors = true;
@@ -2755,6 +2764,7 @@ export async function executeWorkflow(
           status: "error",
           completedAt: nowIso(),
           durationMs: Date.now() - started,
+          input: nodeInput,
           error: failedError
         });
 

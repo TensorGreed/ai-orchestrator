@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNode } from "../lib/workflow";
-import { discoverMcpTools, fetchWorkflows, testCodeNode, testConnector, type SecretListItem } from "../lib/api";
+import { createSecret, discoverMcpTools, fetchWorkflows, testCodeNode, testConnector, type SecretListItem } from "../lib/api";
 
 export interface NodeInputOption {
   id: string;
@@ -14,6 +14,7 @@ interface NodeConfigModalProps {
   executionResult: WorkflowExecutionResult | null;
   showRuntimeInspection?: boolean;
   secrets: SecretListItem[];
+  onRefreshSecrets?: () => Promise<SecretListItem[]>;
   mcpServerDefinitions: Array<{ id: string; label: string; description: string }>;
   onClose: () => void;
   onSave: (payload: { label: string; config: Record<string, unknown> }) => void;
@@ -21,6 +22,7 @@ interface NodeConfigModalProps {
 }
 
 const NODE_INPUT_OPTION_ID = "__node_input__";
+const ADD_NEW_CREDENTIAL_VALUE = "__add_new_credential__";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -36,6 +38,18 @@ function toNumberValue(value: unknown, fallback: number): number {
 
 function toBooleanValue(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function toProviderLabel(provider: string): string {
+  const normalized = provider.trim();
+  if (!normalized) {
+    return "Custom";
+  }
+
+  return normalized
+    .split(/[_\s-]+/)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(" ");
 }
 
 function ToggleField({
@@ -459,6 +473,7 @@ export function NodeConfigModal({
   executionResult,
   showRuntimeInspection = true,
   secrets,
+  onRefreshSecrets,
   mcpServerDefinitions,
   onClose,
   onSave,
@@ -481,6 +496,16 @@ export function NodeConfigModal({
   const [connectorTestMessage, setConnectorTestMessage] = useState<string | null>(null);
   const [workflowOptions, setWorkflowOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [workflowOptionsError, setWorkflowOptionsError] = useState<string | null>(null);
+  const [inlineCreatedSecrets, setInlineCreatedSecrets] = useState<SecretListItem[]>([]);
+  const [activeSecretFieldKey, setActiveSecretFieldKey] = useState<string | null>(null);
+  const [inlineSecretProvider, setInlineSecretProvider] = useState("custom");
+  const [inlineSecretName, setInlineSecretName] = useState("");
+  const [inlineSecretValue, setInlineSecretValue] = useState("");
+  const [inlineGoogleAuthMode, setInlineGoogleAuthMode] = useState<"access_token" | "service_account_json">("access_token");
+  const [inlineGoogleAccessToken, setInlineGoogleAccessToken] = useState("");
+  const [inlineGoogleServiceAccountJson, setInlineGoogleServiceAccountJson] = useState("");
+  const [inlineSecretBusy, setInlineSecretBusy] = useState(false);
+  const [inlineSecretError, setInlineSecretError] = useState<string | null>(null);
 
   useEffect(() => {
     const initialConfig = asRecord(node.data.config);
@@ -532,7 +557,28 @@ export function NodeConfigModal({
     setConnectorTestMessage(null);
     setWorkflowOptions([]);
     setWorkflowOptionsError(null);
+    setInlineCreatedSecrets([]);
+    setActiveSecretFieldKey(null);
+    setInlineSecretProvider("custom");
+    setInlineSecretName("");
+    setInlineSecretValue("");
+    setInlineGoogleAuthMode("access_token");
+    setInlineGoogleAccessToken("");
+    setInlineGoogleServiceAccountJson("");
+    setInlineSecretBusy(false);
+    setInlineSecretError(null);
   }, [inputOptions, mcpServerDefinitions, node]);
+
+  const availableSecrets = useMemo(() => {
+    const byId = new Map<string, SecretListItem>();
+    for (const secret of secrets) {
+      byId.set(secret.id, secret);
+    }
+    for (const secret of inlineCreatedSecrets) {
+      byId.set(secret.id, secret);
+    }
+    return [...byId.values()];
+  }, [inlineCreatedSecrets, secrets]);
 
   useEffect(() => {
     let cancelled = false;
@@ -634,6 +680,235 @@ export function NodeConfigModal({
       }
     }));
   };
+
+  const buildInlineSecretPayload = useCallback(
+    (providerInput: string): { provider: string; value?: string; error?: string } => {
+      const provider = providerInput.trim() || "custom";
+
+      if (provider === "google_drive") {
+        if (inlineGoogleAuthMode === "access_token") {
+          const token = inlineGoogleAccessToken.trim();
+          if (!token) {
+            return { provider, error: "Google Drive access token is required." };
+          }
+          return { provider, value: token };
+        }
+
+        const rawJson = inlineGoogleServiceAccountJson.trim();
+        if (!rawJson) {
+          return { provider, error: "Google Drive service account JSON is required." };
+        }
+
+        try {
+          const parsed = JSON.parse(rawJson) as Record<string, unknown>;
+          if (typeof parsed.client_email !== "string" || !parsed.client_email.trim()) {
+            return { provider, error: "Google service account JSON must include client_email." };
+          }
+          if (typeof parsed.private_key !== "string" || !parsed.private_key.trim()) {
+            return { provider, error: "Google service account JSON must include private_key." };
+          }
+          return { provider, value: JSON.stringify(parsed) };
+        } catch {
+          return { provider, error: "Google service account must be valid JSON." };
+        }
+      }
+
+      const value = inlineSecretValue.trim();
+      if (!value) {
+        return { provider, error: "Credential value is required." };
+      }
+      return { provider, value };
+    },
+    [inlineGoogleAccessToken, inlineGoogleAuthMode, inlineGoogleServiceAccountJson, inlineSecretValue]
+  );
+
+  const openInlineSecretCreator = useCallback((fieldKey: string, provider: string) => {
+    const normalizedProvider = provider.trim() || "custom";
+    setActiveSecretFieldKey(fieldKey);
+    setInlineSecretProvider(normalizedProvider);
+    setInlineSecretName(`${toProviderLabel(normalizedProvider)} Credential`);
+    setInlineSecretValue("");
+    setInlineGoogleAuthMode("access_token");
+    setInlineGoogleAccessToken("");
+    setInlineGoogleServiceAccountJson("");
+    setInlineSecretError(null);
+  }, []);
+
+  const closeInlineSecretCreator = useCallback(() => {
+    if (inlineSecretBusy) {
+      return;
+    }
+    setActiveSecretFieldKey(null);
+    setInlineSecretProvider("custom");
+    setInlineSecretName("");
+    setInlineSecretValue("");
+    setInlineGoogleAuthMode("access_token");
+    setInlineGoogleAccessToken("");
+    setInlineGoogleServiceAccountJson("");
+    setInlineSecretError(null);
+  }, [inlineSecretBusy]);
+
+  const renderCredentialSecretField = useCallback(
+    (input: {
+      fieldKey: string;
+      label: string;
+      value: string;
+      noneLabel: string;
+      preferredProvider: string;
+      onSelect: (secretId: string) => void;
+      filter?: (secret: SecretListItem) => boolean;
+    }) => {
+      const filteredSecrets = input.filter ? availableSecrets.filter(input.filter) : availableSecrets;
+      const options = [
+        { value: "", label: input.noneLabel },
+        ...filteredSecrets.map((secret) => ({
+          value: secret.id,
+          label: `${secret.name} (${secret.provider})`
+        })),
+        { value: ADD_NEW_CREDENTIAL_VALUE, label: "+ Add New Credential..." }
+      ];
+      const isActiveCreator = activeSecretFieldKey === input.fieldKey;
+      const isGoogleDriveProvider = inlineSecretProvider.trim() === "google_drive";
+
+      const handleCreateInlineSecret = async () => {
+        const name = inlineSecretName.trim();
+        const provider = inlineSecretProvider.trim() || input.preferredProvider.trim() || "custom";
+        const payload = buildInlineSecretPayload(provider);
+
+        if (!name) {
+          setInlineSecretError("Credential name is required.");
+          return;
+        }
+        if (payload.error || !payload.value) {
+          setInlineSecretError(payload.error ?? "Credential value is required.");
+          return;
+        }
+
+        try {
+          setInlineSecretBusy(true);
+          setInlineSecretError(null);
+          const created = await createSecret({
+            name,
+            provider: payload.provider,
+            value: payload.value
+          });
+          const createdSecret: SecretListItem = {
+            id: created.id,
+            name: created.name,
+            provider: created.provider,
+            createdAt: new Date().toISOString()
+          };
+          setInlineCreatedSecrets((current) => {
+            const map = new Map(current.map((entry) => [entry.id, entry]));
+            map.set(createdSecret.id, createdSecret);
+            return [...map.values()];
+          });
+          input.onSelect(createdSecret.id);
+          setActiveSecretFieldKey(null);
+          setInlineSecretProvider("custom");
+          setInlineSecretName("");
+          setInlineSecretValue("");
+          setInlineGoogleAuthMode("access_token");
+          setInlineGoogleAccessToken("");
+          setInlineGoogleServiceAccountJson("");
+          setInlineSecretError(null);
+
+          if (onRefreshSecrets) {
+            try {
+              await onRefreshSecrets();
+            } catch {
+              // local state already has the newly created secret
+            }
+          }
+        } catch (error) {
+          setInlineSecretError(error instanceof Error ? error.message : "Failed to create credential.");
+        } finally {
+          setInlineSecretBusy(false);
+        }
+      };
+
+      return (
+        <>
+          <SelectField
+            label={input.label}
+            value={input.value}
+            onChange={(next) => {
+              if (next === ADD_NEW_CREDENTIAL_VALUE) {
+                openInlineSecretCreator(input.fieldKey, input.preferredProvider);
+                return;
+              }
+              closeInlineSecretCreator();
+              input.onSelect(next);
+            }}
+            options={options}
+          />
+          {isActiveCreator && (
+            <div className="cfg-tip">
+              <div style={{ marginBottom: "8px" }}>
+                Create credential for provider <code>{toProviderLabel(inlineSecretProvider)}</code>.
+              </div>
+              <TextField label="Credential Name" value={inlineSecretName} onChange={setInlineSecretName} />
+              {isGoogleDriveProvider ? (
+                <>
+                  <SelectField
+                    label="Google Auth Mode"
+                    value={inlineGoogleAuthMode}
+                    onChange={(next) => setInlineGoogleAuthMode(next as "access_token" | "service_account_json")}
+                    options={[
+                      { value: "access_token", label: "Access Token" },
+                      { value: "service_account_json", label: "Service Account JSON" }
+                    ]}
+                  />
+                  {inlineGoogleAuthMode === "access_token" ? (
+                    <TextField
+                      label="Google Drive Access Token"
+                      value={inlineGoogleAccessToken}
+                      onChange={setInlineGoogleAccessToken}
+                      placeholder="ya29..."
+                    />
+                  ) : (
+                    <TextAreaField
+                      label="Google Service Account JSON"
+                      value={inlineGoogleServiceAccountJson}
+                      onChange={setInlineGoogleServiceAccountJson}
+                      rows={7}
+                    />
+                  )}
+                </>
+              ) : (
+                <TextAreaField label="Credential Value" value={inlineSecretValue} onChange={setInlineSecretValue} rows={5} />
+              )}
+              {inlineSecretError && <div className="error-banner">{inlineSecretError}</div>}
+              <div className="cfg-inline-actions">
+                <button type="button" className="node-btn" onClick={() => void handleCreateInlineSecret()} disabled={inlineSecretBusy}>
+                  {inlineSecretBusy ? "Creating..." : "Create Credential"}
+                </button>
+                <button type="button" className="header-btn" onClick={closeInlineSecretCreator} disabled={inlineSecretBusy}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      );
+    },
+    [
+      activeSecretFieldKey,
+      availableSecrets,
+      buildInlineSecretPayload,
+      closeInlineSecretCreator,
+      inlineGoogleAccessToken,
+      inlineGoogleAuthMode,
+      inlineGoogleServiceAccountJson,
+      inlineSecretBusy,
+      inlineSecretError,
+      inlineSecretName,
+      inlineSecretProvider,
+      inlineSecretValue,
+      onRefreshSecrets,
+      openInlineSecretCreator
+    ]
+  );
 
   const discoverToolsForMcpNode = useCallback(
     async (params?: { serverId?: string; connection?: Record<string, unknown>; currentToolName?: string }) => {
@@ -821,16 +1096,17 @@ export function NodeConfigModal({
             placeholder="http://localhost:11434/v1"
           />
         )}
-        <SelectField
-          label="API Key Secret"
-          value={toStringValue(asRecord(provider.secretRef).secretId, "")}
-          onChange={(next) =>
+        {renderCredentialSecretField({
+          fieldKey: "llm_provider_secret",
+          label: "API Key Secret",
+          value: toStringValue(asRecord(provider.secretRef).secretId, ""),
+          noneLabel: "None / Environmental Variable",
+          preferredProvider: toStringValue(provider.providerId, "custom"),
+          onSelect: (next) =>
             setProvider({
               secretRef: next ? { secretId: next } : undefined
             })
-          }
-          options={[{ value: "", label: "None / Environmental Variable" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
-        />
+        })}
         <div className="cfg-grid-2">
           <NumberField
             label="Temperature"
@@ -1084,17 +1360,18 @@ export function NodeConfigModal({
           />
         )}
 
-        <SelectField
-          label="Auth Secret"
-          value={toStringValue(asRecord(config.secretRef).secretId)}
-          onChange={(next) =>
+        {renderCredentialSecretField({
+          fieldKey: "mcp_auth_secret",
+          label: "Auth Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None",
+          preferredProvider: "custom",
+          onSelect: (next) =>
             setConfig((current) => ({
               ...current,
               secretRef: next ? { secretId: next } : undefined
             }))
-          }
-          options={[{ value: "", label: "None" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
-        />
+        })}
 
         <div className="cfg-inline-actions">
           <button
@@ -1464,17 +1741,18 @@ export function NodeConfigModal({
               onChange={(next) => setConfig((current) => ({ ...current, authHeaderName: next }))}
               placeholder="authorization"
             />
-            <SelectField
-              label="Token Secret"
-              value={secretId}
-              onChange={(next) =>
+            {renderCredentialSecretField({
+              fieldKey: "webhook_token_secret",
+              label: "Token Secret",
+              value: secretId,
+              noneLabel: "Select secret",
+              preferredProvider: "webhook",
+              onSelect: (next) =>
                 setConfig((current) => ({
                   ...current,
                   secretRef: next ? { secretId: next } : undefined
                 }))
-              }
-              options={[{ value: "", label: "Select secret" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
-            />
+            })}
           </>
         )}
 
@@ -1499,17 +1777,18 @@ export function NodeConfigModal({
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, replayToleranceSeconds: next }))}
             />
-            <SelectField
-              label="HMAC Secret"
-              value={secretId}
-              onChange={(next) =>
+            {renderCredentialSecretField({
+              fieldKey: "webhook_hmac_secret",
+              label: "HMAC Secret",
+              value: secretId,
+              noneLabel: "Select secret",
+              preferredProvider: "webhook",
+              onSelect: (next) =>
                 setConfig((current) => ({
                   ...current,
                   secretRef: next ? { secretId: next } : undefined
                 }))
-              }
-              options={[{ value: "", label: "Select secret" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name} (${secret.provider})` }))]}
-            />
+            })}
           </>
         )}
 
@@ -1577,13 +1856,6 @@ export function NodeConfigModal({
   const renderConnectorParameters = () => {
     const connectorId = toStringValue(config.connectorId, "google-drive");
     const connectorConfig = asRecord(config.connectorConfig);
-    const connectorSecrets = [
-      { value: "", label: "None (demo fallback)" },
-      ...secrets.map((secret) => ({
-        value: secret.id,
-        label: `${secret.name} (${secret.provider})`
-      }))
-    ];
 
     const updateConnectorConfig = (patch: Record<string, unknown>) => {
       setConfig((current) => ({
@@ -1614,16 +1886,17 @@ export function NodeConfigModal({
 
         {connectorId === "google-drive" ? (
           <>
-            <SelectField
-              label="Google Drive Credentials Secret"
-              value={toStringValue(asRecord(connectorConfig.secretRef).secretId)}
-              onChange={(next) =>
+            {renderCredentialSecretField({
+              fieldKey: "connector_google_drive_secret",
+              label: "Google Drive Credentials Secret",
+              value: toStringValue(asRecord(connectorConfig.secretRef).secretId),
+              noneLabel: "None (demo fallback)",
+              preferredProvider: "google_drive",
+              onSelect: (next) =>
                 updateConnectorConfig({
                   secretRef: next ? { secretId: next } : undefined
                 })
-              }
-              options={connectorSecrets}
-            />
+            })}
             <TextField
               label="Folder ID (optional)"
               value={toStringValue(connectorConfig.folderId)}
@@ -1718,27 +1991,21 @@ export function NodeConfigModal({
 
   const renderGoogleDriveSourceParameters = () => {
     const fileIdsCsv = Array.isArray(config.fileIds) ? config.fileIds.map((value) => String(value)).join(",") : "";
-    const secretOptions = [
-      { value: "", label: "None (demo fallback)" },
-      ...secrets.map((secret) => ({
-        value: secret.id,
-        label: `${secret.name} (${secret.provider})`
-      }))
-    ];
 
     return (
       <>
-        <SelectField
-          label="Google Drive Credentials Secret"
-          value={toStringValue(asRecord(config.secretRef).secretId)}
-          onChange={(next) =>
+        {renderCredentialSecretField({
+          fieldKey: "google_drive_source_secret",
+          label: "Google Drive Credentials Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None (demo fallback)",
+          preferredProvider: "google_drive",
+          onSelect: (next) =>
             setConfig((current) => ({
               ...current,
               secretRef: next ? { secretId: next } : undefined
             }))
-          }
-          options={secretOptions}
-        />
+        })}
         <TextField
           label="Folder ID (optional)"
           value={toStringValue(config.folderId)}
@@ -1982,23 +2249,18 @@ export function NodeConfigModal({
               onChange={(next) => setConfig((current) => ({ ...current, urlTemplate: next }))}
               placeholder="https://api.example.com/resource/{{id}}"
             />
-            <SelectField
-              label="Authorization Secret (Bearer)"
-              value={toStringValue(asRecord(config.secretRef).secretId)}
-              onChange={(next) =>
+            {renderCredentialSecretField({
+              fieldKey: "http_request_secret",
+              label: "Authorization Secret (Bearer)",
+              value: toStringValue(asRecord(config.secretRef).secretId),
+              noneLabel: "None",
+              preferredProvider: "custom",
+              onSelect: (next) =>
                 setConfig((current) => ({
                   ...current,
                   secretRef: next ? { secretId: next } : undefined
                 }))
-              }
-              options={[
-                { value: "", label: "None" },
-                ...secrets.map((secret) => ({
-                  value: secret.id,
-                  label: `${secret.name} (${secret.provider})`
-                }))
-              ]}
-            />
+            })}
             <TextAreaField
               label="Headers Template (JSON)"
               value={toStringValue(config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}")}
@@ -2185,6 +2447,18 @@ export function NodeConfigModal({
           />
         );
       case "rag_retrieve":
+        {
+          const embedderId = toStringValue(config.embedderId, "openai-embedder");
+          const vectorStoreId = toStringValue(config.vectorStoreId, "pinecone-vector-store");
+          const preferredProvider =
+            embedderId === "openai-embedder"
+              ? "openai"
+              : vectorStoreId === "pinecone-vector-store"
+                ? "pinecone"
+                : vectorStoreId === "pgvector-store"
+                  ? "postgres"
+                  : "custom";
+
         return (
           <>
             <TextField
@@ -2218,14 +2492,15 @@ export function NodeConfigModal({
                 { value: "in-memory-vector-store", label: "In Memory (Local Demo)" }
               ]}
             />
-            <SelectField
-              label="API Key / Connection String Secret"
-              value={toStringValue(asRecord(config.embeddingSecretRef).secretId)}
-              onChange={(next) =>
+            {renderCredentialSecretField({
+              fieldKey: "rag_embedding_secret",
+              label: "API Key / Connection String Secret",
+              value: toStringValue(asRecord(config.embeddingSecretRef).secretId),
+              noneLabel: "None / Env Var",
+              preferredProvider,
+              onSelect: (next) =>
                 setConfig((current) => ({ ...current, embeddingSecretRef: next ? { secretId: next } : undefined }))
-              }
-              options={[{ value: "", label: "None / Env Var" }, ...secrets.map((secret) => ({ value: secret.id, label: `${secret.name}` }))]}
-            />
+            })}
             <TextAreaField
               label="Vector Store Extra Config (JSON)"
               value={JSON.stringify(asRecord(config.vectorStoreConfig), null, 2)}
@@ -2239,6 +2514,7 @@ export function NodeConfigModal({
             />
           </>
         );
+        }
       case "document_chunker":
         return (
           <>
