@@ -12,6 +12,7 @@ interface NodeConfigModalProps {
   node: EditorNode;
   inputOptions: NodeInputOption[];
   executionResult: WorkflowExecutionResult | null;
+  showRuntimeInspection?: boolean;
   secrets: SecretListItem[];
   mcpServerDefinitions: Array<{ id: string; label: string; description: string }>;
   onClose: () => void;
@@ -456,6 +457,7 @@ export function NodeConfigModal({
   node,
   inputOptions,
   executionResult,
+  showRuntimeInspection = true,
   secrets,
   mcpServerDefinitions,
   onClose,
@@ -2622,29 +2624,31 @@ export function NodeConfigModal({
           </button>
         </div>
 
-        <div className="node-modal-grid">
-          <section className="node-modal-panel">
-            <h3>INPUT</h3>
-            <SelectField
-              label="Input Source"
-              value={selectedInputId}
-              onChange={setSelectedInputId}
-              options={[
-                { value: NODE_INPUT_OPTION_ID, label: "This node input (last run)" },
-                ...inputOptions.map((option) => ({ value: option.id, label: option.label }))
-              ]}
-            />
-            {resolvedInputPreview === undefined ? (
-              <div className="node-modal-placeholder">No input data yet. Execute the workflow to inspect payload.</div>
-            ) : (
-              <KeyValueTable
-                label={selectedInputId === NODE_INPUT_OPTION_ID ? "Resolved Input" : "Selected Source Output"}
-                value={resolvedInputPreview}
+        <div className={showRuntimeInspection ? "node-modal-grid" : "node-modal-grid node-modal-grid-single"}>
+          {showRuntimeInspection && (
+            <section className="node-modal-panel">
+              <h3>INPUT</h3>
+              <SelectField
+                label="Input Source"
+                value={selectedInputId}
+                onChange={setSelectedInputId}
+                options={[
+                  { value: NODE_INPUT_OPTION_ID, label: "This node input (last run)" },
+                  ...inputOptions.map((option) => ({ value: option.id, label: option.label }))
+                ]}
               />
-            )}
-          </section>
+              {resolvedInputPreview === undefined ? (
+                <div className="node-modal-placeholder">No input data yet. Execute the workflow to inspect payload.</div>
+              ) : (
+                <KeyValueTable
+                  label={selectedInputId === NODE_INPUT_OPTION_ID ? "Resolved Input" : "Selected Source Output"}
+                  value={resolvedInputPreview}
+                />
+              )}
+            </section>
+          )}
 
-          <section className="node-modal-panel center">
+          <section className={showRuntimeInspection ? "node-modal-panel center" : "node-modal-panel center node-modal-panel-full"}>
             <div className="node-modal-tabs">
               <div>
                 <button
@@ -2678,36 +2682,38 @@ export function NodeConfigModal({
             )}
           </section>
 
-          <section className="node-modal-panel">
-            <h3>OUTPUT</h3>
-            {resolvedOutputPreview !== undefined ? (
-              <div className="cfg-group">
-                <div className="cfg-tip">
-                  Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
+          {showRuntimeInspection && (
+            <section className="node-modal-panel">
+              <h3>OUTPUT</h3>
+              {resolvedOutputPreview !== undefined ? (
+                <div className="cfg-group">
+                  <div className="cfg-tip">
+                    Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
+                  </div>
+                  <KeyValueTable label="Output" value={resolvedOutputPreview} />
                 </div>
-                <KeyValueTable label="Output" value={resolvedOutputPreview} />
-              </div>
-            ) : node.data.nodeType === "code_node" && codeTestResult ? (
-              <div className="cfg-group">
-                <TextAreaField
-                  label="Result"
-                  value={JSON.stringify(codeTestResult.result, null, 2)}
-                  onChange={() => undefined}
-                  rows={8}
-                  readOnly
-                />
-                <TextAreaField
-                  label="Console Logs"
-                  value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
-                  onChange={() => undefined}
-                  rows={6}
-                  readOnly
-                />
-              </div>
-            ) : (
-              <div className="node-modal-placeholder">Output appears after executing this step.</div>
-            )}
-          </section>
+              ) : node.data.nodeType === "code_node" && codeTestResult ? (
+                <div className="cfg-group">
+                  <TextAreaField
+                    label="Result"
+                    value={JSON.stringify(codeTestResult.result, null, 2)}
+                    onChange={() => undefined}
+                    rows={8}
+                    readOnly
+                  />
+                  <TextAreaField
+                    label="Console Logs"
+                    value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
+                    onChange={() => undefined}
+                    rows={6}
+                    readOnly
+                  />
+                </div>
+              ) : (
+                <div className="node-modal-placeholder">Output appears after executing this step.</div>
+              )}
+            </section>
+          )}
         </div>
 
         <div className="node-modal-actions">

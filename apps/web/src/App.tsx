@@ -39,6 +39,7 @@ import {
   saveWorkflow,
   updateWorkflowVariables,
   type AuthUser,
+  type ExecutionHistoryDetail,
   type SecretListItem
 } from "./lib/api";
 import {
@@ -99,6 +100,7 @@ const auxiliaryHandles = new Set(["chat_model", "memory", "tool"]);
 const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
 const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
 const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
+const DEBUG_MODE_STORAGE_KEY = "ai-orchestrator:debug-mode";
 const DEFAULT_LOGS_PANEL_HEIGHT = 210;
 const MIN_LOGS_PANEL_HEIGHT = 140;
 const MAX_LOGS_PANEL_HEIGHT = 620;
@@ -254,6 +256,19 @@ function buildExecutionErrorResult(workflowId: string, message: string): Workflo
     completedAt: now,
     nodeResults: [],
     error: message
+  };
+}
+
+function toWorkflowExecutionResult(detail: ExecutionHistoryDetail): WorkflowExecutionResult {
+  return {
+    workflowId: detail.workflowId,
+    status: detail.status as WorkflowExecutionResult["status"],
+    startedAt: detail.startedAt,
+    completedAt: detail.completedAt ?? detail.startedAt,
+    executionId: detail.id,
+    nodeResults: Array.isArray(detail.nodeResults) ? (detail.nodeResults as WorkflowExecutionResult["nodeResults"]) : [],
+    output: detail.output,
+    error: detail.error ?? undefined
   };
 }
 
@@ -602,6 +617,20 @@ function StudioApp() {
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
+  const [isDebugMode, setIsDebugMode] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem(DEBUG_MODE_STORAGE_KEY);
+      if (stored === "1") {
+        return true;
+      }
+      if (stored === "0") {
+        return false;
+      }
+    } catch {
+      // localStorage can fail in private mode.
+    }
+    return true;
+  });
   const [logsTab, setLogsTab] = useState<LogsTab>("logs");
   const [isLogsPanelCollapsed, setIsLogsPanelCollapsed] = useState(false);
   const [logsPanelHeight, setLogsPanelHeight] = useState(DEFAULT_LOGS_PANEL_HEIGHT);
@@ -615,6 +644,7 @@ function StudioApp() {
   const chatDeltaIntervalRef = useRef<number | null>(null);
   const activeAssistantMessageIdRef = useRef<string | null>(null);
   const logsResizeAbortRef = useRef<AbortController | null>(null);
+  const latestDebugExecutionIdRef = useRef<string | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
 
@@ -675,6 +705,10 @@ function StudioApp() {
   const currentChatSessionId = chatSessionsByWorkflow[currentWorkflow.id] ?? "";
 
   const executionStatuses = useMemo(() => {
+    if (!isDebugMode) {
+      return new Map<string, string>();
+    }
+
     const combined = getNodeStatusMap(executionResult);
     for (const [nodeId, status] of Object.entries(liveNodeStatuses)) {
       if (!combined.has(nodeId)) {
@@ -682,7 +716,7 @@ function StudioApp() {
       }
     }
     return combined;
-  }, [executionResult, liveNodeStatuses]);
+  }, [executionResult, isDebugMode, liveNodeStatuses]);
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
@@ -705,11 +739,13 @@ function StudioApp() {
   }, [dashboardFilter, workflowList]);
   const canvasAndLogsStyle = useMemo(
     () => ({
-      gridTemplateRows: isLogsPanelCollapsed
-        ? "minmax(280px, 1fr) 0px 46px"
-        : `minmax(280px, 1fr) 8px ${logsPanelHeight}px`
+      gridTemplateRows: !isDebugMode
+        ? "minmax(280px, 1fr)"
+        : isLogsPanelCollapsed
+          ? "minmax(280px, 1fr) 0px 46px"
+          : `minmax(280px, 1fr) 8px ${logsPanelHeight}px`
     }),
-    [isLogsPanelCollapsed, logsPanelHeight]
+    [isDebugMode, isLogsPanelCollapsed, logsPanelHeight]
   );
 
   const startVisualRun = useCallback(() => {
@@ -727,6 +763,79 @@ function StudioApp() {
     setVisualRunOrder([]);
     setVisualRunActiveIndex(null);
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(DEBUG_MODE_STORAGE_KEY, isDebugMode ? "1" : "0");
+    } catch {
+      // localStorage may fail in private mode.
+    }
+  }, [isDebugMode]);
+
+  useEffect(() => {
+    latestDebugExecutionIdRef.current = null;
+  }, [currentWorkflow.id]);
+
+  useEffect(() => {
+    if (isDebugMode) {
+      return;
+    }
+    setExecutionResult(null);
+    setLiveNodeStatuses({});
+    setChatNodeTrace([]);
+    stopVisualRun();
+  }, [isDebugMode, stopVisualRun]);
+
+  useEffect(() => {
+    if (!isDebugMode || !authUser || !currentWorkflowExists) {
+      return;
+    }
+
+    let cancelled = false;
+    const syncLatestExecution = async () => {
+      if (busy) {
+        return;
+      }
+
+      try {
+        const history = await fetchExecutions({
+          page: 1,
+          pageSize: 1,
+          workflowId: currentWorkflow.id
+        });
+        if (cancelled) {
+          return;
+        }
+
+        const latest = history.items[0];
+        if (!latest || latestDebugExecutionIdRef.current === latest.id) {
+          return;
+        }
+
+        const detail = await fetchExecutionById(latest.id);
+        if (cancelled) {
+          return;
+        }
+
+        latestDebugExecutionIdRef.current = latest.id;
+        setExecutionResult(toWorkflowExecutionResult(detail));
+        setLogsTab("logs");
+        setLiveNodeStatuses({});
+      } catch {
+        // Polling failures should not interrupt editor usage.
+      }
+    };
+
+    void syncLatestExecution();
+    const timerId = window.setInterval(() => {
+      void syncLatestExecution();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timerId);
+    };
+  }, [authUser, busy, currentWorkflow.id, currentWorkflowExists, isDebugMode]);
 
   useEffect(() => {
     setNodes((currentNodes) =>
@@ -1420,17 +1529,25 @@ function StudioApp() {
     try {
       setBusy(true);
       setError(null);
-      setExecutionResult(null);
+      if (isDebugMode) {
+        setExecutionResult(null);
+      }
       setLiveNodeStatuses({});
       const saved = await persistWorkflow();
       const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(), {
         onNodeStart: (event) => {
+          if (!isDebugMode) {
+            return;
+          }
           setLiveNodeStatuses((current) => ({
             ...current,
             [event.nodeId]: "running"
           }));
         },
         onNodeComplete: (event) => {
+          if (!isDebugMode) {
+            return;
+          }
           const normalizedStatus = normalizeEditorExecutionStatus(event.status);
           if (!normalizedStatus) {
             return;
@@ -1444,15 +1561,22 @@ function StudioApp() {
           setError((current) => current ?? event.message);
         }
       });
-      setExecutionResult(result);
-      setLogsTab("logs");
-      setActiveMode("editor");
+      if (isDebugMode) {
+        setExecutionResult(result);
+        setLogsTab("logs");
+        setActiveMode("editor");
+        if (result.executionId) {
+          latestDebugExecutionIdRef.current = result.executionId;
+        }
+      }
       void refreshExecutionHistory();
     } catch (execError) {
       const message = handleApiError(execError, "Execution failed");
-      setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
-      setLogsTab("logs");
-      setActiveMode("editor");
+      if (isDebugMode) {
+        setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
+        setLogsTab("logs");
+        setActiveMode("editor");
+      }
     } finally {
       setLiveNodeStatuses({});
       setBusy(false);
@@ -1462,6 +1586,7 @@ function StudioApp() {
     buildEditorExecutionPayload,
     executeWorkflowStream,
     handleApiError,
+    isDebugMode,
     persistWorkflow,
     refreshExecutionHistory,
   ]);
@@ -1470,22 +1595,31 @@ function StudioApp() {
     try {
       setBusy(true);
       setError(null);
-      setExecutionResult(null);
+      if (isDebugMode) {
+        setExecutionResult(null);
+      }
       startVisualRun();
       const saved = await persistWorkflow();
       const result = await runWebhook({
         workflow_id: saved.id,
         ...buildWebhookExecutionPayload()
       });
-      setExecutionResult(result);
-      setLogsTab("logs");
-      setActiveMode("editor");
+      if (isDebugMode) {
+        setExecutionResult(result);
+        setLogsTab("logs");
+        setActiveMode("editor");
+        if (result.executionId) {
+          latestDebugExecutionIdRef.current = result.executionId;
+        }
+      }
       void refreshExecutionHistory();
     } catch (execError) {
       const message = handleApiError(execError, "Webhook execution failed");
-      setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
-      setLogsTab("logs");
-      setActiveMode("editor");
+      if (isDebugMode) {
+        setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
+        setLogsTab("logs");
+        setActiveMode("editor");
+      }
     } finally {
       stopVisualRun();
       setBusy(false);
@@ -1494,6 +1628,7 @@ function StudioApp() {
     currentWorkflow.id,
     buildWebhookExecutionPayload,
     handleApiError,
+    isDebugMode,
     persistWorkflow,
     refreshExecutionHistory,
     startVisualRun,
@@ -1510,6 +1645,10 @@ function StudioApp() {
     setChatBusy(true);
     setChatError(null);
     setChatNodeTrace([]);
+    if (isDebugMode) {
+      setExecutionResult(null);
+      setLiveNodeStatuses({});
+    }
     let activeWorkflowId = currentWorkflow.id;
 
     let streamedAnyDelta = false;
@@ -1566,9 +1705,24 @@ function StudioApp() {
         chatExecutionPayload,
         {
           onNodeStart: (event) => {
+            if (isDebugMode) {
+              setLiveNodeStatuses((current) => ({
+                ...current,
+                [event.nodeId]: "running"
+              }));
+            }
             setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: "running", at: event.startedAt }].slice(-40));
           },
           onNodeComplete: (event) => {
+            if (isDebugMode) {
+              const normalizedStatus = normalizeEditorExecutionStatus(event.status);
+              if (normalizedStatus) {
+                setLiveNodeStatuses((current) => ({
+                  ...current,
+                  [event.nodeId]: normalizedStatus
+                }));
+              }
+            }
             setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: event.status, at: event.completedAt }].slice(-40));
           },
           onLlmDelta: (event) => {
@@ -1604,10 +1758,21 @@ function StudioApp() {
       if (result.status === "error") {
         setChatError(result.error ?? "Workflow execution failed");
       }
+      if (isDebugMode) {
+        setExecutionResult(result);
+        setLogsTab("logs");
+        if (result.executionId) {
+          latestDebugExecutionIdRef.current = result.executionId;
+        }
+      }
       void refreshExecutionHistory();
     } catch (error) {
       const messageText = handleApiError(error, "Failed to stream chat response");
       setChatError(messageText);
+      if (isDebugMode) {
+        setExecutionResult(buildExecutionErrorResult(activeWorkflowId, messageText));
+        setLogsTab("logs");
+      }
       if (activeAssistantMessageIdRef.current) {
         setChatMessageStatus(activeWorkflowId, activeAssistantMessageIdRef.current, "error");
       } else {
@@ -1635,6 +1800,7 @@ function StudioApp() {
     chatSystemPrompt,
     currentWorkflow.id,
     handleApiError,
+    isDebugMode,
     persistWorkflow,
     promptNodeSources.systemPromptFromNodes,
     refreshExecutionHistory,
@@ -1802,6 +1968,9 @@ function StudioApp() {
         setError(null);
         const result = await executeWorkflow(workflowId, buildEditorExecutionPayload());
         setExecutionResult(result);
+        if (result.executionId) {
+          latestDebugExecutionIdRef.current = result.executionId;
+        }
         setLogsTab("logs");
         setActiveMode("executions");
         void refreshExecutionHistory();
@@ -2322,8 +2491,8 @@ function StudioApp() {
                 setExecutionResult(null);
                 setEditingNodeId(null);
               }}
-              onExecute={handleExecute}
-              onWebhookExecute={handleWebhookExecute}
+              debugMode={isDebugMode}
+              onDebugModeChange={setIsDebugMode}
               busy={busy}
               onLogsResizeStart={handleLogsResizeStart}
               logsTab={logsTab}
@@ -2779,13 +2948,15 @@ function StudioApp() {
 
                 <div className="chat-side-trace">
                   <h4>Node Trace</h4>
-                  {chatNodeTrace.length === 0 && <div className="muted">Waiting for execution events.</div>}
-                  {chatNodeTrace.map((trace, index) => (
-                    <div key={`${trace.nodeId}-${trace.at}-${index}`} className="chat-trace-item">
-                      <span>{trace.nodeId}</span>
-                      <strong style={{ color: statusColors[trace.status] ?? "#657087" }}>{trace.status}</strong>
-                    </div>
-                  ))}
+                  {!isDebugMode && <div className="muted">Enable Debug mode in Editor to see live node trace.</div>}
+                  {isDebugMode && chatNodeTrace.length === 0 && <div className="muted">Waiting for execution events.</div>}
+                  {isDebugMode &&
+                    chatNodeTrace.map((trace, index) => (
+                      <div key={`${trace.nodeId}-${trace.at}-${index}`} className="chat-trace-item">
+                        <span>{trace.nodeId}</span>
+                        <strong style={{ color: statusColors[trace.status] ?? "#657087" }}>{trace.status}</strong>
+                      </div>
+                    ))}
                 </div>
               </div>
 
@@ -2968,7 +3139,8 @@ function StudioApp() {
         <NodeConfigModal
           node={editingNode}
           inputOptions={editingNodeInputOptions}
-          executionResult={executionResult}
+          executionResult={isDebugMode ? executionResult : null}
+          showRuntimeInspection={isDebugMode}
           secrets={secrets}
           mcpServerDefinitions={mcpServerDefinitions}
           onClose={() => setEditingNodeId(null)}

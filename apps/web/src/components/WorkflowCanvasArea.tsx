@@ -132,8 +132,8 @@ interface WorkflowCanvasAreaProps {
   onOpenNodeConfig: (nodeId: string) => void;
   reactFlowInstance: ReactFlowInstance | null;
   onClearCanvas: () => void;
-  onExecute: () => void;
-  onWebhookExecute: () => void;
+  debugMode: boolean;
+  onDebugModeChange: (next: boolean) => void;
   busy: boolean;
   onLogsResizeStart: (event: ReactMouseEvent<HTMLDivElement>) => void;
   logsTab: LogsTab;
@@ -175,8 +175,8 @@ export function WorkflowCanvasArea({
   onOpenNodeConfig,
   reactFlowInstance,
   onClearCanvas,
-  onExecute,
-  onWebhookExecute,
+  debugMode,
+  onDebugModeChange,
   busy,
   onLogsResizeStart,
   logsTab,
@@ -449,133 +449,111 @@ export function WorkflowCanvasArea({
           )}
 
           <div className="execute-strip">
-            <button className="execute-btn" onClick={onExecute} disabled={busy}>
-              Execute workflow
-            </button>
-            <button className="execute-btn secondary" onClick={onWebhookExecute} disabled={busy}>
-              Webhook run
+            <button
+              className={debugMode ? "execute-btn" : "execute-btn secondary"}
+              onClick={() => onDebugModeChange(!debugMode)}
+              disabled={busy}
+            >
+              {debugMode ? "Debug mode: ON" : "Debug mode: OFF"}
             </button>
           </div>
         </div>
 
-        <div
-          className={isLogsPanelCollapsed ? "logs-resize-handle disabled" : "logs-resize-handle"}
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize logs panel"
-          onMouseDown={onLogsResizeStart}
-        />
+        {debugMode && (
+          <>
+            <div
+              className={isLogsPanelCollapsed ? "logs-resize-handle disabled" : "logs-resize-handle"}
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize logs panel"
+              onMouseDown={onLogsResizeStart}
+            />
 
-        <div className="logs-pane">
-          <div className="logs-header">
-            <div className="logs-tabs">
-              <button className={logsTab === "logs" ? "logs-tab active" : "logs-tab"} onClick={() => onLogsTabChange("logs")}>
-                Logs
-              </button>
-              <button className={logsTab === "inputs" ? "logs-tab active" : "logs-tab"} onClick={() => onLogsTabChange("inputs")}>
-                Run Inputs
-              </button>
-            </div>
+            <div className="logs-pane">
+              <div className="logs-header">
+                <div className="logs-tabs">
+                  <button className="logs-tab active" onClick={() => onLogsTabChange("logs")}>
+                    Logs
+                  </button>
+                </div>
 
-            <div className="logs-header-actions">
-              {logsTab === "logs" ? (
-                <button className="icon-btn" onClick={onClearLogs} title="Clear logs" aria-label="Clear logs">
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      d="M6 7h12M9 7V5h6v2m-7 3v8m4-8v8m4-8v8M7 7l1 13h8l1-13"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-              ) : (
-                <span className="muted">Used by Execute and Webhook run.</span>
-              )}
-              <button
-                className="icon-btn"
-                onClick={onToggleLogsPanel}
-                title={isLogsPanelCollapsed ? "Expand panel" : "Minimize panel"}
-                aria-label={isLogsPanelCollapsed ? "Expand panel" : "Minimize panel"}
-              >
-                {isLogsPanelCollapsed ? (
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      d="M8 10l4-4 4 4M8 14l4 4 4-4"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      d="M8 8l4 4 4-4M8 16l4-4 4 4"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                )}
-              </button>
-            </div>
-          </div>
+                <div className="logs-header-actions">
+                  <button className="icon-btn" onClick={onClearLogs} title="Clear logs" aria-label="Clear logs">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d="M6 7h12M9 7V5h6v2m-7 3v8m4-8v8m4-8v8M7 7l1 13h8l1-13"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                  <button
+                    className="icon-btn"
+                    onClick={onToggleLogsPanel}
+                    title={isLogsPanelCollapsed ? "Expand panel" : "Minimize panel"}
+                    aria-label={isLogsPanelCollapsed ? "Expand panel" : "Minimize panel"}
+                  >
+                    {isLogsPanelCollapsed ? (
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M8 10l4-4 4 4M8 14l4 4 4-4"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M8 8l4 4 4-4M8 16l4-4 4 4"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.8"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
 
-          {!isLogsPanelCollapsed && (
-            <div className="logs-body">
-              {logsTab === "inputs" && (
-                <div className="run-inputs-panel">
-                  <label>Fallback system prompt</label>
-                  <textarea value={systemPrompt} onChange={(event) => onSystemPromptChange(event.target.value)} rows={3} />
-                  <label>Fallback user prompt</label>
-                  <textarea value={userPrompt} onChange={(event) => onUserPromptChange(event.target.value)} rows={3} />
-                  <div className="muted">Used only when no configured System/User Prompt input nodes provide those values.</div>
-                  <label>Session id</label>
-                  <input value={sessionId} onChange={(event) => onSessionIdChange(event.target.value)} />
-                  <div className="row-actions">
-                    <button onClick={onExecute} disabled={busy}>
-                      Execute workflow
-                    </button>
-                    <button onClick={onWebhookExecute} disabled={busy}>
-                      Webhook run
-                    </button>
-                  </div>
+              {!isLogsPanelCollapsed && (
+                <div className="logs-body">
+                  {!executionResult && (
+                    <div className="logs-placeholder">No debug trace yet. Send a chat message or call a webhook endpoint.</div>
+                  )}
+
+                  {executionResult && (
+                    <>
+                      <div className="log-summary">
+                        <span>
+                          Status: <strong>{executionResult.status}</strong>
+                        </span>
+                        <span>Started: {new Date(executionResult.startedAt).toLocaleString()}</span>
+                        <span>Completed: {new Date(executionResult.completedAt).toLocaleString()}</span>
+                      </div>
+                      <div className="node-status-list">
+                        {executionResult.nodeResults.map((result) => (
+                          <div key={result.nodeId} className="node-status-item">
+                            <span>{result.nodeId}</span>
+                            <strong style={{ color: statusColors[result.status] ?? "#657087" }}>{result.status}</strong>
+                          </div>
+                        ))}
+                      </div>
+                      <pre className="result-block">{stringifyPretty(executionResult.output ?? executionResult.error ?? "")}</pre>
+                    </>
+                  )}
                 </div>
               )}
-
-              {logsTab === "logs" && !executionResult && (
-                <div className="logs-placeholder">Nothing to display yet. Execute the workflow to see logs.</div>
-              )}
-
-              {logsTab === "logs" && executionResult && (
-                <>
-                  <div className="log-summary">
-                    <span>
-                      Status: <strong>{executionResult.status}</strong>
-                    </span>
-                    <span>Started: {new Date(executionResult.startedAt).toLocaleString()}</span>
-                    <span>Completed: {new Date(executionResult.completedAt).toLocaleString()}</span>
-                  </div>
-                  <div className="node-status-list">
-                    {executionResult.nodeResults.map((result) => (
-                      <div key={result.nodeId} className="node-status-item">
-                        <span>{result.nodeId}</span>
-                        <strong style={{ color: statusColors[result.status] ?? "#657087" }}>{result.status}</strong>
-                      </div>
-                    ))}
-                  </div>
-                  <pre className="result-block">{stringifyPretty(executionResult.output ?? executionResult.error ?? "")}</pre>
-                </>
-              )}
             </div>
-          )}
-        </div>
+          </>
+        )}
       </section>
     </div>
   );

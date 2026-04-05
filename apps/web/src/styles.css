@@ -1939,6 +1939,10 @@ select {
   grid-template-columns: minmax(220px, 1fr) minmax(460px, 1.15fr) minmax(220px, 0.8fr);
 }
 
+.node-modal-grid.node-modal-grid-single {
+  grid-template-columns: 1fr;
+}
+
 .node-modal-panel {
   border-right: 1px solid #eadac8;
   padding: 14px;
@@ -1960,6 +1964,10 @@ select {
 
 .node-modal-panel.center {
   background: #fffdfa;
+}
+
+.node-modal-panel-full {
+  border-right: none;
 }
 
 .node-modal-tabs {
