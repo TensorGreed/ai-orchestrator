@@ -170,6 +170,20 @@ afterEach(async () => {
   }
 });
 
+describe("helper chat page", () => {
+  it("serves the helper chat html page", async () => {
+    const context = await createTestContext();
+    const response = await context.app.inject({
+      method: "GET",
+      url: "/helper-chat"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(String(response.headers["content-type"] ?? "")).toContain("text/html");
+    expect(response.body).toContain("Workflow Chat Helper");
+  });
+});
+
 describe("auth + rbac API", () => {
   it("supports register/login/me/logout happy path", async () => {
     const context = await createTestContext();

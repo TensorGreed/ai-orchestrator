@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Workflow Chat Helper</title>
+    <style>
+      :root {
+        --bg: #f6f4ef;
+        --panel: #ffffff;
+        --border: #d9d2c6;
+        --text: #1d2838;
+        --muted: #6d7b8c;
+        --accent: #c96832;
+        --accent-soft: #f6e8de;
+        --ok: #187d54;
+        --err: #b7333f;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, sans-serif;
+        background: radial-gradient(circle at 95% 0%, #efe2d2 0%, var(--bg) 52%);
+        color: var(--text);
+      }
+
+      .shell {
+        max-width: 860px;
+        margin: 18px auto;
+        padding: 0 14px 14px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+
+      .header {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .title {
+        margin: 0;
+        font-size: 18px;
+      }
+
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .status.ok {
+        color: var(--ok);
+      }
+
+      .status.err {
+        color: var(--err);
+      }
+
+      details {
+        border-bottom: 1px solid var(--border);
+        padding: 8px 14px 12px;
+      }
+
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+        color: #4f5f73;
+      }
+
+      .settings {
+        margin-top: 10px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .field {
+        display: grid;
+        gap: 4px;
+      }
+
+      .field label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .field input,
+      .field textarea {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font: inherit;
+        color: var(--text);
+      }
+
+      .field textarea {
+        min-height: 66px;
+        resize: vertical;
+      }
+
+      .settings-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .chat {
+        height: 52vh;
+        min-height: 360px;
+        overflow: auto;
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .msg {
+        max-width: 92%;
+        border-radius: 10px;
+        padding: 10px 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.4;
+      }
+
+      .msg.user {
+        justify-self: end;
+        background: #e6eef9;
+        border: 1px solid #c8dcf9;
+      }
+
+      .msg.assistant {
+        justify-self: start;
+        background: #f8f3e8;
+        border: 1px solid #e9dcc4;
+      }
+
+      .composer {
+        border-top: 1px solid var(--border);
+        padding: 12px 14px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .composer textarea {
+        width: 100%;
+        min-height: 74px;
+        resize: vertical;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px;
+        font: inherit;
+      }
+
+      .actions {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .btn {
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 8px 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .btn.primary {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .btn.secondary {
+        background: var(--accent-soft);
+        border-color: #e5c7b4;
+        color: #6f3d23;
+      }
+
+      .details {
+        border-top: 1px solid var(--border);
+        padding: 10px 14px 14px;
+      }
+
+      .details h4 {
+        margin: 10px 0 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      pre {
+        margin: 0;
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: #fcfbf8;
+        font-size: 12px;
+        overflow: auto;
+        max-height: 190px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      @media (max-width: 760px) {
+        .row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <section class="card">
+        <header class="header">
+          <h1 class="title">Workflow Chat Helper</h1>
+          <div id="statusLine" class="status">Ready</div>
+        </header>
+
+        <details>
+          <summary>Settings</summary>
+          <div class="settings">
+            <div class="row">
+              <div class="field">
+                <label for="apiBase">API Base URL</label>
+                <input id="apiBase" type="text" placeholder="http://localhost:4001" />
+              </div>
+              <div class="field">
+                <label for="webhookPath">Webhook Path (test or prod)</label>
+                <input id="webhookPath" type="text" placeholder="/webhook-test/agent-demo" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label for="email">Login Email (for history trace)</label>
+                <input id="email" type="email" placeholder="builder@example.com" />
+              </div>
+              <div class="field">
+                <label for="password">Password</label>
+                <input id="password" type="password" placeholder="••••••••" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label for="sessionId">Session ID (kept for follow-up)</label>
+                <input id="sessionId" type="text" />
+              </div>
+              <div class="field">
+                <label for="systemPrompt">System Prompt (optional)</label>
+                <textarea id="systemPrompt" placeholder="Optional system prompt..."></textarea>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="newSessionBtn" class="btn secondary" type="button">New Session</button>
+              <button id="loginBtn" class="btn secondary" type="button">Login</button>
+            </div>
+          </div>
+        </details>
+
+        <div id="chatLog" class="chat"></div>
+
+        <div class="composer">
+          <textarea id="userInput" placeholder="Send prompt to webhook..."></textarea>
+          <div class="actions">
+            <button id="clearBtn" class="btn secondary" type="button">Clear</button>
+            <button id="sendBtn" class="btn primary" type="button">Send</button>
+          </div>
+        </div>
+
+        <div class="details">
+          <h4>Execution Trace (from history)</h4>
+          <pre id="traceBox">[]</pre>
+          <h4>Final API Output</h4>
+          <pre id="resultBox">{}</pre>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      (() => {
+        const STORAGE_KEY = "workflow-helper-chat-settings-v1";
+        const apiBaseEl = document.getElementById("apiBase");
+        const webhookPathEl = document.getElementById("webhookPath");
+        const emailEl = document.getElementById("email");
+        const passwordEl = document.getElementById("password");
+        const sessionIdEl = document.getElementById("sessionId");
+        const systemPromptEl = document.getElementById("systemPrompt");
+        const chatLogEl = document.getElementById("chatLog");
+        const userInputEl = document.getElementById("userInput");
+        const statusLineEl = document.getElementById("statusLine");
+        const traceBoxEl = document.getElementById("traceBox");
+        const resultBoxEl = document.getElementById("resultBox");
+        const loginBtn = document.getElementById("loginBtn");
+        const sendBtn = document.getElementById("sendBtn");
+        const clearBtn = document.getElementById("clearBtn");
+        const newSessionBtn = document.getElementById("newSessionBtn");
+
+        let busy = false;
+
+        function createSessionId() {
+          if (window.crypto && typeof window.crypto.randomUUID === "function") {
+            return `helper-${window.crypto.randomUUID()}`;
+          }
+          return `helper-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        }
+
+        function nowIso() {
+          return new Date().toISOString();
+        }
+
+        function wait(ms) {
+          return new Promise((resolve) => window.setTimeout(resolve, ms));
+        }
+
+        function toJson(value) {
+          try {
+            return JSON.stringify(value ?? null, null, 2);
+          } catch {
+            return String(value);
+          }
+        }
+
+        function loadSettings() {
+          const defaults = {
+            apiBase: window.location.origin || "http://localhost:4001",
+            webhookPath: "/webhook-test/agent-demo",
+            email: "",
+            sessionId: createSessionId(),
+            systemPrompt: ""
+          };
+          try {
+            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+            return { ...defaults, ...parsed };
+          } catch {
+            return defaults;
+          }
+        }
+
+        function saveSettings() {
+          const settings = {
+            apiBase: apiBaseEl.value.trim(),
+            webhookPath: webhookPathEl.value.trim(),
+            email: emailEl.value.trim(),
+            sessionId: sessionIdEl.value.trim(),
+            systemPrompt: systemPromptEl.value
+          };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        }
+
+        function setStatus(text, tone) {
+          statusLineEl.textContent = text;
+          statusLineEl.className = `status ${tone || ""}`.trim();
+        }
+
+        function addMessage(role, text) {
+          const el = document.createElement("div");
+          el.className = `msg ${role}`;
+          el.textContent = text || "";
+          chatLogEl.appendChild(el);
+          chatLogEl.scrollTop = chatLogEl.scrollHeight;
+          return el;
+        }
+
+        function normalizeBase(base) {
+          return String(base || "").trim().replace(/\/+$/, "");
+        }
+
+        function buildWebhookUrl(base, pathOrUrl) {
+          const input = String(pathOrUrl || "").trim();
+          if (/^https?:\/\//i.test(input)) {
+            return input;
+          }
+          const normalizedPath = input.startsWith("/") ? input : `/${input}`;
+          return `${normalizeBase(base)}${normalizedPath}`;
+        }
+
+        function extractAssistantText(payload) {
+          if (typeof payload === "string") return payload;
+          if (payload && typeof payload === "object") {
+            const output = payload.output;
+            if (typeof output === "string") return output;
+            if (output && typeof output === "object") {
+              const candidates = [output.result, output.answer, output.text, output.content];
+              for (const c of candidates) {
+                if (typeof c === "string" && c.trim()) return c;
+              }
+            }
+            const candidates = [payload.result, payload.answer, payload.text, payload.content];
+            for (const c of candidates) {
+              if (typeof c === "string" && c.trim()) return c;
+            }
+          }
+          return toJson(payload);
+        }
+
+        async function login() {
+          const base = normalizeBase(apiBaseEl.value);
+          const email = emailEl.value.trim();
+          const password = passwordEl.value;
+          if (!base || !email || !password) {
+            setStatus("Provide API base, email, and password.", "err");
+            return;
+          }
+
+          try {
+            setStatus("Logging in...", "");
+            const res = await fetch(`${base}/api/auth/login`, {
+              method: "POST",
+              credentials: "include",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ email, password })
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              throw new Error(body && body.error ? body.error : `Login failed (${res.status})`);
+            }
+            saveSettings();
+            setStatus(`Logged in as ${body?.user?.email || email}.`, "ok");
+          } catch (error) {
+            setStatus(error instanceof Error ? error.message : "Login failed.", "err");
+          }
+        }
+
+        async function findExecutionTrace(base, webhookPath, sessionId, startedAfterIso) {
+          const triggerType = webhookPath.includes("/webhook-test/") ? "webhook_test" : "webhook";
+          const startedAfter = Date.parse(startedAfterIso);
+          if (!Number.isFinite(startedAfter)) {
+            return null;
+          }
+
+          for (let attempt = 0; attempt < 8; attempt += 1) {
+            const listRes = await fetch(
+              `${normalizeBase(base)}/api/executions?page=1&pageSize=12&triggerType=${encodeURIComponent(triggerType)}`,
+              { method: "GET", credentials: "include" }
+            );
+            if (!listRes.ok) {
+              return null;
+            }
+            const listBody = await listRes.json().catch(() => ({}));
+            const items = Array.isArray(listBody?.items) ? listBody.items : [];
+
+            for (const item of items) {
+              const startedAtMs = Date.parse(String(item?.startedAt || ""));
+              if (!Number.isFinite(startedAtMs) || startedAtMs < startedAfter - 5000) {
+                continue;
+              }
+              const detailRes = await fetch(`${normalizeBase(base)}/api/executions/${encodeURIComponent(String(item.id || ""))}`, {
+                method: "GET",
+                credentials: "include"
+              });
+              if (!detailRes.ok) {
+                continue;
+              }
+              const detail = await detailRes.json().catch(() => null);
+              if (!detail || typeof detail !== "object") {
+                continue;
+              }
+              const input = detail.input && typeof detail.input === "object" ? detail.input : null;
+              const detailSession =
+                input && typeof input.session_id === "string"
+                  ? input.session_id
+                  : input && typeof input.sessionId === "string"
+                    ? input.sessionId
+                    : "";
+              if (detailSession === sessionId) {
+                return detail;
+              }
+            }
+
+            await wait(500);
+          }
+
+          return null;
+        }
+
+        async function sendMessage() {
+          if (busy) return;
+          const userPrompt = userInputEl.value.trim();
+          if (!userPrompt) return;
+
+          const base = apiBaseEl.value.trim();
+          const webhookPath = webhookPathEl.value.trim();
+          const sessionId = sessionIdEl.value.trim();
+          const systemPrompt = systemPromptEl.value.trim();
+
+          if (!base || !webhookPath || !sessionId) {
+            setStatus("Provide API base, webhook path, and session ID.", "err");
+            return;
+          }
+
+          busy = true;
+          sendBtn.disabled = true;
+          saveSettings();
+
+          userInputEl.value = "";
+          const startedAt = nowIso();
+          addMessage("user", userPrompt);
+          const assistant = addMessage("assistant", "...");
+          resultBoxEl.textContent = "{}";
+          traceBoxEl.textContent = "[]";
+          setStatus("Calling webhook...", "");
+
+          const payload = {
+            user_prompt: userPrompt,
+            session_id: sessionId,
+            ...(systemPrompt ? { system_prompt: systemPrompt } : {})
+          };
+
+          try {
+            const webhookUrl = buildWebhookUrl(base, webhookPath);
+            const response = await fetch(webhookUrl, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+
+            const rawText = await response.text();
+            let body = rawText;
+            try {
+              body = rawText ? JSON.parse(rawText) : null;
+            } catch {
+              // Keep raw text as-is
+            }
+
+            if (!response.ok) {
+              throw new Error(typeof body === "object" && body && body.error ? body.error : `Webhook call failed (${response.status})`);
+            }
+
+            assistant.textContent = extractAssistantText(body);
+            resultBoxEl.textContent = toJson(body);
+            setStatus("Webhook call complete.", "ok");
+
+            const trace = await findExecutionTrace(base, webhookPath, sessionId, startedAt);
+            if (trace && Array.isArray(trace.nodeResults)) {
+              const compact = trace.nodeResults.map((node) => ({
+                nodeId: node.nodeId,
+                status: node.status,
+                durationMs: node.durationMs,
+                error: node.error
+              }));
+              traceBoxEl.textContent = toJson(compact);
+            } else {
+              traceBoxEl.textContent = toJson([
+                {
+                  message: "Trace not available. Login as viewer/builder/admin to read /api/executions."
+                }
+              ]);
+            }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : "Request failed.";
+            assistant.textContent = `Error: ${msg}`;
+            setStatus(msg, "err");
+          } finally {
+            busy = false;
+            sendBtn.disabled = false;
+          }
+        }
+
+        const initial = loadSettings();
+        apiBaseEl.value = initial.apiBase;
+        webhookPathEl.value = initial.webhookPath;
+        emailEl.value = initial.email;
+        sessionIdEl.value = initial.sessionId;
+        systemPromptEl.value = initial.systemPrompt;
+
+        loginBtn.addEventListener("click", () => {
+          void login();
+        });
+        sendBtn.addEventListener("click", () => {
+          void sendMessage();
+        });
+        clearBtn.addEventListener("click", () => {
+          chatLogEl.innerHTML = "";
+          resultBoxEl.textContent = "{}";
+          traceBoxEl.textContent = "[]";
+          setStatus("Cleared.", "");
+        });
+        newSessionBtn.addEventListener("click", () => {
+          sessionIdEl.value = createSessionId();
+          saveSettings();
+          setStatus(`New session: ${sessionIdEl.value}`, "");
+        });
+        [apiBaseEl, webhookPathEl, emailEl, sessionIdEl, systemPromptEl].forEach((el) => {
+          el.addEventListener("change", saveSettings);
+        });
+        userInputEl.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            void sendMessage();
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

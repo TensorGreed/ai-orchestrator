@@ -277,6 +277,25 @@ function resolveWidgetBundlePath(): string {
   return path.resolve(appDirectory, "../../web/dist-widget/widget.js");
 }
 
+function resolveHelperChatPagePath(): string {
+  const appFilePath = fileURLToPath(import.meta.url);
+  const appDirectory = path.dirname(appFilePath);
+  return path.resolve(appDirectory, "../public/helper-chat.html");
+}
+
+function parseConfiguredOrigins(configuredOrigin: string): Set<string> {
+  const parsed = configuredOrigin
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+
+  return new Set(parsed);
+}
+
+function isLocalDevOrigin(origin: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
+
 async function selectWebhookWorkflow(store: SqliteStore, workflowId?: string): Promise<Workflow | null> {
   if (workflowId) {
     return store.getWorkflow(workflowId);
@@ -1119,8 +1138,23 @@ export function createApp(
     return user;
   };
 
+  const allowedOrigins = parseConfiguredOrigins(config.WEB_ORIGIN);
+
   app.register(cors, {
-    origin: config.WEB_ORIGIN,
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      if (allowedOrigins.has(origin) || isLocalDevOrigin(origin) || origin === "null") {
+        callback(null, true);
+        return;
+      }
+
+      app.log.warn({ origin }, "CORS origin rejected");
+      callback(null, false);
+    },
     credentials: true
   });
 
@@ -1153,6 +1187,21 @@ export function createApp(
     reply.header("cache-control", "public, max-age=300");
     reply.header("Access-Control-Allow-Origin", "*");
     return reply.send(bundle);
+  });
+
+  app.get("/helper-chat", async (_request, reply) => {
+    const helperChatPagePath = resolveHelperChatPagePath();
+    if (!fs.existsSync(helperChatPagePath)) {
+      reply.code(404);
+      return {
+        error: "helper-chat page is not available."
+      };
+    }
+
+    const html = fs.readFileSync(helperChatPagePath, "utf8");
+    reply.header("content-type", "text/html; charset=utf-8");
+    reply.header("cache-control", "no-store");
+    return reply.send(html);
   });
 
   app.post<{ Body: unknown }>("/api/auth/register", async (request, reply) => {
