@@ -96,6 +96,7 @@ const statusColors: Record<string, string> = {
   waiting_approval: "#a154f2"
 };
 const auxiliaryHandles = new Set(["chat_model", "memory", "tool"]);
+const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
 const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
 const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
 const DEFAULT_LOGS_PANEL_HEIGHT = 210;
@@ -1921,6 +1922,33 @@ function StudioApp() {
         }
       }
 
+      if (!isAgentAttachmentHandle && targetNode?.data.nodeType === "agent_orchestrator" && sourceNode) {
+        const incomingPrimaryInputTypes = new Set<EditorNodeData["nodeType"]>();
+
+        for (const edge of edges) {
+          const existingIsAttachment = edge.sourceHandle ? auxiliaryHandles.has(edge.sourceHandle) : false;
+          if (existingIsAttachment || edge.target !== target) {
+            continue;
+          }
+          const existingSourceNode = nodes.find((node) => node.id === edge.source);
+          const existingSourceType = existingSourceNode?.data.nodeType;
+          if (existingSourceType && agentPrimaryInputNodeTypes.has(existingSourceType)) {
+            incomingPrimaryInputTypes.add(existingSourceType);
+          }
+        }
+
+        if (agentPrimaryInputNodeTypes.has(sourceNode.data.nodeType)) {
+          incomingPrimaryInputTypes.add(sourceNode.data.nodeType);
+        }
+
+        if (incomingPrimaryInputTypes.size > 1) {
+          setError(
+            `Agent can only use one primary input type. Found: ${[...incomingPrimaryInputTypes].sort().join(", ")}.`
+          );
+          return;
+        }
+      }
+
       setEdges((existing) => {
         const edge = decorateEdge(
           {
@@ -1937,7 +1965,7 @@ function StudioApp() {
       });
       setError(null);
     },
-    [nodes, setEdges]
+    [edges, nodes, setEdges]
   );
 
   const onDrop = useCallback(

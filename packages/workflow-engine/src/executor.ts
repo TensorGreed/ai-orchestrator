@@ -128,6 +128,22 @@ function toRecord(value: unknown): Record<string, unknown> {
   return {};
 }
 
+function isWebhookTrigger(globals: Record<string, unknown>): boolean {
+  const triggerType = typeof globals.trigger_type === "string" ? globals.trigger_type.trim().toLowerCase() : "";
+  return triggerType.startsWith("webhook");
+}
+
+function resolveWebhookPrompt(globals: Record<string, unknown>): string | undefined {
+  const webhook = toRecord(globals.webhook);
+  const candidates = [webhook.user_prompt, webhook.prompt, webhook.message, webhook.text, globals.user_prompt];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 function getAttachmentHandle(sourceHandle: string | undefined): AgentAttachmentHandle | undefined {
   if (!sourceHandle || !AGENT_ATTACHMENT_HANDLES.has(sourceHandle as AgentAttachmentHandle)) {
     return undefined;
@@ -676,12 +692,15 @@ async function executeNode(
     }
 
     case "text_input": {
+      const webhookPrompt = isWebhookTrigger(context.globals) ? resolveWebhookPrompt(context.globals) : undefined;
       const text =
-        typeof config.text === "string"
-          ? config.text
-          : typeof context.globals.user_prompt === "string"
-            ? context.globals.user_prompt
-            : "";
+        typeof webhookPrompt === "string"
+          ? webhookPrompt
+          : typeof config.text === "string"
+            ? config.text
+            : typeof context.globals.user_prompt === "string"
+              ? context.globals.user_prompt
+              : "";
 
       return {
         text,

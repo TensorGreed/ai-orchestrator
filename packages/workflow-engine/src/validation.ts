@@ -9,6 +9,7 @@ interface GraphMetadata {
 const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const allowedWebhookAuthModes = new Set(["none", "bearer_token", "hmac_sha256"]);
 const allowedHttpRequestMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+const agentPrimaryInputNodeTypes = new Set(["webhook_input", "text_input", "user_prompt"]);
 
 function isValidTimeZone(value: string): boolean {
   try {
@@ -333,6 +334,27 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_max_iterations",
           message: "Agent Orchestrator node requires maxIterations >= 1.",
+          nodeId: node.id
+        });
+      }
+
+      const incomingPrimaryInputTypes = new Set<string>();
+      for (const edge of workflow.edges.filter(isExecutionEdge)) {
+        if (edge.target !== node.id) {
+          continue;
+        }
+        const sourceType = nodeById.get(edge.source)?.type;
+        if (sourceType && agentPrimaryInputNodeTypes.has(sourceType)) {
+          incomingPrimaryInputTypes.add(sourceType);
+        }
+      }
+
+      if (incomingPrimaryInputTypes.size > 1) {
+        issues.push({
+          code: "mixed_agent_primary_inputs",
+          message: `Agent Orchestrator node can only use one primary input type. Found: ${[...incomingPrimaryInputTypes]
+            .sort()
+            .join(", ")}.`,
           nodeId: node.id
         });
       }

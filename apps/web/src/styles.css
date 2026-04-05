@@ -2055,6 +2055,45 @@ select {
   min-height: 0;
 }
 
+.node-kv-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.node-kv-count {
+  font-size: 0.76rem;
+  color: #7d6556;
+}
+
+.node-kv-view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #e6d6c7;
+  border-radius: 999px;
+  background: #fff6ed;
+}
+
+.node-kv-view-switch button {
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #7d6659;
+  padding: 4px 10px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.node-kv-view-switch button.active {
+  background: #cc6236;
+  color: #fff;
+}
+
 .node-kv-table-wrap {
   border: 1px solid #e5d6c5;
   border-radius: 10px;

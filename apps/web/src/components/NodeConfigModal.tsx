@@ -159,10 +159,46 @@ function TextAreaField({
 interface KeyValueRow {
   key: string;
   value: string;
+  depth: number;
+  importantScore: number;
 }
 
 const PREVIEW_TABLE_MAX_ROWS = 250;
 const PREVIEW_TABLE_MAX_DEPTH = 5;
+const PREVIEW_IMPORTANT_MAX_ROWS = 18;
+const PREVIEW_IMPORTANT_FALLBACK_ROWS = 12;
+
+const IMPORTANT_PRIMARY_TOKENS = new Set([
+  "prompt",
+  "user_prompt",
+  "system_prompt",
+  "question",
+  "query",
+  "input",
+  "response",
+  "answer",
+  "output",
+  "result",
+  "content",
+  "message",
+  "status",
+  "error"
+]);
+
+const IMPORTANT_SECONDARY_TOKENS = new Set([
+  "model",
+  "provider",
+  "tool",
+  "tool_name",
+  "latency",
+  "duration",
+  "time_ms",
+  "tokens",
+  "total_tokens",
+  "input_tokens",
+  "output_tokens",
+  "finish_reason"
+]);
 
 function serializePreviewValue(value: unknown): string {
   if (value === null) {
@@ -189,18 +225,66 @@ function serializePreviewValue(value: unknown): string {
   }
 }
 
+function scoreImportantKey(rowKey: string, rawValue: unknown, depth: number): number {
+  const key = rowKey.toLowerCase();
+  if (!key || key === "...") {
+    return -100;
+  }
+  if (key.includes("parent_outputs")) {
+    return -80;
+  }
+
+  const tokens = key.split(/[\.\[\]_\-\s]+/).filter(Boolean);
+  let score = 0;
+
+  for (const token of tokens) {
+    if (IMPORTANT_PRIMARY_TOKENS.has(token)) {
+      score += 55;
+    } else if (IMPORTANT_SECONDARY_TOKENS.has(token)) {
+      score += 30;
+    }
+  }
+
+  if (key.endsWith(".error") || key === "error") {
+    score += 40;
+  }
+  if (key.endsWith(".status") || key === "status") {
+    score += 20;
+  }
+
+  if (depth <= 1) {
+    score += 15;
+  }
+
+  const isPrimitive =
+    rawValue === null ||
+    rawValue === undefined ||
+    typeof rawValue === "string" ||
+    typeof rawValue === "number" ||
+    typeof rawValue === "boolean" ||
+    typeof rawValue === "bigint";
+
+  if (isPrimitive) {
+    score += 10;
+  }
+
+  return score;
+}
+
 function toKeyValueRows(value: unknown): KeyValueRow[] {
   const rows: KeyValueRow[] = [];
   let truncated = false;
 
-  const appendRow = (key: string, rawValue: unknown) => {
+  const appendRow = (key: string, rawValue: unknown, depth: number) => {
     if (rows.length >= PREVIEW_TABLE_MAX_ROWS) {
       truncated = true;
       return;
     }
     rows.push({
       key: key || "value",
-      value: serializePreviewValue(rawValue)
+      value: serializePreviewValue(rawValue),
+      depth,
+      importantScore: scoreImportantKey(key || "value", rawValue, depth)
     });
   };
 
@@ -210,17 +294,17 @@ function toKeyValueRows(value: unknown): KeyValueRow[] {
       return;
     }
     if (entry === null || typeof entry !== "object") {
-      appendRow(path, entry);
+      appendRow(path, entry, depth);
       return;
     }
     if (depth >= PREVIEW_TABLE_MAX_DEPTH) {
-      appendRow(path, entry);
+      appendRow(path, entry, depth);
       return;
     }
 
     if (Array.isArray(entry)) {
       if (entry.length === 0) {
-        appendRow(path, []);
+        appendRow(path, [], depth);
         return;
       }
       entry.forEach((item, index) => {
@@ -231,7 +315,7 @@ function toKeyValueRows(value: unknown): KeyValueRow[] {
 
     const entries = Object.entries(entry as Record<string, unknown>);
     if (entries.length === 0) {
-      appendRow(path, {});
+      appendRow(path, {}, depth);
       return;
     }
     for (const [key, child] of entries) {
@@ -246,24 +330,69 @@ function toKeyValueRows(value: unknown): KeyValueRow[] {
   visit(value, "", 0);
 
   if (!rows.length) {
-    appendRow("value", value);
+    appendRow("value", value, 0);
   }
   if (truncated) {
     rows.push({
       key: "...",
-      value: `Preview truncated at ${PREVIEW_TABLE_MAX_ROWS} rows`
+      value: `Preview truncated at ${PREVIEW_TABLE_MAX_ROWS} rows`,
+      depth: 0,
+      importantScore: -100
     });
   }
 
   return rows;
 }
 
+function toImportantRows(rows: KeyValueRow[]): KeyValueRow[] {
+  const truncationRow = rows.find((row) => row.key === "...");
+  const dataRows = rows.filter((row) => row.key !== "...");
+  const importantRows = dataRows
+    .filter((row) => row.importantScore >= 55)
+    .slice(0, PREVIEW_IMPORTANT_MAX_ROWS);
+
+  const baseRows = importantRows.length ? importantRows : dataRows.slice(0, PREVIEW_IMPORTANT_FALLBACK_ROWS);
+  if (!truncationRow) {
+    return baseRows;
+  }
+  return [...baseRows, truncationRow];
+}
+
 function KeyValueTable({ label, value }: { label: string; value: unknown }) {
   const rows = useMemo(() => toKeyValueRows(value), [value]);
+  const importantRows = useMemo(() => toImportantRows(rows), [rows]);
+  const [viewMode, setViewMode] = useState<"important" | "full">("important");
+
+  useEffect(() => {
+    setViewMode("important");
+  }, [value, label]);
+
+  const visibleRows = viewMode === "important" ? importantRows : rows;
+  const fullDataRowCount = rows.filter((row) => row.key !== "...").length;
+  const visibleDataRowCount = visibleRows.filter((row) => row.key !== "...").length;
 
   return (
     <div className="cfg-field node-kv-field">
       <span>{label}</span>
+      <div className="node-kv-toolbar">
+        <div className="node-kv-count">
+          {viewMode === "important"
+            ? `Showing ${visibleDataRowCount} important fields`
+            : `Showing all ${fullDataRowCount} fields`}
+        </div>
+        <div className="node-kv-view-switch" role="tablist" aria-label={`${label} preview mode`}>
+          <button
+            type="button"
+            className={viewMode === "important" ? "active" : ""}
+            onClick={() => setViewMode("important")}
+          >
+            Important only
+          </button>
+          <button type="button" className={viewMode === "full" ? "active" : ""} onClick={() => setViewMode("full")}>
+            Full view
+          </button>
+        </div>
+      </div>
       <div className="node-kv-table-wrap">
         <table className="node-kv-table">
           <thead>
@@ -273,7 +402,7 @@ function KeyValueTable({ label, value }: { label: string; value: unknown }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row, index) => (
+            {visibleRows.map((row, index) => (
               <tr key={`${row.key}-${index}`}>
                 <td className="node-kv-key">{row.key}</td>
                 <td className="node-kv-value">{row.value}</td>

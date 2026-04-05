@@ -157,6 +157,54 @@ describe("workflow engine", () => {
     expect(promptNode?.output).toBeTruthy();
   });
 
+  it("uses webhook prompt for text_input nodes during webhook-triggered runs", async () => {
+    const workflow: Workflow = {
+      id: "wf-webhook-overrides-text-input",
+      name: "Webhook overrides Text Input",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "text",
+          type: "text_input",
+          name: "Text Input",
+          position: { x: 0, y: 0 },
+          config: { text: "node-default-text" }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 220, y: 0 },
+          config: { responseTemplate: "{{user_prompt}}" }
+        }
+      ],
+      edges: [{ id: "e1", source: "text", target: "output" }]
+    };
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        triggerType: "webhook",
+        webhookPayload: {
+          user_prompt: "prompt-from-webhook"
+        }
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const textNodeOutput = result.nodeResults.find((entry) => entry.nodeId === "text")?.output as Record<string, unknown>;
+    expect(textNodeOutput.user_prompt).toBe("prompt-from-webhook");
+    expect(textNodeOutput.text).toBe("prompt-from-webhook");
+  });
+
   it("requires chat_model attachment for agent orchestrator nodes", () => {
     const workflow: Workflow = {
       id: "wf-agent-no-model",
@@ -200,6 +248,69 @@ describe("workflow engine", () => {
     const validation = validateWorkflowGraph(workflow);
     expect(validation.valid).toBe(false);
     expect(validation.issues.some((issue) => issue.code === "missing_agent_chat_model")).toBe(true);
+  });
+
+  it("rejects mixing multiple primary input types directly into one agent", () => {
+    const workflow: Workflow = {
+      id: "wf-agent-mixed-primary-inputs",
+      name: "Agent with mixed primary inputs",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "webhook",
+          type: "webhook_input",
+          name: "Webhook",
+          position: { x: 0, y: 0 },
+          config: {}
+        },
+        {
+          id: "text",
+          type: "text_input",
+          name: "Text Input",
+          position: { x: 0, y: 120 },
+          config: { text: "hello" }
+        },
+        {
+          id: "agent",
+          type: "agent_orchestrator",
+          name: "Agent",
+          position: { x: 240, y: 60 },
+          config: {
+            systemPromptTemplate: "{{system_prompt}}",
+            userPromptTemplate: "{{user_prompt}}",
+            maxIterations: 2,
+            toolCallingEnabled: true
+          }
+        },
+        {
+          id: "model",
+          type: "llm_call",
+          name: "Model",
+          position: { x: 260, y: 220 },
+          config: {
+            provider: { providerId: "fake", model: "fake-model" }
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 500, y: 60 },
+          config: { responseTemplate: "{{answer}}" }
+        }
+      ],
+      edges: [
+        { id: "e-webhook-agent", source: "webhook", target: "agent" },
+        { id: "e-text-agent", source: "text", target: "agent" },
+        { id: "e-agent-output", source: "agent", target: "output" },
+        { id: "e-agent-model", source: "agent", sourceHandle: "chat_model", target: "model" }
+      ]
+    };
+
+    const validation = validateWorkflowGraph(workflow);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.some((issue) => issue.code === "mixed_agent_primary_inputs")).toBe(true);
   });
 
   it("round-trips import/export", () => {
