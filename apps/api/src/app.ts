@@ -256,6 +256,15 @@ function toDurationMs(startedAt: string, completedAt: string): number | undefine
   return Math.max(0, Math.floor(completed - started));
 }
 
+function summarizeNodeStatuses(nodeResults: Array<{ status?: unknown }> | undefined): Record<string, number> {
+  const summary: Record<string, number> = {};
+  for (const nodeResult of nodeResults ?? []) {
+    const status = typeof nodeResult.status === "string" && nodeResult.status.trim() ? nodeResult.status.trim() : "unknown";
+    summary[status] = (summary[status] ?? 0) + 1;
+  }
+  return summary;
+}
+
 function normalizeSessionId(sessionId?: string, sessionIdSnakeCase?: string): string | undefined {
   const camel = typeof sessionId === "string" && sessionId.trim() ? sessionId.trim() : undefined;
   const snake = typeof sessionIdSnakeCase === "string" && sessionIdSnakeCase.trim() ? sessionIdSnakeCase.trim() : undefined;
@@ -601,6 +610,51 @@ export function createApp(
     }) => Promise<void> | void;
     onLLMDelta?: (event: { nodeId: string; delta: string; index: number }) => Promise<void> | void;
   };
+  type ExecutionHistoryRecord = Parameters<SqliteStore["saveExecutionHistory"]>[0];
+
+  const persistExecutionHistoryRecord = (
+    record: ExecutionHistoryRecord,
+    meta: {
+      phase: "progress" | "final";
+      executionId: string;
+      workflowId: string;
+      triggerType?: string;
+      status: string;
+    }
+  ): boolean => {
+    try {
+      store.saveExecutionHistory(record);
+      return true;
+    } catch (error) {
+      app.log.error(
+        {
+          executionId: meta.executionId,
+          workflowId: meta.workflowId,
+          triggerType: meta.triggerType,
+          status: meta.status,
+          phase: meta.phase,
+          error: secretService.redact(error instanceof Error ? error.message : String(error))
+        },
+        "Failed to persist execution history"
+      );
+      return false;
+    }
+  };
+
+  const deleteWorkflowExecutionSafely = (executionId: string, workflowId: string) => {
+    try {
+      store.deleteWorkflowExecution(executionId);
+    } catch (error) {
+      app.log.warn(
+        {
+          executionId,
+          workflowId,
+          error: secretService.redact(error instanceof Error ? error.message : String(error))
+        },
+        "Failed to clear paused workflow execution state"
+      );
+    }
+  };
 
   const runWorkflowExecution = async (input: {
     workflow: Workflow;
@@ -715,10 +769,20 @@ export function createApp(
     requestInput?: unknown;
   }) => {
     if (input.result.status === "waiting_approval") {
+      app.log.info(
+        {
+          executionId: input.executionId,
+          workflowId: input.workflow.id,
+          triggerType: input.triggerType,
+          triggeredBy: input.triggeredBy,
+          status: input.result.status
+        },
+        "Workflow execution is waiting for approval"
+      );
       return;
     }
 
-    store.saveExecutionHistory({
+    const persisted = persistExecutionHistoryRecord({
       id: input.executionId,
       workflowId: input.workflow.id,
       workflowName: input.workflow.name,
@@ -732,9 +796,31 @@ export function createApp(
       outputJson: input.result.output,
       nodeResultsJson: input.result.nodeResults,
       error: input.result.error
+    }, {
+      phase: "final",
+      executionId: input.executionId,
+      workflowId: input.workflow.id,
+      triggerType: input.triggerType,
+      status: input.result.status
     });
 
-    store.deleteWorkflowExecution(input.executionId);
+    if (persisted) {
+      deleteWorkflowExecutionSafely(input.executionId, input.workflow.id);
+    }
+
+    app.log.info(
+      {
+        executionId: input.executionId,
+        workflowId: input.workflow.id,
+        triggerType: input.triggerType,
+        triggeredBy: input.triggeredBy,
+        status: input.result.status,
+        durationMs: toDurationMs(input.result.startedAt, input.result.completedAt),
+        nodeStatusSummary: summarizeNodeStatuses(input.result.nodeResults as Array<{ status?: unknown }>),
+        persistedHistory: persisted
+      },
+      "Workflow execution completed"
+    );
   };
 
   const createProgressTrackingHooks = (input: {
@@ -760,11 +846,12 @@ export function createApp(
     >();
     let startedAt: string | null = null;
     let currentStatus: "running" | "waiting_approval" = "running";
+    let startLogged = false;
 
     const snapshotNodeResults = () => [...nodeResultsById.values()];
     const persistProgress = (completedAt?: string) => {
       const effectiveStartedAt = startedAt ?? new Date().toISOString();
-      store.saveExecutionHistory({
+      persistExecutionHistoryRecord({
         id: input.executionId,
         workflowId: input.workflow.id,
         workflowName: input.workflow.name,
@@ -779,11 +866,31 @@ export function createApp(
         triggeredBy: input.triggeredBy,
         inputJson: redactSensitiveInput(input.requestInput),
         nodeResultsJson: snapshotNodeResults()
+      }, {
+        phase: "progress",
+        executionId: input.executionId,
+        workflowId: input.workflow.id,
+        triggerType: input.triggerType,
+        status: currentStatus
       });
     };
 
     return {
       onNodeStart: async (event) => {
+        if (!startLogged) {
+          startLogged = true;
+          app.log.info(
+            {
+              executionId: input.executionId,
+              workflowId: input.workflow.id,
+              triggerType: input.triggerType,
+              triggeredBy: input.triggeredBy,
+              firstNodeId: event.nodeId,
+              firstNodeType: event.nodeType
+            },
+            "Workflow execution started"
+          );
+        }
         if (!startedAt) {
           startedAt = event.startedAt;
         }
@@ -797,7 +904,20 @@ export function createApp(
           error: existing?.error
         });
         persistProgress();
-        await input.passthroughHooks?.onNodeStart?.(event);
+        try {
+          await input.passthroughHooks?.onNodeStart?.(event);
+        } catch (error) {
+          app.log.warn(
+            {
+              executionId: input.executionId,
+              workflowId: input.workflow.id,
+              nodeId: event.nodeId,
+              nodeType: event.nodeType,
+              error: secretService.redact(error instanceof Error ? error.message : String(error))
+            },
+            "Execution node-start hook failed"
+          );
+        }
       },
       onNodeComplete: async (event) => {
         const existing = nodeResultsById.get(event.nodeId);
@@ -818,10 +938,48 @@ export function createApp(
           currentStatus = "waiting_approval";
         }
         persistProgress(event.completedAt);
-        await input.passthroughHooks?.onNodeComplete?.(event);
+        app.log.debug(
+          {
+            executionId: input.executionId,
+            workflowId: input.workflow.id,
+            nodeId: event.nodeId,
+            nodeType: event.nodeType,
+            status: event.status,
+            durationMs: event.durationMs
+          },
+          "Workflow node completed"
+        );
+        try {
+          await input.passthroughHooks?.onNodeComplete?.(event);
+        } catch (error) {
+          app.log.warn(
+            {
+              executionId: input.executionId,
+              workflowId: input.workflow.id,
+              nodeId: event.nodeId,
+              nodeType: event.nodeType,
+              status: event.status,
+              error: secretService.redact(error instanceof Error ? error.message : String(error))
+            },
+            "Execution node-complete hook failed"
+          );
+        }
       },
       onLLMDelta: async (event) => {
-        await input.passthroughHooks?.onLLMDelta?.(event);
+        try {
+          await input.passthroughHooks?.onLLMDelta?.(event);
+        } catch (error) {
+          app.log.warn(
+            {
+              executionId: input.executionId,
+              workflowId: input.workflow.id,
+              nodeId: event.nodeId,
+              index: event.index,
+              error: secretService.redact(error instanceof Error ? error.message : String(error))
+            },
+            "Execution LLM-delta hook failed"
+          );
+        }
       }
     };
   };

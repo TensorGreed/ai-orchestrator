@@ -13,6 +13,7 @@ import { SecretService } from "./services/secret-service";
 
 interface TestContext {
   app: FastifyInstance;
+  store: SqliteStore;
   authService: AuthService;
   secretService: SecretService;
   config: AppConfig;
@@ -148,6 +149,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
 
   const context: TestContext = {
     app,
+    store,
     authService,
     secretService,
     config,
@@ -630,5 +632,117 @@ describe("secured webhook execution", () => {
       }
     });
     expect(conflicting.statusCode).toBe(409);
+  });
+});
+
+describe("execution resilience and lifecycle", () => {
+  it("persists terminal node statuses without leaving nodes in running state", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-terminal-status@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-terminal-status";
+    const workflow = createWebhookWorkflow(workflowId, {
+      authMode: "none"
+    });
+
+    const saveResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: workflow
+    });
+    expect(saveResponse.statusCode).toBe(200);
+
+    const runResponse = await context.app.inject({
+      method: "POST",
+      url: `/webhook-test/secure-${workflowId}`,
+      payload: {
+        user_prompt: "terminal run"
+      }
+    });
+    expect(runResponse.statusCode).toBe(200);
+
+    const historyList = await context.app.inject({
+      method: "GET",
+      url: `/api/executions?workflowId=${workflowId}&page=1&pageSize=1`,
+      headers: {
+        cookie: builderCookie
+      }
+    });
+    expect(historyList.statusCode).toBe(200);
+    const listBody = historyList.json<{
+      items: Array<{ id: string; status: string }>;
+    }>();
+    expect(listBody.items.length).toBeGreaterThan(0);
+    expect(listBody.items[0]?.status).toBe("success");
+
+    const executionId = listBody.items[0]?.id ?? "";
+    const historyDetail = await context.app.inject({
+      method: "GET",
+      url: `/api/executions/${executionId}`,
+      headers: {
+        cookie: builderCookie
+      }
+    });
+    expect(historyDetail.statusCode).toBe(200);
+    const detailBody = historyDetail.json<{
+      status: string;
+      nodeResults: Array<{ status: string }>;
+      completedAt: string | null;
+    }>();
+    expect(detailBody.status).toBe("success");
+    expect(detailBody.completedAt).not.toBeNull();
+    expect(detailBody.nodeResults.every((entry) => entry.status !== "running")).toBe(true);
+  });
+
+  it("continues execution successfully when execution-history persistence fails", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-persist-fail@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-persist-failure";
+    const createResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: createValidWorkflow(workflowId)
+    });
+    expect(createResponse.statusCode).toBe(200);
+
+    const originalSaveExecutionHistory = context.store.saveExecutionHistory.bind(context.store);
+    context.store.saveExecutionHistory = (() => {
+      throw new Error("simulated execution history write failure");
+    }) as SqliteStore["saveExecutionHistory"];
+
+    try {
+      const executeResponse = await context.app.inject({
+        method: "POST",
+        url: `/api/workflows/${workflowId}/execute`,
+        headers: {
+          cookie: builderCookie
+        },
+        payload: {
+          input: {
+            prompt: "resilience check"
+          }
+        }
+      });
+      expect(executeResponse.statusCode).toBe(200);
+      const body = executeResponse.json<{ status: string }>();
+      expect(body.status).toBe("success");
+    } finally {
+      context.store.saveExecutionHistory = originalSaveExecutionHistory;
+    }
   });
 });
