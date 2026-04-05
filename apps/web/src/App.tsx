@@ -1328,6 +1328,24 @@ function StudioApp() {
     });
   }, []);
 
+  const setChatMessageText = useCallback((workflowId: string, messageId: string, text: string, status?: ChatMessageEntry["status"]) => {
+    setChatMessagesByWorkflow((current) => {
+      const nextMessages = (current[workflowId] ?? []).map((entry) =>
+        entry.id === messageId
+          ? {
+              ...entry,
+              text,
+              status: status ?? entry.status
+            }
+          : entry
+      );
+      return {
+        ...current,
+        [workflowId]: nextMessages
+      };
+    });
+  }, []);
+
   const setChatMessageStatus = useCallback((workflowId: string, messageId: string, status: ChatMessageEntry["status"]) => {
     setChatMessagesByWorkflow((current) => {
       const nextMessages = (current[workflowId] ?? []).map((entry) =>
@@ -1922,10 +1940,13 @@ function StudioApp() {
         chatDeltaBufferRef.current = "";
       }
 
-      if (!streamedAnyDelta) {
+      const finalWorkflowAnswer = result.status === "error" ? "" : extractAssistantText(result.output ?? "");
+      if (finalWorkflowAnswer && activeAssistantMessageIdRef.current) {
+        setChatMessageText(workflowId, activeAssistantMessageIdRef.current, finalWorkflowAnswer);
+      } else if (!streamedAnyDelta) {
         const fallbackAnswer = extractAssistantText(result.output ?? result.error ?? "");
         if (fallbackAnswer && activeAssistantMessageIdRef.current) {
-          updateChatMessageText(workflowId, activeAssistantMessageIdRef.current, fallbackAnswer);
+          setChatMessageText(workflowId, activeAssistantMessageIdRef.current, fallbackAnswer);
         }
       }
 
@@ -1989,6 +2010,7 @@ function StudioApp() {
     setChatMessageStatus,
     startChatDeltaFlusher,
     stopChatDeltaFlusher,
+    setChatMessageText,
     updateChatMessageText
   ]);
 
