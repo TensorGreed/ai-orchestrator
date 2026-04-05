@@ -447,8 +447,14 @@ describe("workflow engine", () => {
       ((result.nodeResults.find((entry) => entry.nodeId === "model")?.output as Record<string, unknown>)
         ?.details as Record<string, unknown>)?.answer
     ).toBe("captured:U");
-    expect(result.nodeResults.find((entry) => entry.nodeId === "memory")?.status).toBe("skipped");
-    expect(result.nodeResults.find((entry) => entry.nodeId === "tool")?.status).toBe("skipped");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "memory")?.status).toBe("success");
+    expect(
+      (result.nodeResults.find((entry) => entry.nodeId === "memory")?.output as Record<string, unknown>)?.reason
+    ).toBe("attachment_consumed_by_agent");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "tool")?.status).toBe("success");
+    expect(
+      (result.nodeResults.find((entry) => entry.nodeId === "tool")?.output as Record<string, unknown>)?.reason
+    ).toBe("attachment_consumed_by_agent");
   });
 
   it("executes each agent with its own attached chat model", async () => {

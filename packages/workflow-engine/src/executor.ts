@@ -121,7 +121,7 @@ interface NodeRuntimeContext {
     startedAt?: string;
     completedAt?: string;
     durationMs?: number;
-  }) => void;
+  }) => Promise<void> | void;
 }
 
 type AgentAttachmentHandle = "chat_model" | "memory" | "tool";
@@ -1362,7 +1362,8 @@ async function executeNode(
         : [];
 
       const attachedToolServerConfigs: MCPServerConfig[] = [];
-      for (const attached of getAttachedNodes("tool").filter((entry) => entry.type === "mcp_tool")) {
+      const attachedToolNodes = getAttachedNodes("tool").filter((entry) => entry.type === "mcp_tool");
+      for (const attached of attachedToolNodes) {
         const attachedConfig = toRecord(attached.config);
         const serverId = String(attachedConfig.serverId ?? "").trim();
         if (!serverId) {
@@ -1400,6 +1401,22 @@ async function executeNode(
 
       const resolvedTools = await resolveMCPTools(serverConfigs, dependencies.mcpRegistry, mcpExecutionContext);
 
+      for (const attachedToolNode of attachedToolNodes) {
+        const attachedConfig = toRecord(attachedToolNode.config);
+        await context.recordAttachmentUsage?.({
+          attachedNodeId: attachedToolNode.id,
+          usedByNodeId: node.id,
+          handle: "tool",
+          input: {
+            serverId: String(attachedConfig.serverId ?? ""),
+            toolName: String(attachedConfig.toolName ?? "")
+          },
+          output: {
+            resolvedTools: resolvedTools.resolved.length
+          }
+        });
+      }
+
       const attachedMemoryNode = getAttachedNodes("memory").find((attached) => attached.type === "local_memory");
       let memory: { namespace?: string; maxMessages?: number; persistToolMessages?: boolean } | undefined;
       if (attachedMemoryNode) {
@@ -1419,6 +1436,19 @@ async function executeNode(
           maxMessages,
           persistToolMessages
         };
+        await context.recordAttachmentUsage?.({
+          attachedNodeId: attachedMemoryNode.id,
+          usedByNodeId: node.id,
+          handle: "memory",
+          input: {
+            sessionId
+          },
+          output: {
+            namespace,
+            maxMessages,
+            persistToolMessages
+          }
+        });
       }
 
       const modelRunStarted = Date.now();
@@ -1452,7 +1482,7 @@ async function executeNode(
       const modelRunCompletedAt = nowIso();
       if (attachedModelNode) {
         const lastStep = agentState.steps.at(-1);
-        context.recordAttachmentUsage?.({
+        await context.recordAttachmentUsage?.({
           attachedNodeId: attachedModelNode.id,
           usedByNodeId: node.id,
           handle: "chat_model",
@@ -1949,6 +1979,7 @@ export async function executeWorkflow(
     : new Map<string, unknown>();
   const nodeResults: NodeExecutionResult[] = request.resumeState ? [...request.resumeState.nodeResults] : [];
   const attachmentOnlyResultIndexByNodeId = new Map<string, number>();
+  const attachmentCompletionEventEmitted = new Set<string>();
   const attachmentUsageByNodeId = new Map<
     string,
     {
@@ -1988,7 +2019,7 @@ export async function executeWorkflow(
       details: toJsonSafeValue(usage.output)
     }
   });
-  const recordAttachmentUsage = (usage: {
+  const recordAttachmentUsage = async (usage: {
     attachedNodeId: string;
     usedByNodeId: string;
     handle: AgentAttachmentHandle;
@@ -2019,6 +2050,26 @@ export async function executeWorkflow(
     const existingIndex = attachmentOnlyResultIndexByNodeId.get(usage.attachedNodeId);
     if (existingIndex !== undefined) {
       nodeResults[existingIndex] = toAttachmentConsumedResult(normalized);
+    }
+
+    if (!attachmentCompletionEventEmitted.has(usage.attachedNodeId)) {
+      const attachedNodeType = graphIndexes.nodeById.get(usage.attachedNodeId)?.type ?? "unknown";
+      await dependencies.onNodeComplete?.({
+        nodeId: usage.attachedNodeId,
+        nodeType: attachedNodeType,
+        status: "success",
+        completedAt: normalized.completedAt,
+        durationMs: normalized.durationMs,
+        input: normalized.input,
+        output: {
+          reason: "attachment_consumed_by_agent",
+          message: "Node was consumed by an attached agent during execution.",
+          handle: normalized.handle,
+          usedByNodeId: normalized.usedByNodeId,
+          details: toJsonSafeValue(normalized.output)
+        }
+      });
+      attachmentCompletionEventEmitted.add(usage.attachedNodeId);
     }
   };
   let finalOutput: unknown = request.resumeState?.finalOutput;
@@ -2242,11 +2293,40 @@ export async function executeWorkflow(
       const consumedUsage = attachmentUsageByNodeId.get(node.id);
       if (consumedUsage) {
         nodeResults.push(toAttachmentConsumedResult(consumedUsage));
+        if (!attachmentCompletionEventEmitted.has(node.id)) {
+          await dependencies.onNodeComplete?.({
+            nodeId: node.id,
+            nodeType: node.type,
+            status: "success",
+            completedAt: consumedUsage.completedAt,
+            durationMs: consumedUsage.durationMs,
+            input: toJsonSafeValue(consumedUsage.input),
+            output: {
+              reason: "attachment_consumed_by_agent",
+              message: "Node was consumed by an attached agent during execution.",
+              handle: consumedUsage.handle,
+              usedByNodeId: consumedUsage.usedByNodeId,
+              details: toJsonSafeValue(consumedUsage.output)
+            }
+          });
+          attachmentCompletionEventEmitted.add(node.id);
+        }
       } else {
         nodeResults.push({
           nodeId: node.id,
           status: "skipped",
           startedAt: nowIso(),
+          completedAt: nowIso(),
+          durationMs: 0,
+          output: {
+            reason: "attachment_only_node",
+            message: "Node is attached to an agent port and is not part of the execution DAG."
+          }
+        });
+        await dependencies.onNodeComplete?.({
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "skipped",
           completedAt: nowIso(),
           durationMs: 0,
           output: {

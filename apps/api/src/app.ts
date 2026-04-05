@@ -737,6 +737,95 @@ export function createApp(
     store.deleteWorkflowExecution(input.executionId);
   };
 
+  const createProgressTrackingHooks = (input: {
+    executionId: string;
+    workflow: Workflow;
+    triggerType?: string;
+    triggeredBy?: string;
+    requestInput?: unknown;
+    passthroughHooks?: WorkflowExecutionEventHooks;
+  }): WorkflowExecutionEventHooks => {
+    const nodeResultsById = new Map<
+      string,
+      {
+        nodeId: string;
+        status: string;
+        startedAt: string;
+        completedAt?: string;
+        durationMs?: number;
+        input?: unknown;
+        output?: unknown;
+        error?: string;
+      }
+    >();
+    let startedAt: string | null = null;
+    let currentStatus: "running" | "waiting_approval" = "running";
+
+    const snapshotNodeResults = () => [...nodeResultsById.values()];
+    const persistProgress = (completedAt?: string) => {
+      const effectiveStartedAt = startedAt ?? new Date().toISOString();
+      store.saveExecutionHistory({
+        id: input.executionId,
+        workflowId: input.workflow.id,
+        workflowName: input.workflow.name,
+        status: currentStatus,
+        startedAt: effectiveStartedAt,
+        completedAt: currentStatus === "waiting_approval" ? completedAt ?? effectiveStartedAt : undefined,
+        durationMs:
+          completedAt && currentStatus === "waiting_approval"
+            ? toDurationMs(effectiveStartedAt, completedAt)
+            : undefined,
+        triggerType: input.triggerType,
+        triggeredBy: input.triggeredBy,
+        inputJson: redactSensitiveInput(input.requestInput),
+        nodeResultsJson: snapshotNodeResults()
+      });
+    };
+
+    return {
+      onNodeStart: async (event) => {
+        if (!startedAt) {
+          startedAt = event.startedAt;
+        }
+        const existing = nodeResultsById.get(event.nodeId);
+        nodeResultsById.set(event.nodeId, {
+          nodeId: event.nodeId,
+          status: "running",
+          startedAt: existing?.startedAt ?? event.startedAt,
+          input: existing?.input,
+          output: existing?.output,
+          error: existing?.error
+        });
+        persistProgress();
+        await input.passthroughHooks?.onNodeStart?.(event);
+      },
+      onNodeComplete: async (event) => {
+        const existing = nodeResultsById.get(event.nodeId);
+        if (!startedAt) {
+          startedAt = existing?.startedAt ?? event.completedAt;
+        }
+        nodeResultsById.set(event.nodeId, {
+          nodeId: event.nodeId,
+          status: event.status,
+          startedAt: existing?.startedAt ?? event.completedAt,
+          completedAt: event.completedAt,
+          durationMs: event.durationMs,
+          input: event.input ?? existing?.input,
+          output: event.output ?? existing?.output,
+          error: event.error
+        });
+        if (event.status === "waiting_approval") {
+          currentStatus = "waiting_approval";
+        }
+        persistProgress(event.completedAt);
+        await input.passthroughHooks?.onNodeComplete?.(event);
+      },
+      onLLMDelta: async (event) => {
+        await input.passthroughHooks?.onLLMDelta?.(event);
+      }
+    };
+  };
+
   const executeScheduledWorkflow = async (input: {
     workflowId: string;
     workflowName: string;
@@ -1265,6 +1354,13 @@ export function createApp(
     }
 
     const executionId = crypto.randomUUID();
+    const progressHooks = createProgressTrackingHooks({
+      executionId,
+      workflow,
+      triggerType: "manual",
+      triggeredBy: user.email,
+      requestInput: parsed.data
+    });
     const result = await runWorkflowExecution({
       workflow,
       directInput: parsed.data.input,
@@ -1274,7 +1370,8 @@ export function createApp(
       sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
       executionId,
       triggerType: "manual",
-      triggeredBy: user.email
+      triggeredBy: user.email,
+      hooks: progressHooks
     });
 
     persistExecutionHistory({
@@ -1343,17 +1440,13 @@ export function createApp(
     }
 
     try {
-      const result = await runWorkflowExecution({
-        workflow,
-        directInput: parsed.data.input,
-        variables: parsed.data.variables,
-        systemPrompt: parsed.data.system_prompt,
-        userPrompt: parsed.data.user_prompt,
-        sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
+      const progressHooks = createProgressTrackingHooks({
         executionId,
+        workflow,
         triggerType: "manual_stream",
         triggeredBy: user.email,
-        hooks: {
+        requestInput: parsed.data,
+        passthroughHooks: {
           onNodeStart: (event) => {
             sendSseEvent("node_start", event);
           },
@@ -1364,6 +1457,18 @@ export function createApp(
             sendSseEvent("llm_delta", event);
           }
         }
+      });
+      const result = await runWorkflowExecution({
+        workflow,
+        directInput: parsed.data.input,
+        variables: parsed.data.variables,
+        systemPrompt: parsed.data.system_prompt,
+        userPrompt: parsed.data.user_prompt,
+        sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
+        executionId,
+        triggerType: "manual_stream",
+        triggeredBy: user.email,
+        hooks: progressHooks
       });
 
       persistExecutionHistory({
@@ -1618,6 +1723,13 @@ export function createApp(
     }
 
     const executionId = crypto.randomUUID();
+    const progressHooks = createProgressTrackingHooks({
+      executionId,
+      workflow,
+      triggerType: "webhook_api",
+      triggeredBy: user.email,
+      requestInput: parsed.data
+    });
     const result = await runWorkflowExecution({
       workflow,
       webhookPayload: {
@@ -1632,7 +1744,8 @@ export function createApp(
       sessionId: parsed.data.session_id,
       executionId,
       triggerType: "webhook_api",
-      triggeredBy: user.email
+      triggeredBy: user.email,
+      hooks: progressHooks
     });
 
     persistExecutionHistory({
@@ -1704,6 +1817,24 @@ export function createApp(
     }
 
     try {
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "webhook_api_stream",
+        triggeredBy: user.email,
+        requestInput: parsed.data,
+        passthroughHooks: {
+          onNodeStart: (event) => {
+            sendSseEvent("node_start", event);
+          },
+          onNodeComplete: (event) => {
+            sendSseEvent("node_complete", event);
+          },
+          onLLMDelta: (event) => {
+            sendSseEvent("llm_delta", event);
+          }
+        }
+      });
       const result = await runWorkflowExecution({
         workflow,
         webhookPayload: {
@@ -1719,17 +1850,7 @@ export function createApp(
         executionId,
         triggerType: "webhook_api_stream",
         triggeredBy: user.email,
-        hooks: {
-          onNodeStart: (event) => {
-            sendSseEvent("node_start", event);
-          },
-          onNodeComplete: (event) => {
-            sendSseEvent("node_complete", event);
-          },
-          onLLMDelta: (event) => {
-            sendSseEvent("llm_delta", event);
-          }
-        }
+        hooks: progressHooks
       });
 
       persistExecutionHistory({
@@ -1995,6 +2116,14 @@ export function createApp(
         }
 
         const executionId = crypto.randomUUID();
+        const triggerType = isTestRoute ? "webhook_test" : "webhook";
+        const progressHooks = createProgressTrackingHooks({
+          executionId,
+          workflow: match.workflow,
+          triggerType,
+          triggeredBy: "webhook",
+          requestInput: parsedInput.body
+        });
         const result = await runWorkflowExecution({
           workflow: match.workflow,
           webhookPayload: {
@@ -2009,15 +2138,16 @@ export function createApp(
           userPrompt: parsedInput.userPrompt,
           sessionId: parsedInput.sessionId,
           executionId,
-          triggerType: isTestRoute ? "webhook_test" : "webhook",
-          triggeredBy: "webhook"
+          triggerType,
+          triggeredBy: "webhook",
+          hooks: progressHooks
         });
 
         persistExecutionHistory({
           executionId,
           workflow: match.workflow,
           result,
-          triggerType: isTestRoute ? "webhook_test" : "webhook",
+          triggerType,
           triggeredBy: "webhook",
           requestInput: parsedInput.body
         });

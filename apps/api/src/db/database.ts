@@ -829,7 +829,20 @@ export class SqliteStore {
           output_json,
           node_results_json,
           error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          workflow_id = excluded.workflow_id,
+          workflow_name = excluded.workflow_name,
+          status = excluded.status,
+          started_at = excluded.started_at,
+          completed_at = excluded.completed_at,
+          duration_ms = excluded.duration_ms,
+          trigger_type = excluded.trigger_type,
+          triggered_by = excluded.triggered_by,
+          input_json = excluded.input_json,
+          output_json = excluded.output_json,
+          node_results_json = excluded.node_results_json,
+          error = excluded.error`,
       [
         input.id,
         input.workflowId,

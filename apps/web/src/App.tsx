@@ -715,6 +715,7 @@ function StudioApp() {
   const activeAssistantMessageIdRef = useRef<string | null>(null);
   const logsResizeAbortRef = useRef<AbortController | null>(null);
   const latestDebugExecutionIdRef = useRef<string | null>(null);
+  const latestExecutionResultRef = useRef<WorkflowExecutionResult | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
 
@@ -847,6 +848,10 @@ function StudioApp() {
   }, [currentWorkflow.id]);
 
   useEffect(() => {
+    latestExecutionResultRef.current = executionResult;
+  }, [executionResult]);
+
+  useEffect(() => {
     if (isDebugMode) {
       return;
     }
@@ -878,20 +883,36 @@ function StudioApp() {
         }
 
         const latest = history.items[0];
-        if (!latest || latestDebugExecutionIdRef.current === latest.id) {
+        if (!latest) {
+          return;
+        }
+
+        const isInProgressExecutionStatus = (status: unknown) =>
+          status === "running" || status === "partial" || status === "waiting_approval";
+
+        const sameExecution = latestDebugExecutionIdRef.current === latest.id;
+        const isInProgressStatus = isInProgressExecutionStatus(latest.status);
+        const latestResult = latestExecutionResultRef.current;
+        const currentTrackedStatus =
+          latestResult?.executionId === latest.id ? latestResult.status : null;
+        const shouldRefreshSameExecution =
+          isInProgressStatus || isInProgressExecutionStatus(currentTrackedStatus);
+        if (sameExecution && !shouldRefreshSameExecution) {
           return;
         }
 
         // New external execution detected (e.g., REST client / webhook call).
         // Reset previous debug trace immediately before loading full details.
-        setExecutionResult(
-          createPartialExecutionResult(
-            latest.workflowId || currentWorkflow.id,
-            typeof latest.startedAt === "string" && latest.startedAt ? latest.startedAt : new Date().toISOString()
-          )
-        );
-        setLiveNodeStatuses({});
-        setLogsTab("logs");
+        if (!sameExecution) {
+          setExecutionResult(
+            createPartialExecutionResult(
+              latest.workflowId || currentWorkflow.id,
+              typeof latest.startedAt === "string" && latest.startedAt ? latest.startedAt : new Date().toISOString()
+            )
+          );
+          setLiveNodeStatuses({});
+          setLogsTab("logs");
+        }
 
         const detail = await fetchExecutionById(latest.id);
         if (cancelled) {
