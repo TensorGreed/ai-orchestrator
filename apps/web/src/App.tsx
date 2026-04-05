@@ -382,7 +382,31 @@ function rowsToWorkflowVariables(rows: WorkflowVariableRow[]): Record<string, st
   return result;
 }
 
+function decodeBufferLikeText(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type !== "Buffer" || !Array.isArray(record.data)) {
+    return null;
+  }
+  const bytes = record.data.filter((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255) as number[];
+  if (bytes.length !== record.data.length) {
+    return null;
+  }
+  try {
+    return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+  } catch {
+    return null;
+  }
+}
+
 function extractAssistantText(value: unknown): string {
+  const decodedRoot = decodeBufferLikeText(value);
+  if (decodedRoot !== null) {
+    return decodedRoot;
+  }
+
   if (typeof value === "string") {
     return value;
   }
@@ -391,6 +415,10 @@ function extractAssistantText(value: unknown): string {
     const record = value as Record<string, unknown>;
     const candidates = [record.result, record.answer, record.text, record.content];
     for (const candidate of candidates) {
+      const decoded = decodeBufferLikeText(candidate);
+      if (decoded !== null) {
+        return decoded;
+      }
       if (typeof candidate === "string" && candidate.trim()) {
         return candidate;
       }
@@ -406,6 +434,10 @@ function extractAssistantText(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function isPdfDataUrl(value: string): boolean {
+  return /^data:application\/pdf;base64,/i.test(value.trim());
 }
 
 function getNodeStatusMap(result: WorkflowExecutionResult | null) {
@@ -3145,7 +3177,15 @@ function StudioApp() {
                       className={entry.role === "user" ? "chat-bubble chat-bubble-user" : "chat-bubble chat-bubble-assistant"}
                     >
                       <div className="chat-bubble-label">{entry.role === "user" ? "You" : "Assistant"}</div>
-                      <div className="chat-bubble-text">{entry.text || (entry.status === "streaming" ? "..." : "")}</div>
+                      <div className="chat-bubble-text">
+                        {entry.role === "assistant" && entry.text && isPdfDataUrl(entry.text) ? (
+                          <a href={entry.text} download="workflow-output.pdf" target="_blank" rel="noreferrer">
+                            Download PDF
+                          </a>
+                        ) : (
+                          entry.text || (entry.status === "streaming" ? "..." : "")
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>

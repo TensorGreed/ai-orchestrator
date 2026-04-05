@@ -378,6 +378,185 @@ function getValueByPath(input: Record<string, unknown>, path: string): unknown {
   return current;
 }
 
+function normalizePdfFilename(value: string): string {
+  const fallback = "workflow-output.pdf";
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  const base = trimmed || fallback;
+  const sanitized = base
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim();
+  const withDefault = sanitized || fallback;
+  const withExtension = withDefault.toLowerCase().endsWith(".pdf") ? withDefault : `${withDefault}.pdf`;
+  return withExtension.slice(0, 120);
+}
+
+function decodeBufferLikeText(value: unknown): string | null {
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    if (record.type === "Buffer" && Array.isArray(record.data)) {
+      const bytes = record.data.filter((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255) as number[];
+      if (bytes.length === record.data.length) {
+        return Buffer.from(bytes).toString("utf8");
+      }
+    }
+  }
+
+  return null;
+}
+
+function toPdfSourceText(value: unknown): string {
+  const decodedBufferText = decodeBufferLikeText(value);
+  if (decodedBufferText !== null) {
+    return decodedBufferText;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function sanitizePdfAscii(value: string): string {
+  const punctuationMap: Array<[RegExp, string]> = [
+    [/[\u2018\u2019\u201A\u201B\u2032]/g, "'"],
+    [/[\u201C\u201D\u201E\u201F\u2033]/g, "\""],
+    [/[\u2010\u2011\u2012\u2013\u2014\u2015]/g, "-"],
+    [/\u2026/g, "..."],
+    [/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " "],
+    [/[\u2022\u2043\u00B7]/g, "*"],
+    [/\u00D7/g, "x"],
+    [/\u2192/g, "->"],
+    [/\u2190/g, "<-"],
+    [/\u2264/g, "<="],
+    [/\u2265/g, ">="]
+  ];
+
+  let normalized = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  for (const [pattern, replacement] of punctuationMap) {
+    normalized = normalized.replace(pattern, replacement);
+  }
+
+  return normalized.replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "?");
+}
+
+function escapePdfTextLiteral(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+}
+
+function wrapPdfLines(text: string, maxLineLength = 92): string[] {
+  const lines: string[] = [];
+  const sourceLines = text.split("\n");
+
+  for (const sourceLine of sourceLines) {
+    let remaining = sourceLine;
+    if (remaining.length === 0) {
+      lines.push("");
+      continue;
+    }
+
+    while (remaining.length > maxLineLength) {
+      lines.push(remaining.slice(0, maxLineLength));
+      remaining = remaining.slice(maxLineLength);
+    }
+    lines.push(remaining);
+  }
+
+  return lines.length ? lines : [""];
+}
+
+function createSimplePdfBuffer(text: string): Buffer {
+  const normalized = sanitizePdfAscii(text);
+  const wrappedLines = wrapPdfLines(normalized);
+  const linesPerPage = 48;
+  const pages: string[][] = [];
+
+  for (let index = 0; index < wrappedLines.length; index += linesPerPage) {
+    pages.push(wrappedLines.slice(index, index + linesPerPage));
+  }
+  if (!pages.length) {
+    pages.push([""]);
+  }
+
+  const pageCount = pages.length;
+  const firstPageObjectId = 3;
+  const fontObjectId = firstPageObjectId + pageCount * 2;
+  const objectBodies: string[] = new Array(fontObjectId);
+
+  objectBodies[0] = "<< /Type /Catalog /Pages 2 0 R >>";
+
+  const pageKids = pages
+    .map((_, pageIndex) => `${firstPageObjectId + pageIndex * 2} 0 R`)
+    .join(" ");
+  objectBodies[1] = `<< /Type /Pages /Kids [ ${pageKids} ] /Count ${pageCount} >>`;
+
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    const pageObjectId = firstPageObjectId + pageIndex * 2;
+    const contentObjectId = pageObjectId + 1;
+    const pageLines = pages[pageIndex] ?? [""];
+    const streamLines = [
+      "BT",
+      "/F1 11 Tf",
+      "50 760 Td",
+      "14 TL"
+    ];
+
+    for (let lineIndex = 0; lineIndex < pageLines.length; lineIndex += 1) {
+      const escaped = escapePdfTextLiteral(pageLines[lineIndex] ?? "");
+      streamLines.push(`(${escaped}) Tj`);
+      if (lineIndex < pageLines.length - 1) {
+        streamLines.push("T*");
+      }
+    }
+    streamLines.push("ET");
+
+    const stream = streamLines.join("\n");
+    const streamLength = Buffer.byteLength(stream, "ascii");
+
+    objectBodies[pageObjectId - 1] =
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`;
+    objectBodies[contentObjectId - 1] =
+      `<< /Length ${streamLength} >>\nstream\n${stream}\nendstream`;
+  }
+
+  objectBodies[fontObjectId - 1] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+
+  let pdf = "%PDF-1.4\n";
+  const offsets: number[] = [0];
+  for (let objectId = 1; objectId <= objectBodies.length; objectId += 1) {
+    offsets[objectId] = Buffer.byteLength(pdf, "ascii");
+    pdf += `${objectId} 0 obj\n${objectBodies[objectId - 1]}\nendobj\n`;
+  }
+
+  const startXref = Buffer.byteLength(pdf, "ascii");
+  pdf += `xref\n0 ${objectBodies.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (let objectId = 1; objectId <= objectBodies.length; objectId += 1) {
+    const offset = String(offsets[objectId]).padStart(10, "0");
+    pdf += `${offset} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objectBodies.length + 1} /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF`;
+
+  return Buffer.from(pdf, "ascii");
+}
+
 function extractJsonFromText(text: string): string {
   const trimmed = text.trim();
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -1714,6 +1893,55 @@ async function executeNode(
     case "human_approval": {
       return {
         waiting: true
+      };
+    }
+
+    case "pdf_output": {
+      const inputKey = typeof config.inputKey === "string" && config.inputKey.trim() ? config.inputKey.trim() : "result";
+      const textTemplate = typeof config.textTemplate === "string" ? config.textTemplate : "";
+      const filenameTemplate =
+        typeof config.filenameTemplate === "string" && config.filenameTemplate.trim()
+          ? config.filenameTemplate
+          : "workflow-output-{{session_id}}.pdf";
+      const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "pdf";
+
+      const sourceValue = getValueByPath(templateData, inputKey);
+      let sourceText = textTemplate.trim()
+        ? renderTemplate(textTemplate, templateData)
+        : toPdfSourceText(
+            sourceValue ??
+              templateData[inputKey] ??
+              templateData.result ??
+              templateData.answer ??
+              templateData.text ??
+              templateData.user_prompt ??
+              templateData
+          );
+
+      const maxSourceLength = 50_000;
+      if (sourceText.length > maxSourceLength) {
+        sourceText =
+          `${sourceText.slice(0, maxSourceLength)}\n\n[truncated: content exceeded ${maxSourceLength} characters]`;
+      }
+
+      const renderedFilename = renderTemplate(filenameTemplate, templateData);
+      const filename = normalizePdfFilename(renderedFilename);
+      const pdfBuffer = createSimplePdfBuffer(sourceText);
+      const base64 = pdfBuffer.toString("base64");
+      const downloadUrl = `data:application/pdf;base64,${base64}`;
+
+      const payload = {
+        filename,
+        mimeType: "application/pdf",
+        sizeBytes: pdfBuffer.byteLength,
+        downloadUrl,
+        base64
+      };
+
+      return {
+        [outputKey]: payload,
+        pdf: payload,
+        result: downloadUrl
       };
     }
 

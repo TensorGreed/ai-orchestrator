@@ -560,6 +560,27 @@ export const nodeDefinitions: NodeDefinition[] = [
     sampleConfig: {}
   },
   {
+    type: "pdf_output",
+    label: "PDF Output",
+    category: "Output",
+    description: "Generates a downloadable PDF link from upstream content.",
+    configSchema: {
+      type: "object",
+      properties: {
+        inputKey: { type: "string" },
+        textTemplate: { type: "string" },
+        filenameTemplate: { type: "string" },
+        outputKey: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      inputKey: "answer",
+      textTemplate: "",
+      filenameTemplate: "workflow-output-{{session_id}}.pdf",
+      outputKey: "pdf"
+    }
+  },
+  {
     type: "output",
     label: "Output",
     category: "Output",

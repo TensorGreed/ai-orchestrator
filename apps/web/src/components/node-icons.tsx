@@ -311,6 +311,7 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   wait_node: "wait",
   human_approval: "human",
   output: "output",
+  pdf_output: "output",
   webhook_response: "response"
 };
 

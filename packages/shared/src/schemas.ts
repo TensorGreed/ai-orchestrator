@@ -47,6 +47,7 @@ export const workflowNodeSchema = z.object({
     "switch_node",
     "try_catch",
     "webhook_response",
+    "pdf_output",
     "output"
   ]),
   name: z.string().min(1),

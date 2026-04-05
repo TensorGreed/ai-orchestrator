@@ -635,6 +635,152 @@ describe("workflow engine", () => {
     expect(parserOutput.retries).toBe(0);
   });
 
+  it("pdf_output: generates downloadable PDF data URL", async () => {
+    const workflow: Workflow = {
+      id: "wf-pdf-output",
+      name: "PDF output flow",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "Generate me as PDF." } },
+        {
+          id: "n2",
+          type: "pdf_output",
+          name: "PDF Output",
+          position: { x: 200, y: 0 },
+          config: {
+            inputKey: "text",
+            filenameTemplate: "summary-{{session_id}}.pdf",
+            outputKey: "pdf"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 420, y: 0 }, config: { responseTemplate: "{{pdf.downloadUrl}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        sessionId: "session-77"
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const pdfOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    const pdfPayload = (pdfOutput.pdf ?? null) as Record<string, unknown> | null;
+    expect(pdfPayload).toBeTruthy();
+    expect(typeof pdfPayload?.downloadUrl).toBe("string");
+    expect(String(pdfPayload?.downloadUrl ?? "")).toMatch(/^data:application\/pdf;base64,/);
+    expect(String(pdfPayload?.filename ?? "")).toBe("summary-session-77.pdf");
+    expect(Number(pdfPayload?.sizeBytes ?? 0)).toBeGreaterThan(100);
+    expect(typeof result.output).toBe("object");
+    expect(
+      String(((result.output as Record<string, unknown>).result as string) ?? "")
+    ).toMatch(/^data:application\/pdf;base64,/);
+  });
+
+  it("pdf_output: decodes buffer-like upstream values into readable PDF text", async () => {
+    const workflow: Workflow = {
+      id: "wf-pdf-buffer-input",
+      name: "PDF buffer input flow",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "pdf_output",
+          name: "PDF Output",
+          position: { x: 0, y: 0 },
+          config: {
+            inputKey: "blob",
+            filenameTemplate: "buffer-test.pdf",
+            outputKey: "pdf"
+          }
+        },
+        { id: "n2", type: "output", name: "Output", position: { x: 200, y: 0 }, config: { responseTemplate: "{{pdf.downloadUrl}}" } }
+      ],
+      edges: [{ id: "e1", source: "n1", target: "n2" }]
+    };
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        input: {
+          blob: {
+            type: "Buffer",
+            data: Array.from(Buffer.from("buffer text for pdf", "utf8"))
+          }
+        }
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const pdfOutput = result.nodeResults.find((entry) => entry.nodeId === "n1")?.output as Record<string, unknown>;
+    const pdfPayload = (pdfOutput.pdf ?? null) as Record<string, unknown> | null;
+    expect(pdfPayload).toBeTruthy();
+    const encoded = String(pdfPayload?.base64 ?? "");
+    expect(encoded.length).toBeGreaterThan(0);
+    const pdfRaw = Buffer.from(encoded, "base64").toString("latin1");
+    expect(pdfRaw).toContain("buffer text for pdf");
+    expect(pdfRaw).not.toContain(`"type":"Buffer"`);
+  });
+
+  it("pdf_output: normalizes smart punctuation instead of rendering question marks", async () => {
+    const workflow: Workflow = {
+      id: "wf-pdf-smart-punctuation",
+      name: "PDF punctuation flow",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "I can’t wait — really…" } },
+        { id: "n2", type: "pdf_output", name: "PDF", position: { x: 220, y: 0 }, config: { inputKey: "text", outputKey: "pdf" } },
+        { id: "n3", type: "output", name: "Output", position: { x: 420, y: 0 }, config: { responseTemplate: "{{pdf.downloadUrl}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const pdfOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    const pdfPayload = (pdfOutput.pdf ?? null) as Record<string, unknown> | null;
+    const encoded = String(pdfPayload?.base64 ?? "");
+    expect(encoded.length).toBeGreaterThan(0);
+    const pdfRaw = Buffer.from(encoded, "base64").toString("latin1");
+    expect(pdfRaw).toContain("I can't wait - really...");
+    expect(pdfRaw).not.toContain("I can?t wait ? really?");
+  });
+
   it("if_node: routes to true branch when condition is truthy", async () => {
     const workflow: Workflow = {
       id: "wf-if-true",

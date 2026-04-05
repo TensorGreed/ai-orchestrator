@@ -2720,6 +2720,38 @@ export function NodeConfigModal({
             />
           </>
         );
+      case "pdf_output":
+        return (
+          <>
+            <TextField
+              label="Input Key"
+              value={toStringValue(config.inputKey, "result")}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+              placeholder="result"
+            />
+            <TextAreaField
+              label="Text Template (optional)"
+              value={toStringValue(config.textTemplate, "")}
+              onChange={(next) => setConfig((current) => ({ ...current, textTemplate: next }))}
+              rows={4}
+            />
+            <TextField
+              label="Filename Template"
+              value={toStringValue(config.filenameTemplate, "workflow-output-{{session_id}}.pdf")}
+              onChange={(next) => setConfig((current) => ({ ...current, filenameTemplate: next }))}
+              placeholder="workflow-output-{{session_id}}.pdf"
+            />
+            <TextField
+              label="Output Key"
+              value={toStringValue(config.outputKey, "pdf")}
+              onChange={(next) => setConfig((current) => ({ ...current, outputKey: next }))}
+              placeholder="pdf"
+            />
+            <div className="cfg-tip">
+              Generates a PDF and returns a downloadable data URL in the node output.
+            </div>
+          </>
+        );
       default:
         return (
           <div className="cfg-tip">Structured fields are not defined for this node yet. Add parameters in its dedicated editor in a future update.</div>

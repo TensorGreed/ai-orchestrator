@@ -27,7 +27,31 @@ function createWidgetSessionId(workflowId: string): string {
   return `widget-${workflowId}-${Date.now().toString(36)}`;
 }
 
+function decodeBufferLikeText(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type !== "Buffer" || !Array.isArray(record.data)) {
+    return null;
+  }
+  const bytes = record.data.filter((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255) as number[];
+  if (bytes.length !== record.data.length) {
+    return null;
+  }
+  try {
+    return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+  } catch {
+    return null;
+  }
+}
+
 function extractAssistantText(value: unknown): string {
+  const decodedRoot = decodeBufferLikeText(value);
+  if (decodedRoot !== null) {
+    return decodedRoot;
+  }
+
   if (typeof value === "string") {
     return value;
   }
@@ -35,8 +59,14 @@ function extractAssistantText(value: unknown): string {
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
     const candidate = [record.result, record.answer, record.text, record.content].find(
-      (entry) => typeof entry === "string" && String(entry).trim()
+      (entry) =>
+        (typeof entry === "string" && String(entry).trim()) ||
+        decodeBufferLikeText(entry) !== null
     );
+    const decoded = decodeBufferLikeText(candidate);
+    if (decoded !== null) {
+      return decoded;
+    }
     if (typeof candidate === "string") {
       return candidate;
     }
@@ -51,6 +81,10 @@ function extractAssistantText(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function isPdfDataUrl(value: string): boolean {
+  return /^data:application\/pdf;base64,/i.test(value.trim());
 }
 
 export function ChatWidget({
@@ -254,7 +288,13 @@ export function ChatWidget({
                   color: message.role === "user" ? palette.userText : palette.textColor
                 }}
               >
-                {message.text}
+                {message.role === "assistant" && message.text && isPdfDataUrl(message.text) ? (
+                  <a href={message.text} download="workflow-output.pdf" target="_blank" rel="noreferrer">
+                    Download PDF
+                  </a>
+                ) : (
+                  message.text
+                )}
               </div>
             ))}
           </div>

@@ -390,23 +390,62 @@
           return `${normalizeBase(base)}${normalizedPath}`;
         }
 
+        function decodeBufferLikeText(value) {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+          if (value.type !== "Buffer" || !Array.isArray(value.data)) return null;
+          const bytes = value.data;
+          if (!bytes.every((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255)) return null;
+          try {
+            return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+          } catch {
+            return null;
+          }
+        }
+
         function extractAssistantText(payload) {
+          const rootDecoded = decodeBufferLikeText(payload);
+          if (typeof rootDecoded === "string") return rootDecoded;
           if (typeof payload === "string") return payload;
           if (payload && typeof payload === "object") {
             const output = payload.output;
+            const decodedOutput = decodeBufferLikeText(output);
+            if (typeof decodedOutput === "string") return decodedOutput;
             if (typeof output === "string") return output;
             if (output && typeof output === "object") {
               const candidates = [output.result, output.answer, output.text, output.content];
               for (const c of candidates) {
+                const decoded = decodeBufferLikeText(c);
+                if (typeof decoded === "string") return decoded;
                 if (typeof c === "string" && c.trim()) return c;
               }
             }
             const candidates = [payload.result, payload.answer, payload.text, payload.content];
             for (const c of candidates) {
+              const decoded = decodeBufferLikeText(c);
+              if (typeof decoded === "string") return decoded;
               if (typeof c === "string" && c.trim()) return c;
             }
           }
           return toJson(payload);
+        }
+
+        function isPdfDataUrl(value) {
+          return typeof value === "string" && /^data:application\/pdf;base64,/i.test(value.trim());
+        }
+
+        function renderAssistantContent(messageEl, text) {
+          if (isPdfDataUrl(text)) {
+            messageEl.innerHTML = "";
+            const link = document.createElement("a");
+            link.href = text;
+            link.download = "workflow-output.pdf";
+            link.target = "_blank";
+            link.rel = "noreferrer";
+            link.textContent = "Download PDF";
+            messageEl.appendChild(link);
+            return;
+          }
+          messageEl.textContent = text || "";
         }
 
         async function login() {
@@ -542,7 +581,7 @@
               throw new Error(typeof body === "object" && body && body.error ? body.error : `Webhook call failed (${response.status})`);
             }
 
-            assistant.textContent = extractAssistantText(body);
+            renderAssistantContent(assistant, extractAssistantText(body));
             resultBoxEl.textContent = toJson(body);
             setStatus("Webhook call complete.", "ok");
 
@@ -564,7 +603,7 @@
             }
           } catch (error) {
             const msg = error instanceof Error ? error.message : "Request failed.";
-            assistant.textContent = `Error: ${msg}`;
+            renderAssistantContent(assistant, `Error: ${msg}`);
             setStatus(msg, "err");
           } finally {
             busy = false;

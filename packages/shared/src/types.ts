@@ -40,6 +40,7 @@ export type WorkflowNodeType =
   | "switch_node"
   | "try_catch"
   | "webhook_response"
+  | "pdf_output"
   | "output";
 
 export interface WorkflowNodePosition {

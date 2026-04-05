@@ -647,6 +647,48 @@ describe("secured webhook execution", () => {
     });
     expect(conflicting.statusCode).toBe(409);
   });
+
+  it("accepts buffer webhook payloads containing JSON and resolves user_prompt", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-buffer-webhook@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const workflow = createWebhookWorkflow("wf-webhook-buffer-payload", {
+      authMode: "none"
+    });
+
+    const saveResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: workflow
+    });
+    expect(saveResponse.statusCode).toBe(200);
+
+    const payloadBuffer = Buffer.from(
+      JSON.stringify({
+        user_prompt: "buffer payload prompt"
+      }),
+      "utf8"
+    );
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/webhook/secure-wf-webhook-buffer-payload",
+      headers: {
+        "content-type": "application/json"
+      },
+      payload: payloadBuffer
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<{ output?: { result?: string } }>().output?.result).toBe("buffer payload prompt");
+  });
 });
 
 describe("execution resilience and lifecycle", () => {

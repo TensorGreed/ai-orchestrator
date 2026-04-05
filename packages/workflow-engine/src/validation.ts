@@ -662,6 +662,40 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
+    if (node.type === "pdf_output") {
+      if (config.inputKey !== undefined && (typeof config.inputKey !== "string" || !config.inputKey.trim())) {
+        issues.push({
+          code: "invalid_pdf_output_input_key",
+          message: "PDF Output node inputKey must be a non-empty string when provided.",
+          nodeId: node.id
+        });
+      }
+      if (config.textTemplate !== undefined && typeof config.textTemplate !== "string") {
+        issues.push({
+          code: "invalid_pdf_output_text_template",
+          message: "PDF Output node textTemplate must be a string when provided.",
+          nodeId: node.id
+        });
+      }
+      if (
+        config.filenameTemplate !== undefined &&
+        (typeof config.filenameTemplate !== "string" || !config.filenameTemplate.trim())
+      ) {
+        issues.push({
+          code: "invalid_pdf_output_filename_template",
+          message: "PDF Output node filenameTemplate must be a non-empty string when provided.",
+          nodeId: node.id
+        });
+      }
+      if (config.outputKey !== undefined && (typeof config.outputKey !== "string" || !config.outputKey.trim())) {
+        issues.push({
+          code: "invalid_pdf_output_output_key",
+          message: "PDF Output node outputKey must be a non-empty string when provided.",
+          nodeId: node.id
+        });
+      }
+    }
+
     if (node.type === "if_node") {
       if (typeof config.condition !== "string" || !config.condition.trim()) {
         issues.push({

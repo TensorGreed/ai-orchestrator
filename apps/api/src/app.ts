@@ -488,6 +488,24 @@ function getRawRequestBody(request: { rawBody?: unknown; body: unknown }): strin
   }
 }
 
+function decodeBufferLikePayload(payload: unknown): string | null {
+  if (Buffer.isBuffer(payload)) {
+    return payload.toString("utf8");
+  }
+
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const record = payload as Record<string, unknown>;
+    if (record.type === "Buffer" && Array.isArray(record.data)) {
+      const bytes = record.data.filter((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255) as number[];
+      if (bytes.length === record.data.length) {
+        return Buffer.from(bytes).toString("utf8");
+      }
+    }
+  }
+
+  return null;
+}
+
 async function verifyWebhookRequestAuth(input: {
   security: NormalizedWebhookSecurityConfig;
   headers: Record<string, unknown>;
@@ -746,12 +764,16 @@ export function createApp(
 
   const parseWebhookRunInput = (payload: unknown) => {
     let body = asRecord(payload);
-    if (typeof payload === "string" && payload.trim()) {
+    const bufferTextPayload = decodeBufferLikePayload(payload);
+    const maybeTextPayload = typeof payload === "string" ? payload : bufferTextPayload ?? "";
+    if (maybeTextPayload.trim()) {
       try {
-        const parsed = JSON.parse(payload);
+        const parsed = JSON.parse(maybeTextPayload);
         body = asRecord(parsed);
       } catch {
-        body = {};
+        if (typeof payload === "string" || bufferTextPayload !== null) {
+          body = {};
+        }
       }
     }
     const userPromptRaw =
