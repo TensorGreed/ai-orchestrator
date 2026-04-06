@@ -124,8 +124,8 @@ interface NodeRuntimeContext {
   }) => Promise<void> | void;
 }
 
-type AgentAttachmentHandle = "chat_model" | "memory" | "tool";
-const AGENT_ATTACHMENT_HANDLES = new Set<AgentAttachmentHandle>(["chat_model", "memory", "tool"]);
+type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
+const AGENT_ATTACHMENT_HANDLES = new Set<AgentAttachmentHandle>(["chat_model", "memory", "tool", "worker"]);
 const ALL_MCP_TOOLS_SENTINEL = "__all__";
 
 function nowIso() {
@@ -1488,7 +1488,8 @@ async function executeNode(
       };
     }
 
-    case "agent_orchestrator": {
+    case "agent_orchestrator":
+    case "supervisor_node": {
       const attachedByHandle = context.attachmentsBySource.get(node.id);
       const getAttachedNodes = (handle: AgentAttachmentHandle) => {
         const ids = attachedByHandle?.get(handle) ?? [];
@@ -1630,6 +1631,34 @@ async function executeNode(
         });
       }
 
+      const attachedWorkerNodes = getAttachedNodes("worker");
+      const workerTools = attachedWorkerNodes.map(worker => {
+        const workerConfig = toRecord(worker.config);
+        const descriptionHint = typeof workerConfig.systemPromptTemplate === "string" ? workerConfig.systemPromptTemplate.slice(0, 100) : worker.name;
+        return {
+          serverId: `worker-${worker.id}`,
+          name: `delegate_to_${worker.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+          description: `Delegate task to ${worker.name}. Hint: ${descriptionHint}`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              task_prompt: { type: "string", description: "The explicit prompt, context, or task instructions to give this worker." }
+            },
+            required: ["task_prompt"]
+          }
+        };
+      });
+
+      const allToolsForModel = [
+        ...resolvedTools.resolved.map((entry) => ({
+          serverId: entry.serverId,
+          name: entry.exposedName,
+          description: entry.definition.description,
+          inputSchema: entry.definition.inputSchema
+        })),
+        ...workerTools
+      ];
+
       const modelRunStarted = Date.now();
       const modelRunStartedAt = nowIso();
       const agentState = await dependencies.agentRuntime.run(
@@ -1639,18 +1668,34 @@ async function executeNode(
           userPrompt,
           maxIterations,
           toolCallingEnabled,
-          tools: resolvedTools.resolved.map((entry) => ({
-            serverId: entry.serverId,
-            name: entry.exposedName,
-            description: entry.definition.description,
-            inputSchema: entry.definition.inputSchema
-          })),
+          tools: allToolsForModel,
           sessionId,
           memory
         },
         {
-          tools: resolvedTools.tools,
-          invokeTool: resolvedTools.invokeByExposedName
+          tools: [
+            ...resolvedTools.tools,
+            ...workerTools.map(wt => ({ name: wt.name, description: wt.description, inputSchema: wt.inputSchema }))
+          ],
+          invokeTool: async (toolName, args) => {
+             const matchingWorker = workerTools.find(wt => wt.name === toolName);
+             if (matchingWorker) {
+                const workerId = matchingWorker.serverId.replace("worker-", "");
+                const workerNode = attachedWorkerNodes.find(wn => wn.id === workerId);
+                if (!workerNode) throw new Error(`Worker node ${workerId} not found.`);
+                
+                const workerContext: NodeRuntimeContext = {
+                   ...context,
+                   globals: { ...context.globals, user_prompt: String(args.task_prompt ?? "") },
+                   parentOutputs: { ...context.parentOutputs },
+                   callStack: [...context.callStack, node.id]
+                };
+                
+                const workerResult = await executeNode(workerNode, workerContext, dependencies);
+                return workerResult;
+             }
+             return resolvedTools.invokeByExposedName(toolName, args);
+          }
         },
         {
           providerRegistry: dependencies.providerRegistry,

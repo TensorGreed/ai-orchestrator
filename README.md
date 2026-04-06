@@ -14,11 +14,12 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 - MCP adapter model with:
   - `http_mcp` (real remote MCP endpoint over HTTP streamable)
   - `mock-mcp` (local demo tools)
-- Agent Orchestrator node with iterative tool-calling loop (zero/one/many tool calls)
-- Agent port attachments:
+- Agent Orchestrator & Supervisor Nodes with iterative tool-calling loop and Swarm delegation
+- Agent port attachments (auxiliary edges):
   - `chat_model` -> attach `LLM Call` node
   - `memory` -> attach `Simple Memory` node
   - `tool` -> attach one or more `MCP Tool` nodes
+  - `worker` -> attach worker `Agent Orchestrator` or `Supervisor` nodes (applies to Supervisor nodes only)
 - RAG path with connector source + in-memory retriever/vector similarity
 - Connector SDK + sample connectors (`google-drive`, `sql-db`, `nosql-db`)
 - Webhook execution endpoint (`system_prompt` + `user_prompt` payload)
@@ -317,9 +318,9 @@ Replay/idempotency behavior:
 
 The runtime supports zero, one, or multiple tool calls per iteration.
 
-## Agent Port Attachments (Chat Model / Memory / Tool)
+## Swarm Multi-Agent & Port Attachments
 
-The AI Agent node supports dedicated attachment ports. These are auxiliary edges and are not part of linear DAG execution.
+The Agent Orchestrator and Supervisor Nodes support dedicated attachment ports. These are auxiliary edges and are not part of linear DAG execution.
 
 - `chat_model` port:
   - attach an `LLM Call` node
@@ -330,8 +331,16 @@ The AI Agent node supports dedicated attachment ports. These are auxiliary edges
 - `tool` port:
   - attach one or more `MCP Tool` nodes
   - attached tool configs are converted into available MCP tools for the agent loop
+- `worker` port (Supervisor Node only):
+  - attach worker `Agent Orchestrator` or `Supervisor` nodes
+  - connected workers are dynamically exposed as tool calls to the parent Supervisor, allowing it to delegate tasks downstream recursively for Swarm coordination.
 
 Attachment-only helper nodes are marked as skipped in execution traces because they are consumed by the agent runtime rather than executed as direct steps.
+
+## Node Input Mapping (Data Passing)
+
+Nodes can dynamically read outputs from previous nodes in the DAG layout. 
+In a node's configuration, you can use handlebars-style templates or dedicated mapping blocks to pass `results.nodeId.someKey` to dynamically inject an upstream agent's output into a downstream agent's prompt or a tool's parameters.
 
 ## MCP Node Setup (real endpoint)
 

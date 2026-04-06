@@ -10,7 +10,7 @@ function toTitle(nodeType: string): string {
 }
 
 function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "agent" {
-  if (nodeType === "agent_orchestrator") {
+  if (nodeType === "agent_orchestrator" || nodeType === "supervisor_node") {
     return "agent";
   }
 
@@ -85,7 +85,7 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
                 type="source"
                 position={Position.Bottom}
                 className="wf-handle wf-handle-diamond"
-                style={{ left: "24%" }}
+                style={{ left: data.nodeType === "supervisor_node" ? "16%" : "24%" }}
               />
             </div>
             <div className="wf-agent-port">
@@ -95,7 +95,7 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
                 type="source"
                 position={Position.Bottom}
                 className="wf-handle wf-handle-diamond"
-                style={{ left: "52%" }}
+                style={{ left: data.nodeType === "supervisor_node" ? "38%" : "52%" }}
               />
             </div>
             <div className="wf-agent-port">
@@ -105,10 +105,23 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
                 type="source"
                 position={Position.Bottom}
                 className="wf-handle wf-handle-diamond"
-                style={{ left: "80%" }}
+                style={{ left: data.nodeType === "supervisor_node" ? "62%" : "80%" }}
               />
-              <span className="wf-agent-plus">+</span>
+              {data.nodeType !== "supervisor_node" && <span className="wf-agent-plus">+</span>}
             </div>
+            {data.nodeType === "supervisor_node" && (
+              <div className="wf-agent-port">
+                <span>Worker</span>
+                <Handle
+                  id="worker"
+                  type="source"
+                  position={Position.Bottom}
+                  className="wf-handle wf-handle-diamond"
+                  style={{ left: "86%" }}
+                />
+                <span className="wf-agent-plus">+</span>
+              </div>
+            )}
           </div>
         </>
       ) : variant === "resource" ? (

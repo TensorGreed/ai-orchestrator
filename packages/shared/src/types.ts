@@ -26,6 +26,7 @@ export type WorkflowNodeType =
   | "prompt_template"
   | "llm_call"
   | "agent_orchestrator"
+  | "supervisor_node"
   | "local_memory"
   | "mcp_tool"
   | "rag_retrieve"

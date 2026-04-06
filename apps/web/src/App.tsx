@@ -98,7 +98,7 @@ const statusColors: Record<string, string> = {
   pending: "#5b7bd8",
   waiting_approval: "#a154f2"
 };
-const auxiliaryHandles = new Set(["chat_model", "memory", "tool"]);
+const auxiliaryHandles = new Set(["chat_model", "memory", "tool", "worker"]);
 const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
 const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
 const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
@@ -2283,10 +2283,11 @@ function StudioApp() {
       const target = connection.target;
       const sourceNode = nodes.find((node) => node.id === source);
       const targetNode = nodes.find((node) => node.id === target);
-      const expectedTargetType: Record<string, EditorNodeData["nodeType"]> = {
+      const expectedTargetType: Record<string, EditorNodeData["nodeType"] | EditorNodeData["nodeType"][]> = {
         chat_model: "llm_call",
         memory: "local_memory",
-        tool: "mcp_tool"
+        tool: "mcp_tool",
+        worker: ["agent_orchestrator", "supervisor_node"]
       };
       const expectedHandleByTargetType: Partial<Record<EditorNodeData["nodeType"], string>> = {
         llm_call: "chat_model",
@@ -2295,14 +2296,16 @@ function StudioApp() {
       };
 
       let sourceHandle = connection.sourceHandle ?? "";
-      if (sourceNode?.data.nodeType === "agent_orchestrator" && !sourceHandle && targetNode) {
+      if ((sourceNode?.data.nodeType === "agent_orchestrator" || sourceNode?.data.nodeType === "supervisor_node") && !sourceHandle && targetNode) {
         const inferred = expectedHandleByTargetType[targetNode.data.nodeType];
         if (inferred) {
           sourceHandle = inferred;
+        } else if (targetNode.data.nodeType === "agent_orchestrator" || targetNode.data.nodeType === "supervisor_node") {
+          sourceHandle = "worker";
         }
       }
 
-      if (targetNode?.data.nodeType === "agent_orchestrator" && sourceNode) {
+      if ((targetNode?.data.nodeType === "agent_orchestrator" || targetNode?.data.nodeType === "supervisor_node") && sourceNode) {
         const requiredHandle = expectedHandleByTargetType[sourceNode.data.nodeType];
         if (requiredHandle) {
           setError(
@@ -2315,15 +2318,21 @@ function StudioApp() {
       const isAgentAttachmentHandle = auxiliaryHandles.has(sourceHandle);
 
       if (isAgentAttachmentHandle) {
-        if (sourceNode?.data.nodeType !== "agent_orchestrator") {
-          setError("chat_model/memory/tool handles can only be used from an Agent Orchestrator node.");
+        if (sourceNode?.data.nodeType !== "agent_orchestrator" && sourceNode?.data.nodeType !== "supervisor_node") {
+          setError("chat_model/memory/tool/worker handles can only be used from an Agent Orchestrator or Supervisor node.");
           return;
         }
 
         const requiredType = expectedTargetType[sourceHandle];
-        if (requiredType && targetNode?.data.nodeType !== requiredType) {
-          setError(`Invalid attachment. '${sourceHandle}' must connect to a '${requiredType}' node.`);
-          return;
+        if (requiredType) {
+          const typeMatches = Array.isArray(requiredType) 
+            ? requiredType.includes(targetNode?.data.nodeType as any)
+            : targetNode?.data.nodeType === requiredType;
+            
+          if (!typeMatches) {
+            setError(`Invalid attachment. '${sourceHandle}' must connect to a '${Array.isArray(requiredType) ? requiredType.join(" or ") : requiredType}' node.`);
+            return;
+          }
         }
       }
 

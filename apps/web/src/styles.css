@@ -1,25 +1,25 @@
-@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500;600;700&display=swap");
 
 :root {
-  --app-bg: #f5f2eb;
+  --app-bg: #f8fafc;
   --panel: #ffffff;
-  --panel-border: #ddd4c6;
-  --text: #1d2738;
-  --muted: #66758a;
-  --accent: #d0693c;
-  --accent-dark: #b9562d;
-  --accent-soft: #fff0e8;
-  --accent-line: #f1c9b5;
+  --panel-border: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #2563eb;
+  --accent-dark: #1d4ed8;
+  --accent-soft: #eff6ff;
+  --accent-line: #bfdbfe;
   --node-bg: #ffffff;
-  --node-border: #d9d0c2;
-  --shadow: 0 14px 32px rgba(66, 47, 32, 0.12);
-  --run-success: #1f9a68;
-  --run-success-ring: rgba(31, 154, 104, 0.24);
-  --run-active: #d0693c;
-  --run-active-ring-soft: rgba(208, 105, 60, 0.2);
-  --run-active-ring-strong: rgba(208, 105, 60, 0.32);
-  --run-active-glow-soft: rgba(208, 105, 60, 0.24);
-  --run-active-glow-strong: rgba(208, 105, 60, 0.36);
+  --node-border: #cbd5e1;
+  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --run-success: #059669;
+  --run-success-ring: rgba(5, 150, 105, 0.24);
+  --run-active: #2563eb;
+  --run-active-ring-soft: rgba(37, 99, 235, 0.2);
+  --run-active-ring-strong: rgba(37, 99, 235, 0.32);
+  --run-active-glow-soft: rgba(37, 99, 235, 0.24);
+  --run-active-glow-strong: rgba(37, 99, 235, 0.36);
 }
 
 * {
@@ -33,7 +33,7 @@ body,
   width: 100%;
   height: 100dvh;
   min-height: 100dvh;
-  font-family: "Plus Jakarta Sans", "Segoe UI", sans-serif;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   color: var(--text);
   background: var(--app-bg);
   overflow: hidden;
@@ -127,7 +127,7 @@ select {
 
 .app-rail {
   border-right: 1px solid var(--panel-border);
-  background: linear-gradient(180deg, #fcfaf7 0%, #f7f1e8 100%);
+  background: var(--panel);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -166,7 +166,7 @@ select {
 }
 
 .top-header {
-  background: linear-gradient(120deg, #fffdfa 0%, #fff5ec 100%);
+  background: var(--panel);
   border-bottom: 1px solid var(--panel-border);
   display: grid;
   grid-template-columns: 1fr auto auto;
@@ -261,32 +261,32 @@ select {
   gap: 5px;
   flex-wrap: nowrap;
   padding: 3px;
-  background: #fff5ee;
-  border: 1px solid #efd8ca;
-  border-radius: 12px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
 }
 
 .tab {
   border: none;
-  border-radius: 10px;
+  border-radius: 6px;
   padding: 6px 11px;
   font-size: 0.82rem;
   white-space: nowrap;
   background: transparent;
-  color: #4f586e;
+  color: #64748b;
   cursor: pointer;
   font-weight: 600;
 }
 
 .tab.active {
   background: #ffffff;
-  border: 1px solid var(--accent-line);
-  box-shadow: 0 2px 8px rgba(127, 71, 42, 0.12);
-  color: #6f371d;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  color: #0f172a;
 }
 
 .tab:hover {
-  background: #fff9f4;
+  background: #e2e8f0;
 }
 
 .header-actions {
@@ -373,18 +373,18 @@ select {
 }
 
 .header-btn {
-  border: 1px solid #d3dfe8;
-  background: #fffdfb;
-  border-radius: 10px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  border-radius: 6px;
   padding: 8px 12px;
   cursor: pointer;
-  color: #334156;
+  color: #334155;
   font-weight: 600;
 }
 
 .header-btn:hover {
-  border-color: var(--accent-line);
-  background: #fff7f0;
+  border-color: #94a3b8;
+  background: #f1f5f9;
 }
 
 .header-btn:disabled {
@@ -393,13 +393,13 @@ select {
 }
 
 .header-btn.danger {
-  border-color: #efc7c7;
-  color: #a13d3d;
-  background: #fff8f8;
+  border-color: #fca5a5;
+  color: #b91c1c;
+  background: #fef2f2;
 }
 
 .header-btn.danger:hover {
-  border-color: #e6b4b4;
+  border-color: #f87171;
 }
 
 .main-content {
@@ -415,10 +415,10 @@ select {
 }
 
 .info-banner {
-  border: 1px solid #cde3e2;
-  border-radius: 10px;
-  background: #f3fbf9;
-  color: #2d5c63;
+  border: 1px solid #bae6fd;
+  border-radius: 6px;
+  background: #f0f9ff;
+  color: #0369a1;
   padding: 8px;
 }
 
@@ -444,10 +444,7 @@ select {
 .canvas-pane {
   position: relative;
   border-bottom: 1px solid var(--panel-border);
-  background:
-    radial-gradient(circle at 16% 22%, rgba(233, 172, 138, 0.12) 0, rgba(233, 172, 138, 0) 36%),
-    radial-gradient(circle at 82% 78%, rgba(255, 214, 173, 0.2) 0, rgba(255, 214, 173, 0) 38%),
-    linear-gradient(180deg, #fcf8f3 0%, #f7f0e7 100%);
+  background: var(--app-bg);
   min-height: 0;
 }
 

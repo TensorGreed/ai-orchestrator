@@ -289,6 +289,28 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "supervisor_node",
+    label: "Supervisor Node",
+    category: "Agent",
+    description: "Swarm Supervisor that coordinates attached Worker nodes.",
+    configSchema: {
+      type: "object",
+      properties: {
+        systemPromptTemplate: { type: "string" },
+        userPromptTemplate: { type: "string" },
+        sessionIdTemplate: { type: "string" },
+        maxIterations: { type: "number" }
+      },
+      required: ["maxIterations"]
+    },
+    sampleConfig: {
+      systemPromptTemplate: "{{system_prompt}}",
+      userPromptTemplate: "{{user_prompt}}",
+      sessionIdTemplate: "{{session_id}}",
+      maxIterations: 10
+    }
+  },
+  {
     type: "local_memory",
     label: "Simple Memory",
     category: "Utility",
