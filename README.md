@@ -359,6 +359,28 @@ Notes:
 - If your MCP server exposes many large tool schemas, model context limits can be hit. The runtime now compacts tool schemas, truncates oversized tool outputs in conversation memory, and caps tool metadata sent to the model.
 - In all-tools mode, runtime also shortlists tools by prompt relevance to reduce wrong tool picks across similarly named endpoints.
 
+### Configurable Tool Output Limits (Agent Orchestrator)
+
+In Agent Orchestrator node config, use **Tool Output Limits (Advanced)** to control truncation:
+
+- `toolMessageMaxChars`
+- `toolPayloadMaxDepth`
+- `toolPayloadMaxObjectKeys`
+- `toolPayloadMaxArrayItems`
+- `toolPayloadMaxStringChars`
+
+These values are passed directly to the runtime and validated server-side.
+
+Recommended starting point for large-context local models (~92k available context):
+
+- `toolMessageMaxChars`: `90000`
+- `toolPayloadMaxDepth`: `8`
+- `toolPayloadMaxObjectKeys`: `256`
+- `toolPayloadMaxArrayItems`: `256`
+- `toolPayloadMaxStringChars`: `4096`
+
+If you still hit provider context errors, reduce these values first (especially `toolMessageMaxChars`), then reduce attached tool count.
+
 ## Simple Memory Node
 
 `Simple Memory` (`local_memory`) is a real SQLite-backed session memory node.

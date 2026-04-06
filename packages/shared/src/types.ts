@@ -273,6 +273,14 @@ export interface AgentMemoryConfig {
   persistToolMessages?: boolean;
 }
 
+export interface AgentToolOutputLimits {
+  messageMaxChars?: number;
+  payloadMaxDepth?: number;
+  payloadMaxObjectKeys?: number;
+  payloadMaxArrayItems?: number;
+  payloadMaxStringChars?: number;
+}
+
 export interface AgentRunRequest {
   provider: LLMProviderConfig;
   systemPrompt: string;
@@ -282,6 +290,7 @@ export interface AgentRunRequest {
   toolCallingEnabled: boolean;
   sessionId?: string;
   memory?: AgentMemoryConfig;
+  toolOutputLimits?: AgentToolOutputLimits;
 }
 
 export interface AgentRunStep {

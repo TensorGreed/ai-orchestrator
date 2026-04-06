@@ -380,7 +380,12 @@ describe("workflow engine", () => {
             userPromptTemplate: "{{user_prompt}}",
             sessionIdTemplate: "{{session_id}}",
             maxIterations: 4,
-            toolCallingEnabled: true
+            toolCallingEnabled: true,
+            toolMessageMaxChars: 90000,
+            toolPayloadMaxDepth: 8,
+            toolPayloadMaxObjectKeys: 256,
+            toolPayloadMaxArrayItems: 256,
+            toolPayloadMaxStringChars: 4096
           }
         },
         {
@@ -455,6 +460,13 @@ describe("workflow engine", () => {
     expect(runtime.lastRequest?.tools.length).toBeGreaterThan(0);
     expect(runtime.lastRequest?.memory?.namespace).toBe("default");
     expect(runtime.lastRequest?.sessionId).toBe("session-abc");
+    expect(runtime.lastRequest?.toolOutputLimits).toEqual({
+      messageMaxChars: 90000,
+      payloadMaxDepth: 8,
+      payloadMaxObjectKeys: 256,
+      payloadMaxArrayItems: 256,
+      payloadMaxStringChars: 4096
+    });
     expect(result.nodeResults.find((entry) => entry.nodeId === "model")?.status).toBe("success");
     expect(
       (result.nodeResults.find((entry) => entry.nodeId === "model")?.output as Record<string, unknown>)?.reason

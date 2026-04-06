@@ -276,7 +276,12 @@ export const nodeDefinitions: NodeDefinition[] = [
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
         maxIterations: { type: "number" },
-        toolCallingEnabled: { type: "boolean" }
+        toolCallingEnabled: { type: "boolean" },
+        toolMessageMaxChars: { type: "number" },
+        toolPayloadMaxDepth: { type: "number" },
+        toolPayloadMaxObjectKeys: { type: "number" },
+        toolPayloadMaxArrayItems: { type: "number" },
+        toolPayloadMaxStringChars: { type: "number" }
       },
       required: ["maxIterations"]
     },
@@ -285,7 +290,12 @@ export const nodeDefinitions: NodeDefinition[] = [
       userPromptTemplate: "{{user_prompt}}",
       sessionIdTemplate: "{{session_id}}",
       maxIterations: 6,
-      toolCallingEnabled: true
+      toolCallingEnabled: true,
+      toolMessageMaxChars: 12000,
+      toolPayloadMaxDepth: 4,
+      toolPayloadMaxObjectKeys: 32,
+      toolPayloadMaxArrayItems: 8,
+      toolPayloadMaxStringChars: 400
     }
   },
   {
@@ -299,7 +309,12 @@ export const nodeDefinitions: NodeDefinition[] = [
         systemPromptTemplate: { type: "string" },
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
-        maxIterations: { type: "number" }
+        maxIterations: { type: "number" },
+        toolMessageMaxChars: { type: "number" },
+        toolPayloadMaxDepth: { type: "number" },
+        toolPayloadMaxObjectKeys: { type: "number" },
+        toolPayloadMaxArrayItems: { type: "number" },
+        toolPayloadMaxStringChars: { type: "number" }
       },
       required: ["maxIterations"]
     },
@@ -307,7 +322,12 @@ export const nodeDefinitions: NodeDefinition[] = [
       systemPromptTemplate: "{{system_prompt}}",
       userPromptTemplate: "{{user_prompt}}",
       sessionIdTemplate: "{{session_id}}",
-      maxIterations: 10
+      maxIterations: 10,
+      toolMessageMaxChars: 12000,
+      toolPayloadMaxDepth: 4,
+      toolPayloadMaxObjectKeys: 32,
+      toolPayloadMaxArrayItems: 8,
+      toolPayloadMaxStringChars: 400
     }
   },
   {

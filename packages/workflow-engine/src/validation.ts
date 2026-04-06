@@ -337,6 +337,58 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           nodeId: node.id
         });
       }
+      const toolLimitRules = [
+        {
+          key: "toolMessageMaxChars",
+          min: 500,
+          max: 1_000_000,
+          code: "invalid_tool_message_max_chars",
+          message: "Agent Orchestrator toolMessageMaxChars must be between 500 and 1000000."
+        },
+        {
+          key: "toolPayloadMaxDepth",
+          min: 1,
+          max: 16,
+          code: "invalid_tool_payload_max_depth",
+          message: "Agent Orchestrator toolPayloadMaxDepth must be between 1 and 16."
+        },
+        {
+          key: "toolPayloadMaxObjectKeys",
+          min: 1,
+          max: 5000,
+          code: "invalid_tool_payload_max_object_keys",
+          message: "Agent Orchestrator toolPayloadMaxObjectKeys must be between 1 and 5000."
+        },
+        {
+          key: "toolPayloadMaxArrayItems",
+          min: 1,
+          max: 5000,
+          code: "invalid_tool_payload_max_array_items",
+          message: "Agent Orchestrator toolPayloadMaxArrayItems must be between 1 and 5000."
+        },
+        {
+          key: "toolPayloadMaxStringChars",
+          min: 100,
+          max: 1_000_000,
+          code: "invalid_tool_payload_max_string_chars",
+          message: "Agent Orchestrator toolPayloadMaxStringChars must be between 100 and 1000000."
+        }
+      ] as const;
+
+      for (const rule of toolLimitRules) {
+        const rawValue = config[rule.key];
+        if (rawValue === undefined) {
+          continue;
+        }
+        const parsed = Number(rawValue);
+        if (!Number.isFinite(parsed) || parsed < rule.min || parsed > rule.max) {
+          issues.push({
+            code: rule.code,
+            message: rule.message,
+            nodeId: node.id
+          });
+        }
+      }
 
       const incomingPrimaryInputTypes = new Set<string>();
       for (const edge of workflow.edges.filter(isExecutionEdge)) {

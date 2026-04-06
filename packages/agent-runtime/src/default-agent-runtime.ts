@@ -1,10 +1,16 @@
-import type { AgentRunRequest, AgentRunState, ChatMessage, ToolDefinition } from "@ai-orchestrator/shared";
+import type {
+  AgentRunRequest,
+  AgentRunState,
+  AgentToolOutputLimits,
+  ChatMessage,
+  ToolDefinition
+} from "@ai-orchestrator/shared";
 import type { AgentRuntimeAdapter, AgentRuntimeContext, AgentToolRuntime, InternalToolResult } from "./types";
 import { createToolErrorResult } from "./types";
 
 const MAX_MESSAGE_CHARS = 3000;
 const MAX_SYSTEM_MESSAGE_CHARS = 8000;
-const MAX_TOOL_MESSAGE_CHARS = 12000;
+const DEFAULT_TOOL_MESSAGE_MAX_CHARS = 45000;
 const MAX_TOOL_DESCRIPTION_CHARS = 280;
 const MAX_TOOL_SCHEMA_PROPERTIES = 12;
 const MAX_TOOL_SCHEMA_ENUM_VALUES = 20;
@@ -13,16 +19,49 @@ const MAX_TOOL_COUNT = 24;
 const MAX_TOOLS_WITH_MATCH = 8;
 const MAX_TOOLS_NO_MATCH = 12;
 const STRONG_MATCH_SCORE = 2;
-const MAX_TOOL_PAYLOAD_DEPTH = 4;
-const MAX_TOOL_OBJECT_KEYS = 32;
-const MAX_TOOL_ARRAY_ITEMS = 8;
-const MAX_TOOL_VALUE_STRING_CHARS = 400;
+const DEFAULT_TOOL_PAYLOAD_MAX_DEPTH = 8;
+const DEFAULT_TOOL_PAYLOAD_MAX_OBJECT_KEYS = 256;
+const DEFAULT_TOOL_PAYLOAD_MAX_ARRAY_ITEMS = 256;
+const DEFAULT_TOOL_PAYLOAD_MAX_STRING_CHARS = 2048;
 
 function normalizeMaxMessages(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
     return 20;
   }
   return Math.floor(value);
+}
+
+interface NormalizedToolOutputLimits {
+  messageMaxChars: number;
+  payloadMaxDepth: number;
+  payloadMaxObjectKeys: number;
+  payloadMaxArrayItems: number;
+  payloadMaxStringChars: number;
+}
+
+function normalizeToolOutputLimits(input: AgentToolOutputLimits | undefined): NormalizedToolOutputLimits {
+  const normalize = (value: unknown, fallback: number, min: number, max: number) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return fallback;
+    }
+    const rounded = Math.floor(parsed);
+    if (rounded < min) {
+      return min;
+    }
+    if (rounded > max) {
+      return max;
+    }
+    return rounded;
+  };
+
+  return {
+    messageMaxChars: normalize(input?.messageMaxChars, DEFAULT_TOOL_MESSAGE_MAX_CHARS, 500, 1_000_000),
+    payloadMaxDepth: normalize(input?.payloadMaxDepth, DEFAULT_TOOL_PAYLOAD_MAX_DEPTH, 1, 16),
+    payloadMaxObjectKeys: normalize(input?.payloadMaxObjectKeys, DEFAULT_TOOL_PAYLOAD_MAX_OBJECT_KEYS, 1, 5000),
+    payloadMaxArrayItems: normalize(input?.payloadMaxArrayItems, DEFAULT_TOOL_PAYLOAD_MAX_ARRAY_ITEMS, 1, 5000),
+    payloadMaxStringChars: normalize(input?.payloadMaxStringChars, DEFAULT_TOOL_PAYLOAD_MAX_STRING_CHARS, 100, 1_000_000)
+  };
 }
 
 function truncateText(value: string, maxChars: number): string {
@@ -44,35 +83,35 @@ function toRecord(value: unknown): Record<string, unknown> {
   return {};
 }
 
-function compactToolPayload(value: unknown, depth = 0): unknown {
+function compactToolPayload(value: unknown, limits: NormalizedToolOutputLimits, depth = 0): unknown {
   if (value === null || value === undefined) {
     return value ?? null;
   }
 
   if (typeof value === "string") {
-    return truncateText(value, MAX_TOOL_VALUE_STRING_CHARS);
+    return truncateText(value, limits.payloadMaxStringChars);
   }
 
   if (typeof value === "number" || typeof value === "boolean") {
     return value;
   }
 
-  if (depth >= MAX_TOOL_PAYLOAD_DEPTH) {
+  if (depth >= limits.payloadMaxDepth) {
     if (Array.isArray(value)) {
-      return `[array depth ${MAX_TOOL_PAYLOAD_DEPTH} truncated; length=${value.length}]`;
+      return `[array depth ${limits.payloadMaxDepth} truncated; length=${value.length}]`;
     }
     if (typeof value === "object") {
       const keys = Object.keys(toRecord(value)).length;
-      return `[object depth ${MAX_TOOL_PAYLOAD_DEPTH} truncated; keys=${keys}]`;
+      return `[object depth ${limits.payloadMaxDepth} truncated; keys=${keys}]`;
     }
     return String(value);
   }
 
   if (Array.isArray(value)) {
-    const limited = value.slice(0, MAX_TOOL_ARRAY_ITEMS).map((item) => compactToolPayload(item, depth + 1));
-    if (value.length > MAX_TOOL_ARRAY_ITEMS) {
+    const limited = value.slice(0, limits.payloadMaxArrayItems).map((item) => compactToolPayload(item, limits, depth + 1));
+    if (value.length > limits.payloadMaxArrayItems) {
       limited.push({
-        _truncatedItems: value.length - MAX_TOOL_ARRAY_ITEMS
+        _truncatedItems: value.length - limits.payloadMaxArrayItems
       });
     }
     return limited;
@@ -80,12 +119,12 @@ function compactToolPayload(value: unknown, depth = 0): unknown {
 
   if (typeof value === "object") {
     const entries = Object.entries(toRecord(value));
-    const limitedEntries = entries.slice(0, MAX_TOOL_OBJECT_KEYS);
+    const limitedEntries = entries.slice(0, limits.payloadMaxObjectKeys);
     const compacted = Object.fromEntries(
-      limitedEntries.map(([key, nested]) => [key, compactToolPayload(nested, depth + 1)])
+      limitedEntries.map(([key, nested]) => [key, compactToolPayload(nested, limits, depth + 1)])
     ) as Record<string, unknown>;
-    if (entries.length > MAX_TOOL_OBJECT_KEYS) {
-      compacted._truncatedKeys = entries.length - MAX_TOOL_OBJECT_KEYS;
+    if (entries.length > limits.payloadMaxObjectKeys) {
+      compacted._truncatedKeys = entries.length - limits.payloadMaxObjectKeys;
     }
     return compacted;
   }
@@ -195,17 +234,17 @@ function normalizeToolsForModel(input: ToolDefinition[], prompt: string): ToolDe
   return ranked.slice(0, Math.min(MAX_TOOLS_NO_MATCH, MAX_TOOL_COUNT)).map((entry) => entry.tool);
 }
 
-function serializeToolMessage(ok: boolean, payload: unknown): string {
+function serializeToolMessage(ok: boolean, payload: unknown, limits: NormalizedToolOutputLimits): string {
   const wrapped = ok ? { ok: true, output: payload } : { ok: false, error: payload };
   const raw = JSON.stringify(wrapped);
-  if (raw.length <= MAX_TOOL_MESSAGE_CHARS) {
+  if (raw.length <= limits.messageMaxChars) {
     return raw;
   }
 
   const compactedWrapped = ok
     ? {
         ok: true,
-        output: compactToolPayload(payload),
+        output: compactToolPayload(payload, limits),
         _meta: {
           truncated: true,
           originalChars: raw.length
@@ -213,18 +252,18 @@ function serializeToolMessage(ok: boolean, payload: unknown): string {
       }
     : {
         ok: false,
-        error: compactToolPayload(payload),
+        error: compactToolPayload(payload, limits),
         _meta: {
           truncated: true,
           originalChars: raw.length
         }
       };
   const compactedRaw = JSON.stringify(compactedWrapped);
-  if (compactedRaw.length <= MAX_TOOL_MESSAGE_CHARS) {
+  if (compactedRaw.length <= limits.messageMaxChars) {
     return compactedRaw;
   }
 
-  const previewChars = Math.max(500, MAX_TOOL_MESSAGE_CHARS - 250);
+  const previewChars = Math.max(500, limits.messageMaxChars - 250);
   return JSON.stringify({
     ok,
     truncated: true,
@@ -233,14 +272,18 @@ function serializeToolMessage(ok: boolean, payload: unknown): string {
   });
 }
 
-function normalizeStoredMessages(messages: ChatMessage[], maxMessages: number): ChatMessage[] {
+function normalizeStoredMessages(
+  messages: ChatMessage[],
+  maxMessages: number,
+  toolMessageMaxChars: number
+): ChatMessage[] {
   return messages
     .filter((message) => message.role === "user" || message.role === "assistant" || message.role === "tool")
     .map((message) => ({
       ...message,
       content:
         message.role === "tool"
-          ? normalizeMessageContent(message.content, MAX_TOOL_MESSAGE_CHARS)
+          ? normalizeMessageContent(message.content, toolMessageMaxChars)
           : normalizeMessageContent(message.content, MAX_MESSAGE_CHARS)
     }))
     .slice(-maxMessages);
@@ -255,11 +298,12 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     const memoryNamespace = request.memory?.namespace?.trim() || "default";
     const memoryMaxMessages = normalizeMaxMessages(request.memory?.maxMessages);
     const persistToolMessages = request.memory?.persistToolMessages !== false;
+    const toolOutputLimits = normalizeToolOutputLimits(request.toolOutputLimits);
 
     let memoryMessages: ChatMessage[] = [];
     if (memoryEnabled && request.sessionId) {
       const loaded = await context.memoryStore!.loadMessages(memoryNamespace, request.sessionId);
-      memoryMessages = normalizeStoredMessages(loaded, memoryMaxMessages);
+      memoryMessages = normalizeStoredMessages(loaded, memoryMaxMessages, toolOutputLimits.messageMaxChars);
     }
 
     const messages: ChatMessage[] = [
@@ -321,7 +365,7 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
 
               messages.push({
                 role: "tool",
-                content: serializeToolMessage(true, output),
+                content: serializeToolMessage(true, output, toolOutputLimits),
                 toolCallId: call.id,
                 name: call.name
               });
@@ -330,7 +374,7 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
               toolResults.push(toolError);
               messages.push({
                 role: "tool",
-                content: serializeToolMessage(false, toolError.error),
+                content: serializeToolMessage(false, toolError.error, toolOutputLimits),
                 toolCallId: call.id,
                 name: call.name
               });

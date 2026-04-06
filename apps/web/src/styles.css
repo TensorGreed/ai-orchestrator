@@ -2309,6 +2309,31 @@ select {
   direction: ltr;
 }
 
+.cfg-multi-select-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 10px 6px;
+  background: #fff;
+  border-bottom: 1px solid #e3e8f3;
+}
+
+.cfg-multi-select-search input {
+  width: 100%;
+  border: 1px solid #d4dbe9;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 0.88rem;
+  color: #2f3c53;
+  background: #f9fbff;
+}
+
+.cfg-multi-select-empty {
+  padding: 10px;
+  color: #6f7a8e;
+  font-size: 0.84rem;
+}
+
 .cfg-multi-option {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
@@ -2324,6 +2349,11 @@ select {
 }
 
 .cfg-multi-option input[type="checkbox"] {
+  margin: 0;
+  justify-self: start;
+}
+
+.cfg-multi-option input[type="radio"] {
   margin: 0;
   justify-self: start;
 }

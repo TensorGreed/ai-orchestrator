@@ -1513,6 +1513,21 @@ async function executeNode(
 
       const maxIterations = typeof config.maxIterations === "number" ? Math.max(1, Math.floor(config.maxIterations)) : 4;
       const toolCallingEnabled = config.toolCallingEnabled !== false;
+      const toOptionalPositiveInteger = (value: unknown): number | undefined => {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed < 1) {
+          return undefined;
+        }
+        return Math.floor(parsed);
+      };
+      const toolOutputLimits = {
+        messageMaxChars: toOptionalPositiveInteger(config.toolMessageMaxChars),
+        payloadMaxDepth: toOptionalPositiveInteger(config.toolPayloadMaxDepth),
+        payloadMaxObjectKeys: toOptionalPositiveInteger(config.toolPayloadMaxObjectKeys),
+        payloadMaxArrayItems: toOptionalPositiveInteger(config.toolPayloadMaxArrayItems),
+        payloadMaxStringChars: toOptionalPositiveInteger(config.toolPayloadMaxStringChars)
+      };
+      const hasCustomToolOutputLimits = Object.values(toolOutputLimits).some((value) => value !== undefined);
 
       const systemTemplate =
         typeof config.systemPromptTemplate === "string" ? config.systemPromptTemplate : "{{system_prompt}}";
@@ -1675,6 +1690,7 @@ async function executeNode(
           maxIterations,
           toolCallingEnabled,
           tools: allToolsForModel,
+          toolOutputLimits: hasCustomToolOutputLimits ? toolOutputLimits : undefined,
           sessionId,
           memory
         },

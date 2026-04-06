@@ -214,4 +214,75 @@ describe("DefaultAgentRuntime", () => {
     expect((parsed.output?.resources?.length ?? 0) > 0).toBe(true);
     expect(parsed.output?.resources?.length).toBeLessThanOrEqual(9);
   });
+
+  it("supports custom tool output limits for larger tool payload contexts", async () => {
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new FakeToolCallingProvider());
+    const runtime = new DefaultAgentRuntime();
+
+    const hugeToolOutput = {
+      skip: 0,
+      limit: 50,
+      total: 341920,
+      resources: Array.from({ length: 24 }, (_, index) => ({
+        id: `key-${index}`,
+        name: `resource-${index}`,
+        metadata: "x".repeat(1200)
+      }))
+    };
+
+    const output = await runtime.run(
+      {
+        provider: { providerId: "fake", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "List keys",
+        tools: [
+          {
+            serverId: "mock-mcp",
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object" }
+          }
+        ],
+        maxIterations: 3,
+        toolCallingEnabled: true,
+        toolOutputLimits: {
+          messageMaxChars: 1_000_000,
+          payloadMaxDepth: 8,
+          payloadMaxObjectKeys: 500,
+          payloadMaxArrayItems: 1000,
+          payloadMaxStringChars: 5000
+        }
+      },
+      {
+        tools: [
+          {
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object" }
+          }
+        ],
+        invokeTool: async () => hugeToolOutput
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    const toolMessage = output.messages.find((message) => message.role === "tool");
+    expect(toolMessage).toBeTruthy();
+
+    const parsed = JSON.parse(String(toolMessage?.content)) as {
+      ok: boolean;
+      output?: { total?: number; resources?: unknown[] };
+      _meta?: { truncated?: boolean };
+    };
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.output?.total).toBe(341920);
+    expect(parsed._meta?.truncated).toBeFalsy();
+    expect(Array.isArray(parsed.output?.resources)).toBe(true);
+    expect(parsed.output?.resources?.length).toBe(24);
+  });
 });

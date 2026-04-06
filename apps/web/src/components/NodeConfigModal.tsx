@@ -489,6 +489,7 @@ export function NodeConfigModal({
   const [discoverBusy, setDiscoverBusy] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
+  const [mcpToolSearchQuery, setMcpToolSearchQuery] = useState("");
   const [codeTestInput, setCodeTestInput] = useState("{\n  \"user_prompt\": \"Hello from code node\"\n}");
   const [codeTestBusy, setCodeTestBusy] = useState(false);
   const [codeTestError, setCodeTestError] = useState<string | null>(null);
@@ -550,6 +551,7 @@ export function NodeConfigModal({
     setDiscoverBusy(false);
     setDiscoverError(null);
     setDiscoverMessage(null);
+    setMcpToolSearchQuery("");
     setCodeTestInput("{\n  \"user_prompt\": \"Hello from code node\"\n}");
     setCodeTestBusy(false);
     setCodeTestError(null);
@@ -940,6 +942,7 @@ export function NodeConfigModal({
         });
 
         setDiscoveredTools(response.tools);
+        setMcpToolSearchQuery("");
         setDiscoverMessage(
           response.tools.length
             ? `Discovered ${response.tools.length} tools from '${serverId}'.`
@@ -958,6 +961,7 @@ export function NodeConfigModal({
         setDiscoverError(error instanceof Error ? error.message : "Failed to discover MCP tools");
         setDiscoverMessage(null);
         setDiscoveredTools([]);
+        setMcpToolSearchQuery("");
       } finally {
         setDiscoverBusy(false);
       }
@@ -1184,6 +1188,51 @@ export function NodeConfigModal({
             onChange={(next) => setConfig((current) => ({ ...current, toolCallingEnabled: next }))}
           />
         </div>
+
+        <div className="cfg-group">
+          <h4>Tool Output Limits (Advanced)</h4>
+          <div className="cfg-tip">
+            Increase these when your MCP responses are large (for example 90k+ context flows). Higher values increase
+            model context usage and can hit provider limits faster.
+          </div>
+          <div className="cfg-grid-2">
+            <NumberField
+              label="Tool Message Max Chars"
+              value={toNumberValue(config.toolMessageMaxChars, 12000)}
+              min={500}
+              step={500}
+              onChange={(next) => setConfig((current) => ({ ...current, toolMessageMaxChars: next }))}
+            />
+            <NumberField
+              label="Tool String Max Chars"
+              value={toNumberValue(config.toolPayloadMaxStringChars, 400)}
+              min={100}
+              step={100}
+              onChange={(next) => setConfig((current) => ({ ...current, toolPayloadMaxStringChars: next }))}
+            />
+            <NumberField
+              label="Tool Object Max Keys"
+              value={toNumberValue(config.toolPayloadMaxObjectKeys, 32)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, toolPayloadMaxObjectKeys: next }))}
+            />
+            <NumberField
+              label="Tool Array Max Items"
+              value={toNumberValue(config.toolPayloadMaxArrayItems, 8)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, toolPayloadMaxArrayItems: next }))}
+            />
+            <NumberField
+              label="Tool Payload Max Depth"
+              value={toNumberValue(config.toolPayloadMaxDepth, 4)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, toolPayloadMaxDepth: next }))}
+            />
+          </div>
+        </div>
       </>
     );
   };
@@ -1251,6 +1300,15 @@ export function NodeConfigModal({
     const toolSelectionMode = includeAllDiscoveredTools ? "all" : selectedToolNames.length > 1 ? "multi" : "single";
     const primarySelectedToolName = selectedToolNames[0] ?? "";
     const selectedTool = primarySelectedToolName ? discoveredToolByName.get(primarySelectedToolName) : undefined;
+    const normalizedToolSearchQuery = mcpToolSearchQuery.trim().toLowerCase();
+    const filteredDiscoveredTools = normalizedToolSearchQuery
+      ? discoveredTools.filter((tool) => {
+          const name = toStringValue(tool.name).toLowerCase();
+          const description = toStringValue(tool.description).toLowerCase();
+          return name.includes(normalizedToolSearchQuery) || description.includes(normalizedToolSearchQuery);
+        })
+      : discoveredTools;
+    const shouldShowToolSearch = discoveredTools.length > 10;
 
     return (
       <>
@@ -1397,7 +1455,8 @@ export function NodeConfigModal({
         <SelectField
           label="Tools To Include"
           value={toolSelectionMode}
-          onChange={(next) =>
+          onChange={(next) => {
+            setMcpToolSearchQuery("");
             setConfig((current) => {
               if (next === "all") {
                 return {
@@ -1440,8 +1499,8 @@ export function NodeConfigModal({
                 toolName: resolvedSingleTool,
                 allowedTools: resolvedSingleTool ? [resolvedSingleTool] : undefined
               };
-            })
-          }
+            });
+          }}
           options={[
             { value: "all", label: "All discovered tools (agent decides)" },
             { value: "single", label: "Single tool only" },
@@ -1456,18 +1515,46 @@ export function NodeConfigModal({
               : "Discover tools first to preview what will be exposed to the agent."}
           </div>
         ) : toolSelectionMode === "single" && discoveredTools.length > 0 ? (
-          <SelectField
-            label="Tool Name"
-            value={primarySelectedToolName || discoveredTools[0]?.name || ""}
-            onChange={(next) =>
-              setConfig((current) => ({
-                ...current,
-                toolName: next,
-                allowedTools: next ? [next] : undefined
-              }))
-            }
-            options={discoveredTools.map((tool) => ({ value: tool.name, label: tool.name }))}
-          />
+          <div className="cfg-field">
+            <span>Tool Name</span>
+            <details className="cfg-multi-select">
+              <summary>{primarySelectedToolName || "Choose a discovered tool"}</summary>
+              {shouldShowToolSearch && (
+                <div className="cfg-multi-select-search">
+                  <input
+                    value={mcpToolSearchQuery}
+                    onChange={(event) => setMcpToolSearchQuery(event.target.value)}
+                    placeholder={`Search ${discoveredTools.length} discovered tools`}
+                  />
+                </div>
+              )}
+              <div className="cfg-multi-select-menu">
+                {filteredDiscoveredTools.length === 0 ? (
+                  <div className="cfg-multi-select-empty">
+                    No tools match "{mcpToolSearchQuery.trim()}". Clear search to view all tools.
+                  </div>
+                ) : (
+                  filteredDiscoveredTools.map((tool) => (
+                    <label key={tool.name} className="cfg-multi-option">
+                      <input
+                        type="radio"
+                        name={`mcp-single-tool-${node.id}`}
+                        checked={primarySelectedToolName === tool.name}
+                        onChange={() =>
+                          setConfig((current) => ({
+                            ...current,
+                            toolName: tool.name,
+                            allowedTools: [tool.name]
+                          }))
+                        }
+                      />
+                      <span title={tool.name}>{tool.name}</span>
+                    </label>
+                  ))
+                )}
+              </div>
+            </details>
+          </div>
         ) : toolSelectionMode === "single" ? (
           <TextField
             label="Tool Name"
@@ -1491,7 +1578,21 @@ export function NodeConfigModal({
                     : "Choose one or more discovered tools"}
                 </summary>
                 <div className="cfg-multi-select-menu">
-                  {discoveredTools.map((tool) => (
+                  {shouldShowToolSearch && (
+                    <div className="cfg-multi-select-search">
+                      <input
+                        value={mcpToolSearchQuery}
+                        onChange={(event) => setMcpToolSearchQuery(event.target.value)}
+                        placeholder={`Search ${discoveredTools.length} discovered tools`}
+                      />
+                    </div>
+                  )}
+                  {filteredDiscoveredTools.length === 0 ? (
+                    <div className="cfg-multi-select-empty">
+                      No tools match "{mcpToolSearchQuery.trim()}". Clear search to view all tools.
+                    </div>
+                  ) : (
+                    filteredDiscoveredTools.map((tool) => (
                     <label key={tool.name} className="cfg-multi-option">
                       <input
                         type="checkbox"
@@ -1530,7 +1631,8 @@ export function NodeConfigModal({
                       />
                       <span>{tool.name}</span>
                     </label>
-                  ))}
+                    ))
+                  )}
                 </div>
               </details>
             </div>
