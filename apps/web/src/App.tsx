@@ -9,6 +9,7 @@ import ReactFlow, {
   useNodesState,
   type Connection,
   type Edge,
+  type EdgeTypes,
   type Node,
   type ReactFlowInstance
 } from "reactflow";
@@ -54,6 +55,7 @@ import {
   type EditorNodeData
 } from "./lib/workflow";
 import { WorkflowCanvasNode } from "./components/WorkflowCanvasNode";
+import { WorkflowCanvasEdge } from "./components/WorkflowCanvasEdge";
 import { NodeConfigModal, type NodeInputOption } from "./components/NodeConfigModal";
 import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
@@ -90,6 +92,29 @@ interface WorkflowVariableRow {
   value: string;
 }
 
+interface NodeClipboardNodePayload {
+  sourceId: string;
+  nodeType: EditorNodeData["nodeType"];
+  label: string;
+  config: Record<string, unknown>;
+  relativePosition: { x: number; y: number };
+}
+
+interface NodeClipboardEdgePayload {
+  sourceId: string;
+  targetId: string;
+  sourceHandle?: string;
+  targetHandle?: string;
+  label?: string;
+}
+
+interface NodeClipboardPayload {
+  version: 1;
+  copiedAt: string;
+  nodes: NodeClipboardNodePayload[];
+  edges: NodeClipboardEdgePayload[];
+}
+
 const statusColors: Record<string, string> = {
   success: "#18a35f",
   error: "#d64545",
@@ -103,6 +128,8 @@ const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook
 const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
 const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
 const DEBUG_MODE_STORAGE_KEY = "ai-orchestrator:debug-mode";
+const NODE_CLIPBOARD_STORAGE_KEY = "ai-orchestrator:node-clipboard";
+const NODE_PASTE_OFFSET_PX = 28;
 const DEFAULT_LOGS_PANEL_HEIGHT = 210;
 const MIN_LOGS_PANEL_HEIGHT = 140;
 const MAX_LOGS_PANEL_HEIGHT = 620;
@@ -210,6 +237,10 @@ function buildSecretPayload(input: {
 
 function stringifyPretty(value: unknown) {
   return JSON.stringify(value, null, 2);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function formatDuration(value: number | null | undefined): string {
@@ -513,7 +544,7 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
 
   return {
     ...edge,
-    type: "bezier",
+    type: "workflowBezier",
     animated: Boolean(isAuxiliary),
     label,
     labelBgPadding: [8, 4],
@@ -599,7 +630,12 @@ function computeExecutionOrderForVisual(nodes: EditorNode[], edges: Edge[]): str
 
   const filteredNodeIds = nodes
     .map((node) => node.id)
-    .filter((nodeId) => !attachmentOnlyNodeIds.has(nodeId));
+    .filter((nodeId) => !attachmentOnlyNodeIds.has(nodeId))
+    .filter((nodeId) => {
+      const incomingExec = incomingExecution.get(nodeId) ?? 0;
+      const outgoingExec = outgoingExecutionCount.get(nodeId) ?? 0;
+      return incomingExec > 0 || outgoingExec > 0;
+    });
 
   const filteredSet = new Set(filteredNodeIds);
   const filteredInDegree = new Map<string, number>();
@@ -751,6 +787,7 @@ function StudioApp() {
   const latestDebugExecutionIdRef = useRef<string | null>(null);
   const latestExecutionResultRef = useRef<WorkflowExecutionResult | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
+  const pasteCountRef = useRef(0);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<EditorNodeData>([]);
@@ -759,6 +796,12 @@ function StudioApp() {
   const nodeTypes = useMemo(
     () => ({
       workflowNode: WorkflowCanvasNode
+    }),
+    []
+  );
+  const edgeTypes = useMemo<EdgeTypes>(
+    () => ({
+      workflowBezier: WorkflowCanvasEdge
     }),
     []
   );
@@ -879,6 +922,7 @@ function StudioApp() {
 
   useEffect(() => {
     latestDebugExecutionIdRef.current = null;
+    pasteCountRef.current = 0;
   }, [currentWorkflow.id]);
 
   useEffect(() => {
@@ -1019,6 +1063,10 @@ function StudioApp() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (activeMode !== "editor") {
+        return;
+      }
+
       if (event.key !== "Delete" && event.key !== "Backspace") {
         return;
       }
@@ -1051,7 +1099,165 @@ function StudioApp() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [editingNodeId, edges, nodes, setEdges, setNodes]);
+  }, [activeMode, editingNodeId, edges, nodes, setEdges, setNodes]);
+
+  useEffect(() => {
+    const handleCopyPaste = (event: KeyboardEvent) => {
+      if (activeMode !== "editor") {
+        return;
+      }
+
+      if (isTypingTarget(event.target)) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      const isModifierPressed = event.ctrlKey || event.metaKey;
+      if (!isModifierPressed || (key !== "c" && key !== "v")) {
+        return;
+      }
+
+      if (key === "c") {
+        const selectedNodes = nodes.filter((node) => node.selected);
+        if (selectedNodes.length === 0) {
+          return;
+        }
+
+        event.preventDefault();
+        const selectedNodeIds = new Set(selectedNodes.map((node) => node.id));
+        const minX = Math.min(...selectedNodes.map((node) => node.position.x));
+        const minY = Math.min(...selectedNodes.map((node) => node.position.y));
+
+        const payload: NodeClipboardPayload = {
+          version: 1,
+          copiedAt: new Date().toISOString(),
+          nodes: selectedNodes.map((node) => ({
+            sourceId: node.id,
+            nodeType: node.data.nodeType,
+            label: node.data.label,
+            config: cloneJson(node.data.config ?? {}),
+            relativePosition: {
+              x: node.position.x - minX,
+              y: node.position.y - minY
+            }
+          })),
+          edges: edges
+            .filter((edge) => selectedNodeIds.has(edge.source) && selectedNodeIds.has(edge.target))
+            .map((edge) => ({
+              sourceId: edge.source,
+              targetId: edge.target,
+              sourceHandle: edge.sourceHandle ?? undefined,
+              targetHandle: edge.targetHandle ?? undefined,
+              label: typeof edge.label === "string" ? edge.label : undefined
+            }))
+        };
+
+        try {
+          localStorage.setItem(NODE_CLIPBOARD_STORAGE_KEY, JSON.stringify(payload));
+          setError(null);
+        } catch {
+          setError("Failed to copy node selection.");
+        }
+        return;
+      }
+
+      if (key === "v") {
+        let raw: string | null = null;
+        try {
+          raw = localStorage.getItem(NODE_CLIPBOARD_STORAGE_KEY);
+        } catch {
+          raw = null;
+        }
+        if (!raw) {
+          return;
+        }
+
+        let payload: NodeClipboardPayload | null = null;
+        try {
+          payload = JSON.parse(raw) as NodeClipboardPayload;
+        } catch {
+          payload = null;
+        }
+        if (!payload || payload.version !== 1 || !Array.isArray(payload.nodes) || payload.nodes.length === 0) {
+          return;
+        }
+
+        event.preventDefault();
+
+        const bounds = flowWrapperRef.current?.getBoundingClientRect();
+        const canvasCenter = reactFlowInstance
+          ? reactFlowInstance.project({
+              x: bounds ? bounds.width / 2 : window.innerWidth / 2,
+              y: bounds ? bounds.height / 2 : window.innerHeight / 2
+            })
+          : { x: 180, y: 160 };
+        const offset = pasteCountRef.current * NODE_PASTE_OFFSET_PX;
+        pasteCountRef.current += 1;
+
+        const idMap = new Map<string, string>();
+        const newNodes: Node<EditorNodeData>[] = payload.nodes.map((entry) => {
+          const newId = createNodeId(entry.nodeType);
+          idMap.set(entry.sourceId, newId);
+          return {
+            id: newId,
+            type: "workflowNode",
+            position: {
+              x: canvasCenter.x + entry.relativePosition.x + offset,
+              y: canvasCenter.y + entry.relativePosition.y + offset
+            },
+            selected: true,
+            data: {
+              label: entry.label,
+              nodeType: entry.nodeType,
+              config: cloneJson(entry.config ?? {})
+            }
+          };
+        });
+
+        const newEdges: Edge[] = payload.edges
+          .map((entry) => {
+            const source = idMap.get(entry.sourceId);
+            const target = idMap.get(entry.targetId);
+            if (!source || !target) {
+              return null;
+            }
+            const candidate: Edge = {
+              id: createEdgeId(source, target),
+              source,
+              target,
+              sourceHandle: entry.sourceHandle,
+              targetHandle: entry.targetHandle,
+              label: entry.label
+            };
+            return decorateEdge(candidate, [...(nodes as EditorNode[]), ...(newNodes as EditorNode[])]);
+          })
+          .filter((edge): edge is Edge => Boolean(edge));
+
+        setNodes((current) => [
+          ...current.map((node) => ({ ...node, selected: false })),
+          ...newNodes
+        ]);
+        setEdges((current) => [
+          ...current.map((edge) => ({ ...edge, selected: false })),
+          ...newEdges
+        ]);
+        setError(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleCopyPaste);
+    return () => {
+      window.removeEventListener("keydown", handleCopyPaste);
+    };
+  }, [activeMode, edges, nodes, reactFlowInstance, setEdges, setNodes]);
+
+  const handleDeleteEdgeById = useCallback(
+    (edgeId: string) => {
+      setEdges((currentEdges) => currentEdges.filter((edge) => edge.id !== edgeId));
+      setError(null);
+    },
+    [setEdges]
+  );
 
   const refreshSecrets = useCallback(async () => {
     if (!canManageSecrets) {
@@ -2723,12 +2929,14 @@ function StudioApp() {
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
               onNodesChange={onNodesChange}
               onEdgesChange={(changes) => {
                 onEdgesChange(changes);
                 setEdges((current) => current.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
               }}
               onConnect={onConnect}
+              onDeleteEdge={handleDeleteEdgeById}
               onInit={setReactFlowInstance}
               onOpenNodeConfig={openNodeConfig}
               reactFlowInstance={reactFlowInstance}
@@ -2873,6 +3081,7 @@ function StudioApp() {
                     nodes={nodes}
                     edges={edges}
                     nodeTypes={nodeTypes}
+                    edgeTypes={edgeTypes}
                     onNodesChange={onNodesChange}
                     onEdgesChange={(changes) => {
                       onEdgesChange(changes);

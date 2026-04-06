@@ -2613,6 +2613,7 @@ export async function executeWorkflow(
     const hasExecutionOutgoing = (graphIndexes.outgoingExecution.get(node.id)?.length ?? 0) > 0;
     const hasAttachmentIncoming = (graphIndexes.incomingAttachments.get(node.id)?.length ?? 0) > 0;
     const isAttachmentOnlyNode = hasAttachmentIncoming && !hasExecutionIncoming && !hasExecutionOutgoing;
+    const isDisconnectedNode = !hasAttachmentIncoming && !hasExecutionIncoming && !hasExecutionOutgoing;
 
     if (isAttachmentOnlyNode) {
       const consumedUsage = attachmentUsageByNodeId.get(node.id);
@@ -2661,6 +2662,32 @@ export async function executeWorkflow(
         });
       }
       attachmentOnlyResultIndexByNodeId.set(node.id, nodeResults.length - 1);
+      continue;
+    }
+
+    if (isDisconnectedNode) {
+      nodeResults.push({
+        nodeId: node.id,
+        status: "skipped",
+        startedAt: nowIso(),
+        completedAt: nowIso(),
+        durationMs: 0,
+        output: {
+          reason: "disconnected_node",
+          message: "Node is not connected to any execution edge and was not executed."
+        }
+      });
+      await dependencies.onNodeComplete?.({
+        nodeId: node.id,
+        nodeType: node.type,
+        status: "skipped",
+        completedAt: nowIso(),
+        durationMs: 0,
+        output: {
+          reason: "disconnected_node",
+          message: "Node is not connected to any execution edge and was not executed."
+        }
+      });
       continue;
     }
 

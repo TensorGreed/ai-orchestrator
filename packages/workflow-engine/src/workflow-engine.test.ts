@@ -1180,6 +1180,42 @@ describe("workflow engine", () => {
     expect(result.nodeResults.find((entry) => entry.nodeId === "n4")?.status).toBe("skipped");
   });
 
+  it("skips isolated disconnected nodes instead of executing them", async () => {
+    const workflow: Workflow = {
+      id: "wf-disconnected-node",
+      name: "Disconnected node handling",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "hello" } },
+        { id: "n2", type: "prompt_template", name: "Prompt", position: { x: 180, y: 0 }, config: { template: "{{text}}" } },
+        { id: "n3", type: "output", name: "Output", position: { x: 360, y: 0 }, config: { responseTemplate: "{{text}}" } },
+        { id: "n4", type: "text_input", name: "Isolated", position: { x: 0, y: 180 }, config: { text: "unused" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("success");
+    const isolated = result.nodeResults.find((entry) => entry.nodeId === "n4");
+    expect(isolated?.status).toBe("skipped");
+    expect((isolated?.output as Record<string, unknown>)?.reason).toBe("disconnected_node");
+  });
+
   it("onError continue: failing node does not halt execution", async () => {
     const workflow: Workflow = {
       id: "wf-continue",

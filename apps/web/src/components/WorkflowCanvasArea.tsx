@@ -5,6 +5,7 @@ import ReactFlow, {
   type Connection,
   type Edge,
   type EdgeChange,
+  type EdgeTypes,
   type Node,
   type NodeChange,
   type NodeTypes,
@@ -125,9 +126,11 @@ interface WorkflowCanvasAreaProps {
   nodes: Node<EditorNodeData>[];
   edges: Edge[];
   nodeTypes: NodeTypes;
+  edgeTypes: EdgeTypes;
   onNodesChange: (changes: NodeChange[]) => void;
   onEdgesChange: (changes: EdgeChange[]) => void;
   onConnect: (connection: Connection) => void;
+  onDeleteEdge: (edgeId: string) => void;
   onInit: (instance: ReactFlowInstance) => void;
   onOpenNodeConfig: (nodeId: string) => void;
   reactFlowInstance: ReactFlowInstance | null;
@@ -168,9 +171,11 @@ export function WorkflowCanvasArea({
   nodes,
   edges,
   nodeTypes,
+  edgeTypes,
   onNodesChange,
   onEdgesChange,
   onConnect,
+  onDeleteEdge,
   onInit,
   onOpenNodeConfig,
   reactFlowInstance,
@@ -232,6 +237,18 @@ export function WorkflowCanvasArea({
       );
     });
   }, [allDefinitions, paletteSearch]);
+
+  const renderEdges = useMemo(
+    () =>
+      edges.map((edge) => ({
+        ...edge,
+        data: {
+          ...(edge.data ?? {}),
+          onDeleteEdge
+        }
+      })),
+    [edges, onDeleteEdge]
+  );
 
   const handleAddNode = (definition: DefinitionNode) => {
     onCreateNodeFromDefinition(definition);
@@ -418,16 +435,26 @@ export function WorkflowCanvasArea({
 
           <ReactFlow
             nodes={nodes}
-            edges={edges}
+            edges={renderEdges}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onEdgeDoubleClick={(event, edge) => {
+              event.preventDefault();
+              onDeleteEdge(edge.id);
+            }}
+            onEdgeContextMenu={(event, edge) => {
+              event.preventDefault();
+              onDeleteEdge(edge.id);
+            }}
             onInit={onInit}
             onNodeDoubleClick={(_event, node) => onOpenNodeConfig(node.id)}
             fitView
           >
-            <Background variant={BackgroundVariant.Dots} color="#d5dae3" gap={20} size={1} />
+            <Background id="workflow-grid-minor" variant={BackgroundVariant.Lines} color="#e4ebf5" gap={24} lineWidth={0.65} />
+            <Background id="workflow-grid-major" variant={BackgroundVariant.Lines} color="#c8d7ea" gap={120} lineWidth={1.15} />
           </ReactFlow>
 
           <div className="canvas-controls-left">

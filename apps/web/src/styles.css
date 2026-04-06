@@ -444,8 +444,34 @@ select {
 .canvas-pane {
   position: relative;
   border-bottom: 1px solid var(--panel-border);
-  background: var(--app-bg);
+  background: #f7fbff;
   min-height: 0;
+}
+
+.edge-delete-btn {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid #e0a9b1;
+  background: #fff7f8;
+  color: #c54157;
+  box-shadow: 0 5px 14px rgba(34, 54, 86, 0.2);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.edge-delete-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.edge-delete-btn:hover {
+  background: #ffe8eb;
+  border-color: #cc6b7a;
+  transform: scale(1.06);
 }
 
 .node-palette-overlay {
