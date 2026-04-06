@@ -24,6 +24,22 @@ class FakeProvider implements LLMProviderAdapter {
   }
 }
 
+class ParserFixProvider implements LLMProviderAdapter {
+  readonly definition = {
+    id: "parser-fix",
+    label: "Parser Fix",
+    supportsTools: false,
+    configSchema: {}
+  };
+
+  async generate() {
+    return {
+      content: "{\"status\":\"complete\"}",
+      toolCalls: []
+    };
+  }
+}
+
 class FakeAgentRuntime implements AgentRuntimeAdapter {
   readonly id = "fake-agent";
 
@@ -635,6 +651,84 @@ describe("workflow engine", () => {
     expect(parserOutput.retries).toBe(0);
   });
 
+  it("output_parser: retries using attached agent provider context when agent returns non-JSON", async () => {
+    const providerRegistry = createProviderRegistry();
+    providerRegistry.register(new ParserFixProvider());
+
+    const workflow: Workflow = {
+      id: "wf-parser-agent-retry",
+      name: "Parser retries from agent provider",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "w1", type: "webhook_input", name: "Webhook", position: { x: 0, y: 0 }, config: {} },
+        {
+          id: "a1",
+          type: "agent_orchestrator",
+          name: "Agent",
+          position: { x: 220, y: 0 },
+          config: {
+            systemPromptTemplate: "{{system_prompt}}",
+            userPromptTemplate: "{{user_prompt}}",
+            maxIterations: 3,
+            toolCallingEnabled: false
+          }
+        },
+        {
+          id: "m1",
+          type: "llm_call",
+          name: "Model",
+          position: { x: 220, y: 180 },
+          config: {
+            provider: { providerId: "parser-fix", model: "parser-fix-model" }
+          }
+        },
+        {
+          id: "p1",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 440, y: 0 },
+          config: {
+            mode: "json_schema",
+            inputKey: "answer",
+            maxRetries: 2,
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]}},\"required\":[\"status\"]}"
+          }
+        },
+        { id: "o1", type: "output", name: "Output", position: { x: 660, y: 0 }, config: { responseTemplate: "{{parsed.status}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "w1", target: "a1" },
+        { id: "e2", source: "a1", target: "p1" },
+        { id: "e3", source: "p1", target: "o1" },
+        { id: "e4", source: "a1", sourceHandle: "chat_model", target: "m1" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        webhookPayload: {
+          system_prompt: "You are helpful",
+          user_prompt: "Get status"
+        }
+      },
+      {
+        providerRegistry,
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "p1")?.output as Record<string, unknown>;
+    expect((parserOutput.parsed as Record<string, unknown>).status).toBe("complete");
+    expect(parserOutput.retries).toBeGreaterThan(0);
+  });
+
   it("pdf_output: generates downloadable PDF data URL", async () => {
     const workflow: Workflow = {
       id: "wf-pdf-output",
@@ -900,6 +994,190 @@ describe("workflow engine", () => {
     expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("skipped");
     expect(result.nodeResults.find((entry) => entry.nodeId === "n4")?.status).toBe("success");
     expect(result.nodeResults.find((entry) => entry.nodeId === "n5")?.status).toBe("skipped");
+  });
+
+  it("switch_node: routes correctly when edges use case index handles (legacy canvas ids)", async () => {
+    const workflow: Workflow = {
+      id: "wf-switch-case-index",
+      name: "Switch routing case index handles",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "needs_more_info" } },
+        {
+          id: "n2",
+          type: "switch_node",
+          name: "Switch",
+          position: { x: 200, y: 0 },
+          config: {
+            switchValue: "{{text}}",
+            cases: [
+              { value: "complete", label: "complete" },
+              { value: "needs_more_info", label: "needs_more_info" }
+            ],
+            defaultLabel: "default"
+          }
+        },
+        { id: "n3", type: "output", name: "Complete", position: { x: 420, y: -50 }, config: { responseTemplate: "pdf" } },
+        { id: "n4", type: "output", name: "Follow Up", position: { x: 420, y: 0 }, config: { responseTemplate: "ask_more" } },
+        { id: "n5", type: "output", name: "Default", position: { x: 420, y: 50 }, config: { responseTemplate: "default" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", sourceHandle: "case_0", target: "n3" },
+        { id: "e3", source: "n2", sourceHandle: "case_1", target: "n4" },
+        { id: "e4", source: "n2", sourceHandle: "default", target: "n5" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("skipped");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n4")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n5")?.status).toBe("skipped");
+  });
+
+  it("switch_node: passes upstream parsed payload to taken branch outputs", async () => {
+    const workflow: Workflow = {
+      id: "wf-switch-pass-through",
+      name: "Switch payload pass-through",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "text_input",
+          name: "Input",
+          position: { x: 0, y: 0 },
+          config: { text: "{\"status\":\"needs_more_info\",\"follow_up_question\":\"Please share project id.\"}" }
+        },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 180, y: 0 },
+          config: {
+            mode: "json_schema",
+            inputKey: "text",
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\"},\"follow_up_question\":{\"type\":\"string\"}},\"required\":[\"status\",\"follow_up_question\"]}"
+          }
+        },
+        {
+          id: "n3",
+          type: "switch_node",
+          name: "Switch",
+          position: { x: 360, y: 0 },
+          config: {
+            switchValue: "{{parsed.status}}",
+            cases: [
+              { value: "complete", label: "complete" },
+              { value: "needs_more_info", label: "needs_more_info" }
+            ],
+            defaultLabel: "default"
+          }
+        },
+        {
+          id: "n4",
+          type: "output",
+          name: "Complete Output",
+          position: { x: 560, y: -50 },
+          config: { responseTemplate: "{{parsed.final_markdown}}", outputKey: "result" }
+        },
+        {
+          id: "n5",
+          type: "output",
+          name: "Follow-up Output",
+          position: { x: 560, y: 50 },
+          config: { responseTemplate: "{{parsed.follow_up_question}}", outputKey: "result" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" },
+        { id: "e3", source: "n3", sourceHandle: "complete", target: "n4" },
+        { id: "e4", source: "n3", sourceHandle: "needs_more_info", target: "n5" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n4")?.status).toBe("skipped");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n5")?.status).toBe("success");
+
+    const followupOutput = result.nodeResults.find((entry) => entry.nodeId === "n5")?.output as Record<string, unknown>;
+    expect(followupOutput.result).toBe("Please share project id.");
+  });
+
+  it("switch_node: does not skip shared targets when taken and non-taken handles point to same node", async () => {
+    const workflow: Workflow = {
+      id: "wf-switch-shared-target",
+      name: "Switch shared target safety",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "complete" } },
+        {
+          id: "n2",
+          type: "switch_node",
+          name: "Switch",
+          position: { x: 200, y: 0 },
+          config: {
+            switchValue: "{{text}}",
+            cases: [
+              { value: "complete", label: "complete" },
+              { value: "needs_more_info", label: "needs_more_info" }
+            ],
+            defaultLabel: "needs_more_info"
+          }
+        },
+        { id: "n3", type: "output", name: "Complete", position: { x: 420, y: -40 }, config: { responseTemplate: "pdf" } },
+        { id: "n4", type: "output", name: "NeedsMoreInfo", position: { x: 420, y: 40 }, config: { responseTemplate: "follow-up" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", sourceHandle: "case_0", target: "n3" },
+        { id: "e3", source: "n2", sourceHandle: "complete", target: "n3" },
+        { id: "e4", source: "n2", sourceHandle: "default", target: "n3" },
+        { id: "e5", source: "n2", sourceHandle: "case_1", target: "n4" },
+        { id: "e6", source: "n2", sourceHandle: "needs_more_info", target: "n4" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n3")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n4")?.status).toBe("skipped");
   });
 
   it("onError continue: failing node does not halt execution", async () => {

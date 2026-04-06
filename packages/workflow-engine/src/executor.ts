@@ -378,6 +378,12 @@ function getValueByPath(input: Record<string, unknown>, path: string): unknown {
   return current;
 }
 
+function branchPassthrough(templateData: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...templateData };
+  delete next.parent_outputs;
+  return next;
+}
+
 function normalizePdfFilename(value: string): string {
   const fallback = "workflow-output.pdf";
   const trimmed = typeof value === "string" ? value.trim() : "";
@@ -1732,7 +1738,8 @@ async function executeNode(
         iterations: agentState.iterations,
         stopReason: agentState.stopReason,
         steps: agentState.steps,
-        messages: agentState.messages
+        messages: agentState.messages,
+        _provider: provider
       };
     }
 
@@ -1808,12 +1815,13 @@ async function executeNode(
       let retries = 0;
 
       if (!result.ok) {
-        // Find a provider to use for retry calls from templateData or upstream llm_call
-        const upstreamProvider = (templateData as Record<string, unknown>).__output_parser_provider as Record<string, unknown> | undefined;
-        const providerId = typeof upstreamProvider?.providerId === "string" ? upstreamProvider.providerId : undefined;
+        // Find a provider to use for retry calls from templateData or upstream nodes.
+        const upstreamProvider =
+          normalizeProvider((templateData as Record<string, unknown>).__output_parser_provider) ??
+          normalizeProvider((templateData as Record<string, unknown>)._provider);
 
-        if (providerId) {
-          const providerAdapter = dependencies.providerRegistry.get(providerId);
+        if (upstreamProvider) {
+          const providerAdapter = dependencies.providerRegistry.get(upstreamProvider.providerId);
           for (let attempt = 0; attempt < maxRetries && !result.ok; attempt += 1) {
             const correctionPrompt = mode === "json_schema" && schemaObj
               ? `Your previous output was invalid. Error: ${result.error}. Required schema: ${JSON.stringify(schemaObj)}. Original output: ${rawInput}. Please output ONLY valid JSON matching the schema, with no other text.`
@@ -1821,7 +1829,7 @@ async function executeNode(
 
             const retryResponse = await providerAdapter.generate(
               {
-                provider: upstreamProvider as unknown as Parameters<typeof providerAdapter.generate>[0]["provider"],
+                provider: upstreamProvider,
                 messages: [
                   { role: "system", content: "You are a JSON formatting assistant. Output ONLY valid JSON." },
                   { role: "user", content: correctionPrompt }
@@ -1905,6 +1913,7 @@ async function executeNode(
       const evaluated = renderTemplate(conditionTemplate, templateData).trim();
       const isTruthy = Boolean(evaluated) && evaluated !== "false" && evaluated !== "0" && evaluated !== "null" && evaluated !== "undefined";
       return {
+        ...branchPassthrough(templateData),
         result: isTruthy,
         evaluatedValue: evaluated,
         _branchHandle: isTruthy ? "true" : "false"
@@ -1917,16 +1926,27 @@ async function executeNode(
       const cases = Array.isArray(config.cases) ? config.cases as Array<{ value: string; label: string }> : [];
       const defaultLabel = typeof config.defaultLabel === "string" ? config.defaultLabel : "default";
       let matchedLabel = defaultLabel;
+      let matchedCaseHandle = "default";
       for (const switchCase of cases) {
         if (String(switchCase.value).trim() === evaluated) {
           matchedLabel = switchCase.label;
           break;
         }
       }
+
+      for (let index = 0; index < cases.length; index += 1) {
+        const switchCase = cases[index];
+        if (String(switchCase.value).trim() === evaluated) {
+          matchedCaseHandle = `case_${index}`;
+          break;
+        }
+      }
       return {
+        ...branchPassthrough(templateData),
         matched: matchedLabel,
         evaluatedValue: evaluated,
-        _branchHandle: matchedLabel
+        _branchHandle: matchedLabel,
+        _branchHandleFallback: matchedCaseHandle
       };
     }
 
@@ -2130,6 +2150,32 @@ function collectDescendants(
     }
   }
   return descendants;
+}
+
+function collectNodeAndDescendants(
+  nodeId: string,
+  outgoingExecution: Map<string, string[]>,
+  workflow: { edges: { source: string; target: string; sourceHandle?: string }[] }
+): Set<string> {
+  const nodes = new Set<string>([nodeId]);
+  for (const descendant of collectDescendants(nodeId, outgoingExecution, workflow)) {
+    nodes.add(descendant);
+  }
+  return nodes;
+}
+
+function collectReachableFromRoots(
+  roots: Iterable<string>,
+  outgoingExecution: Map<string, string[]>,
+  workflow: { edges: { source: string; target: string; sourceHandle?: string }[] }
+): Set<string> {
+  const reachable = new Set<string>();
+  for (const root of roots) {
+    for (const nodeId of collectNodeAndDescendants(root, outgoingExecution, workflow)) {
+      reachable.add(nodeId);
+    }
+  }
+  return reachable;
 }
 
 function serializeNodeOutputs(nodeOutputs: Map<string, unknown>): Record<string, unknown> {
@@ -2483,6 +2529,11 @@ export async function executeWorkflow(
           const handleMap = branchTargets.get(waitingNode.id)!;
           const errorBranchTargets = handleMap.get("error") ?? [];
           if (errorBranchTargets.length > 0) {
+            const protectedNodes = collectReachableFromRoots(
+              errorBranchTargets,
+              graphIndexes.outgoingExecution,
+              workflow
+            );
             for (const [handle, targets] of handleMap.entries()) {
               if (handle === "error") {
                 for (const target of targets) {
@@ -2493,9 +2544,10 @@ export async function executeWorkflow(
                 }
               } else {
                 for (const target of targets) {
-                  skippedByBranch.add(target);
-                  for (const desc of collectDescendants(target, graphIndexes.outgoingExecution, workflow)) {
-                    skippedByBranch.add(desc);
+                  for (const candidate of collectNodeAndDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+                    if (!protectedNodes.has(candidate)) {
+                      skippedByBranch.add(candidate);
+                    }
                   }
                 }
               }
@@ -2945,19 +2997,36 @@ export async function executeWorkflow(
       // Handle branching: determine which branches to skip
       const outputRecord = toRecord(output);
       const activeBranch = typeof outputRecord._branchHandle === "string" ? outputRecord._branchHandle : undefined;
+      const activeBranchFallback =
+        typeof outputRecord._branchHandleFallback === "string" ? outputRecord._branchHandleFallback : undefined;
 
       if (activeBranch && branchTargets.has(node.id)) {
         const handleMap = branchTargets.get(node.id)!;
+        const takenHandles = new Set<string>();
+        if (activeBranch) {
+          takenHandles.add(activeBranch);
+        }
+        if (activeBranchFallback) {
+          takenHandles.add(activeBranchFallback);
+        }
+        const takenTargets = new Set<string>();
+        for (const takenHandle of takenHandles) {
+          for (const target of handleMap.get(takenHandle) ?? []) {
+            takenTargets.add(target);
+          }
+        }
+        const protectedNodes = collectReachableFromRoots(takenTargets, graphIndexes.outgoingExecution, workflow);
+
         for (const [handle, targets] of handleMap.entries()) {
-          if (handle === activeBranch) {
+          if (takenHandles.has(handle)) {
             continue; // This is the taken branch
           }
           // Mark all nodes on non-taken branches as skipped
           for (const target of targets) {
-            const descendants = collectDescendants(target, graphIndexes.outgoingExecution, workflow);
-            skippedByBranch.add(target);
-            for (const desc of descendants) {
-              skippedByBranch.add(desc);
+            for (const candidate of collectNodeAndDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+              if (!protectedNodes.has(candidate)) {
+                skippedByBranch.add(candidate);
+              }
             }
           }
         }
@@ -3058,6 +3127,11 @@ export async function executeWorkflow(
           const handleMap = branchTargets.get(node.id)!;
           const errorBranchTargets = handleMap.get("error") ?? [];
           if (errorBranchTargets.length > 0) {
+            const protectedNodes = collectReachableFromRoots(
+              errorBranchTargets,
+              graphIndexes.outgoingExecution,
+              workflow
+            );
             // Skip non-error branches, un-skip error branch
             for (const [handle, targets] of handleMap.entries()) {
               if (handle === "error") {
@@ -3069,9 +3143,10 @@ export async function executeWorkflow(
                 }
               } else {
                 for (const t of targets) {
-                  skippedByBranch.add(t);
-                  for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, workflow)) {
-                    skippedByBranch.add(desc);
+                  for (const candidate of collectNodeAndDescendants(t, graphIndexes.outgoingExecution, workflow)) {
+                    if (!protectedNodes.has(candidate)) {
+                      skippedByBranch.add(candidate);
+                    }
                   }
                 }
               }

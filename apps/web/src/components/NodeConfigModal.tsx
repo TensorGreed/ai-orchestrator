@@ -459,7 +459,9 @@ function getSuggestedDirectApiBaseUrl(currentBaseUrl: string): string | null {
     return null;
   }
 
-  const suggested = `${window.location.protocol}//${hostname}:4001`;
+  const directPortFromEnv = (import.meta.env.VITE_API_PORT as string | undefined)?.trim();
+  const normalizedPort = directPortFromEnv && /^\d+$/.test(directPortFromEnv) ? directPortFromEnv : "4000";
+  const suggested = `${window.location.protocol}//${hostname}:${normalizedPort}`;
   if (suggested.replace(/\/+$/, "") === currentBaseUrl.replace(/\/+$/, "")) {
     return null;
   }
@@ -2701,7 +2703,11 @@ export function NodeConfigModal({
               value={toStringValue(config.defaultLabel, "default")}
               onChange={(next) => setConfig((current) => ({ ...current, defaultLabel: next }))}
             />
-            <div className="cfg-tip">Define an array of strings in JSON to create branching outputs that match Switch Evaluation Value.</div>
+            <div className="cfg-tip">
+              Define JSON array entries like
+              <code>[{`{\"value\":\"complete\",\"label\":\"complete\"}`}, {`{\"value\":\"needs_more_info\",\"label\":\"needs_more_info\"}`}]</code>.
+              Branch handles use each case <code>label</code>.
+            </div>
           </>
         );
       case "output":

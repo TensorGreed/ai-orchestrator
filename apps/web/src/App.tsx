@@ -506,6 +506,8 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
       } else {
          label = `Case ${caseIdx + 1}`;
       }
+    } else if (source?.data.nodeType === "switch_node") {
+      label = edge.sourceHandle;
     }
   }
 

@@ -6,7 +6,7 @@ export default defineConfig(({ mode }) => {
   const isWidgetBuild = mode === "widget";
   const envDir = path.resolve(__dirname, "../../");
   const env = loadEnv(mode, envDir, "");
-  const targetPort = env.API_PORT || 4001;
+  const targetPort = env.API_PORT || env.VITE_API_PORT || 4000;
 
   if (isWidgetBuild) {
     return {

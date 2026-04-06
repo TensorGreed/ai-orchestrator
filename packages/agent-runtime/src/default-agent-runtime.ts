@@ -4,7 +4,7 @@ import { createToolErrorResult } from "./types";
 
 const MAX_MESSAGE_CHARS = 3000;
 const MAX_SYSTEM_MESSAGE_CHARS = 8000;
-const MAX_TOOL_MESSAGE_CHARS = 2500;
+const MAX_TOOL_MESSAGE_CHARS = 12000;
 const MAX_TOOL_DESCRIPTION_CHARS = 280;
 const MAX_TOOL_SCHEMA_PROPERTIES = 12;
 const MAX_TOOL_SCHEMA_ENUM_VALUES = 20;
@@ -13,6 +13,10 @@ const MAX_TOOL_COUNT = 24;
 const MAX_TOOLS_WITH_MATCH = 8;
 const MAX_TOOLS_NO_MATCH = 12;
 const STRONG_MATCH_SCORE = 2;
+const MAX_TOOL_PAYLOAD_DEPTH = 4;
+const MAX_TOOL_OBJECT_KEYS = 32;
+const MAX_TOOL_ARRAY_ITEMS = 8;
+const MAX_TOOL_VALUE_STRING_CHARS = 400;
 
 function normalizeMaxMessages(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
@@ -38,6 +42,55 @@ function toRecord(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+function compactToolPayload(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined) {
+    return value ?? null;
+  }
+
+  if (typeof value === "string") {
+    return truncateText(value, MAX_TOOL_VALUE_STRING_CHARS);
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (depth >= MAX_TOOL_PAYLOAD_DEPTH) {
+    if (Array.isArray(value)) {
+      return `[array depth ${MAX_TOOL_PAYLOAD_DEPTH} truncated; length=${value.length}]`;
+    }
+    if (typeof value === "object") {
+      const keys = Object.keys(toRecord(value)).length;
+      return `[object depth ${MAX_TOOL_PAYLOAD_DEPTH} truncated; keys=${keys}]`;
+    }
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    const limited = value.slice(0, MAX_TOOL_ARRAY_ITEMS).map((item) => compactToolPayload(item, depth + 1));
+    if (value.length > MAX_TOOL_ARRAY_ITEMS) {
+      limited.push({
+        _truncatedItems: value.length - MAX_TOOL_ARRAY_ITEMS
+      });
+    }
+    return limited;
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(toRecord(value));
+    const limitedEntries = entries.slice(0, MAX_TOOL_OBJECT_KEYS);
+    const compacted = Object.fromEntries(
+      limitedEntries.map(([key, nested]) => [key, compactToolPayload(nested, depth + 1)])
+    ) as Record<string, unknown>;
+    if (entries.length > MAX_TOOL_OBJECT_KEYS) {
+      compacted._truncatedKeys = entries.length - MAX_TOOL_OBJECT_KEYS;
+    }
+    return compacted;
+  }
+
+  return String(value);
 }
 
 function simplifySchema(value: unknown, depth = 0): Record<string, unknown> {
@@ -143,15 +196,40 @@ function normalizeToolsForModel(input: ToolDefinition[], prompt: string): ToolDe
 }
 
 function serializeToolMessage(ok: boolean, payload: unknown): string {
-  const raw = JSON.stringify(ok ? { ok: true, output: payload } : { ok: false, error: payload });
+  const wrapped = ok ? { ok: true, output: payload } : { ok: false, error: payload };
+  const raw = JSON.stringify(wrapped);
   if (raw.length <= MAX_TOOL_MESSAGE_CHARS) {
     return raw;
   }
 
+  const compactedWrapped = ok
+    ? {
+        ok: true,
+        output: compactToolPayload(payload),
+        _meta: {
+          truncated: true,
+          originalChars: raw.length
+        }
+      }
+    : {
+        ok: false,
+        error: compactToolPayload(payload),
+        _meta: {
+          truncated: true,
+          originalChars: raw.length
+        }
+      };
+  const compactedRaw = JSON.stringify(compactedWrapped);
+  if (compactedRaw.length <= MAX_TOOL_MESSAGE_CHARS) {
+    return compactedRaw;
+  }
+
+  const previewChars = Math.max(500, MAX_TOOL_MESSAGE_CHARS - 250);
   return JSON.stringify({
     ok,
     truncated: true,
-    preview: raw.slice(0, MAX_TOOL_MESSAGE_CHARS)
+    originalChars: raw.length,
+    preview: raw.slice(0, previewChars)
   });
 }
 

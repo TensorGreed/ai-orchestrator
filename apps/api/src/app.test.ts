@@ -129,6 +129,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     API_PORT: 0,
     API_HOST: "127.0.0.1",
     WEB_ORIGIN: "http://localhost:5173",
+    SEED_SAMPLE_WORKFLOWS: false,
     SECRET_MASTER_KEY_BASE64: masterKey,
     SESSION_COOKIE_NAME: "ao_session",
     SESSION_TTL_HOURS: 24,

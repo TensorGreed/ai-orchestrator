@@ -169,10 +169,11 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
              <div className="wf-structural-ports">
                {(Array.isArray(data.config?.cases) ? data.config.cases : []).map((c: any, i: number) => {
                   const lbl = typeof c === "string" ? c : (c?.label || c?.value || `Case ${i+1}`);
+                  const normalizedHandleId = String(lbl ?? "").trim() || `case_${i}`;
                   return (
                   <div key={i} className="wf-structural-port">
                      <span className="port-label" title={lbl}>{lbl.length > 8 ? lbl.substring(0,6) + ".." : lbl}</span>
-                     <Handle id={`case_${i}`} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: (20 + (i * 15)) + "%" }} />
+                     <Handle id={normalizedHandleId} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: (20 + (i * 15)) + "%" }} />
                   </div>
                )})}
                <div className="wf-structural-port">

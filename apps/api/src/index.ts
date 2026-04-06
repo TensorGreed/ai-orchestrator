@@ -36,7 +36,9 @@ async function bootstrap() {
     console.log(`Bootstrapped admin user '${bootstrapUser.email}'`);
   }
 
-  seedWorkflowsIfEmpty(store, workspaceRoot);
+  if (config.SEED_SAMPLE_WORKFLOWS) {
+    seedWorkflowsIfEmpty(store, workspaceRoot);
+  }
 
   const schedulerService = new SchedulerService(store);
   const app = createApp(config, store, secretService, authService, schedulerService);

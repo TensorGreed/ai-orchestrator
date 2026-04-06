@@ -150,4 +150,68 @@ describe("DefaultAgentRuntime", () => {
     expect(provider.calls.length).toBe(2);
     expect(provider.calls[1]?.messages.some((message) => message.content.includes("First question"))).toBe(true);
   });
+
+  it("compacts oversized tool payloads into structured JSON for follow-up reasoning", async () => {
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new FakeToolCallingProvider());
+    const runtime = new DefaultAgentRuntime();
+
+    const hugeToolOutput = {
+      skip: 0,
+      limit: 50,
+      total: 341920,
+      resources: Array.from({ length: 24 }, (_, index) => ({
+        id: `key-${index}`,
+        name: `resource-${index}`,
+        metadata: "x".repeat(1200)
+      }))
+    };
+
+    const output = await runtime.run(
+      {
+        provider: { providerId: "fake", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "List keys",
+        tools: [
+          {
+            serverId: "mock-mcp",
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object" }
+          }
+        ],
+        maxIterations: 3,
+        toolCallingEnabled: true
+      },
+      {
+        tools: [
+          {
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object" }
+          }
+        ],
+        invokeTool: async () => hugeToolOutput
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    const toolMessage = output.messages.find((message) => message.role === "tool");
+    expect(toolMessage).toBeTruthy();
+
+    const parsed = JSON.parse(String(toolMessage?.content)) as {
+      ok: boolean;
+      output?: { total?: number; resources?: unknown[] };
+      _meta?: { truncated?: boolean };
+    };
+    expect(parsed.ok).toBe(true);
+    expect(parsed._meta?.truncated).toBe(true);
+    expect(parsed.output?.total).toBe(341920);
+    expect(Array.isArray(parsed.output?.resources)).toBe(true);
+    expect((parsed.output?.resources?.length ?? 0) > 0).toBe(true);
+    expect(parsed.output?.resources?.length).toBeLessThanOrEqual(9);
+  });
 });
