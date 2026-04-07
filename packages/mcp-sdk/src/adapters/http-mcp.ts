@@ -41,9 +41,9 @@ function normalizeEndpoint(config: MCPServerConfig): string {
 }
 
 function normalizeTimeoutMs(config: MCPServerConfig): number {
-  const raw = Number(config.connection?.timeoutMs ?? 15000);
+  const raw = Number(config.connection?.timeoutMs ?? 120000);
   if (!Number.isFinite(raw) || raw < 1000) {
-    return 15000;
+    return 120000;
   }
   return Math.floor(raw);
 }
@@ -152,6 +152,11 @@ async function postRpc(
       response: parsed,
       sessionId: response.headers.get("mcp-session-id") ?? response.headers.get("Mcp-Session-Id") ?? undefined
     };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`MCP request timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }

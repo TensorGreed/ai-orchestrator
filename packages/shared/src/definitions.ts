@@ -361,11 +361,31 @@ export const nodeDefinitions: NodeDefinition[] = [
       properties: {
         serverId: { type: "string" },
         toolName: { type: "string" },
-        argsTemplate: { type: "string" }
+        argsTemplate: { type: "string" },
+        connection: {
+          type: "object",
+          properties: {
+            endpoint: { type: "string" },
+            transport: { type: "string" },
+            timeoutMs: { type: "number" },
+            authType: { type: "string" },
+            username: { type: "string" }
+          }
+        }
       },
       required: ["serverId", "toolName"]
     },
-    sampleConfig: { serverId: "mock-mcp", toolName: "get_current_time", argsTemplate: "{\"tz\":\"UTC\"}" }
+    sampleConfig: {
+      serverId: "mock-mcp",
+      toolName: "get_current_time",
+      argsTemplate: "{\"tz\":\"UTC\"}",
+      connection: {
+        endpoint: "http://127.0.0.1:7001/mcp",
+        transport: "http_streamable",
+        timeoutMs: 120000,
+        authType: "none"
+      }
+    }
   },
   {
     type: "rag_retrieve",

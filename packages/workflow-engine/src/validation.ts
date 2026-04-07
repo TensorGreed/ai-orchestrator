@@ -11,6 +11,13 @@ const allowedWebhookAuthModes = new Set(["none", "bearer_token", "hmac_sha256"])
 const allowedHttpRequestMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const agentPrimaryInputNodeTypes = new Set(["webhook_input", "text_input", "user_prompt"]);
 
+function toRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
 function isValidTimeZone(value: string): boolean {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: value });
@@ -430,6 +437,18 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           message: "MCP Tool node requires serverId and toolName.",
           nodeId: node.id
         });
+      }
+
+      const connection = toRecord(config.connection);
+      if (connection.timeoutMs !== undefined) {
+        const timeoutMs = Number(connection.timeoutMs);
+        if (!Number.isFinite(timeoutMs) || timeoutMs < 1000) {
+          issues.push({
+            code: "invalid_mcp_timeout_ms",
+            message: "MCP Tool node connection.timeoutMs must be a number >= 1000 when set.",
+            nodeId: node.id
+          });
+        }
       }
     }
 

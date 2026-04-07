@@ -1384,6 +1384,22 @@ export function NodeConfigModal({
           }
         />
 
+        <NumberField
+          label="Request Timeout (ms)"
+          value={toNumberValue(connection.timeoutMs, 120000)}
+          min={1000}
+          step={1000}
+          onChange={(next) =>
+            setConfig((current) => ({
+              ...current,
+              connection: {
+                ...asRecord(current.connection),
+                timeoutMs: next
+              }
+            }))
+          }
+        />
+
         <SelectField
           label="Authentication"
           value={authType}

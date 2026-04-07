@@ -349,9 +349,10 @@ Use an `MCP Tool` node attached to the Agent `tool` port.
 1. Open MCP node config.
 2. Set `MCP Server Adapter` to `HTTP MCP Server (http_mcp)`.
 3. Set `Endpoint` to your MCP server URL.
-4. Set `Authentication` (`None` / `Bearer` / `Basic`) and choose `Auth Secret` if needed.
-5. Click `Discover Tools`, then select the discovered tool.
-6. To expose every discovered tool to the agent, set `Tools To Include` to `All discovered tools (agent decides)`.
+4. Set `Request Timeout (ms)` based on tool latency (for large fetches use `60000`-`300000`).
+5. Set `Authentication` (`None` / `Bearer` / `Basic`) and choose `Auth Secret` if needed.
+6. Click `Discover Tools`, then select the discovered tool.
+7. To expose every discovered tool to the agent, set `Tools To Include` to `All discovered tools (agent decides)`.
 
 Notes:
 - `mock-mcp` is a demo adapter and always returns demo tools (`get_current_time`, `calculator`, `lookup_kb`).
