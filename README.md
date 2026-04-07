@@ -10,18 +10,19 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
   - Ollama (real)
   - OpenAI-compatible endpoints (real)
   - OpenAI cloud (real)
+  - Azure OpenAI (real)
   - Gemini (basic)
 - MCP adapter model with:
   - `http_mcp` (real remote MCP endpoint over HTTP streamable)
   - `mock-mcp` (local demo tools)
 - Agent Orchestrator & Supervisor Nodes with iterative tool-calling loop and Swarm delegation
 - Agent port attachments (auxiliary edges):
-  - `chat_model` -> attach `LLM Call` node
+  - `chat_model` -> attach `LLM Call` or `Azure OpenAI Chat Model` node
   - `memory` -> attach `Simple Memory` node
   - `tool` -> attach one or more `MCP Tool` nodes
   - `worker` -> attach worker `Agent Orchestrator` or `Supervisor` nodes (applies to Supervisor nodes only)
 - RAG path with connector source + in-memory retriever/vector similarity
-- Connector SDK + sample connectors (`google-drive`, `sql-db`, `nosql-db`)
+- Connector SDK + connectors (`google-drive`, `sql-db`, `nosql-db`, `azure-storage`, `azure-cosmos-db`, `azure-monitor`, `azure-ai-search`)
 - Webhook execution endpoint (`system_prompt` + `user_prompt` payload)
 - Secret abstraction with encrypted server-side storage (AES-256-GCM)
 - Session-based authentication (`httpOnly` cookie) with RBAC (`admin`, `builder`, `operator`, `viewer`)
@@ -31,6 +32,7 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 
 - Frontend (`apps/web`): React + TypeScript + React Flow
 - Backend (`apps/api`): Fastify + TypeScript
+- Product docs (`apps/docs`): VitePress documentation site
 - DB: local SQLite database file using `sql.js` (persisted to `apps/api/data/orchestrator.db`)
 - Shared contracts: `packages/shared`
 - Runtime/SDK packages:
@@ -45,36 +47,42 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 ```text
 .
 +- apps/
-¦  +- api/
-¦  ¦  +- src/
-¦  ¦  ¦  +- app.ts
-¦  ¦  ¦  +- index.ts
-¦  ¦  ¦  +- db/database.ts
-¦  ¦  ¦  +- services/
-¦  ¦  +- Dockerfile
-¦  +- web/
-¦     +- src/
-¦     ¦  +- App.tsx
-¦     ¦  +- styles.css
-¦     ¦  +- lib/
-¦     +- Dockerfile
-¦     +- nginx.conf
+|  +- api/
+|  |  +- src/
+|  |  |  +- app.ts
+|  |  |  +- index.ts
+|  |  |  +- db/database.ts
+|  |  |  +- services/
+|  |  +- Dockerfile
+|  +- web/
+|  |  +- src/
+|  |  |  +- App.tsx
+|  |  |  +- styles.css
+|  |  |  +- lib/
+|  |  +- Dockerfile
+|  |  +- nginx.conf
+|  +- docs/
+|     +- docs/
+|     |  +- .vitepress/config.ts
+|     |  +- index.md
+|     +- package.json
 +- packages/
-¦  +- shared/
-¦  +- provider-sdk/
-¦  +- mcp-sdk/
-¦  +- connector-sdk/
-¦  +- agent-runtime/
-¦  +- workflow-engine/
+|  +- shared/
+|  +- provider-sdk/
+|  +- mcp-sdk/
+|  +- connector-sdk/
+|  +- agent-runtime/
+|  +- workflow-engine/
 +- samples/workflows/
-¦  +- basic-flow.json
-¦  +- rag-flow.json
-¦  +- agentic-mcp-flow.json
+|  +- basic-flow.json
+|  +- rag-flow.json
+|  +- agentic-mcp-flow.json
++- docs/
+|  +- (legacy static site)
 +- docker-compose.yml
 +- .env.example
 +- README.md
 ```
-
 ## Setup (local)
 
 ### Prerequisites
@@ -110,7 +118,7 @@ pnpm install
 
 ### 3) Start servers
 
-Start both API and UI together:
+Start API + UI + docs together:
 
 ```bash
 pnpm dev
@@ -118,6 +126,15 @@ pnpm dev
 
 - API: `http://localhost:4000`
 - Web UI: `http://localhost:5173`
+- Docs UI: `http://localhost:4173`
+
+Optional: set `VITE_DOCS_URL` (in `apps/web/.env` or your build env) to override the top-bar Docs link target.
+
+Start product only (API + UI):
+
+```bash
+pnpm dev:product
+```
 
 Start API only:
 
@@ -130,6 +147,14 @@ Start UI only:
 ```bash
 pnpm --filter @ai-orchestrator/web dev
 ```
+
+Start docs site only:
+
+```bash
+pnpm docs:dev
+```
+
+- Docs UI: `http://localhost:4173`
 
 ### 4) Run tests
 
@@ -212,7 +237,27 @@ API error behavior:
 - `ANY /webhook-test/:path` (configured test webhook URL)
 - `POST /api/secrets`
 - `GET /api/secrets`
+- `POST /api/connectors/test`
 - `POST /api/mcp/discover-tools`
+
+## Azure node suite (implemented)
+
+The Azure suite from the n8n-style screenshot is implemented end-to-end in this V1:
+
+- `Azure OpenAI Chat Model` (`azure_openai_chat_model`)
+- `Embeddings Azure OpenAI` (`embeddings_azure_openai`)
+- `Azure Storage` (`azure_storage`)
+- `Azure Cosmos DB` (`azure_cosmos_db`)
+- `Microsoft Azure Monitor` (`azure_monitor_http`)
+- `Azure AI Search Vector Store` (`azure_ai_search_vector_store`)
+
+What is included for these nodes:
+
+- structured node config forms in the editor (no free-form JSON required for normal use)
+- dedicated node icons on canvas and in node library
+- secret-backed credentials via `secretRef.secretId`
+- `Test Connection` action for connector nodes (`/api/connectors/test`)
+- execution support in the workflow engine (including demo fallback mode for local development)
 
 ## Webhook execution
 
@@ -323,7 +368,7 @@ The runtime supports zero, one, or multiple tool calls per iteration.
 The Agent Orchestrator and Supervisor Nodes support dedicated attachment ports. These are auxiliary edges and are not part of linear DAG execution.
 
 - `chat_model` port:
-  - attach an `LLM Call` node
+  - attach an `LLM Call` or `Azure OpenAI Chat Model` node
   - this attachment is required; the agent runtime always uses this node's `provider` config
 - `memory` port:
   - attach a `Simple Memory` node
@@ -450,6 +495,8 @@ Includes node types/config, edge graph, and node positions for canvas restoratio
 - `samples/workflows/basic-flow.json`
 - `samples/workflows/rag-flow.json`
 - `samples/workflows/agentic-mcp-flow.json`
+- `samples/workflows/azure-openai-flow.json`
+- `samples/workflows/azure-connectors-demo-flow.json`
 
 The seed service auto-loads these into DB when the workflow table is empty.
 
@@ -457,3 +504,4 @@ The seed service auto-loads these into DB when the workflow table is empty.
 
 - V1 is intentionally a working vertical slice with clear extension seams.
 - Scheduling/distributed execution/multi-tenant auth remain out of V1 scope.
+

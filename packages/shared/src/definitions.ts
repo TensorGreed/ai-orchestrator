@@ -265,6 +265,60 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "azure_openai_chat_model",
+    label: "Azure OpenAI Chat Model",
+    category: "LLM",
+    description: "Calls Azure OpenAI chat/completions using deployment + API version.",
+    configSchema: {
+      type: "object",
+      properties: {
+        endpoint: { type: "string" },
+        deployment: { type: "string" },
+        apiVersion: { type: "string" },
+        secretRef: { type: "object" },
+        temperature: { type: "number" },
+        maxTokens: { type: "number" },
+        promptKey: { type: "string" },
+        systemPromptKey: { type: "string" }
+      },
+      required: ["endpoint", "deployment", "secretRef"]
+    },
+    sampleConfig: {
+      endpoint: "https://my-azure-openai.openai.azure.com",
+      deployment: "gpt-4o-mini",
+      apiVersion: "2024-10-21",
+      temperature: 0.2,
+      maxTokens: 1024,
+      promptKey: "prompt",
+      systemPromptKey: "system_prompt"
+    }
+  },
+  {
+    type: "embeddings_azure_openai",
+    label: "Embeddings Azure OpenAI",
+    category: "RAG",
+    description: "Generates embedding vectors using Azure OpenAI embedding deployments.",
+    configSchema: {
+      type: "object",
+      properties: {
+        endpoint: { type: "string" },
+        deployment: { type: "string" },
+        apiVersion: { type: "string" },
+        secretRef: { type: "object" },
+        inputKey: { type: "string" },
+        outputKey: { type: "string" }
+      },
+      required: ["endpoint", "deployment", "secretRef"]
+    },
+    sampleConfig: {
+      endpoint: "https://my-azure-openai.openai.azure.com",
+      deployment: "text-embedding-3-large",
+      apiVersion: "2024-10-21",
+      inputKey: "user_prompt",
+      outputKey: "embedding"
+    }
+  },
+  {
     type: "agent_orchestrator",
     label: "Agent Orchestrator",
     category: "Agent",
@@ -465,6 +519,145 @@ export const nodeDefinitions: NodeDefinition[] = [
       maxFiles: 10,
       includeSharedDrives: true,
       includeNativeGoogleDocs: true,
+      useDemoFallback: true
+    }
+  },
+  {
+    type: "azure_storage",
+    label: "Azure Storage",
+    category: "Connector",
+    description: "Reads/writes Azure Blob Storage containers and blobs.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["list_containers", "list_blobs", "get_blob_text", "put_blob_text", "delete_blob"]
+        },
+        accountName: { type: "string" },
+        endpoint: { type: "string" },
+        containerName: { type: "string" },
+        blobName: { type: "string" },
+        blobContentTemplate: { type: "string" },
+        prefix: { type: "string" },
+        maxResults: { type: "number" },
+        secretRef: { type: "object" },
+        useDemoFallback: { type: "boolean" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: {
+      operation: "list_blobs",
+      accountName: "",
+      endpoint: "",
+      containerName: "",
+      prefix: "",
+      maxResults: 50,
+      useDemoFallback: true
+    }
+  },
+  {
+    type: "azure_cosmos_db",
+    label: "Azure Cosmos DB",
+    category: "Connector",
+    description: "Queries and mutates documents in Azure Cosmos DB containers.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: ["query_items", "read_item", "create_item", "upsert_item", "delete_item"]
+        },
+        endpoint: { type: "string" },
+        databaseId: { type: "string" },
+        containerId: { type: "string" },
+        queryText: { type: "string" },
+        itemId: { type: "string" },
+        partitionKey: { type: "string" },
+        itemJson: { type: "string" },
+        maxItems: { type: "number" },
+        secretRef: { type: "object" },
+        useDemoFallback: { type: "boolean" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: {
+      operation: "query_items",
+      endpoint: "https://example.documents.azure.com:443/",
+      databaseId: "",
+      containerId: "",
+      queryText: "SELECT TOP 10 * FROM c",
+      maxItems: 25,
+      useDemoFallback: true
+    }
+  },
+  {
+    type: "azure_monitor_http",
+    label: "Microsoft Azure Monitor",
+    category: "Connector",
+    description: "Queries Azure Monitor logs/metrics or executes authenticated monitor API requests.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["query_logs", "query_metrics", "custom_request"] },
+        workspaceId: { type: "string" },
+        resourceId: { type: "string" },
+        queryText: { type: "string" },
+        timespan: { type: "string" },
+        metricNames: { type: "string" },
+        method: { type: "string" },
+        path: { type: "string" },
+        bodyTemplate: { type: "string" },
+        maxRows: { type: "number" },
+        secretRef: { type: "object" },
+        useDemoFallback: { type: "boolean" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: {
+      operation: "query_logs",
+      workspaceId: "",
+      queryText: "Heartbeat | take 5",
+      maxRows: 50,
+      useDemoFallback: true
+    }
+  },
+  {
+    type: "azure_ai_search_vector_store",
+    label: "Azure AI Search Vector Store",
+    category: "Connector",
+    description: "Runs vector and document operations against Azure AI Search indexes.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["vector_search", "upsert_documents", "delete_documents"] },
+        endpoint: { type: "string" },
+        indexName: { type: "string" },
+        apiVersion: { type: "string" },
+        vectorField: { type: "string" },
+        contentField: { type: "string" },
+        idField: { type: "string" },
+        metadataField: { type: "string" },
+        queryText: { type: "string" },
+        queryVectorJson: { type: "string" },
+        topK: { type: "number" },
+        documentsJson: { type: "string" },
+        secretRef: { type: "object" },
+        useDemoFallback: { type: "boolean" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: {
+      operation: "vector_search",
+      endpoint: "https://my-search.search.windows.net",
+      indexName: "documents",
+      apiVersion: "2024-07-01",
+      vectorField: "embedding",
+      contentField: "content",
+      idField: "id",
+      metadataField: "metadata",
+      queryText: "{{user_prompt}}",
+      topK: 5,
       useDemoFallback: true
     }
   },

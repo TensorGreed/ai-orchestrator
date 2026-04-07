@@ -32,6 +32,12 @@ export type WorkflowNodeType =
   | "rag_retrieve"
   | "connector_source"
   | "google_drive_source"
+  | "azure_storage"
+  | "azure_cosmos_db"
+  | "azure_monitor_http"
+  | "azure_openai_chat_model"
+  | "embeddings_azure_openai"
+  | "azure_ai_search_vector_store"
   | "document_chunker"
   | "output_parser"
   | "human_approval"
@@ -160,7 +166,7 @@ export interface SecretReference {
   secretId: string;
 }
 
-export type LLMProviderId = "ollama" | "openai_compatible" | "openai" | "gemini" | (string & {});
+export type LLMProviderId = "ollama" | "openai_compatible" | "openai" | "azure_openai" | "gemini" | (string & {});
 
 export interface ProviderDefinition {
   id: string;
@@ -261,7 +267,15 @@ export interface ConnectorFetchResult {
 export interface ConnectorDefinition {
   id: string;
   label: string;
-  category: "google_drive" | "sql" | "nosql" | "custom";
+  category:
+    | "google_drive"
+    | "sql"
+    | "nosql"
+    | "azure_storage"
+    | "azure_cosmos_db"
+    | "azure_monitor"
+    | "azure_search"
+    | "custom";
   description: string;
   configSchema: Record<string, unknown>;
   authSchema: Record<string, unknown>;

@@ -436,6 +436,94 @@ describe("auth + rbac API", () => {
     });
     expect(secondDeleteResponse.statusCode).toBe(404);
   });
+
+  it("allows builder to test Azure connector configuration through API", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-azure-connector@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/connectors/test",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: {
+        connectorId: "azure-storage",
+        connectorConfig: {
+          operation: "list_containers",
+          useDemoFallback: true
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ ok: boolean; message: string }>();
+    expect(body.ok).toBe(true);
+    expect(body.message.length).toBeGreaterThan(0);
+  });
+
+  it("allows builder to test all Azure connector node families through API", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-azure-connectors-all@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const connectorPayloads: Array<{ connectorId: string; connectorConfig: Record<string, unknown> }> = [
+      {
+        connectorId: "azure-storage",
+        connectorConfig: {
+          operation: "list_containers",
+          useDemoFallback: true
+        }
+      },
+      {
+        connectorId: "azure-cosmos-db",
+        connectorConfig: {
+          operation: "query_items",
+          queryText: "SELECT TOP 1 * FROM c",
+          useDemoFallback: true
+        }
+      },
+      {
+        connectorId: "azure-monitor",
+        connectorConfig: {
+          operation: "query_logs",
+          queryText: "Heartbeat | take 1",
+          useDemoFallback: true
+        }
+      },
+      {
+        connectorId: "azure-ai-search",
+        connectorConfig: {
+          operation: "vector_search",
+          indexName: "demo-index",
+          queryText: "hello",
+          useDemoFallback: true
+        }
+      }
+    ];
+
+    for (const payload of connectorPayloads) {
+      const response = await context.app.inject({
+        method: "POST",
+        url: "/api/connectors/test",
+        headers: {
+          cookie: builderCookie
+        },
+        payload
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json<{ ok: boolean; message: string }>();
+      expect(body.ok).toBe(true);
+      expect(body.message.length).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe("secured webhook execution", () => {

@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-azure-connectors-demo",
+    "name": "Azure Connectors Demo Fallback",
+    "description": "Demonstrates Azure connector nodes with demo fallback for local development.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "text_1",
+        "type": "text_input",
+        "name": "Text Input",
+        "position": { "x": 80, "y": 240 },
+        "config": {
+          "text": "Run Azure connector demo"
+        }
+      },
+      {
+        "id": "storage_1",
+        "type": "azure_storage",
+        "name": "Azure Storage",
+        "position": { "x": 320, "y": 240 },
+        "config": {
+          "operation": "list_blobs",
+          "useDemoFallback": true
+        }
+      },
+      {
+        "id": "cosmos_1",
+        "type": "azure_cosmos_db",
+        "name": "Azure Cosmos DB",
+        "position": { "x": 560, "y": 240 },
+        "config": {
+          "operation": "query_items",
+          "useDemoFallback": true
+        }
+      },
+      {
+        "id": "monitor_1",
+        "type": "azure_monitor_http",
+        "name": "Microsoft Azure Monitor",
+        "position": { "x": 800, "y": 240 },
+        "config": {
+          "operation": "query_logs",
+          "useDemoFallback": true
+        }
+      },
+      {
+        "id": "search_1",
+        "type": "azure_ai_search_vector_store",
+        "name": "Azure AI Search Vector Store",
+        "position": { "x": 1060, "y": 240 },
+        "config": {
+          "operation": "vector_search",
+          "useDemoFallback": true
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 1320, "y": 240 },
+        "config": {
+          "responseTemplate": "Final mode: {{result.mode}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "edge_1", "source": "text_1", "target": "storage_1" },
+      { "id": "edge_2", "source": "storage_1", "target": "cosmos_1" },
+      { "id": "edge_3", "source": "cosmos_1", "target": "monitor_1" },
+      { "id": "edge_4", "source": "monitor_1", "target": "search_1" },
+      { "id": "edge_5", "source": "search_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-04-07T00:00:00.000Z"
+}

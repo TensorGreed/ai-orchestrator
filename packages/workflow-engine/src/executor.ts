@@ -22,9 +22,11 @@ import {
   InMemoryRetrieverAdapter,
   TokenEmbeddingAdapter,
   OpenAIEmbeddingAdapter,
+  AzureOpenAIEmbeddingAdapter,
   InMemoryVectorStoreAdapter,
   PineconeVectorStoreAdapter,
   PGVectorStoreAdapter,
+  AzureAiSearchVectorStoreAdapter,
   type EmbeddingRegistry,
   type VectorStoreRegistry
 } from "./rag-adapters";
@@ -170,6 +172,52 @@ function normalizeProvider(value: unknown): LLMProviderConfig | undefined {
   }
 
   return provider as unknown as LLMProviderConfig;
+}
+
+function normalizeSecretRef(value: unknown): SecretReference | undefined {
+  const record = toRecord(value);
+  const secretId = typeof record.secretId === "string" ? record.secretId.trim() : "";
+  return secretId ? { secretId } : undefined;
+}
+
+function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | undefined {
+  const nodeConfig = toRecord(node.config);
+  if (node.type === "llm_call") {
+    return normalizeProvider(nodeConfig.provider);
+  }
+
+  if (node.type === "azure_openai_chat_model") {
+    const endpoint = typeof nodeConfig.endpoint === "string" ? nodeConfig.endpoint.trim() : "";
+    const deployment = typeof nodeConfig.deployment === "string" ? nodeConfig.deployment.trim() : "";
+    if (!endpoint || !deployment) {
+      return undefined;
+    }
+
+    const apiVersion = typeof nodeConfig.apiVersion === "string" && nodeConfig.apiVersion.trim()
+      ? nodeConfig.apiVersion.trim()
+      : "2024-10-21";
+
+    return {
+      providerId: "azure_openai",
+      model: deployment,
+      baseUrl: endpoint,
+      secretRef: normalizeSecretRef(nodeConfig.secretRef),
+      temperature:
+        typeof nodeConfig.temperature === "number" && Number.isFinite(nodeConfig.temperature)
+          ? nodeConfig.temperature
+          : undefined,
+      maxTokens:
+        typeof nodeConfig.maxTokens === "number" && Number.isFinite(nodeConfig.maxTokens)
+          ? Math.max(1, Math.floor(nodeConfig.maxTokens))
+          : undefined,
+      extra: {
+        deployment,
+        apiVersion
+      }
+    };
+  }
+
+  return undefined;
 }
 
 function buildServerConfigKey(server: MCPServerConfig): string {
@@ -610,6 +658,103 @@ function validateGuardrailChecks(text: string, checks: string[]): string[] {
   }
 
   return failures;
+}
+
+async function runLlmNode(input: {
+  nodeId: string;
+  provider: LLMProviderConfig;
+  userPrompt: string;
+  systemPrompt: string;
+  dependencies: WorkflowExecutionDependencies;
+}): Promise<Record<string, unknown>> {
+  const messages = [] as Array<{ role: "system" | "user"; content: string }>;
+  if (input.systemPrompt) {
+    messages.push({ role: "system", content: input.systemPrompt });
+  }
+  messages.push({ role: "user", content: input.userPrompt });
+
+  const providerAdapter = input.dependencies.providerRegistry.get(input.provider.providerId);
+  if (input.dependencies.onLLMDelta && providerAdapter.generateStream) {
+    let streamedText = "";
+    const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
+    let llmDeltaIndex = 0;
+
+    for await (const chunk of providerAdapter.generateStream(
+      {
+        provider: input.provider,
+        messages
+      },
+      {
+        resolveSecret: input.dependencies.resolveSecret
+      }
+    )) {
+      if (chunk.type === "text_delta" && chunk.textDelta) {
+        streamedText += chunk.textDelta;
+        await input.dependencies.onLLMDelta({
+          nodeId: input.nodeId,
+          delta: chunk.textDelta,
+          index: llmDeltaIndex
+        });
+        llmDeltaIndex += 1;
+      } else if (chunk.type === "tool_call_delta") {
+        const toolCallId = chunk.toolCallId ?? `toolcall_${toolCallById.size}`;
+        const existing = toolCallById.get(toolCallId) ?? {
+          id: toolCallId,
+          name: chunk.name ?? `tool_${toolCallById.size}`,
+          argumentsText: ""
+        };
+        if (typeof chunk.name === "string" && chunk.name) {
+          existing.name = chunk.name;
+        }
+        if (typeof chunk.argumentsDelta === "string") {
+          existing.argumentsText += chunk.argumentsDelta;
+        }
+        toolCallById.set(toolCallId, existing);
+      }
+    }
+
+    const toolCalls = [...toolCallById.values()].map((entry) => {
+      let parsedArguments: Record<string, unknown> = {};
+      try {
+        parsedArguments = JSON.parse(entry.argumentsText || "{}") as Record<string, unknown>;
+      } catch {
+        parsedArguments = {};
+      }
+      return {
+        id: entry.id,
+        name: entry.name,
+        arguments: parsedArguments
+      };
+    });
+
+    return {
+      text: streamedText,
+      answer: streamedText,
+      toolCalls,
+      raw: {
+        streamed: true
+      },
+      _provider: input.provider
+    };
+  }
+
+  const response = await providerAdapter.generate(
+    {
+      provider: input.provider,
+      messages
+    },
+    {
+      resolveSecret: input.dependencies.resolveSecret
+    }
+  );
+
+  return {
+    text: response.content,
+    answer: response.content,
+    toolCalls: response.toolCalls,
+    raw: response.raw,
+    _provider: input.provider
+  };
 }
 
 export interface CodeNodeExecutionInput {
@@ -1208,95 +1353,49 @@ async function executeNode(
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
       const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
       const systemPrompt = String(templateData[systemPromptKey] ?? "");
+      return runLlmNode({
+        nodeId: node.id,
+        provider,
+        userPrompt,
+        systemPrompt,
+        dependencies
+      });
+    }
 
-      const messages = [] as Array<{ role: "system" | "user"; content: string }>;
-      if (systemPrompt) {
-        messages.push({ role: "system", content: systemPrompt });
+    case "azure_openai_chat_model": {
+      const endpoint = typeof config.endpoint === "string" ? config.endpoint.trim() : "";
+      const deployment = typeof config.deployment === "string" ? config.deployment.trim() : "";
+      if (!endpoint || !deployment) {
+        throw new Error("Azure OpenAI Chat Model requires endpoint and deployment.");
       }
-      messages.push({ role: "user", content: userPrompt });
 
-      const providerAdapter = dependencies.providerRegistry.get(provider.providerId);
-      if (dependencies.onLLMDelta && providerAdapter.generateStream) {
-        let streamedText = "";
-        const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
-        let llmDeltaIndex = 0;
-
-        for await (const chunk of providerAdapter.generateStream(
-          {
-            provider,
-            messages
-          },
-          {
-            resolveSecret: dependencies.resolveSecret
-          }
-        )) {
-          if (chunk.type === "text_delta" && chunk.textDelta) {
-            streamedText += chunk.textDelta;
-            await dependencies.onLLMDelta({
-              nodeId: node.id,
-              delta: chunk.textDelta,
-              index: llmDeltaIndex
-            });
-            llmDeltaIndex += 1;
-          } else if (chunk.type === "tool_call_delta") {
-            const toolCallId = chunk.toolCallId ?? `toolcall_${toolCallById.size}`;
-            const existing = toolCallById.get(toolCallId) ?? {
-              id: toolCallId,
-              name: chunk.name ?? `tool_${toolCallById.size}`,
-              argumentsText: ""
-            };
-            if (typeof chunk.name === "string" && chunk.name) {
-              existing.name = chunk.name;
-            }
-            if (typeof chunk.argumentsDelta === "string") {
-              existing.argumentsText += chunk.argumentsDelta;
-            }
-            toolCallById.set(toolCallId, existing);
-          }
+      const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
+      const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
+      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
+      const systemPrompt = String(templateData[systemPromptKey] ?? "");
+      const provider: LLMProviderConfig = {
+        providerId: "azure_openai",
+        model: deployment,
+        baseUrl: endpoint,
+        secretRef: normalizeSecretRef(config.secretRef),
+        temperature: typeof config.temperature === "number" && Number.isFinite(config.temperature) ? config.temperature : undefined,
+        maxTokens: typeof config.maxTokens === "number" && Number.isFinite(config.maxTokens) ? Math.max(1, Math.floor(config.maxTokens)) : undefined,
+        extra: {
+          deployment,
+          apiVersion:
+            typeof config.apiVersion === "string" && config.apiVersion.trim()
+              ? config.apiVersion.trim()
+              : "2024-10-21"
         }
-
-        const toolCalls = [...toolCallById.values()].map((entry) => {
-          let parsedArguments: Record<string, unknown> = {};
-          try {
-            parsedArguments = JSON.parse(entry.argumentsText || "{}") as Record<string, unknown>;
-          } catch {
-            parsedArguments = {};
-          }
-          return {
-            id: entry.id,
-            name: entry.name,
-            arguments: parsedArguments
-          };
-        });
-
-        return {
-          text: streamedText,
-          answer: streamedText,
-          toolCalls,
-          raw: {
-            streamed: true
-          },
-          _provider: provider
-        };
-      }
-
-      const response = await providerAdapter.generate(
-          {
-            provider,
-            messages
-          },
-          {
-            resolveSecret: dependencies.resolveSecret
-          }
-        );
-
-      return {
-        text: response.content,
-        answer: response.content,
-        toolCalls: response.toolCalls,
-        raw: response.raw,
-        _provider: provider
       };
+
+      return runLlmNode({
+        nodeId: node.id,
+        provider,
+        userPrompt,
+        systemPrompt,
+        dependencies
+      });
     }
 
     case "connector_source": {
@@ -1331,6 +1430,78 @@ async function executeNode(
       return {
         documents: output.documents,
         connectorRaw: output.raw
+      };
+    }
+
+    case "azure_storage": {
+      const connector = dependencies.connectorRegistry.get("azure-storage");
+      const output = await connector.fetchData(
+        {
+          ...config
+        },
+        {
+          resolveSecret: dependencies.resolveSecret
+        }
+      );
+
+      return {
+        documents: output.documents,
+        connectorRaw: output.raw,
+        result: output.raw
+      };
+    }
+
+    case "azure_cosmos_db": {
+      const connector = dependencies.connectorRegistry.get("azure-cosmos-db");
+      const output = await connector.fetchData(
+        {
+          ...config
+        },
+        {
+          resolveSecret: dependencies.resolveSecret
+        }
+      );
+
+      return {
+        documents: output.documents,
+        connectorRaw: output.raw,
+        result: output.raw
+      };
+    }
+
+    case "azure_monitor_http": {
+      const connector = dependencies.connectorRegistry.get("azure-monitor");
+      const output = await connector.fetchData(
+        {
+          ...config
+        },
+        {
+          resolveSecret: dependencies.resolveSecret
+        }
+      );
+
+      return {
+        documents: output.documents,
+        connectorRaw: output.raw,
+        result: output.raw
+      };
+    }
+
+    case "azure_ai_search_vector_store": {
+      const connector = dependencies.connectorRegistry.get("azure-ai-search");
+      const output = await connector.fetchData(
+        {
+          ...config
+        },
+        {
+          resolveSecret: dependencies.resolveSecret
+        }
+      );
+
+      return {
+        documents: output.documents,
+        connectorRaw: output.raw,
+        result: output.raw
       };
     }
 
@@ -1381,6 +1552,44 @@ async function executeNode(
       };
     }
 
+    case "embeddings_azure_openai": {
+      const endpoint = typeof config.endpoint === "string" ? config.endpoint.trim() : "";
+      const deployment = typeof config.deployment === "string" ? config.deployment.trim() : "";
+      if (!endpoint || !deployment) {
+        throw new Error("Embeddings Azure OpenAI requires endpoint and deployment.");
+      }
+
+      const inputKey = typeof config.inputKey === "string" && config.inputKey.trim() ? config.inputKey.trim() : "user_prompt";
+      const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "embedding";
+      const inputText = String(templateData[inputKey] ?? templateData.user_prompt ?? "");
+      if (!inputText.trim()) {
+        throw new Error("Embeddings Azure OpenAI requires non-empty input text.");
+      }
+
+      const secret = await dependencies.resolveSecret(normalizeSecretRef(config.secretRef));
+      const apiKey = typeof secret === "string" ? secret.trim() : "";
+      if (!apiKey) {
+        throw new Error("Embeddings Azure OpenAI requires secretRef credential.");
+      }
+
+      const embedder = new AzureOpenAIEmbeddingAdapter({
+        endpoint,
+        deployment,
+        apiVersion:
+          typeof config.apiVersion === "string" && config.apiVersion.trim()
+            ? config.apiVersion.trim()
+            : "2024-10-21",
+        apiKey
+      });
+      const vector = await embedder.embed(inputText);
+      return {
+        [outputKey]: vector,
+        embedding: vector,
+        model: deployment,
+        dimensions: vector.length
+      };
+    }
+
     case "rag_retrieve": {
       const queryTemplate = typeof config.queryTemplate === "string" ? config.queryTemplate : "{{user_prompt}}";
       const query = renderTemplate(queryTemplate, templateData).trim();
@@ -1392,6 +1601,7 @@ async function executeNode(
 
       const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
       const vectorStoreId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
+      const vectorStoreConfig = toRecord(config.vectorStoreConfig);
 
       let embedder = dependencies.embeddingRegistry?.get(embedderId);
       if (!embedder) {
@@ -1399,7 +1609,23 @@ async function executeNode(
         else if (embedderId === "openai-embedder") {
            const apiKeyRef = config.embeddingSecretRef;
            const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.OPENAI_API_KEY;
-           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...toRecord(config.vectorStoreConfig) });
+           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...vectorStoreConfig });
+        } else if (embedderId === "azure-openai-embedder") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.AZURE_OPENAI_API_KEY;
+           const endpoint = typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_OPENAI_ENDPOINT;
+           const deployment =
+             typeof vectorStoreConfig.deployment === "string" && vectorStoreConfig.deployment.trim()
+               ? vectorStoreConfig.deployment
+               : typeof vectorStoreConfig.model === "string"
+                 ? vectorStoreConfig.model
+                 : "text-embedding-3-small";
+           embedder = new AzureOpenAIEmbeddingAdapter({
+             endpoint: endpoint || "",
+             deployment,
+             apiVersion: typeof vectorStoreConfig.apiVersion === "string" ? vectorStoreConfig.apiVersion : process.env.AZURE_OPENAI_API_VERSION,
+             apiKey: apiKey || ""
+           });
         }
         else throw new Error(`Unknown embedder ID: ${embedderId}`);
       }
@@ -1410,11 +1636,24 @@ async function executeNode(
          else if (vectorStoreId === "pinecone-vector-store") {
            const apiKeyRef = config.embeddingSecretRef;
            const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.PINECONE_API_KEY;
-           store = new PineconeVectorStoreAdapter({ apiKey: apiKey || "", indexName: typeof toRecord(config.vectorStoreConfig).indexName === "string" ? toRecord(config.vectorStoreConfig).indexName as string : "" });
+           store = new PineconeVectorStoreAdapter({ apiKey: apiKey || "", indexName: typeof vectorStoreConfig.indexName === "string" ? vectorStoreConfig.indexName : "" });
          } else if (vectorStoreId === "pgvector-store") {
            const connRef = config.embeddingSecretRef;
            const connStr = typeof connRef === "object" && connRef ? await dependencies.resolveSecret(connRef as SecretReference) : process.env.DATABASE_URL;
-           store = new PGVectorStoreAdapter({ connectionString: connStr || "", tableName: typeof toRecord(config.vectorStoreConfig).tableName === "string" ? toRecord(config.vectorStoreConfig).tableName as string : "vectors" });
+           store = new PGVectorStoreAdapter({ connectionString: connStr || "", tableName: typeof vectorStoreConfig.tableName === "string" ? vectorStoreConfig.tableName as string : "vectors" });
+         } else if (vectorStoreId === "azure-ai-search-vector-store") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.AZURE_AI_SEARCH_API_KEY;
+           store = new AzureAiSearchVectorStoreAdapter({
+             endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_AI_SEARCH_ENDPOINT || "",
+             indexName: typeof vectorStoreConfig.indexName === "string" ? vectorStoreConfig.indexName : "",
+             apiVersion: typeof vectorStoreConfig.apiVersion === "string" ? vectorStoreConfig.apiVersion : undefined,
+             vectorField: typeof vectorStoreConfig.vectorField === "string" ? vectorStoreConfig.vectorField : undefined,
+             contentField: typeof vectorStoreConfig.contentField === "string" ? vectorStoreConfig.contentField : undefined,
+             idField: typeof vectorStoreConfig.idField === "string" ? vectorStoreConfig.idField : undefined,
+             metadataField: typeof vectorStoreConfig.metadataField === "string" ? vectorStoreConfig.metadataField : undefined,
+             apiKey: apiKey || ""
+           });
          }
          else throw new Error(`Unknown vector store ID: ${vectorStoreId}`);
       }
@@ -1509,11 +1748,13 @@ async function executeNode(
           .filter((attached): attached is WorkflowNode => Boolean(attached));
       };
 
-      const attachedModelNodes = getAttachedNodes("chat_model").filter((attached) => attached.type === "llm_call");
+      const attachedModelNodes = getAttachedNodes("chat_model").filter(
+        (attached) => attached.type === "llm_call" || attached.type === "azure_openai_chat_model"
+      );
       const attachedModelNode = attachedModelNodes.length ? attachedModelNodes[attachedModelNodes.length - 1] : undefined;
-      const provider = attachedModelNode ? normalizeProvider(toRecord(attachedModelNode.config).provider) : undefined;
+      const provider = attachedModelNode ? buildProviderFromModelNode(attachedModelNode) : undefined;
       if (!provider) {
-        throw new Error("Agent Orchestrator requires an attached LLM Call node on chat_model.");
+        throw new Error("Agent Orchestrator requires an attached Chat Model node on chat_model.");
       }
 
       const maxIterations = typeof config.maxIterations === "number" ? Math.max(1, Math.floor(config.maxIterations)) : 4;

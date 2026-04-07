@@ -27,8 +27,14 @@ function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "a
     nodeType === "mcp_tool" ||
     nodeType === "connector_source" ||
     nodeType === "google_drive_source" ||
+    nodeType === "azure_storage" ||
+    nodeType === "azure_cosmos_db" ||
+    nodeType === "azure_monitor_http" ||
+    nodeType === "azure_ai_search_vector_store" ||
+    nodeType === "embeddings_azure_openai" ||
     nodeType === "http_request" ||
     nodeType === "llm_call" ||
+    nodeType === "azure_openai_chat_model" ||
     nodeType === "local_memory"
   ) {
     return "resource";

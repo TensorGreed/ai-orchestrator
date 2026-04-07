@@ -325,6 +325,37 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
+    if (node.type === "azure_openai_chat_model") {
+      const endpoint = typeof config.endpoint === "string" ? config.endpoint.trim() : "";
+      const deployment = typeof config.deployment === "string" ? config.deployment.trim() : "";
+      const secretRef = toRecord(config.secretRef);
+      const secretId = typeof secretRef.secretId === "string" ? secretRef.secretId.trim() : "";
+
+      if (!endpoint) {
+        issues.push({
+          code: "missing_azure_openai_endpoint",
+          message: "Azure OpenAI Chat Model node requires endpoint.",
+          nodeId: node.id
+        });
+      }
+
+      if (!deployment) {
+        issues.push({
+          code: "missing_azure_openai_deployment",
+          message: "Azure OpenAI Chat Model node requires deployment.",
+          nodeId: node.id
+        });
+      }
+
+      if (!secretId) {
+        issues.push({
+          code: "missing_azure_openai_secret",
+          message: "Azure OpenAI Chat Model node requires secretRef.secretId.",
+          nodeId: node.id
+        });
+      }
+    }
+
     if (node.type === "agent_orchestrator") {
       const hasAttachedChatModel = workflow.edges.some(
         (edge) => edge.source === node.id && edge.sourceHandle === "chat_model"
@@ -466,6 +497,70 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_google_drive_max_files",
           message: "Google Drive Source node maxFiles must be >= 1 when set.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "azure_storage") {
+      const operation = typeof config.operation === "string" ? config.operation.trim() : "";
+      if (!operation) {
+        issues.push({
+          code: "missing_azure_storage_operation",
+          message: "Azure Storage node requires operation.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "azure_cosmos_db") {
+      const operation = typeof config.operation === "string" ? config.operation.trim() : "";
+      if (!operation) {
+        issues.push({
+          code: "missing_azure_cosmos_operation",
+          message: "Azure Cosmos DB node requires operation.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "azure_monitor_http") {
+      const operation = typeof config.operation === "string" ? config.operation.trim() : "";
+      if (!operation) {
+        issues.push({
+          code: "missing_azure_monitor_operation",
+          message: "Microsoft Azure Monitor node requires operation.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "azure_ai_search_vector_store") {
+      const operation = typeof config.operation === "string" ? config.operation.trim() : "";
+      if (!operation) {
+        issues.push({
+          code: "missing_azure_ai_search_operation",
+          message: "Azure AI Search Vector Store node requires operation.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "embeddings_azure_openai") {
+      const endpoint = typeof config.endpoint === "string" ? config.endpoint.trim() : "";
+      const deployment = typeof config.deployment === "string" ? config.deployment.trim() : "";
+      if (!endpoint || !deployment) {
+        issues.push({
+          code: "missing_azure_embedding_config",
+          message: "Embeddings Azure OpenAI node requires endpoint and deployment.",
+          nodeId: node.id
+        });
+      }
+      const secretRef = toRecord(config.secretRef);
+      if (typeof secretRef.secretId !== "string" || !secretRef.secretId.trim()) {
+        issues.push({
+          code: "missing_azure_embedding_secret",
+          message: "Embeddings Azure OpenAI node requires secretRef.secretId.",
           nodeId: node.id
         });
       }
@@ -816,10 +911,14 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       continue;
     }
 
-    if (edge.sourceHandle === "chat_model" && targetNode.type !== "llm_call") {
+    if (
+      edge.sourceHandle === "chat_model" &&
+      targetNode.type !== "llm_call" &&
+      targetNode.type !== "azure_openai_chat_model"
+    ) {
       issues.push({
         code: "invalid_chat_model_attachment",
-        message: "Agent chat_model attachment must target an LLM Call node.",
+        message: "Agent chat_model attachment must target an LLM Call or Azure OpenAI Chat Model node.",
         edgeId: edge.id
       });
     }

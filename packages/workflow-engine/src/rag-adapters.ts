@@ -84,6 +84,49 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
   }
 }
 
+export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
+  readonly id = "azure-openai-embedder";
+
+  constructor(
+    private config: { endpoint: string; deployment: string; apiVersion?: string; apiKey: string }
+  ) {}
+
+  async embed(text: string): Promise<number[]> {
+    const endpoint = this.config.endpoint.replace(/\/+$/, "");
+    const deployment = this.config.deployment.trim();
+    if (!endpoint || !deployment) {
+      throw new Error("AzureOpenAIEmbeddingAdapter requires endpoint and deployment.");
+    }
+
+    const apiVersion = this.config.apiVersion?.trim() || "2024-10-21";
+    const trimmedAuth = this.config.apiKey.trim();
+    const isBearer = trimmedAuth.split(".").length === 3 || /^bearer\s+/i.test(trimmedAuth);
+    const authHeaderName = isBearer ? "Authorization" : "api-key";
+    const authHeaderValue = isBearer ? `Bearer ${trimmedAuth.replace(/^bearer\s+/i, "").trim()}` : trimmedAuth;
+
+    const response = await fetch(
+      `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/embeddings?api-version=${encodeURIComponent(apiVersion)}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [authHeaderName]: authHeaderValue
+        },
+        body: JSON.stringify({
+          input: text
+        })
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Azure OpenAI Embedding API error: ${response.statusText} - ${await response.text()}`);
+    }
+
+    const data = (await response.json()) as { data: Array<{ embedding: number[] }> };
+    return data.data[0]?.embedding || [];
+  }
+}
+
 function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0;
   let magA = 0;
@@ -272,6 +315,133 @@ export class PGVectorStoreAdapter implements VectorStoreAdapter {
     } finally {
       await client.end();
     }
+  }
+}
+
+export class AzureAiSearchVectorStoreAdapter implements VectorStoreAdapter {
+  readonly id = "azure-ai-search-vector-store";
+
+  constructor(
+    private config: {
+      endpoint: string;
+      indexName: string;
+      apiKey: string;
+      apiVersion?: string;
+      vectorField?: string;
+      contentField?: string;
+      idField?: string;
+      metadataField?: string;
+    }
+  ) {}
+
+  private get apiVersion() {
+    return this.config.apiVersion?.trim() || "2024-07-01";
+  }
+
+  private get baseUrl() {
+    return this.config.endpoint.replace(/\/+$/, "");
+  }
+
+  private get authHeader() {
+    const apiKey = this.config.apiKey.trim();
+    const isBearer = apiKey.split(".").length === 3 || /^bearer\s+/i.test(apiKey);
+    return isBearer
+      ? { name: "Authorization", value: `Bearer ${apiKey.replace(/^bearer\s+/i, "").trim()}` }
+      : { name: "api-key", value: apiKey };
+  }
+
+  private get fields() {
+    return {
+      vectorField: this.config.vectorField?.trim() || "embedding",
+      contentField: this.config.contentField?.trim() || "content",
+      idField: this.config.idField?.trim() || "id",
+      metadataField: this.config.metadataField?.trim() || "metadata"
+    };
+  }
+
+  private buildIndexUrl(pathSuffix: string) {
+    return `${this.baseUrl}/indexes/${encodeURIComponent(this.config.indexName)}/${pathSuffix}?api-version=${encodeURIComponent(this.apiVersion)}`;
+  }
+
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    if (!this.baseUrl || !this.config.indexName || !this.config.apiKey.trim()) {
+      throw new Error("AzureAiSearchVectorStoreAdapter requires endpoint, indexName, and apiKey.");
+    }
+
+    const { idField, contentField, metadataField, vectorField } = this.fields;
+    const value = await Promise.all(
+      documents.map(async (document) => ({
+        "@search.action": "mergeOrUpload",
+        [idField]: document.id,
+        [contentField]: document.text,
+        [metadataField]: document.metadata ?? {},
+        [vectorField]: await embedder.embed(document.text)
+      }))
+    );
+
+    const auth = this.authHeader;
+    const response = await fetch(this.buildIndexUrl("docs/index"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        [auth.name]: auth.value
+      },
+      body: JSON.stringify({ value })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Azure AI Search upsert failed: ${await response.text()}`);
+    }
+  }
+
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    if (!this.baseUrl || !this.config.indexName || !this.config.apiKey.trim()) {
+      throw new Error("AzureAiSearchVectorStoreAdapter requires endpoint, indexName, and apiKey.");
+    }
+
+    const { idField, contentField, metadataField, vectorField } = this.fields;
+    const vector = await embedder.embed(query);
+    const auth = this.authHeader;
+
+    const response = await fetch(this.buildIndexUrl("docs/search"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        [auth.name]: auth.value
+      },
+      body: JSON.stringify({
+        search: query || "*",
+        top: topK,
+        select: `${idField},${contentField},${metadataField}`,
+        vectorQueries: [
+          {
+            kind: "vector",
+            vector,
+            fields: vectorField,
+            k: topK
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Azure AI Search query failed: ${await response.text()}`);
+    }
+
+    const json = (await response.json()) as Record<string, unknown>;
+    const value = Array.isArray(json.value) ? (json.value as Array<Record<string, unknown>>) : [];
+
+    return value.map((entry, index) => ({
+      id: typeof entry[idField] === "string" ? (entry[idField] as string) : `azure-search-doc-${index + 1}`,
+      text: typeof entry[contentField] === "string" ? (entry[contentField] as string) : JSON.stringify(entry),
+      metadata: {
+        source: "azure-ai-search",
+        score: entry["@search.score"],
+        ...(entry[metadataField] && typeof entry[metadataField] === "object" && !Array.isArray(entry[metadataField])
+          ? (entry[metadataField] as Record<string, unknown>)
+          : {})
+      }
+    }));
   }
 }
 
