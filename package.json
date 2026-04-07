@@ -5,7 +5,8 @@
   "type": "module",
   "packageManager": "pnpm@10.14.0",
   "scripts": {
-    "dev": "concurrently -n api,web -c cyan,magenta \"pnpm --filter @ai-orchestrator/api dev\" \"pnpm --filter @ai-orchestrator/web dev\"",
+    "dev": "concurrently -n api,web,docs -c cyan,magenta,green \"pnpm --filter @ai-orchestrator/api dev\" \"pnpm --filter @ai-orchestrator/web dev\" \"pnpm --filter @ai-orchestrator/docs dev\"",
+    "dev:product": "concurrently -n api,web -c cyan,magenta \"pnpm --filter @ai-orchestrator/api dev\" \"pnpm --filter @ai-orchestrator/web dev\"",
     "docs:dev": "pnpm --filter @ai-orchestrator/docs dev",
     "docs:build": "pnpm --filter @ai-orchestrator/docs build",
     "docs:preview": "pnpm --filter @ai-orchestrator/docs preview",

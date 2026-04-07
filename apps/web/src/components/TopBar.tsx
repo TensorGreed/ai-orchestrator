@@ -49,6 +49,18 @@ export function TopBar({
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
   const displayName = useMemo(() => authUser.email.split("@")[0] || authUser.email, [authUser.email]);
+  const docsUrl = useMemo(() => {
+    const fromEnv = (import.meta.env.VITE_DOCS_URL as string | undefined)?.trim();
+    if (fromEnv) {
+      return fromEnv;
+    }
+
+    if (typeof window !== "undefined") {
+      return `${window.location.protocol}//${window.location.hostname}:4173`;
+    }
+
+    return "http://localhost:4173";
+  }, []);
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -158,6 +170,9 @@ export function TopBar({
       </div>
 
       <div className="header-actions">
+        <a className="header-btn header-link-btn" href={docsUrl} target="_blank" rel="noreferrer">
+          Docs
+        </a>
         {(activeMode === "editor" ||
           activeMode === "variables" ||
           activeMode === "executions" ||

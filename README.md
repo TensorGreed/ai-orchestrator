@@ -118,7 +118,7 @@ pnpm install
 
 ### 3) Start servers
 
-Start both API and UI together:
+Start API + UI + docs together:
 
 ```bash
 pnpm dev
@@ -126,6 +126,15 @@ pnpm dev
 
 - API: `http://localhost:4000`
 - Web UI: `http://localhost:5173`
+- Docs UI: `http://localhost:4173`
+
+Optional: set `VITE_DOCS_URL` (in `apps/web/.env` or your build env) to override the top-bar Docs link target.
+
+Start product only (API + UI):
+
+```bash
+pnpm dev:product
+```
 
 Start API only:
 

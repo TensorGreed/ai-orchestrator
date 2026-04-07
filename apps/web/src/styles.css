@@ -392,6 +392,12 @@ select {
   cursor: not-allowed;
 }
 
+.header-link-btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
 .header-btn.danger {
   border-color: #fca5a5;
   color: #b91c1c;
