@@ -42,6 +42,8 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     match: (node) =>
       [
         "llm_call",
+        "azure_openai_chat_model",
+        "embeddings_azure_openai",
         "agent_orchestrator",
         "prompt_template",
         "rag_retrieve",
@@ -56,9 +58,17 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     description: "Call connectors, MCP tools, or reusable sub-workflows.",
     icon: "app",
     match: (node) =>
-      ["connector_source", "google_drive_source", "mcp_tool", "http_request", "execute_workflow"].includes(
-        node.type
-      )
+      [
+        "connector_source",
+        "google_drive_source",
+        "azure_storage",
+        "azure_cosmos_db",
+        "azure_monitor_http",
+        "azure_ai_search_vector_store",
+        "mcp_tool",
+        "http_request",
+        "execute_workflow"
+      ].includes(node.type)
   },
   {
     key: "transform",

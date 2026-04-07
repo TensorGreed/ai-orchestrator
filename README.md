@@ -10,18 +10,19 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
   - Ollama (real)
   - OpenAI-compatible endpoints (real)
   - OpenAI cloud (real)
+  - Azure OpenAI (real)
   - Gemini (basic)
 - MCP adapter model with:
   - `http_mcp` (real remote MCP endpoint over HTTP streamable)
   - `mock-mcp` (local demo tools)
 - Agent Orchestrator & Supervisor Nodes with iterative tool-calling loop and Swarm delegation
 - Agent port attachments (auxiliary edges):
-  - `chat_model` -> attach `LLM Call` node
+  - `chat_model` -> attach `LLM Call` or `Azure OpenAI Chat Model` node
   - `memory` -> attach `Simple Memory` node
   - `tool` -> attach one or more `MCP Tool` nodes
   - `worker` -> attach worker `Agent Orchestrator` or `Supervisor` nodes (applies to Supervisor nodes only)
 - RAG path with connector source + in-memory retriever/vector similarity
-- Connector SDK + sample connectors (`google-drive`, `sql-db`, `nosql-db`)
+- Connector SDK + connectors (`google-drive`, `sql-db`, `nosql-db`, `azure-storage`, `azure-cosmos-db`, `azure-monitor`, `azure-ai-search`)
 - Webhook execution endpoint (`system_prompt` + `user_prompt` payload)
 - Secret abstraction with encrypted server-side storage (AES-256-GCM)
 - Session-based authentication (`httpOnly` cookie) with RBAC (`admin`, `builder`, `operator`, `viewer`)
@@ -212,7 +213,27 @@ API error behavior:
 - `ANY /webhook-test/:path` (configured test webhook URL)
 - `POST /api/secrets`
 - `GET /api/secrets`
+- `POST /api/connectors/test`
 - `POST /api/mcp/discover-tools`
+
+## Azure node suite (implemented)
+
+The Azure suite from the n8n-style screenshot is implemented end-to-end in this V1:
+
+- `Azure OpenAI Chat Model` (`azure_openai_chat_model`)
+- `Embeddings Azure OpenAI` (`embeddings_azure_openai`)
+- `Azure Storage` (`azure_storage`)
+- `Azure Cosmos DB` (`azure_cosmos_db`)
+- `Microsoft Azure Monitor` (`azure_monitor_http`)
+- `Azure AI Search Vector Store` (`azure_ai_search_vector_store`)
+
+What is included for these nodes:
+
+- structured node config forms in the editor (no free-form JSON required for normal use)
+- dedicated node icons on canvas and in node library
+- secret-backed credentials via `secretRef.secretId`
+- `Test Connection` action for connector nodes (`/api/connectors/test`)
+- execution support in the workflow engine (including demo fallback mode for local development)
 
 ## Webhook execution
 
@@ -323,7 +344,7 @@ The runtime supports zero, one, or multiple tool calls per iteration.
 The Agent Orchestrator and Supervisor Nodes support dedicated attachment ports. These are auxiliary edges and are not part of linear DAG execution.
 
 - `chat_model` port:
-  - attach an `LLM Call` node
+  - attach an `LLM Call` or `Azure OpenAI Chat Model` node
   - this attachment is required; the agent runtime always uses this node's `provider` config
 - `memory` port:
   - attach a `Simple Memory` node
@@ -450,6 +471,8 @@ Includes node types/config, edge graph, and node positions for canvas restoratio
 - `samples/workflows/basic-flow.json`
 - `samples/workflows/rag-flow.json`
 - `samples/workflows/agentic-mcp-flow.json`
+- `samples/workflows/azure-openai-flow.json`
+- `samples/workflows/azure-connectors-demo-flow.json`
 
 The seed service auto-loads these into DB when the workflow table is empty.
 

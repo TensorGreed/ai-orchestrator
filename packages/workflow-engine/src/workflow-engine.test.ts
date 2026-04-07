@@ -24,6 +24,22 @@ class FakeProvider implements LLMProviderAdapter {
   }
 }
 
+class FakeAzureOpenAIProvider implements LLMProviderAdapter {
+  readonly definition = {
+    id: "azure_openai",
+    label: "Azure OpenAI",
+    supportsTools: true,
+    configSchema: {}
+  };
+
+  async generate() {
+    return {
+      content: "azure-mock-response",
+      toolCalls: []
+    };
+  }
+}
+
 class ParserFixProvider implements LLMProviderAdapter {
   readonly definition = {
     id: "parser-fix",
@@ -89,6 +105,13 @@ class CollectingAgentRuntime implements AgentRuntimeAdapter {
 function createProviderRegistry() {
   const registry = new ProviderRegistry();
   registry.register(new FakeProvider());
+  return registry;
+}
+
+function createProviderRegistryWithAzure() {
+  const registry = new ProviderRegistry();
+  registry.register(new FakeProvider());
+  registry.register(new FakeAzureOpenAIProvider());
   return registry;
 }
 
@@ -583,6 +606,222 @@ describe("workflow engine", () => {
     expect(runtime.requests[1]?.provider.model).toBe("model-two");
     expect(result.nodeResults.find((entry) => entry.nodeId === "model-1")?.status).toBe("success");
     expect(result.nodeResults.find((entry) => entry.nodeId === "model-2")?.status).toBe("success");
+  });
+
+  it("supports Azure OpenAI Chat Model nodes attached to Agent chat_model", async () => {
+    const runtime = new CapturingAgentRuntime();
+    const workflow: Workflow = {
+      id: "wf-agent-azure-model",
+      name: "Agent with Azure model attachment",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "webhook",
+          type: "webhook_input",
+          name: "Webhook",
+          position: { x: 0, y: 0 },
+          config: {}
+        },
+        {
+          id: "agent",
+          type: "agent_orchestrator",
+          name: "Agent",
+          position: { x: 220, y: 0 },
+          config: {
+            systemPromptTemplate: "{{system_prompt}}",
+            userPromptTemplate: "{{user_prompt}}",
+            maxIterations: 2,
+            toolCallingEnabled: true
+          }
+        },
+        {
+          id: "azure-model",
+          type: "azure_openai_chat_model",
+          name: "Azure OpenAI",
+          position: { x: 220, y: 180 },
+          config: {
+            endpoint: "https://example.openai.azure.com",
+            deployment: "gpt-4o-mini",
+            apiVersion: "2024-10-21",
+            secretRef: { secretId: "secret-1" }
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 430, y: 0 },
+          config: { responseTemplate: "{{answer}}" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "webhook", target: "agent" },
+        { id: "e2", source: "agent", target: "output" },
+        { id: "e3", source: "agent", sourceHandle: "chat_model", target: "azure-model" }
+      ]
+    };
+
+    const validation = validateWorkflowGraph(workflow);
+    expect(validation.valid).toBe(true);
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        webhookPayload: {
+          user_prompt: "hello azure",
+          system_prompt: "be concise"
+        }
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: runtime,
+        resolveSecret: async () => "azure-key"
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(runtime.lastRequest?.provider.providerId).toBe("azure_openai");
+    expect(runtime.lastRequest?.provider.baseUrl).toBe("https://example.openai.azure.com");
+    expect(runtime.lastRequest?.provider.model).toBe("gpt-4o-mini");
+    expect(runtime.lastRequest?.provider.extra).toEqual({
+      deployment: "gpt-4o-mini",
+      apiVersion: "2024-10-21"
+    });
+    expect(result.nodeResults.find((entry) => entry.nodeId === "azure-model")?.status).toBe("success");
+  });
+
+  it("executes Azure OpenAI Chat Model node with provider adapter", async () => {
+    const workflow: Workflow = {
+      id: "wf-azure-model-node",
+      name: "Azure model node",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "input",
+          type: "text_input",
+          name: "Input",
+          position: { x: 0, y: 0 },
+          config: { text: "hello from azure model" }
+        },
+        {
+          id: "azure-model",
+          type: "azure_openai_chat_model",
+          name: "Azure OpenAI",
+          position: { x: 200, y: 0 },
+          config: {
+            endpoint: "https://example.openai.azure.com",
+            deployment: "gpt-4o-mini",
+            apiVersion: "2024-10-21",
+            secretRef: { secretId: "secret-1" },
+            promptKey: "text",
+            systemPromptKey: "system_prompt"
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 420, y: 0 },
+          config: { responseTemplate: "{{answer}}" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "input", target: "azure-model" },
+        { id: "e2", source: "azure-model", target: "output" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistryWithAzure(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => "azure-key"
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const modelOutput = result.nodeResults.find((entry) => entry.nodeId === "azure-model")?.output as Record<string, unknown>;
+    expect(modelOutput.answer).toBe("azure-mock-response");
+  });
+
+  it("executes Azure connector nodes end-to-end using demo fallback mode", async () => {
+    const workflow: Workflow = {
+      id: "wf-azure-connectors-demo",
+      name: "Azure connectors demo fallback",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "input", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "run" } },
+        {
+          id: "storage",
+          type: "azure_storage",
+          name: "Azure Storage",
+          position: { x: 180, y: 0 },
+          config: { operation: "list_blobs", useDemoFallback: true }
+        },
+        {
+          id: "cosmos",
+          type: "azure_cosmos_db",
+          name: "Azure Cosmos DB",
+          position: { x: 360, y: 0 },
+          config: { operation: "query_items", useDemoFallback: true }
+        },
+        {
+          id: "monitor",
+          type: "azure_monitor_http",
+          name: "Azure Monitor",
+          position: { x: 540, y: 0 },
+          config: { operation: "query_logs", useDemoFallback: true }
+        },
+        {
+          id: "search",
+          type: "azure_ai_search_vector_store",
+          name: "Azure Search",
+          position: { x: 720, y: 0 },
+          config: { operation: "vector_search", useDemoFallback: true }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 920, y: 0 },
+          config: { responseTemplate: "{{result.mode}}" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "input", target: "storage" },
+        { id: "e2", source: "storage", target: "cosmos" },
+        { id: "e3", source: "cosmos", target: "monitor" },
+        { id: "e4", source: "monitor", target: "search" },
+        { id: "e5", source: "search", target: "output" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "storage")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "cosmos")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "monitor")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "search")?.status).toBe("success");
+    const finalOutput = result.nodeResults.find((entry) => entry.nodeId === "output")?.output as Record<string, unknown>;
+    expect(finalOutput.result).toBe("demo-fallback");
   });
 
   it("output_parser: item_list mode splits text into items", async () => {

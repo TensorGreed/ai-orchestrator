@@ -685,6 +685,22 @@ export function NodeConfigModal({
     }));
   };
 
+  const setProviderExtra = (patch: Record<string, unknown>) => {
+    setConfig((current) => {
+      const provider = asRecord(current.provider);
+      return {
+        ...current,
+        provider: {
+          ...provider,
+          extra: {
+            ...asRecord(provider.extra),
+            ...patch
+          }
+        }
+      };
+    });
+  };
+
   const buildInlineSecretPayload = useCallback(
     (providerInput: string): { provider: string; value?: string; error?: string } => {
       const provider = providerInput.trim() || "custom";
@@ -1073,33 +1089,47 @@ export function NodeConfigModal({
   );
 
   const renderProviderSection = () => {
+    const providerId = toStringValue(provider.providerId, "ollama");
+    const providerExtra = asRecord(provider.extra);
+    const isAzureOpenAI = providerId === "azure_openai";
+    const hideBaseUrl = providerId === "openai" || providerId === "gemini" || providerId === "anthropic";
+
     return (
       <div className="cfg-group">
         <h4>Model</h4>
         <SelectField
           label="Provider"
-          value={toStringValue(provider.providerId, "ollama")}
+          value={providerId}
           onChange={(next) => setProvider({ providerId: next })}
           options={[
             { value: "ollama", label: "Ollama" },
             { value: "openai_compatible", label: "OpenAI Compatible" },
             { value: "openai", label: "OpenAI" },
+            { value: "azure_openai", label: "Azure OpenAI" },
             { value: "gemini", label: "Gemini" },
             { value: "anthropic", label: "Anthropic" }
           ]}
         />
         <TextField
-          label="Model"
+          label={isAzureOpenAI ? "Deployment" : "Model"}
           value={toStringValue(provider.model)}
           onChange={(next) => setProvider({ model: next })}
-          placeholder="gpt-4.1-mini / llama3.1"
+          placeholder={isAzureOpenAI ? "gpt-4o-mini" : "gpt-4.1-mini / llama3.1"}
         />
-        {provider.providerId !== "openai" && provider.providerId !== "gemini" && provider.providerId !== "anthropic" && (
+        {!hideBaseUrl && (
           <TextField
-            label="Base URL"
+            label={isAzureOpenAI ? "Endpoint" : "Base URL"}
             value={toStringValue(provider.baseUrl)}
             onChange={(next) => setProvider({ baseUrl: next })}
-            placeholder="http://localhost:11434/v1"
+            placeholder={isAzureOpenAI ? "https://<resource>.openai.azure.com" : "http://localhost:11434/v1"}
+          />
+        )}
+        {isAzureOpenAI && (
+          <TextField
+            label="API Version"
+            value={toStringValue(providerExtra.apiVersion, "2024-10-21")}
+            onChange={(next) => setProviderExtra({ apiVersion: next })}
+            placeholder="2024-10-21"
           />
         )}
         {renderCredentialSecretField({
@@ -2000,7 +2030,11 @@ export function NodeConfigModal({
           options={[
             { value: "google-drive", label: "Google Drive" },
             { value: "sql-db", label: "SQL Database" },
-            { value: "nosql-db", label: "NoSQL Database" }
+            { value: "nosql-db", label: "NoSQL Database" },
+            { value: "azure-storage", label: "Azure Storage" },
+            { value: "azure-cosmos-db", label: "Azure Cosmos DB" },
+            { value: "azure-monitor", label: "Microsoft Azure Monitor" },
+            { value: "azure-ai-search", label: "Azure AI Search Vector Store" }
           ]}
         />
 
@@ -2203,6 +2237,591 @@ export function NodeConfigModal({
     );
   };
 
+  const renderAzureOpenAIChatModelParameters = () => {
+    return (
+      <>
+        <TextField
+          label="Endpoint"
+          value={toStringValue(config.endpoint)}
+          onChange={(next) => setConfig((current) => ({ ...current, endpoint: next }))}
+          placeholder="https://<resource>.openai.azure.com"
+        />
+        <TextField
+          label="Deployment"
+          value={toStringValue(config.deployment)}
+          onChange={(next) => setConfig((current) => ({ ...current, deployment: next }))}
+          placeholder="gpt-4o-mini"
+        />
+        <TextField
+          label="API Version"
+          value={toStringValue(config.apiVersion, "2024-10-21")}
+          onChange={(next) => setConfig((current) => ({ ...current, apiVersion: next }))}
+          placeholder="2024-10-21"
+        />
+        {renderCredentialSecretField({
+          fieldKey: "azure_openai_chat_secret",
+          label: "Azure OpenAI Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "Select secret",
+          preferredProvider: "azure_openai",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <div className="cfg-grid-2">
+          <NumberField
+            label="Temperature"
+            value={toNumberValue(config.temperature, 0.2)}
+            min={0}
+            max={2}
+            step={0.1}
+            onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
+          />
+          <NumberField
+            label="Max Tokens"
+            value={toNumberValue(config.maxTokens, 1024)}
+            min={1}
+            step={1}
+            onChange={(next) => setConfig((current) => ({ ...current, maxTokens: next }))}
+          />
+        </div>
+        <TextField
+          label="Prompt Key"
+          value={toStringValue(config.promptKey, "prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, promptKey: next }))}
+        />
+        <TextField
+          label="System Prompt Key"
+          value={toStringValue(config.systemPromptKey, "system_prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
+        />
+      </>
+    );
+  };
+
+  const renderEmbeddingsAzureOpenAIParameters = () => {
+    return (
+      <>
+        <TextField
+          label="Endpoint"
+          value={toStringValue(config.endpoint)}
+          onChange={(next) => setConfig((current) => ({ ...current, endpoint: next }))}
+          placeholder="https://<resource>.openai.azure.com"
+        />
+        <TextField
+          label="Deployment"
+          value={toStringValue(config.deployment)}
+          onChange={(next) => setConfig((current) => ({ ...current, deployment: next }))}
+          placeholder="text-embedding-3-small"
+        />
+        <TextField
+          label="API Version"
+          value={toStringValue(config.apiVersion, "2024-10-21")}
+          onChange={(next) => setConfig((current) => ({ ...current, apiVersion: next }))}
+          placeholder="2024-10-21"
+        />
+        {renderCredentialSecretField({
+          fieldKey: "azure_openai_embedding_secret",
+          label: "Azure OpenAI Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "Select secret",
+          preferredProvider: "azure_openai",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <TextField
+          label="Input Key"
+          value={toStringValue(config.inputKey, "user_prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+          placeholder="user_prompt"
+        />
+        <TextField
+          label="Output Key"
+          value={toStringValue(config.outputKey, "embedding")}
+          onChange={(next) => setConfig((current) => ({ ...current, outputKey: next }))}
+          placeholder="embedding"
+        />
+      </>
+    );
+  };
+
+  const renderAzureStorageParameters = () => {
+    const operation = toStringValue(config.operation, "list_blobs");
+
+    return (
+      <>
+        <SelectField
+          label="Operation"
+          value={operation}
+          onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+          options={[
+            { value: "list_containers", label: "List Containers" },
+            { value: "list_blobs", label: "List Blobs" },
+            { value: "get_blob_text", label: "Get Blob Text" },
+            { value: "put_blob_text", label: "Put Blob Text" },
+            { value: "delete_blob", label: "Delete Blob" }
+          ]}
+        />
+        <TextField
+          label="Account Name"
+          value={toStringValue(config.accountName)}
+          onChange={(next) => setConfig((current) => ({ ...current, accountName: next }))}
+          placeholder="myaccount"
+        />
+        <TextField
+          label="Endpoint (optional)"
+          value={toStringValue(config.endpoint)}
+          onChange={(next) => setConfig((current) => ({ ...current, endpoint: next }))}
+          placeholder="https://myaccount.blob.core.windows.net"
+        />
+        {(operation === "list_blobs" || operation === "get_blob_text" || operation === "put_blob_text" || operation === "delete_blob") && (
+          <TextField
+            label="Container Name"
+            value={toStringValue(config.containerName)}
+            onChange={(next) => setConfig((current) => ({ ...current, containerName: next }))}
+            placeholder="my-container"
+          />
+        )}
+        {(operation === "get_blob_text" || operation === "put_blob_text" || operation === "delete_blob") && (
+          <TextField
+            label="Blob Name"
+            value={toStringValue(config.blobName)}
+            onChange={(next) => setConfig((current) => ({ ...current, blobName: next }))}
+            placeholder="reports/today.txt"
+          />
+        )}
+        {operation === "list_blobs" && (
+          <TextField
+            label="Prefix (optional)"
+            value={toStringValue(config.prefix)}
+            onChange={(next) => setConfig((current) => ({ ...current, prefix: next }))}
+            placeholder="reports/"
+          />
+        )}
+        {operation === "put_blob_text" && (
+          <TextAreaField
+            label="Blob Content Template"
+            value={toStringValue(config.blobContentTemplate)}
+            onChange={(next) => setConfig((current) => ({ ...current, blobContentTemplate: next }))}
+            rows={4}
+          />
+        )}
+        {(operation === "list_containers" || operation === "list_blobs") && (
+          <NumberField
+            label="Max Results"
+            value={toNumberValue(config.maxResults, 100)}
+            min={1}
+            max={5000}
+            step={1}
+            onChange={(next) => setConfig((current) => ({ ...current, maxResults: next }))}
+          />
+        )}
+        {renderCredentialSecretField({
+          fieldKey: "azure_storage_secret",
+          label: "Azure Storage Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None (demo fallback)",
+          preferredProvider: "azure_storage",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <ToggleField
+          label="Use Demo Fallback If Unavailable"
+          checked={toBooleanValue(config.useDemoFallback, true)}
+          onChange={(next) => setConfig((current) => ({ ...current, useDemoFallback: next }))}
+        />
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() =>
+              void handleConnectorTestRun({
+                connectorId: "azure-storage",
+                connectorConfig: asRecord(config)
+              })
+            }
+            disabled={connectorTestBusy}
+          >
+            {connectorTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {connectorTestMessage && <span className="muted">{connectorTestMessage}</span>}
+        </div>
+        {connectorTestError && <div className="error-banner">{connectorTestError}</div>}
+      </>
+    );
+  };
+
+  const renderAzureCosmosDbParameters = () => {
+    const operation = toStringValue(config.operation, "query_items");
+
+    return (
+      <>
+        <SelectField
+          label="Operation"
+          value={operation}
+          onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+          options={[
+            { value: "query_items", label: "Query Items" },
+            { value: "read_item", label: "Read Item" },
+            { value: "create_item", label: "Create Item" },
+            { value: "upsert_item", label: "Upsert Item" },
+            { value: "delete_item", label: "Delete Item" }
+          ]}
+        />
+        <TextField
+          label="Endpoint"
+          value={toStringValue(config.endpoint)}
+          onChange={(next) => setConfig((current) => ({ ...current, endpoint: next }))}
+          placeholder="https://<account>.documents.azure.com:443/"
+        />
+        <TextField
+          label="Database ID"
+          value={toStringValue(config.databaseId)}
+          onChange={(next) => setConfig((current) => ({ ...current, databaseId: next }))}
+          placeholder="db1"
+        />
+        <TextField
+          label="Container ID"
+          value={toStringValue(config.containerId)}
+          onChange={(next) => setConfig((current) => ({ ...current, containerId: next }))}
+          placeholder="items"
+        />
+        {(operation === "query_items") && (
+          <>
+            <TextAreaField
+              label="Query Text"
+              value={toStringValue(config.queryText, "SELECT TOP 10 * FROM c")}
+              onChange={(next) => setConfig((current) => ({ ...current, queryText: next }))}
+              rows={4}
+            />
+            <NumberField
+              label="Max Items"
+              value={toNumberValue(config.maxItems, 50)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, maxItems: next }))}
+            />
+          </>
+        )}
+        {(operation === "read_item" || operation === "delete_item") && (
+          <TextField
+            label="Item ID"
+            value={toStringValue(config.itemId)}
+            onChange={(next) => setConfig((current) => ({ ...current, itemId: next }))}
+            placeholder="item-123"
+          />
+        )}
+        {(operation === "read_item" || operation === "delete_item" || operation === "create_item" || operation === "upsert_item") && (
+          <TextField
+            label="Partition Key (optional)"
+            value={toStringValue(config.partitionKey)}
+            onChange={(next) => setConfig((current) => ({ ...current, partitionKey: next }))}
+            placeholder="/tenantId value"
+          />
+        )}
+        {(operation === "create_item" || operation === "upsert_item") && (
+          <TextAreaField
+            label="Item JSON"
+            value={toStringValue(config.itemJson, "{\n  \"id\": \"item-1\"\n}")}
+            onChange={(next) => setConfig((current) => ({ ...current, itemJson: next }))}
+            rows={6}
+          />
+        )}
+        {renderCredentialSecretField({
+          fieldKey: "azure_cosmos_secret",
+          label: "Cosmos Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None (demo fallback)",
+          preferredProvider: "azure_cosmos_db",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <ToggleField
+          label="Use Demo Fallback If Unavailable"
+          checked={toBooleanValue(config.useDemoFallback, true)}
+          onChange={(next) => setConfig((current) => ({ ...current, useDemoFallback: next }))}
+        />
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() =>
+              void handleConnectorTestRun({
+                connectorId: "azure-cosmos-db",
+                connectorConfig: asRecord(config)
+              })
+            }
+            disabled={connectorTestBusy}
+          >
+            {connectorTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {connectorTestMessage && <span className="muted">{connectorTestMessage}</span>}
+        </div>
+        {connectorTestError && <div className="error-banner">{connectorTestError}</div>}
+      </>
+    );
+  };
+
+  const renderAzureMonitorParameters = () => {
+    const operation = toStringValue(config.operation, "query_logs");
+
+    return (
+      <>
+        <SelectField
+          label="Operation"
+          value={operation}
+          onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+          options={[
+            { value: "query_logs", label: "Query Logs" },
+            { value: "query_metrics", label: "Query Metrics" },
+            { value: "custom_request", label: "Custom Request" }
+          ]}
+        />
+        {operation === "query_logs" && (
+          <>
+            <TextField
+              label="Workspace ID"
+              value={toStringValue(config.workspaceId)}
+              onChange={(next) => setConfig((current) => ({ ...current, workspaceId: next }))}
+              placeholder="workspace-guid"
+            />
+            <TextAreaField
+              label="Query Text"
+              value={toStringValue(config.queryText, "Heartbeat | take 5")}
+              onChange={(next) => setConfig((current) => ({ ...current, queryText: next }))}
+              rows={4}
+            />
+          </>
+        )}
+        {operation === "query_metrics" && (
+          <>
+            <TextField
+              label="Resource ID"
+              value={toStringValue(config.resourceId)}
+              onChange={(next) => setConfig((current) => ({ ...current, resourceId: next }))}
+              placeholder="/subscriptions/.../resourceGroups/.../providers/..."
+            />
+            <TextField
+              label="Metric Names"
+              value={toStringValue(config.metricNames)}
+              onChange={(next) => setConfig((current) => ({ ...current, metricNames: next }))}
+              placeholder="Percentage CPU,Requests"
+            />
+          </>
+        )}
+        {operation === "custom_request" && (
+          <>
+            <SelectField
+              label="Method"
+              value={toStringValue(config.method, "GET").toUpperCase()}
+              onChange={(next) => setConfig((current) => ({ ...current, method: next }))}
+              options={[
+                { value: "GET", label: "GET" },
+                { value: "POST", label: "POST" },
+                { value: "PUT", label: "PUT" },
+                { value: "PATCH", label: "PATCH" },
+                { value: "DELETE", label: "DELETE" }
+              ]}
+            />
+            <TextField
+              label="Path / URL"
+              value={toStringValue(config.path)}
+              onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
+              placeholder="/subscriptions?api-version=2020-01-01"
+            />
+            <TextAreaField
+              label="Body (JSON, optional)"
+              value={toStringValue(config.bodyTemplate, "")}
+              onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
+              rows={4}
+            />
+          </>
+        )}
+        <TextField
+          label="Timespan (optional)"
+          value={toStringValue(config.timespan)}
+          onChange={(next) => setConfig((current) => ({ ...current, timespan: next }))}
+          placeholder="PT1H"
+        />
+        <NumberField
+          label="Max Rows"
+          value={toNumberValue(config.maxRows, 200)}
+          min={1}
+          step={1}
+          onChange={(next) => setConfig((current) => ({ ...current, maxRows: next }))}
+        />
+        {renderCredentialSecretField({
+          fieldKey: "azure_monitor_secret",
+          label: "Azure Bearer Token Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None (demo fallback)",
+          preferredProvider: "azure_monitor",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <ToggleField
+          label="Use Demo Fallback If Unavailable"
+          checked={toBooleanValue(config.useDemoFallback, true)}
+          onChange={(next) => setConfig((current) => ({ ...current, useDemoFallback: next }))}
+        />
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() =>
+              void handleConnectorTestRun({
+                connectorId: "azure-monitor",
+                connectorConfig: asRecord(config)
+              })
+            }
+            disabled={connectorTestBusy}
+          >
+            {connectorTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {connectorTestMessage && <span className="muted">{connectorTestMessage}</span>}
+        </div>
+        {connectorTestError && <div className="error-banner">{connectorTestError}</div>}
+      </>
+    );
+  };
+
+  const renderAzureAiSearchParameters = () => {
+    const operation = toStringValue(config.operation, "vector_search");
+
+    return (
+      <>
+        <SelectField
+          label="Operation"
+          value={operation}
+          onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+          options={[
+            { value: "vector_search", label: "Vector Search" },
+            { value: "upsert_documents", label: "Upsert Documents" },
+            { value: "delete_documents", label: "Delete Documents" }
+          ]}
+        />
+        <TextField
+          label="Endpoint"
+          value={toStringValue(config.endpoint)}
+          onChange={(next) => setConfig((current) => ({ ...current, endpoint: next }))}
+          placeholder="https://<service>.search.windows.net"
+        />
+        <TextField
+          label="Index Name"
+          value={toStringValue(config.indexName)}
+          onChange={(next) => setConfig((current) => ({ ...current, indexName: next }))}
+          placeholder="documents"
+        />
+        <TextField
+          label="API Version"
+          value={toStringValue(config.apiVersion, "2024-07-01")}
+          onChange={(next) => setConfig((current) => ({ ...current, apiVersion: next }))}
+          placeholder="2024-07-01"
+        />
+        {renderCredentialSecretField({
+          fieldKey: "azure_ai_search_secret",
+          label: "Azure AI Search API Key Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None (demo fallback)",
+          preferredProvider: "azure_ai_search",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <div className="cfg-grid-2">
+          <TextField
+            label="ID Field"
+            value={toStringValue(config.idField, "id")}
+            onChange={(next) => setConfig((current) => ({ ...current, idField: next }))}
+          />
+          <TextField
+            label="Content Field"
+            value={toStringValue(config.contentField, "content")}
+            onChange={(next) => setConfig((current) => ({ ...current, contentField: next }))}
+          />
+          <TextField
+            label="Vector Field"
+            value={toStringValue(config.vectorField, "embedding")}
+            onChange={(next) => setConfig((current) => ({ ...current, vectorField: next }))}
+          />
+          <TextField
+            label="Metadata Field"
+            value={toStringValue(config.metadataField, "metadata")}
+            onChange={(next) => setConfig((current) => ({ ...current, metadataField: next }))}
+          />
+        </div>
+        {operation === "vector_search" && (
+          <>
+            <TextField
+              label="Query Text"
+              value={toStringValue(config.queryText, "{{user_prompt}}")}
+              onChange={(next) => setConfig((current) => ({ ...current, queryText: next }))}
+            />
+            <TextAreaField
+              label="Query Vector JSON (optional)"
+              value={toStringValue(config.queryVectorJson)}
+              onChange={(next) => setConfig((current) => ({ ...current, queryVectorJson: next }))}
+              rows={4}
+            />
+            <NumberField
+              label="Top K"
+              value={toNumberValue(config.topK, 5)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, topK: next }))}
+            />
+          </>
+        )}
+        {(operation === "upsert_documents" || operation === "delete_documents") && (
+          <TextAreaField
+            label="Documents JSON Array"
+            value={toStringValue(config.documentsJson, "[\n  { \"id\": \"doc-1\", \"content\": \"hello\" }\n]")}
+            onChange={(next) => setConfig((current) => ({ ...current, documentsJson: next }))}
+            rows={6}
+          />
+        )}
+        <ToggleField
+          label="Use Demo Fallback If Unavailable"
+          checked={toBooleanValue(config.useDemoFallback, true)}
+          onChange={(next) => setConfig((current) => ({ ...current, useDemoFallback: next }))}
+        />
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() =>
+              void handleConnectorTestRun({
+                connectorId: "azure-ai-search",
+                connectorConfig: asRecord(config)
+              })
+            }
+            disabled={connectorTestBusy}
+          >
+            {connectorTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {connectorTestMessage && <span className="muted">{connectorTestMessage}</span>}
+        </div>
+        {connectorTestError && <div className="error-banner">{connectorTestError}</div>}
+      </>
+    );
+  };
+
   const renderParameters = () => {
     switch (node.data.nodeType) {
       case "schedule_trigger":
@@ -2244,6 +2863,8 @@ export function NodeConfigModal({
         return renderLocalMemoryParameters();
       case "llm_call":
         return renderLlmParameters();
+      case "azure_openai_chat_model":
+        return renderAzureOpenAIChatModelParameters();
       case "prompt_template":
         return renderPromptTemplateParameters();
       case "code_node":
@@ -2555,6 +3176,14 @@ export function NodeConfigModal({
         return renderConnectorParameters();
       case "google_drive_source":
         return renderGoogleDriveSourceParameters();
+      case "azure_storage":
+        return renderAzureStorageParameters();
+      case "azure_cosmos_db":
+        return renderAzureCosmosDbParameters();
+      case "azure_monitor_http":
+        return renderAzureMonitorParameters();
+      case "azure_ai_search_vector_store":
+        return renderAzureAiSearchParameters();
       case "text_input":
       case "system_prompt":
       case "user_prompt":
@@ -2573,10 +3202,14 @@ export function NodeConfigModal({
           const preferredProvider =
             embedderId === "openai-embedder"
               ? "openai"
+              : embedderId === "azure-openai-embedder"
+                ? "azure_openai"
               : vectorStoreId === "pinecone-vector-store"
                 ? "pinecone"
                 : vectorStoreId === "pgvector-store"
                   ? "postgres"
+                  : vectorStoreId === "azure-ai-search-vector-store"
+                    ? "azure_ai_search"
                   : "custom";
 
         return (
@@ -2599,6 +3232,7 @@ export function NodeConfigModal({
               onChange={(next) => setConfig((current) => ({ ...current, embedderId: next }))}
               options={[
                 { value: "openai-embedder", label: "OpenAI Embeddings" },
+                { value: "azure-openai-embedder", label: "Azure OpenAI Embeddings" },
                 { value: "token-embedder", label: "Token Based (Local Demo)" }
               ]}
             />
@@ -2608,6 +3242,7 @@ export function NodeConfigModal({
               onChange={(next) => setConfig((current) => ({ ...current, vectorStoreId: next }))}
               options={[
                 { value: "pinecone-vector-store", label: "Pinecone Vector Store" },
+                { value: "azure-ai-search-vector-store", label: "Azure AI Search Vector Store" },
                 { value: "pgvector-store", label: "Postgres PGVector Store" },
                 { value: "in-memory-vector-store", label: "In Memory (Local Demo)" }
               ]}
@@ -2635,6 +3270,8 @@ export function NodeConfigModal({
           </>
         );
         }
+      case "embeddings_azure_openai":
+        return renderEmbeddingsAzureOpenAIParameters();
       case "document_chunker":
         return (
           <>

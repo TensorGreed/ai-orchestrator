@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-azure-openai-basic",
+    "name": "Azure OpenAI Basic Flow",
+    "description": "Text Input -> Prompt Template -> Azure OpenAI Chat Model -> Output",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "text_1",
+        "type": "text_input",
+        "name": "Text Input",
+        "position": { "x": 80, "y": 140 },
+        "config": {
+          "text": "Summarize Azure Cosmos DB in 3 bullet points."
+        }
+      },
+      {
+        "id": "template_1",
+        "type": "prompt_template",
+        "name": "Prompt Template",
+        "position": { "x": 360, "y": 140 },
+        "config": {
+          "template": "User request: {{user_prompt}}\n\nReturn a concise answer.",
+          "outputKey": "prompt"
+        }
+      },
+      {
+        "id": "azure_llm_1",
+        "type": "azure_openai_chat_model",
+        "name": "Azure OpenAI Chat Model",
+        "position": { "x": 700, "y": 140 },
+        "config": {
+          "endpoint": "https://<resource>.openai.azure.com",
+          "deployment": "gpt-4o-mini",
+          "apiVersion": "2024-10-21",
+          "secretRef": {
+            "secretId": "replace-with-azure-openai-secret-id"
+          },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt",
+          "temperature": 0.2,
+          "maxTokens": 1024
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 1010, "y": 140 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "edge_1", "source": "text_1", "target": "template_1" },
+      { "id": "edge_2", "source": "template_1", "target": "azure_llm_1" },
+      { "id": "edge_3", "source": "azure_llm_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-04-07T00:00:00.000Z"
+}

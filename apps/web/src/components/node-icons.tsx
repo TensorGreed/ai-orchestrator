@@ -18,7 +18,13 @@ export type NodePaletteIconKey =
   | "connector"
   | "google_drive"
   | "webhook"
-  | "schedule";
+  | "schedule"
+  | "azure_openai"
+  | "azure_storage"
+  | "azure_cosmos"
+  | "azure_monitor"
+  | "azure_search"
+  | "azure_embedding";
 
 export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element {
   if (icon === "ai") {
@@ -273,6 +279,66 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
       </svg>
     );
   }
+  if (icon === "azure_openai") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M4.8 17.5 11.8 4h4.6l-7 13.5H4.8zm5.2 2.5 4.2-8.1h4.8L14.8 20H10z"
+          fill="none"
+          stroke="#0078D4"
+          strokeWidth="1.6"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  if (icon === "azure_embedding") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="7" cy="7" r="2" fill="#0078D4" />
+        <circle cx="17" cy="7" r="2" fill="#0078D4" />
+        <circle cx="7" cy="17" r="2" fill="#0078D4" />
+        <circle cx="17" cy="17" r="2" fill="#0078D4" />
+        <path d="M9 7h6M7 9v6m10-6v6M9 17h6" fill="none" stroke="#0A3E74" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (icon === "azure_storage") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="4" y="5" width="16" height="4" rx="1.2" fill="#38B2AC" />
+        <rect x="4" y="10" width="16" height="4" rx="1.2" fill="#2EA59F" />
+        <rect x="4" y="15" width="16" height="4" rx="1.2" fill="#238A84" />
+      </svg>
+    );
+  }
+  if (icon === "azure_cosmos") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="2.1" fill="#1A73E8" />
+        <ellipse cx="12" cy="12" rx="8" ry="3.6" fill="none" stroke="#1A73E8" strokeWidth="1.6" />
+        <ellipse cx="12" cy="12" rx="3.6" ry="8" fill="none" stroke="#1A73E8" strokeWidth="1.4" />
+      </svg>
+    );
+  }
+  if (icon === "azure_monitor") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="4" y="12" width="3" height="7" rx="1" fill="#4A90E2" />
+        <rect x="10.5" y="8" width="3" height="11" rx="1" fill="#2F78D0" />
+        <rect x="17" y="5" width="3" height="14" rx="1" fill="#1D5FAF" />
+      </svg>
+    );
+  }
+  if (icon === "azure_search") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 15.5a4.5 4.5 0 1 1 3.4-7.4A5 5 0 0 1 19 9.8a4 4 0 0 1-1 7.7H10" fill="none" stroke="#3A8EE6" strokeWidth="1.6" strokeLinecap="round" />
+        <circle cx="10" cy="15.5" r="2.8" fill="none" stroke="#0B4D8C" strokeWidth="1.6" />
+        <path d="m12.1 17.6 2.4 2.4" fill="none" stroke="#0B4D8C" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
 
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -289,6 +355,8 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   user_prompt: "ai",
   prompt_template: "ai",
   llm_call: "ai",
+  azure_openai_chat_model: "azure_openai",
+  embeddings_azure_openai: "azure_embedding",
   agent_orchestrator: "ai",
   output_guardrail: "ai",
   rag_retrieve: "ai",
@@ -296,6 +364,10 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   mcp_tool: "tool",
   connector_source: "connector",
   google_drive_source: "google_drive",
+  azure_storage: "azure_storage",
+  azure_cosmos_db: "azure_cosmos",
+  azure_monitor_http: "azure_monitor",
+  azure_ai_search_vector_store: "azure_search",
   http_request: "http",
   document_chunker: "transform",
   set_node: "set",
