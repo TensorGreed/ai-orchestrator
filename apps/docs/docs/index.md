@@ -21,6 +21,7 @@ AI Orchestrator is a low-code workflow automation platform for:
 - [Workflow editor](/product/workflow-editor)
 - [Core nodes](/nodes/core-nodes)
 - [Azure nodes and credentials](/nodes/azure-nodes)
+- [Vector store nodes (Qdrant)](/nodes/vector-stores)
 - [Auth and RBAC](/security/auth-rbac)
 - [Secrets handling](/security/secrets)
 - [Secure webhooks](/security/secure-webhooks)
@@ -37,3 +38,4 @@ This docs site tracks the current monorepo implementation (apps + packages) and 
 - `azure_cosmos_db`
 - `azure_monitor_http`
 - `azure_ai_search_vector_store`
+- `qdrant_vector_store`

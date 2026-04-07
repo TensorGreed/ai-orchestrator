@@ -5,6 +5,7 @@ import { AzureStorageConnectorAdapter } from "./adapters/azure-storage";
 import { AzureCosmosDbConnectorAdapter } from "./adapters/azure-cosmos-db";
 import { AzureMonitorConnectorAdapter } from "./adapters/azure-monitor";
 import { AzureAiSearchConnectorAdapter } from "./adapters/azure-ai-search";
+import { QdrantConnectorAdapter } from "./adapters/qdrant";
 import { ConnectorRegistry } from "./registry";
 
 export * from "./types";
@@ -16,6 +17,7 @@ export * from "./adapters/azure-storage";
 export * from "./adapters/azure-cosmos-db";
 export * from "./adapters/azure-monitor";
 export * from "./adapters/azure-ai-search";
+export * from "./adapters/qdrant";
 
 export function createDefaultConnectorRegistry(): ConnectorRegistry {
   const registry = new ConnectorRegistry();
@@ -26,5 +28,6 @@ export function createDefaultConnectorRegistry(): ConnectorRegistry {
   registry.register(new AzureCosmosDbConnectorAdapter());
   registry.register(new AzureMonitorConnectorAdapter());
   registry.register(new AzureAiSearchConnectorAdapter());
+  registry.register(new QdrantConnectorAdapter());
   return registry;
 }

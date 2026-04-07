@@ -38,6 +38,7 @@ export type WorkflowNodeType =
   | "azure_openai_chat_model"
   | "embeddings_azure_openai"
   | "azure_ai_search_vector_store"
+  | "qdrant_vector_store"
   | "document_chunker"
   | "output_parser"
   | "human_approval"
@@ -275,6 +276,7 @@ export interface ConnectorDefinition {
     | "azure_cosmos_db"
     | "azure_monitor"
     | "azure_search"
+    | "qdrant"
     | "custom";
   description: string;
   configSchema: Record<string, unknown>;

@@ -65,6 +65,7 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "azure_cosmos_db",
         "azure_monitor_http",
         "azure_ai_search_vector_store",
+        "qdrant_vector_store",
         "mcp_tool",
         "http_request",
         "execute_workflow"

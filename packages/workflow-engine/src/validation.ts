@@ -546,6 +546,17 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
+    if (node.type === "qdrant_vector_store") {
+      const operation = typeof config.operation === "string" ? config.operation.trim() : "";
+      if (!operation) {
+        issues.push({
+          code: "missing_qdrant_operation",
+          message: "Qdrant Vector Store node requires operation.",
+          nodeId: node.id
+        });
+      }
+    }
+
     if (node.type === "embeddings_azure_openai") {
       const endpoint = typeof config.endpoint === "string" ? config.endpoint.trim() : "";
       const deployment = typeof config.deployment === "string" ? config.deployment.trim() : "";

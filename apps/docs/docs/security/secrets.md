@@ -31,6 +31,20 @@ Cookie: ao_session=...
 }
 ```
 
+Qdrant example:
+
+```http
+POST /api/secrets
+Content-Type: application/json
+Cookie: ao_session=...
+
+{
+  "name": "qdrant-prod",
+  "provider": "qdrant",
+  "value": "{\"apiKey\":\"...\"}"
+}
+```
+
 ## Operational guidance
 
 - Separate secrets by environment (dev/stage/prod).

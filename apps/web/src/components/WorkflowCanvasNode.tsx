@@ -31,6 +31,7 @@ function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "a
     nodeType === "azure_cosmos_db" ||
     nodeType === "azure_monitor_http" ||
     nodeType === "azure_ai_search_vector_store" ||
+    nodeType === "qdrant_vector_store" ||
     nodeType === "embeddings_azure_openai" ||
     nodeType === "http_request" ||
     nodeType === "llm_call" ||

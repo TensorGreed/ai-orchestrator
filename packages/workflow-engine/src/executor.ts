@@ -27,6 +27,7 @@ import {
   PineconeVectorStoreAdapter,
   PGVectorStoreAdapter,
   AzureAiSearchVectorStoreAdapter,
+  QdrantVectorStoreAdapter,
   type EmbeddingRegistry,
   type VectorStoreRegistry
 } from "./rag-adapters";
@@ -1505,6 +1506,24 @@ async function executeNode(
       };
     }
 
+    case "qdrant_vector_store": {
+      const connector = dependencies.connectorRegistry.get("qdrant");
+      const output = await connector.fetchData(
+        {
+          ...config
+        },
+        {
+          resolveSecret: dependencies.resolveSecret
+        }
+      );
+
+      return {
+        documents: output.documents,
+        connectorRaw: output.raw,
+        result: output.raw
+      };
+    }
+
     case "document_chunker": {
       const chunkSize = typeof config.chunkSize === "number" && config.chunkSize > 0 ? Math.floor(config.chunkSize) : 500;
       const chunkOverlap = typeof config.chunkOverlap === "number" && config.chunkOverlap >= 0 ? Math.floor(config.chunkOverlap) : 50;
@@ -1653,6 +1672,55 @@ async function executeNode(
              idField: typeof vectorStoreConfig.idField === "string" ? vectorStoreConfig.idField : undefined,
              metadataField: typeof vectorStoreConfig.metadataField === "string" ? vectorStoreConfig.metadataField : undefined,
              apiKey: apiKey || ""
+           });
+         } else if (vectorStoreId === "qdrant-vector-store") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey =
+             typeof apiKeyRef === "object" && apiKeyRef
+               ? await dependencies.resolveSecret(apiKeyRef as SecretReference)
+               : process.env.QDRANT_API_KEY;
+           const parsedFilter = (() => {
+             const raw = vectorStoreConfig.filter;
+             if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+               return raw as Record<string, unknown>;
+             }
+             if (typeof vectorStoreConfig.filterJson === "string" && vectorStoreConfig.filterJson.trim()) {
+               try {
+                 const parsed = JSON.parse(vectorStoreConfig.filterJson);
+                 return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                   ? (parsed as Record<string, unknown>)
+                   : undefined;
+               } catch {
+                 return undefined;
+               }
+             }
+             return undefined;
+           })();
+           store = new QdrantVectorStoreAdapter({
+             endpoint:
+               typeof vectorStoreConfig.endpoint === "string"
+                 ? vectorStoreConfig.endpoint
+                 : process.env.QDRANT_ENDPOINT || "",
+             collectionName:
+               typeof vectorStoreConfig.collectionName === "string"
+                 ? vectorStoreConfig.collectionName
+                 : typeof vectorStoreConfig.collection === "string"
+                   ? vectorStoreConfig.collection
+                   : "",
+             apiKey: apiKey || "",
+             apiKeyHeaderName:
+               typeof vectorStoreConfig.apiKeyHeaderName === "string"
+                 ? vectorStoreConfig.apiKeyHeaderName
+                 : undefined,
+             contentField:
+               typeof vectorStoreConfig.contentField === "string"
+                 ? vectorStoreConfig.contentField
+                 : undefined,
+             metadataField:
+               typeof vectorStoreConfig.metadataField === "string"
+                 ? vectorStoreConfig.metadataField
+                 : undefined,
+             filter: parsedFilter
            });
          }
          else throw new Error(`Unknown vector store ID: ${vectorStoreId}`);

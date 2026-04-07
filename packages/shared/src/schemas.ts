@@ -45,6 +45,7 @@ export const workflowNodeSchema = z.object({
     "azure_monitor_http",
     "embeddings_azure_openai",
     "azure_ai_search_vector_store",
+    "qdrant_vector_store",
     "document_chunker",
     "output_parser",
     "human_approval",

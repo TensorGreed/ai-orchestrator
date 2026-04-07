@@ -751,7 +751,7 @@ describe("workflow engine", () => {
     expect(modelOutput.answer).toBe("azure-mock-response");
   });
 
-  it("executes Azure connector nodes end-to-end using demo fallback mode", async () => {
+  it("executes Azure + Qdrant connector nodes end-to-end using demo fallback mode", async () => {
     const workflow: Workflow = {
       id: "wf-azure-connectors-demo",
       name: "Azure connectors demo fallback",
@@ -788,10 +788,17 @@ describe("workflow engine", () => {
           config: { operation: "vector_search", useDemoFallback: true }
         },
         {
+          id: "qdrant",
+          type: "qdrant_vector_store",
+          name: "Qdrant",
+          position: { x: 900, y: 0 },
+          config: { operation: "get_ranked_documents", useDemoFallback: true }
+        },
+        {
           id: "output",
           type: "output",
           name: "Output",
-          position: { x: 920, y: 0 },
+          position: { x: 1080, y: 0 },
           config: { responseTemplate: "{{result.mode}}" }
         }
       ],
@@ -800,7 +807,8 @@ describe("workflow engine", () => {
         { id: "e2", source: "storage", target: "cosmos" },
         { id: "e3", source: "cosmos", target: "monitor" },
         { id: "e4", source: "monitor", target: "search" },
-        { id: "e5", source: "search", target: "output" }
+        { id: "e5", source: "search", target: "qdrant" },
+        { id: "e6", source: "qdrant", target: "output" }
       ]
     };
 
@@ -820,6 +828,7 @@ describe("workflow engine", () => {
     expect(result.nodeResults.find((entry) => entry.nodeId === "cosmos")?.status).toBe("success");
     expect(result.nodeResults.find((entry) => entry.nodeId === "monitor")?.status).toBe("success");
     expect(result.nodeResults.find((entry) => entry.nodeId === "search")?.status).toBe("success");
+    expect(result.nodeResults.find((entry) => entry.nodeId === "qdrant")?.status).toBe("success");
     const finalOutput = result.nodeResults.find((entry) => entry.nodeId === "output")?.output as Record<string, unknown>;
     expect(finalOutput.result).toBe("demo-fallback");
   });

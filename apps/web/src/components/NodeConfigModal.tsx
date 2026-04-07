@@ -2822,6 +2822,133 @@ export function NodeConfigModal({
     );
   };
 
+  const renderQdrantParameters = () => {
+    const operation = toStringValue(config.operation, "get_ranked_documents");
+    const retrievalMode =
+      operation === "get_ranked_documents" ||
+      operation === "retrieve_for_chain_tool" ||
+      operation === "retrieve_for_ai_agent_tool";
+
+    return (
+      <>
+        <SelectField
+          label="Operation"
+          value={operation}
+          onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+          options={[
+            { value: "get_ranked_documents", label: "Get Ranked Documents From Vector Store" },
+            { value: "add_documents", label: "Add Documents To Vector Store" },
+            { value: "retrieve_for_chain_tool", label: "Retrieve Documents For Chain/Tool As Vector Store" },
+            { value: "retrieve_for_ai_agent_tool", label: "Retrieve Documents For AI Agent As Tool" }
+          ]}
+        />
+        <TextField
+          label="Endpoint"
+          value={toStringValue(config.endpoint)}
+          onChange={(next) => setConfig((current) => ({ ...current, endpoint: next }))}
+          placeholder="http://localhost:6333"
+        />
+        <TextField
+          label="Collection Name"
+          value={toStringValue(config.collectionName)}
+          onChange={(next) => setConfig((current) => ({ ...current, collectionName: next }))}
+          placeholder="documents"
+        />
+        <TextField
+          label="API Key Header Name"
+          value={toStringValue(config.apiKeyHeaderName, "api-key")}
+          onChange={(next) => setConfig((current) => ({ ...current, apiKeyHeaderName: next }))}
+          placeholder="api-key"
+        />
+        {renderCredentialSecretField({
+          fieldKey: "qdrant_secret",
+          label: "Qdrant API Key Secret",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None (demo fallback)",
+          preferredProvider: "qdrant",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <div className="cfg-grid-2">
+          <TextField
+            label="Content Field"
+            value={toStringValue(config.contentField, "content")}
+            onChange={(next) => setConfig((current) => ({ ...current, contentField: next }))}
+          />
+          <TextField
+            label="Metadata Field"
+            value={toStringValue(config.metadataField, "metadata")}
+            onChange={(next) => setConfig((current) => ({ ...current, metadataField: next }))}
+          />
+        </div>
+        {retrievalMode && (
+          <>
+            <TextField
+              label="Query Text (optional)"
+              value={toStringValue(config.queryText, "{{user_prompt}}")}
+              onChange={(next) => setConfig((current) => ({ ...current, queryText: next }))}
+            />
+            <TextAreaField
+              label="Query Vector JSON (optional)"
+              value={toStringValue(config.queryVectorJson)}
+              onChange={(next) => setConfig((current) => ({ ...current, queryVectorJson: next }))}
+              rows={4}
+            />
+            <TextAreaField
+              label="Filter JSON (optional)"
+              value={toStringValue(config.filterJson)}
+              onChange={(next) => setConfig((current) => ({ ...current, filterJson: next }))}
+              rows={4}
+            />
+            <NumberField
+              label="Top K"
+              value={toNumberValue(config.topK, 5)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, topK: next }))}
+            />
+          </>
+        )}
+        {operation === "add_documents" && (
+          <TextAreaField
+            label="Documents JSON Array"
+            value={toStringValue(
+              config.documentsJson,
+              "[\n  { \"id\": \"doc-1\", \"text\": \"hello\", \"metadata\": { \"source\": \"manual\" } }\n]"
+            )}
+            onChange={(next) => setConfig((current) => ({ ...current, documentsJson: next }))}
+            rows={8}
+          />
+        )}
+        <ToggleField
+          label="Use Demo Fallback If Unavailable"
+          checked={toBooleanValue(config.useDemoFallback, true)}
+          onChange={(next) => setConfig((current) => ({ ...current, useDemoFallback: next }))}
+        />
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() =>
+              void handleConnectorTestRun({
+                connectorId: "qdrant",
+                connectorConfig: asRecord(config)
+              })
+            }
+            disabled={connectorTestBusy}
+          >
+            {connectorTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {connectorTestMessage && <span className="muted">{connectorTestMessage}</span>}
+        </div>
+        {connectorTestError && <div className="error-banner">{connectorTestError}</div>}
+      </>
+    );
+  };
+
   const renderParameters = () => {
     switch (node.data.nodeType) {
       case "schedule_trigger":
@@ -3184,6 +3311,8 @@ export function NodeConfigModal({
         return renderAzureMonitorParameters();
       case "azure_ai_search_vector_store":
         return renderAzureAiSearchParameters();
+      case "qdrant_vector_store":
+        return renderQdrantParameters();
       case "text_input":
       case "system_prompt":
       case "user_prompt":
@@ -3210,7 +3339,9 @@ export function NodeConfigModal({
                   ? "postgres"
                   : vectorStoreId === "azure-ai-search-vector-store"
                     ? "azure_ai_search"
-                  : "custom";
+                    : vectorStoreId === "qdrant-vector-store"
+                      ? "qdrant"
+                    : "custom";
 
         return (
           <>
@@ -3243,6 +3374,7 @@ export function NodeConfigModal({
               options={[
                 { value: "pinecone-vector-store", label: "Pinecone Vector Store" },
                 { value: "azure-ai-search-vector-store", label: "Azure AI Search Vector Store" },
+                { value: "qdrant-vector-store", label: "Qdrant Vector Store" },
                 { value: "pgvector-store", label: "Postgres PGVector Store" },
                 { value: "in-memory-vector-store", label: "In Memory (Local Demo)" }
               ]}

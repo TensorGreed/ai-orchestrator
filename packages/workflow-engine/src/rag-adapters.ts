@@ -84,6 +84,10 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
   }
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
   readonly id = "azure-openai-embedder";
 
@@ -442,6 +446,120 @@ export class AzureAiSearchVectorStoreAdapter implements VectorStoreAdapter {
           : {})
       }
     }));
+  }
+}
+
+export class QdrantVectorStoreAdapter implements VectorStoreAdapter {
+  readonly id = "qdrant-vector-store";
+
+  constructor(
+    private config: {
+      endpoint: string;
+      collectionName: string;
+      apiKey?: string;
+      apiKeyHeaderName?: string;
+      contentField?: string;
+      metadataField?: string;
+      filter?: Record<string, unknown>;
+    }
+  ) {}
+
+  private get baseUrl() {
+    return this.config.endpoint.replace(/\/+$/, "");
+  }
+
+  private get headers() {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json"
+    };
+    if (this.config.apiKey?.trim()) {
+      headers[this.config.apiKeyHeaderName?.trim() || "api-key"] = this.config.apiKey.trim();
+    }
+    return headers;
+  }
+
+  private get fields() {
+    return {
+      contentField: this.config.contentField?.trim() || "content",
+      metadataField: this.config.metadataField?.trim() || "metadata"
+    };
+  }
+
+  private collectionPath(pathSuffix: string) {
+    return `${this.baseUrl}/collections/${encodeURIComponent(this.config.collectionName)}${pathSuffix}`;
+  }
+
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    if (!this.baseUrl || !this.config.collectionName.trim()) {
+      throw new Error("QdrantVectorStoreAdapter requires endpoint and collectionName.");
+    }
+
+    const { contentField, metadataField } = this.fields;
+    const points = await Promise.all(
+      documents.map(async (document) => ({
+        id: document.id,
+        vector: await embedder.embed(document.text),
+        payload: {
+          [contentField]: document.text,
+          [metadataField]: document.metadata ?? {}
+        }
+      }))
+    );
+
+    const response = await fetch(this.collectionPath("/points?wait=true"), {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify({ points })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Qdrant upsert failed: ${await response.text()}`);
+    }
+  }
+
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    if (!this.baseUrl || !this.config.collectionName.trim()) {
+      throw new Error("QdrantVectorStoreAdapter requires endpoint and collectionName.");
+    }
+
+    const { contentField, metadataField } = this.fields;
+    const vector = await embedder.embed(query);
+    const response = await fetch(this.collectionPath("/points/search"), {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify({
+        vector,
+        limit: topK,
+        with_payload: true,
+        with_vector: false,
+        ...(this.config.filter ? { filter: this.config.filter } : {})
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Qdrant search failed: ${await response.text()}`);
+    }
+
+    const json = (await response.json()) as Record<string, unknown>;
+    const result = Array.isArray(json.result) ? (json.result as Array<Record<string, unknown>>) : [];
+    return result.map((entry, index) => {
+      const payload = asRecord(entry.payload);
+      const metadata = asRecord(payload[metadataField]);
+      const textCandidate = payload[contentField];
+      const text =
+        typeof textCandidate === "string" && textCandidate.trim()
+          ? textCandidate
+          : JSON.stringify(payload);
+      return {
+        id: typeof entry.id === "string" ? entry.id : `qdrant-doc-${index + 1}`,
+        text,
+        metadata: {
+          ...metadata,
+          source: "qdrant",
+          score: entry.score
+        }
+      };
+    });
   }
 }
 

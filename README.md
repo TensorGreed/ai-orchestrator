@@ -251,6 +251,17 @@ The Azure suite from the n8n-style screenshot is implemented end-to-end in this 
 - `Microsoft Azure Monitor` (`azure_monitor_http`)
 - `Azure AI Search Vector Store` (`azure_ai_search_vector_store`)
 
+## Qdrant node suite (implemented)
+
+- `Qdrant Vector Store` (`qdrant_vector_store`) with actions:
+  - `get_ranked_documents`
+  - `add_documents`
+  - `retrieve_for_chain_tool`
+  - `retrieve_for_ai_agent_tool`
+
+Qdrant is also available in `RAG Retrieve` via `vectorStoreId = qdrant-vector-store`.
+For env-backed local defaults you can set `QDRANT_ENDPOINT` and `QDRANT_API_KEY`.
+
 What is included for these nodes:
 
 - structured node config forms in the editor (no free-form JSON required for normal use)

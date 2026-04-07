@@ -506,6 +506,15 @@ describe("auth + rbac API", () => {
           queryText: "hello",
           useDemoFallback: true
         }
+      },
+      {
+        connectorId: "qdrant",
+        connectorConfig: {
+          operation: "get_ranked_documents",
+          collectionName: "demo",
+          queryText: "hello",
+          useDemoFallback: true
+        }
       }
     ];
 

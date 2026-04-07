@@ -142,6 +142,7 @@ type SecretProviderPreset =
   | "azure_cosmos_db"
   | "azure_monitor"
   | "azure_ai_search"
+  | "qdrant"
   | "google_drive"
   | "webhook"
   | "openai_compatible"
@@ -156,6 +157,7 @@ const SECRET_PROVIDER_OPTIONS: Array<{ value: SecretProviderPreset; label: strin
   { value: "azure_cosmos_db", label: "Azure Cosmos DB" },
   { value: "azure_monitor", label: "Microsoft Azure Monitor" },
   { value: "azure_ai_search", label: "Azure AI Search" },
+  { value: "qdrant", label: "Qdrant" },
   { value: "anthropic", label: "Anthropic" },
   { value: "gemini", label: "Google Gemini" },
   { value: "google_drive", label: "Google Drive" },

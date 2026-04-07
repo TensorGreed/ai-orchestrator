@@ -662,6 +662,50 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "qdrant_vector_store",
+    label: "Qdrant Vector Store",
+    category: "Connector",
+    description: "Runs vector retrieval and document upsert operations against a Qdrant collection.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          enum: [
+            "get_ranked_documents",
+            "add_documents",
+            "retrieve_for_chain_tool",
+            "retrieve_for_ai_agent_tool"
+          ]
+        },
+        endpoint: { type: "string" },
+        collectionName: { type: "string" },
+        apiKeyHeaderName: { type: "string" },
+        queryText: { type: "string" },
+        queryVectorJson: { type: "string" },
+        filterJson: { type: "string" },
+        documentsJson: { type: "string" },
+        topK: { type: "number" },
+        contentField: { type: "string" },
+        metadataField: { type: "string" },
+        secretRef: { type: "object" },
+        useDemoFallback: { type: "boolean" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: {
+      operation: "get_ranked_documents",
+      endpoint: "http://localhost:6333",
+      collectionName: "documents",
+      apiKeyHeaderName: "api-key",
+      queryText: "{{user_prompt}}",
+      topK: 5,
+      contentField: "content",
+      metadataField: "metadata",
+      useDemoFallback: true
+    }
+  },
+  {
     type: "output_parser",
     label: "Output Parser",
     category: "Utility",

@@ -36,7 +36,8 @@ export default defineConfig({
         text: "Nodes",
         items: [
           { text: "Core Nodes", link: "/nodes/core-nodes" },
-          { text: "Azure Nodes", link: "/nodes/azure-nodes" }
+          { text: "Azure Nodes", link: "/nodes/azure-nodes" },
+          { text: "Vector Stores", link: "/nodes/vector-stores" }
         ]
       },
       {

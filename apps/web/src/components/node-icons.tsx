@@ -24,7 +24,8 @@ export type NodePaletteIconKey =
   | "azure_cosmos"
   | "azure_monitor"
   | "azure_search"
-  | "azure_embedding";
+  | "azure_embedding"
+  | "qdrant";
 
 export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element {
   if (icon === "ai") {
@@ -339,6 +340,26 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
       </svg>
     );
   }
+  if (icon === "qdrant") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M12 3.6 19.2 7.8v8.4L12 20.4l-7.2-4.2V7.8z"
+          fill="none"
+          stroke="#e63b5c"
+          strokeWidth="1.6"
+          strokeLinejoin="round"
+        />
+        <path
+          d="m12 3.6 7.2 4.2-7.2 4.2-7.2-4.2 7.2-4.2zm0 8.4v8.4"
+          fill="none"
+          stroke="#b81f47"
+          strokeWidth="1.4"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
 
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -368,6 +389,7 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   azure_cosmos_db: "azure_cosmos",
   azure_monitor_http: "azure_monitor",
   azure_ai_search_vector_store: "azure_search",
+  qdrant_vector_store: "qdrant",
   http_request: "http",
   document_chunker: "transform",
   set_node: "set",
