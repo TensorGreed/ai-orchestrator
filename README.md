@@ -32,6 +32,7 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 
 - Frontend (`apps/web`): React + TypeScript + React Flow
 - Backend (`apps/api`): Fastify + TypeScript
+- Product docs (`apps/docs`): VitePress documentation site
 - DB: local SQLite database file using `sql.js` (persisted to `apps/api/data/orchestrator.db`)
 - Shared contracts: `packages/shared`
 - Runtime/SDK packages:
@@ -46,36 +47,42 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 ```text
 .
 +- apps/
-¦  +- api/
-¦  ¦  +- src/
-¦  ¦  ¦  +- app.ts
-¦  ¦  ¦  +- index.ts
-¦  ¦  ¦  +- db/database.ts
-¦  ¦  ¦  +- services/
-¦  ¦  +- Dockerfile
-¦  +- web/
-¦     +- src/
-¦     ¦  +- App.tsx
-¦     ¦  +- styles.css
-¦     ¦  +- lib/
-¦     +- Dockerfile
-¦     +- nginx.conf
+|  +- api/
+|  |  +- src/
+|  |  |  +- app.ts
+|  |  |  +- index.ts
+|  |  |  +- db/database.ts
+|  |  |  +- services/
+|  |  +- Dockerfile
+|  +- web/
+|  |  +- src/
+|  |  |  +- App.tsx
+|  |  |  +- styles.css
+|  |  |  +- lib/
+|  |  +- Dockerfile
+|  |  +- nginx.conf
+|  +- docs/
+|     +- docs/
+|     |  +- .vitepress/config.ts
+|     |  +- index.md
+|     +- package.json
 +- packages/
-¦  +- shared/
-¦  +- provider-sdk/
-¦  +- mcp-sdk/
-¦  +- connector-sdk/
-¦  +- agent-runtime/
-¦  +- workflow-engine/
+|  +- shared/
+|  +- provider-sdk/
+|  +- mcp-sdk/
+|  +- connector-sdk/
+|  +- agent-runtime/
+|  +- workflow-engine/
 +- samples/workflows/
-¦  +- basic-flow.json
-¦  +- rag-flow.json
-¦  +- agentic-mcp-flow.json
+|  +- basic-flow.json
+|  +- rag-flow.json
+|  +- agentic-mcp-flow.json
++- docs/
+|  +- (legacy static site)
 +- docker-compose.yml
 +- .env.example
 +- README.md
 ```
-
 ## Setup (local)
 
 ### Prerequisites
@@ -131,6 +138,14 @@ Start UI only:
 ```bash
 pnpm --filter @ai-orchestrator/web dev
 ```
+
+Start docs site only:
+
+```bash
+pnpm docs:dev
+```
+
+- Docs UI: `http://localhost:4173`
 
 ### 4) Run tests
 
@@ -480,3 +495,4 @@ The seed service auto-loads these into DB when the workflow table is empty.
 
 - V1 is intentionally a working vertical slice with clear extension seams.
 - Scheduling/distributed execution/multi-tenant auth remain out of V1 scope.
+

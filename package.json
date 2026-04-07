@@ -6,6 +6,9 @@
   "packageManager": "pnpm@10.14.0",
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"pnpm --filter @ai-orchestrator/api dev\" \"pnpm --filter @ai-orchestrator/web dev\"",
+    "docs:dev": "pnpm --filter @ai-orchestrator/docs dev",
+    "docs:build": "pnpm --filter @ai-orchestrator/docs build",
+    "docs:preview": "pnpm --filter @ai-orchestrator/docs preview",
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
     "build": "pnpm -r --if-present build"
