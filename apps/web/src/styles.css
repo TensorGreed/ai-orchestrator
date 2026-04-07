@@ -913,10 +913,122 @@ select {
 .node-status-item {
   border: 1px solid #dce1ed;
   border-radius: 10px;
-  padding: 6px 10px;
+  background: #ffffff;
+  font-size: 0.86rem;
+}
+
+.node-status-item.expanded {
+  border-color: #c9d6e8;
+  box-shadow: 0 2px 10px rgba(50, 76, 110, 0.08);
+}
+
+.node-status-head {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 8px 10px;
   display: flex;
   justify-content: space-between;
-  font-size: 0.86rem;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.node-status-head:hover {
+  background: #f8fbff;
+}
+
+.node-status-title-wrap {
+  display: grid;
+  min-width: 0;
+}
+
+.node-status-title {
+  color: #22314d;
+  font-size: 0.9rem;
+  line-height: 1.2;
+}
+
+.node-status-subtitle {
+  color: #6e7a90;
+  font-size: 0.74rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-status-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #6b7690;
+  font-size: 0.78rem;
+  flex-shrink: 0;
+}
+
+.node-status-chevron {
+  width: 14px;
+  text-align: center;
+  color: #60718f;
+}
+
+.node-log-toolbar {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.mini-btn {
+  border: 1px solid #d1dbe8;
+  border-radius: 8px;
+  background: #fff;
+  color: #52617d;
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.mini-btn:hover {
+  border-color: #bbcade;
+  color: #2a3f63;
+}
+
+.node-log-list {
+  margin-bottom: 10px;
+}
+
+.node-log-details {
+  border-top: 1px dashed #d5deeb;
+  margin-top: 2px;
+  padding: 8px 10px 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.node-log-time-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: #5a6987;
+  font-size: 0.76rem;
+}
+
+.node-log-section h4 {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  color: #374b6f;
+}
+
+.node-log-empty {
+  color: #74839a;
+  font-size: 0.78rem;
+  border: 1px dashed #d4deea;
+  border-radius: 8px;
+  padding: 8px;
+  background: #fbfdff;
 }
 
 .result-block {
@@ -930,6 +1042,12 @@ select {
   color: #2a3448;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.result-block-error {
+  border-color: #e8c3c3;
+  background: #fff5f5;
+  color: #9b2f2f;
 }
 
 .inspector-panel {

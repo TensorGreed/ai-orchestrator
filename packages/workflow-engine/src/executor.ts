@@ -1489,6 +1489,11 @@ async function executeNode(
       }
 
       return {
+        invocation_request: {
+          server_id: serverId,
+          tool_name: toolName,
+          tool_args: args
+        },
         tool_output: result.output,
         tool_name: toolName
       };

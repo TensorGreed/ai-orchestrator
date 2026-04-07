@@ -234,6 +234,31 @@ function normalizeToolsForModel(input: ToolDefinition[], prompt: string): ToolDe
   return ranked.slice(0, Math.min(MAX_TOOLS_NO_MATCH, MAX_TOOL_COUNT)).map((entry) => entry.tool);
 }
 
+function hasProvidedRequiredArg(value: unknown): boolean {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  return true;
+}
+
+function validateRequiredToolArguments(schema: unknown, args: Record<string, unknown>): string[] {
+  const schemaRecord = toRecord(schema);
+  const required = Array.isArray(schemaRecord.required)
+    ? schemaRecord.required
+        .map((field) => String(field ?? "").trim())
+        .filter((field) => field.length > 0)
+    : [];
+
+  if (!required.length) {
+    return [];
+  }
+
+  return required.filter((field) => !hasProvidedRequiredArg(args[field]));
+}
+
 function serializeToolMessage(ok: boolean, payload: unknown, limits: NormalizedToolOutputLimits): string {
   const wrapped = ok ? { ok: true, output: payload } : { ok: false, error: payload };
   const raw = JSON.stringify(wrapped);
@@ -311,6 +336,7 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
       ...memoryMessages,
       { role: "user", content: normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS) }
     ];
+    const toolDefinitionByName = new Map<string, ToolDefinition>(tools.tools.map((tool) => [tool.name, tool]));
     const normalizedTools = normalizeToolsForModel(request.toolCallingEnabled ? tools.tools : [], request.userPrompt);
 
     const steps: AgentRunState["steps"] = [];
@@ -356,6 +382,16 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
 
           for (const call of requestedTools) {
             try {
+              const toolDefinition = toolDefinitionByName.get(call.name);
+              const missingRequiredArgs = validateRequiredToolArguments(toolDefinition?.inputSchema, call.arguments);
+              if (missingRequiredArgs.length > 0) {
+                const providedKeys = Object.keys(call.arguments);
+                throw new Error(
+                  `Tool call '${call.name}' is missing required arguments: ${missingRequiredArgs.join(", ")}.` +
+                    (providedKeys.length ? ` Provided keys: ${providedKeys.join(", ")}.` : " No arguments were provided.")
+                );
+              }
+
               const output = await tools.invokeTool(call.name, call.arguments);
               toolResults.push({
                 toolCallId: call.id,

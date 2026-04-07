@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState, type CSSProperties, type DragEvent, type 
 import ReactFlow, {
   Background,
   BackgroundVariant,
+  type Node,
   type Connection,
   type Edge,
   type EdgeChange,
   type EdgeTypes,
-  type Node,
   type NodeChange,
   type NodeTypes,
   type ReactFlowInstance
@@ -154,7 +154,11 @@ interface WorkflowCanvasAreaProps {
 }
 
 function stringifyPretty(value: unknown) {
-  return JSON.stringify(value, null, 2);
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 export function WorkflowCanvasArea({
@@ -199,6 +203,7 @@ export function WorkflowCanvasArea({
 }: WorkflowCanvasAreaProps) {
   const [paletteSearch, setPaletteSearch] = useState("");
   const [activePaletteCategory, setActivePaletteCategory] = useState<string | null>(null);
+  const [expandedNodeLogIds, setExpandedNodeLogIds] = useState<string[]>([]);
 
   const allDefinitions = useMemo(() => {
     const byType = new Map<string, DefinitionNode>();
@@ -249,6 +254,38 @@ export function WorkflowCanvasArea({
       })),
     [edges, onDeleteEdge]
   );
+
+  const nodeMetaById = useMemo(() => {
+    const byId = new Map<string, { label: string; type: string }>();
+    for (const node of nodes) {
+      byId.set(node.id, {
+        label: node.data.label,
+        type: node.data.nodeType
+      });
+    }
+    return byId;
+  }, [nodes]);
+
+  useEffect(() => {
+    const initialOpenIds = (executionResult?.nodeResults ?? [])
+      .filter((result) => result.status === "error")
+      .map((result) => result.nodeId);
+    setExpandedNodeLogIds(initialOpenIds);
+  }, [executionResult?.executionId, executionResult?.completedAt, executionResult?.status]);
+
+  const toggleNodeLogExpanded = (nodeId: string) => {
+    setExpandedNodeLogIds((current) =>
+      current.includes(nodeId) ? current.filter((value) => value !== nodeId) : [...current, nodeId]
+    );
+  };
+
+  const expandAllNodeLogs = () => {
+    setExpandedNodeLogIds((executionResult?.nodeResults ?? []).map((result) => result.nodeId));
+  };
+
+  const collapseAllNodeLogs = () => {
+    setExpandedNodeLogIds([]);
+  };
 
   const handleAddNode = (definition: DefinitionNode) => {
     onCreateNodeFromDefinition(definition);
@@ -565,13 +602,91 @@ export function WorkflowCanvasArea({
                         <span>Started: {new Date(executionResult.startedAt).toLocaleString()}</span>
                         <span>Completed: {new Date(executionResult.completedAt).toLocaleString()}</span>
                       </div>
-                      <div className="node-status-list">
-                        {executionResult.nodeResults.map((result) => (
-                          <div key={result.nodeId} className="node-status-item">
-                            <span>{result.nodeId}</span>
-                            <strong style={{ color: statusColors[result.status] ?? "#657087" }}>{result.status}</strong>
-                          </div>
-                        ))}
+                      <div className="node-log-toolbar">
+                        <button className="mini-btn" onClick={expandAllNodeLogs}>
+                          Expand all
+                        </button>
+                        <button className="mini-btn" onClick={collapseAllNodeLogs}>
+                          Collapse all
+                        </button>
+                      </div>
+                      <div className="node-status-list node-log-list">
+                        {executionResult.nodeResults.map((result) => {
+                          const meta = nodeMetaById.get(result.nodeId);
+                          const isExpanded = expandedNodeLogIds.includes(result.nodeId);
+                          const nodeLabel = meta?.label ?? result.nodeId;
+                          const nodeResultRecord = result as unknown as { nodeType?: unknown };
+                          const nodeType =
+                            typeof nodeResultRecord.nodeType === "string"
+                              ? String(nodeResultRecord.nodeType)
+                              : meta?.type;
+                          const started = result.startedAt ? new Date(result.startedAt).toLocaleTimeString() : "—";
+                          const completed = result.completedAt ? new Date(result.completedAt).toLocaleTimeString() : "—";
+                          const hasDetails = result.input !== undefined || result.output !== undefined || Boolean(result.error);
+
+                          return (
+                            <div key={result.nodeId} className={isExpanded ? "node-status-item expanded" : "node-status-item"}>
+                              <button
+                                className="node-status-head"
+                                onClick={() => toggleNodeLogExpanded(result.nodeId)}
+                                aria-expanded={isExpanded}
+                              >
+                                <div className="node-status-title-wrap">
+                                  <strong className="node-status-title">{nodeLabel}</strong>
+                                  <span className="node-status-subtitle">
+                                    {result.nodeId}
+                                    {nodeType ? ` · ${nodeType}` : ""}
+                                  </span>
+                                </div>
+                                <div className="node-status-meta">
+                                  {result.durationMs !== undefined ? <span>{result.durationMs}ms</span> : null}
+                                  <strong style={{ color: statusColors[result.status] ?? "#657087" }}>{result.status}</strong>
+                                  <span className="node-status-chevron" aria-hidden="true">
+                                    {isExpanded ? "▾" : "▸"}
+                                  </span>
+                                </div>
+                              </button>
+
+                              {isExpanded && (
+                                <div className="node-log-details">
+                                  <div className="node-log-time-grid">
+                                    <span>
+                                      Started: <strong>{started}</strong>
+                                    </span>
+                                    <span>
+                                      Completed: <strong>{completed}</strong>
+                                    </span>
+                                  </div>
+
+                                  {result.input !== undefined && (
+                                    <div className="node-log-section">
+                                      <h4>Input</h4>
+                                      <pre className="result-block">{stringifyPretty(result.input)}</pre>
+                                    </div>
+                                  )}
+
+                                  {result.output !== undefined && (
+                                    <div className="node-log-section">
+                                      <h4>Output</h4>
+                                      <pre className="result-block">{stringifyPretty(result.output)}</pre>
+                                    </div>
+                                  )}
+
+                                  {result.error && (
+                                    <div className="node-log-section">
+                                      <h4>Error</h4>
+                                      <pre className="result-block result-block-error">{result.error}</pre>
+                                    </div>
+                                  )}
+
+                                  {!hasDetails && (
+                                    <div className="node-log-empty">No input/output payload captured for this node.</div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                       <pre className="result-block">{stringifyPretty(executionResult.output ?? executionResult.error ?? "")}</pre>
                     </>
