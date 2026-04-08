@@ -1,5 +1,6 @@
 import type { LLMCallResponse, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { resilientFetch } from "../resilient-fetch";
 
 export class AnthropicProviderAdapter implements LLMProviderAdapter {
   readonly definition: ProviderDefinition = {
@@ -79,7 +80,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       body.tools = tools;
     }
 
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -87,7 +88,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify(body)
-    });
+    }, { timeoutMs: 60_000, maxRetries: 3, provider: "anthropic" });
 
     if (!response.ok) {
       const respBody = await response.text();

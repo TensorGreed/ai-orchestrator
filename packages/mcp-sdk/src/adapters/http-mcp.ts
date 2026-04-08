@@ -122,44 +122,86 @@ async function postRpc(
   endpoint: string,
   payload: Record<string, unknown>,
   headers: Record<string, string>,
-  timeoutMs: number
+  timeoutMs: number,
+  retryOptions?: { maxRetries?: number; baseDelayMs?: number }
 ): Promise<{ response: JsonRpcResponse; sessionId?: string }> {
-  const abortController = new AbortController();
-  const timeout = setTimeout(() => abortController.abort(), timeoutMs);
-  try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        ...headers
-      },
-      body: JSON.stringify(payload),
-      signal: abortController.signal
-    });
+  const maxRetries = retryOptions?.maxRetries ?? 2;
+  const baseDelayMs = retryOptions?.baseDelayMs ?? 1000;
+  const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 
-    const bodyText = await response.text();
-    if (!response.ok) {
-      throw new Error(`MCP HTTP ${response.status}: ${bodyText || response.statusText}`);
-    }
+  let lastError: Error | undefined;
 
-    const parsed = parseJsonRpcBody(bodyText);
-    if (parsed.error) {
-      throw new Error(parsed.error.message || "MCP JSON-RPC error");
-    }
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...headers
+        },
+        body: JSON.stringify(payload),
+        signal: abortController.signal
+      });
 
-    return {
-      response: parsed,
-      sessionId: response.headers.get("mcp-session-id") ?? response.headers.get("Mcp-Session-Id") ?? undefined
-    };
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`MCP request timed out after ${timeoutMs}ms.`);
+      const bodyText = await response.text();
+
+      if (!response.ok) {
+        // Check if retryable
+        if (attempt < maxRetries && RETRYABLE_STATUSES.has(response.status)) {
+          lastError = new Error(`MCP HTTP ${response.status}: ${bodyText || response.statusText}`);
+          // Parse Retry-After header on 429
+          let delay = baseDelayMs * Math.pow(2, attempt);
+          if (response.status === 429) {
+            const retryAfter = response.headers.get("retry-after");
+            if (retryAfter) {
+              const retryAfterMs = Number(retryAfter) * 1000;
+              if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
+                delay = Math.min(retryAfterMs, 120_000);
+              }
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        throw new Error(`MCP HTTP ${response.status}: ${bodyText || response.statusText}`);
+      }
+
+      const parsed = parseJsonRpcBody(bodyText);
+      if (parsed.error) {
+        throw new Error(parsed.error.message || "MCP JSON-RPC error");
+      }
+
+      return {
+        response: parsed,
+        sessionId: response.headers.get("mcp-session-id") ?? response.headers.get("Mcp-Session-Id") ?? undefined
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        lastError = new Error(`MCP request timed out after ${timeoutMs}ms.`);
+        if (attempt < maxRetries) {
+          const delay = baseDelayMs * Math.pow(2, attempt);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        throw lastError;
+      }
+      // Network errors are retryable
+      if (attempt < maxRetries && error instanceof TypeError) {
+        lastError = error;
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw lastError ?? new Error("MCP request failed after retries");
 }
 
 async function prepareSession(
@@ -362,10 +404,8 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
       toRecord(list.response.result).tools
     );
 
-    if (!tools.length) {
-      throw new Error("No MCP tools discovered from remote server.");
-    }
-
+    // Return empty array instead of throwing — let the workflow continue
+    // with whatever tools were discovered from other servers
     return tools;
   }
 

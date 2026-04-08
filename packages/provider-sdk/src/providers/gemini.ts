@@ -1,5 +1,6 @@
 import type { LLMCallResponse, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { resilientFetch } from "../resilient-fetch";
 
 interface GeminiPart {
   text?: string;
@@ -101,7 +102,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       }];
     }
 
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -113,7 +114,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
           maxOutputTokens: request.provider.maxTokens ?? 1024
         }
       })
-    });
+    }, { timeoutMs: 60_000, maxRetries: 3, provider: "gemini" });
 
     if (!response.ok) {
       const body = await response.text();

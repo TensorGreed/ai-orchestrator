@@ -1,5 +1,6 @@
 import type { ChatMessage, LLMCallResponse, LLMProviderConfig, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { resilientFetch } from "../resilient-fetch";
 
 interface OpenAICompatibleResponse {
   choices?: Array<{
@@ -220,11 +221,17 @@ export async function callOpenAICompatible(
   options: OpenAICompatibleAdapterOptions
 ): Promise<LLMCallResponse> {
   const connection = await resolveProviderConnection(request, context, options);
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: connection.headers,
-    body: JSON.stringify(connection.payload)
-  });
+  const timeoutMs = typeof request.provider.extra?.timeoutMs === "number" ? request.provider.extra.timeoutMs : 60_000;
+  const maxRetries = typeof request.provider.extra?.maxRetries === "number" ? request.provider.extra.maxRetries : 3;
+  const response = await resilientFetch(
+    `${connection.baseUrl}/chat/completions`,
+    {
+      method: "POST",
+      headers: connection.headers,
+      body: JSON.stringify(connection.payload)
+    },
+    { timeoutMs, maxRetries, provider: options.id }
+  );
 
   if (!response.ok) {
     const body = await response.text();
@@ -247,14 +254,20 @@ export async function* callOpenAICompatibleStream(
   options: OpenAICompatibleAdapterOptions
 ): AsyncGenerator<LLMStreamChunk> {
   const connection = await resolveProviderConnection(request, context, options);
-  const response = await fetch(`${connection.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: connection.headers,
-    body: JSON.stringify({
-      ...connection.payload,
-      stream: true
-    })
-  });
+  const timeoutMs = typeof request.provider.extra?.timeoutMs === "number" ? request.provider.extra.timeoutMs : 120_000;
+  const maxRetries = typeof request.provider.extra?.maxRetries === "number" ? request.provider.extra.maxRetries : 3;
+  const response = await resilientFetch(
+    `${connection.baseUrl}/chat/completions`,
+    {
+      method: "POST",
+      headers: connection.headers,
+      body: JSON.stringify({
+        ...connection.payload,
+        stream: true
+      })
+    },
+    { timeoutMs, maxRetries, provider: options.id }
+  );
 
   if (!response.ok) {
     const body = await response.text();

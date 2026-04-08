@@ -617,18 +617,89 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
       await context.memoryStore.saveMessages(memoryNamespace, request.sessionId, persistable);
     };
 
+    const LLM_RETRY_MAX = 2;
+    const LLM_RETRY_BASE_DELAY_MS = 2000;
+    const TOOL_DISABLE_THRESHOLD = 2;
+    const disabledTools = new Set<string>();
+    const toolFailureCounts = new Map<string, number>();
+
     try {
       for (let iteration = 1; iteration <= request.maxIterations; iteration += 1) {
-        const modelResponse = await providerAdapter.generate(
-          {
-            provider: request.provider,
-            messages,
-            tools: request.toolCallingEnabled ? normalizedTools : []
-          },
-          {
-            resolveSecret: context.resolveSecret
+        // --- LLM call with per-iteration retry ---
+        let modelResponse: Awaited<ReturnType<typeof providerAdapter.generate>> | undefined;
+        let llmError: Error | undefined;
+
+        for (let llmAttempt = 0; llmAttempt <= LLM_RETRY_MAX; llmAttempt += 1) {
+          try {
+            // Filter out disabled tools for this iteration
+            const activeTools = normalizedTools.filter(
+              (tool) => !disabledTools.has(tool.name)
+            );
+
+            modelResponse = await providerAdapter.generate(
+              {
+                provider: request.provider,
+                messages,
+                tools: request.toolCallingEnabled ? activeTools : []
+              },
+              {
+                resolveSecret: context.resolveSecret
+              }
+            );
+            llmError = undefined;
+            break;
+          } catch (error) {
+            llmError = error instanceof Error ? error : new Error(String(error));
+            if (llmAttempt < LLM_RETRY_MAX) {
+              const delay = LLM_RETRY_BASE_DELAY_MS * Math.pow(2, llmAttempt);
+              await new Promise((resolve) => setTimeout(resolve, delay));
+            }
           }
-        );
+        }
+
+        if (!modelResponse) {
+          // All LLM retries exhausted
+          if (steps.length > 0 && lastAssistantMessage) {
+            // We have a prior successful iteration — return gracefully
+            const result: AgentRunState = {
+              finalAnswer: lastAssistantMessage,
+              stopReason: "error",
+              iterations: iteration - 1,
+              messages,
+              steps
+            };
+            await persistConversation();
+            return result;
+          }
+          // No prior success — re-throw
+          throw llmError ?? new Error("LLM call failed after retries");
+        }
+
+        // --- Empty/garbage response handling ---
+        const hasContent = modelResponse.content.trim().length > 0;
+        const hasToolCalls = request.toolCallingEnabled && modelResponse.toolCalls.length > 0;
+
+        if (!hasContent && !hasToolCalls) {
+          // Empty response — prompt the model to try again instead of accepting garbage
+          if (iteration < request.maxIterations) {
+            messages.push({ role: "assistant", content: "" });
+            messages.push({
+              role: "user",
+              content: normalizeMessageContent(
+                "Your response was empty. Please provide a substantive answer or call a tool to help answer the question.",
+                MAX_MESSAGE_CHARS
+              )
+            });
+            steps.push({
+              iteration,
+              modelOutput: "",
+              requestedTools: [],
+              toolResults: []
+            });
+            continue;
+          }
+          // Last iteration — fall through to return what we have
+        }
 
         lastAssistantMessage = modelResponse.content;
         const requestedTools = request.toolCallingEnabled ? modelResponse.toolCalls : [];
@@ -641,20 +712,88 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
           });
 
           const toolResults: InternalToolResult[] = [];
+          let failedToolCount = 0;
 
           for (const call of requestedTools) {
             try {
+              // --- Check if tool exists before invoking ---
               const toolDefinition = toolDefinitionByName.get(call.name);
+              const internalTool = internalToolsByName.get(call.name);
+
+              if (!toolDefinition && !internalTool) {
+                // Tool doesn't exist — send error back so LLM can self-correct
+                const availableToolNames = [...toolDefinitionByName.keys()]
+                  .filter((name) => !disabledTools.has(name))
+                  .slice(0, 20)
+                  .join(", ");
+                const errorMsg = `Tool '${call.name}' does not exist. Available tools: ${availableToolNames || "none"}`;
+                toolResults.push({
+                  toolCallId: call.id,
+                  toolName: call.name,
+                  output: null,
+                  error: errorMsg
+                });
+                messages.push({
+                  role: "tool",
+                  content: serializeToolMessage(false, errorMsg, toolOutputLimits),
+                  toolCallId: call.id,
+                  name: call.name
+                });
+                failedToolCount += 1;
+                continue;
+              }
+
+              // --- Check if tool is disabled ---
+              if (disabledTools.has(call.name)) {
+                const errorMsg = `Tool '${call.name}' has been disabled due to repeated failures.`;
+                toolResults.push({
+                  toolCallId: call.id,
+                  toolName: call.name,
+                  output: null,
+                  error: errorMsg
+                });
+                messages.push({
+                  role: "tool",
+                  content: serializeToolMessage(false, errorMsg, toolOutputLimits),
+                  toolCallId: call.id,
+                  name: call.name
+                });
+                failedToolCount += 1;
+                continue;
+              }
+
+              // --- Validate required args, but give the LLM a chance to self-correct ---
               const missingRequiredArgs = validateRequiredToolArguments(toolDefinition?.inputSchema, call.arguments);
               if (missingRequiredArgs.length > 0) {
                 const providedKeys = Object.keys(call.arguments);
-                throw new Error(
+                const errorMsg =
                   `Tool call '${call.name}' is missing required arguments: ${missingRequiredArgs.join(", ")}.` +
-                    (providedKeys.length ? ` Provided keys: ${providedKeys.join(", ")}.` : " No arguments were provided.")
-                );
+                  (providedKeys.length ? ` Provided keys: ${providedKeys.join(", ")}.` : " No arguments were provided.") +
+                  " Please call this tool again with all required fields.";
+
+                toolResults.push({
+                  toolCallId: call.id,
+                  toolName: call.name,
+                  output: null,
+                  error: errorMsg
+                });
+                messages.push({
+                  role: "tool",
+                  content: serializeToolMessage(false, errorMsg, toolOutputLimits),
+                  toolCallId: call.id,
+                  name: call.name
+                });
+
+                // Track failure for potential disabling
+                const priorFails = toolFailureCounts.get(call.name) ?? 0;
+                toolFailureCounts.set(call.name, priorFails + 1);
+                if (priorFails + 1 >= TOOL_DISABLE_THRESHOLD) {
+                  disabledTools.add(call.name);
+                }
+                failedToolCount += 1;
+                continue;
               }
 
-              const internalTool = internalToolsByName.get(call.name);
               const output = internalTool
                 ? await internalTool.invoke(call.arguments)
                 : await tools.invokeTool(call.name, call.arguments);
@@ -663,6 +802,9 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
                 toolName: call.name,
                 output
               });
+
+              // Reset failure count on success
+              toolFailureCounts.delete(call.name);
 
               if (!sessionCacheToolNames.has(call.name) && context.toolDataStore && request.sessionId) {
                 try {
@@ -689,6 +831,14 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
             } catch (error) {
               const toolError = createToolErrorResult(call, error);
               toolResults.push(toolError);
+              failedToolCount += 1;
+
+              // Track failure for potential disabling
+              const priorFails = toolFailureCounts.get(call.name) ?? 0;
+              toolFailureCounts.set(call.name, priorFails + 1);
+              if (priorFails + 1 >= TOOL_DISABLE_THRESHOLD) {
+                disabledTools.add(call.name);
+              }
 
               if (!sessionCacheToolNames.has(call.name) && context.toolDataStore && request.sessionId) {
                 try {
@@ -714,6 +864,17 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
                 name: call.name
               });
             }
+          }
+
+          // --- All tool calls failed hint ---
+          if (failedToolCount > 0 && failedToolCount === requestedTools.length) {
+            messages.push({
+              role: "user",
+              content: normalizeMessageContent(
+                "All tool calls in this iteration failed. Please reconsider your approach, verify tool names and arguments, or provide a final answer without tools.",
+                MAX_MESSAGE_CHARS
+              )
+            });
           }
 
           steps.push({

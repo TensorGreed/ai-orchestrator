@@ -2409,6 +2409,19 @@ async function executeNode(
       const sessionTemplate = typeof config.sessionIdTemplate === "string" ? config.sessionIdTemplate : "{{session_id}}";
       const systemPrompt = renderTemplate(systemTemplate, templateData);
       const userPrompt = renderTemplate(userTemplate, templateData);
+
+      // --- Empty prompt guard ---
+      if (!userPrompt.trim()) {
+        const webhookData = toRecord(templateData.webhook);
+        const fallbackUserPrompt =
+          (typeof templateData.user_prompt === "string" && templateData.user_prompt.trim()) ||
+          (typeof webhookData.user_prompt === "string" && (webhookData.user_prompt as string).trim()) ||
+          (typeof webhookData.message === "string" && (webhookData.message as string).trim()) ||
+          "";
+        if (!fallbackUserPrompt) {
+          throw new Error("Agent Orchestrator user prompt is empty after template rendering. Check your template variables or webhook payload.");
+        }
+      }
       const resolvedSessionId = renderTemplate(sessionTemplate, templateData).trim();
       const sessionId =
         resolvedSessionId || (typeof templateData.session_id === "string" ? String(templateData.session_id) : undefined);
@@ -2765,11 +2778,8 @@ async function executeNode(
                 { resolveSecret: dependencies.resolveSecret }
               );
             } catch (error) {
-              throw new Error(
-                `Output Parser retry model call failed: ${
-                  error instanceof Error ? error.message : String(error)
-                }`
-              );
+              // Graceful fallback: don't crash the workflow if the retry LLM call fails
+              break; // Exit retry loop, use best heuristic result;
             }
             result = validateJsonOutput(retryResponse.content);
             retries += 1;
@@ -2778,7 +2788,10 @@ async function executeNode(
       }
 
       if (!result.ok) {
-        throw new Error(`Output Parser failed after ${retries} retries: ${result.error}`);
+        if (parsingMode === "anything_goes") {
+        return { parsed: null, raw: rawInput, retries, parserTrace: result.trace, warning: "Output parsing failed: " + result.error };
+      }
+      throw new Error(`Output Parser failed after ${retries} retries: ${result.error}`);
       }
 
       return { parsed: result.parsed, raw: rawInput, retries, parserTrace: result.trace };
@@ -3036,6 +3049,40 @@ function getRetryConfig(config: Record<string, unknown>): RetryConfig | undefine
   };
 }
 
+
+const RETRYABLE_NODE_TYPES = new Set([
+  "llm_call",
+  "azure_openai_chat_model",
+  "agent_orchestrator",
+  "supervisor_node",
+  "mcp_tool",
+  "connector_source",
+  "google_drive_source",
+  "azure_storage",
+  "azure_cosmos_db",
+  "azure_monitor_http",
+  "http_request",
+  "rag_retrieve",
+  "embeddings_azure_openai"
+]);
+
+function getRetryConfigForNode(node: WorkflowNode): RetryConfig | undefined {
+  const config = toRecord(node.config);
+  const explicit = getRetryConfig(config);
+  if (explicit) return explicit;
+  const retry = toRecord(config.retry);
+  if (retry && retry.enabled === false) return undefined;
+  if (RETRYABLE_NODE_TYPES.has(node.type)) {
+    return {
+      enabled: true,
+      maxAttempts: 2,
+      delayMs: node.type === "agent_orchestrator" || node.type === "supervisor_node" ? 3000 : 2000,
+      backoffMultiplier: 2
+    };
+  }
+  return undefined;
+}
+
 function getOnError(config: Record<string, unknown>): "stop" | "continue" | "branch" {
   const value = config.onError;
   if (value === "continue" || value === "branch") {
@@ -3054,7 +3101,7 @@ async function executeNodeWithRetry(
   dependencies: WorkflowExecutionDependencies
 ): Promise<{ output: unknown; attempts: number }> {
   const config = toRecord(node.config);
-  const retry = getRetryConfig(config);
+  const retry = getRetryConfigForNode(node);
   if (!retry) {
     return { output: await executeNode(node, context, dependencies), attempts: 1 };
   }
@@ -3575,7 +3622,35 @@ export async function executeWorkflow(
     }
   }
 
+  // --- Execution timeout ---
+  const executionTimeoutMs = typeof (request as unknown as Record<string, unknown>).executionTimeoutMs === "number" ? (request as unknown as Record<string, unknown>).executionTimeoutMs as number : 300000;
+  const executionStartTime = Date.now();
+
   for (let index = startIndex; index < nodeOrder.length; index += 1) {
+
+    // Check execution timeout
+    const elapsedMs = Date.now() - executionStartTime;
+    if (elapsedMs > executionTimeoutMs) {
+      for (let remaining = index; remaining < nodeOrder.length; remaining += 1) {
+        nodeResults.push({
+          nodeId: nodeOrder[remaining],
+          status: "skipped",
+          startedAt: nowIso(),
+          completedAt: nowIso(),
+          durationMs: 0,
+          output: { reason: "execution_timeout" }
+        });
+      }
+      return {
+        workflowId: workflow.id,
+        status: "error" as const,
+        startedAt,
+        completedAt: nowIso(),
+        executionId: request.executionId,
+        nodeResults,
+        error: `Workflow execution timed out after ${elapsedMs}ms (limit: ${executionTimeoutMs}ms)`
+      };
+    }
     const nodeId = nodeOrder[index];
     const node = graphIndexes.nodeById.get(nodeId);
     if (!node) {

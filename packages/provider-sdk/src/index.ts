@@ -8,6 +8,7 @@ import { AzureOpenAIProviderAdapter } from "./providers/azure-openai";
 
 export * from "./types";
 export * from "./registry";
+export * from "./resilient-fetch";
 export * from "./providers/openai-compatible";
 export * from "./providers/openai";
 export * from "./providers/ollama";

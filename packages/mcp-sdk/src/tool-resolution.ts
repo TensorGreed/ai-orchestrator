@@ -24,7 +24,18 @@ export async function resolveMCPTools(
 
   for (const serverConfig of serverConfigs) {
     const adapter = registry.get(serverConfig.serverId);
-    let tools = await adapter.discoverTools(serverConfig, context);
+    let tools: Awaited<ReturnType<typeof adapter.discoverTools>>;
+    try {
+      tools = await adapter.discoverTools(serverConfig, context);
+    } catch (discoveryError) {
+      // Log and continue — don't let one server failure kill the entire workflow
+      console.warn(
+        `[MCP] Tool discovery failed for server '${serverConfig.serverId}': ${
+          discoveryError instanceof Error ? discoveryError.message : String(discoveryError)
+        }. Skipping this server.`
+      );
+      continue;
+    }
 
     if (!tools.length && serverConfig.manualTools?.length) {
       tools = serverConfig.manualTools;

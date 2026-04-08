@@ -1,6 +1,7 @@
 import type { ProviderDefinition } from "@ai-orchestrator/shared";
 import type { ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { resilientFetch } from "../resilient-fetch";
 
 interface AzureOpenAIResponse {
   choices?: Array<{
@@ -275,7 +276,9 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
       payload.tool_choice = "auto";
     }
 
-    const response = await fetch(
+    const timeoutMs = typeof provider.extra?.timeoutMs === "number" ? provider.extra.timeoutMs : 60_000;
+    const maxRetries = typeof provider.extra?.maxRetries === "number" ? provider.extra.maxRetries : 3;
+    const response = await resilientFetch(
       `${connection.endpoint}/openai/deployments/${encodeURIComponent(connection.deployment)}/chat/completions?api-version=${encodeURIComponent(connection.apiVersion)}`,
       {
         method: "POST",
@@ -284,7 +287,8 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
           [connection.authHeaderName]: connection.authHeaderValue
         },
         body: JSON.stringify(payload)
-      }
+      },
+      { timeoutMs, maxRetries, provider: "azure_openai" }
     );
 
     if (!response.ok) {
@@ -319,7 +323,9 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
       payload.tool_choice = "auto";
     }
 
-    const response = await fetch(
+    const timeoutMs = typeof provider.extra?.timeoutMs === "number" ? provider.extra.timeoutMs : 120_000;
+    const maxRetries = typeof provider.extra?.maxRetries === "number" ? provider.extra.maxRetries : 3;
+    const response = await resilientFetch(
       `${connection.endpoint}/openai/deployments/${encodeURIComponent(connection.deployment)}/chat/completions?api-version=${encodeURIComponent(connection.apiVersion)}`,
       {
         method: "POST",
@@ -328,7 +334,8 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
           [connection.authHeaderName]: connection.authHeaderValue
         },
         body: JSON.stringify(payload)
-      }
+      },
+      { timeoutMs, maxRetries, provider: "azure_openai" }
     );
 
     if (!response.ok) {
