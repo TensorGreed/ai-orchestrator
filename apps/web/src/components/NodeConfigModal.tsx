@@ -1228,7 +1228,7 @@ export function NodeConfigModal({
           <div className="cfg-grid-2">
             <NumberField
               label="Tool Message Max Chars"
-              value={toNumberValue(config.toolMessageMaxChars, 12000)}
+              value={toNumberValue(config.toolMessageMaxChars, 6000)}
               min={500}
               step={500}
               onChange={(next) => setConfig((current) => ({ ...current, toolMessageMaxChars: next }))}
@@ -1557,7 +1557,13 @@ export function NodeConfigModal({
         {includeAllDiscoveredTools ? (
           <div className="cfg-tip">
             {discoveredTools.length
-              ? `Agent can call any of: ${discoveredTools.map((tool) => tool.name).join(", ")}`
+              ? (() => {
+                  const preview = discoveredTools.slice(0, 10).map((tool) => tool.name).join(", ");
+                  const remaining = discoveredTools.length - 10;
+                  return remaining > 0
+                    ? `Agent can call ${discoveredTools.length} discovered tools. Preview: ${preview}, +${remaining} more.`
+                    : `Agent can call discovered tools: ${preview}`;
+                })()
               : "Discover tools first to preview what will be exposed to the agent."}
           </div>
         ) : toolSelectionMode === "single" && discoveredTools.length > 0 ? (

@@ -165,8 +165,14 @@ interface WorkflowCanvasAreaProps {
 }
 
 function stringifyPretty(value: unknown) {
+  const MAX_PREVIEW_CHARS = 80_000;
   try {
-    return JSON.stringify(value, null, 2);
+    const raw = JSON.stringify(value, null, 2);
+    if (raw.length <= MAX_PREVIEW_CHARS) {
+      return raw;
+    }
+    const hidden = raw.length - MAX_PREVIEW_CHARS;
+    return `${raw.slice(0, MAX_PREVIEW_CHARS)}\n...[truncated ${hidden} chars for UI safety]`;
   } catch {
     return String(value);
   }

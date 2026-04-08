@@ -10,19 +10,20 @@ import { createToolErrorResult } from "./types";
 
 const MAX_MESSAGE_CHARS = 3000;
 const MAX_SYSTEM_MESSAGE_CHARS = 8000;
-const DEFAULT_TOOL_MESSAGE_MAX_CHARS = 45000;
+const DEFAULT_TOOL_MESSAGE_MAX_CHARS = 6000;
 const MAX_TOOL_DESCRIPTION_CHARS = 280;
-const MAX_TOOL_SCHEMA_PROPERTIES = 12;
-const MAX_TOOL_SCHEMA_ENUM_VALUES = 20;
-const MAX_TOOL_SCHEMA_DEPTH = 2;
-const MAX_TOOL_COUNT = 24;
-const MAX_TOOLS_WITH_MATCH = 8;
-const MAX_TOOLS_NO_MATCH = 12;
+const MAX_TOOL_SCHEMA_PROPERTIES = 8;
+const MAX_TOOL_SCHEMA_ENUM_VALUES = 10;
+const MAX_TOOL_SCHEMA_DEPTH = 1;
+const MAX_TOOL_COUNT = 12;
+const MAX_TOOLS_WITH_MATCH = 6;
+const MAX_TOOLS_NO_MATCH = 8;
+const MAX_TOOL_PROMPT_BUDGET_CHARS = 18000;
 const STRONG_MATCH_SCORE = 2;
 const DEFAULT_TOOL_PAYLOAD_MAX_DEPTH = 8;
-const DEFAULT_TOOL_PAYLOAD_MAX_OBJECT_KEYS = 256;
-const DEFAULT_TOOL_PAYLOAD_MAX_ARRAY_ITEMS = 256;
-const DEFAULT_TOOL_PAYLOAD_MAX_STRING_CHARS = 2048;
+const DEFAULT_TOOL_PAYLOAD_MAX_OBJECT_KEYS = 64;
+const DEFAULT_TOOL_PAYLOAD_MAX_ARRAY_ITEMS = 64;
+const DEFAULT_TOOL_PAYLOAD_MAX_STRING_CHARS = 1024;
 
 function normalizeMaxMessages(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
@@ -200,6 +201,18 @@ function scoreToolForPrompt(tool: ToolDefinition, prompt: string): number {
   return score;
 }
 
+function estimateToolPromptCost(tool: ToolDefinition): number {
+  try {
+    return JSON.stringify({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema
+    }).length;
+  } catch {
+    return 1024;
+  }
+}
+
 function normalizeToolsForModel(input: ToolDefinition[], prompt: string): ToolDefinition[] {
   const deduped = dedupeToolsByName(input).map((tool) => ({
     name: truncateText(String(tool.name ?? ""), 120),
@@ -221,17 +234,29 @@ function normalizeToolsForModel(input: ToolDefinition[], prompt: string): ToolDe
     });
 
   const strongestScore = ranked[0]?.score ?? 0;
-  if (strongestScore >= STRONG_MATCH_SCORE) {
-    const strongest = ranked.filter((entry) => entry.score === strongestScore);
-    return strongest.slice(0, Math.min(MAX_TOOLS_WITH_MATCH, MAX_TOOL_COUNT)).map((entry) => entry.tool);
+  const candidates =
+    strongestScore >= STRONG_MATCH_SCORE
+      ? ranked.filter((entry) => entry.score === strongestScore).slice(0, Math.min(MAX_TOOLS_WITH_MATCH, MAX_TOOL_COUNT))
+      : ranked.filter((entry) => entry.score > 0).length > 0
+        ? ranked.filter((entry) => entry.score > 0).slice(0, Math.min(MAX_TOOLS_WITH_MATCH, MAX_TOOL_COUNT))
+        : ranked.slice(0, Math.min(MAX_TOOLS_NO_MATCH, MAX_TOOL_COUNT));
+
+  const selected: ToolDefinition[] = [];
+  let usedBudget = 0;
+  for (const candidate of candidates) {
+    const estimatedCost = estimateToolPromptCost(candidate.tool);
+    if (selected.length > 0 && usedBudget + estimatedCost > MAX_TOOL_PROMPT_BUDGET_CHARS) {
+      break;
+    }
+    selected.push(candidate.tool);
+    usedBudget += estimatedCost;
   }
 
-  const positive = ranked.filter((entry) => entry.score > 0);
-  if (positive.length > 0) {
-    return positive.slice(0, Math.min(MAX_TOOLS_WITH_MATCH, MAX_TOOL_COUNT)).map((entry) => entry.tool);
+  if (selected.length > 0) {
+    return selected;
   }
 
-  return ranked.slice(0, Math.min(MAX_TOOLS_NO_MATCH, MAX_TOOL_COUNT)).map((entry) => entry.tool);
+  return candidates.length > 0 ? [candidates[0].tool] : [];
 }
 
 function hasProvidedRequiredArg(value: unknown): boolean {
@@ -322,7 +347,7 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     const memoryEnabled = Boolean(context.memoryStore && request.sessionId);
     const memoryNamespace = request.memory?.namespace?.trim() || "default";
     const memoryMaxMessages = normalizeMaxMessages(request.memory?.maxMessages);
-    const persistToolMessages = request.memory?.persistToolMessages !== false;
+    const persistToolMessages = request.memory?.persistToolMessages === true;
     const toolOutputLimits = normalizeToolOutputLimits(request.toolOutputLimits);
 
     let memoryMessages: ChatMessage[] = [];

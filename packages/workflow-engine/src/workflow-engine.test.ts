@@ -508,6 +508,96 @@ describe("workflow engine", () => {
     ).toBe("attachment_consumed_by_agent");
   });
 
+  it("prefers attached MCP Tool nodes over legacy agent mcpServers config when both exist", async () => {
+    const runtime = new CapturingAgentRuntime();
+    const workflow: Workflow = {
+      id: "wf-agent-attached-tools-preferred",
+      name: "Agent attached tools preferred",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "webhook",
+          type: "webhook_input",
+          name: "Webhook",
+          position: { x: 0, y: 0 },
+          config: {}
+        },
+        {
+          id: "agent",
+          type: "agent_orchestrator",
+          name: "Agent",
+          position: { x: 200, y: 0 },
+          config: {
+            systemPromptTemplate: "{{system_prompt}}",
+            userPromptTemplate: "{{user_prompt}}",
+            maxIterations: 3,
+            toolCallingEnabled: true,
+            mcpServers: [
+              {
+                serverId: "mock-mcp"
+              }
+            ]
+          }
+        },
+        {
+          id: "model",
+          type: "llm_call",
+          name: "Model",
+          position: { x: 200, y: 160 },
+          config: {
+            provider: { providerId: "fake", model: "fake-model" }
+          }
+        },
+        {
+          id: "tool-node",
+          type: "mcp_tool",
+          name: "Tool Node",
+          position: { x: 340, y: 160 },
+          config: {
+            serverId: "mock-mcp",
+            toolName: "calculator",
+            allowedTools: ["calculator"]
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 420, y: 0 },
+          config: {}
+        }
+      ],
+      edges: [
+        { id: "e1", source: "webhook", target: "agent" },
+        { id: "e2", source: "agent", target: "output" },
+        { id: "e3", source: "agent", sourceHandle: "chat_model", target: "model" },
+        { id: "e4", source: "agent", sourceHandle: "tool", target: "tool-node" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        webhookPayload: {
+          system_prompt: "S",
+          user_prompt: "U"
+        }
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: runtime,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const toolNames = (runtime.lastRequest?.tools ?? []).map((tool) => tool.name);
+    expect(toolNames).toEqual(["mock-mcp__calculator"]);
+  });
+
   it("executes each agent with its own attached chat model", async () => {
     const runtime = new CollectingAgentRuntime();
     const workflow: Workflow = {

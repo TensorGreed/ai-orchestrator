@@ -85,6 +85,25 @@ class MissingArgsProvider implements LLMProviderAdapter {
   }
 }
 
+class ToolCaptureProvider implements LLMProviderAdapter {
+  readonly definition = {
+    id: "tool-capture",
+    label: "Tool Capture",
+    supportsTools: true,
+    configSchema: {}
+  };
+
+  readonly calls: ProviderCallRequest[] = [];
+
+  async generate(request: ProviderCallRequest) {
+    this.calls.push(request);
+    return {
+      content: "done",
+      toolCalls: []
+    };
+  }
+}
+
 describe("DefaultAgentRuntime", () => {
   it("loops through tool calls and returns final answer", async () => {
     const providerRegistry = new ProviderRegistry();
@@ -382,5 +401,120 @@ describe("DefaultAgentRuntime", () => {
     expect(invoked).toBe(false);
     expect(output.steps[0]?.toolResults[0]?.error).toContain("missing required arguments");
     expect(output.steps[0]?.toolResults[0]?.error).toContain("expression");
+  });
+
+  it("caps tool definitions passed to providers to prevent context overflow", async () => {
+    const providerRegistry = new ProviderRegistry();
+    const provider = new ToolCaptureProvider();
+    providerRegistry.register(provider);
+    const runtime = new DefaultAgentRuntime();
+
+    const manyTools = Array.from({ length: 120 }, (_, index) => ({
+      serverId: "mock-mcp",
+      name: `mock-mcp__very_large_tool_${index}`,
+      description: `Large tool ${index}: ${"d".repeat(1200)}`,
+      inputSchema: {
+        type: "object",
+        properties: Object.fromEntries(
+          Array.from({ length: 40 }, (_ignored, propertyIndex) => [
+            `property_${propertyIndex}`,
+            {
+              type: "string",
+              description: `Property ${propertyIndex} description ${"x".repeat(500)}`
+            }
+          ])
+        ),
+        required: Array.from({ length: 40 }, (_ignored, propertyIndex) => `property_${propertyIndex}`)
+      }
+    }));
+
+    const output = await runtime.run(
+      {
+        provider: { providerId: "tool-capture", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Summarize the inventory status",
+        tools: manyTools,
+        maxIterations: 1,
+        toolCallingEnabled: true
+      },
+      {
+        tools: manyTools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema
+        })),
+        invokeTool: async () => ({ ok: true })
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(output.stopReason).toBe("final_answer");
+    const requestTools = provider.calls[0]?.tools ?? [];
+    expect(requestTools.length).toBeGreaterThan(0);
+    expect(requestTools.length).toBeLessThanOrEqual(12);
+    expect(JSON.stringify(requestTools).length).toBeLessThanOrEqual(24_000);
+  });
+
+  it("does not persist tool messages by default when memory config omits persistToolMessages", async () => {
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new FakeToolCallingProvider());
+    const runtime = new DefaultAgentRuntime();
+
+    const memoryState = new Map<string, string>();
+    const namespace = "memory-default";
+    const sessionId = "session-memory-default";
+
+    const output = await runtime.run(
+      {
+        provider: { providerId: "fake", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "What is 2+2?",
+        tools: [
+          {
+            serverId: "mock-mcp",
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object", required: ["expression"] }
+          }
+        ],
+        maxIterations: 3,
+        toolCallingEnabled: true,
+        sessionId,
+        memory: {
+          namespace,
+          maxMessages: 20
+        }
+      },
+      {
+        tools: [
+          {
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object", required: ["expression"] }
+          }
+        ],
+        invokeTool: async () => ({ result: 4 })
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined,
+        memoryStore: {
+          loadMessages: async (bucket, key) => {
+            const stored = memoryState.get(`${bucket}:${key}`);
+            return stored ? JSON.parse(stored) : [];
+          },
+          saveMessages: async (bucket, key, messages) => {
+            memoryState.set(`${bucket}:${key}`, JSON.stringify(messages));
+          }
+        }
+      }
+    );
+
+    expect(output.stopReason).toBe("final_answer");
+    const saved = JSON.parse(memoryState.get(`${namespace}:${sessionId}`) ?? "[]") as Array<{ role?: string }>;
+    expect(saved.some((message) => message.role === "tool")).toBe(false);
   });
 });

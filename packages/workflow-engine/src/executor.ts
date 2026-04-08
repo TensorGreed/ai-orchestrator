@@ -1908,7 +1908,10 @@ async function executeNode(
         });
       }
 
-      const serverConfigs = mergeMCPServerConfigs(inlineServerConfigs, attachedToolServerConfigs);
+      const serverConfigs =
+        attachedToolServerConfigs.length > 0
+          ? mergeMCPServerConfigs([], attachedToolServerConfigs)
+          : mergeMCPServerConfigs(inlineServerConfigs, attachedToolServerConfigs);
       const mcpExecutionContext = {
         resolveSecret: dependencies.resolveSecret,
         runtimeState: new Map<string, unknown>()
@@ -1945,7 +1948,7 @@ async function executeNode(
           typeof memoryConfig.maxMessages === "number" && memoryConfig.maxMessages > 0
             ? Math.floor(memoryConfig.maxMessages)
             : 20;
-        const persistToolMessages = memoryConfig.persistToolMessages !== false;
+        const persistToolMessages = memoryConfig.persistToolMessages === true;
         memory = {
           namespace,
           maxMessages,
