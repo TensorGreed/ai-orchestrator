@@ -695,6 +695,7 @@ export function createApp(
 
   const runWorkflowExecution = async (input: {
     workflow: Workflow;
+    startNodeId?: string;
     webhookPayload?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     systemPrompt?: string;
@@ -715,6 +716,7 @@ export function createApp(
     return executeWorkflow(
       {
         workflow: input.workflow,
+        startNodeId: input.startNodeId,
         input: input.directInput,
         webhookPayload: input.webhookPayload,
         variables: input.variables,
@@ -1592,6 +1594,7 @@ export function createApp(
     });
     const result = await runWorkflowExecution({
       workflow,
+      startNodeId: parsed.data.startNodeId,
       directInput: parsed.data.input,
       variables: parsed.data.variables,
       systemPrompt: parsed.data.system_prompt,
@@ -1689,6 +1692,7 @@ export function createApp(
       });
       const result = await runWorkflowExecution({
         workflow,
+        startNodeId: parsed.data.startNodeId,
         directInput: parsed.data.input,
         variables: parsed.data.variables,
         systemPrompt: parsed.data.system_prompt,

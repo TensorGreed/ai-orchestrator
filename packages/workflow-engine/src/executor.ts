@@ -81,6 +81,7 @@ export interface WorkflowExecutionDependencies {
 
 export interface ExecuteWorkflowRequest {
   workflow: Workflow;
+  startNodeId?: string;
   input?: Record<string, unknown>;
   webhookPayload?: Record<string, unknown>;
   variables?: Record<string, unknown>;
@@ -406,21 +407,121 @@ function captureNodeInputSnapshot(
   });
 }
 
-function getValueByPath(input: Record<string, unknown>, path: string): unknown {
-  const parts = path
-    .split(".")
-    .map((part) => part.trim())
-    .filter(Boolean);
+function parsePathSegments(path: string): string[] {
+  const input = String(path ?? "").trim();
+  if (!input) {
+    return [];
+  }
 
+  const segments: string[] = [];
+  let current = "";
+  let index = 0;
+
+  while (index < input.length) {
+    const char = input[index];
+
+    if (char === ".") {
+      if (current.trim()) {
+        segments.push(current.trim());
+      }
+      current = "";
+      index += 1;
+      continue;
+    }
+
+    if (char === "[") {
+      if (current.trim()) {
+        segments.push(current.trim());
+      }
+      current = "";
+      index += 1;
+
+      let bracketContent = "";
+      let quote: "'" | '"' | null = null;
+      while (index < input.length) {
+        const inner = input[index];
+        if (!quote && (inner === "'" || inner === '"')) {
+          quote = inner;
+          index += 1;
+          continue;
+        }
+        if (quote && inner === quote) {
+          quote = null;
+          index += 1;
+          continue;
+        }
+        if (!quote && inner === "]") {
+          break;
+        }
+        bracketContent += inner;
+        index += 1;
+      }
+
+      const normalizedBracket = bracketContent.trim();
+      if (normalizedBracket) {
+        segments.push(normalizedBracket);
+      }
+
+      if (index < input.length && input[index] === "]") {
+        index += 1;
+      }
+      continue;
+    }
+
+    current += char;
+    index += 1;
+  }
+
+  if (current.trim()) {
+    segments.push(current.trim());
+  }
+
+  return segments;
+}
+
+function normalizeLookupPath(path: string): string {
+  const trimmed = String(path ?? "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (trimmed.startsWith("{{") && trimmed.endsWith("}}")) {
+    return trimmed.slice(2, -2).trim();
+  }
+
+  return trimmed;
+}
+
+function getValueByPath(input: Record<string, unknown>, path: string): unknown {
+  const trimmedPath = normalizeLookupPath(path);
+  if (!trimmedPath) {
+    return undefined;
+  }
+
+  if (trimmedPath in input) {
+    return input[trimmedPath];
+  }
+
+  const parts = parsePathSegments(trimmedPath);
   if (!parts.length) {
     return undefined;
   }
 
   let current: unknown = input;
   for (const part of parts) {
-    if (!current || typeof current !== "object" || Array.isArray(current)) {
+    if (Array.isArray(current)) {
+      if (!/^\d+$/.test(part)) {
+        return undefined;
+      }
+      const index = Number(part);
+      current = current[index];
+      continue;
+    }
+
+    if (!current || typeof current !== "object") {
       return undefined;
     }
+
     current = (current as Record<string, unknown>)[part];
   }
 
@@ -619,6 +720,95 @@ function extractJsonFromText(text: string): string {
     return fenceMatch[1].trim();
   }
   return trimmed;
+}
+
+function extractBalancedJsonCandidate(text: string): string | null {
+  const source = String(text ?? "");
+  const openerToCloser: Record<string, string> = {
+    "{": "}",
+    "[": "]"
+  };
+  const closers = new Set(Object.values(openerToCloser));
+
+  for (let start = 0; start < source.length; start += 1) {
+    const first = source[start];
+    if (!(first in openerToCloser)) {
+      continue;
+    }
+
+    const stack: string[] = [];
+    let inString = false;
+    let quote: "\"" | "'" | null = null;
+    let escaped = false;
+
+    for (let index = start; index < source.length; index += 1) {
+      const char = source[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === quote) {
+          inString = false;
+          quote = null;
+        }
+        continue;
+      }
+
+      if (char === "\"" || char === "'") {
+        inString = true;
+        quote = char;
+        continue;
+      }
+
+      const expectedCloser = openerToCloser[char];
+      if (expectedCloser) {
+        stack.push(expectedCloser);
+        continue;
+      }
+
+      if (!stack.length) {
+        continue;
+      }
+
+      if (char === stack[stack.length - 1]) {
+        stack.pop();
+        if (stack.length === 0) {
+          return source.slice(start, index + 1).trim();
+        }
+        continue;
+      }
+
+      if (closers.has(char)) {
+        break;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractLikelyJsonFromText(text: string): string {
+  const initial = extractJsonFromText(text);
+  const trimmed = initial.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  const startsAsJsonLike =
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"));
+  if (startsAsJsonLike) {
+    return trimmed;
+  }
+
+  const balanced = extractBalancedJsonCandidate(trimmed);
+  return balanced ?? trimmed;
 }
 
 function validateGuardrailChecks(text: string, checks: string[]): string[] {
@@ -2079,8 +2269,22 @@ async function executeNode(
     case "output_parser": {
       const mode = typeof config.mode === "string" ? config.mode : "json_schema";
       const inputKey = typeof config.inputKey === "string" && config.inputKey ? config.inputKey : "answer";
-      const rawInput = String(templateData[inputKey] ?? templateData.text ?? templateData.answer ?? "");
+      const resolvedInput =
+        getValueByPath(templateData, inputKey) ??
+        templateData[inputKey] ??
+        templateData.text ??
+        templateData.answer;
+      const rawInput =
+        typeof resolvedInput === "string"
+          ? resolvedInput
+          : resolvedInput === undefined || resolvedInput === null
+            ? ""
+            : JSON.stringify(resolvedInput);
       const maxRetries = typeof config.maxRetries === "number" && config.maxRetries > 0 ? Math.floor(config.maxRetries) : 2;
+
+      if (!rawInput.trim()) {
+        throw new Error(`Output Parser input is empty for key '${inputKey}'.`);
+      }
 
       if (mode === "item_list") {
         const separator = typeof config.itemSeparator === "string" ? config.itemSeparator : "\n";
@@ -2099,12 +2303,8 @@ async function executeNode(
       }
 
       const validateJsonOutput = (text: string): { ok: boolean; parsed?: unknown; error?: string } => {
-        // Extract JSON from text (handle markdown code fences)
-        let jsonText = text.trim();
-        const fenceMatch = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (fenceMatch) {
-          jsonText = fenceMatch[1].trim();
-        }
+        // Extract JSON from text (markdown fences, or prose-wrapped JSON object/array)
+        const jsonText = extractLikelyJsonFromText(text);
 
         let parsed: unknown;
         try {
@@ -2156,20 +2356,34 @@ async function executeNode(
         if (upstreamProvider) {
           const providerAdapter = dependencies.providerRegistry.get(upstreamProvider.providerId);
           for (let attempt = 0; attempt < maxRetries && !result.ok; attempt += 1) {
+            const MAX_RETRY_PROMPT_RAW_INPUT_CHARS = 12_000;
+            const truncatedRawInput =
+              rawInput.length > MAX_RETRY_PROMPT_RAW_INPUT_CHARS
+                ? `${rawInput.slice(0, MAX_RETRY_PROMPT_RAW_INPUT_CHARS)}...[truncated ${rawInput.length - MAX_RETRY_PROMPT_RAW_INPUT_CHARS} chars]`
+                : rawInput;
             const correctionPrompt = mode === "json_schema" && schemaObj
-              ? `Your previous output was invalid. Error: ${result.error}. Required schema: ${JSON.stringify(schemaObj)}. Original output: ${rawInput}. Please output ONLY valid JSON matching the schema, with no other text.`
-              : `Your previous output was not valid JSON. Error: ${result.error}. Original output: ${rawInput}. Please output ONLY valid JSON with no other text.`;
+              ? `Your previous output was invalid. Error: ${result.error}. Required schema: ${JSON.stringify(schemaObj)}. Original output: ${truncatedRawInput}. Please output ONLY valid JSON matching the schema, with no other text.`
+              : `Your previous output was not valid JSON. Error: ${result.error}. Original output: ${truncatedRawInput}. Please output ONLY valid JSON with no other text.`;
 
-            const retryResponse = await providerAdapter.generate(
-              {
-                provider: upstreamProvider,
-                messages: [
-                  { role: "system", content: "You are a JSON formatting assistant. Output ONLY valid JSON." },
-                  { role: "user", content: correctionPrompt }
-                ]
-              },
-              { resolveSecret: dependencies.resolveSecret }
-            );
+            let retryResponse: Awaited<ReturnType<typeof providerAdapter.generate>>;
+            try {
+              retryResponse = await providerAdapter.generate(
+                {
+                  provider: upstreamProvider,
+                  messages: [
+                    { role: "system", content: "You are a JSON formatting assistant. Output ONLY valid JSON." },
+                    { role: "user", content: correctionPrompt }
+                  ]
+                },
+                { resolveSecret: dependencies.resolveSecret }
+              );
+            } catch (error) {
+              throw new Error(
+                `Output Parser retry model call failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              );
+            }
             result = validateJsonOutput(retryResponse.content);
             retries += 1;
           }
@@ -2189,7 +2403,17 @@ async function executeNode(
         : [];
       const onFail = config.onFail === "retry" ? "retry" : "error";
       const inputKey = typeof config.inputKey === "string" && config.inputKey ? config.inputKey : "answer";
-      let candidate = String(templateData[inputKey] ?? templateData.answer ?? templateData.text ?? "");
+      const guardrailInput =
+        getValueByPath(templateData, inputKey) ??
+        templateData[inputKey] ??
+        templateData.answer ??
+        templateData.text;
+      let candidate =
+        typeof guardrailInput === "string"
+          ? guardrailInput
+          : guardrailInput === undefined || guardrailInput === null
+            ? ""
+            : JSON.stringify(guardrailInput);
       let failures = validateGuardrailChecks(candidate, checks);
       let attempts = 0;
 
@@ -2596,9 +2820,55 @@ export async function executeWorkflow(
   }
   callStack.push(workflow.id);
 
-  const nodeOrder =
+  let nodeOrder =
     request.resumeState?.nodeOrder?.length ? request.resumeState.nodeOrder : validation.orderedNodeIds ?? sortWorkflowNodes(workflow);
   const graphIndexes = buildGraphIndexes(workflow);
+  const explicitStartNodeId =
+    !request.resumeState && typeof request.startNodeId === "string" && request.startNodeId.trim()
+      ? request.startNodeId.trim()
+      : undefined;
+  const forceExecuteNodeIds = new Set<string>();
+
+  if (explicitStartNodeId) {
+    const startNode = graphIndexes.nodeById.get(explicitStartNodeId);
+    if (!startNode) {
+      return {
+        workflowId: workflow.id,
+        status: "error",
+        startedAt,
+        completedAt: nowIso(),
+        executionId: request.executionId,
+        nodeResults: [],
+        error: `Start node '${explicitStartNodeId}' was not found in workflow '${workflow.id}'.`
+      };
+    }
+
+    forceExecuteNodeIds.add(explicitStartNodeId);
+    const executableNodeIds = new Set<string>(
+      collectNodeAndDescendants(explicitStartNodeId, graphIndexes.outgoingExecution, workflow)
+    );
+    const queue = [...executableNodeIds];
+
+    while (queue.length) {
+      const nodeId = queue.shift()!;
+      const attachments = graphIndexes.attachmentsBySource.get(nodeId);
+      if (!attachments) {
+        continue;
+      }
+
+      for (const targets of attachments.values()) {
+        for (const targetNodeId of targets) {
+          if (executableNodeIds.has(targetNodeId)) {
+            continue;
+          }
+          executableNodeIds.add(targetNodeId);
+          queue.push(targetNodeId);
+        }
+      }
+    }
+
+    nodeOrder = nodeOrder.filter((nodeId) => executableNodeIds.has(nodeId));
+  }
 
   const globals: Record<string, unknown> = request.resumeState
     ? toRecord(request.resumeState.globals)
@@ -2948,7 +3218,7 @@ export async function executeWorkflow(
     const isAttachmentOnlyNode = hasAttachmentIncoming && !hasExecutionIncoming && !hasExecutionOutgoing;
     const isDisconnectedNode = !hasAttachmentIncoming && !hasExecutionIncoming && !hasExecutionOutgoing;
 
-    if (isAttachmentOnlyNode) {
+    if (isAttachmentOnlyNode && !forceExecuteNodeIds.has(node.id)) {
       const consumedUsage = attachmentUsageByNodeId.get(node.id);
       if (consumedUsage) {
         nodeResults.push(toAttachmentConsumedResult(consumedUsage));
@@ -2998,7 +3268,7 @@ export async function executeWorkflow(
       continue;
     }
 
-    if (isDisconnectedNode) {
+    if (isDisconnectedNode && !forceExecuteNodeIds.has(node.id)) {
       nodeResults.push({
         nodeId: node.id,
         status: "skipped",

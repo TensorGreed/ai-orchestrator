@@ -87,6 +87,7 @@ export const workflowSchema = z.object({
 
 export const workflowExecuteRequestSchema = z.object({
   workflowId: z.string().optional(),
+  startNodeId: z.string().optional(),
   sessionId: z.string().optional(),
   session_id: z.string().optional(),
   system_prompt: z.string().optional(),

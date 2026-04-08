@@ -126,6 +126,7 @@ export async function importWorkflow(payload: { json?: string; workflow?: unknow
 export async function executeWorkflow(
   workflowId: string,
   payload: {
+    startNodeId?: string;
     input?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     system_prompt?: string;
@@ -304,6 +305,7 @@ async function streamWorkflowExecutionRequest(
 export async function executeWorkflowStream(
   workflowId: string,
   payload: {
+    startNodeId?: string;
     input?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     system_prompt?: string;

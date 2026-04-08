@@ -43,6 +43,43 @@ function createValidWorkflow(id: string): Workflow {
   };
 }
 
+function createLinearWorkflow(id: string): Workflow {
+  return {
+    id,
+    name: `Linear ${id}`,
+    schemaVersion: WORKFLOW_SCHEMA_VERSION,
+    workflowVersion: 1,
+    nodes: [
+      {
+        id: "text-node",
+        type: "text_input",
+        name: "Text Input",
+        position: { x: 40, y: 120 },
+        config: {
+          text: "default text"
+        }
+      },
+      {
+        id: "output-node",
+        type: "output",
+        name: "Output",
+        position: { x: 280, y: 120 },
+        config: {
+          outputKey: "result",
+          responseTemplate: "{{text}}"
+        }
+      }
+    ],
+    edges: [
+      {
+        id: "edge-text-output",
+        source: "text-node",
+        target: "output-node"
+      }
+    ]
+  };
+}
+
 function createWebhookWorkflow(
   id: string,
   webhookConfig: Record<string, unknown>
@@ -898,5 +935,49 @@ describe("execution resilience and lifecycle", () => {
     } finally {
       context.store.saveExecutionHistory = originalSaveExecutionHistory;
     }
+  });
+
+  it("supports executing from a selected start node onward", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-start-node@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-start-node";
+    const createResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: createLinearWorkflow(workflowId)
+    });
+    expect(createResponse.statusCode).toBe(200);
+
+    const executeResponse = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflowId}/execute`,
+      headers: {
+        cookie: builderCookie
+      },
+      payload: {
+        startNodeId: "output-node",
+        input: {
+          text: "from-selected-step"
+        }
+      }
+    });
+
+    expect(executeResponse.statusCode).toBe(200);
+    const body = executeResponse.json<{
+      status: string;
+      nodeResults: Array<{ nodeId: string }>;
+      output?: { result?: string };
+    }>();
+    expect(body.status).toBe("success");
+    expect(body.nodeResults.map((entry) => entry.nodeId)).toEqual(["output-node"]);
+    expect(body.output?.result).toBe("from-selected-step");
   });
 });

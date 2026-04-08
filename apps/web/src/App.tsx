@@ -1855,14 +1855,19 @@ function StudioApp() {
     };
   }, []);
 
-  const buildEditorExecutionPayload = useCallback(() => {
+  const buildEditorExecutionPayload = useCallback((startNodeId?: string) => {
     const payload: {
       sessionId: string;
+      startNodeId?: string;
       system_prompt?: string;
       user_prompt?: string;
     } = {
       sessionId
     };
+
+    if (typeof startNodeId === "string" && startNodeId.trim()) {
+      payload.startNodeId = startNodeId.trim();
+    }
 
     if (!promptNodeSources.systemPromptFromNodes) {
       payload.system_prompt = systemPrompt;
@@ -1895,14 +1900,14 @@ function StudioApp() {
     return payload;
   }, [promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
 
-  const handleExecute = useCallback(async () => {
+  const handleExecute = useCallback(async (options?: { startNodeId?: string }) => {
     try {
       setBusy(true);
       setError(null);
       let initializedTrace = false;
       let initializedStatuses = false;
       const saved = await persistWorkflow();
-      const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(), {
+      const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(options?.startNodeId), {
         onNodeStart: (event) => {
           if (!isDebugMode) {
             return;
@@ -3135,7 +3140,7 @@ function StudioApp() {
                   )}
 
                   <div className="execute-strip">
-                    <button className="execute-btn" onClick={handleExecute} disabled={busy}>
+                    <button className="execute-btn" onClick={() => void handleExecute()} disabled={busy}>
                       Execute workflow
                     </button>
                     <button className="execute-btn secondary" onClick={handleWebhookExecute} disabled={busy}>
@@ -3229,7 +3234,7 @@ function StudioApp() {
                           <label>Session id</label>
                           <input value={sessionId} onChange={(event) => setSessionId(event.target.value)} />
                           <div className="row-actions">
-                            <button onClick={handleExecute} disabled={busy}>
+                            <button onClick={() => void handleExecute()} disabled={busy}>
                               Execute workflow
                             </button>
                             <button onClick={handleWebhookExecute} disabled={busy}>
@@ -3623,7 +3628,7 @@ function StudioApp() {
           onClose={() => setEditingNodeId(null)}
           onSave={saveNodeConfig}
           onExecuteStep={() => {
-            void handleExecute();
+            void handleExecute({ startNodeId: editingNode.id });
           }}
         />
       )}

@@ -188,6 +188,50 @@ describe("workflow engine", () => {
     expect(result.nodeResults.length).toBe(4);
   });
 
+  it("executes workflow from the selected start node onward", async () => {
+    const workflow = basicWorkflow();
+    const result = await executeWorkflow(
+      {
+        workflow,
+        startNodeId: "n3"
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.map((entry) => entry.nodeId)).toEqual(["n3", "n4"]);
+    expect(result.output).toEqual({
+      result: "mock-response"
+    });
+  });
+
+  it("returns a clear error when startNodeId is unknown", async () => {
+    const workflow = basicWorkflow();
+    const result = await executeWorkflow(
+      {
+        workflow,
+        startNodeId: "does-not-exist"
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("Start node");
+    expect(result.nodeResults).toHaveLength(0);
+  });
+
   it("captures node input snapshots for runtime inspection", async () => {
     const workflow = basicWorkflow();
     const result = await executeWorkflow(
@@ -1077,6 +1121,170 @@ describe("workflow engine", () => {
     const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "p1")?.output as Record<string, unknown>;
     expect((parserOutput.parsed as Record<string, unknown>).status).toBe("complete");
     expect(parserOutput.retries).toBeGreaterThan(0);
+  });
+
+  it("output_parser: resolves nested array path input keys from upstream node output", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-nested-path",
+      name: "Parser nested path",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "code_node",
+          name: "Producer",
+          position: { x: 0, y: 0 },
+          config: {
+            code: "return { messages: [{ role: 'assistant', content: 'ignore' }, { role: 'assistant', content: '{\"status\":\"complete\"}' }] };"
+          }
+        },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            inputKey: "messages[1].content",
+            maxRetries: 0,
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]}},\"required\":[\"status\"]}"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    expect((parserOutput.parsed as Record<string, unknown>).status).toBe("complete");
+    expect(parserOutput.retries).toBe(0);
+  });
+
+  it("output_parser: supports moustache-style inputKey paths", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-moustache-path",
+      name: "Parser moustache path",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "code_node",
+          name: "Producer",
+          position: { x: 0, y: 0 },
+          config: {
+            code: "return { debug: { agent_answer: '{\"status\":\"complete\"}' } };"
+          }
+        },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            inputKey: "{{debug.agent_answer}}",
+            maxRetries: 0,
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]}},\"required\":[\"status\"]}"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    expect((parserOutput.parsed as Record<string, unknown>).status).toBe("complete");
+    expect(parserOutput.retries).toBe(0);
+  });
+
+  it("output_parser: extracts JSON when assistant adds prose before JSON", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-prose-json",
+      name: "Parser prose JSON",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "code_node",
+          name: "Producer",
+          position: { x: 0, y: 0 },
+          config: {
+            code: "return { answer: 'Collected all keys.\\n\\n{\"status\":\"complete\",\"final_markdown\":\"ok\",\"follow_up_question\":\"\"}' };"
+          }
+        },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            inputKey: "answer",
+            maxRetries: 0,
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]},\"final_markdown\":{\"type\":\"string\"},\"follow_up_question\":{\"type\":\"string\"}},\"required\":[\"status\",\"final_markdown\",\"follow_up_question\"]}"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    const parsed = parserOutput.parsed as Record<string, unknown>;
+    expect(parsed.status).toBe("complete");
+    expect(parsed.final_markdown).toBe("ok");
+    expect(parsed.follow_up_question).toBe("");
   });
 
   it("pdf_output: generates downloadable PDF data URL", async () => {

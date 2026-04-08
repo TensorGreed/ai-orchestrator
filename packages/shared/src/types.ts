@@ -331,6 +331,7 @@ export interface AgentRunState {
 
 export interface WorkflowExecuteRequest {
   workflowId?: string;
+  startNodeId?: string;
   sessionId?: string;
   session_id?: string;
   system_prompt?: string;
