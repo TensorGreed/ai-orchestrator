@@ -1,7 +1,9 @@
-export function renderTemplate(template: string, values: Record<string, unknown>): string {
-  return template.replace(/{{\s*([a-zA-Z0-9_.-]+)\s*}}/g, (_match, key: string) => {
+export function renderTemplateAdvanced(template: string, values: Record<string, unknown>): { rendered: string; unresolvedKeys: string[] } {
+  const unresolvedKeys: string[] = [];
+  const rendered = template.replace(/{{\s*([a-zA-Z0-9_.-]+)\s*}}/g, (_match, key: string) => {
     const value = resolvePath(values, key);
     if (value === undefined || value === null) {
+      unresolvedKeys.push(key);
       return "";
     }
     if (typeof value === "string") {
@@ -9,6 +11,11 @@ export function renderTemplate(template: string, values: Record<string, unknown>
     }
     return JSON.stringify(value);
   });
+  return { rendered, unresolvedKeys };
+}
+
+export function renderTemplate(template: string, values: Record<string, unknown>): string {
+  return renderTemplateAdvanced(template, values).rendered;
 }
 
 function resolvePath(values: Record<string, unknown>, path: string): unknown {

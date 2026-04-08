@@ -117,6 +117,10 @@ export interface NodeExecutionResult {
   input?: unknown;
   output?: unknown;
   error?: string;
+  warnings?: string[];
+  retriedNodes?: Array<{ nodeId: string; attempts: number; nodeType: string }>;
+  errorCategory?: string;
+  retryable?: boolean;
   attempts?: number;
 }
 
@@ -129,6 +133,8 @@ export interface WorkflowExecutionResult {
   nodeResults: NodeExecutionResult[];
   output?: unknown;
   error?: string;
+  warnings?: string[];
+  retriedNodes?: Array<{ nodeId: string; attempts: number; nodeType: string }>;
 }
 
 export interface WorkflowExecutionState {

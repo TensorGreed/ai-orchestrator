@@ -33,6 +33,7 @@ import {
 } from "./rag-adapters";
 import { renderTemplate, tryParseJson } from "./template";
 import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
+import { WorkflowError } from "@ai-orchestrator/shared";
 
 export interface WorkflowExecutionDependencies {
   providerRegistry: ProviderRegistry;
@@ -99,6 +100,7 @@ export interface ExecuteWorkflowRequest {
     actedBy?: string;
     reason?: string;
   };
+  executionTimeoutMs?: number;
 }
 
 export interface ResumeWorkflowRequest {
@@ -2419,6 +2421,7 @@ async function executeNode(
           (typeof webhookData.message === "string" && (webhookData.message as string).trim()) ||
           "";
         if (!fallbackUserPrompt) {
+          throw WorkflowError.nodeConfig("Agent Orchestrator user prompt is empty after template rendering. Check your template variables or webhook payload.");
           throw new Error("Agent Orchestrator user prompt is empty after template rendering. Check your template variables or webhook payload.");
         }
       }
@@ -2791,7 +2794,7 @@ async function executeNode(
         if (parsingMode === "anything_goes") {
         return { parsed: null, raw: rawInput, retries, parserTrace: result.trace, warning: "Output parsing failed: " + result.error };
       }
-      throw new Error(`Output Parser failed after ${retries} retries: ${result.error}`);
+      throw WorkflowError.parserError(`Output Parser failed after ${retries} retries: ${result.error}`);
       }
 
       return { parsed: result.parsed, raw: rawInput, retries, parserTrace: result.trace };
@@ -3112,8 +3115,13 @@ async function executeNodeWithRetry(
       const output = await executeNode(node, context, dependencies);
       return { output, attempts: attempt };
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error("Node execution failed");
+      if (error instanceof WorkflowError) {
+        lastError = error;
+      } else {
+        lastError = error instanceof Error ? error : new Error("Node execution failed");
+      }
       if (attempt < retry.maxAttempts) {
+
         const delay = retry.delayMs * Math.pow(retry.backoffMultiplier, attempt - 1);
         await sleep(delay);
       }
@@ -3624,6 +3632,8 @@ export async function executeWorkflow(
 
   // --- Execution timeout ---
   const executionTimeoutMs = typeof (request as unknown as Record<string, unknown>).executionTimeoutMs === "number" ? (request as unknown as Record<string, unknown>).executionTimeoutMs as number : 300000;
+  const workflowWarnings: string[] = [];
+  const retriedNodes: Array<{ nodeId: string; attempts: number; nodeType: string }> = [];
   const executionStartTime = Date.now();
 
   for (let index = startIndex; index < nodeOrder.length; index += 1) {
@@ -3648,7 +3658,9 @@ export async function executeWorkflow(
         completedAt: nowIso(),
         executionId: request.executionId,
         nodeResults,
-        error: `Workflow execution timed out after ${elapsedMs}ms (limit: ${executionTimeoutMs}ms)`
+        error: `Workflow execution timed out after ${elapsedMs}ms (limit: ${executionTimeoutMs}ms)`,
+        warnings: workflowWarnings,
+        retriedNodes
       };
     }
     const nodeId = nodeOrder[index];
