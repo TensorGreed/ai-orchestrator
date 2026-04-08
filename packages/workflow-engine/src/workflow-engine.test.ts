@@ -171,6 +171,40 @@ describe("workflow engine", () => {
     expect(invalid.issues.some((issue) => issue.code === "cycle_detected")).toBe(true);
   });
 
+  it("rejects invalid output_parser parsingMode during validation", () => {
+    const workflow: Workflow = {
+      id: "wf-invalid-parser-parsing-mode",
+      name: "Invalid parser parsing mode",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "{\"status\":\"complete\"}" } },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            parsingMode: "ultra_lenient",
+            inputKey: "text",
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\"}},\"required\":[\"status\"]}"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: { responseTemplate: "{{parsed.status}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const validation = validateWorkflowGraph(workflow);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.some((issue) => issue.code === "invalid_output_parser_parsing_mode")).toBe(true);
+  });
+
   it("executes basic flow", async () => {
     const workflow = basicWorkflow();
     const result = await executeWorkflow(
@@ -1285,6 +1319,178 @@ describe("workflow engine", () => {
     expect(parsed.status).toBe("complete");
     expect(parsed.final_markdown).toBe("ok");
     expect(parsed.follow_up_question).toBe("");
+  });
+
+  it("output_parser: lenient parsing mode repairs python-style dict payload", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-lenient-python-dict",
+      name: "Parser lenient python dict",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "text_input",
+          name: "Input",
+          position: { x: 0, y: 0 },
+          config: {
+            text: "{'status': 'complete', 'final_markdown': 'ok', 'follow_up_question': ''}"
+          }
+        },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            parsingMode: "lenient",
+            inputKey: "text",
+            maxRetries: 0,
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]},\"final_markdown\":{\"type\":\"string\"},\"follow_up_question\":{\"type\":\"string\"}},\"required\":[\"status\",\"final_markdown\",\"follow_up_question\"]}"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    const parsed = parserOutput.parsed as Record<string, unknown>;
+    const parserTrace = parserOutput.parserTrace as Record<string, unknown>;
+    expect(parsed.status).toBe("complete");
+    expect(parsed.final_markdown).toBe("ok");
+    expect(parserTrace.strictness).toBe("lenient");
+  });
+
+  it("output_parser: strict parsing mode rejects python-style dict payload", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-strict-rejects-python-dict",
+      name: "Parser strict rejects python dict",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "text_input",
+          name: "Input",
+          position: { x: 0, y: 0 },
+          config: {
+            text: "{'status': 'complete', 'final_markdown': 'ok', 'follow_up_question': ''}"
+          }
+        },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            parsingMode: "strict",
+            inputKey: "text",
+            maxRetries: 0,
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]},\"final_markdown\":{\"type\":\"string\"},\"follow_up_question\":{\"type\":\"string\"}},\"required\":[\"status\",\"final_markdown\",\"follow_up_question\"]}"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("error");
+    const parserNodeResult = result.nodeResults.find((entry) => entry.nodeId === "n2");
+    expect(parserNodeResult?.status).toBe("error");
+    expect(parserNodeResult?.error).toContain("Invalid JSON (strict)");
+  });
+
+  it("output_parser: anything_goes mode parses simple key-value payload", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-anything-goes-kv",
+      name: "Parser anything goes key-value",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "text_input",
+          name: "Input",
+          position: { x: 0, y: 0 },
+          config: {
+            text: "status: complete\nfinal_markdown: ok\nfollow_up_question: \"\""
+          }
+        },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            parsingMode: "anything_goes",
+            inputKey: "text",
+            maxRetries: 0,
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]},\"final_markdown\":{\"type\":\"string\"},\"follow_up_question\":{\"type\":\"string\"}},\"required\":[\"status\",\"final_markdown\",\"follow_up_question\"]}"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    const parsed = parserOutput.parsed as Record<string, unknown>;
+    const parserTrace = parserOutput.parserTrace as Record<string, unknown>;
+    expect(parsed.status).toBe("complete");
+    expect(parsed.final_markdown).toBe("ok");
+    expect(parsed.follow_up_question).toBe("");
+    expect(parserTrace.strictness).toBe("anything_goes");
   });
 
   it("pdf_output: generates downloadable PDF data URL", async () => {

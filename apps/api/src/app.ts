@@ -740,6 +740,32 @@ export function createApp(
             store.saveSessionMemory(namespace, sessionId, messages);
           }
         },
+        toolDataStore: {
+          saveToolCall: async (payload) =>
+            store.saveSessionToolCall({
+              namespace: payload.namespace,
+              sessionId: payload.sessionId,
+              toolName: payload.toolName,
+              toolCallId: payload.toolCallId,
+              args: payload.args,
+              output: payload.output,
+              error: payload.error,
+              summary: payload.summary
+            }),
+          listToolCalls: async (payload) =>
+            store.listSessionToolCalls({
+              namespace: payload.namespace,
+              sessionId: payload.sessionId,
+              toolName: payload.toolName,
+              limit: payload.limit
+            }),
+          getToolCall: async (payload) =>
+            store.getSessionToolCall({
+              namespace: payload.namespace,
+              sessionId: payload.sessionId,
+              id: payload.id
+            })
+        },
         loadWorkflow: (workflowId) => store.getWorkflow(workflowId) ?? undefined,
         resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
         persistPausedExecution: async (paused) => {

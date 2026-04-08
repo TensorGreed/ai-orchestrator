@@ -10,6 +10,7 @@ export interface AgentRuntimeContext {
   providerRegistry: ProviderRegistry;
   resolveSecret: (secretRef?: { secretId: string }) => Promise<string | undefined>;
   memoryStore?: AgentSessionMemoryStore;
+  toolDataStore?: AgentSessionToolDataStore;
 }
 
 export interface AgentRuntimeAdapter {
@@ -27,6 +28,43 @@ export interface InternalToolResult {
 export interface AgentSessionMemoryStore {
   loadMessages(namespace: string, sessionId: string): Promise<ChatMessage[]>;
   saveMessages(namespace: string, sessionId: string, messages: ChatMessage[]): Promise<void>;
+}
+
+export interface AgentSessionToolRecord {
+  id: string;
+  namespace: string;
+  sessionId: string;
+  toolName: string;
+  toolCallId?: string;
+  args: Record<string, unknown>;
+  output: unknown;
+  error?: string;
+  summary?: unknown;
+  createdAt: string;
+}
+
+export interface AgentSessionToolDataStore {
+  saveToolCall(input: {
+    namespace: string;
+    sessionId: string;
+    toolName: string;
+    toolCallId?: string;
+    args: Record<string, unknown>;
+    output: unknown;
+    error?: string;
+    summary?: unknown;
+  }): Promise<AgentSessionToolRecord>;
+  listToolCalls(input: {
+    namespace: string;
+    sessionId: string;
+    toolName?: string;
+    limit?: number;
+  }): Promise<Array<Omit<AgentSessionToolRecord, "output">>>;
+  getToolCall(input: {
+    namespace: string;
+    sessionId: string;
+    id: string;
+  }): Promise<AgentSessionToolRecord | null>;
 }
 
 export function createToolErrorResult(call: ToolCall, error: unknown): InternalToolResult {

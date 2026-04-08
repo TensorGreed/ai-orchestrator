@@ -9,6 +9,7 @@ interface GraphMetadata {
 const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const allowedWebhookAuthModes = new Set(["none", "bearer_token", "hmac_sha256"]);
 const allowedHttpRequestMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+const allowedOutputParserParsingModes = new Set(["strict", "lenient", "anything_goes"]);
 const agentPrimaryInputNodeTypes = new Set(["webhook_input", "text_input", "user_prompt"]);
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -583,6 +584,16 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_output_parser_mode",
           message: "Output Parser node requires mode to be one of json_schema, item_list, auto_fix.",
+          nodeId: node.id
+        });
+      }
+      if (
+        config.parsingMode !== undefined &&
+        (typeof config.parsingMode !== "string" || !allowedOutputParserParsingModes.has(config.parsingMode))
+      ) {
+        issues.push({
+          code: "invalid_output_parser_parsing_mode",
+          message: "Output Parser parsingMode must be one of strict, lenient, anything_goes.",
           nodeId: node.id
         });
       }

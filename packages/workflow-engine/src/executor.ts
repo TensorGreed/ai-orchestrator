@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import vm from "node:vm";
-import type { AgentRuntimeAdapter, AgentSessionMemoryStore } from "@ai-orchestrator/agent-runtime";
+import type { AgentRuntimeAdapter, AgentSessionMemoryStore, AgentSessionToolDataStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { invokeDirectMCPTool, resolveMCPTools, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
@@ -42,6 +42,7 @@ export interface WorkflowExecutionDependencies {
   vectorStoreRegistry?: VectorStoreRegistry;
   agentRuntime: AgentRuntimeAdapter;
   memoryStore?: AgentSessionMemoryStore;
+  toolDataStore?: AgentSessionToolDataStore;
   loadWorkflow?: (workflowId: string) => Workflow | undefined;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   persistPausedExecution?: (input: {
@@ -809,6 +810,375 @@ function extractLikelyJsonFromText(text: string): string {
 
   const balanced = extractBalancedJsonCandidate(trimmed);
   return balanced ?? trimmed;
+}
+
+type OutputParserParsingMode = "strict" | "lenient" | "anything_goes";
+type OutputParserParseStrategy =
+  | "json_parse"
+  | "double_encoded_json"
+  | "balanced_json_extract"
+  | "json_like_repair"
+  | "yaml_key_value";
+
+interface OutputParserParseAttempt {
+  strategy: OutputParserParseStrategy;
+  candidatePreview: string;
+  ok: boolean;
+  error?: string;
+  warnings?: string[];
+  confidence?: number;
+}
+
+interface OutputParserParseTrace {
+  strictness: OutputParserParsingMode;
+  strategy: OutputParserParseStrategy | "none";
+  confidence: number;
+  warnings: string[];
+  candidateCount: number;
+  attempts: OutputParserParseAttempt[];
+}
+
+type OutputParserParseOutcome =
+  | {
+      ok: true;
+      parsed: unknown;
+      trace: OutputParserParseTrace;
+    }
+  | {
+      ok: false;
+      error: string;
+      trace: OutputParserParseTrace;
+    };
+
+function normalizeOutputParserParsingMode(value: unknown): OutputParserParsingMode {
+  if (value === "lenient" || value === "anything_goes" || value === "strict") {
+    return value;
+  }
+  return "strict";
+}
+
+function previewParserCandidate(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 180) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 180)}...`;
+}
+
+function addUniqueParserCandidate(target: string[], seen: Set<string>, candidate: string): void {
+  const normalized = String(candidate ?? "").trim();
+  if (!normalized || seen.has(normalized)) {
+    return;
+  }
+  target.push(normalized);
+  seen.add(normalized);
+}
+
+function buildJsonParserCandidates(text: string): string[] {
+  const source = String(text ?? "");
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  addUniqueParserCandidate(candidates, seen, trimmed);
+  addUniqueParserCandidate(candidates, seen, extractJsonFromText(trimmed));
+  const balancedFromSource = extractBalancedJsonCandidate(source);
+  if (balancedFromSource) {
+    addUniqueParserCandidate(candidates, seen, balancedFromSource);
+  }
+  const balancedFromLikely = extractBalancedJsonCandidate(extractLikelyJsonFromText(trimmed));
+  if (balancedFromLikely) {
+    addUniqueParserCandidate(candidates, seen, balancedFromLikely);
+  }
+
+  return candidates.slice(0, 10);
+}
+
+function normalizeJsonLikeText(input: string): { text: string; warnings: string[] } {
+  let current = String(input ?? "");
+  const warnings: string[] = [];
+  const apply = (next: string, warning: string) => {
+    if (next !== current) {
+      current = next;
+      warnings.push(warning);
+    }
+  };
+
+  apply(current.replace(/^\uFEFF/, ""), "removed_byte_order_mark");
+  apply(current.replace(/[“”]/g, "\"").replace(/[‘’]/g, "'"), "normalized_smart_quotes");
+  apply(current.replace(/\bNone\b/g, "null"), "normalized_none_literal");
+  apply(current.replace(/\bTrue\b/g, "true").replace(/\bFalse\b/g, "false"), "normalized_python_booleans");
+  apply(current.replace(/([{,]\s*)'([^'\\]*(?:\\.[^'\\]*)*)'(?=\s*:)/g, "$1\"$2\""), "quoted_single_quoted_keys");
+  apply(
+    current.replace(/:\s*'([^'\\]*(?:\\.[^'\\]*)*)'(\s*[,}\]])/g, ": \"$1\"$2"),
+    "converted_single_quoted_string_values"
+  );
+  apply(
+    current.replace(/([\[,]\s*)'([^'\\]*(?:\\.[^'\\]*)*)'(\s*[,}\]])/g, "$1\"$2\"$3"),
+    "converted_single_quoted_array_values"
+  );
+  apply(current.replace(/,\s*([}\]])/g, "$1"), "removed_trailing_commas");
+  apply(current.replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:)/g, "$1\"$2\"$3"), "quoted_unquoted_keys");
+
+  return {
+    text: current.trim(),
+    warnings
+  };
+}
+
+function parseYamlScalar(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (lower === "null" || lower === "none") {
+    return null;
+  }
+  if (lower === "true") {
+    return true;
+  }
+  if (lower === "false") {
+    return false;
+  }
+
+  if ((trimmed.startsWith("\"") && trimmed.endsWith("\"")) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+
+  if (looksLikeJson(trimmed)) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return trimmed;
+    }
+  }
+
+  return trimmed;
+}
+
+function parseSimpleYamlObject(text: string): Record<string, unknown> | null {
+  const source = String(text ?? "").trim();
+  if (!source || source.startsWith("{") || source.startsWith("[")) {
+    return null;
+  }
+
+  const lines = source
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.startsWith("#") && !line.startsWith("- "));
+
+  if (!lines.length) {
+    return null;
+  }
+
+  const output: Record<string, unknown> = {};
+  let parsedPairs = 0;
+
+  for (const line of lines) {
+    const separatorIndex = line.indexOf(":");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const rawKey = line.slice(0, separatorIndex).trim();
+    const rawValue = line.slice(separatorIndex + 1).trim();
+    if (!rawKey) {
+      continue;
+    }
+
+    const key =
+      (rawKey.startsWith("\"") && rawKey.endsWith("\"")) || (rawKey.startsWith("'") && rawKey.endsWith("'"))
+        ? rawKey.slice(1, -1)
+        : rawKey;
+    output[key] = parseYamlScalar(rawValue);
+    parsedPairs += 1;
+  }
+
+  return parsedPairs > 0 ? output : null;
+}
+
+function tryParseJsonCandidate(
+  candidate: string
+): { ok: true; parsed: unknown; strategy: "json_parse" | "double_encoded_json" } | { ok: false; error: string } {
+  try {
+    const parsed = JSON.parse(candidate);
+    if (typeof parsed === "string") {
+      const nestedCandidate = extractLikelyJsonFromText(parsed);
+      if (looksLikeJson(nestedCandidate)) {
+        try {
+          const reparsed = JSON.parse(nestedCandidate);
+          return {
+            ok: true,
+            parsed: reparsed,
+            strategy: "double_encoded_json"
+          };
+        } catch {
+          return {
+            ok: true,
+            parsed,
+            strategy: "json_parse"
+          };
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      parsed,
+      strategy: "json_parse"
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "parse error"
+    };
+  }
+}
+
+function parseWithOutputParserStrategies(text: string, strictness: OutputParserParsingMode): OutputParserParseOutcome {
+  const candidates = buildJsonParserCandidates(text);
+  const attempts: OutputParserParseAttempt[] = [];
+
+  const success = (
+    strategy: OutputParserParseStrategy,
+    parsed: unknown,
+    confidence: number,
+    warnings: string[],
+    candidate: string
+  ): OutputParserParseOutcome => ({
+    ok: true,
+    parsed,
+    trace: {
+      strictness,
+      strategy,
+      confidence,
+      warnings,
+      candidateCount: candidates.length,
+      attempts: [
+        ...attempts,
+        {
+          strategy,
+          candidatePreview: previewParserCandidate(candidate),
+          ok: true,
+          confidence,
+          warnings: warnings.length ? warnings : undefined
+        }
+      ]
+    }
+  });
+
+  const fail = (strategy: OutputParserParseStrategy, error: string, candidate: string, warnings: string[] = []) => {
+    attempts.push({
+      strategy,
+      candidatePreview: previewParserCandidate(candidate),
+      ok: false,
+      error,
+      warnings: warnings.length ? warnings : undefined
+    });
+  };
+
+  if (!candidates.length) {
+    return {
+      ok: false,
+      error: "No parseable content found in parser input.",
+      trace: {
+        strictness,
+        strategy: "none",
+        confidence: 0,
+        warnings: [],
+        candidateCount: 0,
+        attempts
+      }
+    };
+  }
+
+  for (const candidate of candidates) {
+    const parsed = tryParseJsonCandidate(candidate);
+    if (parsed.ok) {
+      if (parsed.strategy === "double_encoded_json") {
+        return success("double_encoded_json", parsed.parsed, 0.95, [], candidate);
+      }
+      return success("json_parse", parsed.parsed, 1, [], candidate);
+    }
+    fail("json_parse", parsed.error, candidate);
+  }
+
+  for (const candidate of candidates) {
+    const balanced = extractBalancedJsonCandidate(candidate);
+    if (!balanced || balanced === candidate) {
+      continue;
+    }
+    const parsed = tryParseJsonCandidate(balanced);
+    if (parsed.ok) {
+      if (parsed.strategy === "double_encoded_json") {
+        return success("double_encoded_json", parsed.parsed, 0.9, ["extracted_balanced_json"], balanced);
+      }
+      return success("balanced_json_extract", parsed.parsed, 0.88, [], balanced);
+    }
+    fail("balanced_json_extract", parsed.error, balanced);
+  }
+
+  if (strictness !== "strict") {
+    for (const candidate of candidates) {
+      const repaired = normalizeJsonLikeText(candidate);
+      if (!repaired.text || repaired.text === candidate) {
+        continue;
+      }
+
+      const parsed = tryParseJsonCandidate(repaired.text);
+      if (parsed.ok) {
+        if (parsed.strategy === "double_encoded_json") {
+          return success("double_encoded_json", parsed.parsed, 0.8, repaired.warnings, repaired.text);
+        }
+        return success("json_like_repair", parsed.parsed, 0.72, repaired.warnings, repaired.text);
+      }
+      fail("json_like_repair", parsed.error, repaired.text, repaired.warnings);
+    }
+  }
+
+  if (strictness === "anything_goes") {
+    for (const candidate of candidates) {
+      const parsed = parseSimpleYamlObject(candidate);
+      if (parsed) {
+        return success("yaml_key_value", parsed, 0.55, ["parsed_as_simple_key_value"], candidate);
+      }
+      fail("yaml_key_value", "did not match simple key-value block format", candidate);
+    }
+  }
+
+  const failedAttempts = attempts.filter((attempt) => !attempt.ok);
+  const summary = failedAttempts
+    .slice(-3)
+    .map((attempt) => `${attempt.strategy}: ${attempt.error}`)
+    .join(" | ");
+  const errorMessage = summary || "No parser strategy succeeded.";
+
+  return {
+    ok: false,
+    error: errorMessage,
+    trace: {
+      strictness,
+      strategy: "none",
+      confidence: 0,
+      warnings: [],
+      candidateCount: candidates.length,
+      attempts
+    }
+  };
 }
 
 function validateGuardrailChecks(text: string, checks: string[]): string[] {
@@ -2229,7 +2599,8 @@ async function executeNode(
         {
           providerRegistry: dependencies.providerRegistry,
           resolveSecret: dependencies.resolveSecret,
-          memoryStore: dependencies.memoryStore
+          memoryStore: dependencies.memoryStore,
+          toolDataStore: dependencies.toolDataStore
         }
       );
       const modelRunCompletedAt = nowIso();
@@ -2268,6 +2639,7 @@ async function executeNode(
 
     case "output_parser": {
       const mode = typeof config.mode === "string" ? config.mode : "json_schema";
+      const parsingMode = normalizeOutputParserParsingMode(config.parsingMode);
       const inputKey = typeof config.inputKey === "string" && config.inputKey ? config.inputKey : "answer";
       const resolvedInput =
         getValueByPath(templateData, inputKey) ??
@@ -2302,19 +2674,21 @@ async function executeNode(
         }
       }
 
-      const validateJsonOutput = (text: string): { ok: boolean; parsed?: unknown; error?: string } => {
-        // Extract JSON from text (markdown fences, or prose-wrapped JSON object/array)
-        const jsonText = extractLikelyJsonFromText(text);
-
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(jsonText);
-        } catch (parseError) {
-          return { ok: false, error: `Invalid JSON: ${parseError instanceof Error ? parseError.message : "parse error"}` };
+      const validateJsonOutput = (
+        text: string
+      ): { ok: boolean; parsed?: unknown; error?: string; trace?: OutputParserParseTrace } => {
+        const parsedResult = parseWithOutputParserStrategies(text, parsingMode);
+        if (!parsedResult.ok) {
+          return {
+            ok: false,
+            error: `Invalid JSON (${parsingMode}): ${parsedResult.error}`,
+            trace: parsedResult.trace
+          };
         }
+        const parsed = parsedResult.parsed;
 
         if (mode === "auto_fix") {
-          return { ok: true, parsed };
+          return { ok: true, parsed, trace: parsedResult.trace };
         }
 
         // json_schema mode: validate required fields and types
@@ -2323,7 +2697,7 @@ async function executeNode(
           const required = Array.isArray(schemaObj.required) ? schemaObj.required.map(String) : [];
           for (const field of required) {
             if (!(field in record)) {
-              return { ok: false, parsed, error: `Missing required field: ${field}` };
+              return { ok: false, parsed, error: `Missing required field: ${field}`, trace: parsedResult.trace };
             }
           }
           const properties = toRecord(schemaObj.properties);
@@ -2332,16 +2706,29 @@ async function executeNode(
             const prop = toRecord(propSchema);
             if (typeof prop.type === "string" && record[key] !== undefined && record[key] !== null) {
               const actualType = typeof record[key];
-              if (prop.type === "string" && actualType !== "string") return { ok: false, parsed, error: `Field '${key}' should be string, got ${actualType}` };
-              if (prop.type === "number" && actualType !== "number") return { ok: false, parsed, error: `Field '${key}' should be number, got ${actualType}` };
-              if (prop.type === "boolean" && actualType !== "boolean") return { ok: false, parsed, error: `Field '${key}' should be boolean, got ${actualType}` };
+              if (prop.type === "string" && actualType !== "string") {
+                return { ok: false, parsed, error: `Field '${key}' should be string, got ${actualType}`, trace: parsedResult.trace };
+              }
+              if (prop.type === "number" && actualType !== "number") {
+                return { ok: false, parsed, error: `Field '${key}' should be number, got ${actualType}`, trace: parsedResult.trace };
+              }
+              if (prop.type === "boolean" && actualType !== "boolean") {
+                return { ok: false, parsed, error: `Field '${key}' should be boolean, got ${actualType}`, trace: parsedResult.trace };
+              }
             }
             if (Array.isArray(prop.enum) && record[key] !== undefined) {
-              if (!prop.enum.includes(record[key])) return { ok: false, parsed, error: `Field '${key}' value '${String(record[key])}' not in enum: ${prop.enum.join(", ")}` };
+              if (!prop.enum.includes(record[key])) {
+                return {
+                  ok: false,
+                  parsed,
+                  error: `Field '${key}' value '${String(record[key])}' not in enum: ${prop.enum.join(", ")}`,
+                  trace: parsedResult.trace
+                };
+              }
             }
           }
         }
-        return { ok: true, parsed };
+        return { ok: true, parsed, trace: parsedResult.trace };
       };
 
       let result = validateJsonOutput(rawInput);
@@ -2394,7 +2781,7 @@ async function executeNode(
         throw new Error(`Output Parser failed after ${retries} retries: ${result.error}`);
       }
 
-      return { parsed: result.parsed, raw: rawInput, retries };
+      return { parsed: result.parsed, raw: rawInput, retries, parserTrace: result.trace };
     }
 
     case "output_guardrail": {

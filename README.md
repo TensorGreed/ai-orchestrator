@@ -398,6 +398,22 @@ Attachment-only helper nodes are marked as skipped in execution traces because t
 Nodes can dynamically read outputs from previous nodes in the DAG layout. 
 In a node's configuration, you can use handlebars-style templates or dedicated mapping blocks to pass `results.nodeId.someKey` to dynamically inject an upstream agent's output into a downstream agent's prompt or a tool's parameters.
 
+## Output Parser Robust Parsing
+
+`Output Parser` now supports parser strictness profiles (independent of parser `mode`):
+
+- `strict`: accepts only valid JSON
+- `lenient`: repairs common JSON-like output (single quotes, python booleans/None, trailing commas, unquoted keys)
+- `anything_goes`: includes `lenient` and best-effort `key: value` parsing
+
+`inputKey` supports path forms:
+
+- `debug.agent_answer`
+- `messages[5].content`
+- `{{debug.agent_answer}}`
+
+When parsing succeeds/fails, node output includes `parserTrace` with strategy/confidence/attempt metadata for debugging.
+
 ## MCP Node Setup (real endpoint)
 
 Use an `MCP Tool` node attached to the Agent `tool` port.
@@ -450,6 +466,30 @@ Config:
 
 DB storage table:
 - `session_memory(namespace, session_id, messages_json, created_at, updated_at)`
+
+## Session Tool Cache (Automatic)
+
+To support multi-turn agent conversations without flooding model context, the runtime now caches full MCP tool outputs outside the LLM prompt window.
+
+How it works:
+- On each external MCP tool call, runtime stores full tool args/output in SQLite by `namespace + session_id`.
+- The model sees compact tool messages in-context (for token safety), but full payload remains retrievable.
+- Runtime injects two internal tools automatically (when `session_id` is present):
+  - `session_cache_list`
+  - `session_cache_get`
+- On follow-up turns, the model can fetch prior tool data from cache instead of re-calling MCP endpoints.
+
+Requirements for reuse across turns:
+- Use the same `session_id` on follow-up webhook/UI runs.
+- Keep agent memory namespace stable (default is stable per workflow/agent attachment).
+
+DB storage table:
+- `session_tool_cache(id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at)`
+
+Why this helps:
+- reduces repeated expensive MCP calls
+- avoids large-context crashes for local models
+- keeps follow-up questions grounded in previously fetched data
 
 ## Secrets handling
 

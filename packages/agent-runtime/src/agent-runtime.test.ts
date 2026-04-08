@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
 import { DefaultAgentRuntime } from "./default-agent-runtime";
+import type { AgentSessionToolDataStore } from "./types";
 
 class FakeToolCallingProvider implements LLMProviderAdapter {
   readonly definition = {
@@ -102,6 +103,114 @@ class ToolCaptureProvider implements LLMProviderAdapter {
       toolCalls: []
     };
   }
+}
+
+class SessionCacheListProvider implements LLMProviderAdapter {
+  readonly definition = {
+    id: "session-cache-list",
+    label: "Session Cache List",
+    supportsTools: true,
+    configSchema: {}
+  };
+
+  private callCount = 0;
+
+  async generate(request: ProviderCallRequest) {
+    this.callCount += 1;
+    if (this.callCount === 1) {
+      return {
+        content: "Checking cached data first.",
+        toolCalls: [
+          {
+            id: "tc-cache-list",
+            name: "session_cache_list",
+            arguments: {
+              tool_name: "mock-mcp__list_keys",
+              limit: 5
+            }
+          }
+        ]
+      };
+    }
+
+    const toolMessage = request.messages.find(
+      (message) => message.role === "tool" && message.name === "session_cache_list"
+    );
+    const parsedTool = toolMessage?.content ? JSON.parse(String(toolMessage.content)) : null;
+    const firstRecordId = parsedTool?.output?.records?.[0]?.record_id;
+    return {
+      content: `Cache records available: ${firstRecordId ? "yes" : "no"}`,
+      toolCalls: []
+    };
+  }
+}
+
+function createInMemorySessionToolStore() {
+  type RecordItem = {
+    id: string;
+    namespace: string;
+    sessionId: string;
+    toolName: string;
+    toolCallId?: string;
+    args: Record<string, unknown>;
+    output: unknown;
+    error?: string;
+    summary?: unknown;
+    createdAt: string;
+  };
+  const records = new Map<string, RecordItem>();
+  const keyFor = (namespace: string, sessionId: string, id: string) => `${namespace}:${sessionId}:${id}`;
+
+  const api: AgentSessionToolDataStore = {
+    saveToolCall: async (input) => {
+      const id = `record-${records.size + 1}`;
+      const item: RecordItem = {
+        id,
+        namespace: input.namespace,
+        sessionId: input.sessionId,
+        toolName: input.toolName,
+        toolCallId: input.toolCallId,
+        args: input.args,
+        output: input.output,
+        error: input.error,
+        summary: input.summary,
+        createdAt: new Date().toISOString()
+      };
+      records.set(keyFor(item.namespace, item.sessionId, item.id), item);
+      return item;
+    },
+    listToolCalls: async (input) => {
+      const limit =
+        typeof input.limit === "number" && Number.isFinite(input.limit) && input.limit > 0
+          ? Math.floor(input.limit)
+          : 20;
+      const toolName = typeof input.toolName === "string" ? input.toolName : undefined;
+      return [...records.values()]
+        .filter((entry) => entry.namespace === input.namespace && entry.sessionId === input.sessionId)
+        .filter((entry) => (toolName ? entry.toolName === toolName : true))
+        .sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1))
+        .slice(0, limit)
+        .map((entry) => ({
+          id: entry.id,
+          namespace: entry.namespace,
+          sessionId: entry.sessionId,
+          toolName: entry.toolName,
+          toolCallId: entry.toolCallId,
+          args: entry.args,
+          error: entry.error,
+          summary: entry.summary,
+          createdAt: entry.createdAt
+        }));
+    },
+    getToolCall: async (input) => {
+      return records.get(keyFor(input.namespace, input.sessionId, input.id)) ?? null;
+    }
+  };
+
+  return {
+    api,
+    records
+  };
 }
 
 describe("DefaultAgentRuntime", () => {
@@ -516,5 +625,132 @@ describe("DefaultAgentRuntime", () => {
     expect(output.stopReason).toBe("final_answer");
     const saved = JSON.parse(memoryState.get(`${namespace}:${sessionId}`) ?? "[]") as Array<{ role?: string }>;
     expect(saved.some((message) => message.role === "tool")).toBe(false);
+  });
+
+  it("stores full external MCP tool output in session cache outside the LLM context", async () => {
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new FakeToolCallingProvider());
+    const runtime = new DefaultAgentRuntime();
+    const cacheStore = createInMemorySessionToolStore();
+
+    const largeOutput = {
+      total: 2,
+      resources: [
+        { id: "k1", metadata: "x".repeat(12_000) },
+        { id: "k2", metadata: "y".repeat(12_000) }
+      ]
+    };
+
+    const result = await runtime.run(
+      {
+        provider: { providerId: "fake", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Fetch keys",
+        tools: [
+          {
+            serverId: "mock-mcp",
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object" }
+          }
+        ],
+        maxIterations: 3,
+        toolCallingEnabled: true,
+        sessionId: "cache-session-1",
+        memory: {
+          namespace: "cache-test",
+          maxMessages: 10,
+          persistToolMessages: false
+        }
+      },
+      {
+        tools: [
+          {
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object" }
+          }
+        ],
+        invokeTool: async () => largeOutput
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined,
+        toolDataStore: cacheStore.api
+      }
+    );
+
+    expect(result.stopReason).toBe("final_answer");
+    const cached = await cacheStore.api.listToolCalls({
+      namespace: "cache-test",
+      sessionId: "cache-session-1",
+      toolName: "mock-mcp__calculator",
+      limit: 10
+    });
+    expect(cached.length).toBe(1);
+
+    const recordId = cached[0]?.id;
+    expect(recordId).toBeTruthy();
+
+    const loaded = await cacheStore.api.getToolCall({
+      namespace: "cache-test",
+      sessionId: "cache-session-1",
+      id: String(recordId)
+    });
+    expect(loaded).toBeTruthy();
+    expect((loaded?.output as { resources?: unknown[] }).resources?.length).toBe(2);
+    const metadataLength = String((loaded?.output as { resources?: Array<{ metadata?: string }> }).resources?.[0]?.metadata).length;
+    expect(metadataLength).toBeGreaterThan(10_000);
+  });
+
+  it("exposes session cache tools so follow-up turns can reuse prior MCP data by session", async () => {
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new SessionCacheListProvider());
+    const runtime = new DefaultAgentRuntime();
+    const cacheStore = createInMemorySessionToolStore();
+
+    await cacheStore.api.saveToolCall({
+      namespace: "cache-test",
+      sessionId: "cache-session-2",
+      toolName: "mock-mcp__list_keys",
+      args: { limit: 50, skip: 0 },
+      output: {
+        total: 136,
+        resources: [{ id: "key-1" }, { id: "key-2" }]
+      },
+      summary: { total: 136, sample: ["key-1", "key-2"] }
+    });
+
+    const result = await runtime.run(
+      {
+        provider: { providerId: "session-cache-list", model: "fake-model" },
+        systemPrompt: "Use cached data if available.",
+        userPrompt: "Create a graph from keys fetched earlier.",
+        tools: [],
+        maxIterations: 3,
+        toolCallingEnabled: true,
+        sessionId: "cache-session-2",
+        memory: {
+          namespace: "cache-test",
+          maxMessages: 10
+        }
+      },
+      {
+        tools: [],
+        invokeTool: async () => {
+          throw new Error("External tool invocation should not happen in this test");
+        }
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined,
+        toolDataStore: cacheStore.api
+      }
+    );
+
+    expect(result.stopReason).toBe("final_answer");
+    expect(result.finalAnswer).toContain("Cache records available: yes");
+    expect(result.steps[0]?.requestedTools[0]?.name).toBe("session_cache_list");
+    expect(result.steps[0]?.toolResults[0]?.toolName).toBe("session_cache_list");
   });
 });

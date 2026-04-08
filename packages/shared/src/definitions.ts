@@ -709,11 +709,13 @@ export const nodeDefinitions: NodeDefinition[] = [
     type: "output_parser",
     label: "Output Parser",
     category: "Utility",
-    description: "Validates and transforms LLM output into structured data using JSON Schema, item list parsing, or auto-fix retry.",
+    description:
+      "Validates and transforms LLM output into structured data using JSON Schema, item list parsing, or auto-fix retry.",
     configSchema: {
       type: "object",
       properties: {
         mode: { type: "string", enum: ["json_schema", "item_list", "auto_fix"] },
+        parsingMode: { type: "string", enum: ["strict", "lenient", "anything_goes"] },
         jsonSchema: { type: "string" },
         itemSeparator: { type: "string" },
         maxRetries: { type: "number" },
@@ -723,6 +725,7 @@ export const nodeDefinitions: NodeDefinition[] = [
     },
     sampleConfig: {
       mode: "json_schema",
+      parsingMode: "strict",
       jsonSchema: "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"sentiment\":{\"type\":\"string\",\"enum\":[\"positive\",\"negative\",\"neutral\"]}},\"required\":[\"name\",\"sentiment\"]}",
       maxRetries: 2,
       inputKey: "answer"

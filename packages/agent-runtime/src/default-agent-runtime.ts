@@ -24,6 +24,17 @@ const DEFAULT_TOOL_PAYLOAD_MAX_DEPTH = 8;
 const DEFAULT_TOOL_PAYLOAD_MAX_OBJECT_KEYS = 64;
 const DEFAULT_TOOL_PAYLOAD_MAX_ARRAY_ITEMS = 64;
 const DEFAULT_TOOL_PAYLOAD_MAX_STRING_CHARS = 1024;
+const SESSION_CACHE_LIST_TOOL_NAME = "session_cache_list";
+const SESSION_CACHE_GET_TOOL_NAME = "session_cache_get";
+const SESSION_CACHE_DEFAULT_LIST_LIMIT = 10;
+const SESSION_CACHE_MAX_LIST_LIMIT = 50;
+const SESSION_CACHE_SUMMARY_LIMITS: NormalizedToolOutputLimits = {
+  messageMaxChars: 20_000,
+  payloadMaxDepth: 3,
+  payloadMaxObjectKeys: 16,
+  payloadMaxArrayItems: 16,
+  payloadMaxStringChars: 240
+};
 
 function normalizeMaxMessages(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
@@ -38,6 +49,11 @@ interface NormalizedToolOutputLimits {
   payloadMaxObjectKeys: number;
   payloadMaxArrayItems: number;
   payloadMaxStringChars: number;
+}
+
+interface RuntimeInternalTool {
+  definition: ToolDefinition;
+  invoke: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
 function normalizeToolOutputLimits(input: AgentToolOutputLimits | undefined): NormalizedToolOutputLimits {
@@ -82,6 +98,201 @@ function toRecord(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+function toOptionalNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function toBoundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  const rounded = Math.floor(parsed);
+  if (rounded < min) {
+    return min;
+  }
+  if (rounded > max) {
+    return max;
+  }
+  return rounded;
+}
+
+function parsePathTokens(path: string): Array<string | number> {
+  const tokens: Array<string | number> = [];
+  const matcher = /[^.[\]]+|\[(\d+)\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(path))) {
+    if (match[1] !== undefined) {
+      tokens.push(Number(match[1]));
+    } else {
+      tokens.push(match[0]);
+    }
+  }
+  return tokens;
+}
+
+function getValueAtPath(root: unknown, rawPath: string): unknown {
+  const trimmed = rawPath.trim();
+  if (!trimmed) {
+    return root;
+  }
+  const tokens = parsePathTokens(trimmed);
+  if (!tokens.length) {
+    return undefined;
+  }
+
+  let current: unknown = root;
+  for (const token of tokens) {
+    if (typeof token === "number") {
+      if (!Array.isArray(current) || token < 0 || token >= current.length) {
+        return undefined;
+      }
+      current = current[token];
+      continue;
+    }
+
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[token];
+  }
+
+  return current;
+}
+
+function buildToolOutputSummary(args: Record<string, unknown>, output: unknown, error?: string): Record<string, unknown> {
+  return {
+    args: compactToolPayload(args, SESSION_CACHE_SUMMARY_LIMITS),
+    output: compactToolPayload(output, SESSION_CACHE_SUMMARY_LIMITS),
+    ...(error ? { error: truncateText(error, 500) } : {})
+  };
+}
+
+function createSessionCacheTools(input: {
+  sessionId: string | undefined;
+  namespace: string;
+  context: AgentRuntimeContext;
+}): RuntimeInternalTool[] {
+  if (!input.sessionId || !input.context.toolDataStore) {
+    return [];
+  }
+
+  const listTool: RuntimeInternalTool = {
+    definition: {
+      name: SESSION_CACHE_LIST_TOOL_NAME,
+      description:
+        "List cached MCP tool results from this session. Use this before repeating expensive MCP calls in follow-up prompts.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tool_name: {
+            type: "string",
+            description: "Optional exact tool name filter."
+          },
+          limit: {
+            type: "number",
+            description: "Maximum records to return. Default 10, maximum 50."
+          }
+        }
+      }
+    },
+    invoke: async (args: Record<string, unknown>) => {
+      const toolName = toOptionalNonEmptyString(args.tool_name);
+      const limit = toBoundedInteger(
+        args.limit,
+        SESSION_CACHE_DEFAULT_LIST_LIMIT,
+        1,
+        SESSION_CACHE_MAX_LIST_LIMIT
+      );
+      const records = await input.context.toolDataStore!.listToolCalls({
+        namespace: input.namespace,
+        sessionId: input.sessionId!,
+        toolName,
+        limit
+      });
+      return {
+        session_id: input.sessionId,
+        namespace: input.namespace,
+        matched: records.length,
+        records: records.map((record) => ({
+          record_id: record.id,
+          tool_name: record.toolName,
+          tool_call_id: record.toolCallId ?? null,
+          created_at: record.createdAt,
+          args: record.args,
+          summary: record.summary ?? null,
+          error: record.error ?? null
+        }))
+      };
+    }
+  };
+
+  const getTool: RuntimeInternalTool = {
+    definition: {
+      name: SESSION_CACHE_GET_TOOL_NAME,
+      description:
+        "Retrieve a cached MCP tool result by record_id, with optional output_path like 'resources[0].name'.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          record_id: {
+            type: "string",
+            description: "Record id returned by session_cache_list."
+          },
+          output_path: {
+            type: "string",
+            description: "Optional path into output JSON (e.g., resources[0].name)."
+          }
+        },
+        required: ["record_id"]
+      }
+    },
+    invoke: async (args: Record<string, unknown>) => {
+      const recordId = toOptionalNonEmptyString(args.record_id);
+      if (!recordId) {
+        throw new Error("record_id is required for session_cache_get.");
+      }
+
+      const record = await input.context.toolDataStore!.getToolCall({
+        namespace: input.namespace,
+        sessionId: input.sessionId!,
+        id: recordId
+      });
+
+      if (!record) {
+        return {
+          found: false,
+          record_id: recordId,
+          message: "No cached record found for this session."
+        };
+      }
+
+      const outputPath = toOptionalNonEmptyString(args.output_path);
+      const selectedOutput = outputPath ? getValueAtPath(record.output, outputPath) : record.output;
+      return {
+        found: selectedOutput !== undefined,
+        record: {
+          record_id: record.id,
+          tool_name: record.toolName,
+          tool_call_id: record.toolCallId ?? null,
+          created_at: record.createdAt,
+          args: record.args,
+          summary: record.summary ?? null,
+          error: record.error ?? null
+        },
+        output_path: outputPath ?? null,
+        output: selectedOutput === undefined ? null : selectedOutput
+      };
+    }
+  };
+
+  return [listTool, getTool];
 }
 
 function compactToolPayload(value: unknown, limits: NormalizedToolOutputLimits, depth = 0): unknown {
@@ -349,6 +560,16 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     const memoryMaxMessages = normalizeMaxMessages(request.memory?.maxMessages);
     const persistToolMessages = request.memory?.persistToolMessages === true;
     const toolOutputLimits = normalizeToolOutputLimits(request.toolOutputLimits);
+    const sessionCacheTools = createSessionCacheTools({
+      sessionId: request.sessionId,
+      namespace: memoryNamespace,
+      context
+    });
+    const sessionCacheToolNames = new Set(sessionCacheTools.map((tool) => tool.definition.name));
+    const sessionCacheHint =
+      sessionCacheTools.length > 0
+        ? `\n\nSession cache tools are available for this session:\n- ${SESSION_CACHE_LIST_TOOL_NAME}: list cached prior MCP outputs\n- ${SESSION_CACHE_GET_TOOL_NAME}: fetch one cached output by record_id\nUse these tools first for follow-up questions to avoid repeating expensive MCP calls.`
+        : "";
 
     let memoryMessages: ChatMessage[] = [];
     if (memoryEnabled && request.sessionId) {
@@ -357,12 +578,28 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     }
 
     const messages: ChatMessage[] = [
-      { role: "system", content: normalizeMessageContent(request.systemPrompt, MAX_SYSTEM_MESSAGE_CHARS) },
+      {
+        role: "system",
+        content: normalizeMessageContent(`${request.systemPrompt}${sessionCacheHint}`, MAX_SYSTEM_MESSAGE_CHARS)
+      },
       ...memoryMessages,
       { role: "user", content: normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS) }
     ];
-    const toolDefinitionByName = new Map<string, ToolDefinition>(tools.tools.map((tool) => [tool.name, tool]));
-    const normalizedTools = normalizeToolsForModel(request.toolCallingEnabled ? tools.tools : [], request.userPrompt);
+    const externalToolDefinitions = tools.tools;
+    const internalToolDefinitions = sessionCacheTools.map((tool) => tool.definition);
+    const allToolDefinitions = [...externalToolDefinitions, ...internalToolDefinitions];
+    const toolDefinitionByName = new Map<string, ToolDefinition>(allToolDefinitions.map((tool) => [tool.name, tool]));
+    const internalToolsByName = new Map<string, RuntimeInternalTool>(
+      sessionCacheTools.map((tool) => [tool.definition.name, tool])
+    );
+
+    const normalizedExternalTools = normalizeToolsForModel(
+      request.toolCallingEnabled ? externalToolDefinitions : [],
+      request.userPrompt
+    );
+    const normalizedTools = request.toolCallingEnabled
+      ? dedupeToolsByName([...internalToolDefinitions, ...normalizedExternalTools])
+      : [];
 
     const steps: AgentRunState["steps"] = [];
     let lastAssistantMessage = "";
@@ -417,12 +654,31 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
                 );
               }
 
-              const output = await tools.invokeTool(call.name, call.arguments);
+              const internalTool = internalToolsByName.get(call.name);
+              const output = internalTool
+                ? await internalTool.invoke(call.arguments)
+                : await tools.invokeTool(call.name, call.arguments);
               toolResults.push({
                 toolCallId: call.id,
                 toolName: call.name,
                 output
               });
+
+              if (!sessionCacheToolNames.has(call.name) && context.toolDataStore && request.sessionId) {
+                try {
+                  await context.toolDataStore.saveToolCall({
+                    namespace: memoryNamespace,
+                    sessionId: request.sessionId,
+                    toolName: call.name,
+                    toolCallId: call.id,
+                    args: call.arguments,
+                    output,
+                    summary: buildToolOutputSummary(call.arguments, output)
+                  });
+                } catch {
+                  // Cache persistence must never break agent execution.
+                }
+              }
 
               messages.push({
                 role: "tool",
@@ -433,6 +689,24 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
             } catch (error) {
               const toolError = createToolErrorResult(call, error);
               toolResults.push(toolError);
+
+              if (!sessionCacheToolNames.has(call.name) && context.toolDataStore && request.sessionId) {
+                try {
+                  await context.toolDataStore.saveToolCall({
+                    namespace: memoryNamespace,
+                    sessionId: request.sessionId,
+                    toolName: call.name,
+                    toolCallId: call.id,
+                    args: call.arguments,
+                    output: null,
+                    error: toolError.error,
+                    summary: buildToolOutputSummary(call.arguments, null, toolError.error)
+                  });
+                } catch {
+                  // Cache persistence must never break agent execution.
+                }
+              }
+
               messages.push({
                 role: "tool",
                 content: serializeToolMessage(false, toolError.error, toolOutputLimits),

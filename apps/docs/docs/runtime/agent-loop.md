@@ -34,3 +34,23 @@ Agent orchestration is iterative, not one-shot.
 - Restrict tool set to task-relevant tools
 - Set explicit max iterations
 - Ensure upstream nodes provide stable prompt fields
+
+## Session tool cache (multi-turn reuse)
+
+The runtime persists full MCP tool outputs outside prompt context and exposes cache tools back to the model for follow-up turns.
+
+Behavior:
+
+1. External MCP tool call completes.
+2. Runtime stores full args/output by `namespace + session_id`.
+3. Runtime gives the model compact in-context tool messages.
+4. On later turns, model can call:
+   - `session_cache_list`
+   - `session_cache_get`
+5. Model reuses prior fetched data instead of repeating expensive MCP calls.
+
+Notes:
+
+- Cache tools are injected automatically when `session_id` is present.
+- Reuse depends on stable `session_id` and memory namespace.
+- Cached payloads are stored in SQLite table `session_tool_cache`.

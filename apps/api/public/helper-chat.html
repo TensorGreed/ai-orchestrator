@@ -6,312 +6,366 @@
     <title>Workflow Chat Helper</title>
     <style>
       :root {
-        --bg: #f6f4ef;
-        --panel: #ffffff;
-        --border: #d9d2c6;
-        --text: #1d2838;
-        --muted: #6d7b8c;
-        --accent: #c96832;
-        --accent-soft: #f6e8de;
-        --ok: #187d54;
-        --err: #b7333f;
+        --bg: #eef2f6;
+        --widget-bg: #ffffff;
+        --widget-border: #d7dde7;
+        --header-bg: #1e293b;
+        --header-text: #f8fafc;
+        --text: #1f2937;
+        --muted: #667085;
+        --user-bg: #dbeafe;
+        --assistant-bg: #f8fafc;
+        --accent: #0ea5a5;
+        --accent-2: #0284c7;
+        --error: #dc2626;
       }
 
       * {
         box-sizing: border-box;
       }
 
+      html,
       body {
         margin: 0;
-        font-family: "Segoe UI", Tahoma, sans-serif;
-        background: radial-gradient(circle at 95% 0%, #efe2d2 0%, var(--bg) 52%);
+        width: 100%;
+        height: 100%;
+        font-family: "Inter", "Segoe UI", Arial, sans-serif;
+        background: linear-gradient(160deg, #f2f4f8 0%, #e5ecf5 100%);
         color: var(--text);
       }
 
-      .shell {
-        max-width: 860px;
-        margin: 18px auto;
-        padding: 0 14px 14px;
+      .page-shell {
+        width: 100%;
+        height: 100%;
+        position: relative;
       }
 
-      .card {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 12px;
+      .helper-label {
+        position: absolute;
+        top: 12px;
+        left: 16px;
+        font-size: 12px;
+        color: #64748b;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
       }
 
-      .header {
+      .chat-widget {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        width: min(430px, calc(100vw - 24px));
+        height: min(680px, calc(100vh - 24px));
+        border: 1px solid var(--widget-border);
+        border-radius: 18px;
+        background: var(--widget-bg);
+        box-shadow:
+          0 20px 48px rgba(15, 23, 42, 0.22),
+          0 2px 8px rgba(15, 23, 42, 0.08);
+        overflow: hidden;
+        display: grid;
+        grid-template-rows: auto auto 1fr auto;
+      }
+
+      .chat-widget.minimized {
+        display: none;
+      }
+
+      .chat-header {
+        background: var(--header-bg);
+        color: var(--header-text);
         padding: 12px 14px;
-        border-bottom: 1px solid var(--border);
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 12px;
+        gap: 10px;
       }
 
-      .title {
+      .title-wrap {
+        min-width: 0;
+      }
+
+      .chat-title {
         margin: 0;
-        font-size: 18px;
+        font-size: 16px;
+        font-weight: 700;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
-      .status {
-        font-size: 12px;
-        color: var(--muted);
+      .chat-subtitle {
+        margin: 2px 0 0;
+        font-size: 11px;
+        color: #c6d0de;
       }
 
-      .status.ok {
-        color: var(--ok);
+      .header-actions {
+        display: flex;
+        gap: 6px;
       }
 
-      .status.err {
-        color: var(--err);
-      }
-
-      details {
-        border-bottom: 1px solid var(--border);
-        padding: 8px 14px 12px;
-      }
-
-      summary {
+      .icon-btn {
+        border: 0;
+        width: 31px;
+        height: 31px;
+        border-radius: 9px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
         cursor: pointer;
-        font-weight: 600;
-        color: #4f5f73;
+        background: rgba(255, 255, 255, 0.12);
+        color: var(--header-text);
+      }
+
+      .icon-btn:hover {
+        background: rgba(255, 255, 255, 0.2);
       }
 
       .settings {
-        margin-top: 10px;
-        display: grid;
-        gap: 8px;
+        padding: 12px;
+        border-bottom: 1px solid #e5e7eb;
+        background: #fbfdff;
+        display: none;
+        gap: 10px;
       }
 
-      .row {
+      .settings.open {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
       }
 
       .field {
         display: grid;
-        gap: 4px;
+        gap: 6px;
       }
 
       .field label {
         font-size: 12px;
-        color: var(--muted);
+        color: #4b5563;
       }
 
-      .field input,
-      .field textarea {
+      .field input {
         width: 100%;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 8px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        padding: 9px 10px;
         font: inherit;
-        color: var(--text);
-      }
-
-      .field textarea {
-        min-height: 66px;
-        resize: vertical;
       }
 
       .settings-actions {
         display: flex;
-        gap: 8px;
         justify-content: flex-end;
-      }
-
-      .chat {
-        height: 52vh;
-        min-height: 360px;
-        overflow: auto;
-        padding: 14px;
-        display: grid;
-        gap: 10px;
-      }
-
-      .msg {
-        max-width: 92%;
-        border-radius: 10px;
-        padding: 10px 12px;
-        white-space: pre-wrap;
-        word-break: break-word;
-        line-height: 1.4;
-      }
-
-      .msg.user {
-        justify-self: end;
-        background: #e6eef9;
-        border: 1px solid #c8dcf9;
-      }
-
-      .msg.assistant {
-        justify-self: start;
-        background: #f8f3e8;
-        border: 1px solid #e9dcc4;
-      }
-
-      .composer {
-        border-top: 1px solid var(--border);
-        padding: 12px 14px;
-        display: grid;
-        gap: 8px;
-      }
-
-      .composer textarea {
-        width: 100%;
-        min-height: 74px;
-        resize: vertical;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 10px;
-        font: inherit;
-      }
-
-      .actions {
-        display: flex;
-        justify-content: space-between;
         gap: 8px;
       }
 
       .btn {
-        border: 1px solid transparent;
-        border-radius: 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
         padding: 8px 12px;
+        font-size: 13px;
         font-weight: 600;
         cursor: pointer;
+        background: #fff;
+        color: #334155;
       }
 
       .btn.primary {
-        background: var(--accent);
+        border-color: #0284c7;
+        background: #0284c7;
         color: #fff;
       }
 
-      .btn.secondary {
-        background: var(--accent-soft);
-        border-color: #e5c7b4;
-        color: #6f3d23;
-      }
-
-      .details {
-        border-top: 1px solid var(--border);
-        padding: 10px 14px 14px;
-      }
-
-      .details h4 {
-        margin: 10px 0 8px;
-        font-size: 13px;
-        color: var(--muted);
-      }
-
-      pre {
-        margin: 0;
-        padding: 10px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: #fcfbf8;
+      .status-line {
+        padding: 9px 12px;
         font-size: 12px;
+        color: var(--muted);
+        border-bottom: 1px solid #e5e7eb;
+        background: #ffffff;
+      }
+
+      .status-line.error {
+        color: var(--error);
+      }
+
+      .status-line.ok {
+        color: #0f766e;
+      }
+
+      .chat-log {
+        min-height: 0;
         overflow: auto;
-        max-height: 190px;
+        padding: 14px 12px;
+        display: grid;
+        align-content: start;
+        gap: 10px;
+        background: #f7fafc;
+      }
+
+      .message {
+        max-width: 88%;
+        border: 1px solid #dbe4ef;
+        border-radius: 12px;
+        padding: 10px 12px;
+        font-size: 14px;
+        line-height: 1.45;
         white-space: pre-wrap;
         word-break: break-word;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       }
 
-      @media (max-width: 760px) {
-        .row {
-          grid-template-columns: 1fr;
+      .message.user {
+        justify-self: end;
+        background: var(--user-bg);
+        border-color: #bfdbfe;
+      }
+
+      .message.assistant {
+        justify-self: start;
+        background: var(--assistant-bg);
+      }
+
+      .message a {
+        color: #0f6fd6;
+        font-weight: 600;
+      }
+
+      .composer {
+        border-top: 1px solid #e2e8f0;
+        background: #fff;
+        padding: 10px;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+      }
+
+      .composer textarea {
+        min-height: 44px;
+        max-height: 140px;
+        resize: vertical;
+        border: 2px solid #d7e2ef;
+        border-radius: 10px;
+        padding: 10px;
+        font: inherit;
+      }
+
+      .send-btn {
+        align-self: end;
+        height: 44px;
+        min-width: 44px;
+        border-radius: 10px;
+        border: 1px solid #0284c7;
+        background: #0284c7;
+        color: #fff;
+        font-size: 18px;
+        cursor: pointer;
+      }
+
+      .send-btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .open-chat-btn {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 16px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: #fff;
+        font-size: 14px;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: 0 10px 25px rgba(2, 132, 199, 0.35);
+        display: none;
+      }
+
+      .open-chat-btn.visible {
+        display: inline-flex;
+      }
+
+      @media (max-width: 640px) {
+        .chat-widget {
+          right: 0;
+          bottom: 0;
+          width: 100vw;
+          height: 100vh;
+          border-radius: 0;
+        }
+
+        .open-chat-btn {
+          right: 12px;
+          bottom: 12px;
         }
       }
     </style>
   </head>
   <body>
-    <div class="shell">
-      <section class="card">
-        <header class="header">
-          <h1 class="title">Workflow Chat Helper</h1>
-          <div id="statusLine" class="status">Ready</div>
+    <div class="page-shell">
+      <div class="helper-label">Workflow Chat Helper</div>
+
+      <section id="chatWidget" class="chat-widget" aria-label="Workflow Chat Helper">
+        <header class="chat-header">
+          <div class="title-wrap">
+            <h1 class="chat-title">L2M Assistant</h1>
+            <p class="chat-subtitle">Webhook chat</p>
+          </div>
+          <div class="header-actions">
+            <button id="settingsBtn" class="icon-btn" title="Settings" type="button">&#9881;</button>
+            <button id="newSessionBtn" class="icon-btn" title="New Session" type="button">&#10227;</button>
+            <button id="minimizeBtn" class="icon-btn" title="Minimize" type="button">&#8722;</button>
+          </div>
         </header>
 
-        <details>
-          <summary>Settings</summary>
-          <div class="settings">
-            <div class="row">
-              <div class="field">
-                <label for="apiBase">API Base URL</label>
-                <input id="apiBase" type="text" placeholder="http://localhost:4001" />
-              </div>
-              <div class="field">
-                <label for="webhookPath">Webhook Path (test or prod)</label>
-                <input id="webhookPath" type="text" placeholder="/webhook-test/agent-demo" />
-              </div>
-            </div>
-            <div class="row">
-              <div class="field">
-                <label for="email">Login Email (for history trace)</label>
-                <input id="email" type="email" placeholder="builder@example.com" />
-              </div>
-              <div class="field">
-                <label for="password">Password</label>
-                <input id="password" type="password" placeholder="••••••••" />
-              </div>
-            </div>
-            <div class="row">
-              <div class="field">
-                <label for="sessionId">Session ID (kept for follow-up)</label>
-                <input id="sessionId" type="text" />
-              </div>
-              <div class="field">
-                <label for="systemPrompt">System Prompt (optional)</label>
-                <textarea id="systemPrompt" placeholder="Optional system prompt..."></textarea>
-              </div>
-            </div>
-            <div class="settings-actions">
-              <button id="newSessionBtn" class="btn secondary" type="button">New Session</button>
-              <button id="loginBtn" class="btn secondary" type="button">Login</button>
-            </div>
+        <section id="settingsPanel" class="settings" aria-label="Connection settings">
+          <div class="field">
+            <label for="apiBase">Base URL</label>
+            <input id="apiBase" type="text" placeholder="http://localhost:4001" />
           </div>
-        </details>
-
-        <div id="chatLog" class="chat"></div>
-
-        <div class="composer">
-          <textarea id="userInput" placeholder="Send prompt to webhook..."></textarea>
-          <div class="actions">
-            <button id="clearBtn" class="btn secondary" type="button">Clear</button>
-            <button id="sendBtn" class="btn primary" type="button">Send</button>
+          <div class="field">
+            <label for="webhookPath">Webhook Path or Full URL</label>
+            <input id="webhookPath" type="text" placeholder="/webhook-test/agent-demo" />
           </div>
-        </div>
+          <div class="settings-actions">
+            <button id="closeSettingsBtn" class="btn" type="button">Close</button>
+            <button id="saveSettingsBtn" class="btn primary" type="button">Save</button>
+          </div>
+        </section>
 
-        <div class="details">
-          <h4>Execution Trace (from history)</h4>
-          <pre id="traceBox">[]</pre>
-          <h4>Final API Output</h4>
-          <pre id="resultBox">{}</pre>
-        </div>
+        <div id="statusLine" class="status-line">Ready</div>
+        <div id="chatLog" class="chat-log"></div>
+
+        <footer class="composer">
+          <textarea id="userInput" placeholder="Type your message"></textarea>
+          <button id="sendBtn" class="send-btn" type="button" title="Send">&#8594;</button>
+        </footer>
       </section>
+
+      <button id="openChatBtn" class="open-chat-btn" type="button">Open chat</button>
     </div>
 
     <script>
       (() => {
-        const STORAGE_KEY = "workflow-helper-chat-settings-v1";
+        const STORAGE_KEY = "workflow-helper-chat-settings-v2";
+
+        const chatWidgetEl = document.getElementById("chatWidget");
+        const openChatBtn = document.getElementById("openChatBtn");
+        const settingsBtn = document.getElementById("settingsBtn");
+        const newSessionBtn = document.getElementById("newSessionBtn");
+        const minimizeBtn = document.getElementById("minimizeBtn");
+        const settingsPanelEl = document.getElementById("settingsPanel");
+        const saveSettingsBtn = document.getElementById("saveSettingsBtn");
+        const closeSettingsBtn = document.getElementById("closeSettingsBtn");
         const apiBaseEl = document.getElementById("apiBase");
         const webhookPathEl = document.getElementById("webhookPath");
-        const emailEl = document.getElementById("email");
-        const passwordEl = document.getElementById("password");
-        const sessionIdEl = document.getElementById("sessionId");
-        const systemPromptEl = document.getElementById("systemPrompt");
+        const statusLineEl = document.getElementById("statusLine");
         const chatLogEl = document.getElementById("chatLog");
         const userInputEl = document.getElementById("userInput");
-        const statusLineEl = document.getElementById("statusLine");
-        const traceBoxEl = document.getElementById("traceBox");
-        const resultBoxEl = document.getElementById("resultBox");
-        const loginBtn = document.getElementById("loginBtn");
         const sendBtn = document.getElementById("sendBtn");
-        const clearBtn = document.getElementById("clearBtn");
-        const newSessionBtn = document.getElementById("newSessionBtn");
 
         let busy = false;
+        let sessionId = "";
 
         function createSessionId() {
           if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -320,29 +374,12 @@
           return `helper-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         }
 
-        function nowIso() {
-          return new Date().toISOString();
-        }
-
-        function wait(ms) {
-          return new Promise((resolve) => window.setTimeout(resolve, ms));
-        }
-
-        function toJson(value) {
-          try {
-            return JSON.stringify(value ?? null, null, 2);
-          } catch {
-            return String(value);
-          }
-        }
-
         function loadSettings() {
           const defaults = {
             apiBase: window.location.origin || "http://localhost:4001",
             webhookPath: "/webhook-test/agent-demo",
-            email: "",
             sessionId: createSessionId(),
-            systemPrompt: ""
+            minimized: false
           };
           try {
             const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
@@ -353,28 +390,13 @@
         }
 
         function saveSettings() {
-          const settings = {
+          const payload = {
             apiBase: apiBaseEl.value.trim(),
             webhookPath: webhookPathEl.value.trim(),
-            email: emailEl.value.trim(),
-            sessionId: sessionIdEl.value.trim(),
-            systemPrompt: systemPromptEl.value
+            sessionId,
+            minimized: chatWidgetEl.classList.contains("minimized")
           };
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-        }
-
-        function setStatus(text, tone) {
-          statusLineEl.textContent = text;
-          statusLineEl.className = `status ${tone || ""}`.trim();
-        }
-
-        function addMessage(role, text) {
-          const el = document.createElement("div");
-          el.className = `msg ${role}`;
-          el.textContent = text || "";
-          chatLogEl.appendChild(el);
-          chatLogEl.scrollTop = chatLogEl.scrollHeight;
-          return el;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
         }
 
         function normalizeBase(base) {
@@ -402,6 +424,14 @@
           }
         }
 
+        function toJson(value) {
+          try {
+            return JSON.stringify(value ?? null, null, 2);
+          } catch {
+            return String(value);
+          }
+        }
+
         function extractAssistantText(payload) {
           const rootDecoded = decodeBufferLikeText(payload);
           if (typeof rootDecoded === "string") return rootDecoded;
@@ -412,18 +442,18 @@
             if (typeof decodedOutput === "string") return decodedOutput;
             if (typeof output === "string") return output;
             if (output && typeof output === "object") {
-              const candidates = [output.result, output.answer, output.text, output.content];
-              for (const c of candidates) {
-                const decoded = decodeBufferLikeText(c);
+              const outputCandidates = [output.result, output.answer, output.text, output.content];
+              for (const candidate of outputCandidates) {
+                const decoded = decodeBufferLikeText(candidate);
                 if (typeof decoded === "string") return decoded;
-                if (typeof c === "string" && c.trim()) return c;
+                if (typeof candidate === "string" && candidate.trim()) return candidate;
               }
             }
-            const candidates = [payload.result, payload.answer, payload.text, payload.content];
-            for (const c of candidates) {
-              const decoded = decodeBufferLikeText(c);
+            const rootCandidates = [payload.result, payload.answer, payload.text, payload.content];
+            for (const candidate of rootCandidates) {
+              const decoded = decodeBufferLikeText(candidate);
               if (typeof decoded === "string") return decoded;
-              if (typeof c === "string" && c.trim()) return c;
+              if (typeof candidate === "string" && candidate.trim()) return candidate;
             }
           }
           return toJson(payload);
@@ -433,9 +463,10 @@
           return typeof value === "string" && /^data:application\/pdf;base64,/i.test(value.trim());
         }
 
-        function renderAssistantContent(messageEl, text) {
-          if (isPdfDataUrl(text)) {
-            messageEl.innerHTML = "";
+        function addMessage(role, text) {
+          const messageEl = document.createElement("div");
+          messageEl.className = `message ${role}`;
+          if (role === "assistant" && isPdfDataUrl(text)) {
             const link = document.createElement("a");
             link.href = text;
             link.download = "workflow-output.pdf";
@@ -443,89 +474,43 @@
             link.rel = "noreferrer";
             link.textContent = "Download PDF";
             messageEl.appendChild(link);
-            return;
+          } else {
+            messageEl.textContent = text || "";
           }
-          messageEl.textContent = text || "";
+          chatLogEl.appendChild(messageEl);
+          chatLogEl.scrollTop = chatLogEl.scrollHeight;
+          return messageEl;
         }
 
-        async function login() {
-          const base = normalizeBase(apiBaseEl.value);
-          const email = emailEl.value.trim();
-          const password = passwordEl.value;
-          if (!base || !email || !password) {
-            setStatus("Provide API base, email, and password.", "err");
-            return;
-          }
-
-          try {
-            setStatus("Logging in...", "");
-            const res = await fetch(`${base}/api/auth/login`, {
-              method: "POST",
-              credentials: "include",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ email, password })
-            });
-            const body = await res.json().catch(() => ({}));
-            if (!res.ok) {
-              throw new Error(body && body.error ? body.error : `Login failed (${res.status})`);
-            }
-            saveSettings();
-            setStatus(`Logged in as ${body?.user?.email || email}.`, "ok");
-          } catch (error) {
-            setStatus(error instanceof Error ? error.message : "Login failed.", "err");
+        function setStatus(text, tone) {
+          statusLineEl.textContent = text;
+          statusLineEl.className = "status-line";
+          if (tone === "ok") {
+            statusLineEl.classList.add("ok");
+          } else if (tone === "error") {
+            statusLineEl.classList.add("error");
           }
         }
 
-        async function findExecutionTrace(base, webhookPath, sessionId, startedAfterIso) {
-          const triggerType = webhookPath.includes("/webhook-test/") ? "webhook_test" : "webhook";
-          const startedAfter = Date.parse(startedAfterIso);
-          if (!Number.isFinite(startedAfter)) {
-            return null;
+        function setMinimized(isMinimized) {
+          if (isMinimized) {
+            chatWidgetEl.classList.add("minimized");
+            openChatBtn.classList.add("visible");
+          } else {
+            chatWidgetEl.classList.remove("minimized");
+            openChatBtn.classList.remove("visible");
           }
+          saveSettings();
+        }
 
-          for (let attempt = 0; attempt < 8; attempt += 1) {
-            const listRes = await fetch(
-              `${normalizeBase(base)}/api/executions?page=1&pageSize=12&triggerType=${encodeURIComponent(triggerType)}`,
-              { method: "GET", credentials: "include" }
-            );
-            if (!listRes.ok) {
-              return null;
-            }
-            const listBody = await listRes.json().catch(() => ({}));
-            const items = Array.isArray(listBody?.items) ? listBody.items : [];
-
-            for (const item of items) {
-              const startedAtMs = Date.parse(String(item?.startedAt || ""));
-              if (!Number.isFinite(startedAtMs) || startedAtMs < startedAfter - 5000) {
-                continue;
-              }
-              const detailRes = await fetch(`${normalizeBase(base)}/api/executions/${encodeURIComponent(String(item.id || ""))}`, {
-                method: "GET",
-                credentials: "include"
-              });
-              if (!detailRes.ok) {
-                continue;
-              }
-              const detail = await detailRes.json().catch(() => null);
-              if (!detail || typeof detail !== "object") {
-                continue;
-              }
-              const input = detail.input && typeof detail.input === "object" ? detail.input : null;
-              const detailSession =
-                input && typeof input.session_id === "string"
-                  ? input.session_id
-                  : input && typeof input.sessionId === "string"
-                    ? input.sessionId
-                    : "";
-              if (detailSession === sessionId) {
-                return detail;
-              }
-            }
-
-            await wait(500);
+        function showWelcomeMessage() {
+          if (chatLogEl.childElementCount > 0) {
+            return;
           }
-
-          return null;
+          addMessage(
+            "assistant",
+            "Hi, this is your workflow assistant. Send a prompt and I will call your configured webhook."
+          );
         }
 
         async function sendMessage() {
@@ -535,30 +520,22 @@
 
           const base = apiBaseEl.value.trim();
           const webhookPath = webhookPathEl.value.trim();
-          const sessionId = sessionIdEl.value.trim();
-          const systemPrompt = systemPromptEl.value.trim();
-
-          if (!base || !webhookPath || !sessionId) {
-            setStatus("Provide API base, webhook path, and session ID.", "err");
+          if (!base || !webhookPath) {
+            setStatus("Set Base URL and Webhook Path in settings.", "error");
             return;
           }
 
           busy = true;
           sendBtn.disabled = true;
-          saveSettings();
 
-          userInputEl.value = "";
-          const startedAt = nowIso();
           addMessage("user", userPrompt);
-          const assistant = addMessage("assistant", "...");
-          resultBoxEl.textContent = "{}";
-          traceBoxEl.textContent = "[]";
+          userInputEl.value = "";
+          const pendingEl = addMessage("assistant", "Typing...");
           setStatus("Calling webhook...", "");
 
           const payload = {
             user_prompt: userPrompt,
-            session_id: sessionId,
-            ...(systemPrompt ? { system_prompt: systemPrompt } : {})
+            session_id: sessionId
           };
 
           try {
@@ -569,75 +546,84 @@
               body: JSON.stringify(payload)
             });
 
-            const rawText = await response.text();
-            let body = rawText;
+            const raw = await response.text();
+            let body = raw;
             try {
-              body = rawText ? JSON.parse(rawText) : null;
+              body = raw ? JSON.parse(raw) : null;
             } catch {
-              // Keep raw text as-is
+              // leave as string
             }
 
             if (!response.ok) {
-              throw new Error(typeof body === "object" && body && body.error ? body.error : `Webhook call failed (${response.status})`);
+              const message = typeof body === "object" && body && body.error ? body.error : `Webhook failed (${response.status})`;
+              throw new Error(message);
             }
 
-            renderAssistantContent(assistant, extractAssistantText(body));
-            resultBoxEl.textContent = toJson(body);
-            setStatus("Webhook call complete.", "ok");
-
-            const trace = await findExecutionTrace(base, webhookPath, sessionId, startedAt);
-            if (trace && Array.isArray(trace.nodeResults)) {
-              const compact = trace.nodeResults.map((node) => ({
-                nodeId: node.nodeId,
-                status: node.status,
-                durationMs: node.durationMs,
-                error: node.error
-              }));
-              traceBoxEl.textContent = toJson(compact);
+            pendingEl.textContent = "";
+            if (isPdfDataUrl(extractAssistantText(body))) {
+              const link = document.createElement("a");
+              link.href = extractAssistantText(body);
+              link.download = "workflow-output.pdf";
+              link.target = "_blank";
+              link.rel = "noreferrer";
+              link.textContent = "Download PDF";
+              pendingEl.appendChild(link);
             } else {
-              traceBoxEl.textContent = toJson([
-                {
-                  message: "Trace not available. Login as viewer/builder/admin to read /api/executions."
-                }
-              ]);
+              pendingEl.textContent = extractAssistantText(body);
             }
+            setStatus("Response received.", "ok");
           } catch (error) {
-            const msg = error instanceof Error ? error.message : "Request failed.";
-            renderAssistantContent(assistant, `Error: ${msg}`);
-            setStatus(msg, "err");
+            const message = error instanceof Error ? error.message : "Request failed.";
+            pendingEl.textContent = `Error: ${message}`;
+            setStatus(message, "error");
           } finally {
             busy = false;
             sendBtn.disabled = false;
+            saveSettings();
           }
         }
 
         const initial = loadSettings();
         apiBaseEl.value = initial.apiBase;
         webhookPathEl.value = initial.webhookPath;
-        emailEl.value = initial.email;
-        sessionIdEl.value = initial.sessionId;
-        systemPromptEl.value = initial.systemPrompt;
+        sessionId = typeof initial.sessionId === "string" && initial.sessionId ? initial.sessionId : createSessionId();
 
-        loginBtn.addEventListener("click", () => {
-          void login();
+        showWelcomeMessage();
+        setMinimized(Boolean(initial.minimized));
+
+        settingsBtn.addEventListener("click", () => {
+          settingsPanelEl.classList.toggle("open");
         });
+
+        saveSettingsBtn.addEventListener("click", () => {
+          saveSettings();
+          settingsPanelEl.classList.remove("open");
+          setStatus("Settings saved.", "ok");
+        });
+
+        closeSettingsBtn.addEventListener("click", () => {
+          settingsPanelEl.classList.remove("open");
+        });
+
+        newSessionBtn.addEventListener("click", () => {
+          sessionId = createSessionId();
+          addMessage("assistant", `New session started (${sessionId}).`);
+          setStatus("Started new session.", "ok");
+          saveSettings();
+        });
+
+        minimizeBtn.addEventListener("click", () => {
+          setMinimized(true);
+        });
+
+        openChatBtn.addEventListener("click", () => {
+          setMinimized(false);
+        });
+
         sendBtn.addEventListener("click", () => {
           void sendMessage();
         });
-        clearBtn.addEventListener("click", () => {
-          chatLogEl.innerHTML = "";
-          resultBoxEl.textContent = "{}";
-          traceBoxEl.textContent = "[]";
-          setStatus("Cleared.", "");
-        });
-        newSessionBtn.addEventListener("click", () => {
-          sessionIdEl.value = createSessionId();
-          saveSettings();
-          setStatus(`New session: ${sessionIdEl.value}`, "");
-        });
-        [apiBaseEl, webhookPathEl, emailEl, sessionIdEl, systemPromptEl].forEach((el) => {
-          el.addEventListener("change", saveSettings);
-        });
+
         userInputEl.addEventListener("keydown", (event) => {
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();

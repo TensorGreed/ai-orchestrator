@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import initSqlJs, { type BindParams, type Database as SQLDatabase } from "sql.js";
 import type { ChatMessage, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
@@ -32,6 +33,19 @@ interface SessionMemoryRow {
   messages_json: string;
   created_at: string;
   updated_at: string;
+}
+
+interface SessionToolCacheRow {
+  id: string;
+  namespace: string;
+  session_id: string;
+  tool_name: string;
+  tool_call_id: string | null;
+  args_json: string;
+  output_json: string;
+  error: string | null;
+  summary_json: string | null;
+  created_at: string;
 }
 
 interface UserRow {
@@ -111,6 +125,16 @@ function toNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value ?? 0);
 }
 
+function parseJsonSafe(value: unknown): unknown {
+  try {
+    return JSON.parse(toString(value));
+  } catch {
+    return null;
+  }
+}
+
+const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
+
 export class SqliteStore {
   private constructor(
     private readonly db: SQLDatabase,
@@ -164,6 +188,25 @@ export class SqliteStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (namespace, session_id)
       );
+
+      CREATE TABLE IF NOT EXISTS session_tool_cache (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        tool_call_id TEXT,
+        args_json TEXT NOT NULL,
+        output_json TEXT NOT NULL,
+        error TEXT,
+        summary_json TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_session_tool_cache_namespace_session_created_at
+      ON session_tool_cache(namespace, session_id, created_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_session_tool_cache_tool_name
+      ON session_tool_cache(tool_name);
 
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -689,6 +732,195 @@ export class SqliteStore {
     );
 
     this.persist();
+  }
+
+  saveSessionToolCall(input: {
+    namespace: string;
+    sessionId: string;
+    toolName: string;
+    toolCallId?: string;
+    args: Record<string, unknown>;
+    output: unknown;
+    error?: string;
+    summary?: unknown;
+  }): {
+    id: string;
+    namespace: string;
+    sessionId: string;
+    toolName: string;
+    toolCallId?: string;
+    args: Record<string, unknown>;
+    output: unknown;
+    error?: string;
+    summary?: unknown;
+    createdAt: string;
+  } {
+    const now = new Date().toISOString();
+    const id = randomUUID();
+
+    this.db.run(
+      `INSERT INTO session_tool_cache (
+          id,
+          namespace,
+          session_id,
+          tool_name,
+          tool_call_id,
+          args_json,
+          output_json,
+          error,
+          summary_json,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        input.namespace,
+        input.sessionId,
+        input.toolName,
+        input.toolCallId ?? null,
+        JSON.stringify(input.args ?? {}),
+        JSON.stringify(input.output ?? null),
+        input.error ?? null,
+        input.summary === undefined ? null : JSON.stringify(input.summary),
+        now
+      ]
+    );
+
+    this.db.run(
+      `DELETE FROM session_tool_cache
+       WHERE id IN (
+         SELECT id
+         FROM session_tool_cache
+         WHERE namespace = ? AND session_id = ?
+         ORDER BY created_at DESC
+         LIMIT -1 OFFSET ?
+       )`,
+      [input.namespace, input.sessionId, MAX_SESSION_TOOL_CACHE_RECORDS]
+    );
+
+    this.persist();
+
+    return {
+      id,
+      namespace: input.namespace,
+      sessionId: input.sessionId,
+      toolName: input.toolName,
+      toolCallId: input.toolCallId,
+      args: input.args ?? {},
+      output: input.output ?? null,
+      error: input.error,
+      summary: input.summary,
+      createdAt: now
+    };
+  }
+
+  listSessionToolCalls(input: {
+    namespace: string;
+    sessionId: string;
+    toolName?: string;
+    limit?: number;
+  }): Array<{
+    id: string;
+    namespace: string;
+    sessionId: string;
+    toolName: string;
+    toolCallId?: string;
+    args: Record<string, unknown>;
+    error?: string;
+    summary?: unknown;
+    createdAt: string;
+  }> {
+    const limit =
+      typeof input.limit === "number" && Number.isFinite(input.limit) && input.limit > 0
+        ? Math.min(Math.floor(input.limit), 200)
+        : 20;
+
+    const toolName =
+      typeof input.toolName === "string" && input.toolName.trim().length > 0 ? input.toolName.trim() : undefined;
+    let rows: SessionToolCacheRow[];
+    if (toolName) {
+      rows = this.queryAll<SessionToolCacheRow>(
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+         FROM session_tool_cache
+         WHERE namespace = ? AND session_id = ? AND tool_name = ?
+         ORDER BY created_at DESC
+         LIMIT ?`,
+        [input.namespace, input.sessionId, toolName, limit]
+      );
+    } else {
+      rows = this.queryAll<SessionToolCacheRow>(
+        `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+         FROM session_tool_cache
+         WHERE namespace = ? AND session_id = ?
+         ORDER BY created_at DESC
+         LIMIT ?`,
+        [input.namespace, input.sessionId, limit]
+      );
+    }
+
+    return rows.map((row) => {
+      const argsParsed = parseJsonSafe(row.args_json);
+      const args = argsParsed && typeof argsParsed === "object" && !Array.isArray(argsParsed)
+        ? (argsParsed as Record<string, unknown>)
+        : {};
+
+      return {
+        id: toString(row.id),
+        namespace: toString(row.namespace),
+        sessionId: toString(row.session_id),
+        toolName: toString(row.tool_name),
+        toolCallId: row.tool_call_id ? toString(row.tool_call_id) : undefined,
+        args,
+        error: row.error ? toString(row.error) : undefined,
+        summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
+        createdAt: toString(row.created_at)
+      };
+    });
+  }
+
+  getSessionToolCall(input: {
+    namespace: string;
+    sessionId: string;
+    id: string;
+  }): {
+    id: string;
+    namespace: string;
+    sessionId: string;
+    toolName: string;
+    toolCallId?: string;
+    args: Record<string, unknown>;
+    output: unknown;
+    error?: string;
+    summary?: unknown;
+    createdAt: string;
+  } | null {
+    const row = this.queryOne<SessionToolCacheRow>(
+      `SELECT id, namespace, session_id, tool_name, tool_call_id, args_json, output_json, error, summary_json, created_at
+       FROM session_tool_cache
+       WHERE namespace = ? AND session_id = ? AND id = ?`,
+      [input.namespace, input.sessionId, input.id]
+    );
+
+    if (!row) {
+      return null;
+    }
+
+    const argsParsed = parseJsonSafe(row.args_json);
+    const args = argsParsed && typeof argsParsed === "object" && !Array.isArray(argsParsed)
+      ? (argsParsed as Record<string, unknown>)
+      : {};
+
+    return {
+      id: toString(row.id),
+      namespace: toString(row.namespace),
+      sessionId: toString(row.session_id),
+      toolName: toString(row.tool_name),
+      toolCallId: row.tool_call_id ? toString(row.tool_call_id) : undefined,
+      args,
+      output: parseJsonSafe(row.output_json),
+      error: row.error ? toString(row.error) : undefined,
+      summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
+      createdAt: toString(row.created_at)
+    };
   }
 
   clearExpiredWebhookSecurityState(nowIso = new Date().toISOString()): void {

@@ -3447,6 +3447,20 @@ export function NodeConfigModal({
                 { value: "auto_fix", label: "Auto Fix JSON" }
               ]}
             />
+            <SelectField
+              label="Parsing Strictness"
+              value={toStringValue(config.parsingMode, "strict")}
+              onChange={(next) => setConfig((current) => ({ ...current, parsingMode: next }))}
+              options={[
+                { value: "strict", label: "Strict (JSON only)" },
+                { value: "lenient", label: "Lenient (JSON repair)" },
+                { value: "anything_goes", label: "Anything Goes (best effort)" }
+              ]}
+            />
+            <div className="cfg-tip">
+              Strict only accepts valid JSON. Lenient repairs common JSON-like formats. Anything Goes also supports
+              best-effort extraction from mixed text and simple key-value blocks.
+            </div>
             <TextField
               label="Input Key"
               value={toStringValue(config.inputKey, "answer")}
