@@ -110,6 +110,12 @@ BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 BOOTSTRAP_ADMIN_PASSWORD=ChangeThisPassword123!
 ```
 
+Increase workflow timeout for long-running MCP/LLM executions (example 20 min):
+
+```bash
+WORKFLOW_EXECUTION_TIMEOUT_MS=1200000
+```
+
 ### 2) Install
 
 ```bash
@@ -238,6 +244,7 @@ API error behavior:
 - `POST /api/secrets`
 - `GET /api/secrets`
 - `POST /api/connectors/test`
+- `POST /api/providers/test`
 - `POST /api/mcp/discover-tools`
 
 ## Azure node suite (implemented)
@@ -268,6 +275,7 @@ What is included for these nodes:
 - dedicated node icons on canvas and in node library
 - secret-backed credentials via `secretRef.secretId`
 - `Test Connection` action for connector nodes (`/api/connectors/test`)
+- `Test Connection` action for LLM model nodes (`/api/providers/test`)
 - execution support in the workflow engine (including demo fallback mode for local development)
 
 ## Webhook execution
@@ -290,6 +298,14 @@ Webhook payload (minimum):
   "variables": {
     "tenant": "local-dev"
   }
+}
+```
+
+Optional payload field for long runs:
+
+```json
+{
+  "executionTimeoutMs": 1200000
 }
 ```
 

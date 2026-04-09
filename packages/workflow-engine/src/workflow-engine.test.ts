@@ -674,6 +674,7 @@ describe("workflow engine", () => {
     expect(result.status).toBe("success");
     const toolNames = (runtime.lastRequest?.tools ?? []).map((tool) => tool.name);
     expect(toolNames).toEqual(["mock-mcp__calculator"]);
+    expect(runtime.lastRequest?.bypassToolFiltering).toBe(true);
   });
 
   it("executes each agent with its own attached chat model", async () => {

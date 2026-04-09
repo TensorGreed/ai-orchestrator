@@ -166,6 +166,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     API_PORT: 0,
     API_HOST: "127.0.0.1",
     WEB_ORIGIN: "http://localhost:5173",
+    WORKFLOW_EXECUTION_TIMEOUT_MS: 300000,
     SEED_SAMPLE_WORKFLOWS: false,
     SECRET_MASTER_KEY_BASE64: masterKey,
     SESSION_COOKIE_NAME: "ao_session",
@@ -569,6 +570,86 @@ describe("auth + rbac API", () => {
       expect(body.ok).toBe(true);
       expect(body.message.length).toBeGreaterThan(0);
     }
+  });
+
+  it("allows builder to test LLM provider connectivity and returns provider errors safely", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-provider-test@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/providers/test",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: {
+        provider: {
+          providerId: "unknown_provider",
+          model: "demo-model"
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json<{ ok: boolean; message: string }>();
+    expect(body.ok).toBe(false);
+    expect(body.message.length).toBeGreaterThan(0);
+  });
+
+  it("rejects provider test for non-builder roles", async () => {
+    const context = await createTestContext();
+    const viewerCookie = await createRoleSession(context, {
+      email: "viewer-provider-test@example.com",
+      password: "ViewerPass123!",
+      role: "viewer"
+    });
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/providers/test",
+      headers: {
+        cookie: viewerCookie
+      },
+      payload: {
+        provider: {
+          providerId: "ollama",
+          model: "llama3.1"
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("validates provider test payload", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-provider-test-validation@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/providers/test",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: {
+        provider: {
+          providerId: "",
+          model: ""
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json<{ error: string }>();
+    expect(body.error).toBe("Invalid provider test payload");
   });
 });
 

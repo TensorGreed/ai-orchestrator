@@ -2594,7 +2594,8 @@ async function executeNode(
           tools: allToolsForModel,
           toolOutputLimits: hasCustomToolOutputLimits ? toolOutputLimits : undefined,
           sessionId,
-          memory
+          memory,
+          bypassToolFiltering: attachedToolServerConfigs.length > 0
         },
         {
           tools: [

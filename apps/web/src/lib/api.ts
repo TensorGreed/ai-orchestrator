@@ -1,4 +1,4 @@
-import type { MCPToolDefinition, Workflow, WorkflowExecutionResult, WorkflowListItem } from "@ai-orchestrator/shared";
+import type { LLMProviderConfig, MCPToolDefinition, Workflow, WorkflowExecutionResult, WorkflowListItem } from "@ai-orchestrator/shared";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -133,6 +133,8 @@ export async function executeWorkflow(
     user_prompt?: string;
     sessionId?: string;
     session_id?: string;
+    executionTimeoutMs?: number;
+    execution_timeout_ms?: number;
   }
 ) {
   return apiRequest<WorkflowExecutionResult>(`/api/workflows/${workflowId}/execute`, {
@@ -312,6 +314,8 @@ export async function executeWorkflowStream(
     user_prompt?: string;
     sessionId?: string;
     session_id?: string;
+    executionTimeoutMs?: number;
+    execution_timeout_ms?: number;
   },
   handlers: WorkflowExecuteStreamHandlers = {}
 ): Promise<WorkflowExecutionResult> {
@@ -321,6 +325,8 @@ export async function executeWorkflowStream(
 export async function runWebhook(payload: {
   workflow_id?: string;
   session_id?: string;
+  executionTimeoutMs?: number;
+  execution_timeout_ms?: number;
   system_prompt?: string;
   user_prompt?: string;
   variables?: Record<string, unknown>;
@@ -335,6 +341,8 @@ export async function runWebhookStream(
   payload: {
     workflow_id?: string;
     session_id?: string;
+    executionTimeoutMs?: number;
+    execution_timeout_ms?: number;
     system_prompt?: string;
     user_prompt?: string;
     variables?: Record<string, unknown>;
@@ -405,6 +413,24 @@ export async function testConnector(payload: {
     ok: boolean;
     message: string;
   }>("/api/connectors/test", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function testProvider(payload: {
+  provider: LLMProviderConfig;
+  prompt?: string;
+  systemPrompt?: string;
+}) {
+  return apiRequest<{
+    ok: boolean;
+    message: string;
+    providerId?: string;
+    model?: string;
+    latencyMs?: number;
+    preview?: string;
+  }>("/api/providers/test", {
     method: "POST",
     body: JSON.stringify(payload)
   });

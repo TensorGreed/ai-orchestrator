@@ -849,4 +849,50 @@ describe("DefaultAgentRuntime", () => {
     expect(result.steps[0]?.requestedTools[0]?.name).toBe("session_cache_list");
     expect(result.steps[0]?.toolResults[0]?.toolName).toBe("session_cache_list");
   });
+
+  it("bypasses tool filtering and includes all tools when bypassToolFiltering is true", async () => {
+    const providerRegistry = new ProviderRegistry();
+    const provider = new ToolCaptureProvider();
+    providerRegistry.register(provider);
+    const runtime = new DefaultAgentRuntime();
+
+    const manyTools = Array.from({ length: 20 }, (_, index) => ({
+      serverId: "mock-mcp",
+      name: `mock-mcp__tool_${index}`,
+      description: `Tool ${index}`,
+      inputSchema: { type: "object" }
+    }));
+
+    await runtime.run(
+      {
+        provider: { providerId: "tool-capture", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Do something",
+        tools: manyTools,
+        maxIterations: 1,
+        toolCallingEnabled: true,
+        bypassToolFiltering: true
+      },
+      {
+        tools: manyTools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema
+        })),
+        invokeTool: async () => ({ ok: true })
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    const requestTools = provider.calls[0]?.tools ?? [];
+    // ToolCaptureProvider records what was passed. It should bypass the max of 6 and max limits.
+    // However dedupeToolsByName and internal session cache tools may be added.
+    // With 20 tools bypass true it should have all 20 external tools.
+    // Depending on if sessionCache tools are added, the length might be slightly more,
+    // but without sessionId, sessioncache tools are not created.
+    expect(requestTools.length).toBe(20);
+  });
 });

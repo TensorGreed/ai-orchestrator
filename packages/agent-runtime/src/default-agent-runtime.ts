@@ -424,12 +424,16 @@ function estimateToolPromptCost(tool: ToolDefinition): number {
   }
 }
 
-function normalizeToolsForModel(input: ToolDefinition[], prompt: string): ToolDefinition[] {
+function normalizeToolsForModel(input: ToolDefinition[], prompt: string, bypassToolFiltering?: boolean): ToolDefinition[] {
   const deduped = dedupeToolsByName(input).map((tool) => ({
     name: truncateText(String(tool.name ?? ""), 120),
     description: truncateText(String(tool.description ?? ""), MAX_TOOL_DESCRIPTION_CHARS),
     inputSchema: simplifySchema(tool.inputSchema)
   }));
+
+  if (bypassToolFiltering) {
+    return deduped;
+  }
 
   const ranked = deduped
     .map((tool, index) => ({
@@ -658,7 +662,8 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
 
     const normalizedExternalTools = normalizeToolsForModel(
       request.toolCallingEnabled ? externalToolDefinitions : [],
-      request.userPrompt
+      request.userPrompt,
+      request.bypassToolFiltering
     );
     const normalizedTools = request.toolCallingEnabled
       ? dedupeToolsByName([...internalToolDefinitions, ...normalizedExternalTools])

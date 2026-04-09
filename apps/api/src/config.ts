@@ -20,6 +20,7 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().int().positive().default(4000),
   API_HOST: z.string().default("0.0.0.0"),
   WEB_ORIGIN: z.string().default("http://localhost:5173"),
+  WORKFLOW_EXECUTION_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
   SEED_SAMPLE_WORKFLOWS: booleanFromEnv.default(false),
   SECRET_MASTER_KEY_BASE64: z.string().min(1).optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("ao_session"),

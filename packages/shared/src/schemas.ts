@@ -90,6 +90,8 @@ export const workflowExecuteRequestSchema = z.object({
   startNodeId: z.string().optional(),
   sessionId: z.string().optional(),
   session_id: z.string().optional(),
+  executionTimeoutMs: z.number().int().positive().optional(),
+  execution_timeout_ms: z.number().int().positive().optional(),
   system_prompt: z.string().optional(),
   user_prompt: z.string().optional(),
   variables: z.record(z.string(), z.unknown()).optional(),
@@ -99,6 +101,8 @@ export const workflowExecuteRequestSchema = z.object({
 export const agentWebhookPayloadSchema = z.object({
   workflow_id: z.string().optional(),
   session_id: z.string().optional(),
+  executionTimeoutMs: z.number().int().positive().optional(),
+  execution_timeout_ms: z.number().int().positive().optional(),
   system_prompt: z.string().optional(),
   user_prompt: z.string().optional(),
   variables: z.record(z.string(), z.unknown()).optional()

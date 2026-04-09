@@ -16,6 +16,7 @@ import {
   nodeDefinitions,
   workflowExecuteRequestSchema,
   workflowSchema,
+  type LLMProviderConfig,
   type MCPServerConfig,
   type SecretReference,
   type Workflow,
@@ -84,6 +85,24 @@ const codeNodeTestSchema = z.object({
 const connectorTestSchema = z.object({
   connectorId: z.string().min(1),
   connectorConfig: z.record(z.string(), z.unknown()).optional()
+});
+
+const providerTestSchema = z.object({
+  provider: z.object({
+    providerId: z.string().min(1),
+    model: z.string().min(1),
+    baseUrl: z.string().optional(),
+    secretRef: z
+      .object({
+        secretId: z.string().min(1)
+      })
+      .optional(),
+    temperature: z.number().optional(),
+    maxTokens: z.number().int().positive().optional(),
+    extra: z.record(z.string(), z.unknown()).optional()
+  }),
+  prompt: z.string().optional(),
+  systemPrompt: z.string().optional()
 });
 
 const workflowVariablesSchema = z.object({
@@ -204,6 +223,44 @@ function stripSignaturePrefix(value: string): string {
     return trimmed.slice(equalsIndex + 1).trim();
   }
   return trimmed;
+}
+
+function normalizeExecutionTimeoutMs(
+  primary: unknown,
+  secondary: unknown,
+  fallbackMs: number
+): number {
+  const candidate =
+    typeof primary === "number" && Number.isFinite(primary) && primary > 0
+      ? primary
+      : typeof secondary === "number" && Number.isFinite(secondary) && secondary > 0
+        ? secondary
+        : fallbackMs;
+  const bounded = Math.floor(candidate);
+  return Math.max(1_000, Math.min(86_400_000, bounded));
+}
+
+function normalizeProviderConfigForTest(
+  input: z.infer<typeof providerTestSchema>["provider"]
+): LLMProviderConfig {
+  const normalizedBaseUrl = typeof input.baseUrl === "string" && input.baseUrl.trim() ? input.baseUrl.trim() : undefined;
+  const normalizedSecretId =
+    typeof input.secretRef?.secretId === "string" && input.secretRef.secretId.trim()
+      ? input.secretRef.secretId.trim()
+      : undefined;
+  const normalizedExtra = input.extra && Object.keys(input.extra).length > 0 ? input.extra : undefined;
+
+  return {
+    providerId: input.providerId.trim(),
+    model: input.model.trim(),
+    ...(normalizedBaseUrl ? { baseUrl: normalizedBaseUrl } : {}),
+    ...(normalizedSecretId ? { secretRef: { secretId: normalizedSecretId } } : {}),
+    ...(typeof input.temperature === "number" && Number.isFinite(input.temperature)
+      ? { temperature: input.temperature }
+      : {}),
+    ...(typeof input.maxTokens === "number" && Number.isFinite(input.maxTokens) ? { maxTokens: input.maxTokens } : {}),
+    ...(normalizedExtra ? { extra: normalizedExtra } : {})
+  };
 }
 
 function safeEqualSecret(expected: string, provided: string): boolean {
@@ -705,6 +762,7 @@ export function createApp(
     executionId?: string;
     triggerType?: string;
     triggeredBy?: string;
+    executionTimeoutMs?: number;
     resumeState?: WorkflowExecutionState;
     approvalDecision?: {
       decision: "approve" | "reject";
@@ -724,6 +782,11 @@ export function createApp(
         userPrompt: input.userPrompt,
         sessionId: input.sessionId,
         executionId: input.executionId,
+        executionTimeoutMs: normalizeExecutionTimeoutMs(
+          input.executionTimeoutMs,
+          undefined,
+          config.WORKFLOW_EXECUTION_TIMEOUT_MS
+        ),
         triggerType: input.triggerType,
         triggeredBy: input.triggeredBy,
         resumeState: input.resumeState,
@@ -819,13 +882,19 @@ export function createApp(
     const variables = body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
       ? (body.variables as Record<string, unknown>)
       : undefined;
+    const executionTimeoutMs = normalizeExecutionTimeoutMs(
+      body.executionTimeoutMs,
+      body.execution_timeout_ms,
+      config.WORKFLOW_EXECUTION_TIMEOUT_MS
+    );
 
     return {
       body,
       userPrompt: userPrompt || undefined,
       systemPrompt: systemPrompt || undefined,
       sessionId,
-      variables
+      variables,
+      executionTimeoutMs
     };
   };
 
@@ -1626,6 +1695,11 @@ export function createApp(
       systemPrompt: parsed.data.system_prompt,
       userPrompt: parsed.data.user_prompt,
       sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
+      executionTimeoutMs: normalizeExecutionTimeoutMs(
+        parsed.data.executionTimeoutMs,
+        parsed.data.execution_timeout_ms,
+        config.WORKFLOW_EXECUTION_TIMEOUT_MS
+      ),
       executionId,
       triggerType: "manual",
       triggeredBy: user.email,
@@ -1724,6 +1798,11 @@ export function createApp(
         systemPrompt: parsed.data.system_prompt,
         userPrompt: parsed.data.user_prompt,
         sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
+        executionTimeoutMs: normalizeExecutionTimeoutMs(
+          parsed.data.executionTimeoutMs,
+          parsed.data.execution_timeout_ms,
+          config.WORKFLOW_EXECUTION_TIMEOUT_MS
+        ),
         executionId,
         triggerType: "manual_stream",
         triggeredBy: user.email,
@@ -1808,6 +1887,68 @@ export function createApp(
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Connector test failed"
+      };
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/providers/test", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const parsed = providerTestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid provider test payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const testProvider = normalizeProviderConfigForTest(parsed.data.provider);
+    const probePrompt = parsed.data.prompt?.trim() || "Reply with: connection_ok";
+    const systemPrompt = parsed.data.systemPrompt?.trim() || "You are a connection test assistant. Keep responses short.";
+
+    try {
+      const providerAdapter = providerRegistry.get(testProvider.providerId);
+      const startedAt = Date.now();
+      const response = await providerAdapter.generate(
+        {
+          provider: {
+            ...testProvider,
+            temperature:
+              typeof testProvider.temperature === "number" && Number.isFinite(testProvider.temperature)
+                ? testProvider.temperature
+                : 0,
+            maxTokens:
+              typeof testProvider.maxTokens === "number" && Number.isFinite(testProvider.maxTokens)
+                ? Math.max(1, Math.floor(testProvider.maxTokens))
+                : 64
+          },
+          messages: [
+            ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+            { role: "user" as const, content: probePrompt }
+          ]
+        },
+        {
+          resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
+        }
+      );
+
+      return {
+        ok: true,
+        message: "Connection successful",
+        providerId: testProvider.providerId,
+        model: testProvider.model,
+        latencyMs: Math.max(1, Date.now() - startedAt),
+        preview: response.content.trim().slice(0, 240)
+      };
+    } catch (error) {
+      reply.code(400);
+      return {
+        ok: false,
+        message: secretService.redact(error instanceof Error ? error.message : "Provider connection test failed")
       };
     }
   });
@@ -2001,6 +2142,11 @@ export function createApp(
       systemPrompt: parsed.data.system_prompt,
       userPrompt: parsed.data.user_prompt,
       sessionId: parsed.data.session_id,
+      executionTimeoutMs: normalizeExecutionTimeoutMs(
+        parsed.data.executionTimeoutMs,
+        parsed.data.execution_timeout_ms,
+        config.WORKFLOW_EXECUTION_TIMEOUT_MS
+      ),
       executionId,
       triggerType: "webhook_api",
       triggeredBy: user.email,
@@ -2106,6 +2252,11 @@ export function createApp(
         systemPrompt: parsed.data.system_prompt,
         userPrompt: parsed.data.user_prompt,
         sessionId: parsed.data.session_id,
+        executionTimeoutMs: normalizeExecutionTimeoutMs(
+          parsed.data.executionTimeoutMs,
+          parsed.data.execution_timeout_ms,
+          config.WORKFLOW_EXECUTION_TIMEOUT_MS
+        ),
         executionId,
         triggerType: "webhook_api_stream",
         triggeredBy: user.email,
@@ -2396,6 +2547,7 @@ export function createApp(
           systemPrompt: parsedInput.systemPrompt,
           userPrompt: parsedInput.userPrompt,
           sessionId: parsedInput.sessionId,
+          executionTimeoutMs: parsedInput.executionTimeoutMs,
           executionId,
           triggerType,
           triggeredBy: "webhook",

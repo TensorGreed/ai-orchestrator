@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import type { LLMProviderConfig, MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNode } from "../lib/workflow";
-import { createSecret, discoverMcpTools, fetchWorkflows, testCodeNode, testConnector, type SecretListItem } from "../lib/api";
+import {
+  createSecret,
+  discoverMcpTools,
+  fetchWorkflows,
+  testCodeNode,
+  testConnector,
+  testProvider,
+  type SecretListItem
+} from "../lib/api";
 
 export interface NodeInputOption {
   id: string;
@@ -497,6 +505,9 @@ export function NodeConfigModal({
   const [connectorTestBusy, setConnectorTestBusy] = useState(false);
   const [connectorTestError, setConnectorTestError] = useState<string | null>(null);
   const [connectorTestMessage, setConnectorTestMessage] = useState<string | null>(null);
+  const [providerTestBusy, setProviderTestBusy] = useState(false);
+  const [providerTestError, setProviderTestError] = useState<string | null>(null);
+  const [providerTestMessage, setProviderTestMessage] = useState<string | null>(null);
   const [workflowOptions, setWorkflowOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [workflowOptionsError, setWorkflowOptionsError] = useState<string | null>(null);
   const [inlineCreatedSecrets, setInlineCreatedSecrets] = useState<SecretListItem[]>([]);
@@ -559,6 +570,9 @@ export function NodeConfigModal({
     setConnectorTestBusy(false);
     setConnectorTestError(null);
     setConnectorTestMessage(null);
+    setProviderTestBusy(false);
+    setProviderTestError(null);
+    setProviderTestMessage(null);
     setWorkflowOptions([]);
     setWorkflowOptionsError(null);
     setInlineCreatedSecrets([]);
@@ -1088,6 +1102,106 @@ export function NodeConfigModal({
     []
   );
 
+  const buildProviderTestConfig = useCallback((): { provider: LLMProviderConfig; prompt?: string; systemPrompt?: string } | null => {
+    if (node.data.nodeType === "llm_call") {
+      const providerConfig = asRecord(config.provider);
+      const providerId = toStringValue(providerConfig.providerId, "ollama").trim();
+      const model = toStringValue(providerConfig.model).trim();
+      if (!providerId || !model) {
+        return null;
+      }
+
+      const baseUrl = toStringValue(providerConfig.baseUrl).trim();
+      const secretId = toStringValue(asRecord(providerConfig.secretRef).secretId).trim();
+      const extraRecord = asRecord(providerConfig.extra);
+      const hasExtra = Object.keys(extraRecord).length > 0;
+      const provider: LLMProviderConfig = {
+        providerId,
+        model,
+        ...(baseUrl ? { baseUrl } : {}),
+        ...(secretId ? { secretRef: { secretId } } : {}),
+        ...(typeof providerConfig.temperature === "number" && Number.isFinite(providerConfig.temperature)
+          ? { temperature: providerConfig.temperature }
+          : {}),
+        ...(typeof providerConfig.maxTokens === "number" && Number.isFinite(providerConfig.maxTokens)
+          ? { maxTokens: Math.max(1, Math.floor(providerConfig.maxTokens)) }
+          : {}),
+        ...(hasExtra ? { extra: extraRecord } : {})
+      };
+      return { provider };
+    }
+
+    if (node.data.nodeType === "azure_openai_chat_model") {
+      const endpoint = toStringValue(config.endpoint).trim();
+      const deployment = toStringValue(config.deployment).trim();
+      if (!endpoint || !deployment) {
+        return null;
+      }
+
+      const apiVersion = toStringValue(config.apiVersion, "2024-10-21").trim() || "2024-10-21";
+      const secretId = toStringValue(asRecord(config.secretRef).secretId).trim();
+      const provider: LLMProviderConfig = {
+        providerId: "azure_openai",
+        model: deployment,
+        baseUrl: endpoint,
+        ...(secretId ? { secretRef: { secretId } } : {}),
+        ...(typeof config.temperature === "number" && Number.isFinite(config.temperature)
+          ? { temperature: config.temperature }
+          : {}),
+        ...(typeof config.maxTokens === "number" && Number.isFinite(config.maxTokens)
+          ? { maxTokens: Math.max(1, Math.floor(config.maxTokens)) }
+          : {}),
+        extra: {
+          deployment,
+          apiVersion
+        }
+      };
+
+      return {
+        provider
+      };
+    }
+
+    return null;
+  }, [config, node.data.nodeType]);
+
+  const handleProviderTestRun = useCallback(async () => {
+    const payload = buildProviderTestConfig();
+    if (!payload) {
+      setProviderTestError("Provider and model/deployment are required before testing.");
+      setProviderTestMessage(null);
+      return;
+    }
+
+    try {
+      setProviderTestBusy(true);
+      setProviderTestError(null);
+      setProviderTestMessage(null);
+
+      const result = await testProvider(payload);
+      if (!result.ok) {
+        setProviderTestError(result.message || "Connection test failed.");
+        setProviderTestMessage(null);
+        return;
+      }
+
+      const latencySuffix = typeof result.latencyMs === "number" && Number.isFinite(result.latencyMs)
+        ? ` (${Math.max(1, Math.floor(result.latencyMs))} ms)`
+        : "";
+      const previewSuffix = typeof result.preview === "string" && result.preview.trim()
+        ? ` Response: ${result.preview.trim()}`
+        : "";
+
+      setProviderTestMessage(`${result.message || "Connection successful"}${latencySuffix}.${previewSuffix}`.trim());
+      setProviderTestError(null);
+    } catch (error) {
+      setProviderTestError(error instanceof Error ? error.message : "Connection test failed.");
+      setProviderTestMessage(null);
+    } finally {
+      setProviderTestBusy(false);
+    }
+  }, [buildProviderTestConfig]);
+
   const renderProviderSection = () => {
     const providerId = toStringValue(provider.providerId, "ollama");
     const providerExtra = asRecord(provider.extra);
@@ -1160,6 +1274,18 @@ export function NodeConfigModal({
             onChange={(next) => setProvider({ maxTokens: next })}
           />
         </div>
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() => void handleProviderTestRun()}
+            disabled={providerTestBusy}
+          >
+            {providerTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
+        </div>
+        {providerTestError && <div className="error-banner">{providerTestError}</div>}
       </div>
     );
   };
@@ -2303,6 +2429,18 @@ export function NodeConfigModal({
           value={toStringValue(config.systemPromptKey, "system_prompt")}
           onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
         />
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() => void handleProviderTestRun()}
+            disabled={providerTestBusy}
+          >
+            {providerTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
+        </div>
+        {providerTestError && <div className="error-banner">{providerTestError}</div>}
       </>
     );
   };

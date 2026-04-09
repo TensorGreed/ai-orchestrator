@@ -313,6 +313,7 @@ export interface AgentRunRequest {
   sessionId?: string;
   memory?: AgentMemoryConfig;
   toolOutputLimits?: AgentToolOutputLimits;
+  bypassToolFiltering?: boolean;
 }
 
 export interface AgentRunStep {
@@ -340,6 +341,8 @@ export interface WorkflowExecuteRequest {
   startNodeId?: string;
   sessionId?: string;
   session_id?: string;
+  executionTimeoutMs?: number;
+  execution_timeout_ms?: number;
   system_prompt?: string;
   user_prompt?: string;
   variables?: Record<string, unknown>;
@@ -349,6 +352,8 @@ export interface WorkflowExecuteRequest {
 export interface AgentWebhookPayload {
   workflow_id?: string;
   session_id?: string;
+  executionTimeoutMs?: number;
+  execution_timeout_ms?: number;
   system_prompt?: string;
   user_prompt?: string;
   variables?: Record<string, unknown>;
