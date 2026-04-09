@@ -1321,6 +1321,62 @@ describe("workflow engine", () => {
     expect(parsed.follow_up_question).toBe("");
   });
 
+  it("output_parser: ignores placeholder braces in prose and extracts final JSON block", async () => {
+    const workflow: Workflow = {
+      id: "wf-parser-prose-placeholder-json",
+      name: "Parser prose placeholder JSON",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "code_node",
+          name: "Producer",
+          position: { x: 0, y: 0 },
+          config: {
+            code:
+              "return { answer: 'The cache confirms only attempts to call `/vault/keys2/{id}/versions`.\\n\\n{\"status\":\"needs_more_info\",\"final_markdown\":\"\",\"follow_up_question\":\"Please provide key id.\"}' };"
+          }
+        },
+        {
+          id: "n2",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            inputKey: "answer",
+            maxRetries: 0,
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]},\"final_markdown\":{\"type\":\"string\"},\"follow_up_question\":{\"type\":\"string\"}},\"required\":[\"status\",\"final_markdown\",\"follow_up_question\"]}"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const parserOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    const parsed = parserOutput.parsed as Record<string, unknown>;
+    expect(parsed.status).toBe("needs_more_info");
+    expect(parsed.follow_up_question).toBe("Please provide key id.");
+  });
+
   it("output_parser: lenient parsing mode repairs python-style dict payload", async () => {
     const workflow: Workflow = {
       id: "wf-parser-lenient-python-dict",

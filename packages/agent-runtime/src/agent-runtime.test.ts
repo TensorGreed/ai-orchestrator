@@ -86,6 +86,41 @@ class MissingArgsProvider implements LLMProviderAdapter {
   }
 }
 
+class MissingPathParamProvider implements LLMProviderAdapter {
+  readonly definition = {
+    id: "missing-path-param",
+    label: "Missing Path Param",
+    supportsTools: true,
+    configSchema: {}
+  };
+
+  private callCount = 0;
+
+  async generate() {
+    this.callCount += 1;
+    if (this.callCount === 1) {
+      return {
+        content: "Trying versions endpoint.",
+        toolCalls: [
+          {
+            id: "tc-path-missing",
+            name: "http_mcp__get_v1_vault_keys2__id__versions",
+            arguments: {
+              skip: 0,
+              limit: 10
+            }
+          }
+        ]
+      };
+    }
+
+    return {
+      content: "Recovered after path parameter validation error.",
+      toolCalls: []
+    };
+  }
+}
+
 class ToolCaptureProvider implements LLMProviderAdapter {
   readonly definition = {
     id: "tool-capture",
@@ -510,6 +545,67 @@ describe("DefaultAgentRuntime", () => {
     expect(invoked).toBe(false);
     expect(output.steps[0]?.toolResults[0]?.error).toContain("missing required arguments");
     expect(output.steps[0]?.toolResults[0]?.error).toContain("expression");
+  });
+
+  it("infers required path parameter from schema metadata and blocks invocation when missing", async () => {
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new MissingPathParamProvider());
+    const runtime = new DefaultAgentRuntime();
+
+    let invoked = false;
+    const output = await runtime.run(
+      {
+        provider: { providerId: "missing-path-param", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Fetch key versions",
+        tools: [
+          {
+            serverId: "http_mcp",
+            name: "http_mcp__get_v1_vault_keys2__id__versions",
+            description: "Get key versions by key id",
+            inputSchema: {
+              type: "object",
+              properties: {
+                id: { type: "string", location: "path" },
+                skip: { type: "number" },
+                limit: { type: "number" }
+              }
+            }
+          }
+        ],
+        maxIterations: 3,
+        toolCallingEnabled: true
+      },
+      {
+        tools: [
+          {
+            name: "http_mcp__get_v1_vault_keys2__id__versions",
+            description: "Get key versions by key id",
+            inputSchema: {
+              type: "object",
+              properties: {
+                id: { type: "string", location: "path" },
+                skip: { type: "number" },
+                limit: { type: "number" }
+              }
+            }
+          }
+        ],
+        invokeTool: async () => {
+          invoked = true;
+          return { ok: true };
+        }
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(output.stopReason).toBe("final_answer");
+    expect(output.finalAnswer).toContain("Recovered");
+    expect(invoked).toBe(false);
+    expect(output.steps[0]?.toolResults[0]?.error).toContain("missing required arguments: id");
   });
 
   it("caps tool definitions passed to providers to prevent context overflow", async () => {

@@ -480,19 +480,82 @@ function hasProvidedRequiredArg(value: unknown): boolean {
   return true;
 }
 
-function validateRequiredToolArguments(schema: unknown, args: Record<string, unknown>): string[] {
-  const schemaRecord = toRecord(schema);
-  const required = Array.isArray(schemaRecord.required)
-    ? schemaRecord.required
-        .map((field) => String(field ?? "").trim())
-        .filter((field) => field.length > 0)
-    : [];
+function toNonEmptyStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => String(entry ?? "").trim())
+    .filter((entry) => entry.length > 0);
+}
 
-  if (!required.length) {
+function inferRequiredArgsFromSchema(schema: unknown): string[] {
+  const schemaRecord = toRecord(schema);
+  const required = toNonEmptyStringArray(schemaRecord.required);
+  const inferred = new Set<string>(required);
+  const properties = toRecord(schemaRecord.properties);
+
+  for (const [propertyName, propertySchemaValue] of Object.entries(properties)) {
+    const propertySchema = toRecord(propertySchemaValue);
+    const rawLocationCandidates = [
+      propertySchema.in,
+      propertySchema.location,
+      propertySchema["x-in"],
+      propertySchema["x-location"],
+      propertySchema["x-param-location"],
+      propertySchema["x-parameter-location"]
+    ];
+    const isPathParam = rawLocationCandidates.some(
+      (candidate) => typeof candidate === "string" && candidate.trim().toLowerCase() === "path"
+    );
+    const markedRequired = propertySchema.required === true || propertySchema["x-required"] === true;
+    const description = typeof propertySchema.description === "string" ? propertySchema.description : "";
+    const looksLikePathParamDescription = /\bpath\s+parameter\b/i.test(description);
+
+    if (isPathParam || markedRequired || looksLikePathParamDescription) {
+      inferred.add(propertyName);
+    }
+  }
+
+  for (const hintKey of ["x-required", "x-required-params", "x-path-params", "x-pathParams"]) {
+    const hinted = toNonEmptyStringArray(schemaRecord[hintKey]);
+    for (const key of hinted) {
+      inferred.add(key);
+    }
+  }
+
+  return [...inferred];
+}
+
+function extractUnresolvedPlaceholderTokens(text: string): string[] {
+  const input = String(text ?? "");
+  let decoded = input;
+  try {
+    decoded = decodeURIComponent(input);
+  } catch {
+    decoded = input;
+  }
+  const matches = [...decoded.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)];
+  const unique = new Set<string>();
+  for (const match of matches) {
+    const token = String(match[1] ?? "").trim();
+    if (token) {
+      unique.add(token);
+    }
+  }
+  return [...unique];
+}
+
+function validateRequiredToolArguments(
+  schema: unknown,
+  args: Record<string, unknown>
+): string[] {
+  const allRequired = inferRequiredArgsFromSchema(schema);
+  if (!allRequired.length) {
     return [];
   }
 
-  return required.filter((field) => !hasProvidedRequiredArg(args[field]));
+  return allRequired.filter((field) => !hasProvidedRequiredArg(args[field]));
 }
 
 function serializeToolMessage(ok: boolean, payload: unknown, limits: NormalizedToolOutputLimits): string {
@@ -829,7 +892,18 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
                 name: call.name
               });
             } catch (error) {
-              const toolError = createToolErrorResult(call, error);
+              const rawError =
+                error instanceof Error ? error.message : typeof error === "string" ? error : "Tool call failed";
+              const unresolvedTokens = extractUnresolvedPlaceholderTokens(rawError).filter(
+                (token) => !hasProvidedRequiredArg(call.arguments[token])
+              );
+              const normalizedError =
+                unresolvedTokens.length > 0
+                  ? `Tool call '${call.name}' failed because unresolved path parameters were detected: ${unresolvedTokens.join(
+                      ", "
+                    )}. Provide these arguments explicitly.`
+                  : rawError;
+              const toolError = createToolErrorResult(call, normalizedError);
               toolResults.push(toolError);
               failedToolCount += 1;
 

@@ -725,13 +725,15 @@ function extractJsonFromText(text: string): string {
   return trimmed;
 }
 
-function extractBalancedJsonCandidate(text: string): string | null {
+function extractBalancedJsonCandidates(text: string, maxCandidates = 40): string[] {
   const source = String(text ?? "");
   const openerToCloser: Record<string, string> = {
     "{": "}",
     "[": "]"
   };
   const closers = new Set(Object.values(openerToCloser));
+  const seen = new Set<string>();
+  const candidates: string[] = [];
 
   for (let start = 0; start < source.length; start += 1) {
     const first = source[start];
@@ -782,7 +784,15 @@ function extractBalancedJsonCandidate(text: string): string | null {
       if (char === stack[stack.length - 1]) {
         stack.pop();
         if (stack.length === 0) {
-          return source.slice(start, index + 1).trim();
+          const candidate = source.slice(start, index + 1).trim();
+          if (candidate && !seen.has(candidate)) {
+            seen.add(candidate);
+            candidates.push(candidate);
+            if (candidates.length >= maxCandidates) {
+              return candidates;
+            }
+          }
+          break;
         }
         continue;
       }
@@ -793,7 +803,7 @@ function extractBalancedJsonCandidate(text: string): string | null {
     }
   }
 
-  return null;
+  return candidates;
 }
 
 function extractLikelyJsonFromText(text: string): string {
@@ -810,7 +820,7 @@ function extractLikelyJsonFromText(text: string): string {
     return trimmed;
   }
 
-  const balanced = extractBalancedJsonCandidate(trimmed);
+  const balanced = extractBalancedJsonCandidates(trimmed, 1)[0];
   return balanced ?? trimmed;
 }
 
@@ -888,16 +898,16 @@ function buildJsonParserCandidates(text: string): string[] {
 
   addUniqueParserCandidate(candidates, seen, trimmed);
   addUniqueParserCandidate(candidates, seen, extractJsonFromText(trimmed));
-  const balancedFromSource = extractBalancedJsonCandidate(source);
-  if (balancedFromSource) {
-    addUniqueParserCandidate(candidates, seen, balancedFromSource);
+  const balancedFromSource = extractBalancedJsonCandidates(source, 40);
+  for (const candidate of balancedFromSource) {
+    addUniqueParserCandidate(candidates, seen, candidate);
   }
-  const balancedFromLikely = extractBalancedJsonCandidate(extractLikelyJsonFromText(trimmed));
-  if (balancedFromLikely) {
-    addUniqueParserCandidate(candidates, seen, balancedFromLikely);
+  const balancedFromLikely = extractBalancedJsonCandidates(extractLikelyJsonFromText(trimmed), 20);
+  for (const candidate of balancedFromLikely) {
+    addUniqueParserCandidate(candidates, seen, candidate);
   }
 
-  return candidates.slice(0, 10);
+  return candidates.slice(0, 40);
 }
 
 function normalizeJsonLikeText(input: string): { text: string; warnings: string[] } {
@@ -1120,18 +1130,17 @@ function parseWithOutputParserStrategies(text: string, strictness: OutputParserP
   }
 
   for (const candidate of candidates) {
-    const balanced = extractBalancedJsonCandidate(candidate);
-    if (!balanced || balanced === candidate) {
-      continue;
-    }
-    const parsed = tryParseJsonCandidate(balanced);
-    if (parsed.ok) {
-      if (parsed.strategy === "double_encoded_json") {
-        return success("double_encoded_json", parsed.parsed, 0.9, ["extracted_balanced_json"], balanced);
+    const balancedCandidates = extractBalancedJsonCandidates(candidate, 20).filter((balanced) => balanced !== candidate);
+    for (const balanced of balancedCandidates) {
+      const parsed = tryParseJsonCandidate(balanced);
+      if (parsed.ok) {
+        if (parsed.strategy === "double_encoded_json") {
+          return success("double_encoded_json", parsed.parsed, 0.9, ["extracted_balanced_json"], balanced);
+        }
+        return success("balanced_json_extract", parsed.parsed, 0.88, [], balanced);
       }
-      return success("balanced_json_extract", parsed.parsed, 0.88, [], balanced);
+      fail("balanced_json_extract", parsed.error, balanced);
     }
-    fail("balanced_json_extract", parsed.error, balanced);
   }
 
   if (strictness !== "strict") {

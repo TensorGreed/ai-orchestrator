@@ -2,6 +2,7 @@ import type { ProviderDefinition } from "@ai-orchestrator/shared";
 import type { ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
 import { resilientFetch } from "../resilient-fetch";
+import { parseToolArguments } from "../tool-arg-parser";
 
 interface AzureOpenAIResponse {
   choices?: Array<{
@@ -94,12 +95,7 @@ function parseToolCalls(input: AzureOpenAIResponse): ToolCall[] {
         return undefined;
       }
 
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(toolCall.function?.arguments ?? "{}");
-      } catch {
-        args = {};
-      }
+      const args = parseToolArguments(toolCall.function?.arguments ?? "{}");
 
       return {
         id,

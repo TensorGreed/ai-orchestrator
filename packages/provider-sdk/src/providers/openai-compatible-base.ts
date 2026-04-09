@@ -1,6 +1,7 @@
 import type { ChatMessage, LLMCallResponse, LLMProviderConfig, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
 import { resilientFetch } from "../resilient-fetch";
+import { parseToolArguments } from "../tool-arg-parser";
 
 interface OpenAICompatibleResponse {
   choices?: Array<{
@@ -91,12 +92,7 @@ function parseToolCalls(input: OpenAICompatibleResponse): ToolCall[] {
         return undefined;
       }
 
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(toolCall.function?.arguments ?? "{}");
-      } catch {
-        args = {};
-      }
+      const args = parseToolArguments(toolCall.function?.arguments ?? "{}");
 
       return {
         id,
