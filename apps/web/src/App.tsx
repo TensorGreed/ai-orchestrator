@@ -23,6 +23,7 @@ import {
   ApiError,
   createSecret,
   deleteWorkflow,
+  duplicateWorkflow,
   executeWorkflow,
   executeWorkflowStream,
   fetchAuthMe,
@@ -2381,6 +2382,45 @@ function StudioApp() {
     }
   }, [canManageWorkflows, handleApiError, hydrateWorkflow, workflowList.length]);
 
+  const handleDuplicateWorkflow = useCallback(
+    async (workflowId: string) => {
+      if (!canManageWorkflows) {
+        setError("You do not have permission to duplicate workflows.");
+        return;
+      }
+
+      const source = workflowList.find((workflow) => workflow.id === workflowId);
+      const suggestedName = source ? `${source.name} Copy` : "Workflow Copy";
+      const requestedName = window.prompt("Name for duplicated workflow", suggestedName);
+      if (requestedName === null) {
+        return;
+      }
+
+      const duplicateName = requestedName.trim();
+      if (!duplicateName) {
+        setError("Workflow name is required.");
+        return;
+      }
+
+      try {
+        setBusy(true);
+        setError(null);
+        const duplicated = await duplicateWorkflow(workflowId, { name: duplicateName });
+        const workflows = await fetchWorkflows();
+        setWorkflowList(workflows);
+        hydrateWorkflow(duplicated);
+        setActiveMode("editor");
+        localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, duplicated.id);
+        localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(duplicated));
+      } catch (duplicateError) {
+        handleApiError(duplicateError, "Failed to duplicate workflow");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [canManageWorkflows, handleApiError, hydrateWorkflow, setWorkflowList, workflowList]
+  );
+
   const handleDeleteWorkflow = useCallback(
     async (workflowId: string) => {
       if (!canManageWorkflows) {
@@ -2912,6 +2952,17 @@ function StudioApp() {
                         >
                           Execute
                         </button>
+                        {canManageWorkflows && (
+                          <button
+                            className="header-btn"
+                            onClick={() => {
+                              void handleDuplicateWorkflow(workflow.id);
+                            }}
+                            disabled={busy}
+                          >
+                            Duplicate
+                          </button>
+                        )}
                         {canManageWorkflows && (
                           <button
                             className="header-btn danger"

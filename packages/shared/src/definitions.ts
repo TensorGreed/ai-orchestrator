@@ -865,19 +865,29 @@ export const nodeDefinitions: NodeDefinition[] = [
     type: "pdf_output",
     label: "PDF Output",
     category: "Output",
-    description: "Generates a downloadable PDF link from upstream content.",
+    description: "Generates a downloadable PDF link from upstream content (plain text or HTML rendering).",
     configSchema: {
       type: "object",
       properties: {
+        renderMode: { type: "string", enum: ["text", "html"] },
         inputKey: { type: "string" },
         textTemplate: { type: "string" },
+        htmlTemplate: { type: "string" },
+        pageFormat: { type: "string", enum: ["A4", "Letter", "Legal", "A3", "A5"] },
+        printBackground: { type: "boolean" },
+        htmlRenderTimeoutMs: { type: "number" },
         filenameTemplate: { type: "string" },
         outputKey: { type: "string" }
       }
     },
     sampleConfig: {
+      renderMode: "text",
       inputKey: "answer",
       textTemplate: "",
+      htmlTemplate: "<html><body><h1>{{title}}</h1><div>{{answer}}</div></body></html>",
+      pageFormat: "A4",
+      printBackground: true,
+      htmlRenderTimeoutMs: 45000,
       filenameTemplate: "workflow-output-{{session_id}}.pdf",
       outputKey: "pdf"
     }

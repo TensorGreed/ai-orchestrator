@@ -716,6 +716,95 @@ function createSimplePdfBuffer(text: string): Buffer {
   return Buffer.from(pdf, "ascii");
 }
 
+type PdfPageFormat = "A4" | "Letter" | "Legal" | "A3" | "A5";
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function looksLikeHtmlDocument(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  return /<(html|body|head|div|section|article|table|img|svg|canvas|h1|h2|h3|p)\b/i.test(trimmed);
+}
+
+function wrapTextAsHtmlDocument(text: string): string {
+  const escaped = escapeHtml(text);
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font-family: Arial, sans-serif; color: #111827; margin: 32px; }
+      pre { white-space: pre-wrap; word-break: break-word; line-height: 1.5; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <pre>${escaped}</pre>
+  </body>
+</html>`;
+}
+
+function toPdfHtmlSource(value: unknown): string {
+  const text = toPdfSourceText(value);
+  if (looksLikeHtmlDocument(text)) {
+    return text;
+  }
+  return wrapTextAsHtmlDocument(text);
+}
+
+async function createHtmlPdfBuffer(input: {
+  html: string;
+  format: PdfPageFormat;
+  printBackground: boolean;
+  timeoutMs: number;
+}): Promise<Buffer> {
+  type PlaywrightModule = typeof import("playwright");
+  let playwright: PlaywrightModule;
+  try {
+    playwright = (await import("playwright")) as PlaywrightModule;
+  } catch {
+    throw new Error(
+      "HTML PDF rendering requires Playwright. Install dependencies and run `pnpm exec playwright install chromium`."
+    );
+  }
+
+  const executablePath = process.env.PDF_CHROMIUM_EXECUTABLE_PATH?.trim();
+  const browser = await playwright.chromium.launch({
+    headless: true,
+    ...(executablePath ? { executablePath } : {}),
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.setContent(input.html, {
+      waitUntil: "networkidle",
+      timeout: input.timeoutMs
+    });
+    const buffer = await page.pdf({
+      format: input.format,
+      printBackground: input.printBackground,
+      preferCSSPageSize: true
+    });
+    return Buffer.from(buffer);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown renderer error";
+    throw new Error(
+      `HTML PDF render failed: ${message}. Ensure Chromium is installed (pnpm exec playwright install chromium).`
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
 function extractJsonFromText(text: string): string {
   const trimmed = text.trim();
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -1351,6 +1440,28 @@ function toJsonSafeValue(value: unknown): unknown {
   }
 }
 
+function toErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    if (typeof record.message === "string" && record.message.trim()) {
+      return record.message.trim();
+    }
+    if (typeof record.name === "string" && record.name.trim()) {
+      return record.name.trim();
+    }
+    try {
+      const serialized = JSON.stringify(record);
+      if (serialized && serialized !== "{}") {
+        return serialized;
+      }
+    } catch {
+      // Ignore serialization errors and fallback to string coercion.
+    }
+  }
+  const coerced = String(error ?? "").trim();
+  return coerced || fallback;
+}
+
 export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput): Promise<CodeNodeExecutionOutput> {
   const code = String(input.code ?? "");
   const timeoutMs =
@@ -1384,6 +1495,7 @@ export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput): Pro
     Array,
     Object,
     Date,
+    Buffer,
     console: sandboxConsole,
     require: undefined,
     process: undefined,
@@ -1407,7 +1519,7 @@ export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput): Pro
       logs
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Code node execution failed.";
+    const message = toErrorMessage(error, "Code node execution failed.");
     throw new Error(`Code node sandbox error: ${message}`);
   }
 }
@@ -2932,8 +3044,22 @@ async function executeNode(
     }
 
     case "pdf_output": {
+      const renderMode = config.renderMode === "html" ? "html" : "text";
       const inputKey = typeof config.inputKey === "string" && config.inputKey.trim() ? config.inputKey.trim() : "result";
       const textTemplate = typeof config.textTemplate === "string" ? config.textTemplate : "";
+      const htmlTemplate = typeof config.htmlTemplate === "string" ? config.htmlTemplate : "";
+      const pageFormat: PdfPageFormat =
+        config.pageFormat === "Letter" ||
+        config.pageFormat === "Legal" ||
+        config.pageFormat === "A3" ||
+        config.pageFormat === "A5"
+          ? config.pageFormat
+          : "A4";
+      const printBackground = config.printBackground !== false;
+      const htmlRenderTimeoutMs =
+        typeof config.htmlRenderTimeoutMs === "number" && Number.isFinite(config.htmlRenderTimeoutMs) && config.htmlRenderTimeoutMs >= 1_000
+          ? Math.floor(config.htmlRenderTimeoutMs)
+          : 45_000;
       const filenameTemplate =
         typeof config.filenameTemplate === "string" && config.filenameTemplate.trim()
           ? config.filenameTemplate
@@ -2941,27 +3067,35 @@ async function executeNode(
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "pdf";
 
       const sourceValue = getValueByPath(templateData, inputKey);
-      let sourceText = textTemplate.trim()
-        ? renderTemplate(textTemplate, templateData)
-        : toPdfSourceText(
-            sourceValue ??
-              templateData[inputKey] ??
-              templateData.result ??
-              templateData.answer ??
-              templateData.text ??
-              templateData.user_prompt ??
-              templateData
-          );
-
-      const maxSourceLength = 50_000;
-      if (sourceText.length > maxSourceLength) {
-        sourceText =
-          `${sourceText.slice(0, maxSourceLength)}\n\n[truncated: content exceeded ${maxSourceLength} characters]`;
-      }
+      const resolvedSource =
+        sourceValue ??
+        templateData[inputKey] ??
+        templateData.result ??
+        templateData.answer ??
+        templateData.text ??
+        templateData.user_prompt ??
+        templateData;
 
       const renderedFilename = renderTemplate(filenameTemplate, templateData);
       const filename = normalizePdfFilename(renderedFilename);
-      const pdfBuffer = createSimplePdfBuffer(sourceText);
+      let pdfBuffer: Buffer;
+      if (renderMode === "html") {
+        const html = htmlTemplate.trim() ? renderTemplate(htmlTemplate, templateData) : toPdfHtmlSource(resolvedSource);
+        pdfBuffer = await createHtmlPdfBuffer({
+          html,
+          format: pageFormat,
+          printBackground,
+          timeoutMs: htmlRenderTimeoutMs
+        });
+      } else {
+        let sourceText = textTemplate.trim() ? renderTemplate(textTemplate, templateData) : toPdfSourceText(resolvedSource);
+        const maxSourceLength = 50_000;
+        if (sourceText.length > maxSourceLength) {
+          sourceText =
+            `${sourceText.slice(0, maxSourceLength)}\n\n[truncated: content exceeded ${maxSourceLength} characters]`;
+        }
+        pdfBuffer = createSimplePdfBuffer(sourceText);
+      }
       const base64 = pdfBuffer.toString("base64");
       const downloadUrl = `data:application/pdf;base64,${base64}`;
 
@@ -2970,7 +3104,8 @@ async function executeNode(
         mimeType: "application/pdf",
         sizeBytes: pdfBuffer.byteLength,
         downloadUrl,
-        base64
+        base64,
+        renderMode
       };
 
       return {

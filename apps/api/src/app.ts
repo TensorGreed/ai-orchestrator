@@ -60,6 +60,11 @@ const workflowImportSchema = z.object({
   workflow: z.unknown().optional()
 });
 
+const workflowDuplicateSchema = z.object({
+  name: z.string().min(1).max(120),
+  id: z.string().min(1).max(120).optional()
+});
+
 const mcpDiscoverSchema = z.object({
   serverId: z.string().min(1),
   label: z.string().optional(),
@@ -238,6 +243,33 @@ function normalizeExecutionTimeoutMs(
         : fallbackMs;
   const bounded = Math.floor(candidate);
   return Math.max(1_000, Math.min(86_400_000, bounded));
+}
+
+function normalizeWorkflowIdCandidate(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return normalized || "workflow-copy";
+}
+
+function makeUniqueWorkflowId(store: SqliteStore, preferredId: string): string {
+  const base = normalizeWorkflowIdCandidate(preferredId);
+  if (!store.getWorkflow(base)) {
+    return base;
+  }
+
+  for (let index = 2; index <= 10_000; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!store.getWorkflow(candidate)) {
+      return candidate;
+    }
+  }
+
+  return `${base}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
 function normalizeProviderConfigForTest(
@@ -1587,6 +1619,42 @@ export function createApp(
         error: error instanceof Error ? error.message : "Failed to delete workflow"
       };
     }
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/duplicate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const sourceWorkflow = store.getWorkflow(request.params.id);
+    if (!sourceWorkflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+
+    const parsed = workflowDuplicateSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid workflow duplication payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const requestedId = parsed.data.id?.trim();
+    const duplicateId = makeUniqueWorkflowId(store, requestedId || `${sourceWorkflow.id}-copy`);
+    const duplicateName = parsed.data.name.trim();
+    const duplicatedWorkflow = JSON.parse(JSON.stringify(sourceWorkflow)) as Workflow;
+    delete duplicatedWorkflow.createdAt;
+    delete duplicatedWorkflow.updatedAt;
+    duplicatedWorkflow.id = duplicateId;
+    duplicatedWorkflow.name = duplicateName;
+    duplicatedWorkflow.workflowVersion = 1;
+
+    const savedWorkflow = store.upsertWorkflow(duplicatedWorkflow);
+    schedulerService?.reloadWorkflow(savedWorkflow.id);
+    return savedWorkflow;
   });
 
   app.post<{ Body: unknown }>("/api/workflows/import", async (request, reply) => {

@@ -122,6 +122,12 @@ WORKFLOW_EXECUTION_TIMEOUT_MS=1200000
 pnpm install
 ```
 
+If you want rich HTML/image PDF rendering in `PDF Output` node (`renderMode=html`), install Chromium for Playwright:
+
+```bash
+pnpm exec playwright install chromium
+```
+
 ### 3) Start servers
 
 Start API + UI + docs together:
@@ -319,6 +325,26 @@ curl -X POST http://localhost:4000/webhook/agent-demo \
     "system_prompt": "You are a tool-using agent. Use tools when required.",
     "user_prompt": "What time is it in America/Toronto and what is 12*7?"
   }'
+```
+
+## Rich PDF output (HTML + images)
+
+`PDF Output` node supports two render modes:
+
+- `text` (default): fast plain-text PDF
+- `html`: renders HTML/CSS/images using headless Chromium
+
+Recommended config for charts/reports:
+
+- Set `renderMode = html`
+- Put report HTML in `htmlTemplate` or upstream `inputKey`
+- Keep `printBackground = true`
+- Choose `pageFormat` (`A4` default)
+
+If Chromium is not auto-detected, set:
+
+```bash
+PDF_CHROMIUM_EXECUTABLE_PATH=/absolute/path/to/chrome-or-chromium
 ```
 
 Compatibility endpoint (still supported): `POST /api/webhooks/execute` with `workflow_id`.

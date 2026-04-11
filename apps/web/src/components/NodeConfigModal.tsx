@@ -3774,18 +3774,64 @@ export function NodeConfigModal({
       case "pdf_output":
         return (
           <>
+            <SelectField
+              label="Render Mode"
+              value={toStringValue(config.renderMode, "text")}
+              onChange={(next) => setConfig((current) => ({ ...current, renderMode: next }))}
+              options={[
+                { value: "text", label: "Text (simple PDF)" },
+                { value: "html", label: "HTML (rich PDF with images)" }
+              ]}
+            />
             <TextField
               label="Input Key"
               value={toStringValue(config.inputKey, "result")}
               onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
               placeholder="result"
             />
-            <TextAreaField
-              label="Text Template (optional)"
-              value={toStringValue(config.textTemplate, "")}
-              onChange={(next) => setConfig((current) => ({ ...current, textTemplate: next }))}
-              rows={4}
-            />
+            {toStringValue(config.renderMode, "text") === "html" ? (
+              <>
+                <TextAreaField
+                  label="HTML Template (optional)"
+                  value={toStringValue(config.htmlTemplate, "")}
+                  onChange={(next) => setConfig((current) => ({ ...current, htmlTemplate: next }))}
+                  rows={8}
+                />
+                <div className="cfg-grid-2">
+                  <SelectField
+                    label="Page Format"
+                    value={toStringValue(config.pageFormat, "A4")}
+                    onChange={(next) => setConfig((current) => ({ ...current, pageFormat: next }))}
+                    options={[
+                      { value: "A4", label: "A4" },
+                      { value: "Letter", label: "Letter" },
+                      { value: "Legal", label: "Legal" },
+                      { value: "A3", label: "A3" },
+                      { value: "A5", label: "A5" }
+                    ]}
+                  />
+                  <NumberField
+                    label="HTML Render Timeout (ms)"
+                    value={toNumberValue(config.htmlRenderTimeoutMs, 45000)}
+                    min={1000}
+                    step={1000}
+                    onChange={(next) => setConfig((current) => ({ ...current, htmlRenderTimeoutMs: next }))}
+                  />
+                </div>
+                <ToggleField
+                  label="Print Background"
+                  checked={toBooleanValue(config.printBackground, true)}
+                  onChange={(next) => setConfig((current) => ({ ...current, printBackground: next }))}
+                />
+              </>
+            ) : (
+              <TextAreaField
+                label="Text Template (optional)"
+                value={toStringValue(config.textTemplate, "")}
+                onChange={(next) => setConfig((current) => ({ ...current, textTemplate: next }))}
+                rows={4}
+              />
+            )}
             <TextField
               label="Filename Template"
               value={toStringValue(config.filenameTemplate, "workflow-output-{{session_id}}.pdf")}
@@ -3799,7 +3845,8 @@ export function NodeConfigModal({
               placeholder="pdf"
             />
             <div className="cfg-tip">
-              Generates a PDF and returns a downloadable data URL in the node output.
+              Generates a PDF and returns a downloadable data URL in the node output. HTML mode supports rich layout,
+              CSS, and images.
             </div>
           </>
         );

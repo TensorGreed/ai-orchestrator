@@ -851,6 +851,17 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     }
 
     if (node.type === "pdf_output") {
+      if (
+        config.renderMode !== undefined &&
+        config.renderMode !== "text" &&
+        config.renderMode !== "html"
+      ) {
+        issues.push({
+          code: "invalid_pdf_output_render_mode",
+          message: "PDF Output node renderMode must be either 'text' or 'html'.",
+          nodeId: node.id
+        });
+      }
       if (config.inputKey !== undefined && (typeof config.inputKey !== "string" || !config.inputKey.trim())) {
         issues.push({
           code: "invalid_pdf_output_input_key",
@@ -862,6 +873,46 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_pdf_output_text_template",
           message: "PDF Output node textTemplate must be a string when provided.",
+          nodeId: node.id
+        });
+      }
+      if (config.htmlTemplate !== undefined && typeof config.htmlTemplate !== "string") {
+        issues.push({
+          code: "invalid_pdf_output_html_template",
+          message: "PDF Output node htmlTemplate must be a string when provided.",
+          nodeId: node.id
+        });
+      }
+      if (
+        config.pageFormat !== undefined &&
+        config.pageFormat !== "A4" &&
+        config.pageFormat !== "Letter" &&
+        config.pageFormat !== "Legal" &&
+        config.pageFormat !== "A3" &&
+        config.pageFormat !== "A5"
+      ) {
+        issues.push({
+          code: "invalid_pdf_output_page_format",
+          message: "PDF Output node pageFormat must be one of: A4, Letter, Legal, A3, A5.",
+          nodeId: node.id
+        });
+      }
+      if (config.printBackground !== undefined && typeof config.printBackground !== "boolean") {
+        issues.push({
+          code: "invalid_pdf_output_print_background",
+          message: "PDF Output node printBackground must be a boolean when provided.",
+          nodeId: node.id
+        });
+      }
+      if (
+        config.htmlRenderTimeoutMs !== undefined &&
+        (typeof config.htmlRenderTimeoutMs !== "number" ||
+          !Number.isFinite(config.htmlRenderTimeoutMs) ||
+          config.htmlRenderTimeoutMs < 1000)
+      ) {
+        issues.push({
+          code: "invalid_pdf_output_html_render_timeout",
+          message: "PDF Output node htmlRenderTimeoutMs must be a number >= 1000 when provided.",
           nodeId: node.id
         });
       }

@@ -475,6 +475,85 @@ describe("auth + rbac API", () => {
     expect(secondDeleteResponse.statusCode).toBe(404);
   });
 
+  it("allows builder to duplicate a workflow with a different name", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-duplicate@example.com",
+      password: "BuilderDuplicate123!",
+      role: "builder"
+    });
+
+    const sourceWorkflow = createValidWorkflow("wf-duplicate-source");
+    sourceWorkflow.name = "CM Reports";
+
+    const createResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie: builderCookie },
+      payload: sourceWorkflow
+    });
+    expect(createResponse.statusCode).toBe(200);
+
+    const duplicateResponse = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${sourceWorkflow.id}/duplicate`,
+      headers: { cookie: builderCookie },
+      payload: {
+        name: "CM Reports - QA Copy"
+      }
+    });
+    expect(duplicateResponse.statusCode).toBe(200);
+    const duplicated = duplicateResponse.json<Workflow>();
+    expect(duplicated.id).not.toBe(sourceWorkflow.id);
+    expect(duplicated.name).toBe("CM Reports - QA Copy");
+    expect(duplicated.workflowVersion).toBe(1);
+    expect(duplicated.nodes).toEqual(sourceWorkflow.nodes);
+    expect(duplicated.edges).toEqual(sourceWorkflow.edges);
+
+    const listResponse = await context.app.inject({
+      method: "GET",
+      url: "/api/workflows",
+      headers: { cookie: builderCookie }
+    });
+    expect(listResponse.statusCode).toBe(200);
+    const workflows = listResponse.json<Array<{ id: string }>>();
+    expect(workflows.some((item) => item.id === sourceWorkflow.id)).toBe(true);
+    expect(workflows.some((item) => item.id === duplicated.id)).toBe(true);
+  });
+
+  it("rejects workflow duplication for viewer role", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-duplicate-seed@example.com",
+      password: "BuilderDuplicateSeed123!",
+      role: "builder"
+    });
+    const viewerCookie = await createRoleSession(context, {
+      email: "viewer-duplicate-denied@example.com",
+      password: "ViewerDuplicateDenied123!",
+      role: "viewer"
+    });
+
+    const sourceWorkflow = createValidWorkflow("wf-duplicate-denied-source");
+    const createResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie: builderCookie },
+      payload: sourceWorkflow
+    });
+    expect(createResponse.statusCode).toBe(200);
+
+    const duplicateResponse = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${sourceWorkflow.id}/duplicate`,
+      headers: { cookie: viewerCookie },
+      payload: {
+        name: "Viewer Attempt Copy"
+      }
+    });
+    expect(duplicateResponse.statusCode).toBe(403);
+  });
+
   it("allows builder to test Azure connector configuration through API", async () => {
     const context = await createTestContext();
     const builderCookie = await createRoleSession(context, {

@@ -116,6 +116,19 @@ export async function deleteWorkflow(id: string) {
   });
 }
 
+export async function duplicateWorkflow(
+  id: string,
+  payload: {
+    name: string;
+    id?: string;
+  }
+) {
+  return apiRequest<Workflow>(`/api/workflows/${id}/duplicate`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export async function importWorkflow(payload: { json?: string; workflow?: unknown }) {
   return apiRequest<Workflow>("/api/workflows/import", {
     method: "POST",

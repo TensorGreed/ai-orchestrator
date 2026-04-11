@@ -14,6 +14,7 @@
 - `POST /api/workflows`
 - `PUT /api/workflows/:id`
 - `DELETE /api/workflows/:id`
+- `POST /api/workflows/:id/duplicate`
 - `POST /api/workflows/import`
 - `GET /api/workflows/:id/export`
 - `POST /api/workflows/:id/validate`
