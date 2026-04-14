@@ -43,6 +43,9 @@ async function bootstrap() {
     seedWorkflowsIfEmpty(store, workspaceRoot);
   }
 
+  // Ensure the default project exists and backfill any legacy rows that predate Phase 4.2.
+  store.ensureDefaultProject();
+
   const schedulerService = new SchedulerService(store);
   const queueService = new QueueService(store, {
     concurrency: Number(process.env.QUEUE_CONCURRENCY) || 5

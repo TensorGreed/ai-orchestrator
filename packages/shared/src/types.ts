@@ -144,6 +144,8 @@ export interface WorkflowSettings {
   saveDataErrorExecution?: "all" | "none";
 }
 
+export const DEFAULT_PROJECT_ID = "default";
+
 export interface Workflow {
   id: string;
   name: string;
@@ -156,6 +158,10 @@ export interface Workflow {
   createdAt?: string;
   updatedAt?: string;
   settings?: WorkflowSettings;
+  /** Phase 4.2 — tags/organization. All optional for backwards-compat. */
+  tags?: string[];
+  projectId?: string;
+  folderId?: string;
 }
 
 export interface WorkflowListItem {
@@ -163,6 +169,27 @@ export interface WorkflowListItem {
   name: string;
   schemaVersion: string;
   workflowVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  tags?: string[];
+  projectId?: string;
+  folderId?: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Folder {
+  id: string;
+  name: string;
+  parentId?: string;
+  projectId: string;
   createdAt: string;
   updatedAt: string;
 }

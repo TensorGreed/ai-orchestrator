@@ -191,6 +191,42 @@ export const MIGRATIONS: Migration[] = [
         PRIMARY KEY (workflow_id, node_id)
       );
     `
+  },
+  {
+    version: 4,
+    description: "Workflow organization — projects, folders, tags, workflow project/folder FKs (Phase 4.2)",
+    up: `
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        parent_id TEXT,
+        project_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_folders_project_id ON folders(project_id);
+      CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id);
+
+      ALTER TABLE workflows ADD COLUMN tags_json TEXT DEFAULT '[]';
+      ALTER TABLE workflows ADD COLUMN project_id TEXT DEFAULT 'default';
+      ALTER TABLE workflows ADD COLUMN folder_id TEXT;
+
+      ALTER TABLE secrets ADD COLUMN project_id TEXT DEFAULT 'default';
+
+      CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
+      CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id);
+      CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id);
+    `
   }
 ];
 

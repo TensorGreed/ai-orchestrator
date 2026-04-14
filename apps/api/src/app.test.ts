@@ -181,6 +181,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     ...overrides
   };
 
+  store.ensureDefaultProject();
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
   const app = createApp(config, store, secretService, authService);
@@ -1522,5 +1523,265 @@ describe("Phase 3.5 trigger system expansion", () => {
     expect(invoke.statusCode).toBe(200);
     const invokeBody = invoke.json<{ ok: boolean }>();
     expect(invokeBody.ok).toBe(true);
+  });
+});
+
+describe("Phase 4.2 workflow organization", () => {
+  async function registerAndLogin(
+    context: TestContext,
+    role: "admin" | "builder" | "viewer"
+  ): Promise<string> {
+    const email = `${role}-42-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@example.com`;
+    context.authService.register({ email, password: "TestPass123!", role });
+    const login = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email, password: "TestPass123!" }
+    });
+    if (login.statusCode !== 200) throw new Error(`login failed: ${login.body}`);
+    return extractCookie(login.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
+  }
+
+  function makeWorkflow(id: string, overrides: Partial<Workflow> = {}): Workflow {
+    return {
+      id,
+      name: `WF ${id}`,
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "out",
+          type: "output",
+          name: "Out",
+          position: { x: 0, y: 0 },
+          config: { outputKey: "result", responseTemplate: "ok" }
+        }
+      ],
+      edges: [],
+      ...overrides
+    };
+  }
+
+  it("bootstraps the default project and returns it from GET /api/projects", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "viewer");
+    const res = await context.app.inject({
+      method: "GET",
+      url: "/api/projects",
+      headers: { cookie }
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ projects: Array<{ id: string; name: string }> }>();
+    expect(body.projects.find((p) => p.id === "default")).toBeDefined();
+  });
+
+  it("create + move workflow into a custom project and folder, then filter list", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "builder");
+
+    const projectRes = await context.app.inject({
+      method: "POST",
+      url: "/api/projects",
+      headers: { cookie },
+      payload: { name: "Client Work", description: "Everything for clients" }
+    });
+    expect(projectRes.statusCode).toBe(200);
+    const project = projectRes.json<{ id: string; name: string }>();
+    expect(project.id).toMatch(/.+/);
+
+    const folderRes = await context.app.inject({
+      method: "POST",
+      url: "/api/folders",
+      headers: { cookie },
+      payload: { name: "Inbound", projectId: project.id }
+    });
+    expect(folderRes.statusCode).toBe(200);
+    const folder = folderRes.json<{ id: string }>();
+
+    context.store.upsertWorkflow(makeWorkflow("wf-move-1", { name: "To move" }));
+
+    const moveRes = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows/wf-move-1/move",
+      headers: { cookie },
+      payload: { projectId: project.id, folderId: folder.id, tags: ["alpha", "beta"] }
+    });
+    expect(moveRes.statusCode).toBe(200);
+    const moved = moveRes.json<{ projectId: string; folderId: string; tags: string[] }>();
+    expect(moved.projectId).toBe(project.id);
+    expect(moved.folderId).toBe(folder.id);
+    expect(moved.tags).toEqual(["alpha", "beta"]);
+
+    const byProject = await context.app.inject({
+      method: "GET",
+      url: `/api/workflows?projectId=${project.id}`,
+      headers: { cookie }
+    });
+    expect(byProject.statusCode).toBe(200);
+    const projectList = byProject.json<Array<{ id: string; tags?: string[] }>>();
+    expect(projectList.some((w) => w.id === "wf-move-1")).toBe(true);
+
+    const byTag = await context.app.inject({
+      method: "GET",
+      url: `/api/workflows?tag=alpha`,
+      headers: { cookie }
+    });
+    expect(byTag.statusCode).toBe(200);
+    const tagList = byTag.json<Array<{ id: string }>>();
+    expect(tagList.some((w) => w.id === "wf-move-1")).toBe(true);
+
+    const byFolder = await context.app.inject({
+      method: "GET",
+      url: `/api/workflows?folderId=${folder.id}`,
+      headers: { cookie }
+    });
+    expect(byFolder.statusCode).toBe(200);
+    const folderList = byFolder.json<Array<{ id: string }>>();
+    expect(folderList.length).toBe(1);
+    expect(folderList[0]!.id).toBe("wf-move-1");
+  });
+
+  it("search filters by name (case-insensitive substring)", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "builder");
+    context.store.upsertWorkflow(makeWorkflow("wf-s-1", { name: "Customer Onboarding Agent" }));
+    context.store.upsertWorkflow(makeWorkflow("wf-s-2", { name: "Invoice Processor" }));
+
+    const res = await context.app.inject({
+      method: "GET",
+      url: "/api/workflows?search=onboard",
+      headers: { cookie }
+    });
+    expect(res.statusCode).toBe(200);
+    const list = res.json<Array<{ id: string }>>();
+    expect(list.map((w) => w.id)).toEqual(["wf-s-1"]);
+  });
+
+  it("duplicate preserves tags/folder/project from source", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "builder");
+
+    const projectRes = await context.app.inject({
+      method: "POST",
+      url: "/api/projects",
+      headers: { cookie },
+      payload: { name: "X" }
+    });
+    const project = projectRes.json<{ id: string }>();
+    const folderRes = await context.app.inject({
+      method: "POST",
+      url: "/api/folders",
+      headers: { cookie },
+      payload: { name: "Y", projectId: project.id }
+    });
+    const folder = folderRes.json<{ id: string }>();
+
+    context.store.upsertWorkflow(
+      makeWorkflow("wf-src", {
+        name: "Src",
+        tags: ["production"],
+        projectId: project.id,
+        folderId: folder.id
+      })
+    );
+
+    const dupRes = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows/wf-src/duplicate",
+      headers: { cookie },
+      payload: { name: "Copy" }
+    });
+    expect(dupRes.statusCode).toBe(200);
+    const dup = dupRes.json<{ id: string; tags?: string[]; projectId?: string; folderId?: string }>();
+    expect(dup.tags).toEqual(["production"]);
+    expect(dup.projectId).toBe(project.id);
+    expect(dup.folderId).toBe(folder.id);
+  });
+
+  it("secrets scope to the project when listed with ?projectId", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "builder");
+    const projectRes = await context.app.inject({
+      method: "POST",
+      url: "/api/projects",
+      headers: { cookie },
+      payload: { name: "P" }
+    });
+    const project = projectRes.json<{ id: string }>();
+
+    await context.app.inject({
+      method: "POST",
+      url: "/api/secrets",
+      headers: { cookie },
+      payload: { name: "Default secret", provider: "custom", value: "secret-a" }
+    });
+    await context.app.inject({
+      method: "POST",
+      url: "/api/secrets",
+      headers: { cookie },
+      payload: {
+        name: "Project secret",
+        provider: "custom",
+        value: "secret-b",
+        projectId: project.id
+      }
+    });
+
+    const defaultList = await context.app.inject({
+      method: "GET",
+      url: "/api/secrets?projectId=default",
+      headers: { cookie }
+    });
+    expect(defaultList.statusCode).toBe(200);
+    const defaults = defaultList.json<Array<{ name: string; projectId: string }>>();
+    expect(defaults.some((s) => s.name === "Default secret")).toBe(true);
+    expect(defaults.some((s) => s.name === "Project secret")).toBe(false);
+
+    const projectList = await context.app.inject({
+      method: "GET",
+      url: `/api/secrets?projectId=${project.id}`,
+      headers: { cookie }
+    });
+    expect(projectList.statusCode).toBe(200);
+    const projectSecrets = projectList.json<Array<{ name: string }>>();
+    expect(projectSecrets.some((s) => s.name === "Project secret")).toBe(true);
+    expect(projectSecrets.some((s) => s.name === "Default secret")).toBe(false);
+  });
+
+  it("refuses to delete the default project", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "builder");
+    const res = await context.app.inject({
+      method: "DELETE",
+      url: "/api/projects/default",
+      headers: { cookie }
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("deleting a folder orphans its workflows (moves them out of folder) without deleting them", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "builder");
+    const folderRes = await context.app.inject({
+      method: "POST",
+      url: "/api/folders",
+      headers: { cookie },
+      payload: { name: "Tmp", projectId: "default" }
+    });
+    const folder = folderRes.json<{ id: string }>();
+    context.store.upsertWorkflow(
+      makeWorkflow("wf-fld", { folderId: folder.id })
+    );
+
+    const del = await context.app.inject({
+      method: "DELETE",
+      url: `/api/folders/${folder.id}`,
+      headers: { cookie }
+    });
+    expect(del.statusCode).toBe(200);
+
+    const wf = context.store.getWorkflow("wf-fld");
+    expect(wf).not.toBeNull();
+    expect(wf?.folderId).toBeUndefined();
   });
 });

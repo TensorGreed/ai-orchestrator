@@ -3,7 +3,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import initSqlJs, { type BindParams, type Database as SQLDatabase } from "sql.js";
-import type { ChatMessage, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
+import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
 
 const require = createRequire(import.meta.url);
 
@@ -13,6 +14,27 @@ interface WorkflowRow {
   schema_version: string;
   workflow_version: number;
   workflow_json: string;
+  created_at: string;
+  updated_at: string;
+  tags_json?: string | null;
+  project_id?: string | null;
+  folder_id?: string | null;
+}
+
+interface ProjectRow {
+  id: string;
+  name: string;
+  description: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface FolderRow {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  project_id: string;
   created_at: string;
   updated_at: string;
 }
@@ -25,6 +47,7 @@ interface SecretRow {
   auth_tag: string;
   ciphertext: string;
   created_at: string;
+  project_id?: string | null;
 }
 
 interface SessionMemoryRow {
@@ -160,6 +183,14 @@ function parseJsonSafe(value: unknown): unknown {
   } catch {
     return null;
   }
+}
+
+function parseTagsJson(value: unknown): string[] | undefined {
+  if (value === null || value === undefined) return undefined;
+  const parsed = parseJsonSafe(value);
+  if (!Array.isArray(parsed)) return undefined;
+  const tags = parsed.filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0);
+  return tags.length > 0 ? tags : [];
 }
 
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
@@ -351,9 +382,62 @@ export class SqliteStore {
         failed_at TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      -- Phase 3.5 trigger state
+      CREATE TABLE IF NOT EXISTS trigger_state (
+        workflow_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        trigger_type TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workflow_id, node_id)
+      );
+
+      -- Phase 4.2 organization tables
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        parent_id TEXT,
+        project_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_folders_project_id ON folders(project_id);
+      CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id);
     `);
 
+    // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
+    this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
+    this.ensureColumn("workflows", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
+    this.ensureColumn("workflows", "folder_id", "TEXT");
+    this.ensureColumn("secrets", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
+
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
+
     this.persist();
+  }
+
+  private columnExists(table: string, column: string): boolean {
+    const rows = this.queryAll<{ name: string }>(`PRAGMA table_info(${table})`);
+    return rows.some((row) => toString(row.name) === column);
+  }
+
+  private ensureColumn(table: string, column: string, type: string, defaultExpr?: string): void {
+    if (this.columnExists(table, column)) return;
+    const def = defaultExpr ? ` DEFAULT ${defaultExpr}` : "";
+    this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}${def}`);
   }
 
   private persist(): void {
@@ -383,26 +467,61 @@ export class SqliteStore {
     return rows[0] ?? null;
   }
 
-  listWorkflows(): WorkflowListItem[] {
+  listWorkflows(options: {
+    projectId?: string;
+    folderId?: string | null;
+    tag?: string;
+    search?: string;
+  } = {}): WorkflowListItem[] {
+    const clauses: string[] = [];
+    const params: BindParams = [];
+    if (options.projectId) {
+      clauses.push(`COALESCE(project_id, ?) = ?`);
+      params.push(DEFAULT_PROJECT_ID, options.projectId);
+    }
+    if (options.folderId === null) {
+      clauses.push(`(folder_id IS NULL OR folder_id = '')`);
+    } else if (typeof options.folderId === "string") {
+      clauses.push(`folder_id = ?`);
+      params.push(options.folderId);
+    }
+    if (options.search && options.search.trim()) {
+      clauses.push(`LOWER(name) LIKE ?`);
+      params.push(`%${options.search.trim().toLowerCase()}%`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.queryAll<WorkflowRow>(
-      `SELECT id, name, schema_version, workflow_version, created_at, updated_at, workflow_json
+      `SELECT id, name, schema_version, workflow_version, created_at, updated_at, workflow_json, tags_json, project_id, folder_id
        FROM workflows
-       ORDER BY updated_at DESC`
+       ${where}
+       ORDER BY updated_at DESC`,
+      params
     );
 
-    return rows.map((row) => ({
+    const mapped = rows.map((row) => ({
       id: toString(row.id),
       name: toString(row.name),
       schemaVersion: toString(row.schema_version),
       workflowVersion: toNumber(row.workflow_version),
       createdAt: toString(row.created_at),
-      updatedAt: toString(row.updated_at)
+      updatedAt: toString(row.updated_at),
+      tags: parseTagsJson(row.tags_json),
+      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
+      folderId: row.folder_id ? toString(row.folder_id) : undefined
     }));
+
+    if (options.tag && options.tag.trim()) {
+      const needle = options.tag.trim().toLowerCase();
+      return mapped.filter((item) =>
+        (item.tags ?? []).some((tag) => tag.toLowerCase() === needle)
+      );
+    }
+    return mapped;
   }
 
   getWorkflow(id: string): Workflow | null {
     const row = this.queryOne<WorkflowRow>(
-      `SELECT id, name, schema_version, workflow_version, workflow_json, created_at, updated_at
+      `SELECT id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id
        FROM workflows
        WHERE id = ?`,
       [id]
@@ -415,6 +534,11 @@ export class SqliteStore {
     const parsed = JSON.parse(toString(row.workflow_json)) as Workflow;
     parsed.createdAt = toString(row.created_at);
     parsed.updatedAt = toString(row.updated_at);
+    // Columns are authoritative (including NULL) — stale JSON is a fallback only if columns absent.
+    const tagsFromCol = parseTagsJson(row.tags_json);
+    if (tagsFromCol !== undefined) parsed.tags = tagsFromCol;
+    parsed.projectId = row.project_id ? toString(row.project_id) : (parsed.projectId ?? DEFAULT_PROJECT_ID);
+    parsed.folderId = row.folder_id ? toString(row.folder_id) : undefined;
     return parsed;
   }
 
@@ -426,19 +550,25 @@ export class SqliteStore {
 
     const payload: Workflow = {
       ...workflow,
+      projectId: workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID,
+      folderId: workflow.folderId ?? existing?.folderId,
+      tags: Array.isArray(workflow.tags) ? workflow.tags.filter((t) => typeof t === "string") : existing?.tags,
       createdAt,
       updatedAt
     };
 
     this.db.run(
-      `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          schema_version = excluded.schema_version,
          workflow_version = excluded.workflow_version,
          workflow_json = excluded.workflow_json,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at,
+         tags_json = excluded.tags_json,
+         project_id = excluded.project_id,
+         folder_id = excluded.folder_id`,
       [
         payload.id,
         payload.name,
@@ -446,7 +576,10 @@ export class SqliteStore {
         payload.workflowVersion,
         JSON.stringify(payload),
         createdAt,
-        updatedAt
+        updatedAt,
+        JSON.stringify(payload.tags ?? []),
+        payload.projectId ?? DEFAULT_PROJECT_ID,
+        payload.folderId ?? null
       ]
     );
 
@@ -498,22 +631,35 @@ export class SqliteStore {
     return row ? toNumber(row.count) : 0;
   }
 
-  listSecrets(): Array<Pick<SecretRow, "id" | "name" | "provider" | "created_at">> {
+  listSecrets(
+    options: { projectId?: string } = {}
+  ): Array<Pick<SecretRow, "id" | "name" | "provider" | "created_at"> & { projectId: string }> {
+    const clauses: string[] = [];
+    const params: BindParams = [];
+    if (options.projectId) {
+      clauses.push(`COALESCE(project_id, ?) = ?`);
+      params.push(DEFAULT_PROJECT_ID, options.projectId);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.queryAll<SecretRow>(
-      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at FROM secrets ORDER BY created_at DESC`
+      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id
+       FROM secrets ${where}
+       ORDER BY created_at DESC`,
+      params
     );
 
     return rows.map((row) => ({
       id: toString(row.id),
       name: toString(row.name),
       provider: toString(row.provider),
-      created_at: toString(row.created_at)
+      created_at: toString(row.created_at),
+      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID
     }));
   }
 
-  getSecret(id: string): SecretRow | null {
+  getSecret(id: string): (SecretRow & { projectId: string }) | null {
     const row = this.queryOne<SecretRow>(
-      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at FROM secrets WHERE id = ?`,
+      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id FROM secrets WHERE id = ?`,
       [id]
     );
 
@@ -528,7 +674,9 @@ export class SqliteStore {
       iv: toString(row.iv),
       auth_tag: toString(row.auth_tag),
       ciphertext: toString(row.ciphertext),
-      created_at: toString(row.created_at)
+      created_at: toString(row.created_at),
+      project_id: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
+      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID
     };
   }
 
@@ -539,16 +687,18 @@ export class SqliteStore {
     iv: string;
     authTag: string;
     ciphertext: string;
+    projectId?: string;
   }): void {
     this.db.run(
-      `INSERT INTO secrets (id, name, provider, iv, auth_tag, ciphertext, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO secrets (id, name, provider, iv, auth_tag, ciphertext, created_at, project_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          provider = excluded.provider,
          iv = excluded.iv,
          auth_tag = excluded.auth_tag,
-         ciphertext = excluded.ciphertext`,
+         ciphertext = excluded.ciphertext,
+         project_id = excluded.project_id`,
       [
         input.id,
         input.name,
@@ -556,7 +706,8 @@ export class SqliteStore {
         input.iv,
         input.authTag,
         input.ciphertext,
-        new Date().toISOString()
+        new Date().toISOString(),
+        input.projectId ?? DEFAULT_PROJECT_ID
       ]
     );
 
@@ -1758,5 +1909,205 @@ export class SqliteStore {
   deleteTriggerStatesForWorkflow(workflowId: string): void {
     this.db.run(`DELETE FROM trigger_state WHERE workflow_id = ?`, [workflowId]);
     this.persist();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 4.2 — projects & folders
+  // ---------------------------------------------------------------------------
+
+  listProjects(): Project[] {
+    const rows = this.queryAll<ProjectRow>(
+      `SELECT id, name, description, created_by, created_at, updated_at
+       FROM projects
+       ORDER BY name ASC`
+    );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      name: toString(row.name),
+      description: row.description ? toString(row.description) : undefined,
+      createdBy: row.created_by ? toString(row.created_by) : undefined,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  getProject(id: string): Project | null {
+    const row = this.queryOne<ProjectRow>(
+      `SELECT id, name, description, created_by, created_at, updated_at FROM projects WHERE id = ?`,
+      [id]
+    );
+    if (!row) return null;
+    return {
+      id: toString(row.id),
+      name: toString(row.name),
+      description: row.description ? toString(row.description) : undefined,
+      createdBy: row.created_by ? toString(row.created_by) : undefined,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertProject(input: {
+    id: string;
+    name: string;
+    description?: string;
+    createdBy?: string;
+  }): Project {
+    const now = new Date().toISOString();
+    const existing = this.getProject(input.id);
+    const createdAt = existing?.createdAt ?? now;
+    this.db.run(
+      `INSERT INTO projects (id, name, description, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         description = excluded.description,
+         updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.name,
+        input.description ?? null,
+        input.createdBy ?? existing?.createdBy ?? null,
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+    return {
+      id: input.id,
+      name: input.name,
+      description: input.description,
+      createdBy: input.createdBy ?? existing?.createdBy,
+      createdAt,
+      updatedAt: now
+    };
+  }
+
+  deleteProject(id: string): boolean {
+    if (id === DEFAULT_PROJECT_ID) {
+      throw new Error("Cannot delete the default project.");
+    }
+    const existing = this.getProject(id);
+    if (!existing) return false;
+    // Move anything belonging to this project back to the default before delete.
+    this.db.run(`UPDATE workflows SET project_id = ?, folder_id = NULL WHERE project_id = ?`, [
+      DEFAULT_PROJECT_ID,
+      id
+    ]);
+    this.db.run(`UPDATE secrets SET project_id = ? WHERE project_id = ?`, [DEFAULT_PROJECT_ID, id]);
+    this.db.run(`DELETE FROM folders WHERE project_id = ?`, [id]);
+    this.db.run(`DELETE FROM projects WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  listFolders(projectId?: string): Folder[] {
+    const rows = projectId
+      ? this.queryAll<FolderRow>(
+          `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders WHERE project_id = ? ORDER BY name ASC`,
+          [projectId]
+        )
+      : this.queryAll<FolderRow>(
+          `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders ORDER BY project_id, name`
+        );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      name: toString(row.name),
+      parentId: row.parent_id ? toString(row.parent_id) : undefined,
+      projectId: toString(row.project_id),
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  getFolder(id: string): Folder | null {
+    const row = this.queryOne<FolderRow>(
+      `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders WHERE id = ?`,
+      [id]
+    );
+    if (!row) return null;
+    return {
+      id: toString(row.id),
+      name: toString(row.name),
+      parentId: row.parent_id ? toString(row.parent_id) : undefined,
+      projectId: toString(row.project_id),
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertFolder(input: {
+    id: string;
+    name: string;
+    parentId?: string;
+    projectId: string;
+  }): Folder {
+    const now = new Date().toISOString();
+    const existing = this.getFolder(input.id);
+    const createdAt = existing?.createdAt ?? now;
+    this.db.run(
+      `INSERT INTO folders (id, name, parent_id, project_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         parent_id = excluded.parent_id,
+         project_id = excluded.project_id,
+         updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.name,
+        input.parentId ?? null,
+        input.projectId,
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+    return {
+      id: input.id,
+      name: input.name,
+      parentId: input.parentId,
+      projectId: input.projectId,
+      createdAt,
+      updatedAt: now
+    };
+  }
+
+  deleteFolder(id: string): boolean {
+    const existing = this.getFolder(id);
+    if (!existing) return false;
+    // Orphan workflows in this folder (keep them in the project, drop the folder_id).
+    this.db.run(`UPDATE workflows SET folder_id = NULL WHERE folder_id = ?`, [id]);
+    // Also re-parent child folders up one level.
+    this.db.run(`UPDATE folders SET parent_id = ? WHERE parent_id = ?`, [
+      existing.parentId ?? null,
+      id
+    ]);
+    this.db.run(`DELETE FROM folders WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  /**
+   * Backfill helper invoked at startup. Idempotent.
+   * Creates the default project if missing, and moves any rows with
+   * NULL project_id (shouldn't exist post-migration, but safe) back to default.
+   */
+  ensureDefaultProject(): Project {
+    const existing = this.getProject(DEFAULT_PROJECT_ID);
+    if (existing) {
+      this.db.run(`UPDATE workflows SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+      this.db.run(`UPDATE secrets SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+      return existing;
+    }
+    const project = this.upsertProject({
+      id: DEFAULT_PROJECT_ID,
+      name: "Default Project",
+      description: "Personal workspace."
+    });
+    this.db.run(`UPDATE workflows SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+    this.db.run(`UPDATE secrets SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+    this.persist();
+    return project;
   }
 }

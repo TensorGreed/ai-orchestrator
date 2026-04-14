@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type RefObject } from "react";
-import type { WorkflowListItem } from "@ai-orchestrator/shared";
+import type { Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import type { AuthUser } from "../lib/api";
 import type { StudioMode } from "./studio-layout-types";
 
@@ -26,6 +26,10 @@ interface TopBarProps {
   theme: "light" | "dark";
   onToggleTheme: () => void;
   onOpenShortcuts: () => void;
+  projects: Project[];
+  activeProjectId: string;
+  onChangeActiveProject: (projectId: string) => void;
+  onCreateProject: () => void;
 }
 
 export function TopBar({
@@ -50,7 +54,11 @@ export function TopBar({
   onLogout,
   theme,
   onToggleTheme,
-  onOpenShortcuts
+  onOpenShortcuts,
+  projects,
+  activeProjectId,
+  onChangeActiveProject,
+  onCreateProject
 }: TopBarProps) {
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
@@ -96,6 +104,28 @@ export function TopBar({
             </strong>
             <span>STUDIO</span>
           </div>
+        </div>
+        <div className="project-switcher" title="Active project">
+          <select
+            className="project-switcher-select"
+            value={activeProjectId}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === "__new__") {
+                onCreateProject();
+                return;
+              }
+              onChangeActiveProject(value);
+            }}
+          >
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+            <option disabled>──────────</option>
+            <option value="__new__">+ New Project…</option>
+          </select>
         </div>
         <input
           className="workflow-name-input"

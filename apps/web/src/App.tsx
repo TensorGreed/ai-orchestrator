@@ -14,14 +14,21 @@ import ReactFlow, {
   type ReactFlowInstance
 } from "reactflow";
 import {
+  DEFAULT_PROJECT_ID,
   WORKFLOW_SCHEMA_VERSION,
   nodeDefinitions,
+  type Folder,
+  type Project,
   type Workflow,
   type WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
 import {
   ApiError,
+  createFolder,
+  createProject,
   createSecret,
+  deleteFolder,
+  deleteProject,
   deleteWorkflow,
   duplicateWorkflow,
   executeWorkflow,
@@ -30,6 +37,8 @@ import {
   fetchExecutionById,
   fetchExecutions,
   fetchDefinitions,
+  fetchFolders,
+  fetchProjects,
   fetchSecrets,
   fetchWorkflow,
   fetchWorkflowVariables,
@@ -37,6 +46,7 @@ import {
   importWorkflow,
   loginUser,
   logoutUser,
+  moveWorkflow,
   runWebhookStream,
   saveWorkflow,
   updateWorkflowVariables,
@@ -138,6 +148,7 @@ const NODE_CLIPBOARD_STORAGE_KEY = "ai-orchestrator:node-clipboard";
 const NODE_PASTE_OFFSET_PX = 28;
 const THEME_STORAGE_KEY = "ai-orchestrator:theme";
 const HISTORY_STACK_LIMIT = 50;
+const ACTIVE_PROJECT_STORAGE_KEY = "ai-orchestrator:active-project";
 const DEFAULT_LOGS_PANEL_HEIGHT = 210;
 const MIN_LOGS_PANEL_HEIGHT = 140;
 const MAX_LOGS_PANEL_HEIGHT = 620;
@@ -772,6 +783,18 @@ function StudioApp() {
   const [secretGoogleAccessToken, setSecretGoogleAccessToken] = useState("");
   const [secretGoogleServiceAccountJson, setSecretGoogleServiceAccountJson] = useState("");
   const [dashboardFilter, setDashboardFilter] = useState("");
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string>(() => {
+    try {
+      return localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || DEFAULT_PROJECT_ID;
+    } catch {
+      return DEFAULT_PROJECT_ID;
+    }
+  });
+  // null = "No folder (root)", undefined = "All folders"
+  const [activeFolderFilter, setActiveFolderFilter] = useState<string | null | undefined>(undefined);
+  const [activeTagFilter, setActiveTagFilter] = useState<string | null>(null);
   const [workflowVariableRows, setWorkflowVariableRows] = useState<WorkflowVariableRow[]>([]);
   const [variablesBusy, setVariablesBusy] = useState(false);
 
@@ -911,16 +934,42 @@ function StudioApp() {
 
   const filteredWorkflowItems = useMemo(() => {
     const query = dashboardFilter.trim().toLowerCase();
-    if (!query) {
-      return workflowList;
-    }
     return workflowList.filter((workflow) => {
-      return (
-        workflow.name.toLowerCase().includes(query) ||
-        workflow.id.toLowerCase().includes(query)
-      );
+      if (query) {
+        const matchesName = workflow.name.toLowerCase().includes(query);
+        const matchesId = workflow.id.toLowerCase().includes(query);
+        const matchesTag = (workflow.tags ?? []).some((tag) => tag.toLowerCase().includes(query));
+        if (!matchesName && !matchesId && !matchesTag) return false;
+      }
+      if (activeFolderFilter === null) {
+        if (workflow.folderId) return false;
+      } else if (typeof activeFolderFilter === "string") {
+        if (workflow.folderId !== activeFolderFilter) return false;
+      }
+      if (activeTagFilter) {
+        if (!(workflow.tags ?? []).some((tag) => tag.toLowerCase() === activeTagFilter.toLowerCase())) return false;
+      }
+      return true;
     });
-  }, [dashboardFilter, workflowList]);
+  }, [activeFolderFilter, activeTagFilter, dashboardFilter, workflowList]);
+
+  const availableTags = useMemo(() => {
+    const set = new Set<string>();
+    for (const w of workflowList) {
+      for (const tag of w.tags ?? []) {
+        if (tag && tag.trim()) set.add(tag.trim());
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [workflowList]);
+
+  const projectById = useMemo(() => {
+    const map = new Map<string, Project>();
+    for (const p of projects) map.set(p.id, p);
+    return map;
+  }, [projects]);
+
+  const activeProject = projectById.get(activeProjectId) ?? null;
   const canvasAndLogsStyle = useMemo(
     () => ({
       gridTemplateRows: !isDebugMode
@@ -1551,12 +1600,15 @@ function StudioApp() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [workflowItems, definitionPayload, secretItems, executionPayload] = await Promise.all([
-        fetchWorkflows(),
-        fetchDefinitions(),
-        canManageSecrets ? fetchSecrets() : Promise.resolve([]),
-        fetchExecutions({ page: 1, pageSize: 40 })
-      ]);
+      const [workflowItems, definitionPayload, secretItems, executionPayload, projectPayload, folderPayload] =
+        await Promise.all([
+          fetchWorkflows({ projectId: activeProjectId }),
+          fetchDefinitions(),
+          canManageSecrets ? fetchSecrets({ projectId: activeProjectId }) : Promise.resolve([]),
+          fetchExecutions({ page: 1, pageSize: 40 }),
+          fetchProjects().catch(() => ({ projects: [] })),
+          fetchFolders(activeProjectId).catch(() => ({ folders: [] }))
+        ]);
 
       setWorkflowList(workflowItems);
       setDefinitions(definitionPayload.nodes);
@@ -1564,6 +1616,8 @@ function StudioApp() {
       setSecrets(secretItems);
       setExecutionHistoryItems(executionPayload.items);
       setExecutionHistoryTotal(executionPayload.total);
+      setProjects(projectPayload.projects ?? []);
+      setFolders(folderPayload.folders ?? []);
 
       const wipWorkflow = readWipWorkflow();
       if (wipWorkflow) {
@@ -1588,7 +1642,22 @@ function StudioApp() {
     } finally {
       setLoading(false);
     }
-  }, [canManageSecrets, hydrateWorkflow, readWipWorkflow]);
+  }, [activeProjectId, canManageSecrets, hydrateWorkflow, readWipWorkflow]);
+
+  // Persist the active project id so switching survives a refresh.
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, activeProjectId);
+    } catch {
+      /* ignore */
+    }
+  }, [activeProjectId]);
+
+  // Reset folder/tag selection when switching project.
+  useEffect(() => {
+    setActiveFolderFilter(undefined);
+    setActiveTagFilter(null);
+  }, [activeProjectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1859,7 +1928,7 @@ function StudioApp() {
   const persistWorkflow = useCallback(async () => {
     const workflow = buildCurrentWorkflow();
     const saved = await saveWorkflow(workflow);
-    const workflows = await fetchWorkflows();
+    const workflows = await fetchWorkflows({ projectId: activeProjectId });
     setWorkflowList(workflows);
     setCurrentWorkflow(saved);
     localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, saved.id);
@@ -2498,7 +2567,7 @@ function StudioApp() {
         setError(null);
         const content = await file.text();
         const imported = await importWorkflow({ json: content });
-        const workflows = await fetchWorkflows();
+        const workflows = await fetchWorkflows({ projectId: activeProjectId });
         setWorkflowList(workflows);
         hydrateWorkflow(imported);
         localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, imported.id);
@@ -2557,7 +2626,7 @@ function StudioApp() {
           }
         ]
       });
-      const workflows = await fetchWorkflows();
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
       setWorkflowList(workflows);
       hydrateWorkflow(savedDraft);
       setActiveMode("editor");
@@ -2594,7 +2663,7 @@ function StudioApp() {
         setBusy(true);
         setError(null);
         const duplicated = await duplicateWorkflow(workflowId, { name: duplicateName });
-        const workflows = await fetchWorkflows();
+        const workflows = await fetchWorkflows({ projectId: activeProjectId });
         setWorkflowList(workflows);
         hydrateWorkflow(duplicated);
         setActiveMode("editor");
@@ -2626,7 +2695,7 @@ function StudioApp() {
         setBusy(true);
         setError(null);
         await deleteWorkflow(workflowId);
-        const workflows = await fetchWorkflows();
+        const workflows = await fetchWorkflows({ projectId: activeProjectId });
         setWorkflowList(workflows);
 
         if (currentWorkflow.id === workflowId) {
@@ -2647,7 +2716,162 @@ function StudioApp() {
         setBusy(false);
       }
     },
-    [canManageWorkflows, currentWorkflow.id, handleApiError, hydrateWorkflow, setEdges, setNodes, workflowList]
+    [activeProjectId, canManageWorkflows, currentWorkflow.id, handleApiError, hydrateWorkflow, setEdges, setNodes, workflowList]
+  );
+
+  // --- Phase 4.2: project/folder/tag handlers --------------------------------
+
+  const handleCreateProject = useCallback(async () => {
+    const name = window.prompt("Project name?");
+    if (!name || !name.trim()) return;
+    try {
+      setBusy(true);
+      const project = await createProject({ name: name.trim() });
+      const payload = await fetchProjects();
+      setProjects(payload.projects);
+      setActiveProjectId(project.id);
+    } catch (error) {
+      handleApiError(error, "Failed to create project");
+    } finally {
+      setBusy(false);
+    }
+  }, [handleApiError]);
+
+  const handleDeleteProject = useCallback(
+    async (projectId: string) => {
+      if (projectId === DEFAULT_PROJECT_ID) {
+        setError("The default project cannot be deleted.");
+        return;
+      }
+      const target = projectById.get(projectId);
+      if (!window.confirm(`Delete project '${target?.name ?? projectId}'? Its workflows/secrets move back to the default project.`)) {
+        return;
+      }
+      try {
+        setBusy(true);
+        await deleteProject(projectId);
+        const payload = await fetchProjects();
+        setProjects(payload.projects);
+        if (activeProjectId === projectId) setActiveProjectId(DEFAULT_PROJECT_ID);
+      } catch (error) {
+        handleApiError(error, "Failed to delete project");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [activeProjectId, handleApiError, projectById]
+  );
+
+  const handleCreateFolder = useCallback(async () => {
+    const name = window.prompt("Folder name?");
+    if (!name || !name.trim()) return;
+    try {
+      setBusy(true);
+      await createFolder({ name: name.trim(), projectId: activeProjectId });
+      const payload = await fetchFolders(activeProjectId);
+      setFolders(payload.folders);
+    } catch (error) {
+      handleApiError(error, "Failed to create folder");
+    } finally {
+      setBusy(false);
+    }
+  }, [activeProjectId, handleApiError]);
+
+  const handleDeleteFolder = useCallback(
+    async (folderId: string) => {
+      const target = folders.find((f) => f.id === folderId);
+      if (!window.confirm(`Delete folder '${target?.name ?? folderId}'? Workflows inside will be moved out (not deleted).`)) {
+        return;
+      }
+      try {
+        setBusy(true);
+        await deleteFolder(folderId);
+        const [folderPayload, workflows] = await Promise.all([
+          fetchFolders(activeProjectId),
+          fetchWorkflows({ projectId: activeProjectId })
+        ]);
+        setFolders(folderPayload.folders);
+        setWorkflowList(workflows);
+        if (activeFolderFilter === folderId) setActiveFolderFilter(undefined);
+      } catch (error) {
+        handleApiError(error, "Failed to delete folder");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [activeFolderFilter, activeProjectId, folders, handleApiError]
+  );
+
+  const handleMoveWorkflow = useCallback(
+    async (
+      workflowId: string,
+      patch: { projectId?: string; folderId?: string | null; tags?: string[] }
+    ) => {
+      try {
+        setBusy(true);
+        await moveWorkflow(workflowId, patch);
+        const workflows = await fetchWorkflows({ projectId: activeProjectId });
+        setWorkflowList(workflows);
+      } catch (error) {
+        handleApiError(error, "Failed to move workflow");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [activeProjectId, handleApiError]
+  );
+
+  const handleWorkflowEditTags = useCallback(
+    async (workflowId: string) => {
+      const workflow = workflowList.find((w) => w.id === workflowId);
+      if (!workflow) return;
+      const current = (workflow.tags ?? []).join(", ");
+      const next = window.prompt("Tags (comma-separated):", current);
+      if (next === null) return;
+      const tags = next
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      await handleMoveWorkflow(workflowId, { tags });
+    },
+    [handleMoveWorkflow, workflowList]
+  );
+
+  const handleWorkflowAssignFolder = useCallback(
+    async (workflowId: string) => {
+      if (folders.length === 0) {
+        setError("No folders in this project yet. Create one first.");
+        return;
+      }
+      const options = [{ id: "", name: "(no folder / root)" }, ...folders.map((f) => ({ id: f.id, name: f.name }))];
+      const menu = options.map((o, i) => `${i}. ${o.name}`).join("\n");
+      const raw = window.prompt(`Move to folder — enter number:\n${menu}`);
+      if (raw === null) return;
+      const idx = Number(raw.trim());
+      if (!Number.isFinite(idx) || idx < 0 || idx >= options.length) return;
+      const choice = options[idx];
+      if (!choice) return;
+      await handleMoveWorkflow(workflowId, { folderId: choice.id ? choice.id : null });
+    },
+    [folders, handleMoveWorkflow]
+  );
+
+  const handleWorkflowAssignProject = useCallback(
+    async (workflowId: string) => {
+      if (projects.length <= 1) {
+        setError("Create another project first to move workflows between projects.");
+        return;
+      }
+      const menu = projects.map((p, i) => `${i}. ${p.name}`).join("\n");
+      const raw = window.prompt(`Move to project — enter number:\n${menu}`);
+      if (raw === null) return;
+      const idx = Number(raw.trim());
+      if (!Number.isFinite(idx) || idx < 0 || idx >= projects.length) return;
+      const project = projects[idx];
+      if (!project) return;
+      await handleMoveWorkflow(workflowId, { projectId: project.id, folderId: null });
+    },
+    [handleMoveWorkflow, projects]
   );
 
   const handleExecuteSavedWorkflow = useCallback(
@@ -3174,6 +3398,12 @@ function StudioApp() {
           theme={theme}
           onToggleTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
           onOpenShortcuts={() => setShowShortcutsPanel(true)}
+          projects={projects}
+          activeProjectId={activeProjectId}
+          onChangeActiveProject={(id) => setActiveProjectId(id)}
+          onCreateProject={() => {
+            void handleCreateProject();
+          }}
         />
 
         <main className="main-content">
@@ -3181,108 +3411,262 @@ function StudioApp() {
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}
 
           {activeMode === "dashboard" && (
-            <section className="dashboard-pane">
-              <div className="dashboard-header-row">
-                <div>
-                  <h2>Workflow Dashboard</h2>
-                  <p className="muted">Manage saved workflows, reopen them later, and execute any workflow on demand.</p>
+            <section className="dashboard-pane has-sidebar">
+              <aside className="dashboard-sidebar">
+                <div className="dashboard-sidebar-section">
+                  <div className="dashboard-sidebar-heading">
+                    <h4>Project</h4>
+                  </div>
+                  <div className="dashboard-sidebar-project">
+                    <strong>{activeProject?.name ?? "Default Project"}</strong>
+                    {activeProject?.description && <p className="muted">{activeProject.description}</p>}
+                  </div>
+                  {canManageWorkflows && activeProjectId !== DEFAULT_PROJECT_ID && (
+                    <button
+                      className="header-btn danger text-only"
+                      onClick={() => void handleDeleteProject(activeProjectId)}
+                      disabled={busy}
+                    >
+                      Delete project
+                    </button>
+                  )}
                 </div>
-                <div className="dashboard-actions">
-                  <button className="header-btn" onClick={() => void loadData()} disabled={busy}>
-                    Refresh
+
+                <div className="dashboard-sidebar-section">
+                  <div className="dashboard-sidebar-heading">
+                    <h4>Folders</h4>
+                    {canManageWorkflows && (
+                      <button
+                        className="mini-btn"
+                        onClick={() => void handleCreateFolder()}
+                        disabled={busy}
+                        title="New folder in this project"
+                      >
+                        +
+                      </button>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className={`folder-row${activeFolderFilter === undefined ? " active" : ""}`}
+                    onClick={() => setActiveFolderFilter(undefined)}
+                  >
+                    <span>All workflows</span>
+                    <span className="folder-row-count">{workflowList.length}</span>
                   </button>
-                </div>
-              </div>
-
-              <div className="dashboard-toolbar">
-                <input
-                  className="dashboard-search"
-                  value={dashboardFilter}
-                  onChange={(event) => setDashboardFilter(event.target.value)}
-                  placeholder="Search by workflow name or ID"
-                />
-                <div className="dashboard-create-controls">
-                  <button className="header-btn" onClick={() => void handleCreateWorkflow()} disabled={busy || !canManageWorkflows}>
-                    {busy ? "Creating..." : "New Workflow"}
+                  <button
+                    type="button"
+                    className={`folder-row${activeFolderFilter === null ? " active" : ""}`}
+                    onClick={() => setActiveFolderFilter(null)}
+                  >
+                    <span>Unfiled</span>
+                    <span className="folder-row-count">
+                      {workflowList.filter((w) => !w.folderId).length}
+                    </span>
                   </button>
-                </div>
-              </div>
-
-              {filteredWorkflowItems.length === 0 && (
-                <div className="logs-placeholder">
-                  {workflowList.length === 0
-                    ? "No workflows saved yet. Create one from this dashboard."
-                    : "No workflows match your search."}
-                </div>
-              )}
-
-              {filteredWorkflowItems.length > 0 && (
-                <div className="dashboard-grid">
-                  {filteredWorkflowItems.map((workflow) => (
-                    <article key={workflow.id} className="dashboard-card">
-                      <div className="dashboard-card-head">
-                        <h3>{workflow.name}</h3>
-                        <span className="mono-cell">{workflow.id.slice(0, 8)}</span>
-                      </div>
-                      <div className="dashboard-card-meta">
-                        <span>Updated: {formatWhen(workflow.updatedAt)}</span>
-                        <span>Version: {workflow.workflowVersion}</span>
-                      </div>
-                      <div className="dashboard-card-actions">
+                  {folders.map((folder) => (
+                    <div key={folder.id} className="folder-row-wrap">
+                      <button
+                        type="button"
+                        className={`folder-row${activeFolderFilter === folder.id ? " active" : ""}`}
+                        onClick={() => setActiveFolderFilter(folder.id)}
+                      >
+                        <span>📁 {folder.name}</span>
+                        <span className="folder-row-count">
+                          {workflowList.filter((w) => w.folderId === folder.id).length}
+                        </span>
+                      </button>
+                      {canManageWorkflows && (
                         <button
-                          className="header-btn"
-                          onClick={() => {
-                            void loadWorkflowById(workflow.id);
-                            setActiveMode("editor");
-                          }}
+                          type="button"
+                          className="folder-row-delete"
+                          title="Delete folder"
+                          aria-label={`Delete folder ${folder.name}`}
+                          onClick={() => void handleDeleteFolder(folder.id)}
                         >
-                          Open Editor
+                          ×
                         </button>
-                        <button
-                          className="header-btn"
-                          onClick={() => {
-                            void loadWorkflowById(workflow.id);
-                            setActiveMode("chat");
-                          }}
-                        >
-                          Open Chat
-                        </button>
-                        <button
-                          className="header-btn"
-                          onClick={() => {
-                            void handleExecuteSavedWorkflow(workflow.id);
-                          }}
-                          disabled={busy}
-                        >
-                          Execute
-                        </button>
-                        {canManageWorkflows && (
-                          <button
-                            className="header-btn"
-                            onClick={() => {
-                              void handleDuplicateWorkflow(workflow.id);
-                            }}
-                            disabled={busy}
-                          >
-                            Duplicate
-                          </button>
-                        )}
-                        {canManageWorkflows && (
-                          <button
-                            className="header-btn danger"
-                            onClick={() => {
-                              void handleDeleteWorkflow(workflow.id);
-                            }}
-                            disabled={busy}
-                          >
-                            Delete
-                          </button>
-                        )}
-                      </div>
-                    </article>
+                      )}
+                    </div>
                   ))}
                 </div>
-              )}
+
+                {availableTags.length > 0 && (
+                  <div className="dashboard-sidebar-section">
+                    <div className="dashboard-sidebar-heading">
+                      <h4>Tags</h4>
+                    </div>
+                    <div className="tag-filter-row">
+                      <button
+                        type="button"
+                        className={`tag-chip${activeTagFilter === null ? " active" : ""}`}
+                        onClick={() => setActiveTagFilter(null)}
+                      >
+                        All
+                      </button>
+                      {availableTags.map((tag) => (
+                        <button
+                          key={tag}
+                          type="button"
+                          className={`tag-chip${activeTagFilter === tag ? " active" : ""}`}
+                          onClick={() => setActiveTagFilter(tag === activeTagFilter ? null : tag)}
+                        >
+                          #{tag}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </aside>
+
+              <div className="dashboard-main">
+                <div className="dashboard-header-row">
+                  <div>
+                    <h2>Workflow Dashboard</h2>
+                    <p className="muted">Manage saved workflows, reopen them later, and execute any workflow on demand.</p>
+                  </div>
+                  <div className="dashboard-actions">
+                    <button className="header-btn" onClick={() => void loadData()} disabled={busy}>
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+
+                <div className="dashboard-toolbar">
+                  <input
+                    className="dashboard-search"
+                    value={dashboardFilter}
+                    onChange={(event) => setDashboardFilter(event.target.value)}
+                    placeholder="Search by name, ID, or tag…"
+                  />
+                  <div className="dashboard-create-controls">
+                    <button className="header-btn" onClick={() => void handleCreateWorkflow()} disabled={busy || !canManageWorkflows}>
+                      {busy ? "Creating..." : "New Workflow"}
+                    </button>
+                  </div>
+                </div>
+
+                {filteredWorkflowItems.length === 0 && (
+                  <div className="logs-placeholder">
+                    {workflowList.length === 0
+                      ? "No workflows in this project yet. Create one from this dashboard."
+                      : "No workflows match your filters."}
+                  </div>
+                )}
+
+                {filteredWorkflowItems.length > 0 && (
+                  <div className="dashboard-grid">
+                    {filteredWorkflowItems.map((workflow) => {
+                      const folderName = workflow.folderId
+                        ? folders.find((f) => f.id === workflow.folderId)?.name
+                        : null;
+                      return (
+                        <article key={workflow.id} className="dashboard-card">
+                          <div className="dashboard-card-head">
+                            <h3>{workflow.name}</h3>
+                            <span className="mono-cell">{workflow.id.slice(0, 8)}</span>
+                          </div>
+                          <div className="dashboard-card-meta">
+                            <span>Updated: {formatWhen(workflow.updatedAt)}</span>
+                            <span>Version: {workflow.workflowVersion}</span>
+                            {folderName && <span>📁 {folderName}</span>}
+                          </div>
+                          {workflow.tags && workflow.tags.length > 0 && (
+                            <div className="dashboard-card-tags">
+                              {workflow.tags.map((tag) => (
+                                <span key={tag} className="tag-chip small">
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          <div className="dashboard-card-actions">
+                            <button
+                              className="header-btn"
+                              onClick={() => {
+                                void loadWorkflowById(workflow.id);
+                                setActiveMode("editor");
+                              }}
+                            >
+                              Open Editor
+                            </button>
+                            <button
+                              className="header-btn"
+                              onClick={() => {
+                                void loadWorkflowById(workflow.id);
+                                setActiveMode("chat");
+                              }}
+                            >
+                              Open Chat
+                            </button>
+                            <button
+                              className="header-btn"
+                              onClick={() => {
+                                void handleExecuteSavedWorkflow(workflow.id);
+                              }}
+                              disabled={busy}
+                            >
+                              Execute
+                            </button>
+                            {canManageWorkflows && (
+                              <button
+                                className="header-btn"
+                                onClick={() => void handleWorkflowEditTags(workflow.id)}
+                                disabled={busy}
+                                title="Edit tags"
+                              >
+                                Tags
+                              </button>
+                            )}
+                            {canManageWorkflows && (
+                              <button
+                                className="header-btn"
+                                onClick={() => void handleWorkflowAssignFolder(workflow.id)}
+                                disabled={busy}
+                                title="Move to folder"
+                              >
+                                Folder
+                              </button>
+                            )}
+                            {canManageWorkflows && projects.length > 1 && (
+                              <button
+                                className="header-btn"
+                                onClick={() => void handleWorkflowAssignProject(workflow.id)}
+                                disabled={busy}
+                                title="Move to another project"
+                              >
+                                Project
+                              </button>
+                            )}
+                            {canManageWorkflows && (
+                              <button
+                                className="header-btn"
+                                onClick={() => {
+                                  void handleDuplicateWorkflow(workflow.id);
+                                }}
+                                disabled={busy}
+                              >
+                                Duplicate
+                              </button>
+                            )}
+                            {canManageWorkflows && (
+                              <button
+                                className="header-btn danger"
+                                onClick={() => {
+                                  void handleDeleteWorkflow(workflow.id);
+                                }}
+                                disabled={busy}
+                              >
+                                Delete
+                              </button>
+                            )}
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </section>
           )}
 

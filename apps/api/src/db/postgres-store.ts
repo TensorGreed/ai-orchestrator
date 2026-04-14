@@ -1,6 +1,7 @@
 import { Pool, type PoolConfig } from "pg";
 import { randomUUID } from "node:crypto";
-import type { ChatMessage, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
+import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
 import { runMigrations } from "./migrations.js";
 
 export interface PostgresStoreConfig {
@@ -21,6 +22,13 @@ function parseJsonSafe(value: string | null | undefined): unknown {
   } catch {
     return null;
   }
+}
+
+function parseTagsJson(value: string | null | undefined): string[] | undefined {
+  if (value === null || value === undefined) return undefined;
+  const parsed = parseJsonSafe(value);
+  if (!Array.isArray(parsed)) return undefined;
+  return parsed.filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0);
 }
 
 function toNum(value: unknown): number {
@@ -112,7 +120,29 @@ export class PostgresStore {
   // Workflow methods
   // ---------------------------------------------------------------------------
 
-  async listWorkflows(): Promise<WorkflowListItem[]> {
+  async listWorkflows(options: {
+    projectId?: string;
+    folderId?: string | null;
+    tag?: string;
+    search?: string;
+  } = {}): Promise<WorkflowListItem[]> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (options.projectId) {
+      params.push(DEFAULT_PROJECT_ID, options.projectId);
+      clauses.push(`COALESCE(project_id, $${params.length - 1}) = $${params.length}`);
+    }
+    if (options.folderId === null) {
+      clauses.push(`(folder_id IS NULL OR folder_id = '')`);
+    } else if (typeof options.folderId === "string") {
+      params.push(options.folderId);
+      clauses.push(`folder_id = $${params.length}`);
+    }
+    if (options.search && options.search.trim()) {
+      params.push(`%${options.search.trim().toLowerCase()}%`);
+      clauses.push(`LOWER(name) LIKE $${params.length}`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = await this.query<{
       id: string;
       name: string;
@@ -120,19 +150,37 @@ export class PostgresStore {
       workflow_version: number;
       created_at: string;
       updated_at: string;
+      tags_json: string | null;
+      project_id: string | null;
+      folder_id: string | null;
     }>(
-      `SELECT id, name, schema_version, workflow_version, created_at, updated_at
+      `SELECT id, name, schema_version, workflow_version, created_at, updated_at, tags_json, project_id, folder_id
        FROM workflows
-       ORDER BY updated_at DESC`
+       ${where}
+       ORDER BY updated_at DESC`,
+      params
     );
-    return rows.map((row) => ({
-      id: toStr(row.id),
-      name: toStr(row.name),
-      schemaVersion: toStr(row.schema_version),
-      workflowVersion: toNum(row.workflow_version),
-      createdAt: toStr(row.created_at),
-      updatedAt: toStr(row.updated_at)
-    }));
+    const mapped = rows.map((row) => {
+      const tags = parseTagsJson(row.tags_json);
+      return {
+        id: toStr(row.id),
+        name: toStr(row.name),
+        schemaVersion: toStr(row.schema_version),
+        workflowVersion: toNum(row.workflow_version),
+        createdAt: toStr(row.created_at),
+        updatedAt: toStr(row.updated_at),
+        tags,
+        projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID,
+        folderId: row.folder_id ? toStr(row.folder_id) : undefined
+      };
+    });
+    if (options.tag && options.tag.trim()) {
+      const needle = options.tag.trim().toLowerCase();
+      return mapped.filter((item) =>
+        (item.tags ?? []).some((tag) => tag.toLowerCase() === needle)
+      );
+    }
+    return mapped;
   }
 
   async getWorkflow(id: string): Promise<Workflow | null> {
@@ -141,14 +189,21 @@ export class PostgresStore {
       workflow_json: string;
       created_at: string;
       updated_at: string;
+      tags_json: string | null;
+      project_id: string | null;
+      folder_id: string | null;
     }>(
-      `SELECT id, workflow_json, created_at, updated_at FROM workflows WHERE id = $1`,
+      `SELECT id, workflow_json, created_at, updated_at, tags_json, project_id, folder_id FROM workflows WHERE id = $1`,
       [id]
     );
     if (!row) return null;
     const parsed = JSON.parse(toStr(row.workflow_json)) as Workflow;
     parsed.createdAt = toStr(row.created_at);
     parsed.updatedAt = toStr(row.updated_at);
+    const tagsFromCol = parseTagsJson(row.tags_json);
+    if (tagsFromCol !== undefined) parsed.tags = tagsFromCol;
+    parsed.projectId = row.project_id ? toStr(row.project_id) : (parsed.projectId ?? DEFAULT_PROJECT_ID);
+    parsed.folderId = row.folder_id ? toStr(row.folder_id) : undefined;
     return parsed;
   }
 
@@ -156,18 +211,39 @@ export class PostgresStore {
     const now = new Date().toISOString();
     const existing = await this.getWorkflow(workflow.id);
     const createdAt = existing?.createdAt ?? now;
-    const payload: Workflow = { ...workflow, createdAt, updatedAt: now };
+    const payload: Workflow = {
+      ...workflow,
+      projectId: workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID,
+      folderId: workflow.folderId ?? existing?.folderId,
+      tags: Array.isArray(workflow.tags) ? workflow.tags.filter((t) => typeof t === "string") : existing?.tags,
+      createdAt,
+      updatedAt: now
+    };
 
     await this.execute(
-      `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          schema_version = EXCLUDED.schema_version,
          workflow_version = EXCLUDED.workflow_version,
          workflow_json = EXCLUDED.workflow_json,
-         updated_at = EXCLUDED.updated_at`,
-      [payload.id, payload.name, payload.schemaVersion, payload.workflowVersion, JSON.stringify(payload), createdAt, now]
+         updated_at = EXCLUDED.updated_at,
+         tags_json = EXCLUDED.tags_json,
+         project_id = EXCLUDED.project_id,
+         folder_id = EXCLUDED.folder_id`,
+      [
+        payload.id,
+        payload.name,
+        payload.schemaVersion,
+        payload.workflowVersion,
+        JSON.stringify(payload),
+        createdAt,
+        now,
+        JSON.stringify(payload.tags ?? []),
+        payload.projectId ?? DEFAULT_PROJECT_ID,
+        payload.folderId ?? null
+      ]
     );
     return payload;
   }
@@ -188,15 +264,32 @@ export class PostgresStore {
   // Secrets
   // ---------------------------------------------------------------------------
 
-  async listSecrets(): Promise<Array<{ id: string; name: string; provider: string; created_at: string }>> {
-    const rows = await this.query<{ id: string; name: string; provider: string; created_at: string }>(
-      `SELECT id, name, provider, created_at FROM secrets ORDER BY created_at DESC`
+  async listSecrets(
+    options: { projectId?: string } = {}
+  ): Promise<Array<{ id: string; name: string; provider: string; created_at: string; projectId: string }>> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (options.projectId) {
+      params.push(DEFAULT_PROJECT_ID, options.projectId);
+      clauses.push(`COALESCE(project_id, $${params.length - 1}) = $${params.length}`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = await this.query<{
+      id: string;
+      name: string;
+      provider: string;
+      created_at: string;
+      project_id: string | null;
+    }>(
+      `SELECT id, name, provider, created_at, project_id FROM secrets ${where} ORDER BY created_at DESC`,
+      params
     );
     return rows.map((row) => ({
       id: toStr(row.id),
       name: toStr(row.name),
       provider: toStr(row.provider),
-      created_at: toStr(row.created_at)
+      created_at: toStr(row.created_at),
+      projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID
     }));
   }
 
@@ -208,6 +301,7 @@ export class PostgresStore {
     auth_tag: string;
     ciphertext: string;
     created_at: string;
+    projectId: string;
   } | null> {
     const row = await this.queryOne<{
       id: string;
@@ -217,7 +311,11 @@ export class PostgresStore {
       auth_tag: string;
       ciphertext: string;
       created_at: string;
-    }>(`SELECT id, name, provider, iv, auth_tag, ciphertext, created_at FROM secrets WHERE id = $1`, [id]);
+      project_id: string | null;
+    }>(
+      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id FROM secrets WHERE id = $1`,
+      [id]
+    );
     if (!row) return null;
     return {
       id: toStr(row.id),
@@ -226,7 +324,8 @@ export class PostgresStore {
       iv: toStr(row.iv),
       auth_tag: toStr(row.auth_tag),
       ciphertext: toStr(row.ciphertext),
-      created_at: toStr(row.created_at)
+      created_at: toStr(row.created_at),
+      projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID
     };
   }
 
@@ -237,18 +336,231 @@ export class PostgresStore {
     iv: string;
     authTag: string;
     ciphertext: string;
+    projectId?: string;
   }): Promise<void> {
     await this.execute(
-      `INSERT INTO secrets (id, name, provider, iv, auth_tag, ciphertext, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO secrets (id, name, provider, iv, auth_tag, ciphertext, created_at, project_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          provider = EXCLUDED.provider,
          iv = EXCLUDED.iv,
          auth_tag = EXCLUDED.auth_tag,
-         ciphertext = EXCLUDED.ciphertext`,
-      [input.id, input.name, input.provider, input.iv, input.authTag, input.ciphertext, new Date().toISOString()]
+         ciphertext = EXCLUDED.ciphertext,
+         project_id = EXCLUDED.project_id`,
+      [
+        input.id,
+        input.name,
+        input.provider,
+        input.iv,
+        input.authTag,
+        input.ciphertext,
+        new Date().toISOString(),
+        input.projectId ?? DEFAULT_PROJECT_ID
+      ]
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 4.2 — projects & folders
+  // ---------------------------------------------------------------------------
+
+  async listProjects(): Promise<Project[]> {
+    const rows = await this.query<{
+      id: string;
+      name: string;
+      description: string | null;
+      created_by: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(`SELECT id, name, description, created_by, created_at, updated_at FROM projects ORDER BY name ASC`);
+    return rows.map((row) => ({
+      id: toStr(row.id),
+      name: toStr(row.name),
+      description: row.description ? toStr(row.description) : undefined,
+      createdBy: row.created_by ? toStr(row.created_by) : undefined,
+      createdAt: toStr(row.created_at),
+      updatedAt: toStr(row.updated_at)
+    }));
+  }
+
+  async getProject(id: string): Promise<Project | null> {
+    const row = await this.queryOne<{
+      id: string;
+      name: string;
+      description: string | null;
+      created_by: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT id, name, description, created_by, created_at, updated_at FROM projects WHERE id = $1`,
+      [id]
+    );
+    if (!row) return null;
+    return {
+      id: toStr(row.id),
+      name: toStr(row.name),
+      description: row.description ? toStr(row.description) : undefined,
+      createdBy: row.created_by ? toStr(row.created_by) : undefined,
+      createdAt: toStr(row.created_at),
+      updatedAt: toStr(row.updated_at)
+    };
+  }
+
+  async upsertProject(input: {
+    id: string;
+    name: string;
+    description?: string;
+    createdBy?: string;
+  }): Promise<Project> {
+    const now = new Date().toISOString();
+    const existing = await this.getProject(input.id);
+    const createdAt = existing?.createdAt ?? now;
+    await this.execute(
+      `INSERT INTO projects (id, name, description, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         description = EXCLUDED.description,
+         updated_at = EXCLUDED.updated_at`,
+      [input.id, input.name, input.description ?? null, input.createdBy ?? existing?.createdBy ?? null, createdAt, now]
+    );
+    return {
+      id: input.id,
+      name: input.name,
+      description: input.description,
+      createdBy: input.createdBy ?? existing?.createdBy,
+      createdAt,
+      updatedAt: now
+    };
+  }
+
+  async deleteProject(id: string): Promise<boolean> {
+    if (id === DEFAULT_PROJECT_ID) {
+      throw new Error("Cannot delete the default project.");
+    }
+    const existing = await this.getProject(id);
+    if (!existing) return false;
+    await this.execute(`UPDATE workflows SET project_id = $1, folder_id = NULL WHERE project_id = $2`, [
+      DEFAULT_PROJECT_ID,
+      id
+    ]);
+    await this.execute(`UPDATE secrets SET project_id = $1 WHERE project_id = $2`, [DEFAULT_PROJECT_ID, id]);
+    await this.execute(`DELETE FROM folders WHERE project_id = $1`, [id]);
+    await this.execute(`DELETE FROM projects WHERE id = $1`, [id]);
+    return true;
+  }
+
+  async listFolders(projectId?: string): Promise<Folder[]> {
+    const rows = projectId
+      ? await this.query<{
+          id: string;
+          name: string;
+          parent_id: string | null;
+          project_id: string;
+          created_at: string;
+          updated_at: string;
+        }>(
+          `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders WHERE project_id = $1 ORDER BY name ASC`,
+          [projectId]
+        )
+      : await this.query<{
+          id: string;
+          name: string;
+          parent_id: string | null;
+          project_id: string;
+          created_at: string;
+          updated_at: string;
+        }>(`SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders ORDER BY project_id, name`);
+    return rows.map((row) => ({
+      id: toStr(row.id),
+      name: toStr(row.name),
+      parentId: row.parent_id ? toStr(row.parent_id) : undefined,
+      projectId: toStr(row.project_id),
+      createdAt: toStr(row.created_at),
+      updatedAt: toStr(row.updated_at)
+    }));
+  }
+
+  async getFolder(id: string): Promise<Folder | null> {
+    const row = await this.queryOne<{
+      id: string;
+      name: string;
+      parent_id: string | null;
+      project_id: string;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT id, name, parent_id, project_id, created_at, updated_at FROM folders WHERE id = $1`,
+      [id]
+    );
+    if (!row) return null;
+    return {
+      id: toStr(row.id),
+      name: toStr(row.name),
+      parentId: row.parent_id ? toStr(row.parent_id) : undefined,
+      projectId: toStr(row.project_id),
+      createdAt: toStr(row.created_at),
+      updatedAt: toStr(row.updated_at)
+    };
+  }
+
+  async upsertFolder(input: {
+    id: string;
+    name: string;
+    parentId?: string;
+    projectId: string;
+  }): Promise<Folder> {
+    const now = new Date().toISOString();
+    const existing = await this.getFolder(input.id);
+    const createdAt = existing?.createdAt ?? now;
+    await this.execute(
+      `INSERT INTO folders (id, name, parent_id, project_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         parent_id = EXCLUDED.parent_id,
+         project_id = EXCLUDED.project_id,
+         updated_at = EXCLUDED.updated_at`,
+      [input.id, input.name, input.parentId ?? null, input.projectId, createdAt, now]
+    );
+    return {
+      id: input.id,
+      name: input.name,
+      parentId: input.parentId,
+      projectId: input.projectId,
+      createdAt,
+      updatedAt: now
+    };
+  }
+
+  async deleteFolder(id: string): Promise<boolean> {
+    const existing = await this.getFolder(id);
+    if (!existing) return false;
+    await this.execute(`UPDATE workflows SET folder_id = NULL WHERE folder_id = $1`, [id]);
+    await this.execute(`UPDATE folders SET parent_id = $1 WHERE parent_id = $2`, [
+      existing.parentId ?? null,
+      id
+    ]);
+    await this.execute(`DELETE FROM folders WHERE id = $1`, [id]);
+    return true;
+  }
+
+  async ensureDefaultProject(): Promise<Project> {
+    const existing = await this.getProject(DEFAULT_PROJECT_ID);
+    if (existing) {
+      await this.execute(`UPDATE workflows SET project_id = $1 WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+      await this.execute(`UPDATE secrets SET project_id = $1 WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+      return existing;
+    }
+    const project = await this.upsertProject({
+      id: DEFAULT_PROJECT_ID,
+      name: "Default Project",
+      description: "Personal workspace."
+    });
+    await this.execute(`UPDATE workflows SET project_id = $1 WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+    await this.execute(`UPDATE secrets SET project_id = $1 WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+    return project;
   }
 
   // ---------------------------------------------------------------------------

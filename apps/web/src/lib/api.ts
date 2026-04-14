@@ -1,4 +1,12 @@
-import type { LLMProviderConfig, MCPToolDefinition, Workflow, WorkflowExecutionResult, WorkflowListItem } from "@ai-orchestrator/shared";
+import type {
+  Folder,
+  LLMProviderConfig,
+  MCPToolDefinition,
+  Project,
+  Workflow,
+  WorkflowExecutionResult,
+  WorkflowListItem
+} from "@ai-orchestrator/shared";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -71,8 +79,17 @@ export async function fetchAuthMe() {
   return apiRequest<{ user: AuthUser }>("/api/auth/me");
 }
 
-export async function fetchWorkflows() {
-  return apiRequest<WorkflowListItem[]>("/api/workflows");
+export async function fetchWorkflows(
+  filters: { projectId?: string; folderId?: string | null; tag?: string; search?: string } = {}
+) {
+  const query = new URLSearchParams();
+  if (filters.projectId) query.set("projectId", filters.projectId);
+  if (filters.folderId === null) query.set("folderId", "__none__");
+  else if (typeof filters.folderId === "string") query.set("folderId", filters.folderId);
+  if (filters.tag) query.set("tag", filters.tag);
+  if (filters.search) query.set("search", filters.search);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<WorkflowListItem[]>(`/api/workflows${suffix}`);
 }
 
 export async function fetchWorkflow(id: string) {
@@ -401,18 +418,94 @@ export interface SecretListItem {
   name: string;
   provider: string;
   createdAt: string;
+  projectId?: string;
 }
 
-export async function fetchSecrets() {
-  return apiRequest<SecretListItem[]>("/api/secrets");
+export async function fetchSecrets(options: { projectId?: string } = {}) {
+  const query = options.projectId ? `?projectId=${encodeURIComponent(options.projectId)}` : "";
+  return apiRequest<SecretListItem[]>(`/api/secrets${query}`);
 }
 
-export async function createSecret(payload: { name: string; provider: string; value: string }) {
+export async function createSecret(payload: {
+  name: string;
+  provider: string;
+  value: string;
+  projectId?: string;
+}) {
   return apiRequest<{
     id: string;
     name: string;
     provider: string;
+    projectId: string;
   }>("/api/secrets", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// --- Phase 4.2: projects, folders, workflow move ---------------------------
+
+export async function fetchProjects() {
+  return apiRequest<{ projects: Project[] }>("/api/projects");
+}
+
+export async function createProject(payload: { name: string; description?: string; id?: string }) {
+  return apiRequest<Project>("/api/projects", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateProject(
+  id: string,
+  payload: { name: string; description?: string }
+) {
+  return apiRequest<Project>(`/api/projects/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteProject(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchFolders(projectId?: string) {
+  const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ folders: Folder[] }>(`/api/folders${query}`);
+}
+
+export async function createFolder(payload: {
+  name: string;
+  projectId: string;
+  parentId?: string;
+  id?: string;
+}) {
+  return apiRequest<Folder>("/api/folders", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateFolder(
+  id: string,
+  payload: { name: string; projectId: string; parentId?: string }
+) {
+  return apiRequest<Folder>(`/api/folders/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteFolder(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/folders/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function moveWorkflow(
+  workflowId: string,
+  payload: { projectId?: string; folderId?: string | null; tags?: string[] }
+) {
+  return apiRequest<Workflow>(`/api/workflows/${encodeURIComponent(workflowId)}/move`, {
     method: "POST",
     body: JSON.stringify(payload)
   });

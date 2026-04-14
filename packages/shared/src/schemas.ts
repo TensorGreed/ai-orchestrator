@@ -134,7 +134,23 @@ export const workflowSchema = z.object({
   nodes: z.array(workflowNodeSchema),
   edges: z.array(workflowEdgeSchema),
   createdAt: z.string().datetime().optional(),
-  updatedAt: z.string().datetime().optional()
+  updatedAt: z.string().datetime().optional(),
+  tags: z.array(z.string().min(1).max(64)).optional(),
+  projectId: z.string().min(1).optional(),
+  folderId: z.string().min(1).optional()
+});
+
+export const projectSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  description: z.string().max(1000).optional()
+});
+
+export const folderSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  parentId: z.string().min(1).max(120).optional(),
+  projectId: z.string().min(1).max(120)
 });
 
 export const workflowExecuteRequestSchema = z.object({

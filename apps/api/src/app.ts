@@ -63,7 +63,8 @@ const TIER1_INTEGRATIONS: Tier1IntegrationSpec[] = [
 const secretCreateSchema = z.object({
   name: z.string().min(1),
   provider: z.string().min(1),
-  value: z.string().min(1)
+  value: z.string().min(1),
+  projectId: z.string().min(1).max(120).optional()
 });
 
 const userRoleSchema = z.enum(["admin", "builder", "operator", "viewer"]);
@@ -1548,13 +1549,28 @@ export function createApp(
     return { integrations: TIER1_INTEGRATIONS };
   });
 
-  app.get("/api/workflows", async (request, reply) => {
-    const user = await requireRole(request, reply, ["viewer"]);
-    if (!user) {
-      return;
+  app.get<{ Querystring: { projectId?: string; folderId?: string; tag?: string; search?: string } }>(
+    "/api/workflows",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["viewer"]);
+      if (!user) {
+        return;
+      }
+      const query = request.query ?? {};
+      const folderFilter: string | null | undefined =
+        typeof query.folderId === "string" && query.folderId.trim()
+          ? query.folderId === "__none__"
+            ? null
+            : query.folderId
+          : undefined;
+      return store.listWorkflows({
+        projectId: typeof query.projectId === "string" && query.projectId.trim() ? query.projectId : undefined,
+        folderId: folderFilter,
+        tag: typeof query.tag === "string" ? query.tag : undefined,
+        search: typeof query.search === "string" ? query.search : undefined
+      });
     }
-    return store.listWorkflows();
-  });
+  );
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
@@ -1820,6 +1836,213 @@ export function createApp(
 
     return validateWorkflowGraph(workflow);
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 4.2 — Projects, Folders, tags, workflow moves
+  // ---------------------------------------------------------------------------
+
+  const projectPayloadSchema = z.object({
+    id: z
+      .string()
+      .min(1)
+      .max(120)
+      .regex(/^[a-zA-Z0-9_-]+$/, "Project id must only contain letters, digits, dashes or underscores")
+      .optional(),
+    name: z.string().min(1).max(120),
+    description: z.string().max(1000).optional()
+  });
+
+  const folderPayloadSchema = z.object({
+    id: z.string().min(1).max(120).optional(),
+    name: z.string().min(1).max(120),
+    parentId: z.string().min(1).max(120).optional(),
+    projectId: z.string().min(1).max(120)
+  });
+
+  const workflowMoveSchema = z.object({
+    projectId: z.string().min(1).max(120).optional(),
+    folderId: z.string().min(1).max(120).nullable().optional(),
+    tags: z.array(z.string().min(1).max(64)).optional()
+  });
+
+  app.get("/api/projects", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    return { projects: store.listProjects() };
+  });
+
+  app.post<{ Body: unknown }>("/api/projects", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = projectPayloadSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid project payload", details: parsed.error.issues };
+    }
+    const id = parsed.data.id?.trim() || `proj-${crypto.randomUUID()}`;
+    const project = store.upsertProject({
+      id,
+      name: parsed.data.name.trim(),
+      description: parsed.data.description?.trim() || undefined,
+      createdBy: user.email
+    });
+    return project;
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/projects/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const existing = store.getProject(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Project not found" };
+    }
+    const parsed = projectPayloadSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid project payload", details: parsed.error.issues };
+    }
+    const project = store.upsertProject({
+      id: existing.id,
+      name: parsed.data.name.trim(),
+      description: parsed.data.description?.trim() || undefined,
+      createdBy: existing.createdBy
+    });
+    return project;
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/projects/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    try {
+      const ok = store.deleteProject(request.params.id);
+      if (!ok) {
+        reply.code(404);
+        return { error: "Project not found" };
+      }
+      return { ok: true };
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : "Failed to delete project" };
+    }
+  });
+
+  app.get<{ Querystring: { projectId?: string } }>("/api/folders", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const projectId =
+      typeof request.query?.projectId === "string" && request.query.projectId.trim()
+        ? request.query.projectId
+        : undefined;
+    return { folders: store.listFolders(projectId) };
+  });
+
+  app.post<{ Body: unknown }>("/api/folders", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = folderPayloadSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid folder payload", details: parsed.error.issues };
+    }
+    if (!store.getProject(parsed.data.projectId)) {
+      reply.code(400);
+      return { error: "Target project does not exist" };
+    }
+    if (parsed.data.parentId && !store.getFolder(parsed.data.parentId)) {
+      reply.code(400);
+      return { error: "Parent folder does not exist" };
+    }
+    const id = parsed.data.id?.trim() || `fld-${crypto.randomUUID()}`;
+    const folder = store.upsertFolder({
+      id,
+      name: parsed.data.name.trim(),
+      parentId: parsed.data.parentId,
+      projectId: parsed.data.projectId
+    });
+    return folder;
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/folders/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const existing = store.getFolder(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Folder not found" };
+    }
+    const parsed = folderPayloadSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid folder payload", details: parsed.error.issues };
+    }
+    if (parsed.data.parentId === existing.id) {
+      reply.code(400);
+      return { error: "A folder cannot be its own parent" };
+    }
+    const folder = store.upsertFolder({
+      id: existing.id,
+      name: parsed.data.name.trim(),
+      parentId: parsed.data.parentId,
+      projectId: parsed.data.projectId
+    });
+    return folder;
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/folders/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const ok = store.deleteFolder(request.params.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: "Folder not found" };
+    }
+    return { ok: true };
+  });
+
+  // Move a workflow between projects/folders and/or update its tags.
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/api/workflows/:id/move",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const workflow = store.getWorkflow(request.params.id);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const parsed = workflowMoveSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "Invalid move payload", details: parsed.error.issues };
+      }
+      if (parsed.data.projectId && !store.getProject(parsed.data.projectId)) {
+        reply.code(400);
+        return { error: "Target project does not exist" };
+      }
+      if (
+        parsed.data.folderId &&
+        parsed.data.folderId !== null &&
+        !store.getFolder(parsed.data.folderId)
+      ) {
+        reply.code(400);
+        return { error: "Target folder does not exist" };
+      }
+      const nextWorkflow: Workflow = {
+        ...workflow,
+        projectId: parsed.data.projectId ?? workflow.projectId,
+        folderId:
+          parsed.data.folderId === null
+            ? undefined
+            : parsed.data.folderId ?? workflow.folderId,
+        tags: parsed.data.tags ?? workflow.tags
+      };
+      const saved = store.upsertWorkflow(nextWorkflow);
+      schedulerService?.reloadWorkflow(saved.id);
+      triggerService?.reloadWorkflow(saved.id);
+      return saved;
+    }
+  );
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
@@ -3320,17 +3543,22 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return {
       id: secretRef.secretId,
       name: parsed.data.name,
-      provider: parsed.data.provider
+      provider: parsed.data.provider,
+      projectId: parsed.data.projectId ?? "default"
     };
   });
 
-  app.get("/api/secrets", async (request, reply) => {
+  app.get<{ Querystring: { projectId?: string } }>("/api/secrets", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
       return;
     }
+    const projectId =
+      typeof request.query?.projectId === "string" && request.query.projectId.trim()
+        ? request.query.projectId
+        : undefined;
 
-    return secretService.listSecrets();
+    return secretService.listSecrets({ projectId });
   });
 
   app.post<{ Body: unknown }>("/api/mcp/discover-tools", async (request, reply) => {

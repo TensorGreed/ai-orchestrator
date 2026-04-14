@@ -58,7 +58,12 @@ export class SecretService {
     return decrypted.toString("utf8");
   }
 
-  createSecret(input: { name: string; provider: string; value: string }): SecretReference {
+  createSecret(input: {
+    name: string;
+    provider: string;
+    value: string;
+    projectId?: string;
+  }): SecretReference {
     const id = `sec_${nanoid(12)}`;
     const encrypted = this.encrypt(input.value);
 
@@ -66,6 +71,7 @@ export class SecretService {
       id,
       name: input.name,
       provider: input.provider,
+      projectId: input.projectId,
       ...encrypted
     });
 
@@ -89,12 +95,13 @@ export class SecretService {
     });
   }
 
-  listSecrets() {
-    return this.store.listSecrets().map((row) => ({
+  listSecrets(options: { projectId?: string } = {}) {
+    return this.store.listSecrets({ projectId: options.projectId }).map((row) => ({
       id: row.id,
       name: row.name,
       provider: row.provider,
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      projectId: row.projectId
     }));
   }
 
