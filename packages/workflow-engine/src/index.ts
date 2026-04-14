@@ -5,3 +5,7 @@ export * from "./rag-adapters";
 export * from "./template";
 export * from "./expression";
 export * from "./graph";
+export {
+  PHASE35_TRIGGER_NODE_TYPES,
+  isPhase35TriggerNode
+} from "./connectors/triggers-dispatch";

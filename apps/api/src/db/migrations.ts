@@ -177,6 +177,20 @@ export const MIGRATIONS: Migration[] = [
         created_at TIMESTAMPTZ NOT NULL
       );
     `
+  },
+  {
+    version: 3,
+    description: "Add trigger state (Phase 3.5)",
+    up: `
+      CREATE TABLE IF NOT EXISTS trigger_state (
+        workflow_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        trigger_type TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (workflow_id, node_id)
+      );
+    `
   }
 ];
 

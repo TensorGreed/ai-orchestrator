@@ -1808,6 +1808,291 @@ export const nodeDefinitions: NodeDefinition[] = [
     sampleConfig: {
       path: "github-events"
     }
+  },
+  // ---------------------------------------------------------------------------
+  // Phase 3.5 — Trigger System Expansion
+  // ---------------------------------------------------------------------------
+  {
+    type: "manual_trigger",
+    label: "Manual Trigger",
+    category: "Input",
+    description: "Start the workflow manually from the editor or via POST /api/triggers/manual/:workflowId.",
+    configSchema: {
+      type: "object",
+      properties: {
+        testData: {},
+        label: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      label: "Run manually",
+      testData: { user_prompt: "Hello" }
+    }
+  },
+  {
+    type: "form_trigger",
+    label: "Form Trigger",
+    category: "Input",
+    description: "Public HTML form that starts a workflow. GET /api/forms/:path renders the form, POST submits.",
+    configSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        title: { type: "string" },
+        description: { type: "string" },
+        submitLabel: { type: "string" },
+        authMode: { type: "string", enum: ["public", "session"] },
+        successMessage: { type: "string" },
+        fields: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              label: { type: "string" },
+              type: { type: "string", enum: ["text", "textarea", "email", "number", "select", "checkbox"] },
+              required: { type: "boolean" },
+              placeholder: { type: "string" },
+              options: { type: "array", items: { type: "string" } }
+            },
+            required: ["name", "type"]
+          }
+        }
+      },
+      required: ["path", "fields"]
+    },
+    sampleConfig: {
+      path: "feedback",
+      title: "Submit feedback",
+      description: "Tell us what you think.",
+      submitLabel: "Send",
+      authMode: "public",
+      successMessage: "Thanks — your response was recorded.",
+      fields: [
+        { name: "name", label: "Name", type: "text", required: true },
+        { name: "email", label: "Email", type: "email", required: true },
+        { name: "message", label: "Message", type: "textarea", required: true }
+      ]
+    }
+  },
+  {
+    type: "chat_trigger",
+    label: "Chat Trigger",
+    category: "Input",
+    description: "Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent_orchestrator.",
+    configSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        authMode: { type: "string", enum: ["public", "session", "bearer"] },
+        secretRef: { type: "object" },
+        persistMessages: { type: "boolean" },
+        sessionNamespace: { type: "string" },
+        welcomeMessage: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      path: "support",
+      authMode: "session",
+      persistMessages: true,
+      sessionNamespace: "chat-support",
+      welcomeMessage: "How can I help today?"
+    }
+  },
+  {
+    type: "file_trigger",
+    label: "File Trigger",
+    category: "Input",
+    description: "Watches a filesystem path (polling) and fires on created/modified/deleted files.",
+    configSchema: {
+      type: "object",
+      properties: {
+        watchPath: { type: "string" },
+        events: { type: "array", items: { type: "string", enum: ["created", "modified", "deleted"] } },
+        pattern: { type: "string" },
+        recursive: { type: "boolean" },
+        pollIntervalSeconds: { type: "number", minimum: 1 },
+        active: { type: "boolean" }
+      },
+      required: ["watchPath"]
+    },
+    sampleConfig: {
+      watchPath: "./data/inbox",
+      events: ["created", "modified"],
+      pattern: "*.csv",
+      recursive: false,
+      pollIntervalSeconds: 30,
+      active: true
+    }
+  },
+  {
+    type: "rss_trigger",
+    label: "RSS / Atom Trigger",
+    category: "Input",
+    description: "Poll an RSS or Atom feed and fire the workflow for new items (deduplicated by GUID).",
+    configSchema: {
+      type: "object",
+      properties: {
+        feedUrl: { type: "string" },
+        pollIntervalSeconds: { type: "number", minimum: 30 },
+        maxItemsPerTick: { type: "number" },
+        headers: { type: "object" },
+        active: { type: "boolean" }
+      },
+      required: ["feedUrl"]
+    },
+    sampleConfig: {
+      feedUrl: "https://example.com/feed.xml",
+      pollIntervalSeconds: 300,
+      maxItemsPerTick: 20,
+      active: true
+    }
+  },
+  {
+    type: "sse_trigger",
+    label: "SSE Trigger",
+    category: "Input",
+    description: "Connects to a Server-Sent Events URL and fires the workflow for each event.",
+    configSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        eventName: { type: "string" },
+        authMode: { type: "string", enum: ["none", "bearer"] },
+        secretRef: { type: "object" },
+        reconnectDelaySeconds: { type: "number" },
+        maxEventsPerMinute: { type: "number" },
+        active: { type: "boolean" }
+      },
+      required: ["url"]
+    },
+    sampleConfig: {
+      url: "https://example.com/sse",
+      authMode: "none",
+      reconnectDelaySeconds: 5,
+      maxEventsPerMinute: 60,
+      active: true
+    }
+  },
+  {
+    type: "mcp_server_trigger",
+    label: "MCP Server Trigger",
+    category: "Input",
+    description: "Exposes this workflow as an MCP tool at POST /api/mcp-server/:path/invoke. Downstream nodes see the tool arguments.",
+    configSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        toolName: { type: "string" },
+        toolDescription: { type: "string" },
+        inputSchema: { type: "object" },
+        authMode: { type: "string", enum: ["public", "bearer"] },
+        secretRef: { type: "object" }
+      },
+      required: ["path", "toolName"]
+    },
+    sampleConfig: {
+      path: "helper",
+      toolName: "query_knowledge_base",
+      toolDescription: "Answer a question using the knowledge base.",
+      inputSchema: {
+        type: "object",
+        properties: { question: { type: "string" } },
+        required: ["question"]
+      },
+      authMode: "public"
+    }
+  },
+  {
+    type: "kafka_trigger",
+    label: "Kafka Trigger",
+    category: "Input",
+    description: "Consume messages from a Kafka topic (requires 'kafkajs' — emits NOT_IMPLEMENTED if missing).",
+    configSchema: {
+      type: "object",
+      properties: {
+        brokers: { type: "array", items: { type: "string" } },
+        topic: { type: "string" },
+        groupId: { type: "string" },
+        fromBeginning: { type: "boolean" },
+        secretRef: { type: "object" },
+        active: { type: "boolean" }
+      },
+      required: ["brokers", "topic", "groupId"]
+    },
+    sampleConfig: {
+      brokers: ["localhost:9092"],
+      topic: "events",
+      groupId: "ai-orchestrator",
+      fromBeginning: false,
+      active: true
+    }
+  },
+  {
+    type: "rabbitmq_trigger",
+    label: "RabbitMQ Trigger",
+    category: "Input",
+    description: "Consume messages from a RabbitMQ queue (requires 'amqplib' — emits NOT_IMPLEMENTED if missing).",
+    configSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        queue: { type: "string" },
+        prefetch: { type: "number" },
+        secretRef: { type: "object" },
+        active: { type: "boolean" }
+      },
+      required: ["url", "queue"]
+    },
+    sampleConfig: {
+      url: "amqp://localhost",
+      queue: "events",
+      prefetch: 1,
+      active: true
+    }
+  },
+  {
+    type: "sticky_note",
+    label: "Sticky Note",
+    category: "Utility",
+    description: "A visual-only annotation on the canvas (markdown supported). Not executed by the runtime.",
+    configSchema: {
+      type: "object",
+      properties: {
+        content: { type: "string" },
+        color: { type: "string", enum: ["yellow", "blue", "green", "pink", "purple", "gray"] },
+        fontSize: { type: "number" }
+      }
+    },
+    sampleConfig: {
+      content: "## Note\nExplain what this section of the workflow does.",
+      color: "yellow",
+      fontSize: 14
+    }
+  },
+  {
+    type: "mqtt_trigger",
+    label: "MQTT Trigger",
+    category: "Input",
+    description: "Subscribe to an MQTT topic (requires 'mqtt' — emits NOT_IMPLEMENTED if missing).",
+    configSchema: {
+      type: "object",
+      properties: {
+        brokerUrl: { type: "string" },
+        topic: { type: "string" },
+        qos: { type: "number", enum: [0, 1, 2] },
+        clientId: { type: "string" },
+        secretRef: { type: "object" },
+        active: { type: "boolean" }
+      },
+      required: ["brokerUrl", "topic"]
+    },
+    sampleConfig: {
+      brokerUrl: "mqtt://localhost:1883",
+      topic: "sensors/+/data",
+      qos: 1,
+      active: true
+    }
   }
 ];
 

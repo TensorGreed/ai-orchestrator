@@ -56,6 +56,8 @@ import {
   type EditorNodeData
 } from "./lib/workflow";
 import { WorkflowCanvasNode } from "./components/WorkflowCanvasNode";
+import { StickyNoteNode } from "./components/StickyNoteNode";
+import { KeyboardShortcutsPanel } from "./components/KeyboardShortcutsPanel";
 import { WorkflowCanvasEdge } from "./components/WorkflowCanvasEdge";
 import { NodeConfigModal, type NodeInputOption } from "./components/NodeConfigModal";
 import { LeftMenuBar } from "./components/LeftMenuBar";
@@ -99,6 +101,8 @@ interface NodeClipboardNodePayload {
   label: string;
   config: Record<string, unknown>;
   relativePosition: { x: number; y: number };
+  disabled?: boolean;
+  color?: EditorNodeData["color"];
 }
 
 interface NodeClipboardEdgePayload {
@@ -131,6 +135,8 @@ const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
 const DEBUG_MODE_STORAGE_KEY = "ai-orchestrator:debug-mode";
 const NODE_CLIPBOARD_STORAGE_KEY = "ai-orchestrator:node-clipboard";
 const NODE_PASTE_OFFSET_PX = 28;
+const THEME_STORAGE_KEY = "ai-orchestrator:theme";
+const HISTORY_STACK_LIMIT = 50;
 const DEFAULT_LOGS_PANEL_HEIGHT = 210;
 const MIN_LOGS_PANEL_HEIGHT = 140;
 const MAX_LOGS_PANEL_HEIGHT = 620;
@@ -770,6 +776,20 @@ function StudioApp() {
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
+  const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    try {
+      const stored = localStorage.getItem(THEME_STORAGE_KEY);
+      if (stored === "dark") return "dark";
+      if (stored === "light") return "light";
+      if (typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches) {
+        return "dark";
+      }
+    } catch {
+      /* ignore */
+    }
+    return "light";
+  });
   const [isDebugMode, setIsDebugMode] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem(DEBUG_MODE_STORAGE_KEY);
@@ -808,7 +828,8 @@ function StudioApp() {
 
   const nodeTypes = useMemo(
     () => ({
-      workflowNode: WorkflowCanvasNode
+      workflowNode: WorkflowCanvasNode,
+      stickyNote: StickyNoteNode
     }),
     []
   );
@@ -932,6 +953,165 @@ function StudioApp() {
       // localStorage may fail in private mode.
     }
   }, [isDebugMode]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      /* ignore */
+    }
+  }, [theme]);
+
+  // Undo/redo history stack. Snapshot is (nodes, edges) pairs. We push on
+  // meaningful mutations (add/delete/duplicate/paste/config-update) via
+  // pushHistorySnapshot() from callsites; positional drag changes are NOT
+  // pushed on every frame (too noisy) — they're pushed once per drag end.
+  const historyStackRef = useRef<Array<{ nodes: EditorNode[]; edges: Edge[] }>>([]);
+  const redoStackRef = useRef<Array<{ nodes: EditorNode[]; edges: Edge[] }>>([]);
+  const suppressHistoryRef = useRef(false);
+
+  const pushHistorySnapshot = useCallback(() => {
+    if (suppressHistoryRef.current) return;
+    historyStackRef.current.push({
+      nodes: cloneJson(nodes as EditorNode[]),
+      edges: cloneJson(edges as Edge[])
+    });
+    if (historyStackRef.current.length > HISTORY_STACK_LIMIT) {
+      historyStackRef.current.shift();
+    }
+    redoStackRef.current = [];
+  }, [edges, nodes]);
+
+  const undo = useCallback(() => {
+    const prev = historyStackRef.current.pop();
+    if (!prev) return;
+    redoStackRef.current.push({
+      nodes: cloneJson(nodes as EditorNode[]),
+      edges: cloneJson(edges as Edge[])
+    });
+    suppressHistoryRef.current = true;
+    setNodes(prev.nodes);
+    setEdges(prev.edges);
+    setTimeout(() => {
+      suppressHistoryRef.current = false;
+    }, 0);
+  }, [edges, nodes, setEdges, setNodes]);
+
+  const redo = useCallback(() => {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    historyStackRef.current.push({
+      nodes: cloneJson(nodes as EditorNode[]),
+      edges: cloneJson(edges as Edge[])
+    });
+    suppressHistoryRef.current = true;
+    setNodes(next.nodes);
+    setEdges(next.edges);
+    setTimeout(() => {
+      suppressHistoryRef.current = false;
+    }, 0);
+  }, [edges, nodes, setEdges, setNodes]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (activeMode !== "editor") return;
+      if (isTypingTarget(event.target)) return;
+
+      const isModifier = event.ctrlKey || event.metaKey;
+      const key = event.key.toLowerCase();
+
+      // Undo / Redo
+      if (isModifier && key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+        return;
+      }
+      if ((isModifier && key === "z" && event.shiftKey) || (isModifier && key === "y")) {
+        event.preventDefault();
+        redo();
+        return;
+      }
+
+      // Duplicate selected nodes (Ctrl+D / Cmd+D)
+      if (isModifier && key === "d") {
+        const selected = nodes.filter((node) => node.selected);
+        if (selected.length === 0) return;
+        event.preventDefault();
+        pushHistorySnapshot();
+        const idMap = new Map<string, string>();
+        const duplicates: Node<EditorNodeData>[] = selected.map((node) => {
+          const newId = createNodeId(node.data.nodeType);
+          idMap.set(node.id, newId);
+          return {
+            ...node,
+            id: newId,
+            selected: true,
+            position: { x: node.position.x + 40, y: node.position.y + 40 },
+            data: {
+              label: node.data.label,
+              nodeType: node.data.nodeType,
+              config: cloneJson(node.data.config ?? {}),
+              disabled: node.data.disabled,
+              color: node.data.color
+            }
+          };
+        });
+        const selectedIds = new Set(selected.map((n) => n.id));
+        const duplicateEdges: Edge[] = edges
+          .filter((edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target))
+          .map((edge) => {
+            const source = idMap.get(edge.source);
+            const target = idMap.get(edge.target);
+            if (!source || !target) return null;
+            const candidate: Edge = {
+              id: createEdgeId(source, target),
+              source,
+              target,
+              sourceHandle: edge.sourceHandle ?? undefined,
+              targetHandle: edge.targetHandle ?? undefined,
+              label: typeof edge.label === "string" ? edge.label : undefined
+            };
+            return decorateEdge(candidate, [...(nodes as EditorNode[]), ...(duplicates as EditorNode[])]);
+          })
+          .filter((edge): edge is Edge => Boolean(edge));
+        setNodes((current) => [
+          ...current.map((node) => ({ ...node, selected: false })),
+          ...duplicates
+        ]);
+        setEdges((current) => [
+          ...current.map((edge) => ({ ...edge, selected: false })),
+          ...duplicateEdges
+        ]);
+        return;
+      }
+
+      // Toggle disable on selected nodes (D without modifier)
+      if (!isModifier && !event.shiftKey && !event.altKey && key === "e") {
+        const selected = nodes.filter((node) => node.selected);
+        if (selected.length === 0) return;
+        event.preventDefault();
+        pushHistorySnapshot();
+        const targetDisabled = !selected.every((n) => n.data.disabled);
+        setNodes((current) =>
+          current.map((node) =>
+            node.selected ? { ...node, data: { ...node.data, disabled: targetDisabled } } : node
+          )
+        );
+        return;
+      }
+
+      // Open shortcuts panel with "?" or Ctrl+/
+      if ((key === "?" && event.shiftKey) || (isModifier && key === "/")) {
+        event.preventDefault();
+        setShowShortcutsPanel(true);
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [activeMode, edges, nodes, pushHistorySnapshot, redo, setEdges, setNodes, undo]);
 
   useEffect(() => {
     latestDebugExecutionIdRef.current = null;
@@ -1095,6 +1275,7 @@ function StudioApp() {
       }
 
       event.preventDefault();
+      pushHistorySnapshot();
       setNodes((currentNodes) => currentNodes.filter((node) => !selectedNodeIds.has(node.id)));
       setEdges((currentEdges) =>
         currentEdges.filter(
@@ -1112,7 +1293,7 @@ function StudioApp() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeMode, editingNodeId, edges, nodes, setEdges, setNodes]);
+  }, [activeMode, editingNodeId, edges, nodes, pushHistorySnapshot, setEdges, setNodes]);
 
   useEffect(() => {
     const handleCopyPaste = (event: KeyboardEvent) => {
@@ -1152,7 +1333,9 @@ function StudioApp() {
             relativePosition: {
               x: node.position.x - minX,
               y: node.position.y - minY
-            }
+            },
+            disabled: node.data.disabled,
+            color: node.data.color
           })),
           edges: edges
             .filter((edge) => selectedNodeIds.has(edge.source) && selectedNodeIds.has(edge.target))
@@ -1196,6 +1379,7 @@ function StudioApp() {
         }
 
         event.preventDefault();
+        pushHistorySnapshot();
 
         const bounds = flowWrapperRef.current?.getBoundingClientRect();
         const canvasCenter = reactFlowInstance
@@ -1213,7 +1397,7 @@ function StudioApp() {
           idMap.set(entry.sourceId, newId);
           return {
             id: newId,
-            type: "workflowNode",
+            type: entry.nodeType === "sticky_note" ? "stickyNote" : "workflowNode",
             position: {
               x: canvasCenter.x + entry.relativePosition.x + offset,
               y: canvasCenter.y + entry.relativePosition.y + offset
@@ -1222,7 +1406,9 @@ function StudioApp() {
             data: {
               label: entry.label,
               nodeType: entry.nodeType,
-              config: cloneJson(entry.config ?? {})
+              config: cloneJson(entry.config ?? {}),
+              disabled: entry.disabled,
+              color: entry.color
             }
           };
         });
@@ -1262,7 +1448,7 @@ function StudioApp() {
     return () => {
       window.removeEventListener("keydown", handleCopyPaste);
     };
-  }, [activeMode, edges, nodes, reactFlowInstance, setEdges, setNodes]);
+  }, [activeMode, edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]);
 
   const handleDeleteEdgeById = useCallback(
     (edgeId: string) => {
@@ -2490,12 +2676,18 @@ function StudioApp() {
   }, []);
 
   const saveNodeConfig = useCallback(
-    (payload: { label: string; config: Record<string, unknown> }) => {
+    (payload: {
+      label: string;
+      config: Record<string, unknown>;
+      disabled?: boolean;
+      color?: EditorNodeData["color"];
+    }) => {
       if (!editingNodeId) {
         return;
       }
 
       const normalizedLabel = payload.label.trim();
+      pushHistorySnapshot();
       setNodes((existing) =>
         existing.map((node) =>
           node.id === editingNodeId
@@ -2504,7 +2696,9 @@ function StudioApp() {
                 data: {
                   ...node.data,
                   label: normalizedLabel || node.data.label,
-                  config: payload.config
+                  config: payload.config,
+                  disabled: payload.disabled,
+                  color: payload.color
                 }
               }
             : node
@@ -2513,7 +2707,7 @@ function StudioApp() {
       setEditingNodeId(null);
       setError(null);
     },
-    [editingNodeId, setNodes]
+    [editingNodeId, pushHistorySnapshot, setNodes]
   );
 
   const createNodeFromDefinition = useCallback(
@@ -2525,7 +2719,7 @@ function StudioApp() {
 
       const newNode: Node<EditorNodeData> = {
         id,
-        type: "workflowNode",
+        type: definition.type === "sticky_note" ? "stickyNote" : "workflowNode",
         position: position ?? fallbackPosition,
         data: {
           label: definition.label,
@@ -2534,9 +2728,10 @@ function StudioApp() {
         }
       };
 
+      pushHistorySnapshot();
       setNodes((existing) => [...existing, newNode]);
     },
-    [reactFlowInstance, setNodes]
+    [pushHistorySnapshot, reactFlowInstance, setNodes]
   );
 
   const onConnect = useCallback(
@@ -2870,6 +3065,9 @@ function StudioApp() {
           onLogout={() => {
             void handleLogout();
           }}
+          theme={theme}
+          onToggleTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+          onOpenShortcuts={() => setShowShortcutsPanel(true)}
         />
 
         <main className="main-content">
@@ -3683,6 +3881,7 @@ function StudioApp() {
           }}
         />
       )}
+      <KeyboardShortcutsPanel open={showShortcutsPanel} onClose={() => setShowShortcutsPanel(false)} />
     </div>
   );
 }

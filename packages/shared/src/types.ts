@@ -89,7 +89,18 @@ export type WorkflowNodeType =
   | "redis_command"
   | "redis_trigger"
   | "github_action"
-  | "github_webhook_trigger";
+  | "github_webhook_trigger"
+  | "manual_trigger"
+  | "form_trigger"
+  | "chat_trigger"
+  | "file_trigger"
+  | "rss_trigger"
+  | "sse_trigger"
+  | "mcp_server_trigger"
+  | "kafka_trigger"
+  | "rabbitmq_trigger"
+  | "mqtt_trigger"
+  | "sticky_note";
 
 export interface WorkflowNodePosition {
   x: number;
@@ -111,6 +122,10 @@ export interface WorkflowNode<TConfig = Record<string, unknown>> {
   position: WorkflowNodePosition;
   config: TConfig;
   errorConfig?: NodeErrorConfig;
+  /** UI-only: when true, the executor skips this node and passes its parent outputs downstream. */
+  disabled?: boolean;
+  /** UI-only: accent color key for visual grouping ("gray" | "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "pink"). */
+  color?: string;
 }
 
 export interface WorkflowEdge {

@@ -58,9 +58,16 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
   const currentStatus = data.executionStatus;
   const showSuccessBadge = currentStatus === "success";
   const showRunningBadge = currentStatus === "running";
+  const disabledClass = data.disabled ? " wf-node-disabled" : "";
+  const colorClass = data.color ? ` wf-node-color-${data.color}` : "";
 
   return (
-    <div className={`wf-node wf-node-${variant} ${statusClass(data.executionStatus)} ${selected ? "selected" : ""}`}>
+    <div
+      className={`wf-node wf-node-${variant} ${statusClass(data.executionStatus)} ${selected ? "selected" : ""}${disabledClass}${colorClass}`}
+    >
+      {data.disabled && (
+        <span className="wf-node-disabled-badge" title="Disabled" aria-label="Disabled">⏸</span>
+      )}
       {showSuccessBadge && (
         <span className="wf-node-status-badge wf-node-status-success" title="Completed" aria-label="Completed">
           ✓

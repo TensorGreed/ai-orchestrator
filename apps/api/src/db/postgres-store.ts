@@ -1320,4 +1320,39 @@ export class PostgresStore {
       failedAt: toStr(row.failed_at)
     }));
   }
+
+  async getTriggerState(workflowId: string, nodeId: string): Promise<Record<string, unknown> | null> {
+    const rows = await this.query<{ state_json: string }>(
+      `SELECT state_json FROM trigger_state WHERE workflow_id = $1 AND node_id = $2`,
+      [workflowId, nodeId]
+    );
+    const row = rows[0];
+    if (!row) return null;
+    try {
+      return JSON.parse(toStr(row.state_json)) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  async saveTriggerState(input: {
+    workflowId: string;
+    nodeId: string;
+    triggerType: string;
+    state: Record<string, unknown>;
+  }): Promise<void> {
+    await this.query(
+      `INSERT INTO trigger_state (workflow_id, node_id, trigger_type, state_json, updated_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (workflow_id, node_id) DO UPDATE SET
+         state_json = EXCLUDED.state_json,
+         trigger_type = EXCLUDED.trigger_type,
+         updated_at = EXCLUDED.updated_at`,
+      [input.workflowId, input.nodeId, input.triggerType, JSON.stringify(input.state), new Date().toISOString()]
+    );
+  }
+
+  async deleteTriggerStatesForWorkflow(workflowId: string): Promise<void> {
+    await this.query(`DELETE FROM trigger_state WHERE workflow_id = $1`, [workflowId]);
+  }
 }

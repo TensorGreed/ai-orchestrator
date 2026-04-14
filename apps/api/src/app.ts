@@ -20,7 +20,8 @@ import {
   type MCPServerConfig,
   type SecretReference,
   type Workflow,
-  type WorkflowExecutionState
+  type WorkflowExecutionState,
+  type WorkflowNode
 } from "@ai-orchestrator/shared";
 import {
   executeCodeNodeSandbox,
@@ -35,6 +36,7 @@ import { SecretService } from "./services/secret-service";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
+import { TriggerService } from "./services/trigger-service";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -748,7 +750,8 @@ export function createApp(
   secretService: SecretService,
   authService: AuthService,
   schedulerService?: SchedulerService,
-  queueService?: QueueService
+  queueService?: QueueService,
+  triggerService?: TriggerService
 ) {
   const app = Fastify({ logger: true });
   const providerRegistry = createDefaultProviderRegistry();
@@ -1259,6 +1262,50 @@ export function createApp(
     });
   }
 
+  const executeTriggeredWorkflow = async (input: {
+    workflow: Workflow;
+    node: { id: string; type: string };
+    triggerType: string;
+    input: Record<string, unknown>;
+  }) => {
+    const executionId = crypto.randomUUID();
+    const progressHooks = createProgressTrackingHooks({
+      executionId,
+      workflow: input.workflow,
+      triggerType: input.triggerType,
+      triggeredBy: "trigger-service",
+      requestInput: input.input
+    });
+    const result = await runWorkflowExecution({
+      workflow: input.workflow,
+      directInput: {
+        trigger_type: input.triggerType,
+        trigger_node_id: input.node.id,
+        ...input.input
+      },
+      executionId,
+      triggerType: input.triggerType,
+      triggeredBy: "trigger-service",
+      hooks: progressHooks
+    });
+    persistExecutionHistory({
+      executionId,
+      workflow: input.workflow,
+      result,
+      triggerType: input.triggerType,
+      triggeredBy: "trigger-service",
+      requestInput: input.input
+    });
+  };
+
+  if (triggerService) {
+    triggerService.setExecutionHandler(async (payload) => executeTriggeredWorkflow(payload));
+    triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
+    app.addHook("onClose", async () => {
+      await triggerService.stop();
+    });
+  }
+
   const rolePriority: Record<UserRole, number> = {
     viewer: 1,
     operator: 2,
@@ -1569,6 +1616,7 @@ export function createApp(
     };
     const saved = store.upsertWorkflow(nextWorkflow);
     schedulerService?.reloadWorkflow(saved.id);
+    triggerService?.reloadWorkflow(saved.id);
 
     return {
       workflowId: saved.id,
@@ -1602,6 +1650,7 @@ export function createApp(
 
     const savedWorkflow = store.upsertWorkflow(parsed.data);
     schedulerService?.reloadWorkflow(savedWorkflow.id);
+    triggerService?.reloadWorkflow(savedWorkflow.id);
     return savedWorkflow;
   });
 
@@ -1636,6 +1685,7 @@ export function createApp(
 
     const savedWorkflow = store.upsertWorkflow(parsed.data);
     schedulerService?.reloadWorkflow(savedWorkflow.id);
+    triggerService?.reloadWorkflow(savedWorkflow.id);
     return savedWorkflow;
   });
 
@@ -1653,6 +1703,7 @@ export function createApp(
       }
 
       schedulerService?.removeWorkflow(request.params.id);
+      triggerService?.removeWorkflow(request.params.id);
 
       return { ok: true };
     } catch (error) {
@@ -1696,6 +1747,7 @@ export function createApp(
 
     const savedWorkflow = store.upsertWorkflow(duplicatedWorkflow);
     schedulerService?.reloadWorkflow(savedWorkflow.id);
+    triggerService?.reloadWorkflow(savedWorkflow.id);
     return savedWorkflow;
   });
 
@@ -1727,6 +1779,7 @@ export function createApp(
 
       const savedWorkflow = store.upsertWorkflow(workflow);
       schedulerService?.reloadWorkflow(savedWorkflow.id);
+      triggerService?.reloadWorkflow(savedWorkflow.id);
       return savedWorkflow;
     } catch (error) {
       reply.code(400);
@@ -2424,6 +2477,386 @@ export function createApp(
         requestInput: body ?? {}
       });
       return { ok: true, status: result.status };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Phase 3.5 — Trigger endpoints
+  // ---------------------------------------------------------------------------
+
+  // Manual trigger — builder role, starts a workflow with payload merged as input.
+  app.post<{ Params: { workflowId: string }; Body: unknown }>(
+    "/api/triggers/manual/:workflowId",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const workflow = store.getWorkflow(request.params.workflowId);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const manualNode = workflow.nodes.find((n) => n.type === "manual_trigger");
+      if (!manualNode) {
+        reply.code(400);
+        return { error: "Workflow has no manual_trigger node" };
+      }
+      const body = asRecord(request.body);
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "manual",
+        triggeredBy: user.email,
+        requestInput: body
+      });
+      const result = await runWorkflowExecution({
+        workflow,
+        directInput: { trigger_type: "manual", trigger_node_id: manualNode.id, ...body },
+        executionId,
+        triggerType: "manual",
+        triggeredBy: user.email,
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "manual",
+        triggeredBy: user.email,
+        requestInput: body
+      });
+      return { ok: true, executionId, status: result.status, output: result.output };
+    }
+  );
+
+  // Form trigger — GET renders an HTML form, POST processes submission.
+  const findFormWorkflow = (formPath: string): { workflow: Workflow; node: WorkflowNode } | null => {
+    for (const summary of store.listWorkflows()) {
+      const wf = store.getWorkflow(summary.id);
+      if (!wf) continue;
+      for (const node of wf.nodes) {
+        if (node.type !== "form_trigger") continue;
+        const cfg = asRecord(node.config);
+        if (typeof cfg.path === "string" && cfg.path.trim() === formPath) {
+          return { workflow: wf, node };
+        }
+      }
+    }
+    return null;
+  };
+
+  const escapeHtml = (value: string): string =>
+    value.replace(/[&<>"']/g, (c) =>
+      c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;"
+    );
+
+  const renderFormHtml = (node: WorkflowNode, formPath: string, successMsg?: string): string => {
+    const cfg = asRecord(node.config);
+    const title = escapeHtml(typeof cfg.title === "string" ? cfg.title : "Submit");
+    const description = escapeHtml(typeof cfg.description === "string" ? cfg.description : "");
+    const submitLabel = escapeHtml(typeof cfg.submitLabel === "string" ? cfg.submitLabel : "Submit");
+    const fields = Array.isArray(cfg.fields) ? (cfg.fields as Array<Record<string, unknown>>) : [];
+    const body = fields
+      .map((f) => {
+        const name = escapeHtml(String(f.name ?? ""));
+        const label = escapeHtml(String(f.label ?? f.name ?? ""));
+        const type = String(f.type ?? "text");
+        const required = f.required === true ? " required" : "";
+        const placeholder = escapeHtml(String(f.placeholder ?? ""));
+        if (type === "textarea") {
+          return `<label>${label}<textarea name="${name}" placeholder="${placeholder}"${required}></textarea></label>`;
+        }
+        if (type === "select") {
+          const opts = Array.isArray(f.options) ? (f.options as string[]) : [];
+          const optionsHtml = opts
+            .map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`)
+            .join("");
+          return `<label>${label}<select name="${name}"${required}>${optionsHtml}</select></label>`;
+        }
+        if (type === "checkbox") {
+          return `<label><input type="checkbox" name="${name}" value="true" /> ${label}</label>`;
+        }
+        const inputType = ["email", "number"].includes(type) ? type : "text";
+        return `<label>${label}<input type="${inputType}" name="${name}" placeholder="${placeholder}"${required} /></label>`;
+      })
+      .join("");
+    const success = successMsg
+      ? `<div class="form-success">${escapeHtml(successMsg)}</div>`
+      : "";
+    return `<!doctype html>
+<html><head><meta charset="utf-8" /><title>${title}</title>
+<style>body{font-family:system-ui,sans-serif;max-width:560px;margin:40px auto;padding:0 20px;}
+form{display:flex;flex-direction:column;gap:12px;}
+label{display:flex;flex-direction:column;gap:4px;font-size:14px;}
+input,textarea,select{padding:8px;border:1px solid #ccc;border-radius:4px;font:inherit;}
+textarea{min-height:120px;}
+button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius:4px;cursor:pointer;}
+.form-success{background:#def7ec;color:#0e542f;padding:12px;border-radius:4px;margin-bottom:16px;}</style>
+</head><body><h1>${title}</h1>${description ? `<p>${description}</p>` : ""}${success}
+<form method="POST" action="/api/forms/${escapeHtml(formPath)}">${body}<button type="submit">${submitLabel}</button></form>
+</body></html>`;
+  };
+
+  app.get<{ Params: { path: string }; Querystring: Record<string, string> }>(
+    "/api/forms/:path",
+    async (request, reply) => {
+      const found = findFormWorkflow(request.params.path);
+      if (!found) {
+        reply.code(404);
+        reply.type("text/html");
+        return "<h1>Form not found</h1>";
+      }
+      const cfg = asRecord(found.node.config);
+      if (cfg.authMode === "session") {
+        const user = await requireRole(request, reply, ["viewer"]);
+        if (!user) return;
+      }
+      const successMsg =
+        request.query?.submitted === "1" && typeof cfg.successMessage === "string"
+          ? cfg.successMessage
+          : undefined;
+      reply.type("text/html");
+      return renderFormHtml(found.node, request.params.path, successMsg);
+    }
+  );
+
+  app.post<{ Params: { path: string }; Body: unknown }>(
+    "/api/forms/:path",
+    async (request, reply) => {
+      const found = findFormWorkflow(request.params.path);
+      if (!found) {
+        reply.code(404);
+        return { error: "Form not found" };
+      }
+      const cfg = asRecord(found.node.config);
+      if (cfg.authMode === "session") {
+        const user = await requireRole(request, reply, ["viewer"]);
+        if (!user) return;
+      }
+      const submission = asRecord(request.body);
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow: found.workflow,
+        triggerType: "form",
+        triggeredBy: "form-submitter",
+        requestInput: submission
+      });
+      const result = await runWorkflowExecution({
+        workflow: found.workflow,
+        directInput: {
+          trigger_type: "form",
+          trigger_node_id: found.node.id,
+          form_path: request.params.path,
+          form_submission: submission,
+          submitted_at: new Date().toISOString(),
+          ...submission
+        },
+        executionId,
+        triggerType: "form",
+        triggeredBy: "form-submitter",
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow: found.workflow,
+        result,
+        triggerType: "form",
+        triggeredBy: "form-submitter",
+        requestInput: submission
+      });
+      const accept = getHeaderValue(request.headers, "accept");
+      if (accept.includes("text/html")) {
+        reply.redirect(`/api/forms/${encodeURIComponent(request.params.path)}?submitted=1`, 303);
+        return;
+      }
+      return { ok: true, executionId, status: result.status };
+    }
+  );
+
+  // Chat trigger — accepts chat messages, optionally persists to session memory.
+  app.post<{ Params: { workflowId: string }; Body: unknown }>(
+    "/api/chat/:workflowId",
+    async (request, reply) => {
+      const workflow = store.getWorkflow(request.params.workflowId);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const chatNode = workflow.nodes.find((n) => n.type === "chat_trigger");
+      if (!chatNode) {
+        reply.code(400);
+        return { error: "Workflow has no chat_trigger node" };
+      }
+      const cfg = asRecord(chatNode.config);
+      const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
+      if (authMode === "session") {
+        const user = await requireRole(request, reply, ["viewer"]);
+        if (!user) return;
+      } else if (authMode === "bearer") {
+        const secretRef = toSecretReference(cfg.secretRef);
+        const secret = await secretService.resolveSecret(secretRef);
+        if (!secret) {
+          reply.code(500);
+          return { error: "Chat bearer secret not configured" };
+        }
+        const header = getHeaderValue(request.headers, "authorization");
+        const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+        if (!token || !safeEqualSecret(secret, token)) {
+          reply.code(401);
+          return { error: "Invalid bearer token" };
+        }
+      }
+      const body = asRecord(request.body);
+      const message =
+        typeof body.message === "string"
+          ? body.message
+          : typeof body.text === "string"
+            ? body.text
+            : typeof body.user_prompt === "string"
+              ? body.user_prompt
+              : "";
+      const sessionId =
+        typeof body.session_id === "string" && body.session_id.trim()
+          ? body.session_id.trim()
+          : typeof body.sessionId === "string" && body.sessionId.trim()
+            ? body.sessionId.trim()
+            : crypto.randomUUID();
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "chat",
+        triggeredBy: "chat-client",
+        requestInput: body
+      });
+      const result = await runWorkflowExecution({
+        workflow,
+        directInput: {
+          trigger_type: "chat",
+          trigger_node_id: chatNode.id,
+          message,
+          user_prompt: message,
+          ...body
+        },
+        sessionId,
+        userPrompt: message || undefined,
+        executionId,
+        triggerType: "chat",
+        triggeredBy: "chat-client",
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "chat",
+        triggeredBy: "chat-client",
+        requestInput: body
+      });
+      return {
+        ok: true,
+        executionId,
+        status: result.status,
+        session_id: sessionId,
+        output: result.output
+      };
+    }
+  );
+
+  // MCP server trigger — expose workflow as a tool callable via HTTP.
+  const findMcpServerWorkflow = (p: string): { workflow: Workflow; node: WorkflowNode } | null => {
+    for (const summary of store.listWorkflows()) {
+      const wf = store.getWorkflow(summary.id);
+      if (!wf) continue;
+      for (const node of wf.nodes) {
+        if (node.type !== "mcp_server_trigger") continue;
+        const cfg = asRecord(node.config);
+        if (typeof cfg.path === "string" && cfg.path.trim() === p) {
+          return { workflow: wf, node };
+        }
+      }
+    }
+    return null;
+  };
+
+  app.get<{ Params: { path: string } }>("/api/mcp-server/:path/manifest", async (request, reply) => {
+    const found = findMcpServerWorkflow(request.params.path);
+    if (!found) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const cfg = asRecord(found.node.config);
+    return {
+      name: cfg.toolName ?? "",
+      description: cfg.toolDescription ?? "",
+      inputSchema: cfg.inputSchema ?? { type: "object" }
+    };
+  });
+
+  app.post<{ Params: { path: string }; Body: unknown }>(
+    "/api/mcp-server/:path/invoke",
+    async (request, reply) => {
+      const found = findMcpServerWorkflow(request.params.path);
+      if (!found) {
+        reply.code(404);
+        return { error: "MCP server not found" };
+      }
+      const cfg = asRecord(found.node.config);
+      if (cfg.authMode === "bearer") {
+        const secret = await secretService.resolveSecret(toSecretReference(cfg.secretRef));
+        if (!secret) {
+          reply.code(500);
+          return { error: "MCP bearer secret not configured" };
+        }
+        const header = getHeaderValue(request.headers, "authorization");
+        const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+        if (!token || !safeEqualSecret(secret, token)) {
+          reply.code(401);
+          return { error: "Invalid bearer token" };
+        }
+      }
+      const body = asRecord(request.body);
+      const args = asRecord(body.arguments ?? body.args ?? body);
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow: found.workflow,
+        triggerType: "mcp_server",
+        triggeredBy: "mcp-client",
+        requestInput: body
+      });
+      const result = await runWorkflowExecution({
+        workflow: found.workflow,
+        directInput: {
+          trigger_type: "mcp_server",
+          trigger_node_id: found.node.id,
+          arguments: args,
+          call_id: typeof body.call_id === "string" ? body.call_id : undefined,
+          ...args
+        },
+        executionId,
+        triggerType: "mcp_server",
+        triggeredBy: "mcp-client",
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow: found.workflow,
+        result,
+        triggerType: "mcp_server",
+        triggeredBy: "mcp-client",
+        requestInput: body
+      });
+      if (result.status === "error") {
+        reply.code(500);
+        return { error: result.error ?? "mcp_server trigger execution failed" };
+      }
+      return {
+        ok: true,
+        executionId,
+        result: result.output ?? null
+      };
     }
   );
 

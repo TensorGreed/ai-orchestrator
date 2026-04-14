@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LLMProviderConfig, MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
-import type { EditorNode } from "../lib/workflow";
+import type { EditorNode, EditorNodeData } from "../lib/workflow";
 import {
   createSecret,
   discoverMcpTools,
@@ -25,7 +25,12 @@ interface NodeConfigModalProps {
   onRefreshSecrets?: () => Promise<SecretListItem[]>;
   mcpServerDefinitions: Array<{ id: string; label: string; description: string }>;
   onClose: () => void;
-  onSave: (payload: { label: string; config: Record<string, unknown> }) => void;
+  onSave: (payload: {
+    label: string;
+    config: Record<string, unknown>;
+    disabled?: boolean;
+    color?: EditorNodeData["color"];
+  }) => void;
   onExecuteStep: () => void;
 }
 
@@ -491,6 +496,8 @@ export function NodeConfigModal({
 }: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
+  const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
+  const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<"parameters" | "settings">("parameters");
   const [selectedInputId, setSelectedInputId] = useState(NODE_INPUT_OPTION_ID);
   const [discoveredTools, setDiscoveredTools] = useState<MCPToolDefinition[]>([]);
@@ -556,6 +563,8 @@ export function NodeConfigModal({
     }
 
     setLabel(node.data.label);
+    setNodeDisabled(Boolean(node.data.disabled));
+    setNodeColor(node.data.color);
     setActiveTab("parameters");
     setSelectedInputId(NODE_INPUT_OPTION_ID);
     setDiscoveredTools([]);
@@ -5619,6 +5628,447 @@ export function NodeConfigModal({
             </div>
           </>
         );
+      case "manual_trigger":
+        return (
+          <>
+            <TextField
+              label="Label"
+              value={toStringValue(config.label, "Run manually")}
+              onChange={(next) => setConfig((current) => ({ ...current, label: next }))}
+            />
+            <TextAreaField
+              label="Test Data (JSON)"
+              value={toStringValue(
+                typeof config.testData === "string"
+                  ? config.testData
+                  : JSON.stringify(config.testData ?? {}, null, 2)
+              )}
+              onChange={(next) => {
+                let parsed: unknown = next;
+                try {
+                  parsed = JSON.parse(next);
+                } catch {
+                  /* store as string until valid */
+                }
+                setConfig((current) => ({ ...current, testData: parsed }));
+              }}
+              rows={4}
+            />
+            <div className="cfg-tip">
+              Trigger from the editor or POST to <code>/api/triggers/manual/&lt;workflowId&gt;</code> (builder role).
+            </div>
+          </>
+        );
+      case "form_trigger":
+        return (
+          <>
+            <TextField
+              label="Form Path"
+              value={toStringValue(config.path, "feedback")}
+              onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
+              placeholder="feedback"
+            />
+            <TextField
+              label="Title"
+              value={toStringValue(config.title, "Submit")}
+              onChange={(next) => setConfig((current) => ({ ...current, title: next }))}
+            />
+            <TextAreaField
+              label="Description"
+              value={toStringValue(config.description)}
+              onChange={(next) => setConfig((current) => ({ ...current, description: next }))}
+              rows={2}
+            />
+            <TextField
+              label="Submit Label"
+              value={toStringValue(config.submitLabel, "Submit")}
+              onChange={(next) => setConfig((current) => ({ ...current, submitLabel: next }))}
+            />
+            <SelectField
+              label="Auth Mode"
+              value={toStringValue(config.authMode, "public")}
+              onChange={(next) => setConfig((current) => ({ ...current, authMode: next }))}
+              options={[
+                { value: "public", label: "Public (no auth)" },
+                { value: "session", label: "Session (logged-in user)" }
+              ]}
+            />
+            <TextAreaField
+              label="Success Message"
+              value={toStringValue(config.successMessage)}
+              onChange={(next) => setConfig((current) => ({ ...current, successMessage: next }))}
+              rows={2}
+            />
+            <TextAreaField
+              label="Fields (JSON array)"
+              value={toStringValue(
+                typeof config.fields === "string"
+                  ? config.fields
+                  : JSON.stringify(config.fields ?? [], null, 2)
+              )}
+              onChange={(next) => {
+                let parsed: unknown = next;
+                try {
+                  parsed = JSON.parse(next);
+                } catch {
+                  /* keep string */
+                }
+                setConfig((current) => ({ ...current, fields: parsed }));
+              }}
+              rows={8}
+            />
+            <div className="cfg-tip">
+              Form is served at <code>/api/forms/&lt;path&gt;</code>. POST submissions trigger the workflow with fields as input.
+            </div>
+          </>
+        );
+      case "chat_trigger":
+        return (
+          <>
+            <TextField
+              label="Path (informational)"
+              value={toStringValue(config.path, "chat")}
+              onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
+            />
+            <SelectField
+              label="Auth Mode"
+              value={toStringValue(config.authMode, "public")}
+              onChange={(next) => setConfig((current) => ({ ...current, authMode: next }))}
+              options={[
+                { value: "public", label: "Public" },
+                { value: "session", label: "Session (logged-in user)" },
+                { value: "bearer", label: "Bearer token" }
+              ]}
+            />
+            {toStringValue(config.authMode, "public") === "bearer" &&
+              renderCredentialSecretField({
+                fieldKey: "chat_bearer",
+                label: "Bearer Token Secret",
+                value: toStringValue(asRecord(config.secretRef).secretId),
+                noneLabel: "Select secret",
+                preferredProvider: "chat",
+                onSelect: (next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    secretRef: next ? { secretId: next } : undefined
+                  }))
+              })}
+            <TextField
+              label="Session Namespace"
+              value={toStringValue(config.sessionNamespace, "chat")}
+              onChange={(next) => setConfig((current) => ({ ...current, sessionNamespace: next }))}
+            />
+            <ToggleField
+              label="Persist messages to session memory"
+              checked={toBooleanValue(config.persistMessages, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, persistMessages: next }))}
+            />
+            <TextAreaField
+              label="Welcome Message"
+              value={toStringValue(config.welcomeMessage)}
+              onChange={(next) => setConfig((current) => ({ ...current, welcomeMessage: next }))}
+              rows={2}
+            />
+            <div className="cfg-tip">
+              POST messages to <code>/api/chat/&lt;workflowId&gt;</code> with body <code>{'{ message, session_id }'}</code>.
+            </div>
+          </>
+        );
+      case "file_trigger":
+        return (
+          <>
+            <TextField
+              label="Watch Path"
+              value={toStringValue(config.watchPath)}
+              onChange={(next) => setConfig((current) => ({ ...current, watchPath: next }))}
+              placeholder="./data/inbox"
+            />
+            <TextField
+              label="Filename Pattern (glob)"
+              value={toStringValue(config.pattern)}
+              onChange={(next) => setConfig((current) => ({ ...current, pattern: next }))}
+              placeholder="*.csv"
+            />
+            <ToggleField
+              label="Recursive"
+              checked={toBooleanValue(config.recursive, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, recursive: next }))}
+            />
+            <NumberField
+              label="Poll Interval (seconds)"
+              value={toNumberValue(config.pollIntervalSeconds, 30)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, pollIntervalSeconds: next }))}
+            />
+            <ToggleField
+              label="Active"
+              checked={toBooleanValue(config.active, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, active: next }))}
+            />
+            <div className="cfg-tip">
+              Events are polled by the trigger service. First run establishes a baseline and does not fire.
+            </div>
+          </>
+        );
+      case "rss_trigger":
+        return (
+          <>
+            <TextField
+              label="Feed URL"
+              value={toStringValue(config.feedUrl)}
+              onChange={(next) => setConfig((current) => ({ ...current, feedUrl: next }))}
+              placeholder="https://example.com/feed.xml"
+            />
+            <NumberField
+              label="Poll Interval (seconds)"
+              value={toNumberValue(config.pollIntervalSeconds, 300)}
+              min={30}
+              step={30}
+              onChange={(next) => setConfig((current) => ({ ...current, pollIntervalSeconds: next }))}
+            />
+            <NumberField
+              label="Max Items Per Tick"
+              value={toNumberValue(config.maxItemsPerTick, 20)}
+              min={1}
+              onChange={(next) => setConfig((current) => ({ ...current, maxItemsPerTick: next }))}
+            />
+            <ToggleField
+              label="Active"
+              checked={toBooleanValue(config.active, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, active: next }))}
+            />
+            <div className="cfg-tip">New items are deduped by GUID (or link/title fallback) against a persisted window of the last 500 seen IDs.</div>
+          </>
+        );
+      case "sse_trigger":
+        return (
+          <>
+            <TextField
+              label="SSE URL"
+              value={toStringValue(config.url)}
+              onChange={(next) => setConfig((current) => ({ ...current, url: next }))}
+              placeholder="https://example.com/sse"
+            />
+            <TextField
+              label="Event Name Filter (optional)"
+              value={toStringValue(config.eventName)}
+              onChange={(next) => setConfig((current) => ({ ...current, eventName: next }))}
+            />
+            <SelectField
+              label="Auth Mode"
+              value={toStringValue(config.authMode, "none")}
+              onChange={(next) => setConfig((current) => ({ ...current, authMode: next }))}
+              options={[
+                { value: "none", label: "None" },
+                { value: "bearer", label: "Bearer token" }
+              ]}
+            />
+            {toStringValue(config.authMode, "none") === "bearer" &&
+              renderCredentialSecretField({
+                fieldKey: "sse_bearer",
+                label: "Bearer Token Secret",
+                value: toStringValue(asRecord(config.secretRef).secretId),
+                noneLabel: "Select secret",
+                preferredProvider: "sse",
+                onSelect: (next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    secretRef: next ? { secretId: next } : undefined
+                  }))
+              })}
+            <NumberField
+              label="Reconnect Delay (seconds)"
+              value={toNumberValue(config.reconnectDelaySeconds, 5)}
+              min={1}
+              onChange={(next) => setConfig((current) => ({ ...current, reconnectDelaySeconds: next }))}
+            />
+            <NumberField
+              label="Max Events Per Minute"
+              value={toNumberValue(config.maxEventsPerMinute, 120)}
+              min={1}
+              onChange={(next) => setConfig((current) => ({ ...current, maxEventsPerMinute: next }))}
+            />
+            <ToggleField
+              label="Active"
+              checked={toBooleanValue(config.active, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, active: next }))}
+            />
+          </>
+        );
+      case "mcp_server_trigger":
+        return (
+          <>
+            <TextField
+              label="Server Path"
+              value={toStringValue(config.path)}
+              onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
+              placeholder="helper"
+            />
+            <TextField
+              label="Tool Name"
+              value={toStringValue(config.toolName)}
+              onChange={(next) => setConfig((current) => ({ ...current, toolName: next }))}
+              placeholder="query_knowledge_base"
+            />
+            <TextAreaField
+              label="Tool Description"
+              value={toStringValue(config.toolDescription)}
+              onChange={(next) => setConfig((current) => ({ ...current, toolDescription: next }))}
+              rows={2}
+            />
+            <TextAreaField
+              label="Input Schema (JSON)"
+              value={toStringValue(
+                typeof config.inputSchema === "string"
+                  ? config.inputSchema
+                  : JSON.stringify(config.inputSchema ?? { type: "object" }, null, 2)
+              )}
+              onChange={(next) => {
+                let parsed: unknown = next;
+                try {
+                  parsed = JSON.parse(next);
+                } catch {
+                  /* keep string */
+                }
+                setConfig((current) => ({ ...current, inputSchema: parsed }));
+              }}
+              rows={6}
+            />
+            <SelectField
+              label="Auth Mode"
+              value={toStringValue(config.authMode, "public")}
+              onChange={(next) => setConfig((current) => ({ ...current, authMode: next }))}
+              options={[
+                { value: "public", label: "Public" },
+                { value: "bearer", label: "Bearer token" }
+              ]}
+            />
+            {toStringValue(config.authMode, "public") === "bearer" &&
+              renderCredentialSecretField({
+                fieldKey: "mcp_server_bearer",
+                label: "Bearer Token Secret",
+                value: toStringValue(asRecord(config.secretRef).secretId),
+                noneLabel: "Select secret",
+                preferredProvider: "mcp_server",
+                onSelect: (next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    secretRef: next ? { secretId: next } : undefined
+                  }))
+              })}
+            <div className="cfg-tip">
+              Invoke at <code>/api/mcp-server/&lt;path&gt;/invoke</code>; manifest at <code>/api/mcp-server/&lt;path&gt;/manifest</code>.
+            </div>
+          </>
+        );
+      case "kafka_trigger":
+        return (
+          <>
+            <TextAreaField
+              label="Brokers (one per line)"
+              value={toStringValue(
+                Array.isArray(config.brokers) ? (config.brokers as string[]).join("\n") : ""
+              )}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  brokers: next.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+                }))
+              }
+              rows={3}
+            />
+            <TextField
+              label="Topic"
+              value={toStringValue(config.topic)}
+              onChange={(next) => setConfig((current) => ({ ...current, topic: next }))}
+            />
+            <TextField
+              label="Consumer Group ID"
+              value={toStringValue(config.groupId)}
+              onChange={(next) => setConfig((current) => ({ ...current, groupId: next }))}
+            />
+            <ToggleField
+              label="From Beginning"
+              checked={toBooleanValue(config.fromBeginning, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, fromBeginning: next }))}
+            />
+            <ToggleField
+              label="Active"
+              checked={toBooleanValue(config.active, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, active: next }))}
+            />
+            <div className="cfg-tip">
+              Requires optional <code>kafkajs</code> npm package. The long-lived consumer is a stub in this build.
+            </div>
+          </>
+        );
+      case "rabbitmq_trigger":
+        return (
+          <>
+            <TextField
+              label="AMQP URL"
+              value={toStringValue(config.url)}
+              onChange={(next) => setConfig((current) => ({ ...current, url: next }))}
+              placeholder="amqp://localhost"
+            />
+            <TextField
+              label="Queue"
+              value={toStringValue(config.queue)}
+              onChange={(next) => setConfig((current) => ({ ...current, queue: next }))}
+            />
+            <NumberField
+              label="Prefetch"
+              value={toNumberValue(config.prefetch, 1)}
+              min={1}
+              onChange={(next) => setConfig((current) => ({ ...current, prefetch: next }))}
+            />
+            <ToggleField
+              label="Active"
+              checked={toBooleanValue(config.active, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, active: next }))}
+            />
+            <div className="cfg-tip">
+              Requires optional <code>amqplib</code> npm package. The long-lived consumer is a stub in this build.
+            </div>
+          </>
+        );
+      case "mqtt_trigger":
+        return (
+          <>
+            <TextField
+              label="Broker URL"
+              value={toStringValue(config.brokerUrl)}
+              onChange={(next) => setConfig((current) => ({ ...current, brokerUrl: next }))}
+              placeholder="mqtt://localhost:1883"
+            />
+            <TextField
+              label="Topic"
+              value={toStringValue(config.topic)}
+              onChange={(next) => setConfig((current) => ({ ...current, topic: next }))}
+            />
+            <NumberField
+              label="QoS"
+              value={toNumberValue(config.qos, 1)}
+              min={0}
+              max={2}
+              onChange={(next) => setConfig((current) => ({ ...current, qos: next }))}
+            />
+            <TextField
+              label="Client ID (optional)"
+              value={toStringValue(config.clientId)}
+              onChange={(next) => setConfig((current) => ({ ...current, clientId: next }))}
+            />
+            <ToggleField
+              label="Active"
+              checked={toBooleanValue(config.active, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, active: next }))}
+            />
+            <div className="cfg-tip">
+              Requires optional <code>mqtt</code> npm package. The long-lived subscriber is a stub in this build.
+            </div>
+          </>
+        );
       default:
         return (
           <div className="cfg-tip">Structured fields are not defined for this node yet. Add parameters in its dedicated editor in a future update.</div>
@@ -5681,11 +6131,50 @@ export function NodeConfigModal({
   );
 
   const renderSettings = () => {
+    const COLOR_OPTIONS: Array<{ key: EditorNodeData["color"]; label: string; swatch: string }> = [
+      { key: undefined, label: "None", swatch: "transparent" },
+      { key: "gray", label: "Gray", swatch: "#94a3b8" },
+      { key: "red", label: "Red", swatch: "#ef4444" },
+      { key: "orange", label: "Orange", swatch: "#f97316" },
+      { key: "yellow", label: "Yellow", swatch: "#eab308" },
+      { key: "green", label: "Green", swatch: "#10b981" },
+      { key: "blue", label: "Blue", swatch: "#3b82f6" },
+      { key: "purple", label: "Purple", swatch: "#8b5cf6" },
+      { key: "pink", label: "Pink", swatch: "#ec4899" }
+    ];
+
     return (
       <>
         <TextField label="Node Label" value={label} onChange={setLabel} />
         <div className="cfg-tip">
           Node ID: <code>{node.id}</code>
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <ToggleField
+            label="Disabled (executor skips this node and passes parent outputs through)"
+            checked={nodeDisabled}
+            onChange={setNodeDisabled}
+          />
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <label className="cfg-field">
+            <span>Accent color</span>
+            <div className="wf-color-swatch-row">
+              {COLOR_OPTIONS.map((option) => (
+                <button
+                  key={option.key ?? "none"}
+                  type="button"
+                  className={`wf-color-swatch${nodeColor === option.key ? " selected" : ""}`}
+                  style={{ background: option.swatch === "transparent" ? undefined : option.swatch }}
+                  title={option.label}
+                  aria-label={`Set color ${option.label}`}
+                  onClick={() => setNodeColor(option.key)}
+                >
+                  {option.swatch === "transparent" ? "∅" : ""}
+                </button>
+              ))}
+            </div>
+          </label>
         </div>
         <div style={{ marginTop: 14 }}>
           <h3>Input Mapping</h3>
@@ -5898,7 +6387,14 @@ export function NodeConfigModal({
           <button
             type="button"
             className="node-btn primary"
-            onClick={() => onSave({ label, config: getConfigForSave() })}
+            onClick={() =>
+              onSave({
+                label,
+                config: getConfigForSave(),
+                disabled: nodeDisabled || undefined,
+                color: nodeColor
+              })
+            }
           >
             Save changes
           </button>

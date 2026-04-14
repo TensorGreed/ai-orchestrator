@@ -11,6 +11,7 @@ import { SecretService } from "./services/secret-service";
 import { AuthService } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
+import { TriggerService } from "./services/trigger-service";
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const apiRoot = path.resolve(path.dirname(currentFilePath), "..");
@@ -46,8 +47,18 @@ async function bootstrap() {
   const queueService = new QueueService(store, {
     concurrency: Number(process.env.QUEUE_CONCURRENCY) || 5
   });
-  const app = createApp(config, store, secretService, authService, schedulerService, queueService);
+  const triggerService = new TriggerService(store);
+  const app = createApp(
+    config,
+    store,
+    secretService,
+    authService,
+    schedulerService,
+    queueService,
+    triggerService
+  );
   schedulerService.initialize();
+  triggerService.initialize();
   await app.listen({
     host: config.API_HOST,
     port: config.API_PORT

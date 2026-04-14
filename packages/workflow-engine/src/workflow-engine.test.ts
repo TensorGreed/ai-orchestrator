@@ -3090,3 +3090,127 @@ describe("Phase 1.8 — Workflow Settings: errorWorkflowId", () => {
     expect(triggerErrorWorkflow).not.toHaveBeenCalled();
   });
 });
+
+describe("workflow engine — Phase 4.1 canvas semantics", () => {
+  it("skips disabled nodes and passes parent outputs downstream", async () => {
+    const workflow: Workflow = {
+      id: "wf-disabled",
+      name: "Disabled node flow",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Text", position: { x: 0, y: 0 }, config: { text: "hello" } },
+        // LLM node is disabled — should be skipped, text_input output must flow to output node.
+        {
+          id: "n2",
+          type: "llm_call",
+          name: "LLM",
+          position: { x: 200, y: 0 },
+          config: { provider: { providerId: "fake", model: "fake-model" } },
+          disabled: true
+        },
+        { id: "n3", type: "output", name: "Out", position: { x: 400, y: 0 }, config: { responseTemplate: "{{text}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    // Output node should have resolved {{text}} via the disabled LLM's passthrough.
+    expect(result.output).toEqual({ result: "hello" });
+  });
+
+  it("treats sticky_note nodes as visual-only (passes parent outputs through)", async () => {
+    const workflow: Workflow = {
+      id: "wf-sticky",
+      name: "Sticky in graph",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "T", position: { x: 0, y: 0 }, config: { text: "world" } },
+        {
+          id: "n2",
+          type: "sticky_note",
+          name: "Note",
+          position: { x: 200, y: 0 },
+          config: { content: "Reminder: wire this", color: "yellow" }
+        },
+        { id: "n3", type: "output", name: "Out", position: { x: 400, y: 0 }, config: { responseTemplate: "{{text}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.output).toEqual({ result: "world" });
+  });
+
+  it("allows sticky_note nodes to pass workflow validation when isolated (output node still required)", () => {
+    const workflow: Workflow = {
+      id: "wf-sticky-validation",
+      name: "Sticky validation",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "T", position: { x: 0, y: 0 }, config: { text: "x" } },
+        { id: "note", type: "sticky_note", name: "Note", position: { x: 100, y: 100 }, config: { content: "hi" } },
+        { id: "n3", type: "output", name: "Out", position: { x: 400, y: 0 }, config: { responseTemplate: "{{text}}" } }
+      ],
+      edges: [{ id: "e1", source: "n1", target: "n3" }]
+    };
+    const validation = validateWorkflowGraph(workflow);
+    expect(validation.valid).toBe(true);
+  });
+
+  it("preserves disabled + color fields through export/import round-trip", () => {
+    const workflow: Workflow = {
+      id: "wf-round",
+      name: "Round trip",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "n1",
+          type: "text_input",
+          name: "T",
+          position: { x: 0, y: 0 },
+          config: { text: "x" },
+          disabled: true,
+          color: "blue"
+        },
+        { id: "n2", type: "output", name: "Out", position: { x: 200, y: 0 }, config: { responseTemplate: "ok" } }
+      ],
+      edges: [{ id: "e1", source: "n1", target: "n2" }]
+    };
+    const raw = exportWorkflowToJson(workflow);
+    const parsed = importWorkflowFromJson(raw);
+    expect(parsed.nodes[0]!.disabled).toBe(true);
+    expect(parsed.nodes[0]!.color).toBe("blue");
+  });
+});

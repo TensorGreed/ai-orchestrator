@@ -1,6 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500;600;700&display=swap");
 
-:root {
+:root,
+:root[data-theme="light"] {
   --app-bg: #f8fafc;
   --panel: #ffffff;
   --panel-border: #e2e8f0;
@@ -20,6 +21,58 @@
   --run-active-ring-strong: rgba(37, 99, 235, 0.32);
   --run-active-glow-soft: rgba(37, 99, 235, 0.24);
   --run-active-glow-strong: rgba(37, 99, 235, 0.36);
+  --canvas-grid-minor: #e4ebf5;
+  --canvas-grid-major: #c8d7ea;
+}
+
+:root[data-theme="dark"] {
+  --app-bg: #0b1220;
+  --panel: #111b2e;
+  --panel-border: #23314e;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #60a5fa;
+  --accent-dark: #3b82f6;
+  --accent-soft: #18253f;
+  --accent-line: #3b82f6;
+  --node-bg: #172238;
+  --node-border: #344568;
+  --shadow: 0 4px 14px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.35);
+  --run-success: #34d399;
+  --run-success-ring: rgba(52, 211, 153, 0.28);
+  --run-active: #60a5fa;
+  --run-active-ring-soft: rgba(96, 165, 250, 0.22);
+  --run-active-ring-strong: rgba(96, 165, 250, 0.4);
+  --run-active-glow-soft: rgba(96, 165, 250, 0.3);
+  --run-active-glow-strong: rgba(96, 165, 250, 0.45);
+  --canvas-grid-minor: #1b2944;
+  --canvas-grid-major: #26375b;
+  color-scheme: dark;
+}
+
+:root[data-theme="dark"] .react-flow__background {
+  background-color: var(--app-bg);
+}
+
+:root[data-theme="dark"] .react-flow__attribution {
+  background: rgba(17, 27, 46, 0.8);
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .react-flow__minimap,
+:root[data-theme="dark"] .react-flow__controls {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+}
+
+:root[data-theme="dark"] .react-flow__controls button {
+  background: var(--panel);
+  color: var(--text);
+  border-bottom-color: var(--panel-border);
+}
+
+:root[data-theme="dark"] .react-flow__controls button:hover {
+  background: var(--accent-soft);
 }
 
 * {
@@ -2630,4 +2683,238 @@ select {
   .chat-bubble {
     max-width: 96%;
   }
+}
+
+/* -----------------------------------------------------------------------------
+ * Phase 4.1 — Canvas Enhancements
+ * -------------------------------------------------------------------------- */
+
+/* Disabled node visual */
+.wf-node.wf-node-disabled {
+  opacity: 0.55;
+  filter: grayscale(0.4);
+}
+
+.wf-node.wf-node-disabled::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent 0 10px,
+    rgba(100, 116, 139, 0.08) 10px 20px
+  );
+  pointer-events: none;
+}
+
+.wf-node-disabled-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: #64748b;
+  color: #fff;
+  font-size: 11px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  z-index: 3;
+}
+
+/* Node accent colors — left border stripe + subtle tinted background */
+.wf-node.wf-node-color-gray { box-shadow: inset 4px 0 0 0 #94a3b8, var(--shadow); }
+.wf-node.wf-node-color-red { box-shadow: inset 4px 0 0 0 #ef4444, var(--shadow); }
+.wf-node.wf-node-color-orange { box-shadow: inset 4px 0 0 0 #f97316, var(--shadow); }
+.wf-node.wf-node-color-yellow { box-shadow: inset 4px 0 0 0 #eab308, var(--shadow); }
+.wf-node.wf-node-color-green { box-shadow: inset 4px 0 0 0 #10b981, var(--shadow); }
+.wf-node.wf-node-color-blue { box-shadow: inset 4px 0 0 0 #3b82f6, var(--shadow); }
+.wf-node.wf-node-color-purple { box-shadow: inset 4px 0 0 0 #8b5cf6, var(--shadow); }
+.wf-node.wf-node-color-pink { box-shadow: inset 4px 0 0 0 #ec4899, var(--shadow); }
+
+/* Sticky note node */
+.wf-sticky {
+  min-width: 180px;
+  max-width: 360px;
+  padding: 14px 16px 16px;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #78350f;
+  border: 1px solid rgba(146, 64, 14, 0.22);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  font-family: "Inter", sans-serif;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+}
+.wf-sticky.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.wf-sticky-yellow { background: #fef3c7; color: #78350f; border-color: rgba(146, 64, 14, 0.22); }
+.wf-sticky-blue { background: #dbeafe; color: #1e3a8a; border-color: rgba(30, 58, 138, 0.22); }
+.wf-sticky-green { background: #d1fae5; color: #064e3b; border-color: rgba(6, 78, 59, 0.22); }
+.wf-sticky-pink { background: #fce7f3; color: #831843; border-color: rgba(131, 24, 67, 0.22); }
+.wf-sticky-purple { background: #ede9fe; color: #4c1d95; border-color: rgba(76, 29, 149, 0.22); }
+.wf-sticky-gray { background: #f1f5f9; color: #1e293b; border-color: rgba(30, 41, 59, 0.18); }
+
+.wf-sticky-body h1,
+.wf-sticky-body h2,
+.wf-sticky-body h3 {
+  margin: 0 0 6px;
+}
+.wf-sticky-body h1 { font-size: 1.3em; }
+.wf-sticky-body h2 { font-size: 1.15em; }
+.wf-sticky-body h3 { font-size: 1em; font-weight: 600; }
+.wf-sticky-body p { margin: 4px 0; }
+.wf-sticky-body ul { margin: 4px 0; padding-left: 20px; }
+.wf-sticky-body code {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: "Fira Code", monospace;
+  font-size: 0.9em;
+}
+.wf-sticky-body a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+/* Color swatch picker in node settings modal */
+.wf-color-swatch-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.wf-color-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 10px;
+  line-height: 22px;
+  padding: 0;
+  transition: border-color 120ms ease;
+}
+.wf-color-swatch.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* React Flow MiniMap + Controls theming in light mode */
+.react-flow__minimap {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+.react-flow__controls {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.react-flow__controls button {
+  color: var(--text);
+  border-bottom-color: var(--panel-border);
+}
+
+/* Keyboard shortcuts reference panel */
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.32);
+  display: grid;
+  place-items: center;
+  z-index: 1000;
+}
+.shortcuts-panel {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  width: min(640px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.shortcuts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.shortcuts-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.shortcuts-close {
+  background: transparent;
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--muted);
+}
+.shortcuts-body {
+  overflow: auto;
+  padding: 14px 18px;
+}
+.shortcuts-group {
+  margin-bottom: 18px;
+}
+.shortcuts-group h4 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+.shortcuts-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.shortcuts-group li {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 12px;
+  padding: 5px 0;
+}
+.shortcuts-keys kbd {
+  display: inline-block;
+  min-width: 22px;
+  padding: 2px 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-family: "Fira Code", monospace;
+  font-size: 12px;
+  line-height: 1.2;
+}
+.shortcuts-or {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 11px;
+  margin: 0 4px;
+}
+.shortcuts-desc {
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* TopBar icon-only buttons */
+.header-btn.icon-only {
+  width: 32px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
 }

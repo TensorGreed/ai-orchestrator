@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type CSSProperties, type DragEvent, type 
 import ReactFlow, {
   Background,
   BackgroundVariant,
+  Controls,
+  MiniMap,
   type Node,
   type Connection,
   type Edge,
@@ -506,9 +508,31 @@ export function WorkflowCanvasArea({
             onInit={onInit}
             onNodeDoubleClick={(_event, node) => onOpenNodeConfig(node.id)}
             fitView
+            multiSelectionKeyCode={["Shift", "Meta", "Control"]}
+            selectionKeyCode={["Shift"]}
+            deleteKeyCode={null}
           >
             <Background id="workflow-grid-minor" variant={BackgroundVariant.Lines} color="#e4ebf5" gap={24} lineWidth={0.65} />
             <Background id="workflow-grid-major" variant={BackgroundVariant.Lines} color="#c8d7ea" gap={120} lineWidth={1.15} />
+            <MiniMap
+              pannable
+              zoomable
+              nodeStrokeWidth={2}
+              maskColor="rgba(15, 23, 42, 0.08)"
+              nodeColor={(n) => {
+                const color = (n.data as EditorNodeData | undefined)?.color;
+                if (color === "red") return "#fecaca";
+                if (color === "orange") return "#fed7aa";
+                if (color === "yellow") return "#fde68a";
+                if (color === "green") return "#bbf7d0";
+                if (color === "blue") return "#bfdbfe";
+                if (color === "purple") return "#ddd6fe";
+                if (color === "pink") return "#fbcfe8";
+                if (color === "gray") return "#e2e8f0";
+                return "#c7d2fe";
+              }}
+            />
+            <Controls showInteractive={false} />
           </ReactFlow>
 
           <div className="canvas-controls-left">

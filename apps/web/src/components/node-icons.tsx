@@ -456,7 +456,17 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   human_approval: "human",
   output: "output",
   pdf_output: "output",
-  webhook_response: "response"
+  webhook_response: "response",
+  manual_trigger: "trigger",
+  form_trigger: "trigger",
+  chat_trigger: "trigger",
+  file_trigger: "trigger",
+  rss_trigger: "trigger",
+  sse_trigger: "trigger",
+  mcp_server_trigger: "trigger",
+  kafka_trigger: "trigger",
+  rabbitmq_trigger: "trigger",
+  mqtt_trigger: "trigger"
 };
 
 export function resolveNodeIcon(nodeType: string, fallbackIcon: PaletteCategoryIconKey = "core"): NodePaletteIconKey {

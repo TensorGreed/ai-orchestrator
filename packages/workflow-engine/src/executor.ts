@@ -34,6 +34,7 @@ import {
 import { renderTemplate, tryParseJson } from "./template";
 import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
+import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
 import { executePythonCodeNode } from "./python-runner";
 import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
@@ -1608,6 +1609,17 @@ async function executeNode(
   dependencies: WorkflowExecutionDependencies
 ): Promise<unknown> {
   const config = toRecord(node.config);
+
+  // Visual-only nodes are never executed; downstream receives the merged parent outputs so the DAG stays intact.
+  if (node.type === "sticky_note") {
+    return mergeParentOutputs(context.parentOutputs);
+  }
+
+  // Disabled nodes pass through their parent outputs unchanged so the rest of the graph still runs.
+  if (node.disabled === true) {
+    return mergeParentOutputs(context.parentOutputs);
+  }
+
   const templateData = buildTemplateData(context, config);
 
   switch (node.type) {
@@ -3405,6 +3417,23 @@ async function executeNode(
       return executeTier1Node(node, config, {
         templateData,
         resolveSecret: dependencies.resolveSecret
+      });
+    }
+
+    case "manual_trigger":
+    case "form_trigger":
+    case "chat_trigger":
+    case "file_trigger":
+    case "rss_trigger":
+    case "sse_trigger":
+    case "mcp_server_trigger":
+    case "kafka_trigger":
+    case "rabbitmq_trigger":
+    case "mqtt_trigger": {
+      return executePhase35TriggerNode(node, config, {
+        templateData,
+        globals: context.globals,
+        webhookPayload: toRecord(context.globals.webhook)
       });
     }
 

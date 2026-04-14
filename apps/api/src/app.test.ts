@@ -1274,3 +1274,253 @@ describe("Phase 3.1 Tier 1 integrations surface", () => {
     }
   });
 });
+
+describe("Phase 3.5 trigger system expansion", () => {
+  async function registerAndLogin(
+    context: TestContext,
+    role: "admin" | "builder" | "viewer"
+  ): Promise<string> {
+    const email = `${role}-35-${Date.now()}@example.com`;
+    const login = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email, password: "TestPass123!" }
+    });
+    if (login.statusCode === 200) {
+      return extractCookie(login.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
+    }
+    context.authService.register({ email, password: "TestPass123!", role });
+    const retry = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email, password: "TestPass123!" }
+    });
+    if (retry.statusCode !== 200) throw new Error(`login failed: ${retry.body}`);
+    return extractCookie(retry.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
+  }
+
+  it("exposes all Phase 3.5 trigger node definitions", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "viewer");
+    const res = await context.app.inject({
+      method: "GET",
+      url: "/api/definitions",
+      headers: { cookie }
+    });
+    expect(res.statusCode).toBe(200);
+    const nodeTypes = new Set(res.json<{ nodes: Array<{ type: string }> }>().nodes.map((n) => n.type));
+    for (const t of [
+      "manual_trigger",
+      "form_trigger",
+      "chat_trigger",
+      "file_trigger",
+      "rss_trigger",
+      "sse_trigger",
+      "mcp_server_trigger",
+      "kafka_trigger",
+      "rabbitmq_trigger",
+      "mqtt_trigger"
+    ]) {
+      expect(nodeTypes.has(t), `missing ${t}`).toBe(true);
+    }
+  });
+
+  it("manual_trigger runs a workflow with payload merged into context", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "builder");
+
+    const workflow: Workflow = {
+      id: "manual-wf-1",
+      name: "Manual Demo",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "trigger",
+          type: "manual_trigger",
+          name: "Manual",
+          position: { x: 0, y: 0 },
+          config: { label: "Run" }
+        },
+        {
+          id: "out",
+          type: "output",
+          name: "Out",
+          position: { x: 200, y: 0 },
+          config: { outputKey: "result", responseTemplate: "echo:{{user_prompt}}" }
+        }
+      ],
+      edges: [{ id: "e1", source: "trigger", target: "out" }]
+    };
+    context.store.upsertWorkflow(workflow);
+
+    const res = await context.app.inject({
+      method: "POST",
+      url: "/api/triggers/manual/manual-wf-1",
+      headers: { cookie },
+      payload: { user_prompt: "hello-manual" }
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ ok: boolean; status: string }>();
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("success");
+  });
+
+  it("form_trigger renders HTML and accepts submissions", async () => {
+    const context = await createTestContext();
+    const cookie = await registerAndLogin(context, "builder");
+
+    const workflow: Workflow = {
+      id: "form-wf-1",
+      name: "Form Demo",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "form",
+          type: "form_trigger",
+          name: "Form",
+          position: { x: 0, y: 0 },
+          config: {
+            path: "contact-demo",
+            title: "Contact",
+            submitLabel: "Send",
+            authMode: "public",
+            successMessage: "Thanks!",
+            fields: [{ name: "name", label: "Name", type: "text", required: true }]
+          }
+        },
+        {
+          id: "out",
+          type: "output",
+          name: "Out",
+          position: { x: 200, y: 0 },
+          config: { outputKey: "result", responseTemplate: "hi:{{name}}" }
+        }
+      ],
+      edges: [{ id: "e1", source: "form", target: "out" }]
+    };
+    context.store.upsertWorkflow(workflow);
+
+    const htmlRes = await context.app.inject({
+      method: "GET",
+      url: "/api/forms/contact-demo"
+    });
+    expect(htmlRes.statusCode).toBe(200);
+    expect(String(htmlRes.headers["content-type"] ?? "")).toContain("text/html");
+    expect(htmlRes.body).toContain('name="name"');
+    expect(htmlRes.body).toContain("Contact");
+
+    const submit = await context.app.inject({
+      method: "POST",
+      url: "/api/forms/contact-demo",
+      headers: { accept: "application/json" },
+      payload: { name: "Alice" }
+    });
+    expect(submit.statusCode).toBe(200);
+    const body = submit.json<{ ok: boolean; status: string }>();
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("success");
+
+    const missing = await context.app.inject({
+      method: "GET",
+      url: "/api/forms/does-not-exist"
+    });
+    expect(missing.statusCode).toBe(404);
+    void cookie;
+  });
+
+  it("chat_trigger generates a session_id when none is provided", async () => {
+    const context = await createTestContext();
+    await registerAndLogin(context, "builder");
+
+    const workflow: Workflow = {
+      id: "chat-wf-1",
+      name: "Chat Demo",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "chat",
+          type: "chat_trigger",
+          name: "Chat",
+          position: { x: 0, y: 0 },
+          config: { authMode: "public", sessionNamespace: "ns" }
+        },
+        {
+          id: "out",
+          type: "output",
+          name: "Out",
+          position: { x: 200, y: 0 },
+          config: { outputKey: "result", responseTemplate: "got:{{message}}" }
+        }
+      ],
+      edges: [{ id: "e1", source: "chat", target: "out" }]
+    };
+    context.store.upsertWorkflow(workflow);
+
+    const res = await context.app.inject({
+      method: "POST",
+      url: "/api/chat/chat-wf-1",
+      payload: { message: "hello chat" }
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{ ok: boolean; session_id: string; status: string }>();
+    expect(body.ok).toBe(true);
+    expect(body.session_id).toMatch(/.+/);
+    expect(body.status).toBe("success");
+  });
+
+  it("mcp_server_trigger exposes manifest + invoke endpoints", async () => {
+    const context = await createTestContext();
+    await registerAndLogin(context, "builder");
+
+    const workflow: Workflow = {
+      id: "mcp-wf-1",
+      name: "MCP Demo",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "mcp",
+          type: "mcp_server_trigger",
+          name: "MCP",
+          position: { x: 0, y: 0 },
+          config: {
+            path: "demo",
+            toolName: "echo",
+            toolDescription: "Echo the input",
+            authMode: "public",
+            inputSchema: { type: "object", properties: { q: { type: "string" } } }
+          }
+        },
+        {
+          id: "out",
+          type: "output",
+          name: "Out",
+          position: { x: 200, y: 0 },
+          config: { outputKey: "result", responseTemplate: "answered:{{q}}" }
+        }
+      ],
+      edges: [{ id: "e1", source: "mcp", target: "out" }]
+    };
+    context.store.upsertWorkflow(workflow);
+
+    const manifest = await context.app.inject({
+      method: "GET",
+      url: "/api/mcp-server/demo/manifest"
+    });
+    expect(manifest.statusCode).toBe(200);
+    const manifestBody = manifest.json<{ name: string; inputSchema: unknown }>();
+    expect(manifestBody.name).toBe("echo");
+
+    const invoke = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp-server/demo/invoke",
+      payload: { arguments: { q: "ping" } }
+    });
+    expect(invoke.statusCode).toBe(200);
+    const invokeBody = invoke.json<{ ok: boolean }>();
+    expect(invokeBody.ok).toBe(true);
+  });
+});

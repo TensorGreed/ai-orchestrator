@@ -95,11 +95,24 @@ export const workflowNodeSchema = z.object({
     "redis_command",
     "redis_trigger",
     "github_action",
-    "github_webhook_trigger"
+    "github_webhook_trigger",
+    "manual_trigger",
+    "form_trigger",
+    "chat_trigger",
+    "file_trigger",
+    "rss_trigger",
+    "sse_trigger",
+    "mcp_server_trigger",
+    "kafka_trigger",
+    "rabbitmq_trigger",
+    "mqtt_trigger",
+    "sticky_note"
   ]),
   name: z.string().min(1),
   position: z.object({ x: z.number(), y: z.number() }),
-  config: z.record(z.string(), z.unknown())
+  config: z.record(z.string(), z.unknown()),
+  disabled: z.boolean().optional(),
+  color: z.string().optional()
 });
 
 export const workflowEdgeSchema = z.object({

@@ -1723,4 +1723,40 @@ export class SqliteStore {
       failedAt: toString(row.failed_at)
     }));
   }
+
+  getTriggerState(workflowId: string, nodeId: string): Record<string, unknown> | null {
+    const row = this.queryOne<{ state_json: string }>(
+      `SELECT state_json FROM trigger_state WHERE workflow_id = ? AND node_id = ?`,
+      [workflowId, nodeId]
+    );
+    if (!row) return null;
+    try {
+      return JSON.parse(toString(row.state_json)) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  saveTriggerState(input: {
+    workflowId: string;
+    nodeId: string;
+    triggerType: string;
+    state: Record<string, unknown>;
+  }): void {
+    this.db.run(
+      `INSERT INTO trigger_state (workflow_id, node_id, trigger_type, state_json, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(workflow_id, node_id) DO UPDATE SET
+         state_json = excluded.state_json,
+         trigger_type = excluded.trigger_type,
+         updated_at = excluded.updated_at`,
+      [input.workflowId, input.nodeId, input.triggerType, JSON.stringify(input.state), new Date().toISOString()]
+    );
+    this.persist();
+  }
+
+  deleteTriggerStatesForWorkflow(workflowId: string): void {
+    this.db.run(`DELETE FROM trigger_state WHERE workflow_id = ?`, [workflowId]);
+    this.persist();
+  }
 }

@@ -1,11 +1,15 @@
 import { WORKFLOW_SCHEMA_VERSION, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeType } from "@ai-orchestrator/shared";
 import type { Edge, Node } from "reactflow";
 
+export type NodeColorKey = "gray" | "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "pink";
+
 export interface EditorNodeData {
   label: string;
   nodeType: WorkflowNodeType;
   config: Record<string, unknown>;
   executionStatus?: "pending" | "running" | "success" | "error" | "skipped";
+  disabled?: boolean;
+  color?: NodeColorKey;
 }
 
 export type EditorNode = Node<EditorNodeData>;
@@ -26,12 +30,14 @@ export function createBlankWorkflow(): Workflow {
 export function workflowToEditor(workflow: Workflow): { nodes: EditorNode[]; edges: Edge[] } {
   const nodes: EditorNode[] = workflow.nodes.map((node) => ({
     id: node.id,
-    type: "workflowNode",
+    type: node.type === "sticky_note" ? "stickyNote" : "workflowNode",
     position: node.position,
     data: {
       label: node.name,
       nodeType: node.type,
-      config: (node.config ?? {}) as Record<string, unknown>
+      config: (node.config ?? {}) as Record<string, unknown>,
+      disabled: node.disabled,
+      color: node.color as NodeColorKey | undefined
     }
   }));
 
@@ -53,7 +59,9 @@ export function editorToWorkflow(base: Workflow, nodes: EditorNode[], edges: Edg
     type: node.data.nodeType,
     name: node.data.label,
     position: node.position,
-    config: node.data.config
+    config: node.data.config,
+    ...(node.data.disabled ? { disabled: true } : {}),
+    ...(node.data.color ? { color: node.data.color } : {})
   }));
 
   const normalizedEdges: WorkflowEdge[] = edges.map((edge) => ({

@@ -23,6 +23,9 @@ interface TopBarProps {
   onImportFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onRefreshSecrets: () => void;
   onLogout: () => void;
+  theme: "light" | "dark";
+  onToggleTheme: () => void;
+  onOpenShortcuts: () => void;
 }
 
 export function TopBar({
@@ -44,7 +47,10 @@ export function TopBar({
   onImportClick,
   onImportFileChange,
   onRefreshSecrets,
-  onLogout
+  onLogout,
+  theme,
+  onToggleTheme,
+  onOpenShortcuts
 }: TopBarProps) {
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
@@ -170,6 +176,22 @@ export function TopBar({
       </div>
 
       <div className="header-actions">
+        <button
+          className="header-btn icon-only"
+          onClick={onToggleTheme}
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          aria-label="Toggle theme"
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
+        <button
+          className="header-btn icon-only"
+          onClick={onOpenShortcuts}
+          title="Keyboard shortcuts (?)"
+          aria-label="Keyboard shortcuts"
+        >
+          ?
+        </button>
         <a className="header-btn header-link-btn" href={docsUrl} target="_blank" rel="noreferrer">
           Docs
         </a>
