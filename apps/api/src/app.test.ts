@@ -1196,3 +1196,81 @@ describe("node definitions surface (Phase 1 + 2)", () => {
     }
   });
 });
+
+describe("Phase 3.1 Tier 1 integrations surface", () => {
+  it("exposes all Tier 1 node types in /api/definitions and /api/integrations", async () => {
+    const context = await createTestContext();
+    context.authService.register({
+      email: "viewer-tier1@example.com",
+      password: "ViewerPass123!",
+      role: "viewer"
+    });
+    const login = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "viewer-tier1@example.com", password: "ViewerPass123!" }
+    });
+    const cookie = extractCookie(login.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
+
+    const defResp = await context.app.inject({
+      method: "GET",
+      url: "/api/definitions",
+      headers: { cookie }
+    });
+    expect(defResp.statusCode).toBe(200);
+    const defBody = defResp.json<{ nodes: Array<{ type: string }> }>();
+    const nodeTypes = new Set(defBody.nodes.map((n) => n.type));
+    const expectedNodeTypes = [
+      "slack_send_message",
+      "slack_trigger",
+      "smtp_send_email",
+      "imap_email_trigger",
+      "google_sheets_read",
+      "google_sheets_append",
+      "google_sheets_update",
+      "google_sheets_trigger",
+      "postgres_query",
+      "postgres_trigger",
+      "mysql_query",
+      "mongo_operation",
+      "redis_command",
+      "redis_trigger",
+      "github_action",
+      "github_webhook_trigger"
+    ];
+    for (const t of expectedNodeTypes) {
+      expect(nodeTypes.has(t), `missing node type ${t}`).toBe(true);
+    }
+
+    const intResp = await context.app.inject({
+      method: "GET",
+      url: "/api/integrations",
+      headers: { cookie }
+    });
+    expect(intResp.statusCode).toBe(200);
+    const intBody = intResp.json<{
+      integrations: Array<{ id: string; label: string; logoPath: string; nodeTypes: string[] }>;
+    }>();
+    const ids = new Set(intBody.integrations.map((i) => i.id));
+    const expectedIds = [
+      "http",
+      "slack",
+      "smtp",
+      "imap",
+      "gmail",
+      "google-sheets",
+      "postgresql",
+      "mysql",
+      "mongodb",
+      "redis",
+      "github"
+    ];
+    for (const id of expectedIds) {
+      expect(ids.has(id), `missing integration ${id}`).toBe(true);
+    }
+    for (const integration of intBody.integrations) {
+      expect(integration.logoPath).toMatch(/^\/logos\/.+\.svg$/);
+      expect(integration.nodeTypes.length).toBeGreaterThan(0);
+    }
+  });
+});

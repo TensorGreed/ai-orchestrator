@@ -73,7 +73,23 @@ export type WorkflowNodeType =
   | "convert_to_file_node"
   | "extract_from_file_node"
   | "compression_node"
-  | "edit_image_node";
+  | "edit_image_node"
+  | "slack_send_message"
+  | "slack_trigger"
+  | "smtp_send_email"
+  | "imap_email_trigger"
+  | "google_sheets_read"
+  | "google_sheets_append"
+  | "google_sheets_update"
+  | "google_sheets_trigger"
+  | "postgres_query"
+  | "postgres_trigger"
+  | "mysql_query"
+  | "mongo_operation"
+  | "redis_command"
+  | "redis_trigger"
+  | "github_action"
+  | "github_webhook_trigger";
 
 export interface WorkflowNodePosition {
   x: number;

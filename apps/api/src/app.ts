@@ -36,6 +36,28 @@ import { AuthService, type SafeUser, type UserRole } from "./services/auth-servi
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
 
+interface Tier1IntegrationSpec {
+  id: string;
+  label: string;
+  category: string;
+  logoPath: string;
+  nodeTypes: string[];
+}
+
+const TIER1_INTEGRATIONS: Tier1IntegrationSpec[] = [
+  { id: "http", label: "HTTP Request", category: "Protocol", logoPath: "/logos/http.svg", nodeTypes: ["http_request", "webhook_input", "webhook_response"] },
+  { id: "slack", label: "Slack", category: "Communication", logoPath: "/logos/slack.svg", nodeTypes: ["slack_send_message", "slack_trigger"] },
+  { id: "smtp", label: "Email (SMTP)", category: "Communication", logoPath: "/logos/smtp.svg", nodeTypes: ["smtp_send_email"] },
+  { id: "imap", label: "Email (IMAP)", category: "Communication", logoPath: "/logos/imap.svg", nodeTypes: ["imap_email_trigger"] },
+  { id: "gmail", label: "Gmail", category: "Communication", logoPath: "/logos/gmail.svg", nodeTypes: ["smtp_send_email", "imap_email_trigger"] },
+  { id: "google-sheets", label: "Google Sheets", category: "Productivity", logoPath: "/logos/google-sheets.svg", nodeTypes: ["google_sheets_read", "google_sheets_append", "google_sheets_update", "google_sheets_trigger"] },
+  { id: "postgresql", label: "PostgreSQL", category: "Database", logoPath: "/logos/postgresql.svg", nodeTypes: ["postgres_query", "postgres_trigger"] },
+  { id: "mysql", label: "MySQL", category: "Database", logoPath: "/logos/mysql.svg", nodeTypes: ["mysql_query"] },
+  { id: "mongodb", label: "MongoDB", category: "Database", logoPath: "/logos/mongodb.svg", nodeTypes: ["mongo_operation"] },
+  { id: "redis", label: "Redis", category: "Database", logoPath: "/logos/redis.svg", nodeTypes: ["redis_command", "redis_trigger"] },
+  { id: "github", label: "GitHub", category: "DevTools", logoPath: "/logos/github.svg", nodeTypes: ["github_action", "github_webhook_trigger"] }
+];
+
 const secretCreateSchema = z.object({
   name: z.string().min(1),
   provider: z.string().min(1),
@@ -294,6 +316,16 @@ function normalizeProviderConfigForTest(
     ...(typeof input.maxTokens === "number" && Number.isFinite(input.maxTokens) ? { maxTokens: input.maxTokens } : {}),
     ...(normalizedExtra ? { extra: normalizedExtra } : {})
   };
+}
+
+function toSecretReference(value: unknown): SecretReference | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const rec = value as Record<string, unknown>;
+    if (typeof rec.secretId === "string" && rec.secretId.trim()) {
+      return { secretId: rec.secretId.trim() };
+    }
+  }
+  return undefined;
 }
 
 function safeEqualSecret(expected: string, provided: string): boolean {
@@ -1461,6 +1493,14 @@ export function createApp(
     };
   });
 
+  app.get("/api/integrations", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+    return { integrations: TIER1_INTEGRATIONS };
+  });
+
   app.get("/api/workflows", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) {
@@ -2241,6 +2281,151 @@ export function createApp(
       selectedWorkflowId: workflow.id
     };
   });
+
+  // Slack Events API webhook — validates Slack signing secret.
+  // Endpoint: POST /api/webhooks/slack/:workflowId
+  app.post<{
+    Params: { workflowId: string };
+    Body: unknown;
+  }>(
+    "/api/webhooks/slack/:workflowId",
+    { config: { rawBody: true } },
+    async (request, reply) => {
+      const workflow = store.getWorkflow(request.params.workflowId);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const slackNode = workflow.nodes.find((n) => n.type === "slack_trigger");
+      if (!slackNode) {
+        reply.code(400);
+        return { error: "Workflow has no slack_trigger node" };
+      }
+      const rawBody = typeof request.rawBody === "string" ? request.rawBody : "";
+
+      const secretRef = toSecretReference((slackNode.config as Record<string, unknown>).signingSecretRef);
+      const signingSecret = await secretService.resolveSecret(secretRef);
+      if (!signingSecret) {
+        reply.code(500);
+        return { error: "Slack signing secret not configured" };
+      }
+      const ts = getHeaderValue(request.headers, "x-slack-request-timestamp");
+      const sig = getHeaderValue(request.headers, "x-slack-signature");
+      if (!ts || !sig) {
+        reply.code(401);
+        return { error: "Missing Slack signature headers" };
+      }
+      const tsMs = Number(ts) * 1000;
+      const tolerance = Number((slackNode.config as Record<string, unknown>).replayToleranceSeconds ?? 300) * 1000;
+      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) {
+        reply.code(401);
+        return { error: "Slack timestamp outside tolerance" };
+      }
+      const basestring = `v0:${ts}:${rawBody}`;
+      const expected = `v0=${crypto.createHmac("sha256", signingSecret).update(basestring).digest("hex")}`;
+      if (!safeEqualSecret(expected, sig)) {
+        reply.code(401);
+        return { error: "Slack signature mismatch" };
+      }
+
+      // URL verification challenge handshake.
+      const body = request.body as Record<string, unknown> | undefined;
+      if (body && body.type === "url_verification" && typeof body.challenge === "string") {
+        reply.type("text/plain");
+        return body.challenge;
+      }
+
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "slack_webhook",
+        triggeredBy: "slack",
+        requestInput: body ?? {}
+      });
+      const result = await runWorkflowExecution({
+        workflow,
+        webhookPayload: (body as Record<string, unknown>) ?? {},
+        executionId,
+        triggerType: "slack_webhook",
+        triggeredBy: "slack",
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "slack_webhook",
+        triggeredBy: "slack",
+        requestInput: body ?? {}
+      });
+      return { ok: true, status: result.status };
+    }
+  );
+
+  // GitHub webhook — validates X-Hub-Signature-256.
+  app.post<{
+    Params: { workflowId: string };
+    Body: unknown;
+  }>(
+    "/api/webhooks/github/:workflowId",
+    { config: { rawBody: true } },
+    async (request, reply) => {
+      const workflow = store.getWorkflow(request.params.workflowId);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const ghNode = workflow.nodes.find((n) => n.type === "github_webhook_trigger");
+      if (!ghNode) {
+        reply.code(400);
+        return { error: "Workflow has no github_webhook_trigger node" };
+      }
+      const rawBody = typeof request.rawBody === "string" ? request.rawBody : "";
+      const secretRef = toSecretReference((ghNode.config as Record<string, unknown>).secretRef);
+      const secret = await secretService.resolveSecret(secretRef);
+      if (!secret) {
+        reply.code(500);
+        return { error: "GitHub webhook secret not configured" };
+      }
+      const sig = getHeaderValue(request.headers, "x-hub-signature-256");
+      if (!sig) {
+        reply.code(401);
+        return { error: "Missing X-Hub-Signature-256 header" };
+      }
+      const expected = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+      if (!safeEqualSecret(expected, sig)) {
+        reply.code(401);
+        return { error: "GitHub signature mismatch" };
+      }
+      const body = request.body as Record<string, unknown> | undefined;
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "github_webhook",
+        triggeredBy: "github",
+        requestInput: body ?? {}
+      });
+      const result = await runWorkflowExecution({
+        workflow,
+        webhookPayload: (body as Record<string, unknown>) ?? {},
+        executionId,
+        triggerType: "github_webhook",
+        triggeredBy: "github",
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "github_webhook",
+        triggeredBy: "github",
+        requestInput: body ?? {}
+      });
+      return { ok: true, status: result.status };
+    }
+  );
 
   app.post<{ Body: unknown }>("/api/webhooks/execute/stream", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);

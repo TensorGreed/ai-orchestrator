@@ -39,7 +39,11 @@ export const nodeDefinitions: NodeDefinition[] = [
         secretRef: { type: "object" },
         replayToleranceSeconds: { type: "number" },
         idempotencyEnabled: { type: "boolean" },
-        idempotencyHeaderName: { type: "string" }
+        idempotencyHeaderName: { type: "string" },
+        responseMode: { type: "string", enum: ["onReceived", "lastNode", "responseNode"] },
+        responseCode: { type: "number" },
+        responseHeaders: { type: "object" },
+        responseBody: { type: "string" }
       }
     },
     sampleConfig: {
@@ -52,7 +56,9 @@ export const nodeDefinitions: NodeDefinition[] = [
       timestampHeaderName: "x-webhook-timestamp",
       replayToleranceSeconds: 300,
       idempotencyEnabled: false,
-      idempotencyHeaderName: "idempotency-key"
+      idempotencyHeaderName: "idempotency-key",
+      responseMode: "lastNode",
+      responseCode: 200
     }
   },
   {
@@ -1390,6 +1396,417 @@ export const nodeDefinitions: NodeDefinition[] = [
       statusCode: 200,
       headersTemplate: "{\n  \"content-type\": \"application/json\"\n}",
       bodyTemplate: "{\"ok\":true,\"result\":\"{{result}}\"}"
+    }
+  },
+  {
+    type: "slack_send_message",
+    label: "Slack: Send Message",
+    category: "Connector",
+    description: "Post a message to a Slack channel via webhook or bot token.",
+    configSchema: {
+      type: "object",
+      properties: {
+        authType: { type: "string", enum: ["webhook", "bot"] },
+        webhookUrl: { type: "string" },
+        secretRef: { type: "object" },
+        channel: { type: "string" },
+        text: { type: "string" },
+        blocks: { type: "string" },
+        threadTs: { type: "string" }
+      },
+      required: ["authType"]
+    },
+    sampleConfig: {
+      authType: "webhook",
+      webhookUrl: "https://hooks.slack.com/services/T000/B000/XXX",
+      channel: "#general",
+      text: "Hello from ai-orchestrator {{user_prompt}}"
+    }
+  },
+  {
+    type: "slack_trigger",
+    label: "Slack Trigger",
+    category: "Input",
+    description: "Webhook-based trigger that validates Slack signing secret. Point Slack Events at /api/webhooks/slack/:workflowId.",
+    configSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        signingSecretRef: { type: "object" },
+        replayToleranceSeconds: { type: "number" }
+      }
+    },
+    sampleConfig: {
+      path: "slack-events",
+      replayToleranceSeconds: 300
+    }
+  },
+  {
+    type: "smtp_send_email",
+    label: "SMTP: Send Email",
+    category: "Connector",
+    description: "Send email via SMTP (nodemailer).",
+    configSchema: {
+      type: "object",
+      properties: {
+        host: { type: "string" },
+        port: { type: "number" },
+        secure: { type: "boolean" },
+        user: { type: "string" },
+        secretRef: { type: "object" },
+        from: { type: "string" },
+        to: { type: "string" },
+        subject: { type: "string" },
+        text: { type: "string" },
+        html: { type: "string" }
+      },
+      required: ["host", "port", "from", "to", "subject"]
+    },
+    sampleConfig: {
+      host: "smtp.example.com",
+      port: 587,
+      secure: false,
+      user: "no-reply@example.com",
+      from: "no-reply@example.com",
+      to: "user@example.com",
+      subject: "Hello",
+      text: "{{user_prompt}}"
+    }
+  },
+  {
+    type: "imap_email_trigger",
+    label: "IMAP Email Trigger",
+    category: "Input",
+    description: "Poll an IMAP inbox for new messages (requires imapflow — stubbed if missing).",
+    configSchema: {
+      type: "object",
+      properties: {
+        host: { type: "string" },
+        port: { type: "number" },
+        secure: { type: "boolean" },
+        user: { type: "string" },
+        secretRef: { type: "object" },
+        mailbox: { type: "string" },
+        pollIntervalSeconds: { type: "number" }
+      },
+      required: ["host", "port", "user"]
+    },
+    sampleConfig: {
+      host: "imap.example.com",
+      port: 993,
+      secure: true,
+      user: "user@example.com",
+      mailbox: "INBOX",
+      pollIntervalSeconds: 60
+    }
+  },
+  {
+    type: "google_sheets_read",
+    label: "Google Sheets: Read",
+    category: "Connector",
+    description: "Read a range from a Google Sheet (OAuth access token or API key).",
+    configSchema: {
+      type: "object",
+      properties: {
+        spreadsheetId: { type: "string" },
+        range: { type: "string" },
+        authType: { type: "string", enum: ["accessToken", "apiKey"] },
+        secretRef: { type: "object" }
+      },
+      required: ["spreadsheetId", "range", "authType"]
+    },
+    sampleConfig: {
+      spreadsheetId: "1abcDEF",
+      range: "Sheet1!A1:D100",
+      authType: "accessToken"
+    }
+  },
+  {
+    type: "google_sheets_append",
+    label: "Google Sheets: Append",
+    category: "Connector",
+    description: "Append rows to a Google Sheet.",
+    configSchema: {
+      type: "object",
+      properties: {
+        spreadsheetId: { type: "string" },
+        range: { type: "string" },
+        values: {},
+        valueInputOption: { type: "string", enum: ["RAW", "USER_ENTERED"] },
+        secretRef: { type: "object" }
+      },
+      required: ["spreadsheetId", "range"]
+    },
+    sampleConfig: {
+      spreadsheetId: "1abcDEF",
+      range: "Sheet1!A1",
+      values: [["a", "b"]],
+      valueInputOption: "USER_ENTERED"
+    }
+  },
+  {
+    type: "google_sheets_update",
+    label: "Google Sheets: Update",
+    category: "Connector",
+    description: "Update values in a Google Sheet range.",
+    configSchema: {
+      type: "object",
+      properties: {
+        spreadsheetId: { type: "string" },
+        range: { type: "string" },
+        values: {},
+        valueInputOption: { type: "string", enum: ["RAW", "USER_ENTERED"] },
+        secretRef: { type: "object" }
+      },
+      required: ["spreadsheetId", "range"]
+    },
+    sampleConfig: {
+      spreadsheetId: "1abcDEF",
+      range: "Sheet1!A1:B1",
+      values: [["a", "b"]],
+      valueInputOption: "USER_ENTERED"
+    }
+  },
+  {
+    type: "google_sheets_trigger",
+    label: "Google Sheets Trigger",
+    category: "Input",
+    description: "Polling trigger that detects new rows since the last run.",
+    configSchema: {
+      type: "object",
+      properties: {
+        spreadsheetId: { type: "string" },
+        range: { type: "string" },
+        authType: { type: "string", enum: ["accessToken", "apiKey"] },
+        secretRef: { type: "object" },
+        pollIntervalSeconds: { type: "number" }
+      },
+      required: ["spreadsheetId", "range"]
+    },
+    sampleConfig: {
+      spreadsheetId: "1abcDEF",
+      range: "Sheet1!A:Z",
+      authType: "accessToken",
+      pollIntervalSeconds: 60
+    }
+  },
+  {
+    type: "postgres_query",
+    label: "PostgreSQL: Query",
+    category: "Connector",
+    description: "Execute a SQL query against PostgreSQL and return rows.",
+    configSchema: {
+      type: "object",
+      properties: {
+        host: { type: "string" },
+        port: { type: "number" },
+        database: { type: "string" },
+        user: { type: "string" },
+        secretRef: { type: "object" },
+        ssl: { type: "boolean" },
+        query: { type: "string" },
+        params: { type: "array" }
+      },
+      required: ["host", "database", "user", "query"]
+    },
+    sampleConfig: {
+      host: "localhost",
+      port: 5432,
+      database: "postgres",
+      user: "postgres",
+      ssl: false,
+      query: "SELECT * FROM users WHERE id = $1",
+      params: [1]
+    }
+  },
+  {
+    type: "postgres_trigger",
+    label: "PostgreSQL Trigger",
+    category: "Input",
+    description: "Polling trigger: execute a SELECT periodically and emit new rows.",
+    configSchema: {
+      type: "object",
+      properties: {
+        host: { type: "string" },
+        port: { type: "number" },
+        database: { type: "string" },
+        user: { type: "string" },
+        secretRef: { type: "object" },
+        ssl: { type: "boolean" },
+        query: { type: "string" },
+        pollIntervalSeconds: { type: "number" }
+      },
+      required: ["host", "database", "user", "query"]
+    },
+    sampleConfig: {
+      host: "localhost",
+      port: 5432,
+      database: "postgres",
+      user: "postgres",
+      query: "SELECT * FROM events WHERE created_at > NOW() - interval '1 minute'",
+      pollIntervalSeconds: 60
+    }
+  },
+  {
+    type: "mysql_query",
+    label: "MySQL: Query",
+    category: "Connector",
+    description: "Execute a SQL query against MySQL.",
+    configSchema: {
+      type: "object",
+      properties: {
+        host: { type: "string" },
+        port: { type: "number" },
+        database: { type: "string" },
+        user: { type: "string" },
+        secretRef: { type: "object" },
+        ssl: { type: "boolean" },
+        query: { type: "string" },
+        params: { type: "array" }
+      },
+      required: ["host", "database", "user", "query"]
+    },
+    sampleConfig: {
+      host: "localhost",
+      port: 3306,
+      database: "app",
+      user: "root",
+      query: "SELECT * FROM users WHERE id = ?",
+      params: [1]
+    }
+  },
+  {
+    type: "mongo_operation",
+    label: "MongoDB: Operation",
+    category: "Connector",
+    description: "Perform find / insert / update / aggregate on MongoDB.",
+    configSchema: {
+      type: "object",
+      properties: {
+        uri: { type: "string" },
+        database: { type: "string" },
+        collection: { type: "string" },
+        operation: { type: "string", enum: ["find", "insert", "update", "aggregate"] },
+        query: {},
+        document: {},
+        update: {},
+        pipeline: {},
+        secretRef: { type: "object" }
+      },
+      required: ["database", "collection", "operation"]
+    },
+    sampleConfig: {
+      uri: "mongodb://localhost:27017",
+      database: "app",
+      collection: "users",
+      operation: "find",
+      query: { active: true }
+    }
+  },
+  {
+    type: "redis_command",
+    label: "Redis: Command",
+    category: "Connector",
+    description: "Execute a Redis command (GET/SET/DEL/PUBLISH/LPUSH/RPUSH/HSET/HGET/EXPIRE).",
+    configSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        secretRef: { type: "object" },
+        command: {
+          type: "string",
+          enum: ["GET", "SET", "DEL", "PUBLISH", "LPUSH", "RPUSH", "HSET", "HGET", "EXPIRE", "INCR", "DECR"]
+        },
+        args: { type: "array" }
+      },
+      required: ["command"]
+    },
+    sampleConfig: {
+      url: "redis://localhost:6379",
+      command: "SET",
+      args: ["greeting", "hello"]
+    }
+  },
+  {
+    type: "redis_trigger",
+    label: "Redis Trigger",
+    category: "Input",
+    description: "Subscribe / blocking-pop trigger (polling fallback with BLPOP).",
+    configSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        secretRef: { type: "object" },
+        mode: { type: "string", enum: ["subscribe", "blpop"] },
+        channel: { type: "string" },
+        key: { type: "string" },
+        timeoutSeconds: { type: "number" }
+      },
+      required: ["mode"]
+    },
+    sampleConfig: {
+      url: "redis://localhost:6379",
+      mode: "subscribe",
+      channel: "events"
+    }
+  },
+  {
+    type: "github_action",
+    label: "GitHub: Action",
+    category: "Connector",
+    description: "Execute a GitHub REST API operation (issues, PRs, files, commits).",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        owner: { type: "string" },
+        repo: { type: "string" },
+        operation: {
+          type: "string",
+          enum: [
+            "createIssue",
+            "commentIssue",
+            "closeIssue",
+            "createPr",
+            "listIssues",
+            "getFile",
+            "createOrUpdateFile",
+            "listCommits"
+          ]
+        },
+        issueNumber: { type: "number" },
+        title: { type: "string" },
+        body: { type: "string" },
+        head: { type: "string" },
+        base: { type: "string" },
+        path: { type: "string" },
+        content: { type: "string" },
+        sha: { type: "string" },
+        commitMessage: { type: "string" },
+        branch: { type: "string" }
+      },
+      required: ["owner", "repo", "operation"]
+    },
+    sampleConfig: {
+      owner: "octocat",
+      repo: "hello-world",
+      operation: "listIssues"
+    }
+  },
+  {
+    type: "github_webhook_trigger",
+    label: "GitHub Webhook Trigger",
+    category: "Input",
+    description: "Webhook trigger that validates the X-Hub-Signature-256 header.",
+    configSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        secretRef: { type: "object" }
+      }
+    },
+    sampleConfig: {
+      path: "github-events"
     }
   }
 ];

@@ -14,10 +14,15 @@
     "@ai-orchestrator/mcp-sdk": "workspace:*",
     "@ai-orchestrator/provider-sdk": "workspace:*",
     "@ai-orchestrator/shared": "workspace:*",
-    "playwright": "^1.53.2",
-    "pg": "^8.20.0"
+    "ioredis": "^5.10.1",
+    "mongodb": "^7.1.1",
+    "mysql2": "^3.22.0",
+    "nodemailer": "^8.0.5",
+    "pg": "^8.20.0",
+    "playwright": "^1.53.2"
   },
   "devDependencies": {
+    "@types/nodemailer": "^8.0.0",
     "@types/pg": "^8.20.0"
   }
 }

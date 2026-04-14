@@ -2089,6 +2089,31 @@ export function NodeConfigModal({
           />
         )}
 
+        <SelectField
+          label="Response Mode"
+          value={toStringValue(config.responseMode, "lastNode")}
+          onChange={(next) => setConfig((current) => ({ ...current, responseMode: next }))}
+          options={[
+            { value: "onReceived", label: "On Received (immediate 200)" },
+            { value: "lastNode", label: "Last Node Output" },
+            { value: "responseNode", label: "Wait for Response Node" }
+          ]}
+        />
+        <NumberField
+          label="Response Status Code"
+          value={toNumberValue(config.responseCode, 200)}
+          min={100}
+          max={599}
+          step={1}
+          onChange={(next) => setConfig((current) => ({ ...current, responseCode: next }))}
+        />
+        <TextAreaField
+          label="Response Body Override (optional)"
+          value={toStringValue(config.responseBody)}
+          onChange={(next) => setConfig((current) => ({ ...current, responseBody: next }))}
+          rows={3}
+        />
+
         <div className="cfg-tip">
           <div>
             <strong>Test URL</strong>
@@ -4924,6 +4949,675 @@ export function NodeConfigModal({
             Image editing requires optional native dependencies and currently returns
             <code> NOT_IMPLEMENTED</code>. This editor is a placeholder until image support lands.
           </div>
+        );
+      case "slack_send_message": {
+        const authType = toStringValue(config.authType, "webhook");
+        return (
+          <>
+            <SelectField
+              label="Auth Type"
+              value={authType}
+              onChange={(next) => setConfig((current) => ({ ...current, authType: next }))}
+              options={[
+                { value: "webhook", label: "Incoming Webhook" },
+                { value: "bot", label: "Bot Token" }
+              ]}
+            />
+            {authType === "webhook" ? (
+              <TextField
+                label="Webhook URL"
+                value={toStringValue(config.webhookUrl)}
+                onChange={(next) => setConfig((current) => ({ ...current, webhookUrl: next }))}
+                placeholder="https://hooks.slack.com/services/..."
+              />
+            ) : (
+              renderCredentialSecretField({
+                fieldKey: "slack_bot_token",
+                label: "Slack Bot Token Secret",
+                value: toStringValue(asRecord(config.secretRef).secretId),
+                noneLabel: "Select token",
+                preferredProvider: "slack",
+                onSelect: (next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    secretRef: next ? { secretId: next } : undefined
+                  }))
+              })
+            )}
+            <TextField
+              label="Channel"
+              value={toStringValue(config.channel)}
+              onChange={(next) => setConfig((current) => ({ ...current, channel: next }))}
+              placeholder="#general"
+            />
+            <TextAreaField
+              label="Text"
+              value={toStringValue(config.text)}
+              onChange={(next) => setConfig((current) => ({ ...current, text: next }))}
+              rows={3}
+            />
+            <TextAreaField
+              label="Blocks (JSON, optional)"
+              value={toStringValue(config.blocks)}
+              onChange={(next) => setConfig((current) => ({ ...current, blocks: next }))}
+              rows={4}
+            />
+            <TextField
+              label="Thread TS (optional)"
+              value={toStringValue(config.threadTs)}
+              onChange={(next) => setConfig((current) => ({ ...current, threadTs: next }))}
+            />
+          </>
+        );
+      }
+      case "slack_trigger":
+        return (
+          <>
+            <TextField
+              label="Path (informational)"
+              value={toStringValue(config.path, "slack-events")}
+              onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
+            />
+            {renderCredentialSecretField({
+              fieldKey: "slack_signing_secret",
+              label: "Slack Signing Secret",
+              value: toStringValue(asRecord(config.signingSecretRef).secretId),
+              noneLabel: "Select secret",
+              preferredProvider: "slack",
+              onSelect: (next) =>
+                setConfig((current) => ({
+                  ...current,
+                  signingSecretRef: next ? { secretId: next } : undefined
+                }))
+            })}
+            <NumberField
+              label="Replay Tolerance (seconds)"
+              value={toNumberValue(config.replayToleranceSeconds, 300)}
+              min={30}
+              step={30}
+              onChange={(next) => setConfig((current) => ({ ...current, replayToleranceSeconds: next }))}
+            />
+            <div className="cfg-tip">
+              Point Slack Events at <code>/api/webhooks/slack/&lt;workflowId&gt;</code>. The signing secret is used to validate <code>X-Slack-Signature</code>.
+            </div>
+          </>
+        );
+      case "smtp_send_email":
+        return (
+          <>
+            <div className="cfg-grid-2">
+              <TextField
+                label="Host"
+                value={toStringValue(config.host)}
+                onChange={(next) => setConfig((current) => ({ ...current, host: next }))}
+                placeholder="smtp.example.com"
+              />
+              <NumberField
+                label="Port"
+                value={toNumberValue(config.port, 587)}
+                min={1}
+                max={65535}
+                onChange={(next) => setConfig((current) => ({ ...current, port: next }))}
+              />
+            </div>
+            <ToggleField
+              label="Secure (TLS)"
+              checked={toBooleanValue(config.secure, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, secure: next }))}
+            />
+            <TextField
+              label="User"
+              value={toStringValue(config.user)}
+              onChange={(next) => setConfig((current) => ({ ...current, user: next }))}
+            />
+            {renderCredentialSecretField({
+              fieldKey: "smtp_password",
+              label: "SMTP Password",
+              value: toStringValue(asRecord(config.secretRef).secretId),
+              noneLabel: "Select secret",
+              preferredProvider: "smtp",
+              onSelect: (next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+            })}
+            <TextField
+              label="From"
+              value={toStringValue(config.from)}
+              onChange={(next) => setConfig((current) => ({ ...current, from: next }))}
+            />
+            <TextField
+              label="To"
+              value={toStringValue(config.to)}
+              onChange={(next) => setConfig((current) => ({ ...current, to: next }))}
+            />
+            <TextField
+              label="Subject"
+              value={toStringValue(config.subject)}
+              onChange={(next) => setConfig((current) => ({ ...current, subject: next }))}
+            />
+            <TextAreaField
+              label="Text Body"
+              value={toStringValue(config.text)}
+              onChange={(next) => setConfig((current) => ({ ...current, text: next }))}
+              rows={4}
+            />
+            <TextAreaField
+              label="HTML Body (optional)"
+              value={toStringValue(config.html)}
+              onChange={(next) => setConfig((current) => ({ ...current, html: next }))}
+              rows={4}
+            />
+          </>
+        );
+      case "imap_email_trigger":
+        return (
+          <>
+            <div className="cfg-grid-2">
+              <TextField
+                label="Host"
+                value={toStringValue(config.host)}
+                onChange={(next) => setConfig((current) => ({ ...current, host: next }))}
+              />
+              <NumberField
+                label="Port"
+                value={toNumberValue(config.port, 993)}
+                min={1}
+                max={65535}
+                onChange={(next) => setConfig((current) => ({ ...current, port: next }))}
+              />
+            </div>
+            <ToggleField
+              label="Secure (TLS)"
+              checked={toBooleanValue(config.secure, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, secure: next }))}
+            />
+            <TextField
+              label="User"
+              value={toStringValue(config.user)}
+              onChange={(next) => setConfig((current) => ({ ...current, user: next }))}
+            />
+            {renderCredentialSecretField({
+              fieldKey: "imap_password",
+              label: "IMAP Password",
+              value: toStringValue(asRecord(config.secretRef).secretId),
+              noneLabel: "Select secret",
+              preferredProvider: "imap",
+              onSelect: (next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+            })}
+            <TextField
+              label="Mailbox"
+              value={toStringValue(config.mailbox, "INBOX")}
+              onChange={(next) => setConfig((current) => ({ ...current, mailbox: next }))}
+            />
+            <NumberField
+              label="Poll Interval (seconds)"
+              value={toNumberValue(config.pollIntervalSeconds, 60)}
+              min={5}
+              step={5}
+              onChange={(next) => setConfig((current) => ({ ...current, pollIntervalSeconds: next }))}
+            />
+            <div className="cfg-tip">
+              IMAP polling requires <code>imapflow</code>. When not installed this trigger emits a <code>NOT_IMPLEMENTED</code> error.
+            </div>
+          </>
+        );
+      case "google_sheets_read":
+      case "google_sheets_append":
+      case "google_sheets_update":
+      case "google_sheets_trigger":
+        return (
+          <>
+            <TextField
+              label="Spreadsheet ID"
+              value={toStringValue(config.spreadsheetId)}
+              onChange={(next) => setConfig((current) => ({ ...current, spreadsheetId: next }))}
+            />
+            <TextField
+              label="Range (A1 notation)"
+              value={toStringValue(config.range)}
+              onChange={(next) => setConfig((current) => ({ ...current, range: next }))}
+              placeholder="Sheet1!A1:D100"
+            />
+            <SelectField
+              label="Auth Type"
+              value={toStringValue(config.authType, "accessToken")}
+              onChange={(next) => setConfig((current) => ({ ...current, authType: next }))}
+              options={[
+                { value: "accessToken", label: "OAuth2 Access Token" },
+                { value: "apiKey", label: "API Key (public sheets)" }
+              ]}
+            />
+            {renderCredentialSecretField({
+              fieldKey: "gsheets_secret",
+              label: "Token / API Key Secret",
+              value: toStringValue(asRecord(config.secretRef).secretId),
+              noneLabel: "Select secret",
+              preferredProvider: "google",
+              onSelect: (next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+            })}
+            {(node.data.nodeType === "google_sheets_append" || node.data.nodeType === "google_sheets_update") && (
+              <>
+                <SelectField
+                  label="Value Input Option"
+                  value={toStringValue(config.valueInputOption, "USER_ENTERED")}
+                  onChange={(next) => setConfig((current) => ({ ...current, valueInputOption: next }))}
+                  options={[
+                    { value: "USER_ENTERED", label: "USER_ENTERED" },
+                    { value: "RAW", label: "RAW" }
+                  ]}
+                />
+                <TextAreaField
+                  label="Values (JSON 2D array)"
+                  value={
+                    typeof config.values === "string"
+                      ? (config.values as string)
+                      : JSON.stringify(config.values ?? [], null, 2)
+                  }
+                  onChange={(next) => {
+                    try {
+                      const parsed = JSON.parse(next);
+                      setConfig((current) => ({ ...current, values: parsed }));
+                    } catch {
+                      setConfig((current) => ({ ...current, values: next }));
+                    }
+                  }}
+                  rows={4}
+                />
+              </>
+            )}
+          </>
+        );
+      case "postgres_query":
+      case "postgres_trigger":
+      case "mysql_query":
+        return (
+          <>
+            <div className="cfg-grid-2">
+              <TextField
+                label="Host"
+                value={toStringValue(config.host)}
+                onChange={(next) => setConfig((current) => ({ ...current, host: next }))}
+              />
+              <NumberField
+                label="Port"
+                value={toNumberValue(
+                  config.port,
+                  node.data.nodeType === "mysql_query" ? 3306 : 5432
+                )}
+                min={1}
+                max={65535}
+                onChange={(next) => setConfig((current) => ({ ...current, port: next }))}
+              />
+            </div>
+            <TextField
+              label="Database"
+              value={toStringValue(config.database)}
+              onChange={(next) => setConfig((current) => ({ ...current, database: next }))}
+            />
+            <TextField
+              label="User"
+              value={toStringValue(config.user)}
+              onChange={(next) => setConfig((current) => ({ ...current, user: next }))}
+            />
+            {renderCredentialSecretField({
+              fieldKey: "db_password",
+              label: "Password Secret",
+              value: toStringValue(asRecord(config.secretRef).secretId),
+              noneLabel: "Select secret",
+              preferredProvider: "database",
+              onSelect: (next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+            })}
+            <ToggleField
+              label="SSL"
+              checked={toBooleanValue(config.ssl, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, ssl: next }))}
+            />
+            <TextAreaField
+              label="SQL Query"
+              value={toStringValue(config.query)}
+              onChange={(next) => setConfig((current) => ({ ...current, query: next }))}
+              rows={5}
+            />
+            <TextAreaField
+              label="Params (JSON array)"
+              value={
+                typeof config.params === "string"
+                  ? (config.params as string)
+                  : JSON.stringify(config.params ?? [], null, 2)
+              }
+              onChange={(next) => {
+                try {
+                  const parsed = JSON.parse(next);
+                  setConfig((current) => ({ ...current, params: parsed }));
+                } catch {
+                  setConfig((current) => ({ ...current, params: next }));
+                }
+              }}
+              rows={2}
+            />
+            {node.data.nodeType === "postgres_trigger" && (
+              <NumberField
+                label="Poll Interval (seconds)"
+                value={toNumberValue(config.pollIntervalSeconds, 60)}
+                min={5}
+                step={5}
+                onChange={(next) => setConfig((current) => ({ ...current, pollIntervalSeconds: next }))}
+              />
+            )}
+          </>
+        );
+      case "mongo_operation":
+        return (
+          <>
+            <TextField
+              label="Connection URI"
+              value={toStringValue(config.uri)}
+              onChange={(next) => setConfig((current) => ({ ...current, uri: next }))}
+              placeholder="mongodb://localhost:27017"
+            />
+            {renderCredentialSecretField({
+              fieldKey: "mongo_uri",
+              label: "Connection String Secret (optional override)",
+              value: toStringValue(asRecord(config.secretRef).secretId),
+              noneLabel: "Use URI above",
+              preferredProvider: "mongodb",
+              onSelect: (next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+            })}
+            <div className="cfg-grid-2">
+              <TextField
+                label="Database"
+                value={toStringValue(config.database)}
+                onChange={(next) => setConfig((current) => ({ ...current, database: next }))}
+              />
+              <TextField
+                label="Collection"
+                value={toStringValue(config.collection)}
+                onChange={(next) => setConfig((current) => ({ ...current, collection: next }))}
+              />
+            </div>
+            <SelectField
+              label="Operation"
+              value={toStringValue(config.operation, "find")}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "find", label: "find" },
+                { value: "insert", label: "insert" },
+                { value: "update", label: "update" },
+                { value: "aggregate", label: "aggregate" }
+              ]}
+            />
+            <TextAreaField
+              label="Query / Filter (JSON)"
+              value={
+                typeof config.query === "string"
+                  ? (config.query as string)
+                  : JSON.stringify(config.query ?? {}, null, 2)
+              }
+              onChange={(next) => {
+                try {
+                  const parsed = JSON.parse(next);
+                  setConfig((current) => ({ ...current, query: parsed }));
+                } catch {
+                  setConfig((current) => ({ ...current, query: next }));
+                }
+              }}
+              rows={4}
+            />
+            <TextAreaField
+              label="Document / Update / Pipeline (JSON)"
+              value={JSON.stringify(
+                config.document ?? config.update ?? config.pipeline ?? {},
+                null,
+                2
+              )}
+              onChange={(next) => {
+                try {
+                  const parsed = JSON.parse(next);
+                  const op = toStringValue(config.operation, "find");
+                  if (op === "insert") {
+                    setConfig((current) => ({ ...current, document: parsed }));
+                  } else if (op === "update") {
+                    setConfig((current) => ({ ...current, update: parsed }));
+                  } else if (op === "aggregate") {
+                    setConfig((current) => ({ ...current, pipeline: parsed }));
+                  }
+                } catch {
+                  /* keep typing */
+                }
+              }}
+              rows={4}
+            />
+          </>
+        );
+      case "redis_command":
+        return (
+          <>
+            <TextField
+              label="Redis URL"
+              value={toStringValue(config.url, "redis://localhost:6379")}
+              onChange={(next) => setConfig((current) => ({ ...current, url: next }))}
+            />
+            <SelectField
+              label="Command"
+              value={toStringValue(config.command, "GET")}
+              onChange={(next) => setConfig((current) => ({ ...current, command: next }))}
+              options={[
+                { value: "GET", label: "GET" },
+                { value: "SET", label: "SET" },
+                { value: "DEL", label: "DEL" },
+                { value: "PUBLISH", label: "PUBLISH" },
+                { value: "LPUSH", label: "LPUSH" },
+                { value: "RPUSH", label: "RPUSH" },
+                { value: "HSET", label: "HSET" },
+                { value: "HGET", label: "HGET" },
+                { value: "EXPIRE", label: "EXPIRE" },
+                { value: "INCR", label: "INCR" },
+                { value: "DECR", label: "DECR" }
+              ]}
+            />
+            <TextAreaField
+              label="Arguments (JSON array)"
+              value={
+                typeof config.args === "string"
+                  ? (config.args as string)
+                  : JSON.stringify(config.args ?? [], null, 2)
+              }
+              onChange={(next) => {
+                try {
+                  const parsed = JSON.parse(next);
+                  setConfig((current) => ({ ...current, args: parsed }));
+                } catch {
+                  setConfig((current) => ({ ...current, args: next }));
+                }
+              }}
+              rows={3}
+            />
+          </>
+        );
+      case "redis_trigger":
+        return (
+          <>
+            <TextField
+              label="Redis URL"
+              value={toStringValue(config.url, "redis://localhost:6379")}
+              onChange={(next) => setConfig((current) => ({ ...current, url: next }))}
+            />
+            <SelectField
+              label="Mode"
+              value={toStringValue(config.mode, "subscribe")}
+              onChange={(next) => setConfig((current) => ({ ...current, mode: next }))}
+              options={[
+                { value: "subscribe", label: "Subscribe (pub/sub)" },
+                { value: "blpop", label: "Blocking List Pop (BLPOP)" }
+              ]}
+            />
+            {toStringValue(config.mode, "subscribe") === "subscribe" ? (
+              <TextField
+                label="Channel"
+                value={toStringValue(config.channel)}
+                onChange={(next) => setConfig((current) => ({ ...current, channel: next }))}
+              />
+            ) : (
+              <>
+                <TextField
+                  label="List Key"
+                  value={toStringValue(config.key)}
+                  onChange={(next) => setConfig((current) => ({ ...current, key: next }))}
+                />
+                <NumberField
+                  label="Timeout (seconds)"
+                  value={toNumberValue(config.timeoutSeconds, 5)}
+                  min={0}
+                  onChange={(next) => setConfig((current) => ({ ...current, timeoutSeconds: next }))}
+                />
+              </>
+            )}
+          </>
+        );
+      case "github_action":
+        return (
+          <>
+            {renderCredentialSecretField({
+              fieldKey: "github_pat",
+              label: "GitHub Personal Access Token",
+              value: toStringValue(asRecord(config.secretRef).secretId),
+              noneLabel: "Select secret",
+              preferredProvider: "github",
+              onSelect: (next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+            })}
+            <div className="cfg-grid-2">
+              <TextField
+                label="Owner"
+                value={toStringValue(config.owner)}
+                onChange={(next) => setConfig((current) => ({ ...current, owner: next }))}
+              />
+              <TextField
+                label="Repo"
+                value={toStringValue(config.repo)}
+                onChange={(next) => setConfig((current) => ({ ...current, repo: next }))}
+              />
+            </div>
+            <SelectField
+              label="Operation"
+              value={toStringValue(config.operation, "listIssues")}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "createIssue", label: "createIssue" },
+                { value: "commentIssue", label: "commentIssue" },
+                { value: "closeIssue", label: "closeIssue" },
+                { value: "createPr", label: "createPr" },
+                { value: "listIssues", label: "listIssues" },
+                { value: "getFile", label: "getFile" },
+                { value: "createOrUpdateFile", label: "createOrUpdateFile" },
+                { value: "listCommits", label: "listCommits" }
+              ]}
+            />
+            <TextField
+              label="Title (optional)"
+              value={toStringValue(config.title)}
+              onChange={(next) => setConfig((current) => ({ ...current, title: next }))}
+            />
+            <TextAreaField
+              label="Body / Content (optional)"
+              value={toStringValue(config.body)}
+              onChange={(next) => setConfig((current) => ({ ...current, body: next }))}
+              rows={4}
+            />
+            <div className="cfg-grid-2">
+              <NumberField
+                label="Issue Number"
+                value={toNumberValue(config.issueNumber, 0)}
+                min={0}
+                onChange={(next) => setConfig((current) => ({ ...current, issueNumber: next }))}
+              />
+              <TextField
+                label="Base Branch"
+                value={toStringValue(config.base, "main")}
+                onChange={(next) => setConfig((current) => ({ ...current, base: next }))}
+              />
+            </div>
+            <TextField
+              label="Head Branch (for PRs)"
+              value={toStringValue(config.head)}
+              onChange={(next) => setConfig((current) => ({ ...current, head: next }))}
+            />
+            <TextField
+              label="Path (for file operations)"
+              value={toStringValue(config.path)}
+              onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
+            />
+            <TextField
+              label="Commit Message"
+              value={toStringValue(config.commitMessage)}
+              onChange={(next) => setConfig((current) => ({ ...current, commitMessage: next }))}
+            />
+            <TextAreaField
+              label="File Content"
+              value={toStringValue(config.content)}
+              onChange={(next) => setConfig((current) => ({ ...current, content: next }))}
+              rows={4}
+            />
+            <div className="cfg-grid-2">
+              <TextField
+                label="File SHA (update)"
+                value={toStringValue(config.sha)}
+                onChange={(next) => setConfig((current) => ({ ...current, sha: next }))}
+              />
+              <TextField
+                label="Branch"
+                value={toStringValue(config.branch)}
+                onChange={(next) => setConfig((current) => ({ ...current, branch: next }))}
+              />
+            </div>
+          </>
+        );
+      case "github_webhook_trigger":
+        return (
+          <>
+            <TextField
+              label="Path (informational)"
+              value={toStringValue(config.path, "github-events")}
+              onChange={(next) => setConfig((current) => ({ ...current, path: next }))}
+            />
+            {renderCredentialSecretField({
+              fieldKey: "github_webhook_secret",
+              label: "GitHub Webhook Secret",
+              value: toStringValue(asRecord(config.secretRef).secretId),
+              noneLabel: "Select secret",
+              preferredProvider: "github",
+              onSelect: (next) =>
+                setConfig((current) => ({
+                  ...current,
+                  secretRef: next ? { secretId: next } : undefined
+                }))
+            })}
+            <div className="cfg-tip">
+              Point your GitHub webhook to <code>/api/webhooks/github/&lt;workflowId&gt;</code>. The secret is used to verify
+              <code> X-Hub-Signature-256</code>.
+            </div>
+          </>
         );
       default:
         return (

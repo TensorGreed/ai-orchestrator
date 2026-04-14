@@ -368,6 +368,56 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
   );
 }
 
+/**
+ * Mapping from Tier 1 integration node types to public logo paths.
+ * Logos live at apps/web/public/logos/*.svg and are served statically.
+ */
+export const NODE_LOGO_MAP: Record<string, string> = {
+  http_request: "/logos/http.svg",
+  webhook_input: "/logos/http.svg",
+  webhook_response: "/logos/http.svg",
+  slack_send_message: "/logos/slack.svg",
+  slack_trigger: "/logos/slack.svg",
+  smtp_send_email: "/logos/smtp.svg",
+  imap_email_trigger: "/logos/imap.svg",
+  google_sheets_read: "/logos/google-sheets.svg",
+  google_sheets_append: "/logos/google-sheets.svg",
+  google_sheets_update: "/logos/google-sheets.svg",
+  google_sheets_trigger: "/logos/google-sheets.svg",
+  postgres_query: "/logos/postgresql.svg",
+  postgres_trigger: "/logos/postgresql.svg",
+  mysql_query: "/logos/mysql.svg",
+  mongo_operation: "/logos/mongodb.svg",
+  redis_command: "/logos/redis.svg",
+  redis_trigger: "/logos/redis.svg",
+  github_action: "/logos/github.svg",
+  github_webhook_trigger: "/logos/github.svg"
+};
+
+export function resolveNodeLogo(nodeType: string): string | undefined {
+  return NODE_LOGO_MAP[nodeType];
+}
+
+export function NodeLogoImage({
+  nodeType,
+  size = 20
+}: {
+  nodeType: string;
+  size?: number;
+}): JSX.Element | null {
+  const src = resolveNodeLogo(nodeType);
+  if (!src) return null;
+  return (
+    <img
+      src={src}
+      alt=""
+      width={size}
+      height={size}
+      style={{ objectFit: "contain", display: "inline-block" }}
+    />
+  );
+}
+
 const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   webhook_input: "webhook",
   schedule_trigger: "schedule",
@@ -420,5 +470,9 @@ export function NodeTypeIcon({
   nodeType: string;
   fallbackIcon?: PaletteCategoryIconKey;
 }): JSX.Element {
+  const logo = resolveNodeLogo(nodeType);
+  if (logo) {
+    return <NodeLogoImage nodeType={nodeType} />;
+  }
   return <PaletteIcon icon={resolveNodeIcon(nodeType, fallbackIcon)} />;
 }

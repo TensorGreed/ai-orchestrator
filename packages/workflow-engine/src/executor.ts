@@ -33,6 +33,7 @@ import {
 } from "./rag-adapters";
 import { renderTemplate, tryParseJson } from "./template";
 import { executePhase2Node } from "./phase2-dispatch";
+import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
 import { executePythonCodeNode } from "./python-runner";
 import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
@@ -3385,6 +3386,28 @@ async function executeNode(
       });
     }
 
+    case "slack_send_message":
+    case "slack_trigger":
+    case "smtp_send_email":
+    case "imap_email_trigger":
+    case "google_sheets_read":
+    case "google_sheets_append":
+    case "google_sheets_update":
+    case "google_sheets_trigger":
+    case "postgres_query":
+    case "postgres_trigger":
+    case "mysql_query":
+    case "mongo_operation":
+    case "redis_command":
+    case "redis_trigger":
+    case "github_action":
+    case "github_webhook_trigger": {
+      return executeTier1Node(node, config, {
+        templateData,
+        resolveSecret: dependencies.resolveSecret
+      });
+    }
+
     default:
       throw new Error(`Unsupported node type '${String(node.type)}'`);
   }
@@ -3424,7 +3447,8 @@ const RETRYABLE_NODE_TYPES = new Set([
   "azure_monitor_http",
   "http_request",
   "rag_retrieve",
-  "embeddings_azure_openai"
+  "embeddings_azure_openai",
+  ...Array.from(TIER1_NODE_TYPES)
 ]);
 
 function getRetryConfigForNode(node: WorkflowNode): RetryConfig | undefined {
