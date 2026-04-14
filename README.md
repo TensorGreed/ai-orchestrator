@@ -1,17 +1,20 @@
 # AI Orchestrator V1
 
-A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, focused on agent orchestration, MCP tools, LLM providers, RAG nodes, connector nodes, and webhook-triggered execution.
+A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, focused on workflow automation, agent orchestration, MCP tools, LLM providers, RAG/vector nodes, connector nodes, and trigger-driven execution.
 
 ## What this V1 includes
 
-- Drag-and-drop node editor (`React Flow`) with connectable edges and persisted node positions
-- Workflow CRUD, import/export JSON, graph validation, and execution tracing
+- Drag-and-drop node editor (`React Flow`) with connectable edges, persisted node positions, mini-map/controls, multi-select, copy/paste/duplicate, undo/redo, sticky notes, disable toggles, keyboard shortcuts, and dark mode
+- Workflow CRUD, duplication, import/export JSON, graph validation, execution tracing, execution history, debug replay, pinned node data, single-node execution, and streaming execution progress
+- Workflow organization with projects, folders, tags, search/filtering, and project-scoped secrets
+- Runtime support for sub-workflows, flow-control nodes, queue-backed execution, schedule triggers, webhook/form/chat/file/RSS/SSE/MCP-server triggers, per-node retry/continue-on-fail settings, and error workflows
 - LLM provider adapter model with built-in adapters for:
   - Ollama (real)
   - OpenAI-compatible endpoints (real)
   - OpenAI cloud (real)
   - Azure OpenAI (real)
   - Gemini (basic)
+  - Anthropic (basic)
 - MCP adapter model with:
   - `http_mcp` (real remote MCP endpoint over HTTP streamable)
   - `mock-mcp` (local demo tools)
@@ -21,9 +24,11 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
   - `memory` -> attach `Simple Memory` node
   - `tool` -> attach one or more `MCP Tool` nodes
   - `worker` -> attach worker `Agent Orchestrator` or `Supervisor` nodes (applies to Supervisor nodes only)
-- RAG path with connector source + in-memory retriever/vector similarity
-- Connector SDK + connectors (`google-drive`, `sql-db`, `nosql-db`, `azure-storage`, `azure-cosmos-db`, `azure-monitor`, `azure-ai-search`)
-- Webhook execution endpoint (`system_prompt` + `user_prompt` payload)
+- RAG path with connector source, document chunking, embeddings, in-memory/vector-store retrieval, Azure AI Search, Qdrant, Pinecone, and PGVector adapter paths
+- Connector SDK + legacy connectors (`google-drive`, `sql-db`, `nosql-db`, `azure-storage`, `azure-cosmos-db`, `azure-monitor`, `azure-ai-search`, `qdrant`)
+- Tier 1 automation connectors and triggers: HTTP/webhook response, Slack, SMTP/IMAP email, Google Sheets, PostgreSQL, MySQL, MongoDB, Redis, and GitHub
+- Data transformation and utility nodes for aggregate/split/sort/limit/dedupe/summarize/diff/rename/edit fields, date/time, crypto, JWT, XML, HTML, file conversion/extraction, compression, and guarded image/PDF output paths
+- Webhook execution endpoints, configured webhook routes, manual triggers, form endpoints, chat endpoints, Slack/GitHub webhooks, and workflow-as-MCP-tool endpoints
 - Secret abstraction with encrypted server-side storage (AES-256-GCM)
 - Session-based authentication (`httpOnly` cookie) with RBAC (`admin`, `builder`, `operator`, `viewer`)
 - Monorepo with shared schemas/types and package-level extension points
@@ -33,7 +38,8 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 - Frontend (`apps/web`): React + TypeScript + React Flow
 - Backend (`apps/api`): Fastify + TypeScript
 - Product docs (`apps/docs`): VitePress documentation site
-- DB: local SQLite database file using `sql.js` (persisted to `apps/api/data/orchestrator.db`)
+- DB: SQLite by default using `sql.js` (persisted to `apps/api/data/orchestrator.db`) or PostgreSQL via `DB_TYPE=postgres`
+- Background services: scheduler service, trigger service, and in-process execution queue with persisted queue/DLQ tables
 - Shared contracts: `packages/shared`
 - Runtime/SDK packages:
   - `packages/provider-sdk`
@@ -75,8 +81,13 @@ A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, f
 |  +- workflow-engine/
 +- samples/workflows/
 |  +- basic-flow.json
+|  +- conditional-flow.json
 |  +- rag-flow.json
+|  +- rag-pinecone-flow.json
 |  +- agentic-mcp-flow.json
+|  +- structured-output-flow.json
+|  +- azure-openai-flow.json
+|  +- azure-connectors-demo-flow.json
 +- docs/
 |  +- (legacy static site)
 +- docker-compose.yml
@@ -114,6 +125,25 @@ Increase workflow timeout for long-running MCP/LLM executions (example 20 min):
 
 ```bash
 WORKFLOW_EXECUTION_TIMEOUT_MS=1200000
+```
+
+Optional PostgreSQL storage:
+
+```bash
+DB_TYPE=postgres
+DB_POSTGRESDB_HOST=localhost
+DB_POSTGRESDB_PORT=5432
+DB_POSTGRESDB_DATABASE=ai_orchestrator
+DB_POSTGRESDB_USER=postgres
+DB_POSTGRESDB_PASSWORD=
+DB_POSTGRESDB_SSL=false
+DB_POSTGRESDB_POOL_SIZE=10
+```
+
+Optional execution queue concurrency:
+
+```bash
+QUEUE_CONCURRENCY=5
 ```
 
 ### 2) Install
@@ -194,7 +224,7 @@ docker compose up --build
 Session model:
 - Login creates a server-side `sessions` record and sets `SESSION_COOKIE_NAME` as an `httpOnly` cookie.
 - Frontend uses `credentials: "include"` for API calls.
-- Session state is persisted in SQLite (`users`, `sessions` tables).
+- Session state is persisted in the configured database (`users`, `sessions` tables).
 
 Auth endpoints:
 - `POST /api/auth/register`
@@ -219,7 +249,14 @@ Role permissions:
 | --- | --- | --- | --- | --- |
 | Workflow list/get/export/validate | yes | yes | yes | yes |
 | Workflow create/update/delete | no | no | yes | yes |
+| Project/folder/tag list | yes | yes | yes | yes |
+| Project/folder/tag create/update/delete | no | no | yes | yes |
+| Pinned data list | yes | yes | yes | yes |
+| Pin/unpin node data | no | no | yes | yes |
 | Execute workflow | no | no | yes | yes |
+| Enqueue workflow / queue depth / DLQ | no | yes | yes | yes |
+| Execution history/debug load | yes | yes | yes | yes |
+| Human approvals | no | yes | yes | yes |
 | Execute `/api/webhooks/execute` | no | no | yes | yes |
 | Secrets list/create | no | no | yes | yes |
 | Register users | first-user only or when public register enabled | first-user only or when public register enabled | no (except public register viewer-level) | yes |
@@ -230,28 +267,126 @@ API error behavior:
 
 ## Core API endpoints
 
+Health and metadata:
+- `GET /health`
+- `GET /api/definitions`
+- `GET /api/integrations`
+
+Auth:
 - `POST /api/auth/register`
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/auth/me`
-- `GET /api/definitions`
-- `GET /api/workflows`
+
+Workflows:
+- `GET /api/workflows?projectId=&folderId=&tag=&search=`
 - `GET /api/workflows/:id`
+- `GET /api/workflows/:id/variables`
+- `PUT /api/workflows/:id/variables`
 - `POST /api/workflows`
 - `PUT /api/workflows/:id`
 - `DELETE /api/workflows/:id`
+- `POST /api/workflows/:id/duplicate`
+- `POST /api/workflows/:id/move`
 - `POST /api/workflows/import`
 - `GET /api/workflows/:id/export`
 - `POST /api/workflows/:id/validate`
 - `POST /api/workflows/:id/execute`
+- `POST /api/workflows/:id/execute/stream`
+- `POST /api/workflows/:id/enqueue`
+
+Projects, folders, tags, and pins:
+- `GET /api/projects`
+- `POST /api/projects`
+- `PUT /api/projects/:id`
+- `DELETE /api/projects/:id`
+- `GET /api/folders?projectId=`
+- `POST /api/folders`
+- `PUT /api/folders/:id`
+- `DELETE /api/folders/:id`
+- `GET /api/workflows/:id/pins`
+- `PUT /api/workflows/:id/pins/:nodeId`
+- `DELETE /api/workflows/:id/pins/:nodeId`
+
+Execution history, debug helpers, and approvals:
+- `GET /api/executions?page=&pageSize=&status=&workflowId=&triggerType=`
+- `GET /api/executions/:id`
+- `POST /api/code-node/test`
+- `POST /api/expressions/preview`
+- `GET /api/approvals`
+- `POST /api/approvals/:id/approve`
+- `POST /api/approvals/:id/reject`
+
+Trigger and webhook entry points:
 - `POST /api/webhooks/execute`
+- `POST /api/webhooks/execute/stream`
+- `POST /api/webhooks/slack/:workflowId`
+- `POST /api/webhooks/github/:workflowId`
+- `POST /api/triggers/manual/:workflowId`
+- `GET /api/forms/:path`
+- `POST /api/forms/:path`
+- `POST /api/chat/:workflowId`
+- `GET /api/mcp-server/:path/manifest`
+- `POST /api/mcp-server/:path/invoke`
 - `ANY /webhook/:path` (configured production webhook URL)
 - `ANY /webhook-test/:path` (configured test webhook URL)
+
+Queue and services:
+- `GET /api/queue/depth`
+- `GET /api/queue/dlq`
+
+Secrets and connection tests:
 - `POST /api/secrets`
-- `GET /api/secrets`
+- `GET /api/secrets?projectId=`
 - `POST /api/connectors/test`
 - `POST /api/providers/test`
 - `POST /api/mcp/discover-tools`
+
+## Workflow organization and debugging
+
+- Projects isolate workflows and secrets. The API bootstraps a default project and backfills legacy rows on startup.
+- Folders organize workflows inside a project. Deleting a folder moves contained workflows back to the project root.
+- Tags are stored on workflows and can be edited or filtered from the dashboard.
+- The dashboard supports project switching, folder filtering, tag filtering, and search by name, ID, or tag.
+- Pinned node data is stored in `workflow.pinnedData` and reused during test runs unless `usePinnedData=false`.
+- Single-node execution uses `runMode: "single_node"` with a selected `startNodeId` and supplied previous node outputs or pinned parent data.
+- Execution history can be loaded back into the editor for failed-run debugging or re-run with `sourceExecutionId`.
+- Debug mode shows compact node input/output/error previews on the canvas and schema/table views in the node inspector.
+
+## Connector and trigger coverage
+
+Tier 1 integrations exposed through `/api/integrations`:
+
+- HTTP request, configured webhook input, and webhook response
+- Slack send message and Slack Events API trigger
+- SMTP send email and IMAP email trigger
+- Google Sheets read/append/update and polling trigger
+- PostgreSQL query and polling trigger
+- MySQL query
+- MongoDB find/insert/update/aggregate
+- Redis commands and Redis trigger
+- GitHub issue/PR/repo actions and signed GitHub webhook trigger
+
+General trigger nodes:
+
+- `schedule_trigger`
+- `manual_trigger`
+- `webhook_input`
+- `form_trigger`
+- `chat_trigger`
+- `file_trigger`
+- `rss_trigger`
+- `sse_trigger`
+- `mcp_server_trigger`
+- `slack_trigger`
+- `github_webhook_trigger`
+- `google_sheets_trigger`
+- `postgres_trigger`
+- `redis_trigger`
+- `imap_email_trigger`
+- `error_trigger`
+
+Message queue trigger nodes are registered for Kafka, RabbitMQ, and MQTT with optional-dependency detection. Their long-lived consumers are intentionally guarded until the corresponding client dependency and deployment path are configured.
 
 ## Azure node suite (implemented)
 
@@ -425,7 +560,7 @@ The Agent Orchestrator and Supervisor Nodes support dedicated attachment ports. 
   - this attachment is required; the agent runtime always uses this node's `provider` config
 - `memory` port:
   - attach a `Simple Memory` node
-  - memory persists conversation turns in SQLite by `namespace + session_id`
+  - memory persists conversation turns in the configured database by `namespace + session_id`
 - `tool` port:
   - attach one or more `MCP Tool` nodes
   - attached tool configs are converted into available MCP tools for the agent loop
@@ -437,8 +572,18 @@ Attachment-only helper nodes are marked as skipped in execution traces because t
 
 ## Node Input Mapping (Data Passing)
 
-Nodes can dynamically read outputs from previous nodes in the DAG layout. 
-In a node's configuration, you can use handlebars-style templates or dedicated mapping blocks to pass `results.nodeId.someKey` to dynamically inject an upstream agent's output into a downstream agent's prompt or a tool's parameters.
+Nodes can dynamically read outputs from previous nodes in the DAG layout.
+
+In a node's configuration, use `{{ ... }}` templates or dedicated mapping blocks to inject upstream data into prompts, tool arguments, connector parameters, and output templates.
+
+Supported template forms:
+
+- Simple dotted paths for back compatibility, for example `{{user_prompt}}` or `{{parent_outputs.nodeId.answer}}`
+- JavaScript-like expressions for richer logic, for example `{{ $if($json.status === "ok", "continue", "stop") }}`
+- Built-ins: `$input`, `$json`, `$node`, `$workflow`, `$execution`, `$env`, `$vars`, `$now`, `$today`, `$itemIndex`
+- Helpers: `$jmespath(input, path)`, `$if(condition, trueValue, falseValue)`, `$ifEmpty(value, fallback)`
+
+The expression preview endpoint (`POST /api/expressions/preview`) lets the editor evaluate expression fields against sample data before saving a workflow.
 
 ## Output Parser Robust Parsing
 
@@ -498,7 +643,7 @@ If you still hit provider context errors, reduce these values first (especially 
 
 ## Simple Memory Node
 
-`Simple Memory` (`local_memory`) is a real SQLite-backed session memory node.
+`Simple Memory` (`local_memory`) is a real database-backed session memory node.
 
 Config:
 - `namespace`: memory bucket key (default `default`)
@@ -514,7 +659,7 @@ DB storage table:
 To support multi-turn agent conversations without flooding model context, the runtime now caches full MCP tool outputs outside the LLM prompt window.
 
 How it works:
-- On each external MCP tool call, runtime stores full tool args/output in SQLite by `namespace + session_id`.
+- On each external MCP tool call, runtime stores full tool args/output in the configured database by `namespace + session_id`.
 - The model sees compact tool messages in-context (for token safety), but full payload remains retrievable.
 - Runtime injects two internal tools automatically (when `session_id` is present):
   - `session_cache_list`
@@ -586,15 +731,20 @@ Includes node types/config, edge graph, and node positions for canvas restoratio
 ## Sample workflows
 
 - `samples/workflows/basic-flow.json`
+- `samples/workflows/conditional-flow.json`
 - `samples/workflows/rag-flow.json`
+- `samples/workflows/rag-pinecone-flow.json`
 - `samples/workflows/agentic-mcp-flow.json`
+- `samples/workflows/structured-output-flow.json`
 - `samples/workflows/azure-openai-flow.json`
 - `samples/workflows/azure-connectors-demo-flow.json`
 
-The seed service auto-loads these into DB when the workflow table is empty.
+Set `SEED_SAMPLE_WORKFLOWS=true` to load these into the database when the workflow table is empty.
 
 ## Notes
 
 - V1 is intentionally a working vertical slice with clear extension seams.
-- Scheduling/distributed execution/multi-tenant auth remain out of V1 scope.
+- Scheduling, persisted queue execution, projects, folders, tags, and project-scoped secrets are implemented.
+- Horizontal worker scaling still requires moving the queue backend to Redis/BullMQ or another shared queue.
+- Enterprise multi-tenancy, SSO/LDAP, audit logging, external secret managers, source control sync, and full OpenAPI coverage remain roadmap items.
 
