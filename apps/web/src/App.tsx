@@ -58,6 +58,7 @@ import {
 import { WorkflowCanvasNode } from "./components/WorkflowCanvasNode";
 import { StickyNoteNode } from "./components/StickyNoteNode";
 import { KeyboardShortcutsPanel } from "./components/KeyboardShortcutsPanel";
+import { RadialActionRing, type RadialAction } from "./components/RadialActionRing";
 import { WorkflowCanvasEdge } from "./components/WorkflowCanvasEdge";
 import { NodeConfigModal, type NodeInputOption } from "./components/NodeConfigModal";
 import { LeftMenuBar } from "./components/LeftMenuBar";
@@ -844,6 +845,7 @@ function StudioApp() {
     () => nodes.find((node) => node.id === editingNodeId) ?? null,
     [editingNodeId, nodes]
   );
+
   const editingNodeInputOptions = useMemo<NodeInputOption[]>(() => {
     if (!editingNode) {
       return [];
@@ -2675,6 +2677,110 @@ function StudioApp() {
     setEditingNodeId(nodeId);
   }, []);
 
+  // --- Radial action ring (Phase 4.1 / L2M distinct UI) ------------------------
+  const soloSelectedNode = useMemo(() => {
+    const selected = nodes.filter((node) => node.selected);
+    if (selected.length !== 1) return null;
+    const only = selected[0]!;
+    if (only.data.nodeType === "sticky_note") return null;
+    if (editingNodeId === only.id) return null;
+    return only;
+  }, [editingNodeId, nodes]);
+
+  const [radialCenter, setRadialCenter] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!soloSelectedNode) {
+      setRadialCenter(null);
+      return;
+    }
+    const compute = () => {
+      if (typeof document === "undefined") return;
+      const domNode = document.querySelector(`.react-flow__node[data-id="${soloSelectedNode.id}"]`);
+      if (!(domNode instanceof HTMLElement)) {
+        setRadialCenter(null);
+        return;
+      }
+      const rect = domNode.getBoundingClientRect();
+      setRadialCenter({ x: rect.right - 8, y: rect.top + rect.height / 2 });
+    };
+    compute();
+    window.addEventListener("resize", compute);
+    const wrapperEl = flowWrapperRef.current;
+    wrapperEl?.addEventListener("scroll", compute);
+    // Pan/zoom doesn't fire scroll on the wrapper — poll lightly while selected.
+    const interval = window.setInterval(compute, 120);
+    return () => {
+      window.removeEventListener("resize", compute);
+      wrapperEl?.removeEventListener("scroll", compute);
+      window.clearInterval(interval);
+    };
+  }, [soloSelectedNode]);
+
+  const onRadialAction = useCallback(
+    (action: RadialAction) => {
+      if (!soloSelectedNode) return;
+      const nodeId = soloSelectedNode.id;
+      switch (action.kind) {
+        case "edit":
+          openNodeConfig(nodeId);
+          return;
+        case "duplicate": {
+          pushHistorySnapshot();
+          const src = soloSelectedNode;
+          const newId = createNodeId(src.data.nodeType);
+          const duplicate: Node<EditorNodeData> = {
+            ...src,
+            id: newId,
+            selected: true,
+            position: { x: src.position.x + 40, y: src.position.y + 40 },
+            data: {
+              label: src.data.label,
+              nodeType: src.data.nodeType,
+              config: cloneJson(src.data.config ?? {}),
+              disabled: src.data.disabled,
+              color: src.data.color
+            }
+          };
+          setNodes((current) => [
+            ...current.map((node) => ({ ...node, selected: false })),
+            duplicate
+          ]);
+          return;
+        }
+        case "toggleDisabled": {
+          pushHistorySnapshot();
+          setNodes((current) =>
+            current.map((node) =>
+              node.id === nodeId
+                ? { ...node, data: { ...node.data, disabled: !node.data.disabled } }
+                : node
+            )
+          );
+          return;
+        }
+        case "setColor": {
+          pushHistorySnapshot();
+          setNodes((current) =>
+            current.map((node) =>
+              node.id === nodeId ? { ...node, data: { ...node.data, color: action.color } } : node
+            )
+          );
+          return;
+        }
+        case "delete": {
+          pushHistorySnapshot();
+          setNodes((current) => current.filter((node) => node.id !== nodeId));
+          setEdges((current) =>
+            current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId)
+          );
+          if (editingNodeId === nodeId) setEditingNodeId(null);
+          return;
+        }
+      }
+    },
+    [editingNodeId, openNodeConfig, pushHistorySnapshot, setEdges, setNodes, soloSelectedNode]
+  );
+
   const saveNodeConfig = useCallback(
     (payload: {
       label: string;
@@ -3865,6 +3971,9 @@ function StudioApp() {
         </main>
       </div>
 
+      {soloSelectedNode && radialCenter && (
+        <RadialActionRing node={soloSelectedNode} center={radialCenter} onAction={onRadialAction} />
+      )}
       {editingNode && (
         <NodeConfigModal
           node={editingNode}
