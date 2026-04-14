@@ -776,7 +776,6 @@ function StudioApp() {
   const [variablesBusy, setVariablesBusy] = useState(false);
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-  const [workbenchAnchor, setWorkbenchAnchor] = useState<{ x: number; y: number } | undefined>(undefined);
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
@@ -2674,25 +2673,9 @@ function StudioApp() {
     [buildEditorExecutionPayload, handleApiError, refreshExecutionHistory]
   );
 
-  const openNodeConfig = useCallback(
-    (nodeId: string) => {
-      // Try to anchor the floating workbench next to the DOM node on the canvas.
-      if (typeof document !== "undefined") {
-        const domNode = document.querySelector(`.react-flow__node[data-id="${nodeId}"]`);
-        if (domNode instanceof HTMLElement) {
-          const rect = domNode.getBoundingClientRect();
-          setWorkbenchAnchor({
-            x: Math.round(rect.right + 20),
-            y: Math.round(rect.top)
-          });
-        } else {
-          setWorkbenchAnchor(undefined);
-        }
-      }
-      setEditingNodeId(nodeId);
-    },
-    []
-  );
+  const openNodeConfig = useCallback((nodeId: string) => {
+    setEditingNodeId(nodeId);
+  }, []);
 
   // --- Radial action ring (Phase 4.1 / L2M distinct UI) ------------------------
   const soloSelectedNode = useMemo(() => {
@@ -4000,16 +3983,11 @@ function StudioApp() {
           secrets={secrets}
           onRefreshSecrets={refreshSecrets}
           mcpServerDefinitions={mcpServerDefinitions}
-          onClose={() => {
-            setEditingNodeId(null);
-            setWorkbenchAnchor(undefined);
-          }}
+          onClose={() => setEditingNodeId(null)}
           onSave={saveNodeConfig}
           onExecuteStep={() => {
             void handleExecute({ startNodeId: editingNode.id });
           }}
-          presentation="workbench"
-          anchor={workbenchAnchor}
         />
       )}
       <KeyboardShortcutsPanel open={showShortcutsPanel} onClose={() => setShowShortcutsPanel(false)} />

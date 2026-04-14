@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  type CSSProperties,
-  type MouseEvent as ReactMouseEvent
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { LLMProviderConfig, MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNode, EditorNodeData } from "../lib/workflow";
 import {
@@ -39,15 +32,6 @@ interface NodeConfigModalProps {
     color?: EditorNodeData["color"];
   }) => void;
   onExecuteStep: () => void;
-  /**
-   * Presentation style:
-   *   - "modal"      → classic fullscreen overlay (default, backdrop click = nothing).
-   *   - "workbench"  → floating, draggable, pinnable card anchored to the canvas node.
-   *                    No backdrop, canvas stays interactive around the card.
-   */
-  presentation?: "modal" | "workbench";
-  /** Initial pixel position (viewport-relative) for the workbench card. Ignored in modal mode. */
-  anchor?: { x: number; y: number };
 }
 
 const NODE_INPUT_OPTION_ID = "__node_input__";
@@ -508,32 +492,13 @@ export function NodeConfigModal({
   mcpServerDefinitions,
   onClose,
   onSave,
-  onExecuteStep,
-  presentation = "modal",
-  anchor
+  onExecuteStep
 }: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
   const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<"parameters" | "settings">("parameters");
-  const workbenchDefaultWidth = 560;
-  const workbenchDefaultHeight = 520;
-  const [workbenchPos, setWorkbenchPos] = useState<{ x: number; y: number }>(() => {
-    if (!anchor || typeof window === "undefined") return { x: 120, y: 120 };
-    const maxX = Math.max(40, window.innerWidth - workbenchDefaultWidth - 40);
-    const maxY = Math.max(80, window.innerHeight - workbenchDefaultHeight - 80);
-    return {
-      x: Math.min(Math.max(anchor.x, 40), maxX),
-      y: Math.min(Math.max(anchor.y, 80), maxY)
-    };
-  });
-  const [workbenchSize, setWorkbenchSize] = useState<{ w: number; h: number }>({
-    w: workbenchDefaultWidth,
-    h: workbenchDefaultHeight
-  });
-  const [workbenchPinned, setWorkbenchPinned] = useState(false);
-  const [isFullscreenWorkbench, setIsFullscreenWorkbench] = useState(false);
   const [selectedInputId, setSelectedInputId] = useState(NODE_INPUT_OPTION_ID);
   const [discoveredTools, setDiscoveredTools] = useState<MCPToolDefinition[]>([]);
   const [discoverBusy, setDiscoverBusy] = useState(false);
@@ -6310,119 +6275,17 @@ export function NodeConfigModal({
     return nextConfig;
   };
 
-  const isWorkbench = presentation === "workbench" && !isFullscreenWorkbench;
-
-  const beginWorkbenchDrag = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!isWorkbench) return;
-    const target = event.target as HTMLElement;
-    // Ignore drags that start on interactive elements inside the header.
-    if (target.closest("button, input, select, textarea, a")) return;
-    event.preventDefault();
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const base = { ...workbenchPos };
-    const onMove = (ev: MouseEvent) => {
-      const maxX = Math.max(40, window.innerWidth - workbenchSize.w - 20);
-      const maxY = Math.max(60, window.innerHeight - 60);
-      setWorkbenchPos({
-        x: Math.min(Math.max(base.x + (ev.clientX - startX), 0), maxX),
-        y: Math.min(Math.max(base.y + (ev.clientY - startY), 0), maxY)
-      });
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
-  const outerProps = isWorkbench
-    ? {
-        className: "workbench-layer",
-        role: "dialog" as const,
-        "aria-label": "Node workbench"
-      }
-    : {
-        className: "node-modal-backdrop",
-        role: "dialog" as const,
-        "aria-modal": true
-      };
-
-  const shellStyle: CSSProperties | undefined = isWorkbench
-    ? {
-        left: workbenchPos.x,
-        top: workbenchPos.y,
-        width: workbenchSize.w,
-        maxHeight: `min(${workbenchSize.h}px, calc(100vh - 40px))`
-      }
-    : undefined;
-
-  const handleResize = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!isWorkbench) return;
-    event.preventDefault();
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const base = { ...workbenchSize };
-    const onMove = (ev: MouseEvent) => {
-      setWorkbenchSize({
-        w: Math.max(360, Math.min(1100, base.w + (ev.clientX - startX))),
-        h: Math.max(320, Math.min(900, base.h + (ev.clientY - startY)))
-      });
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
-  const shellClassName = isWorkbench
-    ? `workbench-panel${workbenchPinned ? " pinned" : ""}`
-    : "node-modal-shell";
-
   return (
-    <div {...outerProps}>
-      <div className={shellClassName} style={shellStyle}>
-        <div
-          className={isWorkbench ? "node-modal-header workbench-drag-handle" : "node-modal-header"}
-          onMouseDown={beginWorkbenchDrag}
-        >
+    <div className="node-modal-backdrop" role="dialog" aria-modal="true">
+      <div className="node-modal-shell">
+        <div className="node-modal-header">
           <div className="node-modal-title">
-            {isWorkbench && (
-              <span className="workbench-grip" aria-hidden="true" title="Drag to move">⋮⋮</span>
-            )}
             <span className="node-modal-icon">{node.data.nodeType === "agent_orchestrator" ? "AG" : "ND"}</span>
             <strong>{label || node.data.label}</strong>
           </div>
-          <div className="workbench-header-actions">
-            {presentation === "workbench" && (
-              <>
-                <button
-                  type="button"
-                  className="node-modal-close"
-                  title={workbenchPinned ? "Unpin" : "Pin in place (prevents auto-close)"}
-                  aria-label="Toggle pin"
-                  onClick={() => setWorkbenchPinned((v) => !v)}
-                >
-                  {workbenchPinned ? "📌" : "📍"}
-                </button>
-                <button
-                  type="button"
-                  className="node-modal-close"
-                  title={isFullscreenWorkbench ? "Collapse to floating workbench" : "Expand to full screen"}
-                  aria-label="Toggle fullscreen"
-                  onClick={() => setIsFullscreenWorkbench((v) => !v)}
-                >
-                  {isFullscreenWorkbench ? "⇲" : "⇱"}
-                </button>
-              </>
-            )}
-            <button type="button" className="node-modal-close" onClick={onClose} aria-label="Close">
-              x
-            </button>
-          </div>
+          <button type="button" className="node-modal-close" onClick={onClose}>
+            x
+          </button>
         </div>
 
         <div className={showRuntimeInspection ? "node-modal-grid" : "node-modal-grid node-modal-grid-single"}>
@@ -6536,14 +6399,6 @@ export function NodeConfigModal({
             Save changes
           </button>
         </div>
-        {isWorkbench && (
-          <div
-            className="workbench-resize-handle"
-            onMouseDown={handleResize}
-            title="Drag to resize"
-            aria-hidden="true"
-          />
-        )}
       </div>
     </div>
   );
