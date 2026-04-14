@@ -3203,6 +3203,15 @@ export function NodeConfigModal({
               ]}
             />
             {workflowOptionsError ? <div className="cfg-tip">Failed to load workflows: {workflowOptionsError}</div> : null}
+            <SelectField
+              label="Execution Mode"
+              value={toStringValue(config.mode, "sync")}
+              onChange={(next) => setConfig((current) => ({ ...current, mode: next }))}
+              options={[
+                { value: "sync", label: "Synchronous (wait for result)" },
+                { value: "async", label: "Asynchronous (fire and forget)" }
+              ]}
+            />
             <TextAreaField
               label="Input Mapping (JSON object)"
               value={JSON.stringify(asRecord(config.inputMapping), null, 2)}
@@ -3214,32 +3223,81 @@ export function NodeConfigModal({
                   // ignore typing errors
                 }
               }}
-              rows={6}
+              rows={5}
+            />
+            <TextAreaField
+              label="Output Mapping (JSON object)"
+              value={JSON.stringify(asRecord(config.outputMapping), null, 2)}
+              onChange={(next) => {
+                try {
+                  const parsed = JSON.parse(next) as Record<string, unknown>;
+                  setConfig((current) => ({ ...current, outputMapping: parsed }));
+                } catch {
+                  // ignore typing errors
+                }
+              }}
+              rows={5}
             />
             <div className="cfg-tip">
-              Use <code>{"{ \"parent.context.key\": \"child_input_key\" }"}</code> mapping to pass data into the sub-workflow.
+              Map sub-workflow output keys back to parent context. Example: <code>{`{ "child_result": "parent_key" }`}</code>.
             </div>
           </>
         );
-      case "wait_node":
+      case "wait_node": {
+        const resumeMode = toStringValue(config.resumeMode, "timer");
         return (
           <>
-            <NumberField
-              label="Delay (ms)"
-              value={toNumberValue(config.delayMs, 1000)}
-              min={0}
-              step={100}
-              onChange={(next) => setConfig((current) => ({ ...current, delayMs: next }))}
+            <SelectField
+              label="Resume Mode"
+              value={resumeMode}
+              onChange={(next) => setConfig((current) => ({ ...current, resumeMode: next }))}
+              options={[
+                { value: "timer", label: "Timer (delay)" },
+                { value: "webhook", label: "Webhook callback" },
+                { value: "datetime", label: "At specific datetime" }
+              ]}
             />
-            <NumberField
-              label="Max Delay (ms)"
-              value={toNumberValue(config.maxDelayMs, 30000)}
-              min={1}
-              step={100}
-              onChange={(next) => setConfig((current) => ({ ...current, maxDelayMs: next }))}
-            />
+            {resumeMode === "timer" && (
+              <>
+                <NumberField
+                  label="Delay (ms)"
+                  value={toNumberValue(config.delayMs, 1000)}
+                  min={0}
+                  step={100}
+                  onChange={(next) => setConfig((current) => ({ ...current, delayMs: next }))}
+                />
+                <NumberField
+                  label="Max Delay (ms)"
+                  value={toNumberValue(config.maxDelayMs, 30000)}
+                  min={1}
+                  step={100}
+                  onChange={(next) => setConfig((current) => ({ ...current, maxDelayMs: next }))}
+                />
+              </>
+            )}
+            {resumeMode === "webhook" && (
+              <TextField
+                label="Resume Webhook Path"
+                value={toStringValue(config.resumeWebhookPath)}
+                onChange={(next) => setConfig((current) => ({ ...current, resumeWebhookPath: next }))}
+                placeholder="/resume/abc-123"
+              />
+            )}
+            {resumeMode === "datetime" && (
+              <label className="cfg-field">
+                <span>Resume At</span>
+                <input
+                  type="datetime-local"
+                  value={toStringValue(config.resumeAt)}
+                  onChange={(event) =>
+                    setConfig((current) => ({ ...current, resumeAt: event.target.value }))
+                  }
+                />
+              </label>
+            )}
           </>
         );
+      }
       case "http_request":
         return (
           <>
@@ -3849,6 +3907,1023 @@ export function NodeConfigModal({
               CSS, and images.
             </div>
           </>
+        );
+      case "sub_workflow_trigger":
+        return (
+          <div className="cfg-tip">
+            This node receives input from a parent workflow's <code>execute_workflow</code> call. Place it as the
+            entry point of a child workflow; the input mapping defined on the parent flows directly into this
+            node's output context.
+          </div>
+        );
+      case "error_trigger":
+        return (
+          <div className="cfg-tip">
+            Fires when an associated workflow errors. The error payload exposes:
+            <ul>
+              <li><code>trigger_type</code></li>
+              <li><code>source_workflow_id</code></li>
+              <li><code>source_workflow_name</code></li>
+              <li><code>execution_id</code></li>
+              <li><code>error</code></li>
+              <li><code>error_stack</code></li>
+              <li><code>timestamp</code></li>
+            </ul>
+          </div>
+        );
+      case "noop_node":
+        return (
+          <div className="cfg-tip">
+            Pass-through node. Useful as a placeholder, visual marker, or graph join point. Output equals input.
+          </div>
+        );
+      case "stop_and_error":
+        return (
+          <>
+            <TextAreaField
+              label="Error Message"
+              value={toStringValue(config.message, "Workflow stopped")}
+              onChange={(next) => setConfig((current) => ({ ...current, message: next }))}
+              rows={3}
+            />
+            <TextField
+              label="Error Code (optional)"
+              value={toStringValue(config.errorCode)}
+              onChange={(next) => setConfig((current) => ({ ...current, errorCode: next }))}
+              placeholder="VALIDATION_ERROR"
+            />
+            <div className="cfg-tip">
+              Templates support handlebars syntax like <code>{`{{error_message}}`}</code>.
+            </div>
+          </>
+        );
+      case "filter_node": {
+        const conditions = Array.isArray(config.conditions)
+          ? config.conditions.map((entry) => asRecord(entry))
+          : [];
+        const updateConditions = (mutator: (rows: Record<string, unknown>[]) => void) => {
+          setConfig((current) => {
+            const rows = Array.isArray(current.conditions)
+              ? current.conditions.map((item) => asRecord(item))
+              : [];
+            mutator(rows);
+            return { ...current, conditions: rows };
+          });
+        };
+        const operatorOptions = [
+          { value: "eq", label: "Equals" },
+          { value: "neq", label: "Not Equals" },
+          { value: "contains", label: "Contains" },
+          { value: "not_contains", label: "Not Contains" },
+          { value: "starts_with", label: "Starts With" },
+          { value: "ends_with", label: "Ends With" },
+          { value: "gt", label: "Greater Than" },
+          { value: "gte", label: "Greater or Equal" },
+          { value: "lt", label: "Less Than" },
+          { value: "lte", label: "Less or Equal" },
+          { value: "is_empty", label: "Is Empty" },
+          { value: "is_not_empty", label: "Is Not Empty" },
+          { value: "regex", label: "Matches Regex" }
+        ];
+        return (
+          <>
+            <SelectField
+              label="Combine With"
+              value={toStringValue(config.combineWith, "AND").toUpperCase()}
+              onChange={(next) => setConfig((current) => ({ ...current, combineWith: next }))}
+              options={[
+                { value: "AND", label: "AND (all match)" },
+                { value: "OR", label: "OR (any match)" }
+              ]}
+            />
+            <SelectField
+              label="Pass Mode"
+              value={toStringValue(config.passMode, "pass")}
+              onChange={(next) => setConfig((current) => ({ ...current, passMode: next }))}
+              options={[
+                { value: "pass", label: "Pass items that match" },
+                { value: "reject", label: "Reject items that match" }
+              ]}
+            />
+            <div className="cfg-group">
+              <h4>Conditions</h4>
+              {conditions.length === 0 && (
+                <div className="cfg-tip">No conditions defined. Add at least one to filter items.</div>
+              )}
+              {conditions.map((condition, index) => (
+                <div key={`filter-cond-${index}`} className="cfg-assignment-row">
+                  <div className="cfg-grid-2">
+                    <TextField
+                      label="Field"
+                      value={toStringValue(condition.field)}
+                      onChange={(next) =>
+                        updateConditions((rows) => {
+                          rows[index] = { ...rows[index], field: next };
+                        })
+                      }
+                      placeholder="status"
+                    />
+                    <SelectField
+                      label="Operator"
+                      value={toStringValue(condition.operator, "eq")}
+                      onChange={(next) =>
+                        updateConditions((rows) => {
+                          rows[index] = { ...rows[index], operator: next };
+                        })
+                      }
+                      options={operatorOptions}
+                    />
+                  </div>
+                  <TextField
+                    label="Value"
+                    value={toStringValue(condition.value)}
+                    onChange={(next) =>
+                      updateConditions((rows) => {
+                        rows[index] = { ...rows[index], value: next };
+                      })
+                    }
+                    placeholder="active"
+                  />
+                  <div className="cfg-inline-actions">
+                    <button
+                      type="button"
+                      className="header-btn danger"
+                      onClick={() =>
+                        updateConditions((rows) => {
+                          rows.splice(index, 1);
+                        })
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div className="cfg-inline-actions">
+                <button
+                  type="button"
+                  className="header-btn"
+                  onClick={() =>
+                    updateConditions((rows) => {
+                      rows.push({ field: "", operator: "eq", value: "" });
+                    })
+                  }
+                >
+                  Add Condition
+                </button>
+              </div>
+            </div>
+          </>
+        );
+      }
+      case "aggregate_node":
+        return (
+          <>
+            <SelectField
+              label="Operation"
+              value={toStringValue(config.operation, "sum")}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "sum", label: "Sum" },
+                { value: "avg", label: "Average" },
+                { value: "min", label: "Min" },
+                { value: "max", label: "Max" },
+                { value: "count", label: "Count" },
+                { value: "concatenate", label: "Concatenate" }
+              ]}
+            />
+            <TextField
+              label="Field"
+              value={toStringValue(config.field)}
+              onChange={(next) => setConfig((current) => ({ ...current, field: next }))}
+              placeholder="amount"
+            />
+            <TextField
+              label="Group By (optional)"
+              value={toStringValue(config.groupBy)}
+              onChange={(next) => setConfig((current) => ({ ...current, groupBy: next }))}
+              placeholder="region"
+            />
+            <TextField
+              label="Input Key (optional)"
+              value={toStringValue(config.inputKey)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+              placeholder="items"
+            />
+          </>
+        );
+      case "split_out_node":
+        return (
+          <>
+            <TextField
+              label="Field (array source)"
+              value={toStringValue(config.field)}
+              onChange={(next) => setConfig((current) => ({ ...current, field: next }))}
+              placeholder="items"
+            />
+            <TextField
+              label="Destination Field (optional)"
+              value={toStringValue(config.destinationField)}
+              onChange={(next) => setConfig((current) => ({ ...current, destinationField: next }))}
+              placeholder="item"
+            />
+            <TextField
+              label="Input Key (optional)"
+              value={toStringValue(config.inputKey)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+            />
+          </>
+        );
+      case "sort_node": {
+        const order = toStringValue(config.order, "asc");
+        return (
+          <>
+            <TextField
+              label="Field"
+              value={toStringValue(config.field)}
+              onChange={(next) => setConfig((current) => ({ ...current, field: next }))}
+              placeholder="name"
+            />
+            <SelectField
+              label="Order"
+              value={order}
+              onChange={(next) => setConfig((current) => ({ ...current, order: next }))}
+              options={[
+                { value: "asc", label: "Ascending" },
+                { value: "desc", label: "Descending" },
+                { value: "random", label: "Random" }
+              ]}
+            />
+            {order !== "random" && (
+              <TextAreaField
+                label="Custom Expression (optional)"
+                value={toStringValue(config.expression)}
+                onChange={(next) => setConfig((current) => ({ ...current, expression: next }))}
+                rows={3}
+              />
+            )}
+            <TextField
+              label="Input Key (optional)"
+              value={toStringValue(config.inputKey)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+              placeholder="items"
+            />
+          </>
+        );
+      }
+      case "limit_node":
+        return (
+          <>
+            <NumberField
+              label="Max Items"
+              value={toNumberValue(config.maxItems, 10)}
+              min={1}
+              step={1}
+              onChange={(next) => setConfig((current) => ({ ...current, maxItems: next }))}
+            />
+            <SelectField
+              label="Keep"
+              value={toStringValue(config.keep, "first")}
+              onChange={(next) => setConfig((current) => ({ ...current, keep: next }))}
+              options={[
+                { value: "first", label: "First N" },
+                { value: "last", label: "Last N" }
+              ]}
+            />
+            <TextField
+              label="Input Key (optional)"
+              value={toStringValue(config.inputKey)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+            />
+          </>
+        );
+      case "remove_duplicates_node": {
+        const fields = Array.isArray(config.fields) ? config.fields.map(String) : [];
+        const updateFields = (mutator: (rows: string[]) => void) => {
+          setConfig((current) => {
+            const rows = Array.isArray(current.fields) ? current.fields.map(String) : [];
+            mutator(rows);
+            return { ...current, fields: rows };
+          });
+        };
+        return (
+          <>
+            <div className="cfg-group">
+              <h4>Compare Fields (empty = all keys)</h4>
+              {fields.map((field, index) => (
+                <div key={`dedup-${index}`} className="cfg-assignment-row">
+                  <TextField
+                    label={`Field ${index + 1}`}
+                    value={field}
+                    onChange={(next) =>
+                      updateFields((rows) => {
+                        rows[index] = next;
+                      })
+                    }
+                    placeholder="id"
+                  />
+                  <div className="cfg-inline-actions">
+                    <button
+                      type="button"
+                      className="header-btn danger"
+                      onClick={() =>
+                        updateFields((rows) => {
+                          rows.splice(index, 1);
+                        })
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div className="cfg-inline-actions">
+                <button
+                  type="button"
+                  className="header-btn"
+                  onClick={() => updateFields((rows) => rows.push(""))}
+                >
+                  Add Field
+                </button>
+              </div>
+            </div>
+            <TextField
+              label="Input Key (optional)"
+              value={toStringValue(config.inputKey)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+            />
+          </>
+        );
+      }
+      case "summarize_node": {
+        const summaries = Array.isArray(config.fieldsToSummarize)
+          ? config.fieldsToSummarize.map((entry) => asRecord(entry))
+          : [];
+        const groupBys = Array.isArray(config.fieldsToGroupBy)
+          ? config.fieldsToGroupBy.map(String)
+          : [];
+        const aggOptions = [
+          { value: "sum", label: "Sum" },
+          { value: "avg", label: "Average" },
+          { value: "min", label: "Min" },
+          { value: "max", label: "Max" },
+          { value: "count", label: "Count" },
+          { value: "concatenate", label: "Concatenate" }
+        ];
+        return (
+          <>
+            <div className="cfg-group">
+              <h4>Fields to Summarize</h4>
+              {summaries.map((row, index) => (
+                <div key={`sum-${index}`} className="cfg-assignment-row">
+                  <div className="cfg-grid-2">
+                    <TextField
+                      label="Field"
+                      value={toStringValue(row.field)}
+                      onChange={(next) =>
+                        setConfig((current) => {
+                          const rows = Array.isArray(current.fieldsToSummarize)
+                            ? current.fieldsToSummarize.map((item) => asRecord(item))
+                            : [];
+                          rows[index] = { ...rows[index], field: next };
+                          return { ...current, fieldsToSummarize: rows };
+                        })
+                      }
+                    />
+                    <SelectField
+                      label="Aggregation"
+                      value={toStringValue(row.aggregation, "sum")}
+                      onChange={(next) =>
+                        setConfig((current) => {
+                          const rows = Array.isArray(current.fieldsToSummarize)
+                            ? current.fieldsToSummarize.map((item) => asRecord(item))
+                            : [];
+                          rows[index] = { ...rows[index], aggregation: next };
+                          return { ...current, fieldsToSummarize: rows };
+                        })
+                      }
+                      options={aggOptions}
+                    />
+                  </div>
+                  <div className="cfg-inline-actions">
+                    <button
+                      type="button"
+                      className="header-btn danger"
+                      onClick={() =>
+                        setConfig((current) => {
+                          const rows = Array.isArray(current.fieldsToSummarize)
+                            ? current.fieldsToSummarize.map((item) => asRecord(item))
+                            : [];
+                          rows.splice(index, 1);
+                          return { ...current, fieldsToSummarize: rows };
+                        })
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div className="cfg-inline-actions">
+                <button
+                  type="button"
+                  className="header-btn"
+                  onClick={() =>
+                    setConfig((current) => {
+                      const rows = Array.isArray(current.fieldsToSummarize)
+                        ? current.fieldsToSummarize.map((item) => asRecord(item))
+                        : [];
+                      rows.push({ field: "", aggregation: "sum" });
+                      return { ...current, fieldsToSummarize: rows };
+                    })
+                  }
+                >
+                  Add Summary
+                </button>
+              </div>
+            </div>
+            <div className="cfg-group">
+              <h4>Group By Fields</h4>
+              {groupBys.map((field, index) => (
+                <div key={`grpby-${index}`} className="cfg-assignment-row">
+                  <TextField
+                    label={`Field ${index + 1}`}
+                    value={field}
+                    onChange={(next) =>
+                      setConfig((current) => {
+                        const rows = Array.isArray(current.fieldsToGroupBy)
+                          ? current.fieldsToGroupBy.map(String)
+                          : [];
+                        rows[index] = next;
+                        return { ...current, fieldsToGroupBy: rows };
+                      })
+                    }
+                  />
+                  <div className="cfg-inline-actions">
+                    <button
+                      type="button"
+                      className="header-btn danger"
+                      onClick={() =>
+                        setConfig((current) => {
+                          const rows = Array.isArray(current.fieldsToGroupBy)
+                            ? current.fieldsToGroupBy.map(String)
+                            : [];
+                          rows.splice(index, 1);
+                          return { ...current, fieldsToGroupBy: rows };
+                        })
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div className="cfg-inline-actions">
+                <button
+                  type="button"
+                  className="header-btn"
+                  onClick={() =>
+                    setConfig((current) => {
+                      const rows = Array.isArray(current.fieldsToGroupBy)
+                        ? current.fieldsToGroupBy.map(String)
+                        : [];
+                      rows.push("");
+                      return { ...current, fieldsToGroupBy: rows };
+                    })
+                  }
+                >
+                  Add Group-By Field
+                </button>
+              </div>
+            </div>
+          </>
+        );
+      }
+      case "compare_datasets_node":
+        return (
+          <>
+            <TextField
+              label="Input A"
+              value={toStringValue(config.inputA)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputA: next }))}
+              placeholder="datasetA"
+            />
+            <TextField
+              label="Input B"
+              value={toStringValue(config.inputB)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputB: next }))}
+              placeholder="datasetB"
+            />
+            <TextField
+              label="Key Field"
+              value={toStringValue(config.keyField)}
+              onChange={(next) => setConfig((current) => ({ ...current, keyField: next }))}
+              placeholder="id"
+            />
+          </>
+        );
+      case "rename_keys_node": {
+        const renames = Array.isArray(config.renames)
+          ? config.renames.map((entry) => asRecord(entry))
+          : [];
+        const update = (mutator: (rows: Record<string, unknown>[]) => void) => {
+          setConfig((current) => {
+            const rows = Array.isArray(current.renames)
+              ? current.renames.map((item) => asRecord(item))
+              : [];
+            mutator(rows);
+            return { ...current, renames: rows };
+          });
+        };
+        return (
+          <>
+            <div className="cfg-group">
+              <h4>Renames</h4>
+              {renames.map((row, index) => (
+                <div key={`rename-${index}`} className="cfg-assignment-row">
+                  <div className="cfg-grid-2">
+                    <TextField
+                      label="From"
+                      value={toStringValue(row.from)}
+                      onChange={(next) => update((rows) => { rows[index] = { ...rows[index], from: next }; })}
+                    />
+                    <TextField
+                      label="To"
+                      value={toStringValue(row.to)}
+                      onChange={(next) => update((rows) => { rows[index] = { ...rows[index], to: next }; })}
+                    />
+                  </div>
+                  <div className="cfg-inline-actions">
+                    <button
+                      type="button"
+                      className="header-btn danger"
+                      onClick={() => update((rows) => { rows.splice(index, 1); })}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div className="cfg-inline-actions">
+                <button
+                  type="button"
+                  className="header-btn"
+                  onClick={() => update((rows) => { rows.push({ from: "", to: "" }); })}
+                >
+                  Add Rename
+                </button>
+              </div>
+            </div>
+            <TextField
+              label="Input Key (optional)"
+              value={toStringValue(config.inputKey)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+            />
+          </>
+        );
+      }
+      case "edit_fields_node": {
+        const operations = Array.isArray(config.operations)
+          ? config.operations.map((entry) => asRecord(entry))
+          : [];
+        const update = (mutator: (rows: Record<string, unknown>[]) => void) => {
+          setConfig((current) => {
+            const rows = Array.isArray(current.operations)
+              ? current.operations.map((item) => asRecord(item))
+              : [];
+            mutator(rows);
+            return { ...current, operations: rows };
+          });
+        };
+        return (
+          <>
+            <div className="cfg-group">
+              <h4>Operations</h4>
+              {operations.map((row, index) => {
+                const op = toStringValue(row.op, "set");
+                return (
+                  <div key={`edit-${index}`} className="cfg-assignment-row">
+                    <div className="cfg-grid-2">
+                      <SelectField
+                        label="Operation"
+                        value={op}
+                        onChange={(next) => update((rows) => { rows[index] = { ...rows[index], op: next }; })}
+                        options={[
+                          { value: "set", label: "Set" },
+                          { value: "remove", label: "Remove" },
+                          { value: "rename", label: "Rename" }
+                        ]}
+                      />
+                      <TextField
+                        label="Field"
+                        value={toStringValue(row.field)}
+                        onChange={(next) => update((rows) => { rows[index] = { ...rows[index], field: next }; })}
+                      />
+                    </div>
+                    {op === "set" && (
+                      <TextField
+                        label="Value"
+                        value={toStringValue(row.value)}
+                        onChange={(next) => update((rows) => { rows[index] = { ...rows[index], value: next }; })}
+                      />
+                    )}
+                    {op === "rename" && (
+                      <TextField
+                        label="New Name"
+                        value={toStringValue(row.newName)}
+                        onChange={(next) => update((rows) => { rows[index] = { ...rows[index], newName: next }; })}
+                      />
+                    )}
+                    <div className="cfg-inline-actions">
+                      <button
+                        type="button"
+                        className="header-btn danger"
+                        onClick={() => update((rows) => { rows.splice(index, 1); })}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="cfg-inline-actions">
+                <button
+                  type="button"
+                  className="header-btn"
+                  onClick={() => update((rows) => { rows.push({ op: "set", field: "", value: "" }); })}
+                >
+                  Add Operation
+                </button>
+              </div>
+            </div>
+            <TextField
+              label="Input Key (optional)"
+              value={toStringValue(config.inputKey)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+            />
+          </>
+        );
+      }
+      case "date_time_node": {
+        const operation = toStringValue(config.operation, "format");
+        return (
+          <>
+            <SelectField
+              label="Operation"
+              value={operation}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "format", label: "Format" },
+                { value: "parse", label: "Parse" },
+                { value: "add", label: "Add" },
+                { value: "subtract", label: "Subtract" },
+                { value: "compare", label: "Compare" },
+                { value: "now", label: "Now" }
+              ]}
+            />
+            {operation !== "now" && (
+              <TextField
+                label="Value"
+                value={toStringValue(config.value)}
+                onChange={(next) => setConfig((current) => ({ ...current, value: next }))}
+                placeholder="{{now}}"
+              />
+            )}
+            {(operation === "format" || operation === "parse") && (
+              <TextField
+                label="Format"
+                value={toStringValue(config.format, "iso")}
+                onChange={(next) => setConfig((current) => ({ ...current, format: next }))}
+                placeholder="iso"
+              />
+            )}
+            {(operation === "add" || operation === "subtract") && (
+              <>
+                <SelectField
+                  label="Unit"
+                  value={toStringValue(config.unit, "second")}
+                  onChange={(next) => setConfig((current) => ({ ...current, unit: next }))}
+                  options={[
+                    { value: "ms", label: "Milliseconds" },
+                    { value: "second", label: "Seconds" },
+                    { value: "minute", label: "Minutes" },
+                    { value: "hour", label: "Hours" },
+                    { value: "day", label: "Days" },
+                    { value: "week", label: "Weeks" },
+                    { value: "month", label: "Months" },
+                    { value: "year", label: "Years" }
+                  ]}
+                />
+                <NumberField
+                  label="Amount"
+                  value={toNumberValue(config.amount, 1)}
+                  step={1}
+                  onChange={(next) => setConfig((current) => ({ ...current, amount: next }))}
+                />
+              </>
+            )}
+            {operation === "compare" && (
+              <TextField
+                label="Compare To"
+                value={toStringValue(config.compareTo)}
+                onChange={(next) => setConfig((current) => ({ ...current, compareTo: next }))}
+              />
+            )}
+          </>
+        );
+      }
+      case "crypto_node":
+        return (
+          <>
+            <SelectField
+              label="Operation"
+              value={toStringValue(config.operation, "hash")}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "hash", label: "Hash" },
+                { value: "hmac", label: "HMAC" },
+                { value: "encrypt", label: "Encrypt" },
+                { value: "decrypt", label: "Decrypt" },
+                { value: "sign", label: "Sign" },
+                { value: "verify", label: "Verify" },
+                { value: "random", label: "Random Bytes" }
+              ]}
+            />
+            <TextField
+              label="Algorithm"
+              value={toStringValue(config.algorithm, "sha256")}
+              onChange={(next) => setConfig((current) => ({ ...current, algorithm: next }))}
+              placeholder="sha256"
+            />
+            <label className="cfg-field">
+              <span>Key (secret)</span>
+              <input
+                type="password"
+                value={toStringValue(config.key)}
+                onChange={(event) => setConfig((current) => ({ ...current, key: event.target.value }))}
+              />
+            </label>
+            <TextAreaField
+              label="Data"
+              value={toStringValue(config.data)}
+              onChange={(next) => setConfig((current) => ({ ...current, data: next }))}
+              rows={4}
+            />
+            <SelectField
+              label="Encoding"
+              value={toStringValue(config.encoding, "hex")}
+              onChange={(next) => setConfig((current) => ({ ...current, encoding: next }))}
+              options={[
+                { value: "hex", label: "Hex" },
+                { value: "base64", label: "Base64" },
+                { value: "utf8", label: "UTF-8" }
+              ]}
+            />
+          </>
+        );
+      case "jwt_node": {
+        const operation = toStringValue(config.operation, "sign");
+        return (
+          <>
+            <SelectField
+              label="Operation"
+              value={operation}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "sign", label: "Sign" },
+                { value: "decode", label: "Decode" },
+                { value: "verify", label: "Verify" }
+              ]}
+            />
+            <SelectField
+              label="Algorithm"
+              value={toStringValue(config.algorithm, "HS256")}
+              onChange={(next) => setConfig((current) => ({ ...current, algorithm: next }))}
+              options={[
+                { value: "HS256", label: "HS256" },
+                { value: "HS384", label: "HS384" },
+                { value: "HS512", label: "HS512" }
+              ]}
+            />
+            {operation !== "decode" && (
+              <label className="cfg-field">
+                <span>Secret</span>
+                <input
+                  type="password"
+                  value={toStringValue(config.secret)}
+                  onChange={(event) => setConfig((current) => ({ ...current, secret: event.target.value }))}
+                />
+              </label>
+            )}
+            {operation === "sign" && (
+              <TextAreaField
+                label="Payload (JSON)"
+                value={JSON.stringify(asRecord(config.payload), null, 2)}
+                onChange={(next) => {
+                  try {
+                    const parsed = JSON.parse(next);
+                    setConfig((current) => ({ ...current, payload: parsed }));
+                  } catch {
+                    // ignore
+                  }
+                }}
+                rows={6}
+              />
+            )}
+            {(operation === "decode" || operation === "verify") && (
+              <TextField
+                label="Token"
+                value={toStringValue(config.token)}
+                onChange={(next) => setConfig((current) => ({ ...current, token: next }))}
+              />
+            )}
+          </>
+        );
+      }
+      case "xml_node":
+        return (
+          <>
+            <SelectField
+              label="Operation"
+              value={toStringValue(config.operation, "toJson")}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "toJson", label: "XML to JSON" },
+                { value: "toXml", label: "JSON to XML" }
+              ]}
+            />
+            <TextAreaField
+              label="Data"
+              value={toStringValue(config.data)}
+              onChange={(next) => setConfig((current) => ({ ...current, data: next }))}
+              rows={6}
+            />
+          </>
+        );
+      case "html_node": {
+        const operation = toStringValue(config.operation, "extract");
+        const selectors = Array.isArray(config.selectors)
+          ? config.selectors.map((entry) => asRecord(entry))
+          : [];
+        const update = (mutator: (rows: Record<string, unknown>[]) => void) => {
+          setConfig((current) => {
+            const rows = Array.isArray(current.selectors)
+              ? current.selectors.map((item) => asRecord(item))
+              : [];
+            mutator(rows);
+            return { ...current, selectors: rows };
+          });
+        };
+        return (
+          <>
+            <SelectField
+              label="Operation"
+              value={operation}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "extract", label: "Extract" },
+                { value: "generate", label: "Generate" }
+              ]}
+            />
+            <TextAreaField
+              label="HTML"
+              value={toStringValue(config.html)}
+              onChange={(next) => setConfig((current) => ({ ...current, html: next }))}
+              rows={6}
+            />
+            {operation === "extract" && (
+              <div className="cfg-group">
+                <h4>Selectors</h4>
+                {selectors.map((row, index) => (
+                  <div key={`sel-${index}`} className="cfg-assignment-row">
+                    <div className="cfg-grid-2">
+                      <TextField
+                        label="Key"
+                        value={toStringValue(row.key)}
+                        onChange={(next) => update((rows) => { rows[index] = { ...rows[index], key: next }; })}
+                      />
+                      <TextField
+                        label="Selector"
+                        value={toStringValue(row.selector)}
+                        onChange={(next) => update((rows) => { rows[index] = { ...rows[index], selector: next }; })}
+                      />
+                    </div>
+                    <div className="cfg-inline-actions">
+                      <button
+                        type="button"
+                        className="header-btn danger"
+                        onClick={() => update((rows) => { rows.splice(index, 1); })}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                <div className="cfg-inline-actions">
+                  <button
+                    type="button"
+                    className="header-btn"
+                    onClick={() => update((rows) => { rows.push({ key: "", selector: "" }); })}
+                  >
+                    Add Selector
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        );
+      }
+      case "convert_to_file_node":
+        return (
+          <>
+            <SelectField
+              label="Format"
+              value={toStringValue(config.format, "json")}
+              onChange={(next) => setConfig((current) => ({ ...current, format: next }))}
+              options={[
+                { value: "csv", label: "CSV" },
+                { value: "json", label: "JSON" },
+                { value: "html", label: "HTML" },
+                { value: "text", label: "Text" }
+              ]}
+            />
+            <TextField
+              label="Filename"
+              value={toStringValue(config.filename, "out.json")}
+              onChange={(next) => setConfig((current) => ({ ...current, filename: next }))}
+            />
+            <TextField
+              label="Input Key (optional)"
+              value={toStringValue(config.inputKey)}
+              onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+            />
+          </>
+        );
+      case "extract_from_file_node": {
+        const format = toStringValue(config.format, "csv");
+        return (
+          <>
+            <SelectField
+              label="Format"
+              value={format}
+              onChange={(next) => setConfig((current) => ({ ...current, format: next }))}
+              options={[
+                { value: "csv", label: "CSV" },
+                { value: "json", label: "JSON" },
+                { value: "xml", label: "XML" },
+                { value: "pdf", label: "PDF" },
+                { value: "excel", label: "Excel" }
+              ]}
+            />
+            <TextAreaField
+              label="Data"
+              value={toStringValue(config.data)}
+              onChange={(next) => setConfig((current) => ({ ...current, data: next }))}
+              rows={6}
+            />
+            {(format === "pdf" || format === "excel") && (
+              <div className="cfg-tip">
+                Note: <strong>{format.toUpperCase()}</strong> extraction is not yet implemented in the core executor.
+              </div>
+            )}
+          </>
+        );
+      }
+      case "compression_node": {
+        const operation = toStringValue(config.operation, "gzip");
+        return (
+          <>
+            <SelectField
+              label="Operation"
+              value={operation}
+              onChange={(next) => setConfig((current) => ({ ...current, operation: next }))}
+              options={[
+                { value: "gzip", label: "Gzip" },
+                { value: "gunzip", label: "Gunzip" },
+                { value: "zip", label: "Zip" },
+                { value: "unzip", label: "Unzip" }
+              ]}
+            />
+            <TextAreaField
+              label="Data"
+              value={toStringValue(config.data)}
+              onChange={(next) => setConfig((current) => ({ ...current, data: next }))}
+              rows={5}
+            />
+            {(operation === "zip" || operation === "unzip") && (
+              <div className="cfg-tip">
+                Note: <strong>zip/unzip</strong> are not yet supported. Use gzip/gunzip for now.
+              </div>
+            )}
+          </>
+        );
+      }
+      case "edit_image_node":
+        return (
+          <div className="cfg-tip">
+            Image editing requires optional native dependencies and currently returns
+            <code> NOT_IMPLEMENTED</code>. This editor is a placeholder until image support lands.
+          </div>
         );
       default:
         return (

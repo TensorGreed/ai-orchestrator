@@ -1141,3 +1141,58 @@ describe("execution resilience and lifecycle", () => {
     expect(body.output?.result).toBe("from-selected-step");
   });
 });
+
+describe("node definitions surface (Phase 1 + 2)", () => {
+  it("exposes all 23 new Phase 1 + Phase 2 node types via /api/definitions", async () => {
+    const context = await createTestContext();
+    context.authService.register({
+      email: "viewer@example.com",
+      password: "ViewerPass123!",
+      role: "viewer"
+    });
+    const login = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "viewer@example.com", password: "ViewerPass123!" }
+    });
+    const cookie = extractCookie(login.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
+
+    const response = await context.app.inject({
+      method: "GET",
+      url: "/api/definitions",
+      headers: { cookie }
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ nodes: Array<{ type: string }> }>();
+    const types = new Set(body.nodes.map((n) => n.type));
+
+    const required = [
+      "sub_workflow_trigger",
+      "error_trigger",
+      "filter_node",
+      "stop_and_error",
+      "noop_node",
+      "aggregate_node",
+      "split_out_node",
+      "sort_node",
+      "limit_node",
+      "remove_duplicates_node",
+      "summarize_node",
+      "compare_datasets_node",
+      "rename_keys_node",
+      "edit_fields_node",
+      "date_time_node",
+      "crypto_node",
+      "jwt_node",
+      "xml_node",
+      "html_node",
+      "convert_to_file_node",
+      "extract_from_file_node",
+      "compression_node",
+      "edit_image_node"
+    ];
+    for (const type of required) {
+      expect(types.has(type), `expected node type ${type}`).toBe(true);
+    }
+  });
+});
