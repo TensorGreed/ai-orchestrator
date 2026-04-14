@@ -150,6 +150,8 @@ interface WorkflowCanvasAreaProps {
   onClearCanvas: () => void;
   debugMode: boolean;
   onDebugModeChange: (next: boolean) => void;
+  onExecuteWorkflow: () => void;
+  onExecuteWebhook: () => void;
   busy: boolean;
   onLogsResizeStart: (event: ReactMouseEvent<HTMLDivElement>) => void;
   logsTab: LogsTab;
@@ -205,6 +207,8 @@ export function WorkflowCanvasArea({
   onClearCanvas,
   debugMode,
   onDebugModeChange,
+  onExecuteWorkflow,
+  onExecuteWebhook,
   busy,
   onLogsResizeStart,
   logsTab,
@@ -554,6 +558,12 @@ export function WorkflowCanvasArea({
           )}
 
           <div className="execute-strip">
+            <button className="execute-btn" onClick={onExecuteWorkflow} disabled={busy}>
+              Execute workflow
+            </button>
+            <button className="execute-btn secondary" onClick={onExecuteWebhook} disabled={busy}>
+              Webhook run
+            </button>
             <button
               className={debugMode ? "execute-btn" : "execute-btn secondary"}
               onClick={() => onDebugModeChange(!debugMode)}

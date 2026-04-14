@@ -26,8 +26,10 @@ import {
 import {
   executeCodeNodeSandbox,
   executeWorkflow,
+  evaluateExpression,
   exportWorkflowToJson,
   importWorkflowFromJson,
+  renderExpressionTemplate,
   validateWorkflowGraph
 } from "@ai-orchestrator/workflow-engine";
 import { SqliteStore } from "./db/database";
@@ -134,6 +136,39 @@ const providerTestSchema = z.object({
   }),
   prompt: z.string().optional(),
   systemPrompt: z.string().optional()
+});
+
+const pinDataSchema = z
+  .object({
+    data: z.unknown()
+  })
+  .superRefine((value, context) => {
+    if (!Object.prototype.hasOwnProperty.call(value, "data")) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["data"],
+        message: "Required"
+      });
+    }
+  });
+
+const expressionPreviewSchema = z.object({
+  expression: z.string(),
+  mode: z.enum(["expression", "template"]).optional(),
+  context: z
+    .object({
+      input: z.unknown().optional(),
+      vars: z.record(z.string(), z.unknown()).optional(),
+      nodeOutputs: z.record(z.string(), z.unknown()).optional(),
+      workflow: z
+        .object({
+          id: z.string().optional(),
+          name: z.string().optional()
+        })
+        .optional(),
+      executionId: z.string().optional()
+    })
+    .optional()
 });
 
 const workflowVariablesSchema = z.object({
@@ -445,6 +480,27 @@ const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"])
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function extractNodeOutputsFromResults(nodeResults: unknown): Record<string, unknown> {
+  const outputs: Record<string, unknown> = {};
+  if (!Array.isArray(nodeResults)) {
+    return outputs;
+  }
+
+  for (const entry of nodeResults) {
+    const result = asRecord(entry);
+    const nodeId = typeof result.nodeId === "string" ? result.nodeId : "";
+    if (!nodeId || !hasOwnRecordKey(result, "output")) {
+      continue;
+    }
+    outputs[nodeId] = result.output;
+  }
+  return outputs;
 }
 
 function normalizeWebhookPath(value: unknown, fallback: string): string {
@@ -823,6 +879,10 @@ export function createApp(
   const runWorkflowExecution = async (input: {
     workflow: Workflow;
     startNodeId?: string;
+    runMode?: "workflow" | "single_node";
+    usePinnedData?: boolean;
+    pinnedData?: Record<string, unknown>;
+    nodeOutputs?: Record<string, unknown>;
     webhookPayload?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     systemPrompt?: string;
@@ -845,6 +905,10 @@ export function createApp(
       {
         workflow: input.workflow,
         startNodeId: input.startNodeId,
+        runMode: input.runMode,
+        usePinnedData: input.usePinnedData,
+        pinnedData: input.pinnedData,
+        nodeOutputs: input.nodeOutputs,
         input: input.directInput,
         webhookPayload: input.webhookPayload,
         variables: input.variables,
@@ -1188,6 +1252,72 @@ export function createApp(
             "Execution LLM-delta hook failed"
           );
         }
+      }
+    };
+  };
+
+  type ParsedWorkflowExecutePayload = z.infer<typeof workflowExecuteRequestSchema>;
+  const prepareWorkflowExecutionPayload = (
+    payload: ParsedWorkflowExecutePayload,
+    reply: FastifyReply
+  ):
+    | {
+        payload: ParsedWorkflowExecutePayload;
+        nodeOutputs: Record<string, unknown>;
+        requestInput: Record<string, unknown>;
+      }
+    | null => {
+    const sourceExecutionId = typeof payload.sourceExecutionId === "string" && payload.sourceExecutionId.trim()
+      ? payload.sourceExecutionId.trim()
+      : undefined;
+    let replayInput: Record<string, unknown> = {};
+    let replayNodeOutputs: Record<string, unknown> = {};
+
+    if (sourceExecutionId) {
+      const sourceExecution = store.getExecutionHistory(sourceExecutionId);
+      if (!sourceExecution) {
+        reply.code(404);
+        return null;
+      }
+      replayInput = asRecord(sourceExecution.input);
+      replayNodeOutputs = extractNodeOutputsFromResults(sourceExecution.nodeResults);
+    }
+
+    const mergedPayload: ParsedWorkflowExecutePayload = {
+      ...replayInput,
+      ...payload,
+      input: payload.input ?? asRecord(replayInput.input),
+      variables: payload.variables ?? asRecord(replayInput.variables),
+      system_prompt:
+        payload.system_prompt ??
+        (typeof replayInput.system_prompt === "string" ? replayInput.system_prompt : undefined),
+      user_prompt:
+        payload.user_prompt ??
+        (typeof replayInput.user_prompt === "string" ? replayInput.user_prompt : undefined),
+      sessionId:
+        payload.sessionId ??
+        (typeof replayInput.sessionId === "string" ? replayInput.sessionId : undefined),
+      session_id:
+        payload.session_id ??
+        (typeof replayInput.session_id === "string" ? replayInput.session_id : undefined),
+      executionTimeoutMs:
+        payload.executionTimeoutMs ??
+        (typeof replayInput.executionTimeoutMs === "number" ? replayInput.executionTimeoutMs : undefined),
+      execution_timeout_ms:
+        payload.execution_timeout_ms ??
+        (typeof replayInput.execution_timeout_ms === "number" ? replayInput.execution_timeout_ms : undefined),
+      nodeOutputs: {
+        ...replayNodeOutputs,
+        ...asRecord(payload.nodeOutputs)
+      }
+    };
+
+    return {
+      payload: mergedPayload,
+      nodeOutputs: asRecord(mergedPayload.nodeOutputs),
+      requestInput: {
+        ...mergedPayload,
+        replayedFromExecutionId: sourceExecutionId
       }
     };
   };
@@ -2044,6 +2174,86 @@ export function createApp(
     }
   );
 
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/pins", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    return {
+      workflowId: workflow.id,
+      pinnedData: asRecord(workflow.pinnedData)
+    };
+  });
+
+  app.put<{ Params: { id: string; nodeId: string }; Body: unknown }>(
+    "/api/workflows/:id/pins/:nodeId",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const workflow = store.getWorkflow(request.params.id);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      if (!workflow.nodes.some((node) => node.id === request.params.nodeId)) {
+        reply.code(404);
+        return { error: "Node not found" };
+      }
+      const parsed = pinDataSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "Invalid pin payload", details: parsed.error.issues };
+      }
+      const nextWorkflow: Workflow = {
+        ...workflow,
+        pinnedData: {
+          ...asRecord(workflow.pinnedData),
+          [request.params.nodeId]: parsed.data.data
+        }
+      };
+      const saved = store.upsertWorkflow(nextWorkflow);
+      schedulerService?.reloadWorkflow(saved.id);
+      triggerService?.reloadWorkflow(saved.id);
+      return {
+        workflowId: saved.id,
+        nodeId: request.params.nodeId,
+        data: asRecord(saved.pinnedData)[request.params.nodeId],
+        pinnedData: asRecord(saved.pinnedData)
+      };
+    }
+  );
+
+  app.delete<{ Params: { id: string; nodeId: string } }>(
+    "/api/workflows/:id/pins/:nodeId",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const workflow = store.getWorkflow(request.params.id);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const pinnedData = { ...asRecord(workflow.pinnedData) };
+      delete pinnedData[request.params.nodeId];
+      const nextWorkflow: Workflow = {
+        ...workflow,
+        pinnedData: Object.keys(pinnedData).length > 0 ? pinnedData : undefined
+      };
+      const saved = store.upsertWorkflow(nextWorkflow);
+      schedulerService?.reloadWorkflow(saved.id);
+      triggerService?.reloadWorkflow(saved.id);
+      return {
+        ok: true,
+        workflowId: saved.id,
+        nodeId: request.params.nodeId,
+        pinnedData: asRecord(saved.pinnedData)
+      };
+    }
+  );
+
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
@@ -2064,6 +2274,11 @@ export function createApp(
         details: parsed.error.issues
       };
     }
+    const prepared = prepareWorkflowExecutionPayload(parsed.data, reply);
+    if (!prepared) {
+      return { error: "Source execution not found" };
+    }
+    const executionPayload = prepared.payload;
 
     const executionId = crypto.randomUUID();
     const progressHooks = createProgressTrackingHooks({
@@ -2071,19 +2286,23 @@ export function createApp(
       workflow,
       triggerType: "manual",
       triggeredBy: user.email,
-      requestInput: parsed.data
+      requestInput: prepared.requestInput
     });
     const result = await runWorkflowExecution({
       workflow,
-      startNodeId: parsed.data.startNodeId,
-      directInput: parsed.data.input,
-      variables: parsed.data.variables,
-      systemPrompt: parsed.data.system_prompt,
-      userPrompt: parsed.data.user_prompt,
-      sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
+      startNodeId: executionPayload.startNodeId,
+      runMode: executionPayload.runMode,
+      usePinnedData: executionPayload.usePinnedData,
+      pinnedData: executionPayload.pinnedData,
+      nodeOutputs: prepared.nodeOutputs,
+      directInput: executionPayload.input,
+      variables: executionPayload.variables,
+      systemPrompt: executionPayload.system_prompt,
+      userPrompt: executionPayload.user_prompt,
+      sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
       executionTimeoutMs: normalizeExecutionTimeoutMs(
-        parsed.data.executionTimeoutMs,
-        parsed.data.execution_timeout_ms,
+        executionPayload.executionTimeoutMs,
+        executionPayload.execution_timeout_ms,
         config.WORKFLOW_EXECUTION_TIMEOUT_MS
       ),
       executionId,
@@ -2098,7 +2317,7 @@ export function createApp(
       result,
       triggerType: "manual",
       triggeredBy: user.email,
-      requestInput: parsed.data
+      requestInput: prepared.requestInput
     });
 
     if (result.status === "error") {
@@ -2128,6 +2347,11 @@ export function createApp(
         details: parsed.error.issues
       };
     }
+    const prepared = prepareWorkflowExecutionPayload(parsed.data, reply);
+    if (!prepared) {
+      return { error: "Source execution not found" };
+    }
+    const executionPayload = prepared.payload;
 
     const executionId = crypto.randomUUID();
     let streamClosed = false;
@@ -2163,7 +2387,7 @@ export function createApp(
         workflow,
         triggerType: "manual_stream",
         triggeredBy: user.email,
-        requestInput: parsed.data,
+        requestInput: prepared.requestInput,
         passthroughHooks: {
           onNodeStart: (event) => {
             sendSseEvent("node_start", event);
@@ -2178,15 +2402,19 @@ export function createApp(
       });
       const result = await runWorkflowExecution({
         workflow,
-        startNodeId: parsed.data.startNodeId,
-        directInput: parsed.data.input,
-        variables: parsed.data.variables,
-        systemPrompt: parsed.data.system_prompt,
-        userPrompt: parsed.data.user_prompt,
-        sessionId: normalizeSessionId(parsed.data.sessionId, parsed.data.session_id),
+        startNodeId: executionPayload.startNodeId,
+        runMode: executionPayload.runMode,
+        usePinnedData: executionPayload.usePinnedData,
+        pinnedData: executionPayload.pinnedData,
+        nodeOutputs: prepared.nodeOutputs,
+        directInput: executionPayload.input,
+        variables: executionPayload.variables,
+        systemPrompt: executionPayload.system_prompt,
+        userPrompt: executionPayload.user_prompt,
+        sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
         executionTimeoutMs: normalizeExecutionTimeoutMs(
-          parsed.data.executionTimeoutMs,
-          parsed.data.execution_timeout_ms,
+          executionPayload.executionTimeoutMs,
+          executionPayload.execution_timeout_ms,
           config.WORKFLOW_EXECUTION_TIMEOUT_MS
         ),
         executionId,
@@ -2201,7 +2429,7 @@ export function createApp(
         result,
         triggerType: "manual_stream",
         triggeredBy: user.email,
-        requestInput: parsed.data
+        requestInput: prepared.requestInput
       });
 
       sendSseEvent("result", result);
@@ -2335,6 +2563,52 @@ export function createApp(
       return {
         ok: false,
         message: secretService.redact(error instanceof Error ? error.message : "Provider connection test failed")
+      };
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/expressions/preview", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const parsed = expressionPreviewSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid expression preview payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const context = parsed.data.context ?? {};
+    const expressionContext = {
+      $input: context.input,
+      $json: context.input,
+      $workflow: context.workflow,
+      $execution: { id: context.executionId ?? "" },
+      $vars: context.vars,
+      $nodeOutputs: context.nodeOutputs,
+      extras: {
+        ...asRecord(context.input),
+        vars: context.vars ?? {}
+      }
+    };
+
+    try {
+      const result =
+        parsed.data.mode === "template" || parsed.data.expression.includes("{{")
+          ? renderExpressionTemplate(parsed.data.expression, expressionContext)
+          : evaluateExpression(parsed.data.expression, expressionContext);
+      return {
+        ok: true,
+        result
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : "Expression preview failed"
       };
     }
   });

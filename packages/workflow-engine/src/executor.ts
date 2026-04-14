@@ -99,6 +99,10 @@ export interface WorkflowExecutionDependencies {
 export interface ExecuteWorkflowRequest {
   workflow: Workflow;
   startNodeId?: string;
+  runMode?: "workflow" | "single_node";
+  usePinnedData?: boolean;
+  pinnedData?: Record<string, unknown>;
+  nodeOutputs?: Record<string, unknown>;
   input?: Record<string, unknown>;
   webhookPayload?: Record<string, unknown>;
   variables?: Record<string, unknown>;
@@ -159,6 +163,10 @@ function toRecord(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
 }
 
 function isWebhookTrigger(globals: Record<string, unknown>): boolean {
@@ -3685,6 +3693,7 @@ export async function executeWorkflow(
   let nodeOrder =
     request.resumeState?.nodeOrder?.length ? request.resumeState.nodeOrder : validation.orderedNodeIds ?? sortWorkflowNodes(workflow);
   const graphIndexes = buildGraphIndexes(workflow);
+  const runMode = request.runMode === "single_node" ? "single_node" : "workflow";
   const explicitStartNodeId =
     !request.resumeState && typeof request.startNodeId === "string" && request.startNodeId.trim()
       ? request.startNodeId.trim()
@@ -3706,30 +3715,34 @@ export async function executeWorkflow(
     }
 
     forceExecuteNodeIds.add(explicitStartNodeId);
-    const executableNodeIds = new Set<string>(
-      collectNodeAndDescendants(explicitStartNodeId, graphIndexes.outgoingExecution, workflow)
-    );
-    const queue = [...executableNodeIds];
+    if (runMode === "single_node") {
+      nodeOrder = [explicitStartNodeId];
+    } else {
+      const executableNodeIds = new Set<string>(
+        collectNodeAndDescendants(explicitStartNodeId, graphIndexes.outgoingExecution, workflow)
+      );
+      const queue = [...executableNodeIds];
 
-    while (queue.length) {
-      const nodeId = queue.shift()!;
-      const attachments = graphIndexes.attachmentsBySource.get(nodeId);
-      if (!attachments) {
-        continue;
-      }
+      while (queue.length) {
+        const nodeId = queue.shift()!;
+        const attachments = graphIndexes.attachmentsBySource.get(nodeId);
+        if (!attachments) {
+          continue;
+        }
 
-      for (const targets of attachments.values()) {
-        for (const targetNodeId of targets) {
-          if (executableNodeIds.has(targetNodeId)) {
-            continue;
+        for (const targets of attachments.values()) {
+          for (const targetNodeId of targets) {
+            if (executableNodeIds.has(targetNodeId)) {
+              continue;
+            }
+            executableNodeIds.add(targetNodeId);
+            queue.push(targetNodeId);
           }
-          executableNodeIds.add(targetNodeId);
-          queue.push(targetNodeId);
         }
       }
-    }
 
-    nodeOrder = nodeOrder.filter((nodeId) => executableNodeIds.has(nodeId));
+      nodeOrder = nodeOrder.filter((nodeId) => executableNodeIds.has(nodeId));
+    }
   }
 
   const globals: Record<string, unknown> = request.resumeState
@@ -3760,7 +3773,15 @@ export async function executeWorkflow(
 
   const nodeOutputs = request.resumeState
     ? deserializeNodeOutputs(toRecord(request.resumeState.nodeOutputs))
-    : new Map<string, unknown>();
+    : deserializeNodeOutputs(toRecord(request.nodeOutputs));
+  const workflowPinnedData = toRecord(workflow.pinnedData);
+  const requestPinnedData = request.pinnedData === undefined ? workflowPinnedData : toRecord(request.pinnedData);
+  const pinnedData = request.usePinnedData === false ? {} : requestPinnedData;
+  if (!request.resumeState) {
+    for (const [nodeId, output] of Object.entries(pinnedData)) {
+      nodeOutputs.set(nodeId, output);
+    }
+  }
   const nodeResults: NodeExecutionResult[] = request.resumeState ? [...request.resumeState.nodeResults] : [];
   const attachmentOnlyResultIndexByNodeId = new Map<string, number>();
   const attachmentCompletionEventEmitted = new Set<string>();
@@ -3899,6 +3920,56 @@ export async function executeWorkflow(
     targets.push(edge.target);
     handleMap.set(edge.sourceHandle, targets);
   }
+
+  const applySuccessfulNodeRouting = (node: WorkflowNode, output: unknown) => {
+    const outputRecord = toRecord(output);
+    const activeBranch = typeof outputRecord._branchHandle === "string" ? outputRecord._branchHandle : undefined;
+    const activeBranchFallback =
+      typeof outputRecord._branchHandleFallback === "string" ? outputRecord._branchHandleFallback : undefined;
+
+    if (activeBranch && branchTargets.has(node.id)) {
+      const handleMap = branchTargets.get(node.id)!;
+      const takenHandles = new Set<string>();
+      takenHandles.add(activeBranch);
+      if (activeBranchFallback) {
+        takenHandles.add(activeBranchFallback);
+      }
+      const takenTargets = new Set<string>();
+      for (const takenHandle of takenHandles) {
+        for (const target of handleMap.get(takenHandle) ?? []) {
+          takenTargets.add(target);
+        }
+      }
+      const protectedNodes = collectReachableFromRoots(takenTargets, graphIndexes.outgoingExecution, workflow);
+
+      for (const [handle, targets] of handleMap.entries()) {
+        if (takenHandles.has(handle)) {
+          continue;
+        }
+        for (const target of targets) {
+          for (const candidate of collectNodeAndDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+            if (!protectedNodes.has(candidate)) {
+              skippedByBranch.add(candidate);
+            }
+          }
+        }
+      }
+    }
+
+    if (node.type === "try_catch") {
+      const handleMap = branchTargets.get(node.id);
+      const successTargets = handleMap?.get("success") ?? [];
+      const errorTargets = handleMap?.get("error") ?? [];
+      const successDescendants = new Set<string>();
+      for (const target of successTargets) {
+        successDescendants.add(target);
+        for (const descendant of collectDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+          successDescendants.add(descendant);
+        }
+      }
+      tryCatchScopes.set(node.id, { errorTargets, successDescendants });
+    }
+  };
 
   if (request.resumeState && request.approvalDecision) {
     const waitingNode = graphIndexes.nodeById.get(request.resumeState.waitingNodeId);
@@ -4211,6 +4282,37 @@ export async function executeWorkflow(
 
       const merged = mergeParentOutputs(parentOutputs);
       nodeInput = captureNodeInputSnapshot(globals, merged, parentOutputs);
+      if (hasOwnRecordKey(pinnedData, node.id)) {
+        const output = pinnedData[node.id];
+        nodeOutputs.set(node.id, output);
+        const completedAt = nowIso();
+        const durationMs = Date.now() - started;
+        nodeResults.push({
+          nodeId: node.id,
+          status: "success",
+          startedAt: startedAtNode,
+          completedAt,
+          durationMs,
+          input: nodeInput,
+          output,
+          warnings: ["Used pinned data; node executor was not called."]
+        });
+        await dependencies.onNodeComplete?.({
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "success",
+          completedAt,
+          durationMs,
+          input: nodeInput,
+          output
+        });
+        if (node.type === "output") {
+          finalOutput = output;
+        }
+        applySuccessfulNodeRouting(node, output);
+        continue;
+      }
+
       if (node.type === "loop_node") {
         const inputKey = typeof nodeConfig.inputKey === "string" ? nodeConfig.inputKey.trim() : "";
         const itemVariable =
@@ -4519,58 +4621,7 @@ export async function executeWorkflow(
         finalOutput = output;
       }
 
-      // Handle branching: determine which branches to skip
-      const outputRecord = toRecord(output);
-      const activeBranch = typeof outputRecord._branchHandle === "string" ? outputRecord._branchHandle : undefined;
-      const activeBranchFallback =
-        typeof outputRecord._branchHandleFallback === "string" ? outputRecord._branchHandleFallback : undefined;
-
-      if (activeBranch && branchTargets.has(node.id)) {
-        const handleMap = branchTargets.get(node.id)!;
-        const takenHandles = new Set<string>();
-        if (activeBranch) {
-          takenHandles.add(activeBranch);
-        }
-        if (activeBranchFallback) {
-          takenHandles.add(activeBranchFallback);
-        }
-        const takenTargets = new Set<string>();
-        for (const takenHandle of takenHandles) {
-          for (const target of handleMap.get(takenHandle) ?? []) {
-            takenTargets.add(target);
-          }
-        }
-        const protectedNodes = collectReachableFromRoots(takenTargets, graphIndexes.outgoingExecution, workflow);
-
-        for (const [handle, targets] of handleMap.entries()) {
-          if (takenHandles.has(handle)) {
-            continue; // This is the taken branch
-          }
-          // Mark all nodes on non-taken branches as skipped
-          for (const target of targets) {
-            for (const candidate of collectNodeAndDescendants(target, graphIndexes.outgoingExecution, workflow)) {
-              if (!protectedNodes.has(candidate)) {
-                skippedByBranch.add(candidate);
-              }
-            }
-          }
-        }
-      }
-
-      // try_catch: register scope for error routing
-      if (node.type === "try_catch") {
-        const handleMap = branchTargets.get(node.id);
-        const successTargets = handleMap?.get("success") ?? [];
-        const errorTargets = handleMap?.get("error") ?? [];
-        const successDescendants = new Set<string>();
-        for (const t of successTargets) {
-          successDescendants.add(t);
-          for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, workflow)) {
-            successDescendants.add(desc);
-          }
-        }
-        tryCatchScopes.set(node.id, { errorTargets, successDescendants });
-      }
+      applySuccessfulNodeRouting(node, output);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Node execution failed";
 

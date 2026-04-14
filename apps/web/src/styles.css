@@ -805,6 +805,8 @@ select {
   bottom: 14px;
   transform: translateX(-50%);
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 8px;
 }
 
@@ -1525,6 +1527,14 @@ select {
   overflow-wrap: anywhere;
 }
 
+.execution-actions-cell {
+  white-space: nowrap;
+}
+
+.execution-actions-cell .mini-btn {
+  margin-right: 6px;
+}
+
 .mono-cell {
   font-family: "JetBrains Mono", monospace;
   font-size: 0.78rem;
@@ -1785,6 +1795,35 @@ select {
   box-shadow: 0 5px 18px rgba(38, 52, 80, 0.08);
   color: #293346;
   overflow: visible;
+}
+
+.wf-node-debug-preview {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 5px);
+  left: 8px;
+  right: 8px;
+  max-height: 48px;
+  overflow: hidden;
+  border: 1px solid #cbd7e6;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #334155;
+  padding: 5px 7px;
+  font-size: 0.66rem;
+  line-height: 1.25;
+  box-shadow: 0 4px 12px rgba(30, 41, 59, 0.12);
+  pointer-events: none;
+}
+
+.wf-node-debug-preview strong {
+  color: #0f766e;
+  margin-right: 4px;
+}
+
+.wf-node-debug-error,
+.wf-node-debug-error strong {
+  color: #b91c1c;
 }
 
 .wf-node.selected {
@@ -2188,6 +2227,15 @@ select {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
+}
+
+.node-modal-debug-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .node-tab {
@@ -2213,6 +2261,17 @@ select {
   font-weight: 700;
   padding: 8px 12px;
   cursor: pointer;
+}
+
+.node-exec-btn.secondary {
+  border: 1px solid #d9c6b7;
+  background: #fff7ed;
+  color: #7c4a32;
+}
+
+.node-exec-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .node-modal-content {
@@ -2378,6 +2437,44 @@ select {
   background: #fff;
   color: #243047;
   padding: 8px 10px;
+}
+
+.expression-field textarea {
+  font-family: "Fira Code", monospace;
+}
+
+.expression-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.expression-preview {
+  border: 1px solid #cfe0d8;
+  border-radius: 8px;
+  background: #f4fbf7;
+  color: #244234;
+  padding: 8px;
+  display: grid;
+  gap: 5px;
+}
+
+.expression-preview.error {
+  border-color: #eccaca;
+  background: #fff5f5;
+  color: #8f2d2d;
+}
+
+.expression-preview strong {
+  font-size: 0.76rem;
+}
+
+.expression-preview pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: "Fira Code", monospace;
+  font-size: 0.72rem;
 }
 
 .cfg-field textarea {
@@ -2728,6 +2825,22 @@ select {
   display: grid;
   place-items: center;
   z-index: 3;
+}
+
+.wf-node-pinned-badge {
+  position: absolute;
+  top: 6px;
+  left: 30px;
+  border: 1px solid #0f766e;
+  background: #ccfbf1;
+  color: #0f766e;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0;
+  padding: 3px 4px;
+  border-radius: 5px;
+  z-index: 4;
 }
 
 /* Node accent colors — left border stripe + subtle tinted background */

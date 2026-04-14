@@ -5,6 +5,7 @@ import {
   createSecret,
   discoverMcpTools,
   fetchWorkflows,
+  previewExpression,
   testCodeNode,
   testConnector,
   testProvider,
@@ -20,6 +21,12 @@ interface NodeConfigModalProps {
   node: EditorNode;
   inputOptions: NodeInputOption[];
   executionResult: WorkflowExecutionResult | null;
+  workflowContext?: {
+    id?: string;
+    name?: string;
+    vars?: Record<string, unknown>;
+  };
+  pinnedData?: Record<string, unknown>;
   showRuntimeInspection?: boolean;
   secrets: SecretListItem[];
   onRefreshSecrets?: () => Promise<SecretListItem[]>;
@@ -32,6 +39,8 @@ interface NodeConfigModalProps {
     color?: EditorNodeData["color"];
   }) => void;
   onExecuteStep: () => void;
+  onPinNodeOutput?: (nodeId: string) => Promise<void> | void;
+  onUnpinNodeOutput?: (nodeId: string) => Promise<void> | void;
 }
 
 const NODE_INPUT_OPTION_ID = "__node_input__";
@@ -39,6 +48,10 @@ const ADD_NEW_CREDENTIAL_VALUE = "__add_new_credential__";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
 }
 
 function toStringValue(value: unknown, fallback = ""): string {
@@ -386,10 +399,30 @@ function toImportantRows(rows: KeyValueRow[]): KeyValueRow[] {
   return [...baseRows, truncationRow];
 }
 
+function describeSchema(value: unknown, depth = 0): unknown {
+  if (value === null) return "null";
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "array<empty>";
+    return [describeSchema(value[0], depth + 1)];
+  }
+  if (typeof value !== "object" || value === undefined) {
+    return typeof value;
+  }
+  if (depth >= PREVIEW_TABLE_MAX_DEPTH) {
+    return "object";
+  }
+  const schema: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    schema[key] = describeSchema(child, depth + 1);
+  }
+  return schema;
+}
+
 function KeyValueTable({ label, value }: { label: string; value: unknown }) {
   const rows = useMemo(() => toKeyValueRows(value), [value]);
   const importantRows = useMemo(() => toImportantRows(rows), [rows]);
-  const [viewMode, setViewMode] = useState<"important" | "full">("important");
+  const schemaValue = useMemo(() => describeSchema(value), [value]);
+  const [viewMode, setViewMode] = useState<"important" | "table" | "schema" | "json">("important");
 
   useEffect(() => {
     setViewMode("important");
@@ -406,7 +439,11 @@ function KeyValueTable({ label, value }: { label: string; value: unknown }) {
         <div className="node-kv-count">
           {viewMode === "important"
             ? `Showing ${visibleDataRowCount} important fields`
-            : `Showing all ${fullDataRowCount} fields`}
+            : viewMode === "table"
+              ? `Showing all ${fullDataRowCount} fields`
+              : viewMode === "schema"
+                ? "Showing inferred structure"
+                : "Showing raw JSON"}
         </div>
         <div className="node-kv-view-switch" role="tablist" aria-label={`${label} preview mode`}>
           <button
@@ -414,31 +451,153 @@ function KeyValueTable({ label, value }: { label: string; value: unknown }) {
             className={viewMode === "important" ? "active" : ""}
             onClick={() => setViewMode("important")}
           >
-            Important only
+            Summary
           </button>
-          <button type="button" className={viewMode === "full" ? "active" : ""} onClick={() => setViewMode("full")}>
-            Full view
+          <button type="button" className={viewMode === "table" ? "active" : ""} onClick={() => setViewMode("table")}>
+            Table
+          </button>
+          <button type="button" className={viewMode === "schema" ? "active" : ""} onClick={() => setViewMode("schema")}>
+            Schema
+          </button>
+          <button type="button" className={viewMode === "json" ? "active" : ""} onClick={() => setViewMode("json")}>
+            JSON
           </button>
         </div>
       </div>
-      <div className="node-kv-table-wrap">
-        <table className="node-kv-table">
-          <thead>
-            <tr>
-              <th>Key</th>
-              <th>Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visibleRows.map((row, index) => (
-              <tr key={`${row.key}-${index}`}>
-                <td className="node-kv-key">{row.key}</td>
-                <td className="node-kv-value">{row.value}</td>
+      {viewMode === "schema" || viewMode === "json" ? (
+        <pre className="result-block">
+          {JSON.stringify(viewMode === "schema" ? schemaValue : value, null, 2)}
+        </pre>
+      ) : (
+        <div className="node-kv-table-wrap">
+          <table className="node-kv-table">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Value</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {visibleRows.map((row, index) => (
+                <tr key={`${row.key}-${index}`}>
+                  <td className="node-kv-key">{row.key}</td>
+                  <td className="node-kv-value">{row.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface ExpressionPreviewContext {
+  input?: unknown;
+  vars?: Record<string, unknown>;
+  nodeOutputs?: Record<string, unknown>;
+  workflow?: { id?: string; name?: string };
+  executionId?: string;
+}
+
+const EXPRESSION_SUGGESTIONS = [
+  { label: "$json", value: "$json" },
+  { label: "$input", value: "$input" },
+  { label: "$vars", value: "$vars" },
+  { label: "$now", value: "$now.toISOString()" },
+  { label: "$if", value: "$if(condition, trueValue, falseValue)" },
+  { label: "$ifEmpty", value: "$ifEmpty(value, fallback)" },
+  { label: "$jmespath", value: "$jmespath($json, \"path.to.field\")" },
+  { label: "Template", value: "{{ $json }}" }
+];
+
+function stringifyInline(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function ExpressionField({
+  label,
+  value,
+  onChange,
+  rows = 3,
+  mode = "expression",
+  previewContext
+}: {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  rows?: number;
+  mode?: "expression" | "template";
+  previewContext?: ExpressionPreviewContext;
+}) {
+  const [previewText, setPreviewText] = useState("");
+  const [previewError, setPreviewError] = useState("");
+
+  useEffect(() => {
+    const expression = value.trim();
+    if (!expression) {
+      setPreviewText("");
+      setPreviewError("");
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void previewExpression({
+        expression: value,
+        mode,
+        context: previewContext
+      })
+        .then((response) => {
+          if (cancelled) return;
+          if (response.ok) {
+            setPreviewText(stringifyInline(response.result));
+            setPreviewError("");
+          } else {
+            setPreviewText("");
+            setPreviewError(response.error ?? "Preview failed.");
+          }
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setPreviewText("");
+          setPreviewError(error instanceof Error ? error.message : "Preview failed.");
+        });
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [mode, previewContext, value]);
+
+  return (
+    <div className="cfg-field expression-field">
+      <span>{label}</span>
+      <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={rows} />
+      <div className="expression-suggestions" aria-label={`${label} suggestions`}>
+        {EXPRESSION_SUGGESTIONS.map((item) => (
+          <button
+            key={item.label}
+            type="button"
+            className="mini-btn"
+            onClick={() => onChange(value ? `${value} ${item.value}` : item.value)}
+          >
+            {item.label}
+          </button>
+        ))}
       </div>
+      {(previewText || previewError) && (
+        <div className={previewError ? "expression-preview error" : "expression-preview"}>
+          <strong>Preview</strong>
+          <pre>{previewError || previewText}</pre>
+        </div>
+      )}
     </div>
   );
 }
@@ -486,13 +645,17 @@ export function NodeConfigModal({
   node,
   inputOptions,
   executionResult,
+  workflowContext,
+  pinnedData,
   showRuntimeInspection = true,
   secrets,
   onRefreshSecrets,
   mcpServerDefinitions,
   onClose,
   onSave,
-  onExecuteStep
+  onExecuteStep,
+  onPinNodeOutput,
+  onUnpinNodeOutput
 }: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
@@ -667,6 +830,38 @@ export function NodeConfigModal({
     return map;
   }, [executionResult]);
   const currentNodeResult = nodeResultById.get(node.id);
+  const nodeOutputsForPreview = useMemo(() => {
+    const outputs: Record<string, unknown> = {};
+    for (const result of executionResult?.nodeResults ?? []) {
+      if (result.output !== undefined) {
+        outputs[result.nodeId] = result.output;
+      }
+    }
+    return outputs;
+  }, [executionResult]);
+  const expressionPreviewContext = useMemo<ExpressionPreviewContext>(
+    () => ({
+      input: currentNodeResult?.input ?? currentNodeResult?.output,
+      vars: workflowContext?.vars,
+      nodeOutputs: nodeOutputsForPreview,
+      workflow: {
+        id: workflowContext?.id,
+        name: workflowContext?.name
+      },
+      executionId: executionResult?.executionId
+    }),
+    [
+      currentNodeResult?.input,
+      currentNodeResult?.output,
+      executionResult?.executionId,
+      nodeOutputsForPreview,
+      workflowContext?.id,
+      workflowContext?.name,
+      workflowContext?.vars
+    ]
+  );
+  const currentNodePinned = hasOwnRecordKey(asRecord(pinnedData), node.id);
+  const currentPinnedOutput = currentNodePinned ? asRecord(pinnedData)[node.id] : undefined;
 
   const resolvedInputPreview = useMemo(() => {
     if (selectedInputId === NODE_INPUT_OPTION_ID) {
@@ -1306,18 +1501,22 @@ export function NodeConfigModal({
           Tip: Attach a Chat Model on the <code>chat_model</code> port. Optionally attach Memory and one or more MCP Tool nodes on their dedicated ports.
         </div>
 
-        <TextAreaField
+        <ExpressionField
           label="Prompt (User Message)"
           value={toStringValue(config.userPromptTemplate, "{{user_prompt}}")}
           onChange={(next) => setConfig((current) => ({ ...current, userPromptTemplate: next }))}
           rows={3}
+          mode="template"
+          previewContext={expressionPreviewContext}
         />
 
-        <TextAreaField
+        <ExpressionField
           label="System Message"
           value={toStringValue(config.systemPromptTemplate, "{{system_prompt}}")}
           onChange={(next) => setConfig((current) => ({ ...current, systemPromptTemplate: next }))}
           rows={4}
+          mode="template"
+          previewContext={expressionPreviewContext}
         />
 
         <TextField
@@ -1867,11 +2066,13 @@ export function NodeConfigModal({
           </div>
         )}
 
-        <TextAreaField
+        <ExpressionField
           label="Tool Args Template"
           value={toStringValue(config.argsTemplate, "{}")}
           onChange={(next) => setConfig((current) => ({ ...current, argsTemplate: next }))}
           rows={3}
+          mode="template"
+          previewContext={expressionPreviewContext}
         />
       </>
     );
@@ -1898,11 +2099,13 @@ export function NodeConfigModal({
   const renderPromptTemplateParameters = () => {
     return (
       <>
-        <TextAreaField
+        <ExpressionField
           label="Template"
           value={toStringValue(config.template)}
           onChange={(next) => setConfig((current) => ({ ...current, template: next }))}
           rows={5}
+          mode="template"
+          previewContext={expressionPreviewContext}
         />
         <TextField
           label="Output key"
@@ -3347,11 +3550,13 @@ export function NodeConfigModal({
                 { value: "DELETE", label: "DELETE" }
               ]}
             />
-            <TextField
+            <ExpressionField
               label="URL Template"
               value={toStringValue(config.urlTemplate, "https://api.example.com/resource/{{id}}")}
               onChange={(next) => setConfig((current) => ({ ...current, urlTemplate: next }))}
-              placeholder="https://api.example.com/resource/{{id}}"
+              rows={2}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
             {renderCredentialSecretField({
               fieldKey: "http_request_secret",
@@ -3365,17 +3570,21 @@ export function NodeConfigModal({
                   secretRef: next ? { secretId: next } : undefined
                 }))
             })}
-            <TextAreaField
+            <ExpressionField
               label="Headers Template (JSON)"
               value={toStringValue(config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}")}
               onChange={(next) => setConfig((current) => ({ ...current, headersTemplate: next }))}
               rows={5}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
-            <TextAreaField
+            <ExpressionField
               label="Body Template"
               value={toStringValue(config.bodyTemplate, "")}
               onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
               rows={5}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
             <div className="cfg-grid-2">
               <SelectField
@@ -3518,17 +3727,21 @@ export function NodeConfigModal({
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, statusCode: next }))}
             />
-            <TextAreaField
+            <ExpressionField
               label="Headers Template (JSON)"
               value={toStringValue(config.headersTemplate, "{\n  \"content-type\": \"application/json\"\n}")}
               onChange={(next) => setConfig((current) => ({ ...current, headersTemplate: next }))}
               rows={5}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
-            <TextAreaField
+            <ExpressionField
               label="Body Template"
               value={toStringValue(config.bodyTemplate, "{\"ok\":true,\"result\":\"{{result}}\"}")}
               onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
               rows={5}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
             <div className="cfg-tip">
               This node only affects responses for webhook-triggered executions.
@@ -3581,10 +3794,13 @@ export function NodeConfigModal({
 
         return (
           <>
-            <TextField
+            <ExpressionField
               label="Query Template"
               value={toStringValue(config.queryTemplate, "{{user_prompt}}")}
               onChange={(next) => setConfig((current) => ({ ...current, queryTemplate: next }))}
+              rows={2}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
             <NumberField
               label="Top K"
@@ -3806,10 +4022,13 @@ export function NodeConfigModal({
       case "if_node":
         return (
           <>
-            <TextField
+            <ExpressionField
               label="Condition Statement"
               value={toStringValue(config.condition, "{{answer}} === 'true'")}
               onChange={(next) => setConfig((current) => ({ ...current, condition: next }))}
+              rows={2}
+              mode="expression"
+              previewContext={expressionPreviewContext}
             />
             <div className="cfg-tip">A javascript expression that returns true or false. Example: <code>{`{{userScore}} > 90`}</code></div>
           </>
@@ -3817,10 +4036,13 @@ export function NodeConfigModal({
       case "switch_node":
         return (
           <>
-            <TextField
+            <ExpressionField
               label="Switch Evaluation Value"
               value={toStringValue(config.switchValue, "{{answer}}")}
               onChange={(next) => setConfig((current) => ({ ...current, switchValue: next }))}
+              rows={2}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
             <TextAreaField
               label="Cases array (JSON)"
@@ -3850,11 +4072,13 @@ export function NodeConfigModal({
       case "output":
         return (
           <>
-            <TextAreaField
+            <ExpressionField
               label="Response Template"
               value={toStringValue(config.responseTemplate, "{{answer}}")}
               onChange={(next) => setConfig((current) => ({ ...current, responseTemplate: next }))}
               rows={4}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
             <TextField
               label="Output Key"
@@ -3883,11 +4107,13 @@ export function NodeConfigModal({
             />
             {toStringValue(config.renderMode, "text") === "html" ? (
               <>
-                <TextAreaField
+                <ExpressionField
                   label="HTML Template (optional)"
                   value={toStringValue(config.htmlTemplate, "")}
                   onChange={(next) => setConfig((current) => ({ ...current, htmlTemplate: next }))}
                   rows={8}
+                  mode="template"
+                  previewContext={expressionPreviewContext}
                 />
                 <div className="cfg-grid-2">
                   <SelectField
@@ -3917,18 +4143,22 @@ export function NodeConfigModal({
                 />
               </>
             ) : (
-              <TextAreaField
+              <ExpressionField
                 label="Text Template (optional)"
                 value={toStringValue(config.textTemplate, "")}
                 onChange={(next) => setConfig((current) => ({ ...current, textTemplate: next }))}
                 rows={4}
+                mode="template"
+                previewContext={expressionPreviewContext}
               />
             )}
-            <TextField
+            <ExpressionField
               label="Filename Template"
               value={toStringValue(config.filenameTemplate, "workflow-output-{{session_id}}.pdf")}
               onChange={(next) => setConfig((current) => ({ ...current, filenameTemplate: next }))}
-              placeholder="workflow-output-{{session_id}}.pdf"
+              rows={2}
+              mode="template"
+              previewContext={expressionPreviewContext}
             />
             <TextField
               label="Output Key"
@@ -4189,11 +4419,13 @@ export function NodeConfigModal({
               ]}
             />
             {order !== "random" && (
-              <TextAreaField
+              <ExpressionField
                 label="Custom Expression (optional)"
                 value={toStringValue(config.expression)}
                 onChange={(next) => setConfig((current) => ({ ...current, expression: next }))}
                 rows={3}
+                mode="expression"
+                previewContext={expressionPreviewContext}
               />
             )}
             <TextField
@@ -6330,9 +6562,29 @@ export function NodeConfigModal({
                   Settings
                 </button>
               </div>
-              <button className="node-exec-btn" type="button" onClick={onExecuteStep}>
-                Execute step
-              </button>
+              <div className="node-modal-debug-actions">
+                {currentNodePinned ? (
+                  <button
+                    className="node-exec-btn secondary"
+                    type="button"
+                    onClick={() => void onUnpinNodeOutput?.(node.id)}
+                  >
+                    Unpin output
+                  </button>
+                ) : (
+                  <button
+                    className="node-exec-btn secondary"
+                    type="button"
+                    onClick={() => void onPinNodeOutput?.(node.id)}
+                    disabled={!currentNodeResult || currentNodeResult.output === undefined}
+                  >
+                    Pin output
+                  </button>
+                )}
+                <button className="node-exec-btn" type="button" onClick={onExecuteStep}>
+                  Execute node
+                </button>
+              </div>
             </div>
 
             <div className="node-modal-content">{activeTab === "parameters" ? renderParameters() : renderSettings()}</div>
@@ -6349,12 +6601,21 @@ export function NodeConfigModal({
           {showRuntimeInspection && (
             <section className="node-modal-panel">
               <h3>OUTPUT</h3>
-              {resolvedOutputPreview !== undefined ? (
+              {resolvedOutputPreview !== undefined || currentPinnedOutput !== undefined ? (
                 <div className="cfg-group">
                   <div className="cfg-tip">
-                    Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
+                    {currentPinnedOutput !== undefined && resolvedOutputPreview === undefined ? (
+                      <>
+                        Using pinned output. <code>Execute node</code> will reuse this data until unpinned.
+                      </>
+                    ) : (
+                      <>
+                        Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
+                        {currentNodePinned ? " (pinned)" : ""}
+                      </>
+                    )}
                   </div>
-                  <KeyValueTable label="Output" value={resolvedOutputPreview} />
+                  <KeyValueTable label="Output" value={resolvedOutputPreview ?? currentPinnedOutput} />
                 </div>
               ) : node.data.nodeType === "code_node" && codeTestResult ? (
                 <div className="cfg-group">

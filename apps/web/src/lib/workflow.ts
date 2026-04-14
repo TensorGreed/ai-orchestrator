@@ -8,6 +8,12 @@ export interface EditorNodeData {
   nodeType: WorkflowNodeType;
   config: Record<string, unknown>;
   executionStatus?: "pending" | "running" | "success" | "error" | "skipped";
+  executionPreview?: {
+    input?: string;
+    output?: string;
+    error?: string;
+  };
+  pinned?: boolean;
   disabled?: boolean;
   color?: NodeColorKey;
 }
@@ -36,6 +42,7 @@ export function workflowToEditor(workflow: Workflow): { nodes: EditorNode[]; edg
       label: node.name,
       nodeType: node.type,
       config: (node.config ?? {}) as Record<string, unknown>,
+      pinned: Boolean(workflow.pinnedData && Object.prototype.hasOwnProperty.call(workflow.pinnedData, node.id)),
       disabled: node.disabled,
       color: node.color as NodeColorKey | undefined
     }

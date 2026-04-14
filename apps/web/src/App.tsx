@@ -27,6 +27,7 @@ import {
   createFolder,
   createProject,
   createSecret,
+  deleteWorkflowPin,
   deleteFolder,
   deleteProject,
   deleteWorkflow,
@@ -49,6 +50,7 @@ import {
   moveWorkflow,
   runWebhookStream,
   saveWorkflow,
+  saveWorkflowPin,
   updateWorkflowVariables,
   type AuthUser,
   type ExecutionHistoryDetail,
@@ -514,6 +516,42 @@ function getNodeStatusMap(result: WorkflowExecutionResult | null) {
   return map;
 }
 
+function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function summarizePreviewValue(value: unknown): string {
+  if (value === undefined) return "";
+  if (value === null) return "null";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return `Array(${value.length})`;
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>).slice(0, 4);
+    return keys.length ? `{ ${keys.join(", ")} }` : "{}";
+  }
+  return String(value);
+}
+
+function truncatePreview(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 72 ? `${normalized.slice(0, 69)}...` : normalized;
+}
+
+function extractNodeOutputsFromExecution(result: WorkflowExecutionResult | null): Record<string, unknown> {
+  const outputs: Record<string, unknown> = {};
+  for (const nodeResult of result?.nodeResults ?? []) {
+    if (nodeResult.output !== undefined) {
+      outputs[nodeResult.nodeId] = nodeResult.output;
+    }
+  }
+  return outputs;
+}
+
 function normalizeEditorExecutionStatus(value: unknown): EditorNodeData["executionStatus"] {
   if (value === "pending" || value === "running" || value === "success" || value === "error" || value === "skipped") {
     return value;
@@ -924,6 +962,24 @@ function StudioApp() {
     }
     return combined;
   }, [executionResult, isDebugMode, liveNodeStatuses]);
+  const executionPreviewByNodeId = useMemo(() => {
+    const map = new Map<string, NonNullable<EditorNodeData["executionPreview"]>>();
+    if (!isDebugMode || !executionResult) {
+      return map;
+    }
+    for (const nodeResult of executionResult.nodeResults) {
+      map.set(nodeResult.nodeId, {
+        input: nodeResult.input !== undefined ? truncatePreview(summarizePreviewValue(nodeResult.input)) : undefined,
+        output: nodeResult.output !== undefined ? truncatePreview(summarizePreviewValue(nodeResult.output)) : undefined,
+        error: nodeResult.error ? truncatePreview(nodeResult.error) : undefined
+      });
+    }
+    return map;
+  }, [executionResult, isDebugMode]);
+  const pinnedNodeIds = useMemo(
+    () => new Set(Object.keys(asRecord(currentWorkflow.pinnedData) ?? {})),
+    [currentWorkflow.pinnedData]
+  );
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
@@ -1265,11 +1321,13 @@ function StudioApp() {
         ...node,
         data: {
           ...node.data,
-          executionStatus: executionStatuses.get(node.id) as EditorNodeData["executionStatus"]
+          executionStatus: executionStatuses.get(node.id) as EditorNodeData["executionStatus"],
+          executionPreview: executionPreviewByNodeId.get(node.id),
+          pinned: pinnedNodeIds.has(node.id)
         }
       }))
     );
-  }, [executionStatuses, setNodes]);
+  }, [executionPreviewByNodeId, executionStatuses, pinnedNodeIds, setNodes]);
 
   useEffect(() => {
     setEdges((currentEdges) => currentEdges.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
@@ -1772,6 +1830,62 @@ function StudioApp() {
     return message;
   }, []);
 
+  const handleDebugExecution = useCallback(
+    async (executionId: string) => {
+      try {
+        setBusy(true);
+        setError(null);
+        const detail = await fetchExecutionById(executionId);
+        const workflow = await fetchWorkflow(detail.workflowId);
+        hydrateWorkflow(workflow);
+        setExecutionResult(toWorkflowExecutionResult(detail));
+        latestDebugExecutionIdRef.current = detail.id;
+        setIsDebugMode(true);
+        setLogsTab("logs");
+        setActiveMode("editor");
+      } catch (debugError) {
+        handleApiError(debugError, "Failed to load execution into editor");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [handleApiError, hydrateWorkflow]
+  );
+
+  const handleRerunExecution = useCallback(
+    async (executionId: string) => {
+      let targetWorkflowId = currentWorkflow.id;
+      try {
+        setBusy(true);
+        setError(null);
+        const detail = await fetchExecutionById(executionId);
+        targetWorkflowId = detail.workflowId;
+        const workflow = await fetchWorkflow(detail.workflowId);
+        hydrateWorkflow(workflow);
+        setIsDebugMode(true);
+        setLogsTab("logs");
+        setActiveMode("editor");
+        const replayInput = asRecord(detail.input);
+        const result = await executeWorkflowStream(workflow.id, {
+          ...replayInput,
+          sourceExecutionId: detail.id,
+          usePinnedData: true
+        });
+        setExecutionResult(result);
+        if (result.executionId) {
+          latestDebugExecutionIdRef.current = result.executionId;
+        }
+        void refreshExecutionHistory();
+      } catch (rerunError) {
+        const message = handleApiError(rerunError, "Failed to re-run execution");
+        setExecutionResult(buildExecutionErrorResult(targetWorkflowId, message));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [currentWorkflow.id, handleApiError, hydrateWorkflow, refreshExecutionHistory]
+  );
+
   useEffect(() => {
     let cancelled = false;
     if (activeMode !== "variables" || !authUser || !currentWorkflowExists) {
@@ -2113,18 +2227,27 @@ function StudioApp() {
     };
   }, []);
 
-  const buildEditorExecutionPayload = useCallback((startNodeId?: string) => {
+  const buildEditorExecutionPayload = useCallback((startNodeId?: string, runMode: "workflow" | "single_node" = "workflow") => {
     const payload: {
       sessionId: string;
       startNodeId?: string;
+      runMode?: "workflow" | "single_node";
+      usePinnedData?: boolean;
+      nodeOutputs?: Record<string, unknown>;
       system_prompt?: string;
       user_prompt?: string;
     } = {
-      sessionId
+      sessionId,
+      usePinnedData: true
     };
 
     if (typeof startNodeId === "string" && startNodeId.trim()) {
       payload.startNodeId = startNodeId.trim();
+    }
+
+    if (runMode === "single_node") {
+      payload.runMode = "single_node";
+      payload.nodeOutputs = extractNodeOutputsFromExecution(executionResult);
     }
 
     if (!promptNodeSources.systemPromptFromNodes) {
@@ -2136,7 +2259,7 @@ function StudioApp() {
     }
 
     return payload;
-  }, [promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
+  }, [executionResult, promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
 
   const buildWebhookExecutionPayload = useCallback(() => {
     const payload: {
@@ -2158,14 +2281,14 @@ function StudioApp() {
     return payload;
   }, [promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
 
-  const handleExecute = useCallback(async (options?: { startNodeId?: string }) => {
+  const handleExecute = useCallback(async (options?: { startNodeId?: string; runMode?: "workflow" | "single_node" }) => {
     try {
       setBusy(true);
       setError(null);
       let initializedTrace = false;
       let initializedStatuses = false;
       const saved = await persistWorkflow();
-      const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(options?.startNodeId), {
+      const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(options?.startNodeId, options?.runMode), {
         onNodeStart: (event) => {
           if (!isDebugMode) {
             return;
@@ -2895,6 +3018,74 @@ function StudioApp() {
       }
     },
     [buildEditorExecutionPayload, handleApiError, refreshExecutionHistory]
+  );
+
+  const handlePinNodeOutput = useCallback(
+    async (nodeId: string) => {
+      const nodeResult = executionResult?.nodeResults.find((entry) => entry.nodeId === nodeId);
+      if (!nodeResult || nodeResult.output === undefined) {
+        setError("Execute the node before pinning its output.");
+        return;
+      }
+
+      try {
+        setBusy(true);
+        setError(null);
+        const saved = currentWorkflowExists ? currentWorkflow : await persistWorkflow();
+        const response = await saveWorkflowPin(saved.id, nodeId, nodeResult.output);
+        setCurrentWorkflow((current) =>
+          current.id === saved.id
+            ? {
+                ...current,
+                pinnedData: response.pinnedData
+              }
+            : current
+        );
+        localStorage.setItem(
+          WIP_WORKFLOW_STORAGE_KEY,
+          JSON.stringify({
+            ...buildCurrentWorkflow(),
+            pinnedData: response.pinnedData
+          })
+        );
+      } catch (pinError) {
+        handleApiError(pinError, "Failed to pin node output");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [buildCurrentWorkflow, currentWorkflow, currentWorkflowExists, executionResult, handleApiError, persistWorkflow, setCurrentWorkflow]
+  );
+
+  const handleUnpinNodeOutput = useCallback(
+    async (nodeId: string) => {
+      try {
+        setBusy(true);
+        setError(null);
+        const saved = currentWorkflowExists ? currentWorkflow : await persistWorkflow();
+        const response = await deleteWorkflowPin(saved.id, nodeId);
+        setCurrentWorkflow((current) =>
+          current.id === saved.id
+            ? {
+                ...current,
+                pinnedData: response.pinnedData
+              }
+            : current
+        );
+        localStorage.setItem(
+          WIP_WORKFLOW_STORAGE_KEY,
+          JSON.stringify({
+            ...buildCurrentWorkflow(),
+            pinnedData: response.pinnedData
+          })
+        );
+      } catch (pinError) {
+        handleApiError(pinError, "Failed to remove pinned node output");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [buildCurrentWorkflow, currentWorkflow, currentWorkflowExists, handleApiError, persistWorkflow, setCurrentWorkflow]
   );
 
   const openNodeConfig = useCallback((nodeId: string) => {
@@ -3704,6 +3895,12 @@ function StudioApp() {
               }}
               debugMode={isDebugMode}
               onDebugModeChange={setIsDebugMode}
+              onExecuteWorkflow={() => {
+                void handleExecute();
+              }}
+              onExecuteWebhook={() => {
+                void handleWebhookExecute();
+              }}
               busy={busy}
               onLogsResizeStart={handleLogsResizeStart}
               logsTab={logsTab}
@@ -4027,6 +4224,8 @@ function StudioApp() {
                 void refreshExecutionHistory();
               }}
               onToggleRow={(executionId) => toggleExecutionRow(executionId)}
+              onDebugExecution={(executionId) => handleDebugExecution(executionId)}
+              onRerunExecution={(executionId) => handleRerunExecution(executionId)}
             />
           )}
 
@@ -4363,6 +4562,12 @@ function StudioApp() {
           node={editingNode}
           inputOptions={editingNodeInputOptions}
           executionResult={isDebugMode ? executionResult : null}
+          workflowContext={{
+            id: currentWorkflow.id,
+            name: currentWorkflow.name,
+            vars: currentWorkflow.variables
+          }}
+          pinnedData={currentWorkflow.pinnedData}
           showRuntimeInspection={isDebugMode}
           secrets={secrets}
           onRefreshSecrets={refreshSecrets}
@@ -4370,8 +4575,10 @@ function StudioApp() {
           onClose={() => setEditingNodeId(null)}
           onSave={saveNodeConfig}
           onExecuteStep={() => {
-            void handleExecute({ startNodeId: editingNode.id });
+            void handleExecute({ startNodeId: editingNode.id, runMode: "single_node" });
           }}
+          onPinNodeOutput={handlePinNodeOutput}
+          onUnpinNodeOutput={handleUnpinNodeOutput}
         />
       )}
       <KeyboardShortcutsPanel open={showShortcutsPanel} onClose={() => setShowShortcutsPanel(false)} />

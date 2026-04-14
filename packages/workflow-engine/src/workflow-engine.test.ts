@@ -245,6 +245,83 @@ describe("workflow engine", () => {
     });
   });
 
+  it("executes only the selected node in single-node mode using previous parent output", async () => {
+    const workflow = basicWorkflow();
+    const result = await executeWorkflow(
+      {
+        workflow,
+        startNodeId: "n4",
+        runMode: "single_node",
+        nodeOutputs: {
+          n3: {
+            answer: "cached-answer"
+          }
+        }
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.map((entry) => entry.nodeId)).toEqual(["n4"]);
+    expect(result.output).toEqual({
+      result: "cached-answer"
+    });
+  });
+
+  it("uses pinned node output instead of executing the node", async () => {
+    const workflow: Workflow = {
+      id: "wf-pinned-engine",
+      name: "Pinned Engine",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      pinnedData: {
+        n1: {
+          safe: "pinned"
+        }
+      },
+      nodes: [
+        {
+          id: "n1",
+          type: "code_node",
+          name: "Should Not Run",
+          position: { x: 0, y: 0 },
+          config: { code: "throw new Error('not pinned');" }
+        },
+        {
+          id: "n2",
+          type: "output",
+          name: "Output",
+          position: { x: 200, y: 0 },
+          config: { responseTemplate: "{{safe}}" }
+        }
+      ],
+      edges: [{ id: "e1", source: "n1", target: "n2" }]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.output).toEqual({ result: "pinned" });
+    expect(result.nodeResults.find((entry) => entry.nodeId === "n1")?.warnings).toContain(
+      "Used pinned data; node executor was not called."
+    );
+  });
+
   it("returns a clear error when startNodeId is unknown", async () => {
     const workflow = basicWorkflow();
     const result = await executeWorkflow(
@@ -2943,7 +3020,7 @@ describe("Phase 1.7 — Node-Level Error Settings", () => {
     // OR use code_node with errorConfig.retryOnFail which forces retry via getRetryConfigForNode
     let callCount = 0;
 
-    class CountingProvider implements import("@ai-orchestrator/provider-sdk").LLMProviderAdapter {
+    class CountingProvider implements LLMProviderAdapter {
       readonly definition = {
         id: "counting",
         label: "Counting",
@@ -2951,7 +3028,7 @@ describe("Phase 1.7 — Node-Level Error Settings", () => {
         configSchema: {}
       };
 
-      async generate() {
+      async generate(): Promise<never> {
         callCount += 1;
         throw new Error("always-fail");
       }
@@ -2986,7 +3063,7 @@ describe("Phase 1.7 — Node-Level Error Settings", () => {
   it("retryOnFail: false — node runs exactly once (no retry)", async () => {
     let callCount = 0;
 
-    class CountingProvider2 implements import("@ai-orchestrator/provider-sdk").LLMProviderAdapter {
+    class CountingProvider2 implements LLMProviderAdapter {
       readonly definition = {
         id: "counting2",
         label: "Counting2",
@@ -2994,7 +3071,7 @@ describe("Phase 1.7 — Node-Level Error Settings", () => {
         configSchema: {}
       };
 
-      async generate() {
+      async generate(): Promise<never> {
         callCount += 1;
         throw new Error("always-fail");
       }

@@ -135,6 +135,7 @@ export const workflowSchema = z.object({
   edges: z.array(workflowEdgeSchema),
   createdAt: z.string().datetime().optional(),
   updatedAt: z.string().datetime().optional(),
+  pinnedData: z.record(z.string(), z.unknown()).optional(),
   tags: z.array(z.string().min(1).max(64)).optional(),
   projectId: z.string().min(1).optional(),
   folderId: z.string().min(1).optional()
@@ -156,6 +157,11 @@ export const folderSchema = z.object({
 export const workflowExecuteRequestSchema = z.object({
   workflowId: z.string().optional(),
   startNodeId: z.string().optional(),
+  runMode: z.enum(["workflow", "single_node"]).optional(),
+  usePinnedData: z.boolean().optional(),
+  pinnedData: z.record(z.string(), z.unknown()).optional(),
+  nodeOutputs: z.record(z.string(), z.unknown()).optional(),
+  sourceExecutionId: z.string().optional(),
   sessionId: z.string().optional(),
   session_id: z.string().optional(),
   executionTimeoutMs: z.number().int().positive().optional(),

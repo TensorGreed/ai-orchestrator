@@ -1141,6 +1141,137 @@ describe("execution resilience and lifecycle", () => {
     expect(body.nodeResults.map((entry) => entry.nodeId)).toEqual(["output-node"]);
     expect(body.output?.result).toBe("from-selected-step");
   });
+
+  it("pins node output and reuses it during execution without calling the node executor", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-pin-data@example.com",
+      password: "BuilderPinData123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-pin-data";
+    const workflow: Workflow = {
+      id: workflowId,
+      name: "Pinned Data Workflow",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "code-node",
+          type: "code_node",
+          name: "External Substitute",
+          position: { x: 40, y: 120 },
+          config: {
+            code: "throw new Error('should not run');"
+          }
+        },
+        {
+          id: "output-node",
+          type: "output",
+          name: "Output",
+          position: { x: 280, y: 120 },
+          config: {
+            outputKey: "result",
+            responseTemplate: "{{safe}}"
+          }
+        }
+      ],
+      edges: [
+        {
+          id: "edge-code-output",
+          source: "code-node",
+          target: "output-node"
+        }
+      ]
+    };
+
+    const createResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie: builderCookie },
+      payload: workflow
+    });
+    expect(createResponse.statusCode).toBe(200);
+
+    const pinResponse = await context.app.inject({
+      method: "PUT",
+      url: `/api/workflows/${workflowId}/pins/code-node`,
+      headers: { cookie: builderCookie },
+      payload: {
+        data: {
+          safe: "pinned-output"
+        }
+      }
+    });
+    expect(pinResponse.statusCode).toBe(200);
+
+    const executeResponse = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflowId}/execute`,
+      headers: { cookie: builderCookie },
+      payload: {}
+    });
+    expect(executeResponse.statusCode).toBe(200);
+    const body = executeResponse.json<{
+      status: string;
+      output?: { result?: string };
+      nodeResults: Array<{ nodeId: string; warnings?: string[] }>;
+    }>();
+    expect(body.status).toBe("success");
+    expect(body.output?.result).toBe("pinned-output");
+    expect(body.nodeResults.find((entry) => entry.nodeId === "code-node")?.warnings).toContain(
+      "Used pinned data; node executor was not called."
+    );
+  });
+
+  it("executes a single node with provided previous parent outputs", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-single-node@example.com",
+      password: "BuilderSingleNode123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-single-node";
+    const createResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: {
+        cookie: builderCookie
+      },
+      payload: createLinearWorkflow(workflowId)
+    });
+    expect(createResponse.statusCode).toBe(200);
+
+    const executeResponse = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflowId}/execute`,
+      headers: {
+        cookie: builderCookie
+      },
+      payload: {
+        startNodeId: "output-node",
+        runMode: "single_node",
+        nodeOutputs: {
+          "text-node": {
+            text: "previous-output",
+            user_prompt: "previous-output"
+          }
+        }
+      }
+    });
+
+    expect(executeResponse.statusCode).toBe(200);
+    const body = executeResponse.json<{
+      status: string;
+      nodeResults: Array<{ nodeId: string }>;
+      output?: { result?: string };
+    }>();
+    expect(body.status).toBe("success");
+    expect(body.nodeResults.map((entry) => entry.nodeId)).toEqual(["output-node"]);
+    expect(body.output?.result).toBe("previous-output");
+  });
 });
 
 describe("node definitions surface (Phase 1 + 2)", () => {

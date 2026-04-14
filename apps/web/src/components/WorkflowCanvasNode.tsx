@@ -58,6 +58,7 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
   const currentStatus = data.executionStatus;
   const showSuccessBadge = currentStatus === "success";
   const showRunningBadge = currentStatus === "running";
+  const preview = data.executionPreview;
   const disabledClass = data.disabled ? " wf-node-disabled" : "";
   const colorClass = data.color ? ` wf-node-color-${data.color}` : "";
 
@@ -67,6 +68,9 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
     >
       {data.disabled && (
         <span className="wf-node-disabled-badge" title="Disabled" aria-label="Disabled">⏸</span>
+      )}
+      {data.pinned && (
+        <span className="wf-node-pinned-badge" title="Pinned data" aria-label="Pinned data">PIN</span>
       )}
       {showSuccessBadge && (
         <span className="wf-node-status-badge wf-node-status-success" title="Completed" aria-label="Completed">
@@ -199,6 +203,25 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
              <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
           )}
         </>
+      )}
+      {preview && (preview.input || preview.output || preview.error) && (
+        <div className="wf-node-debug-preview">
+          {preview.input && (
+            <div>
+              <strong>In</strong> {preview.input}
+            </div>
+          )}
+          {preview.output && (
+            <div>
+              <strong>Out</strong> {preview.output}
+            </div>
+          )}
+          {preview.error && (
+            <div className="wf-node-debug-error">
+              <strong>Err</strong> {preview.error}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

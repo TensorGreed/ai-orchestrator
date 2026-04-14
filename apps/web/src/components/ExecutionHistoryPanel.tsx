@@ -10,6 +10,8 @@ interface ExecutionHistoryPanelProps {
   statusColors: Record<string, string>;
   onRefresh: () => void;
   onToggleRow: (executionId: string) => Promise<void> | void;
+  onDebugExecution: (executionId: string) => Promise<void> | void;
+  onRerunExecution: (executionId: string) => Promise<void> | void;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -39,7 +41,9 @@ export function ExecutionHistoryPanel({
   executionDetailById,
   statusColors,
   onRefresh,
-  onToggleRow
+  onToggleRow,
+  onDebugExecution,
+  onRerunExecution
 }: ExecutionHistoryPanelProps) {
   return (
     <section className="executions-pane">
@@ -69,6 +73,7 @@ export function ExecutionHistoryPanel({
                 <th>Status</th>
                 <th>Trigger</th>
                 <th>Duration</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -92,10 +97,30 @@ export function ExecutionHistoryPanel({
                     </td>
                     <td>{item.triggerType ?? "unknown"}</td>
                     <td>{formatDuration(item.durationMs)}</td>
+                    <td className="execution-actions-cell">
+                      <button
+                        className="mini-btn"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void onDebugExecution(item.id);
+                        }}
+                      >
+                        Debug
+                      </button>
+                      <button
+                        className="mini-btn"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void onRerunExecution(item.id);
+                        }}
+                      >
+                        Re-run
+                      </button>
+                    </td>
                   </tr>,
                   expanded ? (
                     <tr key={`${item.id}-detail`} className="execution-detail-row">
-                      <td colSpan={5}>
+                      <td colSpan={6}>
                         {!detail && <div className="muted">Loading full trace...</div>}
                         {detail && (
                           <div className="execution-trace">

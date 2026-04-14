@@ -157,6 +157,11 @@ export async function executeWorkflow(
   workflowId: string,
   payload: {
     startNodeId?: string;
+    runMode?: "workflow" | "single_node";
+    usePinnedData?: boolean;
+    pinnedData?: Record<string, unknown>;
+    nodeOutputs?: Record<string, unknown>;
+    sourceExecutionId?: string;
     input?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     system_prompt?: string;
@@ -338,6 +343,11 @@ export async function executeWorkflowStream(
   workflowId: string,
   payload: {
     startNodeId?: string;
+    runMode?: "workflow" | "single_node";
+    usePinnedData?: boolean;
+    pinnedData?: Record<string, unknown>;
+    nodeOutputs?: Record<string, unknown>;
+    sourceExecutionId?: string;
     input?: Record<string, unknown>;
     variables?: Record<string, unknown>;
     system_prompt?: string;
@@ -350,6 +360,36 @@ export async function executeWorkflowStream(
   handlers: WorkflowExecuteStreamHandlers = {}
 ): Promise<WorkflowExecutionResult> {
   return streamWorkflowExecutionRequest(`/api/workflows/${workflowId}/execute/stream`, payload, handlers);
+}
+
+export async function fetchWorkflowPins(workflowId: string) {
+  return apiRequest<{
+    workflowId: string;
+    pinnedData: Record<string, unknown>;
+  }>(`/api/workflows/${workflowId}/pins`);
+}
+
+export async function saveWorkflowPin(workflowId: string, nodeId: string, data: unknown) {
+  return apiRequest<{
+    workflowId: string;
+    nodeId: string;
+    data: unknown;
+    pinnedData: Record<string, unknown>;
+  }>(`/api/workflows/${workflowId}/pins/${encodeURIComponent(nodeId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ data })
+  });
+}
+
+export async function deleteWorkflowPin(workflowId: string, nodeId: string) {
+  return apiRequest<{
+    ok: boolean;
+    workflowId: string;
+    nodeId: string;
+    pinnedData: Record<string, unknown>;
+  }>(`/api/workflows/${workflowId}/pins/${encodeURIComponent(nodeId)}`, {
+    method: "DELETE"
+  });
 }
 
 export async function runWebhook(payload: {
@@ -537,6 +577,27 @@ export async function testProvider(payload: {
     latencyMs?: number;
     preview?: string;
   }>("/api/providers/test", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function previewExpression(payload: {
+  expression: string;
+  mode?: "expression" | "template";
+  context?: {
+    input?: unknown;
+    vars?: Record<string, unknown>;
+    nodeOutputs?: Record<string, unknown>;
+    workflow?: { id?: string; name?: string };
+    executionId?: string;
+  };
+}) {
+  return apiRequest<{
+    ok: boolean;
+    result?: unknown;
+    error?: string;
+  }>("/api/expressions/preview", {
     method: "POST",
     body: JSON.stringify(payload)
   });

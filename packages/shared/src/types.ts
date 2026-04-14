@@ -158,6 +158,8 @@ export interface Workflow {
   createdAt?: string;
   updatedAt?: string;
   settings?: WorkflowSettings;
+  /** Phase 4.3 debug tooling: saved node outputs keyed by node id. */
+  pinnedData?: Record<string, unknown>;
   /** Phase 4.2 — tags/organization. All optional for backwards-compat. */
   tags?: string[];
   projectId?: string;
@@ -438,6 +440,11 @@ export interface AgentRunState {
 export interface WorkflowExecuteRequest {
   workflowId?: string;
   startNodeId?: string;
+  runMode?: "workflow" | "single_node";
+  usePinnedData?: boolean;
+  pinnedData?: Record<string, unknown>;
+  nodeOutputs?: Record<string, unknown>;
+  sourceExecutionId?: string;
   sessionId?: string;
   session_id?: string;
   executionTimeoutMs?: number;
