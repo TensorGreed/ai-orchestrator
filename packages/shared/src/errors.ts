@@ -34,7 +34,13 @@ export enum ErrorCategory {
   /** Missing required node configuration */
   NODE_CONFIG = "node_config",
   /** Uncategorized error */
-  UNKNOWN = "unknown"
+  UNKNOWN = "unknown",
+  /** Workflow intentionally stopped by a stop_and_error node */
+  WORKFLOW_STOPPED = "workflow_stopped",
+  /** Feature/operation is not implemented in this build */
+  NOT_IMPLEMENTED = "not_implemented",
+  /** Configuration error (missing dependency, runtime not installed, etc.) */
+  CONFIGURATION = "configuration"
 }
 
 /**

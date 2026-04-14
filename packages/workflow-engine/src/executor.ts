@@ -32,8 +32,12 @@ import {
   type VectorStoreRegistry
 } from "./rag-adapters";
 import { renderTemplate, tryParseJson } from "./template";
+import { executePhase2Node } from "./phase2-dispatch";
+import { executePythonCodeNode } from "./python-runner";
 import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
-import { WorkflowError } from "@ai-orchestrator/shared";
+import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
+
+const MAX_SUB_WORKFLOW_DEPTH = 10;
 
 export interface WorkflowExecutionDependencies {
   providerRegistry: ProviderRegistry;
@@ -79,6 +83,15 @@ export interface WorkflowExecutionDependencies {
     index: number;
   }) => Promise<void> | void;
   logger?: (message: string, metadata?: unknown) => void;
+  triggerErrorWorkflow?: (input: {
+    errorWorkflowId: string;
+    sourceWorkflowId: string;
+    sourceWorkflowName: string;
+    executionId?: string;
+    error: string;
+    errorStack?: string;
+    timestamp: string;
+  }) => Promise<void>;
 }
 
 export interface ExecuteWorkflowRequest {
@@ -1895,15 +1908,117 @@ async function executeNode(
       return {};
     }
 
+    case "sub_workflow_trigger": {
+      // Entry point for sub-workflows — pass through the injected input context
+      return {
+        trigger_type: "sub_workflow",
+        ...context.globals,
+        ...context.merged
+      };
+    }
+
+    case "error_trigger": {
+      return {
+        trigger_type: "error",
+        source_workflow_id: context.globals.source_workflow_id ?? "",
+        source_workflow_name: context.globals.source_workflow_name ?? "",
+        execution_id: context.globals.execution_id ?? "",
+        error: context.globals.error ?? "",
+        error_stack: context.globals.error_stack ?? "",
+        timestamp: context.globals.timestamp ?? nowIso()
+      };
+    }
+
+    case "filter_node": {
+      const conditions = Array.isArray(config.conditions) ? config.conditions : [];
+      const combineWith = config.combineWith === "OR" ? "OR" : "AND";
+      const passMode = config.passMode === "reject" ? "reject" : "pass";
+
+      function evaluateFilterCondition(cond: Record<string, unknown>): boolean {
+        const field = typeof cond.field === "string" ? cond.field : "";
+        const operator = typeof cond.operator === "string" ? cond.operator : "eq";
+        const expectedRaw =
+          typeof cond.value === "string" ? renderTemplate(String(cond.value), templateData) : cond.value;
+
+        let actual: unknown = templateData[field];
+        if (actual === undefined) actual = getValueByPath(templateData, field);
+
+        const actualStr = actual == null ? "" : String(actual);
+        const expectedStr = expectedRaw == null ? "" : String(expectedRaw);
+
+        switch (operator) {
+          case "eq": return actualStr === expectedStr;
+          case "neq": return actualStr !== expectedStr;
+          case "gt": return Number(actual) > Number(expectedRaw);
+          case "gte": return Number(actual) >= Number(expectedRaw);
+          case "lt": return Number(actual) < Number(expectedRaw);
+          case "lte": return Number(actual) <= Number(expectedRaw);
+          case "contains": return actualStr.includes(expectedStr);
+          case "not_contains": return !actualStr.includes(expectedStr);
+          case "starts_with": return actualStr.startsWith(expectedStr);
+          case "ends_with": return actualStr.endsWith(expectedStr);
+          case "is_empty":
+            return actual == null || actualStr === "" || (Array.isArray(actual) && actual.length === 0);
+          case "is_not_empty":
+            return actual != null && actualStr !== "" && !(Array.isArray(actual) && actual.length === 0);
+          case "regex": {
+            try { return new RegExp(expectedStr).test(actualStr); } catch { return false; }
+          }
+          default: return false;
+        }
+      }
+
+      const results = conditions.map((c: unknown) => evaluateFilterCondition(toRecord(c)));
+      const passed = combineWith === "OR" ? results.some(Boolean) : results.every(Boolean);
+      const shouldPass = passMode === "pass" ? passed : !passed;
+
+      return {
+        _branchHandle: shouldPass ? "pass" : "filtered",
+        passed: shouldPass,
+        input: { ...context.merged },
+        ...context.merged
+      };
+    }
+
+    case "stop_and_error": {
+      const messageTemplate =
+        typeof config.message === "string" && config.message.trim()
+          ? config.message
+          : "Workflow stopped by stop_and_error node.";
+      const errorCode =
+        typeof config.errorCode === "string" && config.errorCode.trim()
+          ? config.errorCode
+          : "WORKFLOW_STOPPED";
+      const renderedMessage = renderTemplate(messageTemplate, templateData);
+      throw new WorkflowError(renderedMessage, ErrorCategory.WORKFLOW_STOPPED, false, { errorCode });
+    }
+
+    case "noop_node": {
+      return { ...context.merged };
+    }
+
     case "wait_node": {
-      const requestedDelay =
-        typeof config.delayMs === "number" && Number.isFinite(config.delayMs) && config.delayMs >= 0
-          ? Math.floor(config.delayMs)
-          : 1000;
+      const resumeMode =
+        typeof config.resumeMode === "string" ? config.resumeMode : "timer";
       const maxDelay =
         typeof config.maxDelayMs === "number" && Number.isFinite(config.maxDelayMs) && config.maxDelayMs > 0
           ? Math.floor(config.maxDelayMs)
           : 30000;
+
+      if (resumeMode === "datetime" && typeof config.resumeAt === "string" && config.resumeAt.trim()) {
+        const resumeAtMs = Date.parse(config.resumeAt.trim());
+        if (!Number.isNaN(resumeAtMs)) {
+          const delayUntil = Math.max(0, resumeAtMs - Date.now());
+          const clampedDelay = Math.min(delayUntil, maxDelay);
+          await sleep(clampedDelay);
+          return mergeParentOutputs(context.parentOutputs);
+        }
+      }
+
+      const requestedDelay =
+        typeof config.delayMs === "number" && Number.isFinite(config.delayMs) && config.delayMs >= 0
+          ? Math.floor(config.delayMs)
+          : 1000;
       const clampedDelay = Math.min(requestedDelay, maxDelay);
       await sleep(clampedDelay);
       return mergeParentOutputs(context.parentOutputs);
@@ -1936,6 +2051,12 @@ async function executeNode(
         throw new Error("Execute Workflow node requires a loadWorkflow dependency.");
       }
 
+      if (context.callStack.length >= MAX_SUB_WORKFLOW_DEPTH) {
+        throw new Error(
+          `Maximum sub-workflow depth of ${MAX_SUB_WORKFLOW_DEPTH} exceeded. Call stack: ${context.callStack.join(" -> ")}`
+        );
+      }
+
       if (context.callStack.includes(workflowId)) {
         throw new Error(
           `Circular sub-workflow reference detected: ${[...context.callStack, workflowId].join(" -> ")}`
@@ -1947,6 +2068,7 @@ async function executeNode(
         throw new Error(`Sub-workflow '${workflowId}' was not found.`);
       }
 
+      const mode = config.mode === "async" ? "async" : "sync";
       const inputMapping = toRecord(config.inputMapping);
       const mappedInput: Record<string, unknown> = {};
       for (const [parentKey, childKeyValue] of Object.entries(inputMapping)) {
@@ -1961,6 +2083,23 @@ async function executeNode(
           mappedValue = getValueByPath(templateData, parentPath);
         }
         mappedInput[childKey] = mappedValue;
+      }
+
+      if (mode === "async") {
+        // Fire-and-forget
+        executeWorkflow(
+          {
+            workflow: targetWorkflow,
+            input: mappedInput,
+            triggerType: "sub_workflow",
+            triggeredBy: context.workflow.id,
+            callStack: [...context.callStack]
+          },
+          dependencies
+        ).catch(() => {
+          // Intentionally ignored — async sub-workflow errors do not propagate
+        });
+        return { async: true, workflowId, status: "enqueued" };
       }
 
       const childResult = await executeWorkflow(
@@ -1984,6 +2123,23 @@ async function executeNode(
         );
       }
 
+      // Apply outputMapping if configured
+      const outputMapping = toRecord(config.outputMapping);
+      const childOutput = toRecord(childResult.output);
+      const outputMappingEntries = Object.entries(outputMapping);
+      if (outputMappingEntries.length > 0) {
+        const projected: Record<string, unknown> = {};
+        for (const [childKey, parentKey] of outputMappingEntries) {
+          const ck = String(childKey ?? "").trim();
+          const pk = String(parentKey ?? "").trim();
+          if (!ck || !pk) continue;
+          let val = childOutput[ck];
+          if (val === undefined) val = getValueByPath(childOutput, ck);
+          projected[pk] = val;
+        }
+        return projected;
+      }
+
       return childResult.output;
     }
 
@@ -1995,6 +2151,38 @@ async function executeNode(
       const code = typeof config.code === "string" ? config.code : "";
       if (!code.trim()) {
         throw new Error("Code Node requires a non-empty code script.");
+      }
+
+      const language = typeof config.language === "string" ? config.language : "javascript";
+      const mode = config.mode === "runOnceForEachItem" ? "runOnceForEachItem" : "runOnceForAllItems";
+
+      if (language === "python") {
+        const items = Array.isArray(templateData.items)
+          ? (templateData.items as unknown[])
+          : [templateData];
+        const py = await executePythonCodeNode({ code, items, mode, timeoutMs: timeout });
+        if (py.result && typeof py.result === "object" && !Array.isArray(py.result)) {
+          return {
+            ...(py.result as Record<string, unknown>),
+            code_result: py.result,
+            code_logs: py.logs
+          };
+        }
+        return { code_result: py.result, code_logs: py.logs };
+      }
+
+      // JS path — supports runOnceForEachItem too
+      if (mode === "runOnceForEachItem" && Array.isArray(templateData.items)) {
+        const outputs: unknown[] = [];
+        const allLogs: string[] = [];
+        for (let i = 0; i < (templateData.items as unknown[]).length; i++) {
+          const item = (templateData.items as unknown[])[i];
+          const itemInput = { ...templateData, item, _itemIndex: i, input: { ...templateData, item } };
+          const r = await executeCodeNodeSandbox({ code, input: itemInput, timeoutMs: timeout });
+          outputs.push(r.result);
+          allLogs.push(...r.logs);
+        }
+        return { code_result: outputs, items: outputs, code_logs: allLogs };
       }
 
       const sandboxInput = {
@@ -3172,6 +3360,31 @@ async function executeNode(
       };
     }
 
+    case "aggregate_node":
+    case "split_out_node":
+    case "sort_node":
+    case "limit_node":
+    case "remove_duplicates_node":
+    case "summarize_node":
+    case "compare_datasets_node":
+    case "rename_keys_node":
+    case "edit_fields_node":
+    case "date_time_node":
+    case "crypto_node":
+    case "jwt_node":
+    case "xml_node":
+    case "html_node":
+    case "convert_to_file_node":
+    case "extract_from_file_node":
+    case "compression_node":
+    case "edit_image_node": {
+      return executePhase2Node(node, config, {
+        templateData,
+        parentOutputs: context.parentOutputs,
+        getValueByPath
+      });
+    }
+
     default:
       throw new Error(`Unsupported node type '${String(node.type)}'`);
   }
@@ -3215,6 +3428,15 @@ const RETRYABLE_NODE_TYPES = new Set([
 ]);
 
 function getRetryConfigForNode(node: WorkflowNode): RetryConfig | undefined {
+  // Check node-level errorConfig first
+  if (node.errorConfig?.retryOnFail === true) {
+    return {
+      enabled: true,
+      maxAttempts: (node.errorConfig.maxRetries ?? 2) + 1,
+      delayMs: node.errorConfig.retryIntervalMs ?? 1000,
+      backoffMultiplier: 2
+    };
+  }
   const config = toRecord(node.config);
   const explicit = getRetryConfig(config);
   if (explicit) return explicit;
@@ -3916,7 +4138,8 @@ export async function executeWorkflow(
     const started = Date.now();
     const startedAtNode = nowIso();
     const nodeConfig = toRecord(node.config);
-    const onError = getOnError(nodeConfig);
+    const onError: "stop" | "continue" | "branch" =
+      node.errorConfig?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
     await dependencies.onNodeStart?.({
       nodeId: node.id,
       nodeType: node.type,
@@ -4454,6 +4677,20 @@ export async function executeWorkflow(
             startedAt: nowIso(),
             completedAt: nowIso(),
             durationMs: 0
+          });
+        }
+
+        // Trigger error workflow if configured
+        if (workflow.settings?.errorWorkflowId && dependencies.triggerErrorWorkflow) {
+          dependencies.triggerErrorWorkflow({
+            errorWorkflowId: workflow.settings.errorWorkflowId,
+            sourceWorkflowId: workflow.id,
+            sourceWorkflowName: workflow.name,
+            executionId: request.executionId,
+            error: failedError ?? "Unknown error",
+            timestamp: nowIso()
+          }).catch(() => {
+            // Intentionally ignored — error workflow trigger failures do not affect the result
           });
         }
 

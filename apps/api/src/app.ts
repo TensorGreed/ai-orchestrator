@@ -34,6 +34,7 @@ import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
+import { QueueService } from "./services/queue-service";
 
 const secretCreateSchema = z.object({
   name: z.string().min(1),
@@ -714,7 +715,8 @@ export function createApp(
   store: SqliteStore,
   secretService: SecretService,
   authService: AuthService,
-  schedulerService?: SchedulerService
+  schedulerService?: SchedulerService,
+  queueService?: QueueService
 ) {
   const app = Fastify({ logger: true });
   const providerRegistry = createDefaultProviderRegistry();
@@ -2752,6 +2754,100 @@ export function createApp(
       };
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Queue endpoints
+  // -------------------------------------------------------------------------
+
+  if (queueService) {
+    queueService.setHandler(async (payload) => {
+      const workflow = store.getWorkflow(payload.workflowId);
+      if (!workflow) {
+        throw new Error(`Workflow not found: ${payload.workflowId}`);
+      }
+      const startedAt = new Date().toISOString();
+      const result = await runWorkflowExecution({
+        workflow,
+        executionId: payload.executionId,
+        directInput: payload.input,
+        variables: payload.variables,
+        systemPrompt: payload.systemPrompt,
+        userPrompt: payload.userPrompt,
+        sessionId: payload.sessionId,
+        triggerType: payload.triggerType ?? "queue",
+        triggeredBy: payload.triggeredBy,
+        executionTimeoutMs: payload.executionTimeoutMs
+      });
+      persistExecutionHistory({
+        executionId: payload.executionId,
+        workflow,
+        result,
+        triggerType: payload.triggerType ?? "queue",
+        triggeredBy: payload.triggeredBy,
+        requestInput: payload.input
+      });
+      app.log.info(
+        { executionId: payload.executionId, workflowId: payload.workflowId, status: result.status },
+        "Queued workflow execution completed"
+      );
+    });
+
+    queueService.start();
+
+    app.addHook("onClose", async () => {
+      queueService.stop();
+    });
+
+    app.get("/api/queue/depth", async (request, reply) => {
+      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+      if (!user) return;
+      return queueService.getDepth();
+    });
+
+    app.get("/api/queue/dlq", async (request, reply) => {
+      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+      if (!user) return;
+      const limit = typeof (request.query as Record<string, unknown>).limit === "string"
+        ? Math.min(200, Math.max(1, Number((request.query as Record<string, unknown>).limit)))
+        : 50;
+      return queueService.listDlq(limit);
+    });
+
+    app.post<{ Params: { id: string }; Body: unknown }>(
+      "/api/workflows/:id/enqueue",
+      async (request, reply) => {
+        const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+        if (!user) return;
+
+        const workflow = store.getWorkflow(request.params.id);
+        if (!workflow) {
+          reply.code(404);
+          return { error: "Workflow not found" };
+        }
+
+        const body = asRecord(request.body);
+        const executionId = await queueService.enqueue({
+          workflowId: workflow.id,
+          input: body.input && typeof body.input === "object" && !Array.isArray(body.input)
+            ? (body.input as Record<string, unknown>)
+            : undefined,
+          variables: body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
+            ? (body.variables as Record<string, unknown>)
+            : undefined,
+          systemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
+          userPrompt: typeof body.userPrompt === "string" ? body.userPrompt : undefined,
+          sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
+          triggerType: typeof body.triggerType === "string" ? body.triggerType : "api_queue",
+          triggeredBy: typeof body.triggeredBy === "string" ? body.triggeredBy : user.email,
+          executionTimeoutMs: typeof body.executionTimeoutMs === "number" ? body.executionTimeoutMs : undefined,
+          priority: typeof body.priority === "number" ? body.priority : 0
+        });
+
+        const depth = queueService.getDepth();
+        return { queued: true, executionId, queueDepth: depth };
+      }
+    );
+  }
 
   app.setErrorHandler((error, _request, reply) => {
     const message = error instanceof Error ? error.message : "Unknown error";

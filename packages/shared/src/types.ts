@@ -1,4 +1,5 @@
 export const WORKFLOW_SCHEMA_VERSION = "1.0.0";
+export const MAX_SUB_WORKFLOW_DEPTH = 10;
 
 export type NodeCategory =
   | "Input"
@@ -49,11 +50,42 @@ export type WorkflowNodeType =
   | "try_catch"
   | "webhook_response"
   | "pdf_output"
-  | "output";
+  | "output"
+  | "sub_workflow_trigger"
+  | "error_trigger"
+  | "filter_node"
+  | "stop_and_error"
+  | "noop_node"
+  | "aggregate_node"
+  | "split_out_node"
+  | "sort_node"
+  | "limit_node"
+  | "remove_duplicates_node"
+  | "summarize_node"
+  | "compare_datasets_node"
+  | "rename_keys_node"
+  | "edit_fields_node"
+  | "date_time_node"
+  | "crypto_node"
+  | "jwt_node"
+  | "xml_node"
+  | "html_node"
+  | "convert_to_file_node"
+  | "extract_from_file_node"
+  | "compression_node"
+  | "edit_image_node";
 
 export interface WorkflowNodePosition {
   x: number;
   y: number;
+}
+
+export interface NodeErrorConfig {
+  continueOnFail?: boolean;
+  retryOnFail?: boolean;
+  maxRetries?: number;
+  retryIntervalMs?: number;
+  alwaysOutputData?: boolean;
 }
 
 export interface WorkflowNode<TConfig = Record<string, unknown>> {
@@ -62,6 +94,7 @@ export interface WorkflowNode<TConfig = Record<string, unknown>> {
   name: string;
   position: WorkflowNodePosition;
   config: TConfig;
+  errorConfig?: NodeErrorConfig;
 }
 
 export interface WorkflowEdge {
@@ -71,6 +104,13 @@ export interface WorkflowEdge {
   sourceHandle?: string;
   targetHandle?: string;
   label?: string;
+}
+
+export interface WorkflowSettings {
+  errorWorkflowId?: string;
+  executionTimeoutMs?: number;
+  saveDataSuccessExecution?: "all" | "none";
+  saveDataErrorExecution?: "all" | "none";
 }
 
 export interface Workflow {
@@ -84,6 +124,7 @@ export interface Workflow {
   edges: WorkflowEdge[];
   createdAt?: string;
   updatedAt?: string;
+  settings?: WorkflowSettings;
 }
 
 export interface WorkflowListItem {

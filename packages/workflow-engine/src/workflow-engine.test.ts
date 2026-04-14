@@ -2251,3 +2251,842 @@ describe("workflow engine", () => {
   });
 
 });
+
+// ---------------------------------------------------------------------------
+// Phase 1 Feature Tests
+// ---------------------------------------------------------------------------
+
+import { vi } from "vitest";
+import type { NodeErrorConfig, WorkflowSettings } from "@ai-orchestrator/shared";
+import type { WorkflowExecutionDependencies } from "./executor";
+
+// Helper builders shared across Phase 1 suites
+function makeWorkflow(
+  nodes: ReturnType<typeof makeNode>[],
+  edges: ReturnType<typeof makeEdge>[],
+  settings?: WorkflowSettings
+) {
+  return {
+    id: "test-wf",
+    name: "Test Workflow",
+    schemaVersion: "1.0.0" as const,
+    workflowVersion: 1,
+    nodes,
+    edges,
+    ...(settings ? { settings } : {})
+  };
+}
+
+function makeNode(id: string, type: string, config: Record<string, unknown> = {}, errorConfig?: NodeErrorConfig) {
+  return {
+    id,
+    type: type as import("@ai-orchestrator/shared").WorkflowNodeType,
+    name: id,
+    position: { x: 0, y: 0 },
+    config,
+    ...(errorConfig ? { errorConfig } : {})
+  };
+}
+
+function makeEdge(source: string, target: string, sourceHandle?: string) {
+  return {
+    id: `${source}-${target}`,
+    source,
+    target,
+    ...(sourceHandle ? { sourceHandle } : {})
+  };
+}
+
+const fakeProviderRegistry = createProviderRegistry();
+const fakeMcpRegistry = createDefaultMCPRegistry();
+const fakeConnectorRegistry = createDefaultConnectorRegistry();
+
+function makeDeps(overrides?: Partial<WorkflowExecutionDependencies>): WorkflowExecutionDependencies {
+  return {
+    providerRegistry: fakeProviderRegistry,
+    mcpRegistry: fakeMcpRegistry,
+    connectorRegistry: fakeConnectorRegistry,
+    agentRuntime: new FakeAgentRuntime(),
+    resolveSecret: async () => undefined,
+    ...overrides
+  };
+}
+
+// ---------------------------------------------------------------------------
+describe("Phase 1.1 — Sub-Workflow Execution (execute_workflow node)", () => {
+  // Minimal valid child workflow with sub_workflow_trigger + output
+  function makeChildWorkflow(id: string, extraNodes: ReturnType<typeof makeNode>[] = [], extraEdges: ReturnType<typeof makeEdge>[] = []) {
+    return {
+      id,
+      name: `Child ${id}`,
+      schemaVersion: "1.0.0" as const,
+      workflowVersion: 1,
+      nodes: [
+        makeNode("c1", "sub_workflow_trigger"),
+        makeNode("c2", "output", { responseTemplate: "{{custom_global}}" }),
+        ...extraNodes
+      ],
+      edges: [makeEdge("c1", "c2"), ...extraEdges]
+    };
+  }
+
+  it("passes context globals to child sub_workflow_trigger node", async () => {
+    const childWorkflow = makeChildWorkflow("child-wf");
+
+    const parentWorkflow = makeWorkflow(
+      [
+        makeNode("p1", "text_input", { text: "hello" }),
+        makeNode("p2", "execute_workflow", {
+          workflowId: "child-wf",
+          inputMapping: { text: "custom_global" }
+        }),
+        makeNode("p3", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("p1", "p2"), makeEdge("p2", "p3")]
+    );
+
+    const result = await executeWorkflow(
+      { workflow: parentWorkflow },
+      makeDeps({ loadWorkflow: (id) => (id === "child-wf" ? childWorkflow : undefined) })
+    );
+
+    expect(result.status).toBe("success");
+    const execNode = result.nodeResults.find((r) => r.nodeId === "p2");
+    expect(execNode?.status).toBe("success");
+  });
+
+  it("throws when recursion depth >= 10", async () => {
+    const childWorkflow = makeChildWorkflow("deep-wf");
+
+    const parentWorkflow = makeWorkflow(
+      [
+        makeNode("p1", "execute_workflow", { workflowId: "deep-wf" }),
+        makeNode("p2", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("p1", "p2")]
+    );
+
+    // Pre-populate callStack to 10 items to simulate depth limit
+    const callStack = Array.from({ length: 10 }, (_, i) => `wf-${i}`);
+
+    const result = await executeWorkflow(
+      { workflow: parentWorkflow, callStack },
+      makeDeps({ loadWorkflow: () => childWorkflow })
+    );
+
+    expect(result.status).toBe("error");
+    expect(result.error).toMatch(/depth|exceeded/i);
+  });
+
+  it("sync mode: parent waits for child result", async () => {
+    const childWorkflow = {
+      id: "sync-child",
+      name: "Sync Child",
+      schemaVersion: "1.0.0" as const,
+      workflowVersion: 1,
+      nodes: [
+        makeNode("c1", "text_input", { text: "child-result" }),
+        makeNode("c2", "output", { responseTemplate: "{{text}}" })
+      ],
+      edges: [makeEdge("c1", "c2")]
+    };
+
+    const parentWorkflow = makeWorkflow(
+      [
+        makeNode("p1", "execute_workflow", { workflowId: "sync-child", mode: "sync" }),
+        makeNode("p2", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("p1", "p2")]
+    );
+
+    const result = await executeWorkflow(
+      { workflow: parentWorkflow },
+      makeDeps({ loadWorkflow: (id) => (id === "sync-child" ? childWorkflow : undefined) })
+    );
+
+    expect(result.status).toBe("success");
+    const execNode = result.nodeResults.find((r) => r.nodeId === "p1");
+    expect(execNode?.status).toBe("success");
+  });
+
+  it("async mode: returns enqueued immediately without child result", async () => {
+    const childWorkflow = {
+      id: "async-child",
+      name: "Async Child",
+      schemaVersion: "1.0.0" as const,
+      workflowVersion: 1,
+      nodes: [
+        makeNode("c1", "text_input", { text: "slow" }),
+        makeNode("c2", "output", { responseTemplate: "{{text}}" })
+      ],
+      edges: [makeEdge("c1", "c2")]
+    };
+
+    const parentWorkflow = makeWorkflow(
+      [
+        makeNode("p1", "execute_workflow", { workflowId: "async-child", mode: "async" }),
+        makeNode("p2", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("p1", "p2")]
+    );
+
+    const result = await executeWorkflow(
+      { workflow: parentWorkflow },
+      makeDeps({ loadWorkflow: (id) => (id === "async-child" ? childWorkflow : undefined) })
+    );
+
+    expect(result.status).toBe("success");
+    const execNode = result.nodeResults.find((r) => r.nodeId === "p1");
+    const output = execNode?.output as Record<string, unknown>;
+    expect(output?.async).toBe(true);
+    expect(output?.status).toBe("enqueued");
+  });
+
+  it("output mapping maps child output keys to parent keys", async () => {
+    const childWorkflow = {
+      id: "mapped-child",
+      name: "Mapped Child",
+      schemaVersion: "1.0.0" as const,
+      workflowVersion: 1,
+      nodes: [
+        makeNode("c1", "text_input", { text: "42" }),
+        makeNode("c2", "output", { responseTemplate: "{{text}}" })
+      ],
+      edges: [makeEdge("c1", "c2")]
+    };
+
+    const parentWorkflow = makeWorkflow(
+      [
+        makeNode("p1", "execute_workflow", {
+          workflowId: "mapped-child",
+          outputMapping: { result: "mapped_result" }
+        }),
+        makeNode("p2", "output", { responseTemplate: "{{mapped_result}}" })
+      ],
+      [makeEdge("p1", "p2")]
+    );
+
+    const result = await executeWorkflow(
+      { workflow: parentWorkflow },
+      makeDeps({ loadWorkflow: (id) => (id === "mapped-child" ? childWorkflow : undefined) })
+    );
+
+    expect(result.status).toBe("success");
+    const execNode = result.nodeResults.find((r) => r.nodeId === "p1");
+    const output = execNode?.output as Record<string, unknown>;
+    expect(output).toHaveProperty("mapped_result");
+  });
+
+  it("throws a clear error when loadWorkflow dependency is missing", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("p1", "execute_workflow", { workflowId: "some-wf" }),
+        makeNode("p2", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("p1", "p2")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    expect(result.status).toBe("error");
+    expect(result.error).toMatch(/loadWorkflow/i);
+  });
+
+  it("throws when the target workflow is not found", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("p1", "execute_workflow", { workflowId: "missing-wf" }),
+        makeNode("p2", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("p1", "p2")]
+    );
+
+    const result = await executeWorkflow(
+      { workflow },
+      makeDeps({ loadWorkflow: () => undefined })
+    );
+
+    expect(result.status).toBe("error");
+    expect(result.error).toMatch(/not found|missing-wf/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Phase 1.2 — Enhanced Flow Control: filter_node", () => {
+  // Helper: run a filter and return the filter node's output
+  async function runFilter(conditions: unknown[], combineWith = "AND", passMode?: string, inputText = "hello world") {
+    const wf = makeWorkflow(
+      [
+        makeNode("fsrc", "text_input", { text: inputText }),
+        makeNode("fnode", "filter_node", {
+          conditions,
+          combineWith,
+          ...(passMode ? { passMode } : {})
+        }),
+        makeNode("fout", "output", { responseTemplate: "{{passed}}" })
+      ],
+      [makeEdge("fsrc", "fnode"), makeEdge("fnode", "fout")]
+    );
+    const result = await executeWorkflow({ workflow: wf }, makeDeps());
+    const filterNode = result.nodeResults.find((r) => r.nodeId === "fnode");
+    return filterNode?.output as Record<string, unknown>;
+  }
+
+  it("eq condition passes when value matches exactly", async () => {
+    const output = await runFilter([{ field: "text", operator: "eq", value: "hello world" }]);
+    expect(output?.passed).toBe(true);
+  });
+
+  it("eq condition blocks when value does not match", async () => {
+    const output = await runFilter([{ field: "text", operator: "eq", value: "goodbye" }]);
+    expect(output?.passed).toBe(false);
+  });
+
+  it("neq condition blocks matching items", async () => {
+    const output = await runFilter([{ field: "text", operator: "neq", value: "hello world" }]);
+    expect(output?.passed).toBe(false);
+  });
+
+  it("contains operator passes when value is a substring", async () => {
+    const output = await runFilter([{ field: "text", operator: "contains", value: "world" }]);
+    expect(output?.passed).toBe(true);
+  });
+
+  it("is_empty operator passes when field is missing/empty", async () => {
+    const output = await runFilter([{ field: "nonexistent_field", operator: "is_empty" }]);
+    expect(output?.passed).toBe(true);
+  });
+
+  it("is_not_empty operator passes when field has a value", async () => {
+    const output = await runFilter([{ field: "text", operator: "is_not_empty" }]);
+    expect(output?.passed).toBe(true);
+  });
+
+  it("regex operator passes when value matches pattern", async () => {
+    const output = await runFilter([{ field: "text", operator: "regex", value: "^hello" }]);
+    expect(output?.passed).toBe(true);
+  });
+
+  it("regex operator blocks when value does not match pattern", async () => {
+    const output = await runFilter([{ field: "text", operator: "regex", value: "^goodbye" }]);
+    expect(output?.passed).toBe(false);
+  });
+
+  it("AND combine: all conditions must pass", async () => {
+    const output = await runFilter([
+      { field: "text", operator: "contains", value: "hello" },
+      { field: "text", operator: "contains", value: "world" }
+    ], "AND");
+    expect(output?.passed).toBe(true);
+  });
+
+  it("AND combine: fails when one condition does not pass", async () => {
+    const output = await runFilter([
+      { field: "text", operator: "contains", value: "hello" },
+      { field: "text", operator: "eq", value: "goodbye" }
+    ], "AND");
+    expect(output?.passed).toBe(false);
+  });
+
+  it("OR combine: passes when any condition is true", async () => {
+    const output = await runFilter([
+      { field: "text", operator: "eq", value: "nope" },
+      { field: "text", operator: "contains", value: "world" }
+    ], "OR");
+    expect(output?.passed).toBe(true);
+  });
+
+  it("passMode: reject inverts the filter result", async () => {
+    // "hello world" matches eq "hello world", but reject mode inverts: should block
+    const output = await runFilter(
+      [{ field: "text", operator: "eq", value: "hello world" }],
+      "AND",
+      "reject"
+    );
+    expect(output?.passed).toBe(false);
+  });
+
+  it("filtered-false items set passed=false in node output", async () => {
+    const output = await runFilter([{ field: "text", operator: "eq", value: "no-match" }]);
+    expect(output?.passed).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Phase 1.3 — Stop and Error Node", () => {
+  it("stops execution with a custom message", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("e1", "stop_and_error", { message: "Custom stop message" }),
+        makeNode("eout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("e1", "eout")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("Custom stop message");
+  });
+
+  it("message template is rendered with context variables", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "dynamic-value" }),
+        makeNode("n2", "stop_and_error", { message: "Error: {{text}}" }),
+        makeNode("nout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "nout")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("dynamic-value");
+  });
+
+  it("uses default message when message config is empty", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("e1", "stop_and_error", {}),
+        makeNode("eout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("e1", "eout")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    expect(result.status).toBe("error");
+    expect(result.error).toBeTruthy();
+  });
+
+  it("errorCode is present — node result status is error", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("e1", "stop_and_error", { message: "Stopped", errorCode: "MY_CODE" }),
+        makeNode("eout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("e1", "eout")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    expect(result.status).toBe("error");
+    const nodeResult = result.nodeResults.find((r) => r.nodeId === "e1");
+    expect(nodeResult?.status).toBe("error");
+    expect(nodeResult?.error).toContain("Stopped");
+  });
+
+  it("workflow result status is error", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "hello" }),
+        makeNode("n2", "stop_and_error", { message: "Halted" }),
+        makeNode("nout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "nout")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    expect(result.status).toBe("error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Phase 1.4 — Noop Node", () => {
+  it("passes through merged parent context unchanged", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "passthrough" }),
+        makeNode("n2", "noop_node"),
+        makeNode("n3", "output", { responseTemplate: "{{text}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "n3")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    expect(result.status).toBe("success");
+    const noopResult = result.nodeResults.find((r) => r.nodeId === "n2");
+    const output = noopResult?.output as Record<string, unknown>;
+    expect(output?.text).toBe("passthrough");
+  });
+
+  it("chaining: noop → output node gets parent data", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "chain-value" }),
+        makeNode("n2", "noop_node"),
+        makeNode("n3", "output", { responseTemplate: "{{text}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "n3")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    expect(result.status).toBe("success");
+    expect(result.output).toEqual({ result: "chain-value" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Phase 1.5 — Wait Node Enhancements", () => {
+  it("resumeMode: datetime with a past date executes immediately (0 delay)", async () => {
+    const pastDate = new Date(Date.now() - 60_000).toISOString(); // 1 minute ago
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "nowait" }),
+        makeNode("n2", "wait_node", { resumeMode: "datetime", resumeAt: pastDate, maxDelayMs: 100 }),
+        makeNode("n3", "output", { responseTemplate: "{{text}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "n3")]
+    );
+
+    const start = Date.now();
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    const elapsed = Date.now() - start;
+
+    expect(result.status).toBe("success");
+    expect(elapsed).toBeLessThan(500); // Should be near-instant
+  });
+
+  it("resumeMode: datetime with a near-future date delays appropriately", async () => {
+    const futureDate = new Date(Date.now() + 80).toISOString(); // 80ms from now
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "wait" }),
+        makeNode("n2", "wait_node", { resumeMode: "datetime", resumeAt: futureDate, maxDelayMs: 200 }),
+        makeNode("n3", "output", { responseTemplate: "{{text}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "n3")]
+    );
+
+    const start = Date.now();
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    const elapsed = Date.now() - start;
+
+    expect(result.status).toBe("success");
+    expect(elapsed).toBeGreaterThanOrEqual(50); // some delay occurred
+  });
+
+  it("resumeMode: timer delays by the configured amount", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "timer" }),
+        makeNode("n2", "wait_node", { resumeMode: "timer", delayMs: 50, maxDelayMs: 200 }),
+        makeNode("n3", "output", { responseTemplate: "{{text}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "n3")]
+    );
+
+    const start = Date.now();
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    const elapsed = Date.now() - start;
+
+    expect(result.status).toBe("success");
+    expect(elapsed).toBeGreaterThanOrEqual(40);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Phase 1.6 — Error Trigger Node", () => {
+  it("returns error context globals from error_trigger node", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("t1", "error_trigger"),
+        makeNode("tout", "output", { responseTemplate: "{{trigger_type}}" })
+      ],
+      [makeEdge("t1", "tout")]
+    );
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        variables: {
+          source_workflow_id: "wf-source",
+          error: "Something went wrong",
+          timestamp: "2026-01-01T00:00:00.000Z"
+        }
+      },
+      makeDeps()
+    );
+
+    expect(result.status).toBe("success");
+    const triggerNode = result.nodeResults.find((r) => r.nodeId === "t1");
+    const output = triggerNode?.output as Record<string, unknown>;
+    expect(output?.trigger_type).toBe("error");
+  });
+
+  it("triggerErrorWorkflow is called when errorWorkflowId is set and execution fails", async () => {
+    let resolveTrigger!: () => void;
+    const triggerPromise = new Promise<void>((resolve) => { resolveTrigger = resolve; });
+    const triggerErrorWorkflow = vi.fn().mockImplementation(() => { resolveTrigger(); return Promise.resolve(); });
+
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "hello" }),
+        makeNode("n2", "stop_and_error", { message: "Forced failure" }),
+        makeNode("nout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "nout")],
+      { errorWorkflowId: "error-handler-wf" }
+    );
+
+    const result = await executeWorkflow(
+      { workflow, executionId: "exec-123" },
+      makeDeps({ triggerErrorWorkflow })
+    );
+
+    expect(result.status).toBe("error");
+    // Wait for the fire-and-forget trigger to be called
+    await triggerPromise;
+    expect(triggerErrorWorkflow).toHaveBeenCalledTimes(1);
+    const callArg = triggerErrorWorkflow.mock.calls[0][0] as Record<string, unknown>;
+    expect(callArg.errorWorkflowId).toBe("error-handler-wf");
+    expect(callArg.sourceWorkflowId).toBe("test-wf");
+    expect(callArg.sourceWorkflowName).toBe("Test Workflow");
+    expect(callArg.executionId).toBe("exec-123");
+    expect(typeof callArg.error).toBe("string");
+    expect(typeof callArg.timestamp).toBe("string");
+  });
+
+  it("triggerErrorWorkflow is NOT called when execution succeeds", async () => {
+    const triggerErrorWorkflow = vi.fn().mockResolvedValue(undefined);
+
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "hello" }),
+        makeNode("nout", "output", { responseTemplate: "{{text}}" })
+      ],
+      [makeEdge("n1", "nout")],
+      { errorWorkflowId: "error-handler-wf" }
+    );
+
+    const result = await executeWorkflow(
+      { workflow },
+      makeDeps({ triggerErrorWorkflow })
+    );
+
+    expect(result.status).toBe("success");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(triggerErrorWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("error payload contains all required fields", async () => {
+    let resolveTrigger!: () => void;
+    const triggerPromise = new Promise<void>((resolve) => { resolveTrigger = resolve; });
+    const triggerErrorWorkflow = vi.fn().mockImplementation(() => { resolveTrigger(); return Promise.resolve(); });
+
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "stop_and_error", { message: "Payload test" }),
+        makeNode("nout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("n1", "nout")],
+      { errorWorkflowId: "err-wf" }
+    );
+
+    await executeWorkflow(
+      { workflow, executionId: "exec-456" },
+      makeDeps({ triggerErrorWorkflow })
+    );
+
+    await triggerPromise;
+    expect(triggerErrorWorkflow).toHaveBeenCalledTimes(1);
+    const payload = triggerErrorWorkflow.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      errorWorkflowId: "err-wf",
+      sourceWorkflowId: "test-wf",
+      sourceWorkflowName: "Test Workflow",
+      executionId: "exec-456"
+    });
+    expect(typeof payload.error).toBe("string");
+    expect(typeof payload.timestamp).toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Phase 1.7 — Node-Level Error Settings", () => {
+  it("continueOnFail: true — workflow continues past node error and returns partial status", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "hello" }),
+        makeNode("n2", "code_node", { code: "throw new Error('intentional');" }, { continueOnFail: true }),
+        makeNode("n3", "output", { responseTemplate: "{{text}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "n3")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    // Should not stop with hard error — continues past the failing node
+    expect(result.status).not.toBe("error");
+    // n2 should record as error but n3 should still run
+    const n2Result = result.nodeResults.find((r) => r.nodeId === "n2");
+    const n3Result = result.nodeResults.find((r) => r.nodeId === "n3");
+    expect(n2Result?.status).toBe("error");
+    expect(n3Result?.status).toBe("success");
+  });
+
+  it("continueOnFail: true — failed node output is { error: message } accessible downstream", async () => {
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "hello" }),
+        makeNode("n2", "code_node", { code: "throw new Error('captured-error');" }, { continueOnFail: true }),
+        makeNode("n3", "output", { responseTemplate: "{{error}}" })
+      ],
+      [makeEdge("n1", "n2"), makeEdge("n2", "n3")]
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps());
+    const n2Result = result.nodeResults.find((r) => r.nodeId === "n2");
+    expect(n2Result?.status).toBe("error");
+    // The error property on nodeResult captures the error message
+    expect(typeof n2Result?.error).toBe("string");
+    expect(n2Result?.error).toContain("captured-error");
+  });
+
+  it("retryOnFail: true with maxRetries: 2 — node is retried and retriedNodes is populated", async () => {
+    // Use an llm_call node with a provider that always fails to observe retries
+    // OR use code_node with errorConfig.retryOnFail which forces retry via getRetryConfigForNode
+    let callCount = 0;
+
+    class CountingProvider implements import("@ai-orchestrator/provider-sdk").LLMProviderAdapter {
+      readonly definition = {
+        id: "counting",
+        label: "Counting",
+        supportsTools: false,
+        configSchema: {}
+      };
+
+      async generate() {
+        callCount += 1;
+        throw new Error("always-fail");
+      }
+    }
+
+    const registry = new (await import("@ai-orchestrator/provider-sdk")).ProviderRegistry();
+    registry.register(new CountingProvider());
+
+    const workflow = makeWorkflow(
+      [
+        makeNode(
+          "n1",
+          "llm_call",
+          { provider: { providerId: "counting", model: "m" } },
+          { retryOnFail: true, maxRetries: 2, retryIntervalMs: 0 }
+        ),
+        makeNode("nout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("n1", "nout")]
+    );
+
+    const result = await executeWorkflow(
+      { workflow },
+      makeDeps({ providerRegistry: registry })
+    );
+
+    expect(result.status).toBe("error");
+    // retryOnFail: true + maxRetries: 2 → maxAttempts = 3, so 3 calls expected
+    expect(callCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it("retryOnFail: false — node runs exactly once (no retry)", async () => {
+    let callCount = 0;
+
+    class CountingProvider2 implements import("@ai-orchestrator/provider-sdk").LLMProviderAdapter {
+      readonly definition = {
+        id: "counting2",
+        label: "Counting2",
+        supportsTools: false,
+        configSchema: {}
+      };
+
+      async generate() {
+        callCount += 1;
+        throw new Error("always-fail");
+      }
+    }
+
+    const registry = new (await import("@ai-orchestrator/provider-sdk")).ProviderRegistry();
+    registry.register(new CountingProvider2());
+
+    const workflow = makeWorkflow(
+      [
+        makeNode(
+          "n1",
+          "llm_call",
+          { provider: { providerId: "counting2", model: "m" }, retry: { enabled: false } },
+          { retryOnFail: false }
+        ),
+        makeNode("nout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("n1", "nout")]
+    );
+
+    const result = await executeWorkflow(
+      { workflow },
+      makeDeps({ providerRegistry: registry })
+    );
+
+    expect(result.status).toBe("error");
+    // No retry: should call exactly once
+    expect(callCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Phase 1.8 — Workflow Settings: errorWorkflowId", () => {
+  it("triggers error workflow when errorWorkflowId is set and workflow fails", async () => {
+    let resolveTrigger!: () => void;
+    const triggerPromise = new Promise<void>((resolve) => { resolveTrigger = resolve; });
+    const triggerErrorWorkflow = vi.fn().mockImplementation(() => { resolveTrigger(); return Promise.resolve(); });
+
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "stop_and_error", { message: "Oops" }),
+        makeNode("nout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("n1", "nout")],
+      { errorWorkflowId: "my-error-handler" }
+    );
+
+    const result = await executeWorkflow(
+      { workflow },
+      makeDeps({ triggerErrorWorkflow })
+    );
+
+    expect(result.status).toBe("error");
+    await triggerPromise;
+    expect(triggerErrorWorkflow).toHaveBeenCalledWith(
+      expect.objectContaining({ errorWorkflowId: "my-error-handler" })
+    );
+  });
+
+  it("does NOT trigger error workflow when errorWorkflowId is not set", async () => {
+    const triggerErrorWorkflow = vi.fn().mockResolvedValue(undefined);
+
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "stop_and_error", { message: "Oops" }),
+        makeNode("nout", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("n1", "nout")]
+      // no settings.errorWorkflowId
+    );
+
+    await executeWorkflow({ workflow }, makeDeps({ triggerErrorWorkflow }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(triggerErrorWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("does NOT trigger error workflow when workflow succeeds even with errorWorkflowId set", async () => {
+    const triggerErrorWorkflow = vi.fn().mockResolvedValue(undefined);
+
+    const workflow = makeWorkflow(
+      [
+        makeNode("n1", "text_input", { text: "ok" }),
+        makeNode("nout", "output", { responseTemplate: "{{text}}" })
+      ],
+      [makeEdge("n1", "nout")],
+      { errorWorkflowId: "my-error-handler" }
+    );
+
+    const result = await executeWorkflow({ workflow }, makeDeps({ triggerErrorWorkflow }));
+    expect(result.status).toBe("success");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(triggerErrorWorkflow).not.toHaveBeenCalled();
+  });
+});

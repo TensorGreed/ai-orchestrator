@@ -24,10 +24,13 @@
     "fastify-raw-body": "5.0.0",
     "nanoid": "^5.1.5",
     "node-cron": "^4.2.1",
+    "pg": "^8.13.3",
     "sql.js": "^1.13.0",
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/pg": "^8.11.10",
     "@types/sql.js": "^1.4.9",
     "tsx": "^4.20.5"
   }

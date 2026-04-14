@@ -1,15 +1,38 @@
+import { evaluateExpression, isComplexExpression } from "./expression";
+
 export function renderTemplateAdvanced(template: string, values: Record<string, unknown>): { rendered: string; unresolvedKeys: string[] } {
   const unresolvedKeys: string[] = [];
-  const rendered = template.replace(/{{\s*([a-zA-Z0-9_.-]+)\s*}}/g, (_match, key: string) => {
-    const value = resolvePath(values, key);
-    if (value === undefined || value === null) {
-      unresolvedKeys.push(key);
-      return "";
+  // Match either a simple dotted-path token (back-compat) or any {{ ... }} body.
+  const rendered = template.replace(/{{\s*([\s\S]+?)\s*}}/g, (_match, body: string) => {
+    const trimmed = body.trim();
+    // Simple a.b.c path — preserve original behavior + unresolved tracking.
+    if (/^[A-Za-z0-9_.-]+$/.test(trimmed)) {
+      const value = resolvePath(values, trimmed);
+      if (value === undefined || value === null) {
+        unresolvedKeys.push(trimmed);
+        return "";
+      }
+      if (typeof value === "string") return value;
+      return JSON.stringify(value);
     }
-    if (typeof value === "string") {
-      return value;
+    // Otherwise — treat as a JS expression in the new engine.
+    if (isComplexExpression(trimmed)) {
+      try {
+        const result = evaluateExpression(trimmed, {
+          $input: values,
+          $json: values,
+          $vars: (values.vars && typeof values.vars === "object" ? values.vars : {}) as Record<string, unknown>,
+          extras: values
+        });
+        if (result === undefined || result === null) return "";
+        if (typeof result === "string") return result;
+        if (typeof result === "number" || typeof result === "boolean") return String(result);
+        try { return JSON.stringify(result); } catch { return String(result); }
+      } catch {
+        return "";
+      }
     }
-    return JSON.stringify(value);
+    return "";
   });
   return { rendered, unresolvedKeys };
 }

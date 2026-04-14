@@ -4,11 +4,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfig } from "./config";
 import { SqliteStore } from "./db/database";
+import { createStore } from "./db/create-store";
 import { createApp } from "./app";
 import { seedWorkflowsIfEmpty } from "./services/seed-service";
 import { SecretService } from "./services/secret-service";
 import { AuthService } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
+import { QueueService } from "./services/queue-service";
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const apiRoot = path.resolve(path.dirname(currentFilePath), "..");
@@ -26,7 +28,7 @@ if (fs.existsSync(apiEnvPath)) {
 async function bootstrap() {
   const config = getConfig();
   const dbPath = path.resolve(apiRoot, "data", "orchestrator.db");
-  const store = await SqliteStore.create(dbPath);
+  const store = await createStore({ dbFilePath: dbPath }) as SqliteStore;
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
 
@@ -41,7 +43,10 @@ async function bootstrap() {
   }
 
   const schedulerService = new SchedulerService(store);
-  const app = createApp(config, store, secretService, authService, schedulerService);
+  const queueService = new QueueService(store, {
+    concurrency: Number(process.env.QUEUE_CONCURRENCY) || 5
+  });
+  const app = createApp(config, store, secretService, authService, schedulerService, queueService);
   schedulerService.initialize();
   await app.listen({
     host: config.API_HOST,

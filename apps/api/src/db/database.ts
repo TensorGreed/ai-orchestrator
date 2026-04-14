@@ -84,6 +84,35 @@ interface WebhookIdempotencyRow {
   expires_at: string;
 }
 
+interface ExecutionQueueRow {
+  id: string;
+  workflow_id: string;
+  workflow_name: string | null;
+  payload_json: string;
+  status: string;
+  priority: number;
+  attempts: number;
+  max_attempts: number;
+  last_error: string | null;
+  scheduled_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ExecutionQueueDlqRow {
+  id: string;
+  original_id: string;
+  workflow_id: string;
+  workflow_name: string | null;
+  payload_json: string;
+  attempts: number;
+  final_error: string;
+  failed_at: string;
+  created_at: string;
+}
+
 interface ExecutionHistoryRow {
   id: string;
   workflow_id: string;
@@ -290,6 +319,38 @@ export class SqliteStore {
 
       CREATE INDEX IF NOT EXISTS idx_workflow_executions_status
       ON workflow_executions(status);
+
+      CREATE TABLE IF NOT EXISTS execution_queue (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        priority INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        last_error TEXT,
+        scheduled_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_execution_queue_status_scheduled
+      ON execution_queue(status, scheduled_at);
+
+      CREATE TABLE IF NOT EXISTS execution_queue_dlq (
+        id TEXT PRIMARY KEY,
+        original_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        payload_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL,
+        final_error TEXT NOT NULL,
+        failed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `);
 
     this.persist();
@@ -1441,5 +1502,225 @@ export class SqliteStore {
       this.persist();
     }
     return deleted;
+  }
+
+  // -------------------------------------------------------------------------
+  // Execution Queue methods
+  // -------------------------------------------------------------------------
+
+  enqueueExecution(input: {
+    id: string;
+    workflowId: string;
+    workflowName?: string;
+    payload: Record<string, unknown>;
+    priority?: number;
+    maxAttempts?: number;
+    scheduledAt?: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?, NULL, NULL, ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
+      [
+        input.id,
+        input.workflowId,
+        input.workflowName ?? null,
+        JSON.stringify(input.payload),
+        input.priority ?? 0,
+        input.maxAttempts ?? 3,
+        input.scheduledAt ?? now,
+        now,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  dequeueNext(limit = 1): Array<{
+    id: string;
+    workflowId: string;
+    workflowName: string | null;
+    payload: Record<string, unknown>;
+    attempts: number;
+    maxAttempts: number;
+    scheduledAt: string;
+  }> {
+    const now = new Date().toISOString();
+    const rows = this.queryAll<ExecutionQueueRow>(
+      `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts, scheduled_at
+       FROM execution_queue
+       WHERE status = 'pending' AND scheduled_at <= ?
+       ORDER BY priority DESC, scheduled_at ASC
+       LIMIT ?`,
+      [now, limit]
+    );
+
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const ids = rows.map((row) => toString(row.id));
+    for (const rowId of ids) {
+      this.db.run(
+        `UPDATE execution_queue SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?`,
+        [now, now, rowId]
+      );
+    }
+    this.persist();
+
+    return rows.map((row) => {
+      let payload: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(toString(row.payload_json));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          payload = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // ignore
+      }
+      return {
+        id: toString(row.id),
+        workflowId: toString(row.workflow_id),
+        workflowName: row.workflow_name ? toString(row.workflow_name) : null,
+        payload,
+        attempts: toNumber(row.attempts),
+        maxAttempts: toNumber(row.max_attempts),
+        scheduledAt: toString(row.scheduled_at)
+      };
+    });
+  }
+
+  markQueueItemRunning(id: string): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `UPDATE execution_queue SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?`,
+      [now, now, id]
+    );
+    this.persist();
+  }
+
+  markQueueItemCompleted(id: string): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?`,
+      [now, now, id]
+    );
+    this.persist();
+  }
+
+  markQueueItemFailed(id: string, error: string): void {
+    const now = new Date().toISOString();
+    const row = this.queryOne<ExecutionQueueRow>(
+      `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue WHERE id = ?`,
+      [id]
+    );
+    if (!row) {
+      return;
+    }
+
+    const attempts = toNumber(row.attempts) + 1;
+    const maxAttempts = toNumber(row.max_attempts);
+
+    if (attempts >= maxAttempts) {
+      // Move to DLQ
+      const dlqId = randomUUID();
+      this.db.run(
+        `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          dlqId,
+          toString(row.id),
+          toString(row.workflow_id),
+          row.workflow_name ? toString(row.workflow_name) : null,
+          toString(row.payload_json),
+          attempts,
+          error,
+          now,
+          now
+        ]
+      );
+      this.db.run(`UPDATE execution_queue SET status = 'dead', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?`, [
+        attempts,
+        error,
+        now,
+        id
+      ]);
+    } else {
+      // Exponential backoff: 1000 * 2^(attempts-1) ms
+      const backoffMs = 1000 * Math.pow(2, attempts - 1);
+      const retryAt = new Date(Date.now() + backoffMs).toISOString();
+      this.db.run(
+        `UPDATE execution_queue SET status = 'pending', attempts = ?, last_error = ?, scheduled_at = ?, updated_at = ? WHERE id = ?`,
+        [attempts, error, retryAt, now, id]
+      );
+    }
+    this.persist();
+  }
+
+  requeueStuckItems(stuckAfterMs = 600_000): number {
+    const stuckBefore = new Date(Date.now() - stuckAfterMs).toISOString();
+    const now = new Date().toISOString();
+    const stuck = this.queryAll<ExecutionQueueRow>(
+      `SELECT id FROM execution_queue WHERE status = 'running' AND started_at <= ?`,
+      [stuckBefore]
+    );
+
+    for (const row of stuck) {
+      this.db.run(
+        `UPDATE execution_queue SET status = 'pending', started_at = NULL, updated_at = ? WHERE id = ?`,
+        [now, toString(row.id)]
+      );
+    }
+
+    if (stuck.length > 0) {
+      this.persist();
+    }
+    return stuck.length;
+  }
+
+  getQueueDepth(): { pending: number; running: number; dlq: number } {
+    const pendingRow = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM execution_queue WHERE status = 'pending'`
+    );
+    const runningRow = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM execution_queue WHERE status = 'running'`
+    );
+    const dlqRow = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM execution_queue_dlq`
+    );
+    return {
+      pending: pendingRow ? toNumber(pendingRow.count) : 0,
+      running: runningRow ? toNumber(runningRow.count) : 0,
+      dlq: dlqRow ? toNumber(dlqRow.count) : 0
+    };
+  }
+
+  listDlqItems(limit = 50): Array<{
+    id: string;
+    originalId: string;
+    workflowId: string;
+    workflowName: string | null;
+    attempts: number;
+    finalError: string;
+    failedAt: string;
+  }> {
+    const rows = this.queryAll<ExecutionQueueDlqRow>(
+      `SELECT id, original_id, workflow_id, workflow_name, attempts, final_error, failed_at
+       FROM execution_queue_dlq
+       ORDER BY failed_at DESC
+       LIMIT ?`,
+      [limit]
+    );
+
+    return rows.map((row) => ({
+      id: toString(row.id),
+      originalId: toString(row.original_id),
+      workflowId: toString(row.workflow_id),
+      workflowName: row.workflow_name ? toString(row.workflow_name) : null,
+      attempts: toNumber(row.attempts),
+      finalError: toString(row.final_error),
+      failedAt: toString(row.failed_at)
+    }));
   }
 }

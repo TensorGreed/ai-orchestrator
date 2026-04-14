@@ -156,6 +156,11 @@ export const nodeDefinitions: NodeDefinition[] = [
         inputMapping: {
           type: "object",
           additionalProperties: { type: "string" }
+        },
+        mode: { type: "string", enum: ["sync", "async"] },
+        outputMapping: {
+          type: "object",
+          additionalProperties: { type: "string" }
         }
       },
       required: ["workflowId"]
@@ -165,7 +170,9 @@ export const nodeDefinitions: NodeDefinition[] = [
       inputMapping: {
         user_prompt: "user_prompt",
         session_id: "session_id"
-      }
+      },
+      mode: "sync",
+      outputMapping: {}
     }
   },
   {
@@ -177,12 +184,16 @@ export const nodeDefinitions: NodeDefinition[] = [
       type: "object",
       properties: {
         delayMs: { type: "number" },
-        maxDelayMs: { type: "number" }
+        maxDelayMs: { type: "number" },
+        resumeMode: { type: "string", enum: ["timer", "webhook", "datetime"] },
+        resumeWebhookPath: { type: "string" },
+        resumeAt: { type: "string", description: "ISO 8601 datetime string for datetime resume mode" }
       }
     },
     sampleConfig: {
       delayMs: 1000,
-      maxDelayMs: 30000
+      maxDelayMs: 30000,
+      resumeMode: "timer"
     }
   },
   {
@@ -902,6 +913,465 @@ export const nodeDefinitions: NodeDefinition[] = [
       properties: { responseTemplate: { type: "string" }, outputKey: { type: "string" } }
     },
     sampleConfig: { responseTemplate: "{{answer}}", outputKey: "result" }
+  },
+  {
+    type: "sub_workflow_trigger",
+    label: "Sub-Workflow Trigger",
+    category: "Input",
+    description: "Entry point for workflows invoked as sub-workflows via Execute Workflow node.",
+    configSchema: {
+      type: "object",
+      properties: {
+        description: { type: "string" },
+        inputSchema: { type: "object" }
+      }
+    },
+    sampleConfig: {
+      description: "Sub-workflow entry point"
+    }
+  },
+  {
+    type: "error_trigger",
+    label: "Error Trigger",
+    category: "Input",
+    description: "Fires when a designated production workflow fails. Configure target workflows in their Error Workflow setting.",
+    configSchema: {
+      type: "object",
+      properties: {}
+    },
+    sampleConfig: {}
+  },
+  {
+    type: "filter_node",
+    label: "Filter",
+    category: "Utility",
+    description: "Evaluates conditions against context data and routes to pass or filtered branches.",
+    configSchema: {
+      type: "object",
+      properties: {
+        conditions: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string" },
+              operator: {
+                type: "string",
+                enum: [
+                  "eq", "neq", "gt", "gte", "lt", "lte",
+                  "contains", "not_contains", "starts_with", "ends_with",
+                  "is_empty", "is_not_empty", "regex"
+                ]
+              },
+              value: { type: "string" }
+            },
+            required: ["field", "operator"]
+          }
+        },
+        combineWith: { type: "string", enum: ["AND", "OR"] },
+        passMode: { type: "string", enum: ["pass", "reject"] }
+      }
+    },
+    sampleConfig: {
+      conditions: [{ field: "status", operator: "eq", value: "active" }],
+      combineWith: "AND",
+      passMode: "pass"
+    }
+  },
+  {
+    type: "stop_and_error",
+    label: "Stop and Error",
+    category: "Utility",
+    description: "Immediately stops the workflow with a custom error message and code.",
+    configSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+        errorCode: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      message: "Validation failed: {{error_message}}",
+      errorCode: "VALIDATION_ERROR"
+    }
+  },
+  {
+    type: "noop_node",
+    label: "No Operation",
+    category: "Utility",
+    description: "Pass-through node that performs no operation. Useful as a placeholder or visual marker.",
+    configSchema: {
+      type: "object",
+      properties: {
+        label: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      label: "Placeholder"
+    }
+  },
+  // ---------------------------------------------------------------------------
+  // Phase 2 — Data Transformation Nodes
+  // ---------------------------------------------------------------------------
+  {
+    type: "aggregate_node",
+    label: "Aggregate",
+    category: "Utility",
+    description: "Groups items and aggregates a numeric/text field (sum, avg, min, max, count, concatenate).",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["sum", "avg", "min", "max", "count", "concatenate"] },
+        field: { type: "string" },
+        groupBy: { type: "string" },
+        inputKey: { type: "string" },
+        separator: { type: "string" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: { operation: "sum", field: "amount", inputKey: "items" }
+  },
+  {
+    type: "split_out_node",
+    label: "Split Out",
+    category: "Utility",
+    description: "Splits an array field into multiple items.",
+    configSchema: {
+      type: "object",
+      properties: {
+        field: { type: "string" },
+        destinationField: { type: "string" },
+        inputKey: { type: "string" }
+      },
+      required: ["field"]
+    },
+    sampleConfig: { field: "items", destinationField: "item" }
+  },
+  {
+    type: "sort_node",
+    label: "Sort",
+    category: "Utility",
+    description: "Sorts items ascending, descending, randomly, or by custom expression.",
+    configSchema: {
+      type: "object",
+      properties: {
+        field: { type: "string" },
+        order: { type: "string", enum: ["asc", "desc", "random"] },
+        expression: { type: "string" },
+        inputKey: { type: "string" }
+      }
+    },
+    sampleConfig: { field: "name", order: "asc", inputKey: "items" }
+  },
+  {
+    type: "limit_node",
+    label: "Limit",
+    category: "Utility",
+    description: "Caps an array of items to N entries from the start or end.",
+    configSchema: {
+      type: "object",
+      properties: {
+        maxItems: { type: "number" },
+        keep: { type: "string", enum: ["first", "last"] },
+        inputKey: { type: "string" }
+      },
+      required: ["maxItems"]
+    },
+    sampleConfig: { maxItems: 10, keep: "first", inputKey: "items" }
+  },
+  {
+    type: "remove_duplicates_node",
+    label: "Remove Duplicates",
+    category: "Utility",
+    description: "Removes duplicate items by all or specified fields.",
+    configSchema: {
+      type: "object",
+      properties: {
+        fields: { type: "array", items: { type: "string" } },
+        inputKey: { type: "string" }
+      }
+    },
+    sampleConfig: { fields: ["id"], inputKey: "items" }
+  },
+  {
+    type: "summarize_node",
+    label: "Summarize",
+    category: "Utility",
+    description: "Multi-field aggregate (pivot-like). Supports group-by and multiple aggregations per group.",
+    configSchema: {
+      type: "object",
+      properties: {
+        fieldsToSummarize: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              field: { type: "string" },
+              aggregation: { type: "string", enum: ["sum", "avg", "min", "max", "count", "concatenate"] }
+            },
+            required: ["field", "aggregation"]
+          }
+        },
+        fieldsToGroupBy: { type: "array", items: { type: "string" } },
+        inputKey: { type: "string" }
+      },
+      required: ["fieldsToSummarize"]
+    },
+    sampleConfig: {
+      fieldsToSummarize: [{ field: "amount", aggregation: "sum" }],
+      fieldsToGroupBy: ["region"],
+      inputKey: "items"
+    }
+  },
+  {
+    type: "compare_datasets_node",
+    label: "Compare Datasets",
+    category: "Utility",
+    description: "Diffs two datasets by a key field and reports added/removed/changed/same items.",
+    configSchema: {
+      type: "object",
+      properties: {
+        inputA: { type: "string" },
+        inputB: { type: "string" },
+        keyField: { type: "string" }
+      },
+      required: ["inputA", "inputB", "keyField"]
+    },
+    sampleConfig: { inputA: "datasetA", inputB: "datasetB", keyField: "id" }
+  },
+  {
+    type: "rename_keys_node",
+    label: "Rename Keys",
+    category: "Utility",
+    description: "Renames keys on items in an array (or single object).",
+    configSchema: {
+      type: "object",
+      properties: {
+        renames: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              from: { type: "string" },
+              to: { type: "string" }
+            },
+            required: ["from", "to"]
+          }
+        },
+        inputKey: { type: "string" }
+      },
+      required: ["renames"]
+    },
+    sampleConfig: { renames: [{ from: "old", to: "new" }], inputKey: "items" }
+  },
+  {
+    type: "edit_fields_node",
+    label: "Edit Fields",
+    category: "Utility",
+    description: "Adds, modifies, removes or renames fields on items.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operations: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              op: { type: "string", enum: ["set", "remove", "rename"] },
+              field: { type: "string" },
+              value: {},
+              newName: { type: "string" }
+            },
+            required: ["op", "field"]
+          }
+        },
+        inputKey: { type: "string" }
+      },
+      required: ["operations"]
+    },
+    sampleConfig: {
+      operations: [
+        { op: "set", field: "active", value: true },
+        { op: "remove", field: "tmp" }
+      ]
+    }
+  },
+  {
+    type: "date_time_node",
+    label: "Date & Time",
+    category: "Utility",
+    description: "Format, parse, add/subtract or compare dates using built-in Date and Intl.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["format", "parse", "add", "subtract", "compare", "now"] },
+        value: { type: "string" },
+        format: { type: "string" },
+        unit: { type: "string", enum: ["ms", "second", "minute", "hour", "day", "week", "month", "year"] },
+        amount: { type: "number" },
+        compareTo: { type: "string" },
+        timezone: { type: "string" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: { operation: "format", value: "{{now}}", format: "iso" }
+  },
+  {
+    type: "crypto_node",
+    label: "Crypto",
+    category: "Utility",
+    description: "Hash, HMAC, encrypt, decrypt, sign, verify using node:crypto.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["hash", "hmac", "encrypt", "decrypt", "sign", "verify", "random"] },
+        algorithm: { type: "string" },
+        key: { type: "string" },
+        iv: { type: "string" },
+        data: { type: "string" },
+        encoding: { type: "string", enum: ["hex", "base64", "utf8"] },
+        signature: { type: "string" },
+        bytes: { type: "number" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: { operation: "hash", algorithm: "sha256", data: "hello", encoding: "hex" }
+  },
+  {
+    type: "jwt_node",
+    label: "JWT",
+    category: "Utility",
+    description: "Sign, decode, verify JWTs (HS256/HS384/HS512). HMAC-only, no external library.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["sign", "decode", "verify"] },
+        secret: { type: "string" },
+        payload: { type: "object" },
+        token: { type: "string" },
+        algorithm: { type: "string", enum: ["HS256", "HS384", "HS512"] },
+        expiresInSeconds: { type: "number" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: { operation: "sign", secret: "shh", algorithm: "HS256", payload: { sub: "user1" } }
+  },
+  {
+    type: "xml_node",
+    label: "XML",
+    category: "Utility",
+    description: "Convert XML to JSON or JSON to XML using a built-in lightweight parser.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["toJson", "toXml"] },
+        data: {}
+      },
+      required: ["operation"]
+    },
+    sampleConfig: { operation: "toJson", data: "<root><item>1</item></root>" }
+  },
+  {
+    type: "html_node",
+    label: "HTML",
+    category: "Utility",
+    description: "Extract data from HTML via simple CSS-like selectors, or generate HTML.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["extract", "generate"] },
+        html: { type: "string" },
+        selectors: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              key: { type: "string" },
+              selector: { type: "string" },
+              attribute: { type: "string" },
+              all: { type: "boolean" }
+            },
+            required: ["key", "selector"]
+          }
+        },
+        template: { type: "string" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: {
+      operation: "extract",
+      html: "<div class='title'>Hi</div>",
+      selectors: [{ key: "title", selector: ".title" }]
+    }
+  },
+  {
+    type: "convert_to_file_node",
+    label: "Convert to File",
+    category: "Utility",
+    description: "Convert data to CSV, JSON, HTML, or text file output.",
+    configSchema: {
+      type: "object",
+      properties: {
+        format: { type: "string", enum: ["csv", "json", "html", "text"] },
+        filename: { type: "string" },
+        inputKey: { type: "string" },
+        data: {}
+      },
+      required: ["format"]
+    },
+    sampleConfig: { format: "json", filename: "out.json", inputKey: "items" }
+  },
+  {
+    type: "extract_from_file_node",
+    label: "Extract from File",
+    category: "Utility",
+    description: "Parse CSV, JSON, or XML strings/base64 into structured data.",
+    configSchema: {
+      type: "object",
+      properties: {
+        format: { type: "string", enum: ["csv", "json", "xml", "pdf", "excel"] },
+        data: { type: "string" },
+        encoding: { type: "string", enum: ["utf8", "base64"] },
+        inputKey: { type: "string" }
+      },
+      required: ["format"]
+    },
+    sampleConfig: { format: "csv", data: "a,b\n1,2", encoding: "utf8" }
+  },
+  {
+    type: "compression_node",
+    label: "Compression",
+    category: "Utility",
+    description: "Gzip / gunzip data using node:zlib. Zip/unzip not yet supported.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["gzip", "gunzip", "zip", "unzip"] },
+        data: { type: "string" },
+        encoding: { type: "string", enum: ["utf8", "base64"] }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: { operation: "gzip", data: "hello", encoding: "utf8" }
+  },
+  {
+    type: "edit_image_node",
+    label: "Edit Image",
+    category: "Utility",
+    description: "Image editing (resize/crop/rotate/text/watermark). Requires optional native dependency — currently not implemented in core.",
+    configSchema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["resize", "crop", "rotate", "text", "watermark"] },
+        data: { type: "string" },
+        width: { type: "number" },
+        height: { type: "number" },
+        rotateDegrees: { type: "number" },
+        text: { type: "string" }
+      },
+      required: ["operation"]
+    },
+    sampleConfig: { operation: "resize", width: 100, height: 100 }
   },
   {
     type: "webhook_response",
