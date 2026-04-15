@@ -63,7 +63,7 @@ export async function registerUser(payload: {
 }
 
 export async function loginUser(payload: { email: string; password: string }) {
-  return apiRequest<{ user: AuthUser; expiresAt: string }>("/api/auth/login", {
+  return apiRequest<LoginResponse>("/api/auth/login", {
     method: "POST",
     body: JSON.stringify(payload)
   });
@@ -706,4 +706,301 @@ export async function testCodeNode(payload: {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.1 — MFA (TOTP)
+// ---------------------------------------------------------------------------
+
+export interface MfaStatus {
+  enabled: boolean;
+  pending: boolean;
+  activatedAt: string | null;
+  remainingBackupCodes: number;
+}
+
+export async function fetchMfaStatus() {
+  return apiRequest<MfaStatus>("/api/auth/mfa/status");
+}
+
+export async function enrollMfa() {
+  return apiRequest<{ secret: string; otpauthUrl: string; backupCodes: string[] }>(
+    "/api/auth/mfa/enroll",
+    { method: "POST" }
+  );
+}
+
+export async function activateMfa(payload: { code: string }) {
+  return apiRequest<{ enabled: boolean }>("/api/auth/mfa/activate", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function disableMfa(payload: { code?: string } = {}) {
+  return apiRequest<{ ok: boolean }>("/api/auth/mfa/disable", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function completeMfaLogin(payload: { challenge: string; code: string }) {
+  return apiRequest<{ user: AuthUser; expiresAt: string }>("/api/auth/login/mfa", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// loginUser's response type is refined here so callers can handle MFA challenges.
+export interface LoginSuccessResponse {
+  user: AuthUser;
+  expiresAt: string;
+  mfaEnrollmentRequired?: boolean;
+}
+
+export interface LoginMfaChallengeResponse {
+  mfaChallenge: string;
+  expiresInSeconds: number;
+}
+
+export type LoginResponse = LoginSuccessResponse | LoginMfaChallengeResponse;
+
+export function isMfaChallenge(response: LoginResponse): response is LoginMfaChallengeResponse {
+  return typeof (response as LoginMfaChallengeResponse).mfaChallenge === "string";
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.1 — API keys
+// ---------------------------------------------------------------------------
+
+export interface ApiKeyRecord {
+  id: string;
+  userId: string;
+  name: string;
+  keyPrefix: string;
+  scopes: string[];
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export async function fetchApiKeys() {
+  return apiRequest<{ keys: ApiKeyRecord[] }>("/api/auth/api-keys");
+}
+
+export async function createApiKey(payload: { name: string; scopes?: string[]; expiresInDays?: number }) {
+  return apiRequest<{ key: string; record: ApiKeyRecord }>("/api/auth/api-keys", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function revokeApiKey(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/auth/api-keys/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.1 — SSO group mappings
+// ---------------------------------------------------------------------------
+
+export interface SsoGroupMapping {
+  id: string;
+  provider: "saml" | "ldap";
+  groupName: string;
+  projectId: string | null;
+  role: string;
+  customRoleId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchSsoMappings(provider?: "saml" | "ldap") {
+  const query = provider ? `?provider=${provider}` : "";
+  return apiRequest<{ mappings: SsoGroupMapping[] }>(`/api/auth/sso/mappings${query}`);
+}
+
+export async function createSsoMapping(payload: {
+  provider: "saml" | "ldap";
+  groupName: string;
+  projectId?: string | null;
+  role: string;
+  customRoleId?: string | null;
+}) {
+  return apiRequest<{ id: string }>("/api/auth/sso/mappings", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteSsoMapping(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/auth/sso/mappings/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.2 — Project members
+// ---------------------------------------------------------------------------
+
+export interface ProjectMembership {
+  userId: string;
+  projectId: string;
+  role: "project_admin" | "editor" | "viewer" | "custom";
+  customRoleId: string | null;
+  permissions: string[];
+}
+
+export async function fetchProjectMembers(projectId: string) {
+  return apiRequest<{ members: ProjectMembership[] }>(
+    `/api/projects/${encodeURIComponent(projectId)}/members`
+  );
+}
+
+export async function addProjectMember(
+  projectId: string,
+  payload: { userId: string; role: string; customRoleId?: string | null }
+) {
+  return apiRequest<{ ok: boolean; membership: ProjectMembership }>(
+    `/api/projects/${encodeURIComponent(projectId)}/members`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function removeProjectMember(projectId: string, userId: string) {
+  return apiRequest<{ ok: boolean }>(
+    `/api/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.2 — Custom roles
+// ---------------------------------------------------------------------------
+
+export interface CustomRoleRecord {
+  id: string;
+  projectId: string | null;
+  name: string;
+  description: string | null;
+  permissions: string[];
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchCustomRoles(projectId?: string) {
+  const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ roles: CustomRoleRecord[]; availablePermissions: string[] }>(
+    `/api/custom-roles${query}`
+  );
+}
+
+export async function createCustomRole(payload: {
+  name: string;
+  description?: string | null;
+  projectId?: string | null;
+  permissions: string[];
+}) {
+  return apiRequest<{ id: string; role: CustomRoleRecord | null }>("/api/custom-roles", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateCustomRole(
+  id: string,
+  payload: {
+    name?: string;
+    description?: string | null;
+    projectId?: string | null;
+    permissions?: string[];
+  }
+) {
+  return apiRequest<{ role: CustomRoleRecord | null }>(
+    `/api/custom-roles/${encodeURIComponent(id)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function deleteCustomRole(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/custom-roles/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.2 — Workflow / secret sharing
+// ---------------------------------------------------------------------------
+
+export interface WorkflowShareRecord {
+  workflowId: string;
+  projectId: string;
+  accessLevel: "read" | "execute";
+  sharedBy: string | null;
+  createdAt: string;
+}
+
+export async function fetchWorkflowShares(workflowId: string) {
+  return apiRequest<{ shares: WorkflowShareRecord[] }>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/shares`
+  );
+}
+
+export async function shareWorkflow(
+  workflowId: string,
+  payload: { projectId: string; accessLevel?: "read" | "execute" }
+) {
+  return apiRequest<{ ok: boolean }>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/shares`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function unshareWorkflow(workflowId: string, projectId: string) {
+  return apiRequest<{ ok: boolean }>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/shares/${encodeURIComponent(projectId)}`,
+    { method: "DELETE" }
+  );
+}
+
+export interface SecretShareRecord {
+  secretId: string;
+  projectId: string;
+  sharedBy: string | null;
+  createdAt: string;
+}
+
+export async function fetchSecretShares(secretId: string) {
+  return apiRequest<{ shares: SecretShareRecord[] }>(
+    `/api/secrets/${encodeURIComponent(secretId)}/shares`
+  );
+}
+
+export async function shareSecret(secretId: string, payload: { projectId: string }) {
+  return apiRequest<{ ok: boolean }>(
+    `/api/secrets/${encodeURIComponent(secretId)}/shares`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function unshareSecret(secretId: string, projectId: string) {
+  return apiRequest<{ ok: boolean }>(
+    `/api/secrets/${encodeURIComponent(secretId)}/shares/${encodeURIComponent(projectId)}`,
+    { method: "DELETE" }
+  );
 }

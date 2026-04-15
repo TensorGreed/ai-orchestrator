@@ -262,6 +262,16 @@ export function TopBar({
             <div className="account-dropdown" role="menu">
               <div className="account-email">{authUser.email}</div>
               <button
+                className="account-menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setIsAccountMenuOpen(false);
+                  onModeChange("settings");
+                }}
+              >
+                Account Settings
+              </button>
+              <button
                 className="account-logout"
                 role="menuitem"
                 onClick={() => {

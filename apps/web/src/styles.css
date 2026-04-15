@@ -3370,3 +3370,309 @@ select {
 :root[data-theme="dark"] .header-btn.danger.text-only {
   color: #fca5a5;
 }
+
+/* ==========================================================================
+   Phase 5 — Settings page, MFA, API keys, shares
+   ========================================================================== */
+
+.settings-page {
+  margin: 14px;
+  border: 1px solid var(--panel-border, #dbe2ef);
+  border-radius: 12px;
+  background: var(--panel, #fff);
+  padding: 20px;
+  display: grid;
+  gap: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.settings-header h2 {
+  margin: 0 0 4px;
+}
+
+.settings-header p {
+  margin: 0;
+  color: var(--muted, #64748b);
+  max-width: 720px;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--panel-border, #e2e8f0);
+  flex-wrap: wrap;
+}
+
+.settings-tab {
+  background: transparent;
+  border: none;
+  padding: 10px 14px;
+  cursor: pointer;
+  color: var(--muted, #64748b);
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.settings-tab:hover {
+  color: var(--text, #0f172a);
+}
+
+.settings-tab.active {
+  color: var(--accent, #2563eb);
+  border-bottom-color: var(--accent, #2563eb);
+}
+
+.settings-body {
+  display: grid;
+  gap: 16px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-section h3 {
+  margin: 0;
+}
+
+.settings-help {
+  margin: 0;
+  color: var(--muted, #64748b);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.settings-card {
+  border: 1px solid var(--panel-border, #e0e6f2);
+  border-radius: 10px;
+  background: var(--panel, #fcfdff);
+  padding: 16px;
+  display: grid;
+  gap: 8px;
+}
+
+.settings-card h4 {
+  margin: 0 0 4px;
+}
+
+.settings-card label {
+  color: var(--muted, #5e6981);
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.settings-card input,
+.settings-card select {
+  width: 100%;
+  border: 1px solid var(--panel-border, #d4dbe8);
+  border-radius: 8px;
+  background: var(--app-bg, #fff);
+  color: var(--text, #2a3650);
+  padding: 8px;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-loading {
+  padding: 20px;
+  text-align: center;
+  color: var(--muted, #64748b);
+}
+
+.settings-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+:root[data-theme="dark"] .settings-error {
+  background: rgba(153, 27, 27, 0.15);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: #fca5a5;
+}
+
+.settings-highlight {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #fde68a;
+  background: #fef3c7;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+:root[data-theme="dark"] .settings-highlight {
+  background: rgba(120, 53, 15, 0.4);
+  border-color: rgba(251, 191, 36, 0.4);
+  color: #fef3c7;
+}
+
+.settings-highlight code {
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 0.85rem;
+}
+
+.settings-muted {
+  color: var(--muted, #64748b);
+  margin: 0;
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.settings-table th,
+.settings-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--panel-border, #e2e8f0);
+  vertical-align: top;
+}
+
+.settings-table th {
+  color: var(--muted, #64748b);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.settings-row-muted {
+  opacity: 0.6;
+}
+
+.settings-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.settings-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft, #eff6ff);
+  color: var(--accent, #2563eb);
+  border: 1px solid var(--accent-line, #bfdbfe);
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+}
+
+:root[data-theme="dark"] .settings-chip {
+  background: rgba(96, 165, 250, 0.12);
+  border-color: rgba(96, 165, 250, 0.35);
+  color: #93c5fd;
+}
+
+.settings-permissions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.settings-permission-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+  color: var(--text, #0f172a);
+  font-size: 0.9rem;
+  margin: 0;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.mfa-secret {
+  display: inline-block;
+  padding: 6px 10px;
+  background: var(--accent-soft, #eff6ff);
+  border: 1px solid var(--accent-line, #bfdbfe);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+}
+
+.mfa-uri {
+  display: block;
+  padding: 6px 8px;
+  margin-top: 4px;
+  background: rgba(148, 163, 184, 0.12);
+  border-radius: 6px;
+  word-break: break-all;
+  font-size: 0.8rem;
+}
+
+.mfa-backup-codes {
+  margin-top: 8px;
+}
+
+.mfa-backup-codes ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 6px;
+  padding: 0;
+  list-style: none;
+  margin: 8px 0 0;
+}
+
+.mfa-backup-codes li code {
+  display: block;
+  padding: 6px 8px;
+  background: var(--accent-soft, #eff6ff);
+  border: 1px solid var(--accent-line, #bfdbfe);
+  border-radius: 6px;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+}
+
+.header-btn.ghost {
+  background: transparent;
+  border: 1px solid var(--panel-border, #e2e8f0);
+  color: var(--muted, #64748b);
+}
+
+.account-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 8px 12px;
+  cursor: pointer;
+  color: var(--text, #0f172a);
+  font-size: 0.9rem;
+}
+
+.account-menu-item:hover {
+  background: var(--accent-soft, #eff6ff);
+}
+
+.settings-share-modal .node-modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--panel-border, #e2e8f0);
+}
+
+.settings-share-modal .node-modal-body {
+  padding: 16px 20px;
+  display: grid;
+  gap: 16px;
+  overflow: auto;
+}

@@ -178,6 +178,19 @@ function toNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value ?? 0);
 }
 
+function parseJsonArray(raw: unknown): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(typeof raw === "string" ? raw : String(raw));
+    if (Array.isArray(parsed)) {
+      return parsed.filter((v): v is string => typeof v === "string");
+    }
+  } catch {
+    // fall through
+  }
+  return [];
+}
+
 function toDurationMsForStore(startedAt: string, completedAt: string): number | null {
   const started = Date.parse(startedAt);
   const completed = Date.parse(completedAt);
@@ -425,6 +438,108 @@ export class SqliteStore {
 
       CREATE INDEX IF NOT EXISTS idx_folders_project_id ON folders(project_id);
       CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id);
+
+      -- Phase 5.1/5.2 enterprise auth + RBAC tables
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        key_prefix TEXT NOT NULL,
+        key_hash TEXT NOT NULL,
+        scopes_json TEXT NOT NULL DEFAULT '[]',
+        last_used_at TEXT,
+        expires_at TEXT,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
+      CREATE INDEX IF NOT EXISTS idx_api_keys_key_prefix ON api_keys(key_prefix);
+
+      CREATE TABLE IF NOT EXISTS mfa_secrets (
+        user_id TEXT PRIMARY KEY,
+        secret_iv TEXT NOT NULL,
+        secret_auth_tag TEXT NOT NULL,
+        secret_ciphertext TEXT NOT NULL,
+        backup_codes_json TEXT NOT NULL DEFAULT '[]',
+        enabled INTEGER NOT NULL DEFAULT 0,
+        activated_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sso_identities (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        email TEXT,
+        attributes_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(provider, subject)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sso_identities_user_id ON sso_identities(user_id);
+
+      CREATE TABLE IF NOT EXISTS user_project_roles (
+        user_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        custom_role_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, project_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_user_project_roles_project_id ON user_project_roles(project_id);
+
+      CREATE TABLE IF NOT EXISTS custom_roles (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        name TEXT NOT NULL,
+        description TEXT,
+        permissions_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_custom_roles_project_id ON custom_roles(project_id);
+
+      CREATE TABLE IF NOT EXISTS workflow_shares (
+        workflow_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        access_level TEXT NOT NULL DEFAULT 'read',
+        shared_by TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workflow_id, project_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_shares_project_id ON workflow_shares(project_id);
+
+      CREATE TABLE IF NOT EXISTS secret_shares (
+        secret_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        shared_by TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (secret_id, project_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_secret_shares_project_id ON secret_shares(project_id);
+
+      CREATE TABLE IF NOT EXISTS sso_group_mappings (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        group_name TEXT NOT NULL,
+        project_id TEXT,
+        role TEXT NOT NULL,
+        custom_role_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sso_group_mappings_provider_group ON sso_group_mappings(provider, group_name);
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -2159,6 +2274,820 @@ export class SqliteStore {
       id
     ]);
     this.db.run(`DELETE FROM folders WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — API keys
+  // ---------------------------------------------------------------------------
+
+  saveApiKey(input: {
+    id: string;
+    userId: string;
+    name: string;
+    keyPrefix: string;
+    keyHash: string;
+    scopes?: string[];
+    expiresAt?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)`,
+      [
+        input.id,
+        input.userId,
+        input.name,
+        input.keyPrefix,
+        input.keyHash,
+        JSON.stringify(input.scopes ?? []),
+        input.expiresAt ?? null,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  listApiKeys(userId?: string): Array<{
+    id: string;
+    userId: string;
+    name: string;
+    keyPrefix: string;
+    scopes: string[];
+    lastUsedAt: string | null;
+    expiresAt: string | null;
+    revokedAt: string | null;
+    createdAt: string;
+  }> {
+    const rows = userId
+      ? this.queryAll<{
+          id: string;
+          user_id: string;
+          name: string;
+          key_prefix: string;
+          scopes_json: string;
+          last_used_at: string | null;
+          expires_at: string | null;
+          revoked_at: string | null;
+          created_at: string;
+        }>(
+          `SELECT id, user_id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at
+           FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`,
+          [userId]
+        )
+      : this.queryAll<{
+          id: string;
+          user_id: string;
+          name: string;
+          key_prefix: string;
+          scopes_json: string;
+          last_used_at: string | null;
+          expires_at: string | null;
+          revoked_at: string | null;
+          created_at: string;
+        }>(
+          `SELECT id, user_id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at
+           FROM api_keys ORDER BY created_at DESC`
+        );
+
+    return rows.map((row) => ({
+      id: toString(row.id),
+      userId: toString(row.user_id),
+      name: toString(row.name),
+      keyPrefix: toString(row.key_prefix),
+      scopes: parseJsonArray(row.scopes_json),
+      lastUsedAt: row.last_used_at ? toString(row.last_used_at) : null,
+      expiresAt: row.expires_at ? toString(row.expires_at) : null,
+      revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
+      createdAt: toString(row.created_at)
+    }));
+  }
+
+  findApiKeyByPrefix(prefix: string): {
+    id: string;
+    userId: string;
+    name: string;
+    keyPrefix: string;
+    keyHash: string;
+    scopes: string[];
+    lastUsedAt: string | null;
+    expiresAt: string | null;
+    revokedAt: string | null;
+    createdAt: string;
+  } | null {
+    const row = this.queryOne<{
+      id: string;
+      user_id: string;
+      name: string;
+      key_prefix: string;
+      key_hash: string;
+      scopes_json: string;
+      last_used_at: string | null;
+      expires_at: string | null;
+      revoked_at: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at
+       FROM api_keys WHERE key_prefix = ? AND revoked_at IS NULL`,
+      [prefix]
+    );
+    if (!row) return null;
+    return {
+      id: toString(row.id),
+      userId: toString(row.user_id),
+      name: toString(row.name),
+      keyPrefix: toString(row.key_prefix),
+      keyHash: toString(row.key_hash),
+      scopes: parseJsonArray(row.scopes_json),
+      lastUsedAt: row.last_used_at ? toString(row.last_used_at) : null,
+      expiresAt: row.expires_at ? toString(row.expires_at) : null,
+      revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
+      createdAt: toString(row.created_at)
+    };
+  }
+
+  touchApiKey(id: string): void {
+    this.db.run(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+    this.persist();
+  }
+
+  revokeApiKey(id: string, userId?: string): boolean {
+    const existing = userId
+      ? this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ? AND user_id = ?`, [id, userId])
+      : this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ?`, [id]);
+    if (!existing) return false;
+    this.db.run(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+    this.persist();
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — MFA
+  // ---------------------------------------------------------------------------
+
+  getMfaSecret(userId: string): {
+    userId: string;
+    secretIv: string;
+    secretAuthTag: string;
+    secretCiphertext: string;
+    backupCodes: string[];
+    enabled: boolean;
+    activatedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.queryOne<{
+      user_id: string;
+      secret_iv: string;
+      secret_auth_tag: string;
+      secret_ciphertext: string;
+      backup_codes_json: string;
+      enabled: number;
+      activated_at: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT user_id, secret_iv, secret_auth_tag, secret_ciphertext, backup_codes_json, enabled, activated_at, created_at, updated_at
+       FROM mfa_secrets WHERE user_id = ?`,
+      [userId]
+    );
+    if (!row) return null;
+    return {
+      userId: toString(row.user_id),
+      secretIv: toString(row.secret_iv),
+      secretAuthTag: toString(row.secret_auth_tag),
+      secretCiphertext: toString(row.secret_ciphertext),
+      backupCodes: parseJsonArray(row.backup_codes_json),
+      enabled: toNumber(row.enabled) === 1,
+      activatedAt: row.activated_at ? toString(row.activated_at) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertMfaSecret(input: {
+    userId: string;
+    secretIv: string;
+    secretAuthTag: string;
+    secretCiphertext: string;
+    backupCodes: string[];
+    enabled: boolean;
+    activatedAt: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    const existing = this.getMfaSecret(input.userId);
+    const createdAt = existing?.createdAt ?? now;
+    this.db.run(
+      `INSERT INTO mfa_secrets (user_id, secret_iv, secret_auth_tag, secret_ciphertext, backup_codes_json, enabled, activated_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         secret_iv = excluded.secret_iv,
+         secret_auth_tag = excluded.secret_auth_tag,
+         secret_ciphertext = excluded.secret_ciphertext,
+         backup_codes_json = excluded.backup_codes_json,
+         enabled = excluded.enabled,
+         activated_at = excluded.activated_at,
+         updated_at = excluded.updated_at`,
+      [
+        input.userId,
+        input.secretIv,
+        input.secretAuthTag,
+        input.secretCiphertext,
+        JSON.stringify(input.backupCodes),
+        input.enabled ? 1 : 0,
+        input.activatedAt,
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  deleteMfaSecret(userId: string): boolean {
+    const existing = this.getMfaSecret(userId);
+    if (!existing) return false;
+    this.db.run(`DELETE FROM mfa_secrets WHERE user_id = ?`, [userId]);
+    this.persist();
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — SSO identities
+  // ---------------------------------------------------------------------------
+
+  findSsoIdentity(provider: string, subject: string): {
+    id: string;
+    userId: string;
+    provider: string;
+    subject: string;
+    email: string | null;
+    attributes: unknown;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.queryOne<{
+      id: string;
+      user_id: string;
+      provider: string;
+      subject: string;
+      email: string | null;
+      attributes_json: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT id, user_id, provider, subject, email, attributes_json, created_at, updated_at
+       FROM sso_identities WHERE provider = ? AND subject = ?`,
+      [provider, subject]
+    );
+    if (!row) return null;
+    let attributes: unknown = null;
+    if (row.attributes_json) {
+      try {
+        attributes = JSON.parse(toString(row.attributes_json));
+      } catch {
+        attributes = null;
+      }
+    }
+    return {
+      id: toString(row.id),
+      userId: toString(row.user_id),
+      provider: toString(row.provider),
+      subject: toString(row.subject),
+      email: row.email ? toString(row.email) : null,
+      attributes,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertSsoIdentity(input: {
+    id: string;
+    userId: string;
+    provider: string;
+    subject: string;
+    email?: string | null;
+    attributes?: unknown;
+  }): void {
+    const now = new Date().toISOString();
+    const existing = this.findSsoIdentity(input.provider, input.subject);
+    const createdAt = existing?.createdAt ?? now;
+    this.db.run(
+      `INSERT INTO sso_identities (id, user_id, provider, subject, email, attributes_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(provider, subject) DO UPDATE SET
+         user_id = excluded.user_id,
+         email = excluded.email,
+         attributes_json = excluded.attributes_json,
+         updated_at = excluded.updated_at`,
+      [
+        existing?.id ?? input.id,
+        input.userId,
+        input.provider,
+        input.subject,
+        input.email ?? null,
+        input.attributes === undefined ? null : JSON.stringify(input.attributes),
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.2 — Project-level roles
+  // ---------------------------------------------------------------------------
+
+  listProjectMembers(projectId: string): Array<{
+    userId: string;
+    projectId: string;
+    role: string;
+    customRoleId: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const rows = this.queryAll<{
+      user_id: string;
+      project_id: string;
+      role: string;
+      custom_role_id: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT user_id, project_id, role, custom_role_id, created_at, updated_at
+       FROM user_project_roles WHERE project_id = ? ORDER BY created_at ASC`,
+      [projectId]
+    );
+    return rows.map((row) => ({
+      userId: toString(row.user_id),
+      projectId: toString(row.project_id),
+      role: toString(row.role),
+      customRoleId: row.custom_role_id ? toString(row.custom_role_id) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  listUserProjectRoles(userId: string): Array<{
+    userId: string;
+    projectId: string;
+    role: string;
+    customRoleId: string | null;
+  }> {
+    const rows = this.queryAll<{
+      user_id: string;
+      project_id: string;
+      role: string;
+      custom_role_id: string | null;
+    }>(
+      `SELECT user_id, project_id, role, custom_role_id
+       FROM user_project_roles WHERE user_id = ?`,
+      [userId]
+    );
+    return rows.map((row) => ({
+      userId: toString(row.user_id),
+      projectId: toString(row.project_id),
+      role: toString(row.role),
+      customRoleId: row.custom_role_id ? toString(row.custom_role_id) : null
+    }));
+  }
+
+  getProjectRole(userId: string, projectId: string): {
+    userId: string;
+    projectId: string;
+    role: string;
+    customRoleId: string | null;
+  } | null {
+    const row = this.queryOne<{
+      user_id: string;
+      project_id: string;
+      role: string;
+      custom_role_id: string | null;
+    }>(
+      `SELECT user_id, project_id, role, custom_role_id
+       FROM user_project_roles WHERE user_id = ? AND project_id = ?`,
+      [userId, projectId]
+    );
+    if (!row) return null;
+    return {
+      userId: toString(row.user_id),
+      projectId: toString(row.project_id),
+      role: toString(row.role),
+      customRoleId: row.custom_role_id ? toString(row.custom_role_id) : null
+    };
+  }
+
+  upsertProjectRole(input: {
+    userId: string;
+    projectId: string;
+    role: string;
+    customRoleId?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    const existing = this.getProjectRole(input.userId, input.projectId);
+    if (existing) {
+      this.db.run(
+        `UPDATE user_project_roles SET role = ?, custom_role_id = ?, updated_at = ?
+         WHERE user_id = ? AND project_id = ?`,
+        [input.role, input.customRoleId ?? null, now, input.userId, input.projectId]
+      );
+    } else {
+      this.db.run(
+        `INSERT INTO user_project_roles (user_id, project_id, role, custom_role_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [input.userId, input.projectId, input.role, input.customRoleId ?? null, now, now]
+      );
+    }
+    this.persist();
+  }
+
+  removeProjectRole(userId: string, projectId: string): boolean {
+    const existing = this.getProjectRole(userId, projectId);
+    if (!existing) return false;
+    this.db.run(`DELETE FROM user_project_roles WHERE user_id = ? AND project_id = ?`, [userId, projectId]);
+    this.persist();
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.2 — Custom roles
+  // ---------------------------------------------------------------------------
+
+  listCustomRoles(projectId?: string | null): Array<{
+    id: string;
+    projectId: string | null;
+    name: string;
+    description: string | null;
+    permissions: string[];
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const rows = projectId === undefined
+      ? this.queryAll<{
+          id: string;
+          project_id: string | null;
+          name: string;
+          description: string | null;
+          permissions_json: string;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
+        }>(
+          `SELECT id, project_id, name, description, permissions_json, created_by, created_at, updated_at
+           FROM custom_roles ORDER BY name ASC`
+        )
+      : projectId === null
+        ? this.queryAll<{
+            id: string;
+            project_id: string | null;
+            name: string;
+            description: string | null;
+            permissions_json: string;
+            created_by: string | null;
+            created_at: string;
+            updated_at: string;
+          }>(
+            `SELECT id, project_id, name, description, permissions_json, created_by, created_at, updated_at
+             FROM custom_roles WHERE project_id IS NULL ORDER BY name ASC`
+          )
+        : this.queryAll<{
+            id: string;
+            project_id: string | null;
+            name: string;
+            description: string | null;
+            permissions_json: string;
+            created_by: string | null;
+            created_at: string;
+            updated_at: string;
+          }>(
+            `SELECT id, project_id, name, description, permissions_json, created_by, created_at, updated_at
+             FROM custom_roles WHERE project_id = ? OR project_id IS NULL ORDER BY name ASC`,
+            [projectId]
+          );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      projectId: row.project_id ? toString(row.project_id) : null,
+      name: toString(row.name),
+      description: row.description ? toString(row.description) : null,
+      permissions: parseJsonArray(row.permissions_json),
+      createdBy: row.created_by ? toString(row.created_by) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  getCustomRole(id: string): {
+    id: string;
+    projectId: string | null;
+    name: string;
+    description: string | null;
+    permissions: string[];
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.queryOne<{
+      id: string;
+      project_id: string | null;
+      name: string;
+      description: string | null;
+      permissions_json: string;
+      created_by: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT id, project_id, name, description, permissions_json, created_by, created_at, updated_at
+       FROM custom_roles WHERE id = ?`,
+      [id]
+    );
+    if (!row) return null;
+    return {
+      id: toString(row.id),
+      projectId: row.project_id ? toString(row.project_id) : null,
+      name: toString(row.name),
+      description: row.description ? toString(row.description) : null,
+      permissions: parseJsonArray(row.permissions_json),
+      createdBy: row.created_by ? toString(row.created_by) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertCustomRole(input: {
+    id: string;
+    projectId?: string | null;
+    name: string;
+    description?: string | null;
+    permissions: string[];
+    createdBy?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    const existing = this.getCustomRole(input.id);
+    const createdAt = existing?.createdAt ?? now;
+    this.db.run(
+      `INSERT INTO custom_roles (id, project_id, name, description, permissions_json, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         project_id = excluded.project_id,
+         name = excluded.name,
+         description = excluded.description,
+         permissions_json = excluded.permissions_json,
+         updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.projectId ?? null,
+        input.name,
+        input.description ?? null,
+        JSON.stringify(input.permissions),
+        input.createdBy ?? existing?.createdBy ?? null,
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  deleteCustomRole(id: string): boolean {
+    const existing = this.getCustomRole(id);
+    if (!existing) return false;
+    this.db.run(`DELETE FROM custom_roles WHERE id = ?`, [id]);
+    this.db.run(`UPDATE user_project_roles SET custom_role_id = NULL WHERE custom_role_id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.2 — Workflow shares
+  // ---------------------------------------------------------------------------
+
+  listWorkflowShares(workflowId: string): Array<{
+    workflowId: string;
+    projectId: string;
+    accessLevel: string;
+    sharedBy: string | null;
+    createdAt: string;
+  }> {
+    const rows = this.queryAll<{
+      workflow_id: string;
+      project_id: string;
+      access_level: string;
+      shared_by: string | null;
+      created_at: string;
+    }>(
+      `SELECT workflow_id, project_id, access_level, shared_by, created_at
+       FROM workflow_shares WHERE workflow_id = ?`,
+      [workflowId]
+    );
+    return rows.map((row) => ({
+      workflowId: toString(row.workflow_id),
+      projectId: toString(row.project_id),
+      accessLevel: toString(row.access_level),
+      sharedBy: row.shared_by ? toString(row.shared_by) : null,
+      createdAt: toString(row.created_at)
+    }));
+  }
+
+  listWorkflowsSharedToProject(projectId: string): Array<{
+    workflowId: string;
+    projectId: string;
+    accessLevel: string;
+  }> {
+    const rows = this.queryAll<{
+      workflow_id: string;
+      project_id: string;
+      access_level: string;
+    }>(
+      `SELECT workflow_id, project_id, access_level FROM workflow_shares WHERE project_id = ?`,
+      [projectId]
+    );
+    return rows.map((row) => ({
+      workflowId: toString(row.workflow_id),
+      projectId: toString(row.project_id),
+      accessLevel: toString(row.access_level)
+    }));
+  }
+
+  upsertWorkflowShare(input: {
+    workflowId: string;
+    projectId: string;
+    accessLevel: "read" | "execute";
+    sharedBy?: string | null;
+  }): void {
+    this.db.run(
+      `INSERT INTO workflow_shares (workflow_id, project_id, access_level, shared_by, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(workflow_id, project_id) DO UPDATE SET
+         access_level = excluded.access_level`,
+      [input.workflowId, input.projectId, input.accessLevel, input.sharedBy ?? null, new Date().toISOString()]
+    );
+    this.persist();
+  }
+
+  removeWorkflowShare(workflowId: string, projectId: string): boolean {
+    const existing = this.queryOne<{ workflow_id: string }>(
+      `SELECT workflow_id FROM workflow_shares WHERE workflow_id = ? AND project_id = ?`,
+      [workflowId, projectId]
+    );
+    if (!existing) return false;
+    this.db.run(`DELETE FROM workflow_shares WHERE workflow_id = ? AND project_id = ?`, [workflowId, projectId]);
+    this.persist();
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.2 — Secret shares
+  // ---------------------------------------------------------------------------
+
+  listSecretShares(secretId: string): Array<{
+    secretId: string;
+    projectId: string;
+    sharedBy: string | null;
+    createdAt: string;
+  }> {
+    const rows = this.queryAll<{
+      secret_id: string;
+      project_id: string;
+      shared_by: string | null;
+      created_at: string;
+    }>(
+      `SELECT secret_id, project_id, shared_by, created_at
+       FROM secret_shares WHERE secret_id = ?`,
+      [secretId]
+    );
+    return rows.map((row) => ({
+      secretId: toString(row.secret_id),
+      projectId: toString(row.project_id),
+      sharedBy: row.shared_by ? toString(row.shared_by) : null,
+      createdAt: toString(row.created_at)
+    }));
+  }
+
+  listSecretsSharedToProject(projectId: string): string[] {
+    const rows = this.queryAll<{ secret_id: string }>(
+      `SELECT secret_id FROM secret_shares WHERE project_id = ?`,
+      [projectId]
+    );
+    return rows.map((row) => toString(row.secret_id));
+  }
+
+  upsertSecretShare(input: { secretId: string; projectId: string; sharedBy?: string | null }): void {
+    this.db.run(
+      `INSERT INTO secret_shares (secret_id, project_id, shared_by, created_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(secret_id, project_id) DO NOTHING`,
+      [input.secretId, input.projectId, input.sharedBy ?? null, new Date().toISOString()]
+    );
+    this.persist();
+  }
+
+  removeSecretShare(secretId: string, projectId: string): boolean {
+    const existing = this.queryOne<{ secret_id: string }>(
+      `SELECT secret_id FROM secret_shares WHERE secret_id = ? AND project_id = ?`,
+      [secretId, projectId]
+    );
+    if (!existing) return false;
+    this.db.run(`DELETE FROM secret_shares WHERE secret_id = ? AND project_id = ?`, [secretId, projectId]);
+    this.persist();
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — SSO group-to-role mappings
+  // ---------------------------------------------------------------------------
+
+  listSsoGroupMappings(provider?: string): Array<{
+    id: string;
+    provider: string;
+    groupName: string;
+    projectId: string | null;
+    role: string;
+    customRoleId: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const rows = provider
+      ? this.queryAll<{
+          id: string;
+          provider: string;
+          group_name: string;
+          project_id: string | null;
+          role: string;
+          custom_role_id: string | null;
+          created_at: string;
+          updated_at: string;
+        }>(
+          `SELECT id, provider, group_name, project_id, role, custom_role_id, created_at, updated_at
+           FROM sso_group_mappings WHERE provider = ? ORDER BY group_name ASC`,
+          [provider]
+        )
+      : this.queryAll<{
+          id: string;
+          provider: string;
+          group_name: string;
+          project_id: string | null;
+          role: string;
+          custom_role_id: string | null;
+          created_at: string;
+          updated_at: string;
+        }>(
+          `SELECT id, provider, group_name, project_id, role, custom_role_id, created_at, updated_at
+           FROM sso_group_mappings ORDER BY provider, group_name ASC`
+        );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      provider: toString(row.provider),
+      groupName: toString(row.group_name),
+      projectId: row.project_id ? toString(row.project_id) : null,
+      role: toString(row.role),
+      customRoleId: row.custom_role_id ? toString(row.custom_role_id) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  upsertSsoGroupMapping(input: {
+    id: string;
+    provider: string;
+    groupName: string;
+    projectId?: string | null;
+    role: string;
+    customRoleId?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    const existing = this.queryOne<{ created_at: string }>(
+      `SELECT created_at FROM sso_group_mappings WHERE id = ?`,
+      [input.id]
+    );
+    const createdAt = existing ? toString(existing.created_at) : now;
+    this.db.run(
+      `INSERT INTO sso_group_mappings (id, provider, group_name, project_id, role, custom_role_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         provider = excluded.provider,
+         group_name = excluded.group_name,
+         project_id = excluded.project_id,
+         role = excluded.role,
+         custom_role_id = excluded.custom_role_id,
+         updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.provider,
+        input.groupName,
+        input.projectId ?? null,
+        input.role,
+        input.customRoleId ?? null,
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  deleteSsoGroupMapping(id: string): boolean {
+    const existing = this.queryOne<{ id: string }>(`SELECT id FROM sso_group_mappings WHERE id = ?`, [id]);
+    if (!existing) return false;
+    this.db.run(`DELETE FROM sso_group_mappings WHERE id = ?`, [id]);
     this.persist();
     return true;
   }

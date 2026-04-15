@@ -247,6 +247,117 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_id
       ON execution_history(workflow_id);
     `
+  },
+  {
+    version: 6,
+    description: "Enterprise auth + advanced RBAC (Phase 5.1/5.2): API keys, MFA, SSO identities, project roles, custom roles, workflow/secret sharing",
+    up: `
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        key_prefix TEXT NOT NULL,
+        key_hash TEXT NOT NULL,
+        scopes_json TEXT NOT NULL DEFAULT '[]',
+        last_used_at TIMESTAMPTZ,
+        expires_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
+      CREATE INDEX IF NOT EXISTS idx_api_keys_key_prefix ON api_keys(key_prefix);
+
+      CREATE TABLE IF NOT EXISTS mfa_secrets (
+        user_id TEXT PRIMARY KEY,
+        secret_iv TEXT NOT NULL,
+        secret_auth_tag TEXT NOT NULL,
+        secret_ciphertext TEXT NOT NULL,
+        backup_codes_json TEXT NOT NULL DEFAULT '[]',
+        enabled INTEGER NOT NULL DEFAULT 0,
+        activated_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS sso_identities (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        email TEXT,
+        attributes_json TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE(provider, subject),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sso_identities_user_id ON sso_identities(user_id);
+
+      CREATE TABLE IF NOT EXISTS user_project_roles (
+        user_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        custom_role_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (user_id, project_id),
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_user_project_roles_project_id ON user_project_roles(project_id);
+
+      CREATE TABLE IF NOT EXISTS custom_roles (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        name TEXT NOT NULL,
+        description TEXT,
+        permissions_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_custom_roles_project_id ON custom_roles(project_id);
+
+      CREATE TABLE IF NOT EXISTS workflow_shares (
+        workflow_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        access_level TEXT NOT NULL DEFAULT 'read',
+        shared_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (workflow_id, project_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_shares_project_id ON workflow_shares(project_id);
+
+      CREATE TABLE IF NOT EXISTS secret_shares (
+        secret_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        shared_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (secret_id, project_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_secret_shares_project_id ON secret_shares(project_id);
+
+      CREATE TABLE IF NOT EXISTS sso_group_mappings (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        group_name TEXT NOT NULL,
+        project_id TEXT,
+        role TEXT NOT NULL,
+        custom_role_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sso_group_mappings_provider_group ON sso_group_mappings(provider, group_name);
+    `
   }
 ];
 

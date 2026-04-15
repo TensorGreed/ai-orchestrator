@@ -25,6 +25,7 @@ import {
 import {
   ApiError,
   cancelExecution,
+  completeMfaLogin,
   createFolder,
   createProject,
   createSecret,
@@ -46,6 +47,7 @@ import {
   fetchWorkflowVariables,
   fetchWorkflows,
   importWorkflow,
+  isMfaChallenge,
   loginUser,
   logoutUser,
   moveWorkflow,
@@ -78,6 +80,8 @@ import { NodeConfigModal, type NodeInputOption } from "./components/NodeConfigMo
 import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
+import { SettingsPage } from "./components/SettingsPage";
+import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WorkflowCanvasArea } from "./components/WorkflowCanvasArea";
 import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
 
@@ -813,6 +817,13 @@ function StudioApp() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
+  const [mfaChallengeId, setMfaChallengeId] = useState<string | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
+  const [shareWorkflowTarget, setShareWorkflowTarget] = useState<{
+    id: string;
+    name: string;
+    projectId: string;
+  } | null>(null);
 
   const [definitions, setDefinitions] = useState<DefinitionNode[]>(nodeDefinitions as unknown as DefinitionNode[]);
   const [mcpServerDefinitions, setMcpServerDefinitions] = useState<MCPServerDefinition[]>([]);
@@ -3519,6 +3530,11 @@ function StudioApp() {
           email: loginEmail.trim(),
           password: loginPassword
         });
+        if (isMfaChallenge(result)) {
+          setMfaChallengeId(result.mfaChallenge);
+          setLoginPassword("");
+          return;
+        }
         setAuthUser(result.user);
         setError(null);
         setLoginPassword("");
@@ -3529,6 +3545,26 @@ function StudioApp() {
       }
     },
     [loginEmail, loginPassword]
+  );
+
+  const handleCompleteMfa = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!mfaChallengeId) return;
+      try {
+        setAuthBusy(true);
+        setAuthError(null);
+        const result = await completeMfaLogin({ challenge: mfaChallengeId, code: mfaCode.trim() });
+        setAuthUser(result.user);
+        setMfaChallengeId(null);
+        setMfaCode("");
+      } catch (err) {
+        setAuthError(err instanceof Error ? err.message : "MFA verification failed");
+      } finally {
+        setAuthBusy(false);
+      }
+    },
+    [mfaChallengeId, mfaCode]
   );
 
   const handleLogout = useCallback(async () => {
@@ -3567,6 +3603,46 @@ function StudioApp() {
   }
 
   if (!authUser) {
+    if (mfaChallengeId) {
+      return (
+        <div className="auth-shell">
+          <form className="auth-card" onSubmit={handleCompleteMfa}>
+            <div className="auth-brand">
+              <img src="/lsquarem-logo.svg" alt="L2M logo" className="auth-brand-logo" />
+              <h1>
+                L<sup>2</sup>M
+              </h1>
+            </div>
+            <p>Enter the 6-digit code from your authenticator app (or a backup code).</p>
+            {authError && <div className="error-banner">{authError}</div>}
+            <label>Verification code</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={mfaCode}
+              onChange={(event) => setMfaCode(event.target.value)}
+              autoFocus
+              required
+              autoComplete="one-time-code"
+            />
+            <button className="execute-btn" type="submit" disabled={authBusy || !mfaCode.trim()}>
+              {authBusy ? "Verifying..." : "Verify"}
+            </button>
+            <button
+              type="button"
+              className="header-btn ghost"
+              onClick={() => {
+                setMfaChallengeId(null);
+                setMfaCode("");
+                setAuthError(null);
+              }}
+            >
+              Cancel
+            </button>
+          </form>
+        </div>
+      );
+    }
     return (
       <div className="auth-shell">
         <form className="auth-card" onSubmit={handleLogin}>
@@ -3887,6 +3963,22 @@ function StudioApp() {
                                 title="Move to another project"
                               >
                                 Project
+                              </button>
+                            )}
+                            {canManageWorkflows && projects.length > 1 && (
+                              <button
+                                className="header-btn"
+                                onClick={() =>
+                                  setShareWorkflowTarget({
+                                    id: workflow.id,
+                                    name: workflow.name,
+                                    projectId: workflow.projectId ?? activeProjectId
+                                  })
+                                }
+                                disabled={busy}
+                                title="Share with other projects"
+                              >
+                                Share
                               </button>
                             )}
                             {canManageWorkflows && (
@@ -4615,8 +4707,26 @@ function StudioApp() {
               </p>
             </section>
           )}
+
+          {activeMode === "settings" && (
+            <SettingsPage
+              authUser={authUser}
+              projects={projects}
+              activeProjectId={activeProjectId}
+            />
+          )}
         </main>
       </div>
+
+      {shareWorkflowTarget && (
+        <WorkflowShareModal
+          workflowId={shareWorkflowTarget.id}
+          workflowName={shareWorkflowTarget.name}
+          owningProjectId={shareWorkflowTarget.projectId}
+          projects={projects}
+          onClose={() => setShareWorkflowTarget(null)}
+        />
+      )}
 
       {soloSelectedNode && radialCenter && (
         <RadialActionRing node={soloSelectedNode} center={radialCenter} onAction={onRadialAction} />

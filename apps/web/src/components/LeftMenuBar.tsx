@@ -67,6 +67,14 @@ export function LeftMenuBar({ activeMode, canManageSecrets, onModeChange }: Left
           Secrets
         </button>
       )}
+      <button
+        className="rail-btn"
+        onClick={() => onModeChange("settings")}
+        title="Settings"
+        aria-pressed={activeMode === "settings"}
+      >
+        Settings
+      </button>
     </aside>
   );
 }

@@ -184,6 +184,23 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     OPENAI_API_KEY: undefined,
     GEMINI_API_KEY: undefined,
     OLLAMA_BASE_URL: undefined,
+    API_KEY_DEFAULT_EXPIRY_DAYS: 0,
+    MFA_ENABLED: false,
+    MFA_ENFORCE: false,
+    MFA_ISSUER: "ai-orchestrator-test",
+    SAML_ENABLED: false,
+    SAML_ENTRY_POINT: undefined,
+    SAML_ISSUER: undefined,
+    SAML_CALLBACK_URL: undefined,
+    SAML_IDP_CERT: undefined,
+    SAML_GROUPS_ATTRIBUTE: "groups",
+    LDAP_ENABLED: false,
+    LDAP_URL: undefined,
+    LDAP_BIND_DN: undefined,
+    LDAP_BIND_PASSWORD: undefined,
+    LDAP_BASE_DN: undefined,
+    LDAP_USER_FILTER: "(mail={{email}})",
+    LDAP_GROUPS_ATTRIBUTE: "memberOf",
     ...overrides
   };
 

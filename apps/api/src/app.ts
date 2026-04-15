@@ -39,6 +39,17 @@ import { AuthService, type SafeUser, type UserRole } from "./services/auth-servi
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
 import { TriggerService } from "./services/trigger-service";
+import { ApiKeyService } from "./services/api-key-service";
+import { MfaService } from "./services/mfa-service";
+import { SamlService, type SamlAssertionProfile } from "./services/saml-service";
+import { LdapService } from "./services/ldap-service";
+import {
+  ALL_PERMISSIONS,
+  RbacService,
+  isProjectRole,
+  type Permission,
+  type ProjectRole
+} from "./services/rbac-service";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -1581,8 +1592,76 @@ export function createApp(
     return allowedRoles.some((role) => rolePriority[user.role] >= rolePriority[role]);
   };
 
+  const apiKeyService = new ApiKeyService(store, config.API_KEY_DEFAULT_EXPIRY_DAYS);
+  const mfaService = new MfaService(store, config.SECRET_MASTER_KEY_BASE64, config.MFA_ISSUER);
+  const rbacService = new RbacService(store);
+  const samlService = new SamlService(store, {
+    enabled: config.SAML_ENABLED,
+    entryPoint: config.SAML_ENTRY_POINT,
+    issuer: config.SAML_ISSUER,
+    callbackUrl: config.SAML_CALLBACK_URL,
+    idpCert: config.SAML_IDP_CERT,
+    groupsAttribute: config.SAML_GROUPS_ATTRIBUTE
+  });
+  const ldapService = new LdapService(store, {
+    enabled: config.LDAP_ENABLED,
+    url: config.LDAP_URL,
+    bindDn: config.LDAP_BIND_DN,
+    bindPassword: config.LDAP_BIND_PASSWORD,
+    baseDn: config.LDAP_BASE_DN,
+    userFilter: config.LDAP_USER_FILTER,
+    groupsAttribute: config.LDAP_GROUPS_ATTRIBUTE
+  });
+
+  const pendingMfaChallenges = new Map<string, { userId: string; createdAt: number }>();
+  const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+
+  const issueMfaChallenge = (userId: string): string => {
+    for (const [key, entry] of pendingMfaChallenges.entries()) {
+      if (Date.now() - entry.createdAt > MFA_CHALLENGE_TTL_MS) {
+        pendingMfaChallenges.delete(key);
+      }
+    }
+    const challengeId = `mfa_${crypto.randomUUID()}`;
+    pendingMfaChallenges.set(challengeId, { userId, createdAt: Date.now() });
+    return challengeId;
+  };
+
+  const consumeMfaChallenge = (challengeId: string): string | null => {
+    const entry = pendingMfaChallenges.get(challengeId);
+    if (!entry) return null;
+    pendingMfaChallenges.delete(challengeId);
+    if (Date.now() - entry.createdAt > MFA_CHALLENGE_TTL_MS) return null;
+    return entry.userId;
+  };
+
   const getSessionIdFromRequest = (request: { cookies: Record<string, string | undefined> }) => {
     return request.cookies[config.SESSION_COOKIE_NAME] ?? "";
+  };
+
+  const extractBearerToken = (headers: Record<string, unknown>): string | null => {
+    const raw = headers["authorization"];
+    const value = typeof raw === "string" ? raw : Array.isArray(raw) ? String(raw[0]) : "";
+    if (!value) return null;
+    const match = value.match(/^Bearer\s+(.+)$/i);
+    return match ? match[1].trim() : null;
+  };
+
+  const authenticateApiKey = (headers: Record<string, unknown>): SafeUser | null => {
+    const token = extractBearerToken(headers);
+    if (!token) return null;
+    const verified = apiKeyService.verify(token);
+    if (!verified) return null;
+    const user = store.getUserById(verified.userId);
+    if (!user) return null;
+    return {
+      id: user.id,
+      email: user.email,
+      role:
+        user.role === "admin" || user.role === "builder" || user.role === "operator" || user.role === "viewer"
+          ? user.role
+          : "viewer"
+    };
   };
 
   const setSessionCookie = (reply: FastifyReply, sessionId: string) => {
@@ -1609,10 +1688,20 @@ export function createApp(
   };
 
   const requireRole = async (
-    request: { cookies: Record<string, string | undefined> },
+    request: { cookies: Record<string, string | undefined>; headers: Record<string, unknown> },
     reply: FastifyReply,
     allowedRoles: UserRole[]
   ): Promise<SafeUser | null> => {
+    // Allow API key authentication (Phase 5.1) as a first-class alternative to session cookies.
+    const apiKeyUser = authenticateApiKey(request.headers as Record<string, unknown>);
+    if (apiKeyUser) {
+      if (!hasRequiredRole(apiKeyUser, allowedRoles)) {
+        deny(reply, 403, "Insufficient permissions");
+        return null;
+      }
+      return apiKeyUser;
+    }
+
     const sessionId = getSessionIdFromRequest(request);
     if (!sessionId) {
       deny(reply, 401, "Authentication required");
@@ -1632,6 +1721,130 @@ export function createApp(
     }
 
     return user;
+  };
+
+  const requirePermission = async (
+    request: { cookies: Record<string, string | undefined>; headers: Record<string, unknown> },
+    reply: FastifyReply,
+    projectId: string,
+    permission: Permission
+  ): Promise<SafeUser | null> => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return null;
+    if (!rbacService.can(user, projectId, permission)) {
+      deny(reply, 403, `Permission '${permission}' required in project '${projectId}'`);
+      return null;
+    }
+    return user;
+  };
+
+  const provisionSsoUser = (input: {
+    provider: "saml" | "ldap";
+    subject: string;
+    email: string;
+    groups: string[];
+  }): { user: SafeUser; created: boolean } => {
+    const normalizedEmail = input.email.trim().toLowerCase();
+    let storeUser = store.getUserByEmail(normalizedEmail);
+    let created = false;
+
+    // Determine global role: group-mapped role > default viewer.
+    const mappedGlobalRole =
+      input.provider === "saml"
+        ? samlService.resolveGlobalRole(input.groups)
+        : ldapService.resolveGlobalRole(input.groups);
+    const desiredRole: UserRole = mappedGlobalRole ?? "viewer";
+
+    if (!storeUser) {
+      const id = `usr_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+      const randomPassword = crypto.randomBytes(24).toString("base64url");
+      // Register with the normal register flow so password hashing is consistent.
+      const registered = authService.register({
+        email: normalizedEmail,
+        password: randomPassword,
+        role: desiredRole
+      });
+      storeUser = store.getUserById(registered.id);
+      created = true;
+    } else if (mappedGlobalRole && storeUser.role !== mappedGlobalRole) {
+      // Update role when SSO group mapping indicates a change (do NOT downgrade admins unless explicitly mapped).
+      const currentPriority = rolePriority[(storeUser.role as UserRole) ?? "viewer"] ?? 1;
+      const targetPriority = rolePriority[mappedGlobalRole];
+      if (targetPriority >= currentPriority) {
+        store.saveUser({
+          id: storeUser.id,
+          email: storeUser.email,
+          passwordHash: storeUser.passwordHash,
+          role: mappedGlobalRole
+        });
+        storeUser = store.getUserById(storeUser.id);
+      }
+    }
+
+    if (!storeUser) {
+      throw new Error("Failed to provision SSO user");
+    }
+
+    // Apply project-level role assignments from group mappings.
+    const projectAssignments =
+      input.provider === "saml"
+        ? samlService.listProjectRoleAssignments(input.groups)
+        : ldapService.listProjectRoleAssignments(input.groups);
+    for (const assignment of projectAssignments) {
+      const project = store.getProject(assignment.projectId);
+      if (!project) continue;
+      try {
+        rbacService.addMember({
+          userId: storeUser.id,
+          projectId: assignment.projectId,
+          role: isProjectRole(assignment.role) ? assignment.role : "custom",
+          customRoleId: assignment.customRoleId
+        });
+      } catch {
+        // Ignore mapping errors (e.g., unknown custom role); continue provisioning others.
+      }
+    }
+
+    // Persist SSO identity linkage.
+    if (input.provider === "saml") {
+      samlService.recordIdentity(storeUser.id, {
+        nameId: input.subject,
+        email: normalizedEmail,
+        groups: input.groups,
+        attributes: {}
+      });
+    } else {
+      store.upsertSsoIdentity({
+        id: `sso_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
+        userId: storeUser.id,
+        provider: "ldap",
+        subject: input.subject,
+        email: normalizedEmail
+      });
+    }
+
+    const user: SafeUser = {
+      id: storeUser.id,
+      email: storeUser.email,
+      role:
+        storeUser.role === "admin" ||
+        storeUser.role === "builder" ||
+        storeUser.role === "operator" ||
+        storeUser.role === "viewer"
+          ? storeUser.role
+          : "viewer"
+    };
+    return { user, created };
+  };
+
+  const issueSessionForUser = (user: SafeUser, reply: FastifyReply): { expiresAt: string } => {
+    const expiresAtDate = new Date();
+    expiresAtDate.setHours(expiresAtDate.getHours() + config.SESSION_TTL_HOURS);
+    const expiresAt = expiresAtDate.toISOString();
+    const sessionId = `sess_${crypto.randomUUID().replace(/-/g, "")}${crypto.randomBytes(6).toString("hex")}`;
+    store.saveSession({ id: sessionId, userId: user.id, expiresAt });
+    setSessionCookie(reply, sessionId);
+    return { expiresAt };
   };
 
   const allowedOrigins = parseConfiguredOrigins(config.WEB_ORIGIN);
@@ -1760,6 +1973,29 @@ export function createApp(
 
     try {
       const result = authService.login(parsed.data.email, parsed.data.password);
+      // MFA gate: if the user has MFA enabled (or MFA_ENFORCE is on for admin), require a challenge step.
+      const mfaStatus = mfaService.status(result.user.id);
+      const mustProvideMfa = mfaStatus.enabled || (config.MFA_ENFORCE && result.user.role === "admin");
+      if (mustProvideMfa) {
+        if (!mfaStatus.enabled) {
+          // MFA enforced but not enrolled — still issue the session so user can enrol immediately,
+          // but flag it so the UI can redirect to the MFA enrolment flow.
+          setSessionCookie(reply, result.sessionId);
+          return {
+            user: result.user,
+            expiresAt: result.expiresAt,
+            mfaEnrollmentRequired: true
+          };
+        }
+        // Revoke the freshly-created session and exchange it for a short-lived MFA challenge token.
+        store.revokeSession(result.sessionId);
+        const challengeId = issueMfaChallenge(result.user.id);
+        reply.code(200);
+        return {
+          mfaChallenge: challengeId,
+          expiresInSeconds: Math.floor(MFA_CHALLENGE_TTL_MS / 1000)
+        };
+      }
       setSessionCookie(reply, result.sessionId);
       return {
         user: result.user,
@@ -1771,6 +2007,43 @@ export function createApp(
         error: error instanceof Error ? error.message : "Invalid credentials"
       };
     }
+  });
+
+  app.post<{ Body: unknown }>("/api/auth/login/mfa", async (request, reply) => {
+    const body = asRecord(request.body);
+    const challengeId = typeof body.challenge === "string" ? body.challenge : "";
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    if (!challengeId || !code) {
+      reply.code(400);
+      return { error: "challenge and code are required" };
+    }
+    const userId = consumeMfaChallenge(challengeId);
+    if (!userId) {
+      reply.code(401);
+      return { error: "MFA challenge expired or invalid" };
+    }
+    if (!mfaService.verify(userId, code)) {
+      reply.code(401);
+      return { error: "Invalid MFA code" };
+    }
+    const storeUser = store.getUserById(userId);
+    if (!storeUser) {
+      reply.code(401);
+      return { error: "User not found" };
+    }
+    const safeUser: SafeUser = {
+      id: storeUser.id,
+      email: storeUser.email,
+      role:
+        storeUser.role === "admin" ||
+        storeUser.role === "builder" ||
+        storeUser.role === "operator" ||
+        storeUser.role === "viewer"
+          ? storeUser.role
+          : "viewer"
+    };
+    const { expiresAt } = issueSessionForUser(safeUser, reply);
+    return { user: safeUser, expiresAt };
   });
 
   app.post("/api/auth/logout", async (request, reply) => {
@@ -1787,8 +2060,549 @@ export function createApp(
     if (!user) {
       return;
     }
-    return { user };
+    const mfa = mfaService.status(user.id);
+    const memberships = rbacService.listUserProjects(user.id);
+    return { user, mfa, memberships };
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — MFA (TOTP)
+  // ---------------------------------------------------------------------------
+
+  app.get("/api/auth/mfa/status", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    return mfaService.status(user.id);
+  });
+
+  app.post("/api/auth/mfa/enroll", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const existing = mfaService.status(user.id);
+    if (existing.enabled) {
+      reply.code(409);
+      return { error: "MFA is already enabled for this account. Disable it first to re-enrol." };
+    }
+    const enrollment = mfaService.enroll(user.id, user.email);
+    return {
+      secret: enrollment.secret,
+      otpauthUrl: enrollment.otpauthUrl,
+      backupCodes: enrollment.backupCodes
+    };
+  });
+
+  app.post<{ Body: unknown }>("/api/auth/mfa/activate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const body = asRecord(request.body);
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    if (!code) {
+      reply.code(400);
+      return { error: "code is required" };
+    }
+    const ok = mfaService.activate(user.id, code);
+    if (!ok) {
+      reply.code(401);
+      return { error: "Invalid activation code" };
+    }
+    return { enabled: true };
+  });
+
+  app.post<{ Body: unknown }>("/api/auth/mfa/disable", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const body = asRecord(request.body);
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    const status = mfaService.status(user.id);
+    if (status.enabled) {
+      if (!code || !mfaService.verify(user.id, code)) {
+        reply.code(401);
+        return { error: "A valid MFA code is required to disable MFA" };
+      }
+    }
+    mfaService.disable(user.id);
+    return { ok: true };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — API keys
+  // ---------------------------------------------------------------------------
+
+  const apiKeyCreateSchema = z.object({
+    name: z.string().min(1).max(120),
+    scopes: z.array(z.string().min(1).max(64)).optional(),
+    expiresInDays: z.number().int().nonnegative().optional()
+  });
+
+  app.get("/api/auth/api-keys", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const keys = user.role === "admin" ? apiKeyService.list() : apiKeyService.list(user.id);
+    return { keys };
+  });
+
+  app.post<{ Body: unknown }>("/api/auth/api-keys", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = apiKeyCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid API key payload", details: parsed.error.issues };
+    }
+    const { plaintext, record } = apiKeyService.create({
+      userId: user.id,
+      name: parsed.data.name,
+      scopes: parsed.data.scopes,
+      expiresInDays: parsed.data.expiresInDays ?? null
+    });
+    return {
+      key: plaintext,
+      record
+    };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/auth/api-keys/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const ok = apiKeyService.revoke(request.params.id, user.role === "admin" ? undefined : user.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: "API key not found" };
+    }
+    return { ok: true };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — SAML SSO
+  // ---------------------------------------------------------------------------
+
+  app.get("/api/auth/saml/metadata", async (_request, reply) => {
+    if (!config.SAML_ENABLED) {
+      reply.code(404);
+      return { error: "SAML is not enabled" };
+    }
+    return {
+      enabled: config.SAML_ENABLED,
+      ready: samlService.isReady(),
+      entryPoint: config.SAML_ENTRY_POINT,
+      issuer: config.SAML_ISSUER,
+      callbackUrl: config.SAML_CALLBACK_URL,
+      groupsAttribute: config.SAML_GROUPS_ATTRIBUTE
+    };
+  });
+
+  app.get("/api/auth/saml/login", async (_request, reply) => {
+    try {
+      const redirectUrl = await samlService.buildLoginUrl();
+      reply.redirect(redirectUrl);
+    } catch (error) {
+      reply.code(503);
+      return {
+        error: error instanceof Error ? error.message : "SAML login is not available"
+      };
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/auth/saml/callback", async (request, reply) => {
+    const body = asRecord(request.body);
+    const samlResponse = typeof body.SAMLResponse === "string" ? body.SAMLResponse : "";
+    if (!samlResponse) {
+      reply.code(400);
+      return { error: "SAMLResponse is required" };
+    }
+    try {
+      const profile: SamlAssertionProfile = await samlService.consumeAssertion(samlResponse);
+      const email = profile.email ?? profile.nameId;
+      if (!email) {
+        reply.code(400);
+        return { error: "SAML assertion did not include an email or nameId" };
+      }
+      const { user, created } = provisionSsoUser({
+        provider: "saml",
+        subject: profile.nameId,
+        email,
+        groups: profile.groups
+      });
+      const { expiresAt } = issueSessionForUser(user, reply);
+      return { user, expiresAt, provisioned: created };
+    } catch (error) {
+      reply.code(401);
+      return {
+        error: error instanceof Error ? error.message : "SAML assertion failed"
+      };
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — LDAP login
+  // ---------------------------------------------------------------------------
+
+  app.post<{ Body: unknown }>("/api/auth/ldap/login", async (request, reply) => {
+    const body = asRecord(request.body);
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!email || !password) {
+      reply.code(400);
+      return { error: "email and password are required" };
+    }
+    try {
+      const profile = await ldapService.authenticate(email, password);
+      const { user, created } = provisionSsoUser({
+        provider: "ldap",
+        subject: profile.dn || profile.email,
+        email: profile.email,
+        groups: profile.groups
+      });
+      const { expiresAt } = issueSessionForUser(user, reply);
+      return { user, expiresAt, provisioned: created };
+    } catch (error) {
+      const err = error as Error & { code?: string };
+      reply.code(err.code === "CONFIGURATION_ERROR" ? 503 : 401);
+      return { error: err.message };
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.1 — SSO group-to-role mappings
+  // ---------------------------------------------------------------------------
+
+  const ssoMappingSchema = z.object({
+    provider: z.enum(["saml", "ldap"]),
+    groupName: z.string().min(1).max(200),
+    projectId: z.string().min(1).max(120).nullable().optional(),
+    role: z.string().min(1).max(60),
+    customRoleId: z.string().min(1).max(120).nullable().optional()
+  });
+
+  app.get<{ Querystring: { provider?: string } }>("/api/auth/sso/mappings", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const provider = typeof request.query?.provider === "string" ? request.query.provider : undefined;
+    return { mappings: rbacService.listSsoGroupMappings(provider) };
+  });
+
+  app.post<{ Body: unknown }>("/api/auth/sso/mappings", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = ssoMappingSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid SSO mapping payload", details: parsed.error.issues };
+    }
+    const id = rbacService.upsertSsoGroupMapping({
+      provider: parsed.data.provider,
+      groupName: parsed.data.groupName,
+      projectId: parsed.data.projectId ?? null,
+      role: parsed.data.role,
+      customRoleId: parsed.data.customRoleId ?? null
+    });
+    return { id };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/auth/sso/mappings/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const ok = rbacService.deleteSsoGroupMapping(request.params.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: "SSO mapping not found" };
+    }
+    return { ok: true };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.2 — Project memberships
+  // ---------------------------------------------------------------------------
+
+  const projectMemberSchema = z.object({
+    userId: z.string().min(1).max(120),
+    role: z.string().min(1).max(60),
+    customRoleId: z.string().min(1).max(120).nullable().optional()
+  });
+
+  app.get<{ Params: { id: string } }>("/api/projects/:id/members", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const project = store.getProject(request.params.id);
+    if (!project) {
+      reply.code(404);
+      return { error: "Project not found" };
+    }
+    if (!rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+      reply.code(403);
+      return { error: "Insufficient permissions to view project members" };
+    }
+    return { members: rbacService.listMembers(project.id) };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/projects/:id/members", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const project = store.getProject(request.params.id);
+    if (!project) {
+      reply.code(404);
+      return { error: "Project not found" };
+    }
+    if (!rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+      reply.code(403);
+      return { error: "Insufficient permissions to manage members" };
+    }
+    const parsed = projectMemberSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid member payload", details: parsed.error.issues };
+    }
+    const targetUser = store.getUserById(parsed.data.userId);
+    if (!targetUser) {
+      reply.code(400);
+      return { error: "Target user does not exist" };
+    }
+    const role = parsed.data.role;
+    if (!isProjectRole(role) && role !== "custom") {
+      reply.code(400);
+      return { error: "role must be project_admin, editor, viewer, or custom" };
+    }
+    try {
+      rbacService.addMember({
+        userId: parsed.data.userId,
+        projectId: project.id,
+        role: role as ProjectRole | "custom",
+        customRoleId: parsed.data.customRoleId ?? null
+      });
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : "Failed to add member" };
+    }
+    return { ok: true, membership: rbacService.getMembership(parsed.data.userId, project.id) };
+  });
+
+  app.delete<{ Params: { id: string; userId: string } }>(
+    "/api/projects/:id/members/:userId",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["viewer"]);
+      if (!user) return;
+      const project = store.getProject(request.params.id);
+      if (!project) {
+        reply.code(404);
+        return { error: "Project not found" };
+      }
+      if (!rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+        reply.code(403);
+        return { error: "Insufficient permissions to remove members" };
+      }
+      const ok = rbacService.removeMember(request.params.userId, project.id);
+      if (!ok) {
+        reply.code(404);
+        return { error: "Membership not found" };
+      }
+      return { ok: true };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.2 — Custom roles
+  // ---------------------------------------------------------------------------
+
+  const customRoleSchema = z.object({
+    name: z.string().min(1).max(120),
+    description: z.string().max(1000).nullable().optional(),
+    projectId: z.string().min(1).max(120).nullable().optional(),
+    permissions: z.array(z.string().min(1).max(60))
+  });
+
+  app.get<{ Querystring: { projectId?: string } }>("/api/custom-roles", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const projectId =
+      typeof request.query?.projectId === "string" && request.query.projectId.trim()
+        ? request.query.projectId
+        : undefined;
+    return {
+      roles: rbacService.listCustomRoles(projectId),
+      availablePermissions: ALL_PERMISSIONS
+    };
+  });
+
+  app.post<{ Body: unknown }>("/api/custom-roles", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = customRoleSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid custom role payload", details: parsed.error.issues };
+    }
+    const { id } = rbacService.createCustomRole({
+      name: parsed.data.name,
+      description: parsed.data.description ?? null,
+      projectId: parsed.data.projectId ?? null,
+      permissions: parsed.data.permissions as Permission[],
+      createdBy: user.email
+    });
+    return { id, role: rbacService.getCustomRole(id) };
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/custom-roles/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = customRoleSchema.partial().safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid custom role payload", details: parsed.error.issues };
+    }
+    const ok = rbacService.updateCustomRole(request.params.id, {
+      name: parsed.data.name,
+      description: parsed.data.description ?? null,
+      projectId: parsed.data.projectId === undefined ? undefined : parsed.data.projectId,
+      permissions: parsed.data.permissions as Permission[] | undefined
+    });
+    if (!ok) {
+      reply.code(404);
+      return { error: "Custom role not found" };
+    }
+    return { role: rbacService.getCustomRole(request.params.id) };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/custom-roles/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const ok = rbacService.deleteCustomRole(request.params.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: "Custom role not found" };
+    }
+    return { ok: true };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.2 — Workflow sharing
+  // ---------------------------------------------------------------------------
+
+  const workflowShareSchema = z.object({
+    projectId: z.string().min(1).max(120),
+    accessLevel: z.enum(["read", "execute"]).default("read")
+  });
+
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/shares", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    if (!rbacService.canAccessWorkflow(user, workflow, "workflow:read")) {
+      reply.code(403);
+      return { error: "Insufficient permissions" };
+    }
+    return { shares: rbacService.listWorkflowShares(workflow.id) };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/shares", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    const owningProject = workflow.projectId ?? "default";
+    if (!rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
+      reply.code(403);
+      return { error: "Only users with workflow:write on the owning project can share the workflow" };
+    }
+    const parsed = workflowShareSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid share payload", details: parsed.error.issues };
+    }
+    if (!store.getProject(parsed.data.projectId)) {
+      reply.code(400);
+      return { error: "Target project does not exist" };
+    }
+    if (parsed.data.projectId === owningProject) {
+      reply.code(400);
+      return { error: "Cannot share a workflow to its owning project" };
+    }
+    rbacService.shareWorkflow({
+      workflowId: workflow.id,
+      projectId: parsed.data.projectId,
+      accessLevel: parsed.data.accessLevel,
+      sharedBy: user.email
+    });
+    return { ok: true };
+  });
+
+  app.delete<{ Params: { id: string; projectId: string } }>(
+    "/api/workflows/:id/shares/:projectId",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["viewer"]);
+      if (!user) return;
+      const workflow = store.getWorkflow(request.params.id);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const owningProject = workflow.projectId ?? "default";
+      if (!rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
+        reply.code(403);
+        return { error: "Insufficient permissions" };
+      }
+      const ok = rbacService.unshareWorkflow(workflow.id, request.params.projectId);
+      if (!ok) {
+        reply.code(404);
+        return { error: "Share not found" };
+      }
+      return { ok: true };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.2 — Secret sharing
+  // ---------------------------------------------------------------------------
+
+  const secretShareSchema = z.object({
+    projectId: z.string().min(1).max(120)
+  });
+
+  app.get<{ Params: { id: string } }>("/api/secrets/:id/shares", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    return { shares: rbacService.listSecretShares(request.params.id) };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/secrets/:id/shares", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = secretShareSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid share payload", details: parsed.error.issues };
+    }
+    if (!store.getProject(parsed.data.projectId)) {
+      reply.code(400);
+      return { error: "Target project does not exist" };
+    }
+    rbacService.shareSecret({
+      secretId: request.params.id,
+      projectId: parsed.data.projectId,
+      sharedBy: user.email
+    });
+    return { ok: true };
+  });
+
+  app.delete<{ Params: { id: string; projectId: string } }>(
+    "/api/secrets/:id/shares/:projectId",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const ok = rbacService.unshareSecret(request.params.id, request.params.projectId);
+      if (!ok) {
+        reply.code(404);
+        return { error: "Share not found" };
+      }
+      return { ok: true };
+    }
+  );
 
   app.get("/api/definitions", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
