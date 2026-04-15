@@ -170,6 +170,7 @@ export async function executeWorkflow(
     session_id?: string;
     executionTimeoutMs?: number;
     execution_timeout_ms?: number;
+    customData?: Record<string, unknown>;
   }
 ) {
   return apiRequest<WorkflowExecutionResult>(`/api/workflows/${workflowId}/execute`, {
@@ -356,6 +357,7 @@ export async function executeWorkflowStream(
     session_id?: string;
     executionTimeoutMs?: number;
     execution_timeout_ms?: number;
+    customData?: Record<string, unknown>;
   },
   handlers: WorkflowExecuteStreamHandlers = {}
 ): Promise<WorkflowExecutionResult> {
@@ -397,6 +399,7 @@ export async function runWebhook(payload: {
   session_id?: string;
   executionTimeoutMs?: number;
   execution_timeout_ms?: number;
+  customData?: Record<string, unknown>;
   system_prompt?: string;
   user_prompt?: string;
   variables?: Record<string, unknown>;
@@ -413,6 +416,7 @@ export async function runWebhookStream(
     session_id?: string;
     executionTimeoutMs?: number;
     execution_timeout_ms?: number;
+    customData?: Record<string, unknown>;
     system_prompt?: string;
     user_prompt?: string;
     variables?: Record<string, unknown>;
@@ -591,6 +595,7 @@ export async function previewExpression(payload: {
     nodeOutputs?: Record<string, unknown>;
     workflow?: { id?: string; name?: string };
     executionId?: string;
+    customData?: Record<string, unknown>;
   };
 }) {
   return apiRequest<{
@@ -613,6 +618,7 @@ export interface ExecutionHistorySummary {
   durationMs: number | null;
   triggerType: string | null;
   triggeredBy: string | null;
+  customData: unknown;
   error: string | null;
   createdAt: string;
 }
@@ -629,6 +635,8 @@ export async function fetchExecutions(input?: {
   status?: string;
   workflowId?: string;
   triggerType?: string;
+  startedFrom?: string;
+  startedTo?: string;
 }) {
   const params = new URLSearchParams();
   if (typeof input?.page === "number") {
@@ -646,6 +654,12 @@ export async function fetchExecutions(input?: {
   if (input?.triggerType) {
     params.set("triggerType", input.triggerType);
   }
+  if (input?.startedFrom) {
+    params.set("startedFrom", input.startedFrom);
+  }
+  if (input?.startedTo) {
+    params.set("startedTo", input.startedTo);
+  }
 
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return apiRequest<{
@@ -658,6 +672,26 @@ export async function fetchExecutions(input?: {
 
 export async function fetchExecutionById(id: string) {
   return apiRequest<ExecutionHistoryDetail>(`/api/executions/${id}`);
+}
+
+export async function retryExecution(id: string, payload: Record<string, unknown> = {}) {
+  return apiRequest<WorkflowExecutionResult>(`/api/executions/${encodeURIComponent(id)}/retry`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function cancelExecution(id: string, reason?: string) {
+  return apiRequest<{
+    ok: boolean;
+    id: string;
+    status: "canceled";
+    abortedActiveRun: boolean;
+    completedAt: string;
+  }>(`/api/executions/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+    body: JSON.stringify(reason ? { reason } : {})
+  });
 }
 
 export async function testCodeNode(payload: {

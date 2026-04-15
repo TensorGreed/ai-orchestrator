@@ -156,6 +156,10 @@ async function createRoleSession(
   return extractCookie(login.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ai-orchestrator-auth-test-"));
   const dbPath = path.join(tempDir, "orchestrator.db");
@@ -167,6 +171,8 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     API_HOST: "127.0.0.1",
     WEB_ORIGIN: "http://localhost:5173",
     WORKFLOW_EXECUTION_TIMEOUT_MS: 300000,
+    EXECUTION_HISTORY_RETENTION_DAYS: 30,
+    EXECUTION_HISTORY_PRUNE_INTERVAL_MS: 3600000,
     SEED_SAMPLE_WORKFLOWS: false,
     SECRET_MASTER_KEY_BASE64: masterKey,
     SESSION_COOKIE_NAME: "ao_session",
@@ -1271,6 +1277,285 @@ describe("execution resilience and lifecycle", () => {
     expect(body.status).toBe("success");
     expect(body.nodeResults.map((entry) => entry.nodeId)).toEqual(["output-node"]);
     expect(body.output?.result).toBe("previous-output");
+  });
+
+  it("filters execution history by workflow, status, date range, and stores custom execution data", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-history-filters@example.com",
+      password: "BuilderHistory123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-history-filters";
+    const workflow: Workflow = {
+      id: workflowId,
+      name: "History Filters Workflow",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "manual",
+          type: "manual_trigger",
+          name: "Manual",
+          position: { x: 0, y: 80 },
+          config: { label: "Run" }
+        },
+        {
+          id: "output-node",
+          type: "output",
+          name: "Output",
+          position: { x: 220, y: 80 },
+          config: {
+            outputKey: "result",
+            responseTemplate: "{{ $execution.customData.batch }}"
+          }
+        }
+      ],
+      edges: [{ id: "edge-manual-output", source: "manual", target: "output-node" }]
+    };
+
+    const createResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie: builderCookie },
+      payload: workflow
+    });
+    expect(createResponse.statusCode).toBe(200);
+
+    const startedFrom = new Date(Date.now() - 60_000).toISOString();
+    const executeResponse = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflowId}/execute`,
+      headers: { cookie: builderCookie },
+      payload: {
+        customData: {
+          batch: "alpha",
+          source: "test"
+        }
+      }
+    });
+    expect(executeResponse.statusCode).toBe(200);
+    expect(executeResponse.json<{ output?: { result?: string } }>().output?.result).toBe("alpha");
+    const startedTo = new Date(Date.now() + 60_000).toISOString();
+
+    const historyResponse = await context.app.inject({
+      method: "GET",
+      url:
+        `/api/executions?workflowId=${workflowId}&status=success` +
+        `&startedFrom=${encodeURIComponent(startedFrom)}&startedTo=${encodeURIComponent(startedTo)}`,
+      headers: { cookie: builderCookie }
+    });
+    expect(historyResponse.statusCode).toBe(200);
+    const historyBody = historyResponse.json<{
+      total: number;
+      items: Array<{ id: string; customData: { batch?: string } }>;
+    }>();
+    expect(historyBody.total).toBe(1);
+    expect(historyBody.items[0]?.customData.batch).toBe("alpha");
+
+    const detailResponse = await context.app.inject({
+      method: "GET",
+      url: `/api/executions/${historyBody.items[0]?.id}`,
+      headers: { cookie: builderCookie }
+    });
+    expect(detailResponse.statusCode).toBe(200);
+    const detailBody = detailResponse.json<{ customData: { batch?: string }; output?: { result?: string } }>();
+    expect(detailBody.customData.batch).toBe("alpha");
+    expect(detailBody.output?.result).toBe("alpha");
+  });
+
+  it("retries a failed execution from history", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-history-retry@example.com",
+      password: "BuilderRetry123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-history-retry";
+    const makeWorkflow = (code: string): Workflow => ({
+      id: workflowId,
+      name: "History Retry Workflow",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "code-node",
+          type: "code_node",
+          name: "Code",
+          position: { x: 40, y: 80 },
+          config: { code }
+        },
+        {
+          id: "output-node",
+          type: "output",
+          name: "Output",
+          position: { x: 260, y: 80 },
+          config: {
+            outputKey: "result",
+            responseTemplate: "{{value}}"
+          }
+        }
+      ],
+      edges: [{ id: "edge-code-output", source: "code-node", target: "output-node" }]
+    });
+
+    expect((await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie: builderCookie },
+      payload: makeWorkflow("throw new Error('first run failed');")
+    })).statusCode).toBe(200);
+
+    const failedRun = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflowId}/execute`,
+      headers: { cookie: builderCookie },
+      payload: {}
+    });
+    expect(failedRun.statusCode).toBe(400);
+
+    const failedHistory = await context.app.inject({
+      method: "GET",
+      url: `/api/executions?workflowId=${workflowId}&status=error&page=1&pageSize=1`,
+      headers: { cookie: builderCookie }
+    });
+    expect(failedHistory.statusCode).toBe(200);
+    const failedExecutionId = failedHistory.json<{ items: Array<{ id: string }> }>().items[0]?.id ?? "";
+    expect(failedExecutionId).not.toBe("");
+
+    expect((await context.app.inject({
+      method: "PUT",
+      url: `/api/workflows/${workflowId}`,
+      headers: { cookie: builderCookie },
+      payload: makeWorkflow("return { value: 'recovered' };")
+    })).statusCode).toBe(200);
+
+    const retryResponse = await context.app.inject({
+      method: "POST",
+      url: `/api/executions/${failedExecutionId}/retry`,
+      headers: { cookie: builderCookie },
+      payload: {}
+    });
+    expect(retryResponse.statusCode).toBe(200);
+    const retryBody = retryResponse.json<{ status: string; output?: { result?: string } }>();
+    expect(retryBody.status).toBe("success");
+    expect(retryBody.output?.result).toBe("recovered");
+  });
+
+  it("cancels a running execution from history", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-history-cancel@example.com",
+      password: "BuilderCancel123!",
+      role: "builder"
+    });
+
+    const workflowId = "wf-history-cancel";
+    const workflow: Workflow = {
+      id: workflowId,
+      name: "History Cancel Workflow",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "wait-node",
+          type: "wait_node",
+          name: "Wait",
+          position: { x: 40, y: 80 },
+          config: { delayMs: 5000, maxDelayMs: 5000 }
+        },
+        {
+          id: "output-node",
+          type: "output",
+          name: "Output",
+          position: { x: 260, y: 80 },
+          config: { responseTemplate: "done", outputKey: "result" }
+        }
+      ],
+      edges: [{ id: "edge-wait-output", source: "wait-node", target: "output-node" }]
+    };
+
+    expect((await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie: builderCookie },
+      payload: workflow
+    })).statusCode).toBe(200);
+
+    const runPromise = context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflowId}/execute`,
+      headers: { cookie: builderCookie },
+      payload: {}
+    });
+
+    let executionId = "";
+    for (let attempt = 0; attempt < 40 && !executionId; attempt += 1) {
+      await delay(50);
+      const listResponse = await context.app.inject({
+        method: "GET",
+        url: `/api/executions?workflowId=${workflowId}&status=running&page=1&pageSize=1`,
+        headers: { cookie: builderCookie }
+      });
+      const items = listResponse.json<{ items: Array<{ id: string }> }>().items;
+      executionId = items[0]?.id ?? "";
+    }
+    expect(executionId).not.toBe("");
+
+    const cancelResponse = await context.app.inject({
+      method: "POST",
+      url: `/api/executions/${executionId}/cancel`,
+      headers: { cookie: builderCookie },
+      payload: { reason: "test cancellation" }
+    });
+    expect(cancelResponse.statusCode).toBe(200);
+    expect(cancelResponse.json<{ status: string; abortedActiveRun: boolean }>().abortedActiveRun).toBe(true);
+
+    const runResponse = await runPromise;
+    expect(runResponse.statusCode).toBe(200);
+    expect(runResponse.json<{ status: string }>().status).toBe("canceled");
+
+    const detailResponse = await context.app.inject({
+      method: "GET",
+      url: `/api/executions/${executionId}`,
+      headers: { cookie: builderCookie }
+    });
+    expect(detailResponse.statusCode).toBe(200);
+    const detailBody = detailResponse.json<{ status: string; nodeResults: Array<{ status: string }> }>();
+    expect(detailBody.status).toBe("canceled");
+    expect(detailBody.nodeResults.some((entry) => entry.status === "canceled")).toBe(true);
+  });
+
+  it("prunes execution history older than a retention cutoff", async () => {
+    const context = await createTestContext();
+    const oldStartedAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const recentStartedAt = new Date().toISOString();
+
+    context.store.saveExecutionHistory({
+      id: "exec-old",
+      workflowId: "wf-old",
+      workflowName: "Old Workflow",
+      status: "success",
+      startedAt: oldStartedAt,
+      completedAt: oldStartedAt
+    });
+    context.store.saveExecutionHistory({
+      id: "exec-recent",
+      workflowId: "wf-recent",
+      workflowName: "Recent Workflow",
+      status: "success",
+      startedAt: recentStartedAt,
+      completedAt: recentStartedAt
+    });
+
+    const deleted = context.store.pruneExecutionHistory({
+      before: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    });
+    expect(deleted).toBe(1);
+    expect(context.store.getExecutionHistory("exec-old")).toBeNull();
+    expect(context.store.getExecutionHistory("exec-recent")).not.toBeNull();
   });
 });
 

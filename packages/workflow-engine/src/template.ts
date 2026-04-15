@@ -1,5 +1,9 @@
 import { evaluateExpression, isComplexExpression } from "./expression";
 
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
 export function renderTemplateAdvanced(template: string, values: Record<string, unknown>): { rendered: string; unresolvedKeys: string[] } {
   const unresolvedKeys: string[] = [];
   // Match either a simple dotted-path token (back-compat) or any {{ ... }} body.
@@ -18,9 +22,19 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
     // Otherwise — treat as a JS expression in the new engine.
     if (isComplexExpression(trimmed)) {
       try {
+        const workflowContext = toRecord(values.$workflow ?? values.workflow);
+        const executionContext = toRecord(values.$execution ?? values.execution);
         const result = evaluateExpression(trimmed, {
           $input: values,
           $json: values,
+          $workflow: {
+            id: typeof workflowContext.id === "string" ? workflowContext.id : "",
+            name: typeof workflowContext.name === "string" ? workflowContext.name : ""
+          },
+          $execution: {
+            id: typeof executionContext.id === "string" ? executionContext.id : "",
+            customData: toRecord(executionContext.customData)
+          },
           $vars: (values.vars && typeof values.vars === "object" ? values.vars : {}) as Record<string, unknown>,
           extras: values
         });

@@ -114,12 +114,19 @@ export const MIGRATIONS: Migration[] = [
         input_json TEXT,
         output_json TEXT,
         node_results_json TEXT,
+        custom_data_json TEXT,
         error TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE INDEX IF NOT EXISTS idx_execution_history_started_at
       ON execution_history(started_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_execution_history_status
+      ON execution_history(status);
+
+      CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_id
+      ON execution_history(workflow_id);
 
       CREATE TABLE IF NOT EXISTS workflow_executions (
         id TEXT PRIMARY KEY,
@@ -226,6 +233,19 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
       CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id);
       CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id);
+    `
+  },
+  {
+    version: 5,
+    description: "Execution history custom metadata and filter indexes (Phase 4.4)",
+    up: `
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS custom_data_json TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_execution_history_status
+      ON execution_history(status);
+
+      CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_id
+      ON execution_history(workflow_id);
     `
   }
 ];

@@ -24,6 +24,7 @@ import {
 } from "@ai-orchestrator/shared";
 import {
   ApiError,
+  cancelExecution,
   createFolder,
   createProject,
   createSecret,
@@ -48,6 +49,7 @@ import {
   loginUser,
   logoutUser,
   moveWorkflow,
+  retryExecution,
   runWebhookStream,
   saveWorkflow,
   saveWorkflowPin,
@@ -108,6 +110,13 @@ interface WorkflowVariableRow {
   value: string;
 }
 
+interface ExecutionHistoryFilters {
+  status: string;
+  workflowId: string;
+  startedFrom: string;
+  startedTo: string;
+}
+
 interface NodeClipboardNodePayload {
   sourceId: string;
   nodeType: EditorNodeData["nodeType"];
@@ -139,7 +148,8 @@ const statusColors: Record<string, string> = {
   skipped: "#7f8797",
   running: "#d68f16",
   pending: "#5b7bd8",
-  waiting_approval: "#a154f2"
+  waiting_approval: "#a154f2",
+  canceled: "#8a5a44"
 };
 const auxiliaryHandles = new Set(["chat_model", "memory", "tool", "worker"]);
 const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
@@ -294,6 +304,14 @@ function formatWhen(value: string): string {
   return new Date(timestamp).toLocaleString();
 }
 
+function dateTimeLocalToIso(value: string): string | undefined {
+  if (!value.trim()) {
+    return undefined;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -332,6 +350,7 @@ function toWorkflowExecutionResult(detail: ExecutionHistoryDetail): WorkflowExec
     startedAt: detail.startedAt,
     completedAt: detail.completedAt ?? detail.startedAt,
     executionId: detail.id,
+    customData: asRecord(detail.customData) ?? undefined,
     nodeResults: Array.isArray(detail.nodeResults) ? (detail.nodeResults as WorkflowExecutionResult["nodeResults"]) : [],
     output: detail.output,
     error: detail.error ?? undefined
@@ -553,7 +572,14 @@ function extractNodeOutputsFromExecution(result: WorkflowExecutionResult | null)
 }
 
 function normalizeEditorExecutionStatus(value: unknown): EditorNodeData["executionStatus"] {
-  if (value === "pending" || value === "running" || value === "success" || value === "error" || value === "skipped") {
+  if (
+    value === "pending" ||
+    value === "running" ||
+    value === "success" ||
+    value === "error" ||
+    value === "skipped" ||
+    value === "canceled"
+  ) {
     return value;
   }
   return undefined;
@@ -800,6 +826,12 @@ function StudioApp() {
   const [executionResult, setExecutionResult] = useState<WorkflowExecutionResult | null>(null);
   const [executionsLoading, setExecutionsLoading] = useState(false);
   const [executionsError, setExecutionsError] = useState<string | null>(null);
+  const [executionHistoryFilters, setExecutionHistoryFilters] = useState<ExecutionHistoryFilters>({
+    status: "",
+    workflowId: "",
+    startedFrom: "",
+    startedTo: ""
+  });
 
   const [systemPrompt, setSystemPrompt] = useState("You are a precise tool-using AI assistant.");
   const [userPrompt, setUserPrompt] = useState("What time is it in America/Toronto? Use tools when needed.");
@@ -1581,7 +1613,14 @@ function StudioApp() {
     try {
       setExecutionsLoading(true);
       setExecutionsError(null);
-      const payload = await fetchExecutions({ page: 1, pageSize: 40 });
+      const payload = await fetchExecutions({
+        page: 1,
+        pageSize: 40,
+        status: executionHistoryFilters.status || undefined,
+        workflowId: executionHistoryFilters.workflowId || undefined,
+        startedFrom: dateTimeLocalToIso(executionHistoryFilters.startedFrom),
+        startedTo: dateTimeLocalToIso(executionHistoryFilters.startedTo)
+      });
       setExecutionHistoryItems(payload.items);
       setExecutionHistoryTotal(payload.total);
     } catch (historyError) {
@@ -1594,7 +1633,7 @@ function StudioApp() {
     } finally {
       setExecutionsLoading(false);
     }
-  }, []);
+  }, [executionHistoryFilters]);
 
   const toggleExecutionRow = useCallback(async (executionId: string) => {
     const isExpanded = expandedExecutionIds.includes(executionId);
@@ -1865,12 +1904,7 @@ function StudioApp() {
         setIsDebugMode(true);
         setLogsTab("logs");
         setActiveMode("editor");
-        const replayInput = asRecord(detail.input);
-        const result = await executeWorkflowStream(workflow.id, {
-          ...replayInput,
-          sourceExecutionId: detail.id,
-          usePinnedData: true
-        });
+        const result = await retryExecution(detail.id);
         setExecutionResult(result);
         if (result.executionId) {
           latestDebugExecutionIdRef.current = result.executionId;
@@ -1884,6 +1918,32 @@ function StudioApp() {
       }
     },
     [currentWorkflow.id, handleApiError, hydrateWorkflow, refreshExecutionHistory]
+  );
+
+  const handleCancelExecution = useCallback(
+    async (executionId: string) => {
+      try {
+        setExecutionsError(null);
+        await cancelExecution(executionId);
+        setExecutionDetailById((current) => {
+          const existing = current[executionId];
+          if (!existing) return current;
+          return {
+            ...current,
+            [executionId]: {
+              ...existing,
+              status: "canceled",
+              completedAt: new Date().toISOString(),
+              error: existing.error ?? "Execution canceled"
+            }
+          };
+        });
+        await refreshExecutionHistory();
+      } catch (cancelError) {
+        setExecutionsError(cancelError instanceof Error ? cancelError.message : "Failed to cancel execution");
+      }
+    },
+    [refreshExecutionHistory, setExecutionDetailById]
   );
 
   useEffect(() => {
@@ -4217,15 +4277,19 @@ function StudioApp() {
               executionsLoading={executionsLoading}
               executionsError={executionsError}
               executionHistoryItems={executionHistoryItems}
+              workflowList={workflowList}
+              filters={executionHistoryFilters}
               expandedExecutionIds={expandedExecutionIds}
               executionDetailById={executionDetailById}
               statusColors={statusColors}
+              onFiltersChange={setExecutionHistoryFilters}
               onRefresh={() => {
                 void refreshExecutionHistory();
               }}
               onToggleRow={(executionId) => toggleExecutionRow(executionId)}
               onDebugExecution={(executionId) => handleDebugExecution(executionId)}
               onRerunExecution={(executionId) => handleRerunExecution(executionId)}
+              onCancelExecution={(executionId) => handleCancelExecution(executionId)}
             />
           )}
 

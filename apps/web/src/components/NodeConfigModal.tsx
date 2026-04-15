@@ -498,6 +498,7 @@ interface ExpressionPreviewContext {
   nodeOutputs?: Record<string, unknown>;
   workflow?: { id?: string; name?: string };
   executionId?: string;
+  customData?: Record<string, unknown>;
 }
 
 const EXPRESSION_SUGGESTIONS = [
@@ -505,6 +506,7 @@ const EXPRESSION_SUGGESTIONS = [
   { label: "$input", value: "$input" },
   { label: "$vars", value: "$vars" },
   { label: "$now", value: "$now.toISOString()" },
+  { label: "$execution", value: "$execution.customData" },
   { label: "$if", value: "$if(condition, trueValue, falseValue)" },
   { label: "$ifEmpty", value: "$ifEmpty(value, fallback)" },
   { label: "$jmespath", value: "$jmespath($json, \"path.to.field\")" },
@@ -848,12 +850,14 @@ export function NodeConfigModal({
         id: workflowContext?.id,
         name: workflowContext?.name
       },
-      executionId: executionResult?.executionId
+      executionId: executionResult?.executionId,
+      customData: executionResult?.customData
     }),
     [
       currentNodeResult?.input,
       currentNodeResult?.output,
       executionResult?.executionId,
+      executionResult?.customData,
       nodeOutputsForPreview,
       workflowContext?.id,
       workflowContext?.name,

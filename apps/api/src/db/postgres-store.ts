@@ -1049,7 +1049,7 @@ export class PostgresStore {
   async saveWebhookIdempotencyResult(input: {
     endpointKey: string;
     idempotencyKey: string;
-    status: "success" | "error" | "partial" | "waiting_approval";
+    status: "success" | "error" | "partial" | "waiting_approval" | "canceled";
     result: unknown;
   }): Promise<void> {
     const now = new Date().toISOString();
@@ -1077,11 +1077,12 @@ export class PostgresStore {
     inputJson?: unknown;
     outputJson?: unknown;
     nodeResultsJson?: unknown;
+    customData?: unknown;
     error?: string;
   }): Promise<void> {
     await this.execute(
-      `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, error)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (id) DO UPDATE SET
          workflow_id = EXCLUDED.workflow_id,
          workflow_name = EXCLUDED.workflow_name,
@@ -1094,6 +1095,7 @@ export class PostgresStore {
          input_json = EXCLUDED.input_json,
          output_json = EXCLUDED.output_json,
          node_results_json = EXCLUDED.node_results_json,
+         custom_data_json = EXCLUDED.custom_data_json,
          error = EXCLUDED.error`,
       [
         input.id,
@@ -1108,6 +1110,7 @@ export class PostgresStore {
         input.inputJson === undefined ? null : JSON.stringify(input.inputJson),
         input.outputJson === undefined ? null : JSON.stringify(input.outputJson),
         input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
+        input.customData === undefined ? null : JSON.stringify(input.customData),
         input.error ?? null
       ]
     );
@@ -1119,6 +1122,8 @@ export class PostgresStore {
     status?: string;
     workflowId?: string;
     triggerType?: string;
+    startedFrom?: string;
+    startedTo?: string;
   }): Promise<{
     total: number;
     page: number;
@@ -1133,6 +1138,7 @@ export class PostgresStore {
       durationMs: number | null;
       triggerType: string | null;
       triggeredBy: string | null;
+      customData: unknown;
       error: string | null;
       createdAt: string;
     }>;
@@ -1157,6 +1163,14 @@ export class PostgresStore {
       whereParts.push(`trigger_type = $${paramIdx++}`);
       whereParams.push(input.triggerType);
     }
+    if (input.startedFrom) {
+      whereParts.push(`started_at >= $${paramIdx++}`);
+      whereParams.push(input.startedFrom);
+    }
+    if (input.startedTo) {
+      whereParts.push(`started_at <= $${paramIdx++}`);
+      whereParams.push(input.startedTo);
+    }
 
     const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
     const countRow = await this.queryOne<{ count: string }>(
@@ -1175,10 +1189,11 @@ export class PostgresStore {
       duration_ms: number | null;
       trigger_type: string | null;
       triggered_by: string | null;
+      custom_data_json: string | null;
       error: string | null;
       created_at: string;
     }>(
-      `SELECT id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, error, created_at
+      `SELECT id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, custom_data_json, error, created_at
        FROM execution_history
        ${whereClause}
        ORDER BY started_at DESC
@@ -1200,6 +1215,7 @@ export class PostgresStore {
         durationMs: row.duration_ms === null ? null : toNum(row.duration_ms),
         triggerType: row.trigger_type ? toStr(row.trigger_type) : null,
         triggeredBy: row.triggered_by ? toStr(row.triggered_by) : null,
+        customData: parseJsonSafe(row.custom_data_json),
         error: row.error ? toStr(row.error) : null,
         createdAt: toStr(row.created_at)
       }))
@@ -1219,6 +1235,7 @@ export class PostgresStore {
     input: unknown;
     output: unknown;
     nodeResults: unknown;
+    customData: unknown;
     error: string | null;
     createdAt: string;
   } | null> {
@@ -1235,10 +1252,11 @@ export class PostgresStore {
       input_json: string | null;
       output_json: string | null;
       node_results_json: string | null;
+      custom_data_json: string | null;
       error: string | null;
       created_at: string;
     }>(
-      `SELECT id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, error, created_at
+      `SELECT id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error, created_at
        FROM execution_history WHERE id = $1`,
       [id]
     );
@@ -1256,9 +1274,45 @@ export class PostgresStore {
       input: parseJsonSafe(row.input_json),
       output: parseJsonSafe(row.output_json),
       nodeResults: parseJsonSafe(row.node_results_json),
+      customData: parseJsonSafe(row.custom_data_json),
       error: row.error ? toStr(row.error) : null,
       createdAt: toStr(row.created_at)
     };
+  }
+
+  async cancelExecutionHistory(input: {
+    id: string;
+    completedAt?: string;
+    error?: string;
+  }): Promise<boolean> {
+    const existing = await this.getExecutionHistory(input.id);
+    if (!existing) {
+      return false;
+    }
+    const completedAt = input.completedAt ?? new Date().toISOString();
+    const started = Date.parse(existing.startedAt);
+    const completed = Date.parse(completedAt);
+    const durationMs = Number.isFinite(started) && Number.isFinite(completed)
+      ? Math.max(0, Math.floor(completed - started))
+      : null;
+    const result = await this.pool.query(
+      `UPDATE execution_history
+       SET status = 'canceled',
+           completed_at = $1,
+           duration_ms = $2,
+           error = $3
+       WHERE id = $4`,
+      [completedAt, durationMs, input.error ?? "Execution canceled", input.id]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async pruneExecutionHistory(input: { before: string }): Promise<number> {
+    const result = await this.pool.query(
+      `DELETE FROM execution_history WHERE started_at < $1`,
+      [input.before]
+    );
+    return result.rowCount ?? 0;
   }
 
   // ---------------------------------------------------------------------------

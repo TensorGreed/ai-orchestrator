@@ -205,9 +205,16 @@ export interface NodeDefinition {
   sampleConfig: Record<string, unknown>;
 }
 
-export type NodeExecutionStatus = "pending" | "running" | "success" | "error" | "skipped" | "waiting_approval";
+export type NodeExecutionStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "error"
+  | "skipped"
+  | "waiting_approval"
+  | "canceled";
 
-export type WorkflowExecutionStatus = "success" | "error" | "partial" | "waiting_approval";
+export type WorkflowExecutionStatus = "success" | "error" | "partial" | "waiting_approval" | "canceled";
 
 export interface NodeExecutionResult {
   nodeId: string;
@@ -231,6 +238,7 @@ export interface WorkflowExecutionResult {
   startedAt: string;
   completedAt: string;
   executionId?: string;
+  customData?: Record<string, unknown>;
   nodeResults: NodeExecutionResult[];
   output?: unknown;
   error?: string;
@@ -449,6 +457,7 @@ export interface WorkflowExecuteRequest {
   session_id?: string;
   executionTimeoutMs?: number;
   execution_timeout_ms?: number;
+  customData?: Record<string, unknown>;
   system_prompt?: string;
   user_prompt?: string;
   variables?: Record<string, unknown>;
@@ -460,6 +469,7 @@ export interface AgentWebhookPayload {
   session_id?: string;
   executionTimeoutMs?: number;
   execution_timeout_ms?: number;
+  customData?: Record<string, unknown>;
   system_prompt?: string;
   user_prompt?: string;
   variables?: Record<string, unknown>;

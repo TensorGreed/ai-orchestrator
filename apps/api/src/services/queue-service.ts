@@ -12,6 +12,7 @@ export interface QueuedExecutionPayload {
   triggerType?: string;
   triggeredBy?: string;
   executionTimeoutMs?: number;
+  customData?: Record<string, unknown>;
 }
 
 export interface QueueServiceConfig {

@@ -15,7 +15,7 @@ export interface ExpressionContext {
   $input?: unknown;
   $json?: unknown;
   $workflow?: { id?: string; name?: string };
-  $execution?: { id?: string };
+  $execution?: { id?: string; customData?: Record<string, unknown> };
   $vars?: Record<string, unknown>;
   $env?: Record<string, string | undefined>;
   $itemIndex?: number;
@@ -29,7 +29,7 @@ interface SandboxScope extends Record<string, unknown> {
   $input: unknown;
   $json: unknown;
   $workflow: { id: string; name: string };
-  $execution: { id: string };
+  $execution: { id: string; customData: Record<string, unknown> };
   $env: Record<string, string | undefined>;
   $vars: Record<string, unknown>;
   $now: Date;
@@ -190,7 +190,10 @@ function buildScope(context: ExpressionContext): SandboxScope {
     $input: context.$input,
     $json: context.$json ?? context.$input,
     $workflow: { id: context.$workflow?.id ?? "", name: context.$workflow?.name ?? "" },
-    $execution: { id: context.$execution?.id ?? "" },
+    $execution: {
+      id: context.$execution?.id ?? "",
+      customData: context.$execution?.customData ?? {}
+    },
     $env: buildSafeEnv(context.$env),
     $vars: context.$vars ?? {},
     $now: now,

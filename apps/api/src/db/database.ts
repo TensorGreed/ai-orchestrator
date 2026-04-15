@@ -149,6 +149,7 @@ interface ExecutionHistoryRow {
   input_json: string | null;
   output_json: string | null;
   node_results_json: string | null;
+  custom_data_json: string | null;
   error: string | null;
   created_at: string;
 }
@@ -175,6 +176,15 @@ function toString(value: unknown): string {
 
 function toNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value ?? 0);
+}
+
+function toDurationMsForStore(startedAt: string, completedAt: string): number | null {
+  const started = Date.parse(startedAt);
+  const completed = Date.parse(completedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(completed)) {
+    return null;
+  }
+  return Math.max(0, Math.floor(completed - started));
 }
 
 function parseJsonSafe(value: unknown): unknown {
@@ -325,6 +335,7 @@ export class SqliteStore {
         input_json TEXT,
         output_json TEXT,
         node_results_json TEXT,
+        custom_data_json TEXT,
         error TEXT,
         created_at TEXT DEFAULT (datetime('now'))
       );
@@ -421,10 +432,13 @@ export class SqliteStore {
     this.ensureColumn("workflows", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
     this.ensureColumn("workflows", "folder_id", "TEXT");
     this.ensureColumn("secrets", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
+    this.ensureColumn("execution_history", "custom_data_json", "TEXT");
 
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_execution_history_status ON execution_history(status)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_id ON execution_history(workflow_id)`);
 
     this.persist();
   }
@@ -1230,7 +1244,7 @@ export class SqliteStore {
   saveWebhookIdempotencyResult(input: {
     endpointKey: string;
     idempotencyKey: string;
-    status: "success" | "error" | "partial" | "waiting_approval";
+    status: "success" | "error" | "partial" | "waiting_approval" | "canceled";
     result: unknown;
   }): void {
     const now = new Date().toISOString();
@@ -1256,6 +1270,7 @@ export class SqliteStore {
     inputJson?: unknown;
     outputJson?: unknown;
     nodeResultsJson?: unknown;
+    customData?: unknown;
     error?: string;
   }): void {
     this.db.run(
@@ -1272,8 +1287,9 @@ export class SqliteStore {
           input_json,
           output_json,
           node_results_json,
+          custom_data_json,
           error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           workflow_id = excluded.workflow_id,
           workflow_name = excluded.workflow_name,
@@ -1286,6 +1302,7 @@ export class SqliteStore {
           input_json = excluded.input_json,
           output_json = excluded.output_json,
           node_results_json = excluded.node_results_json,
+          custom_data_json = excluded.custom_data_json,
           error = excluded.error`,
       [
         input.id,
@@ -1300,6 +1317,7 @@ export class SqliteStore {
         input.inputJson === undefined ? null : JSON.stringify(input.inputJson),
         input.outputJson === undefined ? null : JSON.stringify(input.outputJson),
         input.nodeResultsJson === undefined ? null : JSON.stringify(input.nodeResultsJson),
+        input.customData === undefined ? null : JSON.stringify(input.customData),
         input.error ?? null
       ]
     );
@@ -1312,6 +1330,8 @@ export class SqliteStore {
     status?: string;
     workflowId?: string;
     triggerType?: string;
+    startedFrom?: string;
+    startedTo?: string;
   }): {
     total: number;
     page: number;
@@ -1326,6 +1346,7 @@ export class SqliteStore {
       durationMs: number | null;
       triggerType: string | null;
       triggeredBy: string | null;
+      customData: unknown;
       error: string | null;
       createdAt: string;
     }>;
@@ -1349,6 +1370,14 @@ export class SqliteStore {
       whereParts.push("trigger_type = ?");
       whereParams.push(input.triggerType);
     }
+    if (input.startedFrom) {
+      whereParts.push("started_at >= ?");
+      whereParams.push(input.startedFrom);
+    }
+    if (input.startedTo) {
+      whereParts.push("started_at <= ?");
+      whereParams.push(input.startedTo);
+    }
 
     const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
     const countRow = this.queryOne<{ count: number }>(
@@ -1371,6 +1400,7 @@ export class SqliteStore {
          input_json,
          output_json,
          node_results_json,
+         custom_data_json,
          error,
          created_at
        FROM execution_history
@@ -1394,6 +1424,7 @@ export class SqliteStore {
         durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : toNumber(row.duration_ms),
         triggerType: row.trigger_type ? toString(row.trigger_type) : null,
         triggeredBy: row.triggered_by ? toString(row.triggered_by) : null,
+        customData: row.custom_data_json ? parseJsonSafe(row.custom_data_json) : null,
         error: row.error ? toString(row.error) : null,
         createdAt: toString(row.created_at)
       }))
@@ -1413,6 +1444,7 @@ export class SqliteStore {
     input: unknown;
     output: unknown;
     nodeResults: unknown;
+    customData: unknown;
     error: string | null;
     createdAt: string;
   } | null {
@@ -1430,6 +1462,7 @@ export class SqliteStore {
          input_json,
          output_json,
          node_results_json,
+         custom_data_json,
          error,
          created_at
        FROM execution_history
@@ -1465,9 +1498,51 @@ export class SqliteStore {
       input: parseJson(row.input_json),
       output: parseJson(row.output_json),
       nodeResults: parseJson(row.node_results_json),
+      customData: parseJson(row.custom_data_json),
       error: row.error ? toString(row.error) : null,
       createdAt: toString(row.created_at)
     };
+  }
+
+  cancelExecutionHistory(input: {
+    id: string;
+    completedAt?: string;
+    error?: string;
+  }): boolean {
+    const existing = this.getExecutionHistory(input.id);
+    if (!existing) {
+      return false;
+    }
+    const completedAt = input.completedAt ?? new Date().toISOString();
+    this.db.run(
+      `UPDATE execution_history
+       SET status = 'canceled',
+           completed_at = ?,
+           duration_ms = ?,
+           error = ?
+       WHERE id = ?`,
+      [
+        completedAt,
+        toDurationMsForStore(existing.startedAt, completedAt),
+        input.error ?? "Execution canceled",
+        input.id
+      ]
+    );
+    this.persist();
+    return true;
+  }
+
+  pruneExecutionHistory(input: { before: string }): number {
+    const before = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM execution_history WHERE started_at < ?`,
+      [input.before]
+    );
+    this.db.run(`DELETE FROM execution_history WHERE started_at < ?`, [input.before]);
+    const deleted = before ? toNumber(before.count) : 0;
+    if (deleted > 0) {
+      this.persist();
+    }
+    return deleted;
   }
 
   saveWorkflowExecutionState(input: {

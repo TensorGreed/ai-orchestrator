@@ -7,7 +7,7 @@ export interface EditorNodeData {
   label: string;
   nodeType: WorkflowNodeType;
   config: Record<string, unknown>;
-  executionStatus?: "pending" | "running" | "success" | "error" | "skipped";
+  executionStatus?: "pending" | "running" | "success" | "error" | "skipped" | "canceled";
   executionPreview?: {
     input?: string;
     output?: string;

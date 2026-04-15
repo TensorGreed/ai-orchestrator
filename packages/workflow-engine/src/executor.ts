@@ -84,6 +84,7 @@ export interface WorkflowExecutionDependencies {
     delta: string;
     index: number;
   }) => Promise<void> | void;
+  abortSignal?: AbortSignal;
   logger?: (message: string, metadata?: unknown) => void;
   triggerErrorWorkflow?: (input: {
     errorWorkflowId: string;
@@ -110,6 +111,7 @@ export interface ExecuteWorkflowRequest {
   userPrompt?: string;
   sessionId?: string;
   executionId?: string;
+  customData?: Record<string, unknown>;
   triggerType?: string;
   triggeredBy?: string;
   callStack?: string[];
@@ -156,6 +158,34 @@ const ALL_MCP_TOOLS_SENTINEL = "__all__";
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+class WorkflowCanceledError extends Error {
+  constructor(message = "Workflow execution canceled.") {
+    super(message);
+    this.name = "WorkflowCanceledError";
+  }
+}
+
+function getAbortMessage(signal?: AbortSignal): string {
+  const reason = signal?.reason;
+  if (reason instanceof Error && reason.message.trim()) {
+    return reason.message;
+  }
+  if (typeof reason === "string" && reason.trim()) {
+    return reason.trim();
+  }
+  return "Workflow execution canceled.";
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new WorkflowCanceledError(getAbortMessage(signal));
+  }
+}
+
+function isCancellationError(error: unknown): boolean {
+  return error instanceof WorkflowCanceledError;
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -409,6 +439,22 @@ function buildTemplateData(
   const base: Record<string, unknown> = {
     ...context.globals,
     ...context.merged,
+    $workflow: {
+      id: context.workflow.id,
+      name: context.workflow.name
+    },
+    workflow: {
+      id: context.workflow.id,
+      name: context.workflow.name
+    },
+    $execution: {
+      id: typeof context.globals.execution_id === "string" ? context.globals.execution_id : "",
+      customData: toRecord(context.globals.execution_custom_data)
+    },
+    execution: {
+      id: typeof context.globals.execution_id === "string" ? context.globals.execution_id : "",
+      customData: toRecord(context.globals.execution_custom_data)
+    },
     vars: toRecord(context.globals.vars),
     parent_outputs: context.parentOutputs
   };
@@ -1363,6 +1409,7 @@ async function runLlmNode(input: {
     const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
     let llmDeltaIndex = 0;
 
+    throwIfAborted(input.dependencies.abortSignal);
     for await (const chunk of providerAdapter.generateStream(
       {
         provider: input.provider,
@@ -1372,6 +1419,7 @@ async function runLlmNode(input: {
         resolveSecret: input.dependencies.resolveSecret
       }
     )) {
+      throwIfAborted(input.dependencies.abortSignal);
       if (chunk.type === "text_delta" && chunk.textDelta) {
         streamedText += chunk.textDelta;
         await input.dependencies.onLLMDelta({
@@ -1431,6 +1479,7 @@ async function runLlmNode(input: {
       resolveSecret: input.dependencies.resolveSecret
     }
   );
+  throwIfAborted(input.dependencies.abortSignal);
 
   return {
     text: response.content,
@@ -1616,6 +1665,7 @@ async function executeNode(
   context: NodeRuntimeContext,
   dependencies: WorkflowExecutionDependencies
 ): Promise<unknown> {
+  throwIfAborted(dependencies.abortSignal);
   const config = toRecord(node.config);
 
   // Visual-only nodes are never executed; downstream receives the merged parent outputs so the DAG stays intact.
@@ -1705,6 +1755,14 @@ async function executeNode(
       const responseType = config.responseType === "text" ? "text" : "json";
 
       const controller = new AbortController();
+      const abortFromExecution = () => {
+        controller.abort(dependencies.abortSignal?.reason);
+      };
+      if (dependencies.abortSignal?.aborted) {
+        abortFromExecution();
+      } else {
+        dependencies.abortSignal?.addEventListener("abort", abortFromExecution, { once: true });
+      }
       const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const requestInit: RequestInit = {
@@ -1742,11 +1800,15 @@ async function executeNode(
         };
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
+          if (dependencies.abortSignal?.aborted) {
+            throw new WorkflowCanceledError(getAbortMessage(dependencies.abortSignal));
+          }
           throw new Error(`HTTP Request node timed out after ${timeoutMs}ms.`);
         }
         throw error;
       } finally {
         clearTimeout(timeoutHandle);
+        dependencies.abortSignal?.removeEventListener("abort", abortFromExecution);
       }
     }
 
@@ -2031,7 +2093,7 @@ async function executeNode(
         if (!Number.isNaN(resumeAtMs)) {
           const delayUntil = Math.max(0, resumeAtMs - Date.now());
           const clampedDelay = Math.min(delayUntil, maxDelay);
-          await sleep(clampedDelay);
+          await sleep(clampedDelay, dependencies.abortSignal);
           return mergeParentOutputs(context.parentOutputs);
         }
       }
@@ -2041,7 +2103,7 @@ async function executeNode(
           ? Math.floor(config.delayMs)
           : 1000;
       const clampedDelay = Math.min(requestedDelay, maxDelay);
-      await sleep(clampedDelay);
+      await sleep(clampedDelay, dependencies.abortSignal);
       return mergeParentOutputs(context.parentOutputs);
     }
 
@@ -3522,8 +3584,33 @@ function getOnError(config: Record<string, unknown>): "stop" | "continue" | "bra
   return "stop";
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    throwIfAborted(signal);
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timeout);
+      cleanup();
+      reject(new WorkflowCanceledError(getAbortMessage(signal)));
+    };
+    const cleanup = () => {
+      signal?.removeEventListener("abort", abort);
+    };
+
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 async function executeNodeWithRetry(
@@ -3543,6 +3630,9 @@ async function executeNodeWithRetry(
       const output = await executeNode(node, context, dependencies);
       return { output, attempts: attempt };
     } catch (error) {
+      if (isCancellationError(error) || dependencies.abortSignal?.aborted) {
+        throw error;
+      }
       if (error instanceof WorkflowError) {
         lastError = error;
       } else {
@@ -3551,7 +3641,7 @@ async function executeNodeWithRetry(
       if (attempt < retry.maxAttempts) {
 
         const delay = retry.delayMs * Math.pow(retry.backoffMultiplier, attempt - 1);
-        await sleep(delay);
+        await sleep(delay, dependencies.abortSignal);
       }
     }
   }
@@ -3652,6 +3742,20 @@ function appendSkippedNodes(nodeOrder: string[], startIndex: number, nodeResults
       startedAt: nowIso(),
       completedAt: nowIso(),
       durationMs: 0
+    });
+  }
+}
+
+function appendCanceledRemainder(nodeOrder: string[], startIndex: number, nodeResults: NodeExecutionResult[]): void {
+  const canceledAt = nowIso();
+  for (let index = startIndex; index < nodeOrder.length; index += 1) {
+    nodeResults.push({
+      nodeId: nodeOrder[index],
+      status: "skipped",
+      startedAt: canceledAt,
+      completedAt: canceledAt,
+      durationMs: 0,
+      output: { reason: "execution_canceled" }
     });
   }
 }
@@ -3764,6 +3868,11 @@ export async function executeWorkflow(
         trigger_type: request.triggerType ?? "manual",
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
+  const customData = request.resumeState
+    ? toRecord(globals.execution_custom_data)
+    : toRecord(request.customData);
+  globals.execution_id = request.executionId ?? "";
+  globals.execution_custom_data = customData;
 
   if (!request.resumeState) {
     globals.vars = toRecord(workflow.variables);
@@ -4128,6 +4237,21 @@ export async function executeWorkflow(
   const executionStartTime = Date.now();
 
   for (let index = startIndex; index < nodeOrder.length; index += 1) {
+    if (dependencies.abortSignal?.aborted) {
+      appendCanceledRemainder(nodeOrder, index, nodeResults);
+      return {
+        workflowId: workflow.id,
+        status: "canceled",
+        startedAt,
+        completedAt: nowIso(),
+        executionId: request.executionId,
+        customData,
+        nodeResults,
+        error: getAbortMessage(dependencies.abortSignal),
+        warnings: workflowWarnings,
+        retriedNodes
+      };
+    }
 
     // Check execution timeout
     const elapsedMs = Date.now() - executionStartTime;
@@ -4148,6 +4272,7 @@ export async function executeWorkflow(
         startedAt,
         completedAt: nowIso(),
         executionId: request.executionId,
+        customData,
         nodeResults,
         error: `Workflow execution timed out after ${elapsedMs}ms (limit: ${executionTimeoutMs}ms)`,
         warnings: workflowWarnings,
@@ -4570,6 +4695,7 @@ export async function executeWorkflow(
           startedAt,
           completedAt: nowIso(),
           executionId,
+          customData,
           nodeResults,
           output: {
             waitingForApproval: true,
@@ -4623,6 +4749,42 @@ export async function executeWorkflow(
 
       applySuccessfulNodeRouting(node, output);
     } catch (error) {
+      if (isCancellationError(error) || dependencies.abortSignal?.aborted) {
+        const canceledAt = nowIso();
+        const cancelMessage = getAbortMessage(dependencies.abortSignal);
+        nodeResults.push({
+          nodeId: node.id,
+          status: "canceled",
+          startedAt: startedAtNode,
+          completedAt: canceledAt,
+          durationMs: Date.now() - started,
+          input: nodeInput,
+          error: cancelMessage
+        });
+        await dependencies.onNodeComplete?.({
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "canceled",
+          completedAt: canceledAt,
+          durationMs: Date.now() - started,
+          input: nodeInput,
+          error: cancelMessage
+        });
+        appendCanceledRemainder(nodeOrder, index + 1, nodeResults);
+        return {
+          workflowId: workflow.id,
+          status: "canceled",
+          startedAt,
+          completedAt: canceledAt,
+          executionId: request.executionId,
+          customData,
+          nodeResults,
+          error: cancelMessage,
+          warnings: workflowWarnings,
+          retriedNodes
+        };
+      }
+
       const errorMessage = error instanceof Error ? error.message : "Node execution failed";
 
       // Check if this node is inside a try_catch scope
@@ -4804,6 +4966,7 @@ export async function executeWorkflow(
           startedAt,
           completedAt: nowIso(),
           executionId: request.executionId,
+          customData,
           nodeResults,
           error: failedError
         };
@@ -4821,6 +4984,7 @@ export async function executeWorkflow(
     startedAt,
     completedAt: nowIso(),
     executionId: request.executionId,
+    customData,
     nodeResults,
     output: finalOutput
   };

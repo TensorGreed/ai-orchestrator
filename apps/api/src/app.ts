@@ -166,7 +166,8 @@ const expressionPreviewSchema = z.object({
           name: z.string().optional()
         })
         .optional(),
-      executionId: z.string().optional()
+      executionId: z.string().optional(),
+      customData: z.record(z.string(), z.unknown()).optional()
     })
     .optional()
 });
@@ -304,6 +305,17 @@ function normalizeExecutionTimeoutMs(
         : fallbackMs;
   const bounded = Math.floor(candidate);
   return Math.max(1_000, Math.min(86_400_000, bounded));
+}
+
+function normalizeIsoDateFilter(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+  const timestamp = Date.parse(value.trim());
+  if (!Number.isFinite(timestamp)) {
+    return undefined;
+  }
+  return new Date(timestamp).toISOString();
 }
 
 function normalizeWorkflowIdCandidate(value: string): string {
@@ -815,6 +827,56 @@ export function createApp(
   const connectorRegistry = createDefaultConnectorRegistry();
   const mcpRegistry = createDefaultMCPRegistry();
   const agentRuntime = createDefaultAgentRuntime();
+  const activeExecutions = new Map<
+    string,
+    {
+      controller: AbortController;
+      workflowId: string;
+      startedAt: string;
+      triggerType?: string;
+      triggeredBy?: string;
+    }
+  >();
+
+  const pruneExecutionHistory = (reason: "startup" | "interval" | "write") => {
+    const retentionDays = config.EXECUTION_HISTORY_RETENTION_DAYS;
+    if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+      return 0;
+    }
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    try {
+      const deleted = store.pruneExecutionHistory({ before: cutoff });
+      if (deleted > 0) {
+        app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned execution history");
+      }
+      return deleted;
+    } catch (error) {
+      app.log.warn(
+        {
+          cutoff,
+          retentionDays,
+          reason,
+          error: secretService.redact(error instanceof Error ? error.message : String(error))
+        },
+        "Failed to prune execution history"
+      );
+      return 0;
+    }
+  };
+
+  pruneExecutionHistory("startup");
+  const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0
+    ? setInterval(() => {
+        pruneExecutionHistory("interval");
+      }, config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS)
+    : null;
+  if (retentionTimer) {
+    const timerWithUnref = retentionTimer as { unref?: () => void };
+    timerWithUnref.unref?.();
+    app.addHook("onClose", async () => {
+      clearInterval(retentionTimer);
+    });
+  }
 
   type WorkflowExecutionEventHooks = {
     onNodeStart?: (event: { nodeId: string; nodeType: string; startedAt: string }) => Promise<void> | void;
@@ -832,6 +894,37 @@ export function createApp(
   };
   type ExecutionHistoryRecord = Parameters<SqliteStore["saveExecutionHistory"]>[0];
 
+  const registerActiveExecution = (input: {
+    executionId: string;
+    workflowId: string;
+    triggerType?: string;
+    triggeredBy?: string;
+  }): AbortController => {
+    const existing = activeExecutions.get(input.executionId);
+    if (existing) {
+      return existing.controller;
+    }
+    const controller = new AbortController();
+    activeExecutions.set(input.executionId, {
+      controller,
+      workflowId: input.workflowId,
+      startedAt: new Date().toISOString(),
+      triggerType: input.triggerType,
+      triggeredBy: input.triggeredBy
+    });
+    return controller;
+  };
+
+  const releaseActiveExecution = (executionId: string | undefined, controller: AbortController | undefined) => {
+    if (!executionId || !controller) {
+      return;
+    }
+    const current = activeExecutions.get(executionId);
+    if (current?.controller === controller) {
+      activeExecutions.delete(executionId);
+    }
+  };
+
   const persistExecutionHistoryRecord = (
     record: ExecutionHistoryRecord,
     meta: {
@@ -842,8 +935,15 @@ export function createApp(
       status: string;
     }
   ): boolean => {
+    const active = activeExecutions.get(meta.executionId);
+    if (active?.controller.signal.aborted && record.status !== "canceled") {
+      return false;
+    }
     try {
       store.saveExecutionHistory(record);
+      if (meta.phase === "final") {
+        pruneExecutionHistory("write");
+      }
       return true;
     } catch (error) {
       app.log.error(
@@ -893,6 +993,7 @@ export function createApp(
     triggerType?: string;
     triggeredBy?: string;
     executionTimeoutMs?: number;
+    customData?: Record<string, unknown>;
     resumeState?: WorkflowExecutionState;
     approvalDecision?: {
       decision: "approve" | "reject";
@@ -901,90 +1002,117 @@ export function createApp(
     };
     hooks?: WorkflowExecutionEventHooks;
   }) => {
-    return executeWorkflow(
-      {
-        workflow: input.workflow,
-        startNodeId: input.startNodeId,
-        runMode: input.runMode,
-        usePinnedData: input.usePinnedData,
-        pinnedData: input.pinnedData,
-        nodeOutputs: input.nodeOutputs,
-        input: input.directInput,
-        webhookPayload: input.webhookPayload,
-        variables: input.variables,
-        systemPrompt: input.systemPrompt,
-        userPrompt: input.userPrompt,
-        sessionId: input.sessionId,
-        executionId: input.executionId,
-        executionTimeoutMs: normalizeExecutionTimeoutMs(
-          input.executionTimeoutMs,
-          undefined,
-          config.WORKFLOW_EXECUTION_TIMEOUT_MS
-        ),
-        triggerType: input.triggerType,
-        triggeredBy: input.triggeredBy,
-        resumeState: input.resumeState,
-        approvalDecision: input.approvalDecision
-      },
-      {
-        providerRegistry,
-        connectorRegistry,
-        mcpRegistry,
-        agentRuntime,
-        memoryStore: {
-          loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
-          saveMessages: async (namespace, sessionId, messages) => {
-            store.saveSessionMemory(namespace, sessionId, messages);
-          }
+    const controller = input.executionId
+      ? registerActiveExecution({
+          executionId: input.executionId,
+          workflowId: input.workflow.id,
+          triggerType: input.triggerType,
+          triggeredBy: input.triggeredBy
+        })
+      : undefined;
+    try {
+      const result = await executeWorkflow(
+        {
+          workflow: input.workflow,
+          startNodeId: input.startNodeId,
+          runMode: input.runMode,
+          usePinnedData: input.usePinnedData,
+          pinnedData: input.pinnedData,
+          nodeOutputs: input.nodeOutputs,
+          input: input.directInput,
+          webhookPayload: input.webhookPayload,
+          variables: input.variables,
+          systemPrompt: input.systemPrompt,
+          userPrompt: input.userPrompt,
+          sessionId: input.sessionId,
+          executionId: input.executionId,
+          customData: input.customData,
+          executionTimeoutMs: normalizeExecutionTimeoutMs(
+            input.executionTimeoutMs,
+            undefined,
+            config.WORKFLOW_EXECUTION_TIMEOUT_MS
+          ),
+          triggerType: input.triggerType,
+          triggeredBy: input.triggeredBy,
+          resumeState: input.resumeState,
+          approvalDecision: input.approvalDecision
         },
-        toolDataStore: {
-          saveToolCall: async (payload) =>
-            store.saveSessionToolCall({
-              namespace: payload.namespace,
-              sessionId: payload.sessionId,
-              toolName: payload.toolName,
-              toolCallId: payload.toolCallId,
-              args: payload.args,
-              output: payload.output,
-              error: payload.error,
-              summary: payload.summary
-            }),
-          listToolCalls: async (payload) =>
-            store.listSessionToolCalls({
-              namespace: payload.namespace,
-              sessionId: payload.sessionId,
-              toolName: payload.toolName,
-              limit: payload.limit
-            }),
-          getToolCall: async (payload) =>
-            store.getSessionToolCall({
-              namespace: payload.namespace,
-              sessionId: payload.sessionId,
-              id: payload.id
-            })
-        },
-        loadWorkflow: (workflowId) => store.getWorkflow(workflowId) ?? undefined,
-        resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
-        persistPausedExecution: async (paused) => {
-          store.saveWorkflowExecutionState({
-            id: paused.executionId,
-            workflowId: paused.workflowId,
-            workflowName: paused.workflowName,
-            status: "waiting_approval",
-            waitingNodeId: paused.waitingNodeId,
-            approvalMessage: paused.approvalMessage,
-            timeoutMinutes: paused.timeoutMinutes,
-            triggerType: paused.triggerType,
-            triggeredBy: paused.triggeredBy,
-            startedAt: paused.startedAt,
-            state: paused.state
-          });
-        },
-        onNodeStart: input.hooks?.onNodeStart,
-        onNodeComplete: input.hooks?.onNodeComplete,
-        onLLMDelta: input.hooks?.onLLMDelta
+        {
+          providerRegistry,
+          connectorRegistry,
+          mcpRegistry,
+          agentRuntime,
+          memoryStore: {
+            loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
+            saveMessages: async (namespace, sessionId, messages) => {
+              store.saveSessionMemory(namespace, sessionId, messages);
+            }
+          },
+          toolDataStore: {
+            saveToolCall: async (payload) =>
+              store.saveSessionToolCall({
+                namespace: payload.namespace,
+                sessionId: payload.sessionId,
+                toolName: payload.toolName,
+                toolCallId: payload.toolCallId,
+                args: payload.args,
+                output: payload.output,
+                error: payload.error,
+                summary: payload.summary
+              }),
+            listToolCalls: async (payload) =>
+              store.listSessionToolCalls({
+                namespace: payload.namespace,
+                sessionId: payload.sessionId,
+                toolName: payload.toolName,
+                limit: payload.limit
+              }),
+            getToolCall: async (payload) =>
+              store.getSessionToolCall({
+                namespace: payload.namespace,
+                sessionId: payload.sessionId,
+                id: payload.id
+              })
+          },
+          loadWorkflow: (workflowId) => store.getWorkflow(workflowId) ?? undefined,
+          resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+          persistPausedExecution: async (paused) => {
+            store.saveWorkflowExecutionState({
+              id: paused.executionId,
+              workflowId: paused.workflowId,
+              workflowName: paused.workflowName,
+              status: "waiting_approval",
+              waitingNodeId: paused.waitingNodeId,
+              approvalMessage: paused.approvalMessage,
+              timeoutMinutes: paused.timeoutMinutes,
+              triggerType: paused.triggerType,
+              triggeredBy: paused.triggeredBy,
+              startedAt: paused.startedAt,
+              state: paused.state
+            });
+          },
+          onNodeStart: input.hooks?.onNodeStart,
+          onNodeComplete: input.hooks?.onNodeComplete,
+          onLLMDelta: input.hooks?.onLLMDelta,
+          abortSignal: controller?.signal
+        }
+      );
+
+      if (controller?.signal.aborted && result.status !== "canceled") {
+        const completedAt = new Date().toISOString();
+        return {
+          ...result,
+          status: "canceled" as const,
+          completedAt,
+          customData: input.customData ?? result.customData,
+          error: "Workflow execution canceled."
+        };
       }
-    );
+
+      return result;
+    } finally {
+      releaseActiveExecution(input.executionId, controller);
+    }
   };
 
   const parseWebhookRunInput = (payload: unknown) => {
@@ -1039,6 +1167,7 @@ export function createApp(
     triggerType?: string;
     triggeredBy?: string;
     requestInput?: unknown;
+    customData?: Record<string, unknown>;
   }) => {
     if (input.result.status === "waiting_approval") {
       app.log.info(
@@ -1067,6 +1196,7 @@ export function createApp(
       inputJson: redactSensitiveInput(input.requestInput),
       outputJson: input.result.output,
       nodeResultsJson: input.result.nodeResults,
+      customData: input.customData ?? input.result.customData,
       error: input.result.error
     }, {
       phase: "final",
@@ -1101,6 +1231,7 @@ export function createApp(
     triggerType?: string;
     triggeredBy?: string;
     requestInput?: unknown;
+    customData?: Record<string, unknown>;
     passthroughHooks?: WorkflowExecutionEventHooks;
   }): WorkflowExecutionEventHooks => {
     const nodeResultsById = new Map<
@@ -1137,6 +1268,7 @@ export function createApp(
         triggerType: input.triggerType,
         triggeredBy: input.triggeredBy,
         inputJson: redactSensitiveInput(input.requestInput),
+        customData: input.customData,
         nodeResultsJson: snapshotNodeResults()
       }, {
         phase: "progress",
@@ -1306,6 +1438,7 @@ export function createApp(
       execution_timeout_ms:
         payload.execution_timeout_ms ??
         (typeof replayInput.execution_timeout_ms === "number" ? replayInput.execution_timeout_ms : undefined),
+      customData: payload.customData ?? asRecord(replayInput.customData),
       nodeOutputs: {
         ...replayNodeOutputs,
         ...asRecord(payload.nodeOutputs)
@@ -2286,7 +2419,8 @@ export function createApp(
       workflow,
       triggerType: "manual",
       triggeredBy: user.email,
-      requestInput: prepared.requestInput
+      requestInput: prepared.requestInput,
+      customData: executionPayload.customData
     });
     const result = await runWorkflowExecution({
       workflow,
@@ -2305,6 +2439,7 @@ export function createApp(
         executionPayload.execution_timeout_ms,
         config.WORKFLOW_EXECUTION_TIMEOUT_MS
       ),
+      customData: executionPayload.customData,
       executionId,
       triggerType: "manual",
       triggeredBy: user.email,
@@ -2317,7 +2452,8 @@ export function createApp(
       result,
       triggerType: "manual",
       triggeredBy: user.email,
-      requestInput: prepared.requestInput
+      requestInput: prepared.requestInput,
+      customData: executionPayload.customData
     });
 
     if (result.status === "error") {
@@ -2388,6 +2524,7 @@ export function createApp(
         triggerType: "manual_stream",
         triggeredBy: user.email,
         requestInput: prepared.requestInput,
+        customData: executionPayload.customData,
         passthroughHooks: {
           onNodeStart: (event) => {
             sendSseEvent("node_start", event);
@@ -2417,6 +2554,7 @@ export function createApp(
           executionPayload.execution_timeout_ms,
           config.WORKFLOW_EXECUTION_TIMEOUT_MS
         ),
+        customData: executionPayload.customData,
         executionId,
         triggerType: "manual_stream",
         triggeredBy: user.email,
@@ -2429,7 +2567,8 @@ export function createApp(
         result,
         triggerType: "manual_stream",
         triggeredBy: user.email,
-        requestInput: prepared.requestInput
+        requestInput: prepared.requestInput,
+        customData: executionPayload.customData
       });
 
       sendSseEvent("result", result);
@@ -2587,7 +2726,7 @@ export function createApp(
       $input: context.input,
       $json: context.input,
       $workflow: context.workflow,
-      $execution: { id: context.executionId ?? "" },
+      $execution: { id: context.executionId ?? "", customData: asRecord(context.customData) },
       $vars: context.vars,
       $nodeOutputs: context.nodeOutputs,
       extras: {
@@ -2629,7 +2768,9 @@ export function createApp(
       status: typeof query.status === "string" && query.status.trim() ? query.status.trim() : undefined,
       workflowId: typeof query.workflowId === "string" && query.workflowId.trim() ? query.workflowId.trim() : undefined,
       triggerType:
-        typeof query.triggerType === "string" && query.triggerType.trim() ? query.triggerType.trim() : undefined
+        typeof query.triggerType === "string" && query.triggerType.trim() ? query.triggerType.trim() : undefined,
+      startedFrom: normalizeIsoDateFilter(query.startedFrom),
+      startedTo: normalizeIsoDateFilter(query.startedTo)
     });
   });
 
@@ -2646,6 +2787,151 @@ export function createApp(
     }
 
     return execution;
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/retry", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const sourceExecution = store.getExecutionHistory(request.params.id);
+    if (!sourceExecution) {
+      reply.code(404);
+      return { error: "Execution not found" };
+    }
+
+    if (!["error", "partial", "canceled"].includes(sourceExecution.status)) {
+      reply.code(409);
+      return { error: "Only failed or canceled executions can be retried from history" };
+    }
+
+    const workflow = store.getWorkflow(sourceExecution.workflowId);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+
+    const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid retry payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const prepared = prepareWorkflowExecutionPayload({
+      ...parsed.data,
+      sourceExecutionId: sourceExecution.id,
+      usePinnedData: parsed.data.usePinnedData ?? true
+    }, reply);
+    if (!prepared) {
+      return { error: "Source execution not found" };
+    }
+
+    const executionPayload = prepared.payload;
+    const executionId = crypto.randomUUID();
+    const progressHooks = createProgressTrackingHooks({
+      executionId,
+      workflow,
+      triggerType: "manual_retry",
+      triggeredBy: user.email,
+      requestInput: prepared.requestInput,
+      customData: executionPayload.customData
+    });
+
+    const result = await runWorkflowExecution({
+      workflow,
+      startNodeId: executionPayload.startNodeId,
+      runMode: executionPayload.runMode,
+      usePinnedData: executionPayload.usePinnedData,
+      pinnedData: executionPayload.pinnedData,
+      nodeOutputs: prepared.nodeOutputs,
+      directInput: executionPayload.input,
+      variables: executionPayload.variables,
+      systemPrompt: executionPayload.system_prompt,
+      userPrompt: executionPayload.user_prompt,
+      sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
+      executionTimeoutMs: normalizeExecutionTimeoutMs(
+        executionPayload.executionTimeoutMs,
+        executionPayload.execution_timeout_ms,
+        config.WORKFLOW_EXECUTION_TIMEOUT_MS
+      ),
+      customData: executionPayload.customData,
+      executionId,
+      triggerType: "manual_retry",
+      triggeredBy: user.email,
+      hooks: progressHooks
+    });
+
+    persistExecutionHistory({
+      executionId,
+      workflow,
+      result,
+      triggerType: "manual_retry",
+      triggeredBy: user.email,
+      requestInput: prepared.requestInput,
+      customData: executionPayload.customData
+    });
+
+    if (result.status === "error") {
+      reply.code(400);
+    }
+
+    return result;
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/cancel", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+    if (!user) {
+      return;
+    }
+
+    const execution = store.getExecutionHistory(request.params.id);
+    if (!execution) {
+      reply.code(404);
+      return { error: "Execution not found" };
+    }
+
+    const cancelable =
+      execution.status === "running" ||
+      execution.status === "waiting_approval" ||
+      (execution.status === "partial" && !execution.completedAt);
+    if (!cancelable) {
+      reply.code(409);
+      return { error: "Only running or waiting executions can be canceled" };
+    }
+
+    const reasonRecord = asRecord(request.body);
+    const reason =
+      typeof reasonRecord.reason === "string" && reasonRecord.reason.trim()
+        ? reasonRecord.reason.trim()
+        : `Execution canceled by ${user.email}`;
+    const active = activeExecutions.get(request.params.id);
+    active?.controller.abort(reason);
+    if (execution.status === "waiting_approval") {
+      deleteWorkflowExecutionSafely(execution.id, execution.workflowId);
+    }
+
+    const completedAt = new Date().toISOString();
+    const canceled = store.cancelExecutionHistory({
+      id: request.params.id,
+      completedAt,
+      error: reason
+    });
+    if (!canceled) {
+      reply.code(404);
+      return { error: "Execution not found" };
+    }
+
+    return {
+      ok: true,
+      id: request.params.id,
+      status: "canceled",
+      abortedActiveRun: Boolean(active),
+      completedAt
+    };
   });
 
   app.get("/api/approvals", async (request, reply) => {
@@ -2788,7 +3074,8 @@ export function createApp(
       workflow,
       triggerType: "webhook_api",
       triggeredBy: user.email,
-      requestInput: parsed.data
+      requestInput: parsed.data,
+      customData: parsed.data.customData
     });
     const result = await runWorkflowExecution({
       workflow,
@@ -2807,6 +3094,7 @@ export function createApp(
         parsed.data.execution_timeout_ms,
         config.WORKFLOW_EXECUTION_TIMEOUT_MS
       ),
+      customData: parsed.data.customData,
       executionId,
       triggerType: "webhook_api",
       triggeredBy: user.email,
@@ -2819,7 +3107,8 @@ export function createApp(
       result,
       triggerType: "webhook_api",
       triggeredBy: user.email,
-      requestInput: parsed.data
+      requestInput: parsed.data,
+      customData: parsed.data.customData
     });
 
     if (result.status === "error") {
@@ -3896,7 +4185,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         sessionId: payload.sessionId,
         triggerType: payload.triggerType ?? "queue",
         triggeredBy: payload.triggeredBy,
-        executionTimeoutMs: payload.executionTimeoutMs
+        executionTimeoutMs: payload.executionTimeoutMs,
+        customData: payload.customData
       });
       persistExecutionHistory({
         executionId: payload.executionId,
@@ -3904,7 +4194,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         result,
         triggerType: payload.triggerType ?? "queue",
         triggeredBy: payload.triggeredBy,
-        requestInput: payload.input
+        requestInput: payload.input,
+        customData: payload.customData
       });
       app.log.info(
         { executionId: payload.executionId, workflowId: payload.workflowId, status: result.status },
@@ -3960,6 +4251,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           triggerType: typeof body.triggerType === "string" ? body.triggerType : "api_queue",
           triggeredBy: typeof body.triggeredBy === "string" ? body.triggeredBy : user.email,
           executionTimeoutMs: typeof body.executionTimeoutMs === "number" ? body.executionTimeoutMs : undefined,
+          customData: body.customData && typeof body.customData === "object" && !Array.isArray(body.customData)
+            ? (body.customData as Record<string, unknown>)
+            : undefined,
           priority: typeof body.priority === "number" ? body.priority : 0
         });
 

@@ -426,8 +426,9 @@ describe("Phase 2.2 — expression engine", () => {
     expect(evaluateExpression("$node('a').output.value", { $nodeOutputs: { a: { value: 42 } } })).toBe(42);
   });
   it("$workflow / $execution", () => {
-    const ctx = { $workflow: { id: "w1", name: "n" }, $execution: { id: "e1" } };
+    const ctx = { $workflow: { id: "w1", name: "n" }, $execution: { id: "e1", customData: { batch: "alpha" } } };
     expect(evaluateExpression("$workflow.id + ':' + $execution.id", ctx)).toBe("w1:e1");
+    expect(evaluateExpression("$execution.customData.batch", ctx)).toBe("alpha");
   });
   it("$vars", () => {
     expect(evaluateExpression("$vars.x", { $vars: { x: "v" } })).toBe("v");
