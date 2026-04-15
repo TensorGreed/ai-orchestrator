@@ -3676,3 +3676,64 @@ select {
   gap: 16px;
   overflow: auto;
 }
+
+.settings-textarea {
+  width: 100%;
+  border: 1px solid var(--panel-border, #d4dbe8);
+  border-radius: 8px;
+  background: var(--app-bg, #fff);
+  color: var(--text, #2a3650);
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+  min-height: 80px;
+}
+
+.settings-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.settings-filter-grid > div {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-audit-scroll {
+  max-height: 540px;
+  overflow: auto;
+  border: 1px solid var(--panel-border, #e2e8f0);
+  border-radius: 8px;
+}
+
+.settings-audit-scroll .settings-table {
+  font-size: 0.85rem;
+}
+
+.settings-audit-metadata {
+  background: rgba(148, 163, 184, 0.1);
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  max-width: 400px;
+  max-height: 240px;
+  overflow: auto;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.settings-chip-danger {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+:root[data-theme="dark"] .settings-chip-danger {
+  background: rgba(153, 27, 27, 0.22);
+  border-color: rgba(220, 38, 38, 0.4);
+  color: #fca5a5;
+}

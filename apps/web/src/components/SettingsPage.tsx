@@ -4,29 +4,49 @@ import {
   activateMfa,
   addProjectMember,
   ApiError,
+  auditExportUrl,
   createApiKey,
   createCustomRole,
+  createExternalProvider,
   createSsoMapping,
   deleteCustomRole,
+  deleteExternalProvider,
   deleteSsoMapping,
   disableMfa,
   enrollMfa,
   fetchApiKeys,
+  fetchAuditLogs,
   fetchCustomRoles,
+  fetchExternalProviders,
   fetchMfaStatus,
   fetchProjectMembers,
+  fetchSecrets,
   fetchSsoMappings,
   removeProjectMember,
   revokeApiKey,
+  testExternalProvider,
+  updateExternalProvider,
   type ApiKeyRecord,
+  type AuditLogEntry,
+  type AuditLogFilter,
   type AuthUser,
   type CustomRoleRecord,
+  type ExternalSecretProviderRecord,
+  type ExternalSecretProviderType,
   type MfaStatus,
   type ProjectMembership,
+  type SecretListItem,
   type SsoGroupMapping
 } from "../lib/api";
 
-type SettingsTab = "security" | "api-keys" | "members" | "roles" | "sso";
+type SettingsTab =
+  | "security"
+  | "api-keys"
+  | "members"
+  | "roles"
+  | "sso"
+  | "external-secrets"
+  | "audit-log";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -62,7 +82,9 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "api-keys", label: "API Keys" },
     { id: "members", label: "Project Members" },
     { id: "roles", label: "Custom Roles", restricted: !isAdmin },
-    { id: "sso", label: "SSO Mappings", restricted: !isAdmin }
+    { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
+    { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
+    { id: "audit-log", label: "Audit Log", restricted: !isAdmin }
   ];
 
   return (
@@ -106,6 +128,10 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         )}
         {tab === "roles" && isAdmin && <CustomRolesTab projects={projects} initialProjectId={activeProjectId} />}
         {tab === "sso" && isAdmin && <SsoMappingsTab projects={projects} />}
+        {tab === "external-secrets" && isAdmin && (
+          <ExternalSecretsTab activeProjectId={activeProjectId} />
+        )}
+        {tab === "audit-log" && isAdmin && <AuditLogTab />}
       </div>
     </section>
   );
@@ -1033,6 +1059,496 @@ function SsoMappingsTab({ projects }: { projects: Project[] }) {
             </tbody>
           </table>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// External Secrets
+// ---------------------------------------------------------------------------
+
+const EXTERNAL_PROVIDER_TYPES: Array<{ value: ExternalSecretProviderType; label: string; configHint: string }> = [
+  {
+    value: "aws-secrets-manager",
+    label: "AWS Secrets Manager",
+    configHint: '{"region": "us-east-1"} — credentials secret stores JSON {accessKeyId, secretAccessKey}'
+  },
+  {
+    value: "hashicorp-vault",
+    label: "HashiCorp Vault",
+    configHint: '{"endpoint": "https://vault.example.com", "field": "value"} — credentials secret stores the Vault token'
+  },
+  {
+    value: "google-secret-manager",
+    label: "Google Secret Manager",
+    configHint: '{"projectId": "my-gcp-project"} — credentials secret stores service-account JSON'
+  },
+  {
+    value: "azure-key-vault",
+    label: "Azure Key Vault",
+    configHint: '{"vaultUrl": "https://my-vault.vault.azure.net"} — credentials secret stores {tenantId, clientId, clientSecret}'
+  },
+  {
+    value: "mock",
+    label: "Mock (testing only)",
+    configHint: "{} — values are injected by tests"
+  }
+];
+
+function ExternalSecretsTab({ activeProjectId }: { activeProjectId: string }) {
+  const [providers, setProviders] = useState<ExternalSecretProviderRecord[]>([]);
+  const [secrets, setSecrets] = useState<SecretListItem[]>([]);
+  const [name, setName] = useState("");
+  const [type, setType] = useState<ExternalSecretProviderType>("aws-secrets-manager");
+  const [configJson, setConfigJson] = useState("{}");
+  const [credentialsSecretId, setCredentialsSecretId] = useState("");
+  const [cacheTtlMs, setCacheTtlMs] = useState("300000");
+  const [testingKey, setTestingKey] = useState<Record<string, string>>({});
+  const [testingResult, setTestingResult] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const typeHint = EXTERNAL_PROVIDER_TYPES.find((t) => t.value === type)?.configHint ?? "";
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const [p, s] = await Promise.all([fetchExternalProviders(), fetchSecrets({ projectId: activeProjectId })]);
+      setProviders(p.providers);
+      setSecrets(s.filter((secret) => secret.source === undefined || secret.source === "local"));
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoaded(true);
+    }
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleCreate = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let parsedConfig: Record<string, unknown>;
+      try {
+        parsedConfig = configJson.trim() ? (JSON.parse(configJson) as Record<string, unknown>) : {};
+      } catch {
+        setError("Config must be valid JSON");
+        setBusy(false);
+        return;
+      }
+      await createExternalProvider({
+        name: name.trim(),
+        type,
+        config: parsedConfig,
+        credentialsSecretId: credentialsSecretId || null,
+        cacheTtlMs: cacheTtlMs.trim() ? Number(cacheTtlMs) : undefined
+      });
+      setName("");
+      setConfigJson("{}");
+      setCredentialsSecretId("");
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!window.confirm("Delete this external secret provider?")) return;
+    setError(null);
+    try {
+      await deleteExternalProvider(id);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    }
+  };
+
+  const handleToggle = async (provider: ExternalSecretProviderRecord) => {
+    setError(null);
+    try {
+      await updateExternalProvider(provider.id, { enabled: !provider.enabled });
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    }
+  };
+
+  const handleTest = async (providerId: string) => {
+    const key = (testingKey[providerId] ?? "").trim();
+    if (!key) {
+      setTestingResult({ ...testingResult, [providerId]: "Enter a key to test" });
+      return;
+    }
+    setTestingResult({ ...testingResult, [providerId]: "Testing…" });
+    try {
+      const response = await testExternalProvider(providerId, { key });
+      setTestingResult({ ...testingResult, [providerId]: `Resolved (${response.length} chars)` });
+    } catch (err) {
+      setTestingResult({ ...testingResult, [providerId]: formatError(err) });
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <h3>External secret providers</h3>
+      <p className="settings-help">
+        Register a connection to an external secret manager (AWS Secrets Manager, HashiCorp Vault, Google Secret
+        Manager, Azure Key Vault). The provider's auth credentials live in a regular encrypted secret you create first.
+        Values are cached per-provider according to <code>cacheTtlMs</code> so rotations propagate automatically.
+      </p>
+      {error && <div className="settings-error">{error}</div>}
+
+      <div className="settings-card">
+        <h4>Register provider</h4>
+        <label htmlFor="esp-name">Name</label>
+        <input id="esp-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="prod-aws" />
+        <label htmlFor="esp-type">Type</label>
+        <select
+          id="esp-type"
+          value={type}
+          onChange={(event) => setType(event.target.value as ExternalSecretProviderType)}
+        >
+          {EXTERNAL_PROVIDER_TYPES.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <p className="settings-muted" style={{ fontSize: "0.8rem" }}>
+          {typeHint}
+        </p>
+        <label htmlFor="esp-config">Config JSON</label>
+        <textarea
+          id="esp-config"
+          value={configJson}
+          onChange={(event) => setConfigJson(event.target.value)}
+          rows={4}
+          className="settings-textarea"
+        />
+        <label htmlFor="esp-credentials">Credentials secret (optional)</label>
+        <select
+          id="esp-credentials"
+          value={credentialsSecretId}
+          onChange={(event) => setCredentialsSecretId(event.target.value)}
+        >
+          <option value="">(none — use default credential chain)</option>
+          {secrets.map((secret) => (
+            <option key={secret.id} value={secret.id}>
+              {secret.name} — {secret.id}
+            </option>
+          ))}
+        </select>
+        <label htmlFor="esp-ttl">Cache TTL (ms)</label>
+        <input
+          id="esp-ttl"
+          value={cacheTtlMs}
+          onChange={(event) => setCacheTtlMs(event.target.value.replace(/\D/g, ""))}
+          placeholder="300000"
+          inputMode="numeric"
+        />
+        <div className="settings-actions">
+          <button className="header-btn" onClick={handleCreate} disabled={busy || !name.trim()}>
+            Register provider
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <h4>Registered providers ({providers.length})</h4>
+        {!loaded ? (
+          <div className="settings-loading">Loading…</div>
+        ) : providers.length === 0 ? (
+          <p className="settings-muted">No external providers yet.</p>
+        ) : (
+          <table className="settings-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Credentials</th>
+                <th>TTL</th>
+                <th>Enabled</th>
+                <th>Test key</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {providers.map((provider) => (
+                <tr key={provider.id}>
+                  <td>
+                    <strong>{provider.name}</strong>
+                    <div className="settings-muted">
+                      <code>{provider.id}</code>
+                    </div>
+                  </td>
+                  <td>{provider.type}</td>
+                  <td>
+                    {provider.credentialsSecretId ? (
+                      <code>{provider.credentialsSecretId}</code>
+                    ) : (
+                      <span className="settings-muted">default</span>
+                    )}
+                  </td>
+                  <td>{provider.cacheTtlMs} ms</td>
+                  <td>
+                    <button className="mini-btn" onClick={() => handleToggle(provider)}>
+                      {provider.enabled ? "Disable" : "Enable"}
+                    </button>
+                  </td>
+                  <td>
+                    <input
+                      placeholder="secret name / ARN"
+                      value={testingKey[provider.id] ?? ""}
+                      onChange={(event) =>
+                        setTestingKey({ ...testingKey, [provider.id]: event.target.value })
+                      }
+                    />
+                    <button className="mini-btn" onClick={() => handleTest(provider.id)}>
+                      Test
+                    </button>
+                    {testingResult[provider.id] && (
+                      <div className="settings-muted" style={{ fontSize: "0.75rem" }}>
+                        {testingResult[provider.id]}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <button className="mini-btn" onClick={() => handleDelete(provider.id)}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+const AUDIT_CATEGORIES = [
+  "auth",
+  "mfa",
+  "sso",
+  "api_key",
+  "secret",
+  "external_secret",
+  "workflow",
+  "execution",
+  "project",
+  "rbac",
+  "sharing",
+  "system"
+];
+
+function AuditLogTab() {
+  const [filter, setFilter] = useState<AuditLogFilter>({ page: 1, pageSize: 50 });
+  const [items, setItems] = useState<AuditLogEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const response = await fetchAuditLogs(filter);
+      setItems(response.items);
+      setTotal(response.total);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoaded(true);
+    }
+  }, [filter]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const updateFilter = (patch: Partial<AuditLogFilter>) => {
+    setFilter((prev) => ({ ...prev, ...patch, page: 1 }));
+  };
+
+  const totalPages = Math.max(1, Math.ceil(total / (filter.pageSize ?? 50)));
+
+  return (
+    <div className="settings-section">
+      <h3>Audit log</h3>
+      <p className="settings-help">
+        Comprehensive trail of authentication, credential, workflow, execution, sharing, and RBAC events. Retention is
+        controlled by <code>AUDIT_LOG_RETENTION_DAYS</code>.
+      </p>
+      {error && <div className="settings-error">{error}</div>}
+
+      <div className="settings-card">
+        <h4>Filter</h4>
+        <div className="settings-filter-grid">
+          <div>
+            <label htmlFor="audit-category">Category</label>
+            <select
+              id="audit-category"
+              value={filter.category ?? ""}
+              onChange={(event) => updateFilter({ category: event.target.value || undefined })}
+            >
+              <option value="">All</option>
+              {AUDIT_CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="audit-outcome">Outcome</label>
+            <select
+              id="audit-outcome"
+              value={filter.outcome ?? ""}
+              onChange={(event) => updateFilter({ outcome: event.target.value || undefined })}
+            >
+              <option value="">All</option>
+              <option value="success">Success</option>
+              <option value="failure">Failure</option>
+              <option value="denied">Denied</option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="audit-actor">Actor user ID</label>
+            <input
+              id="audit-actor"
+              value={filter.actorUserId ?? ""}
+              onChange={(event) => updateFilter({ actorUserId: event.target.value || undefined })}
+            />
+          </div>
+          <div>
+            <label htmlFor="audit-resource">Resource type</label>
+            <input
+              id="audit-resource"
+              value={filter.resourceType ?? ""}
+              onChange={(event) => updateFilter({ resourceType: event.target.value || undefined })}
+            />
+          </div>
+          <div>
+            <label htmlFor="audit-from">From (ISO)</label>
+            <input
+              id="audit-from"
+              value={filter.from ?? ""}
+              onChange={(event) => updateFilter({ from: event.target.value || undefined })}
+              placeholder="2026-01-01T00:00:00Z"
+            />
+          </div>
+          <div>
+            <label htmlFor="audit-to">To (ISO)</label>
+            <input
+              id="audit-to"
+              value={filter.to ?? ""}
+              onChange={(event) => updateFilter({ to: event.target.value || undefined })}
+              placeholder="2026-12-31T23:59:59Z"
+            />
+          </div>
+        </div>
+        <div className="settings-actions">
+          <button className="header-btn" onClick={() => setFilter({ page: 1, pageSize: 50 })}>
+            Reset filters
+          </button>
+          <a className="header-btn" href={auditExportUrl(filter)} target="_blank" rel="noreferrer">
+            Export CSV
+          </a>
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <h4>
+          Entries ({total}) — page {filter.page ?? 1} of {totalPages}
+        </h4>
+        {!loaded ? (
+          <div className="settings-loading">Loading…</div>
+        ) : items.length === 0 ? (
+          <p className="settings-muted">No audit events match your filters.</p>
+        ) : (
+          <div className="settings-audit-scroll">
+            <table className="settings-table">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Category</th>
+                  <th>Event</th>
+                  <th>Outcome</th>
+                  <th>Actor</th>
+                  <th>Resource</th>
+                  <th>Metadata</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item.id}>
+                    <td>{formatDate(item.createdAt)}</td>
+                    <td>
+                      <span className="settings-chip">{item.category}</span>
+                    </td>
+                    <td>
+                      <code>{item.eventType}</code>
+                    </td>
+                    <td>
+                      <span
+                        className={
+                          item.outcome === "success" ? "settings-chip" : "settings-chip settings-chip-danger"
+                        }
+                      >
+                        {item.outcome}
+                      </span>
+                    </td>
+                    <td>{item.actorEmail ?? item.actorUserId ?? item.actorType ?? "—"}</td>
+                    <td>
+                      {item.resourceType && <div className="settings-muted">{item.resourceType}</div>}
+                      {item.resourceId && <code>{item.resourceId}</code>}
+                    </td>
+                    <td>
+                      {item.metadata ? (
+                        <details>
+                          <summary>inspect</summary>
+                          <pre className="settings-audit-metadata">{JSON.stringify(item.metadata, null, 2)}</pre>
+                        </details>
+                      ) : (
+                        <span className="settings-muted">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="settings-actions">
+          <button
+            className="header-btn ghost"
+            onClick={() => setFilter((prev) => ({ ...prev, page: Math.max(1, (prev.page ?? 1) - 1) }))}
+            disabled={(filter.page ?? 1) <= 1}
+          >
+            ← Prev
+          </button>
+          <button
+            className="header-btn ghost"
+            onClick={() =>
+              setFilter((prev) => ({ ...prev, page: Math.min(totalPages, (prev.page ?? 1) + 1) }))
+            }
+            disabled={(filter.page ?? 1) >= totalPages}
+          >
+            Next →
+          </button>
+        </div>
       </div>
     </div>
   );

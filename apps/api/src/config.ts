@@ -52,7 +52,15 @@ const envSchema = z.object({
   LDAP_BIND_PASSWORD: z.string().optional(),
   LDAP_BASE_DN: z.string().optional(),
   LDAP_USER_FILTER: z.string().default("(mail={{email}})"),
-  LDAP_GROUPS_ATTRIBUTE: z.string().default("memberOf")
+  LDAP_GROUPS_ATTRIBUTE: z.string().default("memberOf"),
+
+  // Phase 5.3 — External secrets
+  EXTERNAL_SECRETS_CACHE_TTL_MS: z.coerce.number().int().nonnegative().default(300000),
+
+  // Phase 5.4 — Audit logging
+  AUDIT_LOG_ENABLED: booleanFromEnv.default(true),
+  AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(365),
+  AUDIT_LOG_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000)
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

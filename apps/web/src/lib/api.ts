@@ -463,6 +463,9 @@ export interface SecretListItem {
   provider: string;
   createdAt: string;
   projectId?: string;
+  source?: "local" | "external";
+  externalProviderId?: string | null;
+  externalKey?: string | null;
 }
 
 export async function fetchSecrets(options: { projectId?: string } = {}) {
@@ -1003,4 +1006,173 @@ export async function unshareSecret(secretId: string, projectId: string) {
     `/api/secrets/${encodeURIComponent(secretId)}/shares/${encodeURIComponent(projectId)}`,
     { method: "DELETE" }
   );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.3 — External secret providers
+// ---------------------------------------------------------------------------
+
+export type ExternalSecretProviderType =
+  | "aws-secrets-manager"
+  | "hashicorp-vault"
+  | "google-secret-manager"
+  | "azure-key-vault"
+  | "mock";
+
+export interface ExternalSecretProviderRecord {
+  id: string;
+  name: string;
+  type: ExternalSecretProviderType | string;
+  config: Record<string, unknown>;
+  credentialsSecretId: string | null;
+  cacheTtlMs: number;
+  enabled: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchExternalProviders() {
+  return apiRequest<{ providers: ExternalSecretProviderRecord[] }>("/api/external-providers");
+}
+
+export async function createExternalProvider(payload: {
+  name: string;
+  type: ExternalSecretProviderType | string;
+  config?: Record<string, unknown>;
+  credentialsSecretId?: string | null;
+  cacheTtlMs?: number;
+}) {
+  return apiRequest<{ id: string; provider: ExternalSecretProviderRecord | null }>(
+    "/api/external-providers",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function updateExternalProvider(
+  id: string,
+  payload: {
+    name?: string;
+    config?: Record<string, unknown>;
+    credentialsSecretId?: string | null;
+    cacheTtlMs?: number;
+    enabled?: boolean;
+  }
+) {
+  return apiRequest<{ provider: ExternalSecretProviderRecord | null }>(
+    `/api/external-providers/${encodeURIComponent(id)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+export async function deleteExternalProvider(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/external-providers/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+export async function testExternalProvider(id: string, payload: { key: string }) {
+  return apiRequest<{ ok: boolean; length: number }>(
+    `/api/external-providers/${encodeURIComponent(id)}/test`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }
+  );
+}
+
+// Extend createSecret to support external references.
+export async function createExternalSecret(payload: {
+  name: string;
+  provider: string;
+  externalProviderId: string;
+  externalKey: string;
+  projectId?: string;
+}) {
+  return apiRequest<{
+    id: string;
+    name: string;
+    provider: string;
+    projectId: string;
+    source: "external";
+  }>("/api/secrets", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteSecret(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/secrets/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.4 — Audit log
+// ---------------------------------------------------------------------------
+
+export interface AuditLogEntry {
+  id: string;
+  eventType: string;
+  category: string;
+  action: string;
+  outcome: string;
+  actorUserId: string | null;
+  actorEmail: string | null;
+  actorType: string;
+  resourceType: string | null;
+  resourceId: string | null;
+  projectId: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  metadata: unknown;
+  message: string | null;
+  createdAt: string;
+}
+
+export interface AuditLogFilter {
+  category?: string;
+  eventType?: string;
+  outcome?: string;
+  actorUserId?: string;
+  resourceType?: string;
+  resourceId?: string;
+  projectId?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export async function fetchAuditLogs(filter: AuditLogFilter = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filter)) {
+    if (value !== undefined && value !== null && value !== "") {
+      params.set(key, String(value));
+    }
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{
+    items: AuditLogEntry[];
+    total: number;
+    page: number;
+    pageSize: number;
+  }>(`/api/audit${suffix}`);
+}
+
+export function auditExportUrl(filter: AuditLogFilter = {}): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filter)) {
+    if (value !== undefined && value !== null && value !== "") {
+      params.set(key, String(value));
+    }
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return `${API_BASE}/api/audit/export${suffix}`;
 }

@@ -58,6 +58,10 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     LDAP_BASE_DN: undefined,
     LDAP_USER_FILTER: "(mail={{email}})",
     LDAP_GROUPS_ATTRIBUTE: "memberOf",
+    EXTERNAL_SECRETS_CACHE_TTL_MS: 300000,
+    AUDIT_LOG_ENABLED: true,
+    AUDIT_LOG_RETENTION_DAYS: 365,
+    AUDIT_LOG_PRUNE_INTERVAL_MS: 3600000,
     ...overrides
   };
 }

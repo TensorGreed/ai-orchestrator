@@ -50,6 +50,8 @@ import {
   type Permission,
   type ProjectRole
 } from "./services/rbac-service";
+import { ExternalSecretsService } from "./services/external-secrets-service";
+import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -73,12 +75,39 @@ const TIER1_INTEGRATIONS: Tier1IntegrationSpec[] = [
   { id: "github", label: "GitHub", category: "DevTools", logoPath: "/logos/github.svg", nodeTypes: ["github_action", "github_webhook_trigger"] }
 ];
 
-const secretCreateSchema = z.object({
-  name: z.string().min(1),
-  provider: z.string().min(1),
-  value: z.string().min(1),
-  projectId: z.string().min(1).max(120).optional()
-});
+const secretCreateSchema = z
+  .object({
+    name: z.string().min(1),
+    provider: z.string().min(1),
+    value: z.string().min(1).optional(),
+    projectId: z.string().min(1).max(120).optional(),
+    externalProviderId: z.string().min(1).max(120).optional(),
+    externalKey: z.string().min(1).max(512).optional()
+  })
+  .superRefine((data, ctx) => {
+    if (data.externalProviderId || data.externalKey) {
+      if (!data.externalProviderId || !data.externalKey) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["externalProviderId"],
+          message: "externalProviderId and externalKey are both required when creating an external secret"
+        });
+      }
+      if (data.value !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["value"],
+          message: "External secrets must not include a value — it is resolved from the provider"
+        });
+      }
+    } else if (!data.value) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["value"],
+        message: "value is required for local secrets"
+      });
+    }
+  });
 
 const userRoleSchema = z.enum(["admin", "builder", "operator", "viewer"]);
 
@@ -1221,6 +1250,27 @@ export function createApp(
       deleteWorkflowExecutionSafely(input.executionId, input.workflow.id);
     }
 
+    auditService.record({
+      category: "execution",
+      eventType: `execution.${input.result.status}`,
+      action: "execute",
+      outcome: input.result.status === "error" ? "failure" : "success",
+      actor: {
+        email: typeof input.triggeredBy === "string" ? input.triggeredBy : null,
+        type: "system"
+      },
+      resourceType: "workflow",
+      resourceId: input.workflow.id,
+      projectId: input.workflow.projectId ?? null,
+      metadata: {
+        executionId: input.executionId,
+        triggerType: input.triggerType,
+        durationMs: toDurationMs(input.result.startedAt, input.result.completedAt),
+        status: input.result.status,
+        error: input.result.error ?? null
+      }
+    });
+
     app.log.info(
       {
         executionId: input.executionId,
@@ -1595,6 +1645,83 @@ export function createApp(
   const apiKeyService = new ApiKeyService(store, config.API_KEY_DEFAULT_EXPIRY_DAYS);
   const mfaService = new MfaService(store, config.SECRET_MASTER_KEY_BASE64, config.MFA_ISSUER);
   const rbacService = new RbacService(store);
+  const externalSecretsService = new ExternalSecretsService(store);
+  secretService.attachExternalSecrets(externalSecretsService);
+  const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
+
+  const pruneAuditLogs = (reason: "startup" | "interval") => {
+    const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
+    if (!Number.isFinite(retentionDays) || retentionDays <= 0) return 0;
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    try {
+      const deleted = auditService.purge({ before: cutoff });
+      if (deleted > 0) {
+        app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned audit logs");
+      }
+      return deleted;
+    } catch (err) {
+      app.log.warn(
+        { err: err instanceof Error ? err.message : String(err), reason },
+        "Failed to prune audit logs"
+      );
+      return 0;
+    }
+  };
+  pruneAuditLogs("startup");
+  const auditRetentionTimer = config.AUDIT_LOG_RETENTION_DAYS > 0
+    ? setInterval(() => pruneAuditLogs("interval"), config.AUDIT_LOG_PRUNE_INTERVAL_MS)
+    : null;
+  if (auditRetentionTimer) {
+    const t = auditRetentionTimer as { unref?: () => void };
+    t.unref?.();
+    app.addHook("onClose", async () => {
+      clearInterval(auditRetentionTimer);
+    });
+  }
+
+  const extractIpAndUa = (request: { ip?: string; headers: Record<string, unknown> }) => {
+    const forwarded = request.headers["x-forwarded-for"];
+    const ipAddress =
+      (typeof forwarded === "string" && forwarded.split(",")[0]?.trim()) ||
+      (Array.isArray(forwarded) && typeof forwarded[0] === "string" ? forwarded[0] : "") ||
+      request.ip ||
+      null;
+    const uaHeader = request.headers["user-agent"];
+    const userAgent =
+      typeof uaHeader === "string"
+        ? uaHeader
+        : Array.isArray(uaHeader) && typeof uaHeader[0] === "string"
+          ? uaHeader[0]
+          : null;
+    return { ipAddress: ipAddress || null, userAgent };
+  };
+
+  const buildActor = (
+    request: { ip?: string; headers: Record<string, unknown> },
+    user?: SafeUser | null,
+    overrides?: Partial<AuditActor>
+  ): AuditActor => {
+    const { ipAddress, userAgent } = extractIpAndUa(request);
+    return {
+      userId: user?.id ?? null,
+      email: user?.email ?? null,
+      type: request.headers["authorization"] ? "api_key" : "user",
+      ipAddress,
+      userAgent,
+      ...overrides
+    };
+  };
+
+  const audit = (
+    request: { ip?: string; headers: Record<string, unknown> },
+    user: SafeUser | null,
+    event: Omit<AuditEventInput, "actor"> & { actor?: Partial<AuditActor> }
+  ) => {
+    auditService.record({
+      ...event,
+      actor: buildActor(request, user, event.actor)
+    });
+  };
   const samlService = new SamlService(store, {
     enabled: config.SAML_ENABLED,
     entryPoint: config.SAML_ENTRY_POINT,
@@ -1952,8 +2079,23 @@ export function createApp(
         password: parsed.data.password,
         role
       });
+      audit(request, actor ?? null, {
+        category: "auth",
+        eventType: "user.register",
+        action: "register",
+        resourceType: "user",
+        resourceId: user.id,
+        metadata: { email: user.email, role: user.role, actorEmail: actor?.email }
+      });
       return { user };
     } catch (error) {
+      audit(request, actor ?? null, {
+        category: "auth",
+        eventType: "user.register",
+        action: "register",
+        outcome: "failure",
+        metadata: { email: parsed.data.email, error: error instanceof Error ? error.message : String(error) }
+      });
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Registration failed"
@@ -1981,6 +2123,14 @@ export function createApp(
           // MFA enforced but not enrolled — still issue the session so user can enrol immediately,
           // but flag it so the UI can redirect to the MFA enrolment flow.
           setSessionCookie(reply, result.sessionId);
+          audit(request, result.user, {
+            category: "auth",
+            eventType: "user.login",
+            action: "login",
+            resourceType: "user",
+            resourceId: result.user.id,
+            metadata: { mfaEnrollmentRequired: true }
+          });
           return {
             user: result.user,
             expiresAt: result.expiresAt,
@@ -1990,6 +2140,14 @@ export function createApp(
         // Revoke the freshly-created session and exchange it for a short-lived MFA challenge token.
         store.revokeSession(result.sessionId);
         const challengeId = issueMfaChallenge(result.user.id);
+        audit(request, result.user, {
+          category: "auth",
+          eventType: "user.login.mfa_challenge",
+          action: "login",
+          resourceType: "user",
+          resourceId: result.user.id,
+          metadata: { mfaChallengeIssued: true }
+        });
         reply.code(200);
         return {
           mfaChallenge: challengeId,
@@ -1997,11 +2155,25 @@ export function createApp(
         };
       }
       setSessionCookie(reply, result.sessionId);
+      audit(request, result.user, {
+        category: "auth",
+        eventType: "user.login",
+        action: "login",
+        resourceType: "user",
+        resourceId: result.user.id
+      });
       return {
         user: result.user,
         expiresAt: result.expiresAt
       };
     } catch (error) {
+      audit(request, null, {
+        category: "auth",
+        eventType: "user.login",
+        action: "login",
+        outcome: "failure",
+        metadata: { email: parsed.data.email, error: error instanceof Error ? error.message : String(error) }
+      });
       reply.code(401);
       return {
         error: error instanceof Error ? error.message : "Invalid credentials"
@@ -2048,10 +2220,20 @@ export function createApp(
 
   app.post("/api/auth/logout", async (request, reply) => {
     const sessionId = getSessionIdFromRequest(request);
+    const sessionUser = sessionId ? authService.getSessionUser(sessionId) : null;
     if (sessionId) {
       authService.logout(sessionId);
     }
     clearSessionCookie(reply);
+    if (sessionUser) {
+      audit(request, sessionUser, {
+        category: "auth",
+        eventType: "user.logout",
+        action: "logout",
+        resourceType: "user",
+        resourceId: sessionUser.id
+      });
+    }
     return { ok: true };
   });
 
@@ -2084,6 +2266,13 @@ export function createApp(
       return { error: "MFA is already enabled for this account. Disable it first to re-enrol." };
     }
     const enrollment = mfaService.enroll(user.id, user.email);
+    audit(request, user, {
+      category: "mfa",
+      eventType: "mfa.enroll",
+      action: "enroll",
+      resourceType: "user",
+      resourceId: user.id
+    });
     return {
       secret: enrollment.secret,
       otpauthUrl: enrollment.otpauthUrl,
@@ -2102,9 +2291,24 @@ export function createApp(
     }
     const ok = mfaService.activate(user.id, code);
     if (!ok) {
+      audit(request, user, {
+        category: "mfa",
+        eventType: "mfa.activate",
+        action: "activate",
+        outcome: "failure",
+        resourceType: "user",
+        resourceId: user.id
+      });
       reply.code(401);
       return { error: "Invalid activation code" };
     }
+    audit(request, user, {
+      category: "mfa",
+      eventType: "mfa.activate",
+      action: "activate",
+      resourceType: "user",
+      resourceId: user.id
+    });
     return { enabled: true };
   });
 
@@ -2121,6 +2325,13 @@ export function createApp(
       }
     }
     mfaService.disable(user.id);
+    audit(request, user, {
+      category: "mfa",
+      eventType: "mfa.disable",
+      action: "disable",
+      resourceType: "user",
+      resourceId: user.id
+    });
     return { ok: true };
   });
 
@@ -2155,6 +2366,14 @@ export function createApp(
       scopes: parsed.data.scopes,
       expiresInDays: parsed.data.expiresInDays ?? null
     });
+    audit(request, user, {
+      category: "api_key",
+      eventType: "api_key.create",
+      action: "create",
+      resourceType: "api_key",
+      resourceId: record.id,
+      metadata: { name: record.name, scopes: record.scopes, keyPrefix: record.keyPrefix }
+    });
     return {
       key: plaintext,
       record
@@ -2169,6 +2388,13 @@ export function createApp(
       reply.code(404);
       return { error: "API key not found" };
     }
+    audit(request, user, {
+      category: "api_key",
+      eventType: "api_key.revoke",
+      action: "revoke",
+      resourceType: "api_key",
+      resourceId: request.params.id
+    });
     return { ok: true };
   });
 
@@ -2311,6 +2537,232 @@ export function createApp(
   });
 
   // ---------------------------------------------------------------------------
+  // Phase 5.3 — External secret providers
+  // ---------------------------------------------------------------------------
+
+  const externalProviderTypeSchema = z.enum([
+    "aws-secrets-manager",
+    "hashicorp-vault",
+    "google-secret-manager",
+    "azure-key-vault",
+    "mock"
+  ]);
+
+  const externalProviderCreateSchema = z.object({
+    name: z.string().min(1).max(120),
+    type: externalProviderTypeSchema,
+    config: z.record(z.string(), z.unknown()).default({}),
+    credentialsSecretId: z.string().min(1).max(120).nullable().optional(),
+    cacheTtlMs: z.number().int().nonnegative().max(86_400_000).optional()
+  });
+
+  const externalProviderUpdateSchema = externalProviderCreateSchema
+    .partial()
+    .extend({ enabled: z.boolean().optional() });
+
+  app.get("/api/external-providers", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    return { providers: externalSecretsService.listProviders() };
+  });
+
+  app.post<{ Body: unknown }>("/api/external-providers", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = externalProviderCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid external provider payload", details: parsed.error.issues };
+    }
+    if (parsed.data.credentialsSecretId) {
+      const credRow = store.getSecret(parsed.data.credentialsSecretId);
+      if (!credRow) {
+        reply.code(400);
+        return { error: "credentialsSecretId does not exist" };
+      }
+      if (credRow.source === "external") {
+        reply.code(400);
+        return { error: "credentialsSecretId must reference a local secret, not another external secret" };
+      }
+    }
+    try {
+      const id = externalSecretsService.createProvider({
+        name: parsed.data.name,
+        type: parsed.data.type,
+        config: parsed.data.config ?? {},
+        credentialsSecretId: parsed.data.credentialsSecretId ?? null,
+        cacheTtlMs: parsed.data.cacheTtlMs ?? config.EXTERNAL_SECRETS_CACHE_TTL_MS,
+        createdBy: user.email
+      });
+      audit(request, user, {
+        category: "external_secret",
+        eventType: "external_provider.create",
+        action: "create",
+        resourceType: "external_provider",
+        resourceId: id,
+        metadata: { name: parsed.data.name, type: parsed.data.type }
+      });
+      return { id, provider: externalSecretsService.getProvider(id) };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : "Failed to create external provider" };
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>(
+    "/api/external-providers/:id",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["admin"]);
+      if (!user) return;
+      const parsed = externalProviderUpdateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "Invalid provider payload", details: parsed.error.issues };
+      }
+      const ok = externalSecretsService.updateProvider(request.params.id, {
+        name: parsed.data.name,
+        config: parsed.data.config,
+        credentialsSecretId: parsed.data.credentialsSecretId ?? null,
+        cacheTtlMs: parsed.data.cacheTtlMs,
+        enabled: parsed.data.enabled
+      });
+      if (!ok) {
+        reply.code(404);
+        return { error: "External provider not found" };
+      }
+      audit(request, user, {
+        category: "external_secret",
+        eventType: "external_provider.update",
+        action: "update",
+        resourceType: "external_provider",
+        resourceId: request.params.id
+      });
+      return { provider: externalSecretsService.getProvider(request.params.id) };
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/external-providers/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const result = externalSecretsService.deleteProvider(request.params.id);
+    if (!result.ok) {
+      reply.code(result.reason ? 409 : 404);
+      return { error: result.reason ?? "External provider not found" };
+    }
+    audit(request, user, {
+      category: "external_secret",
+      eventType: "external_provider.delete",
+      action: "delete",
+      resourceType: "external_provider",
+      resourceId: request.params.id
+    });
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/api/external-providers/:id/test",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["admin"]);
+      if (!user) return;
+      const provider = externalSecretsService.getProvider(request.params.id);
+      if (!provider) {
+        reply.code(404);
+        return { error: "External provider not found" };
+      }
+      const body = asRecord(request.body);
+      const key = typeof body.key === "string" ? body.key.trim() : "";
+      if (!key) {
+        reply.code(400);
+        return { error: "key is required" };
+      }
+      let credentialValue: string | undefined;
+      if (provider.credentialsSecretId) {
+        credentialValue = await secretService.resolveSecret({ secretId: provider.credentialsSecretId });
+      }
+      try {
+        const value = await externalSecretsService.resolveExternalSecret({
+          provider,
+          credentials: credentialValue,
+          key
+        });
+        audit(request, user, {
+          category: "external_secret",
+          eventType: "external_provider.test",
+          action: "test",
+          resourceType: "external_provider",
+          resourceId: provider.id,
+          metadata: { key, length: value.length }
+        });
+        return { ok: true, length: value.length };
+      } catch (err) {
+        const e = err as Error & { code?: string };
+        audit(request, user, {
+          category: "external_secret",
+          eventType: "external_provider.test",
+          action: "test",
+          outcome: "failure",
+          resourceType: "external_provider",
+          resourceId: provider.id,
+          metadata: { key, error: e.message }
+        });
+        reply.code(e.code === "CONFIGURATION_ERROR" ? 503 : 400);
+        return { error: e.message };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.4 — Audit log
+  // ---------------------------------------------------------------------------
+
+  const auditFilterSchema = z.object({
+    category: z.string().optional(),
+    eventType: z.string().optional(),
+    outcome: z.string().optional(),
+    actorUserId: z.string().optional(),
+    resourceType: z.string().optional(),
+    resourceId: z.string().optional(),
+    projectId: z.string().optional(),
+    from: z.string().optional(),
+    to: z.string().optional(),
+    page: z.coerce.number().int().positive().optional(),
+    pageSize: z.coerce.number().int().positive().max(500).optional()
+  });
+
+  app.get("/api/audit", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = auditFilterSchema.safeParse(request.query ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid audit filter", details: parsed.error.issues };
+    }
+    return auditService.list(parsed.data);
+  });
+
+  app.get("/api/audit/export", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = auditFilterSchema.safeParse(request.query ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid audit filter", details: parsed.error.issues };
+    }
+    const csv = auditService.exportCsv(parsed.data);
+    audit(request, user, {
+      category: "system",
+      eventType: "audit.export",
+      action: "export"
+    });
+    reply.header("content-type", "text/csv; charset=utf-8");
+    reply.header(
+      "content-disposition",
+      `attachment; filename="audit-log-${new Date().toISOString().slice(0, 10)}.csv"`
+    );
+    return reply.send(csv);
+  });
+
+  // ---------------------------------------------------------------------------
   // Phase 5.2 — Project memberships
   // ---------------------------------------------------------------------------
 
@@ -2373,6 +2825,15 @@ export function createApp(
       reply.code(400);
       return { error: error instanceof Error ? error.message : "Failed to add member" };
     }
+    audit(request, user, {
+      category: "rbac",
+      eventType: "project.member.add",
+      action: "add_member",
+      resourceType: "project_member",
+      resourceId: `${project.id}:${parsed.data.userId}`,
+      projectId: project.id,
+      metadata: { userId: parsed.data.userId, role, customRoleId: parsed.data.customRoleId ?? null }
+    });
     return { ok: true, membership: rbacService.getMembership(parsed.data.userId, project.id) };
   });
 
@@ -2395,6 +2856,14 @@ export function createApp(
         reply.code(404);
         return { error: "Membership not found" };
       }
+      audit(request, user, {
+        category: "rbac",
+        eventType: "project.member.remove",
+        action: "remove_member",
+        resourceType: "project_member",
+        resourceId: `${project.id}:${request.params.userId}`,
+        projectId: project.id
+      });
       return { ok: true };
     }
   );
@@ -2438,6 +2907,15 @@ export function createApp(
       permissions: parsed.data.permissions as Permission[],
       createdBy: user.email
     });
+    audit(request, user, {
+      category: "rbac",
+      eventType: "custom_role.create",
+      action: "create",
+      resourceType: "custom_role",
+      resourceId: id,
+      projectId: parsed.data.projectId ?? null,
+      metadata: { name: parsed.data.name, permissions: parsed.data.permissions }
+    });
     return { id, role: rbacService.getCustomRole(id) };
   });
 
@@ -2470,6 +2948,13 @@ export function createApp(
       reply.code(404);
       return { error: "Custom role not found" };
     }
+    audit(request, user, {
+      category: "rbac",
+      eventType: "custom_role.delete",
+      action: "delete",
+      resourceType: "custom_role",
+      resourceId: request.params.id
+    });
     return { ok: true };
   });
 
@@ -2529,6 +3014,15 @@ export function createApp(
       accessLevel: parsed.data.accessLevel,
       sharedBy: user.email
     });
+    audit(request, user, {
+      category: "sharing",
+      eventType: "workflow.share",
+      action: "share",
+      resourceType: "workflow",
+      resourceId: workflow.id,
+      projectId: workflow.projectId ?? null,
+      metadata: { targetProjectId: parsed.data.projectId, accessLevel: parsed.data.accessLevel }
+    });
     return { ok: true };
   });
 
@@ -2552,6 +3046,15 @@ export function createApp(
         reply.code(404);
         return { error: "Share not found" };
       }
+      audit(request, user, {
+        category: "sharing",
+        eventType: "workflow.unshare",
+        action: "unshare",
+        resourceType: "workflow",
+        resourceId: workflow.id,
+        projectId: workflow.projectId ?? null,
+        metadata: { targetProjectId: request.params.projectId }
+      });
       return { ok: true };
     }
   );
@@ -2582,6 +3085,14 @@ export function createApp(
       reply.code(400);
       return { error: "Target project does not exist" };
     }
+    audit(request, user, {
+      category: "sharing",
+      eventType: "secret.share",
+      action: "share",
+      resourceType: "secret",
+      resourceId: request.params.id,
+      metadata: { targetProjectId: parsed.data.projectId }
+    });
     rbacService.shareSecret({
       secretId: request.params.id,
       projectId: parsed.data.projectId,
@@ -2744,6 +3255,15 @@ export function createApp(
     const savedWorkflow = store.upsertWorkflow(parsed.data);
     schedulerService?.reloadWorkflow(savedWorkflow.id);
     triggerService?.reloadWorkflow(savedWorkflow.id);
+    audit(request, user, {
+      category: "workflow",
+      eventType: "workflow.create",
+      action: "create",
+      resourceType: "workflow",
+      resourceId: savedWorkflow.id,
+      projectId: savedWorkflow.projectId,
+      metadata: { name: savedWorkflow.name, version: savedWorkflow.workflowVersion }
+    });
     return savedWorkflow;
   });
 
@@ -2779,6 +3299,15 @@ export function createApp(
     const savedWorkflow = store.upsertWorkflow(parsed.data);
     schedulerService?.reloadWorkflow(savedWorkflow.id);
     triggerService?.reloadWorkflow(savedWorkflow.id);
+    audit(request, user, {
+      category: "workflow",
+      eventType: "workflow.update",
+      action: "update",
+      resourceType: "workflow",
+      resourceId: savedWorkflow.id,
+      projectId: savedWorkflow.projectId,
+      metadata: { name: savedWorkflow.name, version: savedWorkflow.workflowVersion }
+    });
     return savedWorkflow;
   });
 
@@ -2797,7 +3326,13 @@ export function createApp(
 
       schedulerService?.removeWorkflow(request.params.id);
       triggerService?.removeWorkflow(request.params.id);
-
+      audit(request, user, {
+        category: "workflow",
+        eventType: "workflow.delete",
+        action: "delete",
+        resourceType: "workflow",
+        resourceId: request.params.id
+      });
       return { ok: true };
     } catch (error) {
       reply.code(400);
@@ -4916,13 +5451,72 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       };
     }
 
-    const secretRef = secretService.createSecret(parsed.data);
+    let secretRef;
+    let source: "local" | "external" = "local";
+    if (parsed.data.externalProviderId && parsed.data.externalKey) {
+      const provider = externalSecretsService.getProvider(parsed.data.externalProviderId);
+      if (!provider) {
+        reply.code(400);
+        return { error: "Unknown externalProviderId" };
+      }
+      secretRef = secretService.createExternalSecret({
+        name: parsed.data.name,
+        provider: parsed.data.provider,
+        externalProviderId: parsed.data.externalProviderId,
+        externalKey: parsed.data.externalKey,
+        projectId: parsed.data.projectId
+      });
+      source = "external";
+    } else {
+      secretRef = secretService.createSecret({
+        name: parsed.data.name,
+        provider: parsed.data.provider,
+        value: parsed.data.value as string,
+        projectId: parsed.data.projectId
+      });
+    }
+    audit(request, user, {
+      category: "secret",
+      eventType: source === "external" ? "secret.create.external" : "secret.create",
+      action: "create",
+      resourceType: "secret",
+      resourceId: secretRef.secretId,
+      projectId: parsed.data.projectId ?? "default",
+      metadata: {
+        name: parsed.data.name,
+        provider: parsed.data.provider,
+        source,
+        externalProviderId: parsed.data.externalProviderId ?? undefined
+      }
+    });
     return {
       id: secretRef.secretId,
       name: parsed.data.name,
       provider: parsed.data.provider,
-      projectId: parsed.data.projectId ?? "default"
+      projectId: parsed.data.projectId ?? "default",
+      source
     };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/secrets/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const row = store.getSecret(request.params.id);
+    if (!row) {
+      reply.code(404);
+      return { error: "Secret not found" };
+    }
+    secretService.deleteSecret(request.params.id);
+    audit(request, user, {
+      category: "secret",
+      eventType: "secret.delete",
+      action: "delete",
+      resourceType: "secret",
+      resourceId: request.params.id,
+      projectId: row.projectId,
+      metadata: { name: row.name, provider: row.provider, source: row.source }
+    });
+    return { ok: true };
   });
 
   app.get<{ Querystring: { projectId?: string } }>("/api/secrets", async (request, reply) => {

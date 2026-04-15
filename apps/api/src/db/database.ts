@@ -48,6 +48,9 @@ interface SecretRow {
   ciphertext: string;
   created_at: string;
   project_id?: string | null;
+  source?: string | null;
+  external_provider_id?: string | null;
+  external_key?: string | null;
 }
 
 interface SessionMemoryRow {
@@ -189,6 +192,19 @@ function parseJsonArray(raw: unknown): string[] {
     // fall through
   }
   return [];
+}
+
+function parseJsonObject(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(typeof raw === "string" ? raw : String(raw));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // fall through
+  }
+  return {};
 }
 
 function toDurationMsForStore(startedAt: string, completedAt: string): number | null {
@@ -540,6 +556,58 @@ export class SqliteStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_sso_group_mappings_provider_group ON sso_group_mappings(provider, group_name);
+
+      -- Phase 5.3/5.4 external secrets + audit log tables
+      CREATE TABLE IF NOT EXISTS external_secret_providers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        credentials_secret_id TEXT,
+        cache_ttl_ms INTEGER NOT NULL DEFAULT 300000,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_external_secret_providers_type ON external_secret_providers(type);
+
+      CREATE TABLE IF NOT EXISTS external_secret_cache (
+        secret_id TEXT PRIMARY KEY,
+        iv TEXT NOT NULL,
+        auth_tag TEXT NOT NULL,
+        ciphertext TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_external_secret_cache_expires_at ON external_secret_cache(expires_at);
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        category TEXT NOT NULL,
+        action TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        actor_user_id TEXT,
+        actor_email TEXT,
+        actor_type TEXT NOT NULL DEFAULT 'user',
+        resource_type TEXT,
+        resource_id TEXT,
+        project_id TEXT,
+        ip_address TEXT,
+        user_agent TEXT,
+        metadata_json TEXT,
+        message TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_category ON audit_logs(category);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_user_id ON audit_logs(actor_user_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_resource_type ON audit_logs(resource_type);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome ON audit_logs(outcome);
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -547,6 +615,9 @@ export class SqliteStore {
     this.ensureColumn("workflows", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
     this.ensureColumn("workflows", "folder_id", "TEXT");
     this.ensureColumn("secrets", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
+    this.ensureColumn("secrets", "source", "TEXT", "'local'");
+    this.ensureColumn("secrets", "external_provider_id", "TEXT");
+    this.ensureColumn("secrets", "external_key", "TEXT");
     this.ensureColumn("execution_history", "custom_data_json", "TEXT");
 
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
@@ -762,7 +833,14 @@ export class SqliteStore {
 
   listSecrets(
     options: { projectId?: string } = {}
-  ): Array<Pick<SecretRow, "id" | "name" | "provider" | "created_at"> & { projectId: string }> {
+  ): Array<
+    Pick<SecretRow, "id" | "name" | "provider" | "created_at"> & {
+      projectId: string;
+      source: "local" | "external";
+      externalProviderId: string | null;
+      externalKey: string | null;
+    }
+  > {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (options.projectId) {
@@ -771,7 +849,8 @@ export class SqliteStore {
     }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.queryAll<SecretRow>(
-      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id
+      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id,
+              source, external_provider_id, external_key
        FROM secrets ${where}
        ORDER BY created_at DESC`,
       params
@@ -782,13 +861,23 @@ export class SqliteStore {
       name: toString(row.name),
       provider: toString(row.provider),
       created_at: toString(row.created_at),
-      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID
+      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
+      source: row.source === "external" ? "external" : "local",
+      externalProviderId: row.external_provider_id ? toString(row.external_provider_id) : null,
+      externalKey: row.external_key ? toString(row.external_key) : null
     }));
   }
 
-  getSecret(id: string): (SecretRow & { projectId: string }) | null {
+  getSecret(id: string): (SecretRow & {
+    projectId: string;
+    source: "local" | "external";
+    externalProviderId: string | null;
+    externalKey: string | null;
+  }) | null {
     const row = this.queryOne<SecretRow>(
-      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id FROM secrets WHERE id = ?`,
+      `SELECT id, name, provider, iv, auth_tag, ciphertext, created_at, project_id,
+              source, external_provider_id, external_key
+       FROM secrets WHERE id = ?`,
       [id]
     );
 
@@ -805,7 +894,10 @@ export class SqliteStore {
       ciphertext: toString(row.ciphertext),
       created_at: toString(row.created_at),
       project_id: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
-      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID
+      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
+      source: row.source === "external" ? "external" : "local",
+      externalProviderId: row.external_provider_id ? toString(row.external_provider_id) : null,
+      externalKey: row.external_key ? toString(row.external_key) : null
     };
   }
 
@@ -817,17 +909,24 @@ export class SqliteStore {
     authTag: string;
     ciphertext: string;
     projectId?: string;
+    source?: "local" | "external";
+    externalProviderId?: string | null;
+    externalKey?: string | null;
   }): void {
     this.db.run(
-      `INSERT INTO secrets (id, name, provider, iv, auth_tag, ciphertext, created_at, project_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO secrets (id, name, provider, iv, auth_tag, ciphertext, created_at, project_id,
+                            source, external_provider_id, external_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          provider = excluded.provider,
          iv = excluded.iv,
          auth_tag = excluded.auth_tag,
          ciphertext = excluded.ciphertext,
-         project_id = excluded.project_id`,
+         project_id = excluded.project_id,
+         source = excluded.source,
+         external_provider_id = excluded.external_provider_id,
+         external_key = excluded.external_key`,
       [
         input.id,
         input.name,
@@ -836,11 +935,24 @@ export class SqliteStore {
         input.authTag,
         input.ciphertext,
         new Date().toISOString(),
-        input.projectId ?? DEFAULT_PROJECT_ID
+        input.projectId ?? DEFAULT_PROJECT_ID,
+        input.source ?? "local",
+        input.externalProviderId ?? null,
+        input.externalKey ?? null
       ]
     );
 
     this.persist();
+  }
+
+  deleteSecret(id: string): boolean {
+    const existing = this.queryOne<{ id: string }>(`SELECT id FROM secrets WHERE id = ?`, [id]);
+    if (!existing) return false;
+    this.db.run(`DELETE FROM secrets WHERE id = ?`, [id]);
+    this.db.run(`DELETE FROM secret_shares WHERE secret_id = ?`, [id]);
+    this.db.run(`DELETE FROM external_secret_cache WHERE secret_id = ?`, [id]);
+    this.persist();
+    return true;
   }
 
   countUsers(): number {
@@ -3090,6 +3202,417 @@ export class SqliteStore {
     this.db.run(`DELETE FROM sso_group_mappings WHERE id = ?`, [id]);
     this.persist();
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.3 — External secret providers + rotation cache
+  // ---------------------------------------------------------------------------
+
+  listExternalSecretProviders(): Array<{
+    id: string;
+    name: string;
+    type: string;
+    config: Record<string, unknown>;
+    credentialsSecretId: string | null;
+    cacheTtlMs: number;
+    enabled: boolean;
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const rows = this.queryAll<{
+      id: string;
+      name: string;
+      type: string;
+      config_json: string;
+      credentials_secret_id: string | null;
+      cache_ttl_ms: number;
+      enabled: number;
+      created_by: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT id, name, type, config_json, credentials_secret_id, cache_ttl_ms, enabled, created_by, created_at, updated_at
+       FROM external_secret_providers ORDER BY created_at DESC`
+    );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      name: toString(row.name),
+      type: toString(row.type),
+      config: parseJsonObject(row.config_json),
+      credentialsSecretId: row.credentials_secret_id ? toString(row.credentials_secret_id) : null,
+      cacheTtlMs: toNumber(row.cache_ttl_ms),
+      enabled: toNumber(row.enabled) === 1,
+      createdBy: row.created_by ? toString(row.created_by) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  getExternalSecretProvider(id: string): {
+    id: string;
+    name: string;
+    type: string;
+    config: Record<string, unknown>;
+    credentialsSecretId: string | null;
+    cacheTtlMs: number;
+    enabled: boolean;
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.queryOne<{
+      id: string;
+      name: string;
+      type: string;
+      config_json: string;
+      credentials_secret_id: string | null;
+      cache_ttl_ms: number;
+      enabled: number;
+      created_by: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT id, name, type, config_json, credentials_secret_id, cache_ttl_ms, enabled, created_by, created_at, updated_at
+       FROM external_secret_providers WHERE id = ?`,
+      [id]
+    );
+    if (!row) return null;
+    return {
+      id: toString(row.id),
+      name: toString(row.name),
+      type: toString(row.type),
+      config: parseJsonObject(row.config_json),
+      credentialsSecretId: row.credentials_secret_id ? toString(row.credentials_secret_id) : null,
+      cacheTtlMs: toNumber(row.cache_ttl_ms),
+      enabled: toNumber(row.enabled) === 1,
+      createdBy: row.created_by ? toString(row.created_by) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertExternalSecretProvider(input: {
+    id: string;
+    name: string;
+    type: string;
+    config: Record<string, unknown>;
+    credentialsSecretId?: string | null;
+    cacheTtlMs?: number;
+    enabled?: boolean;
+    createdBy?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    const existing = this.getExternalSecretProvider(input.id);
+    const createdAt = existing?.createdAt ?? now;
+    this.db.run(
+      `INSERT INTO external_secret_providers
+         (id, name, type, config_json, credentials_secret_id, cache_ttl_ms, enabled, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         type = excluded.type,
+         config_json = excluded.config_json,
+         credentials_secret_id = excluded.credentials_secret_id,
+         cache_ttl_ms = excluded.cache_ttl_ms,
+         enabled = excluded.enabled,
+         updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.name,
+        input.type,
+        JSON.stringify(input.config ?? {}),
+        input.credentialsSecretId ?? null,
+        input.cacheTtlMs ?? 300000,
+        input.enabled === false ? 0 : 1,
+        input.createdBy ?? existing?.createdBy ?? null,
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  deleteExternalSecretProvider(id: string): boolean {
+    const existing = this.getExternalSecretProvider(id);
+    if (!existing) return false;
+    this.db.run(`DELETE FROM external_secret_providers WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  countSecretsUsingExternalProvider(providerId: string): number {
+    const row = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM secrets WHERE external_provider_id = ?`,
+      [providerId]
+    );
+    return row ? toNumber(row.count) : 0;
+  }
+
+  getExternalSecretCacheEntry(secretId: string): {
+    secretId: string;
+    iv: string;
+    authTag: string;
+    ciphertext: string;
+    fetchedAt: string;
+    expiresAt: string;
+  } | null {
+    const row = this.queryOne<{
+      secret_id: string;
+      iv: string;
+      auth_tag: string;
+      ciphertext: string;
+      fetched_at: string;
+      expires_at: string;
+    }>(
+      `SELECT secret_id, iv, auth_tag, ciphertext, fetched_at, expires_at
+       FROM external_secret_cache WHERE secret_id = ?`,
+      [secretId]
+    );
+    if (!row) return null;
+    return {
+      secretId: toString(row.secret_id),
+      iv: toString(row.iv),
+      authTag: toString(row.auth_tag),
+      ciphertext: toString(row.ciphertext),
+      fetchedAt: toString(row.fetched_at),
+      expiresAt: toString(row.expires_at)
+    };
+  }
+
+  upsertExternalSecretCacheEntry(input: {
+    secretId: string;
+    iv: string;
+    authTag: string;
+    ciphertext: string;
+    expiresAt: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO external_secret_cache (secret_id, iv, auth_tag, ciphertext, fetched_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(secret_id) DO UPDATE SET
+         iv = excluded.iv,
+         auth_tag = excluded.auth_tag,
+         ciphertext = excluded.ciphertext,
+         fetched_at = excluded.fetched_at,
+         expires_at = excluded.expires_at`,
+      [input.secretId, input.iv, input.authTag, input.ciphertext, now, input.expiresAt]
+    );
+    this.persist();
+  }
+
+  deleteExternalSecretCacheEntry(secretId: string): void {
+    this.db.run(`DELETE FROM external_secret_cache WHERE secret_id = ?`, [secretId]);
+    this.persist();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.4 — Audit log
+  // ---------------------------------------------------------------------------
+
+  writeAuditLog(entry: {
+    id: string;
+    eventType: string;
+    category: string;
+    action: string;
+    outcome: "success" | "failure" | "denied";
+    actorUserId?: string | null;
+    actorEmail?: string | null;
+    actorType?: "user" | "api_key" | "system";
+    resourceType?: string | null;
+    resourceId?: string | null;
+    projectId?: string | null;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+    metadata?: unknown;
+    message?: string | null;
+    createdAt?: string;
+  }): void {
+    const createdAt = entry.createdAt ?? new Date().toISOString();
+    this.db.run(
+      `INSERT INTO audit_logs
+         (id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
+          resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        entry.id,
+        entry.eventType,
+        entry.category,
+        entry.action,
+        entry.outcome,
+        entry.actorUserId ?? null,
+        entry.actorEmail ?? null,
+        entry.actorType ?? "user",
+        entry.resourceType ?? null,
+        entry.resourceId ?? null,
+        entry.projectId ?? null,
+        entry.ipAddress ?? null,
+        entry.userAgent ?? null,
+        entry.metadata === undefined ? null : JSON.stringify(entry.metadata),
+        entry.message ?? null,
+        createdAt
+      ]
+    );
+    this.persist();
+  }
+
+  listAuditLogs(filter: {
+    category?: string;
+    eventType?: string;
+    outcome?: string;
+    actorUserId?: string;
+    resourceType?: string;
+    resourceId?: string;
+    projectId?: string;
+    from?: string;
+    to?: string;
+    page?: number;
+    pageSize?: number;
+  } = {}): {
+    items: Array<{
+      id: string;
+      eventType: string;
+      category: string;
+      action: string;
+      outcome: string;
+      actorUserId: string | null;
+      actorEmail: string | null;
+      actorType: string;
+      resourceType: string | null;
+      resourceId: string | null;
+      projectId: string | null;
+      ipAddress: string | null;
+      userAgent: string | null;
+      metadata: unknown;
+      message: string | null;
+      createdAt: string;
+    }>;
+    total: number;
+    page: number;
+    pageSize: number;
+  } {
+    const clauses: string[] = [];
+    const params: BindParams = [];
+    if (filter.category) {
+      clauses.push(`category = ?`);
+      params.push(filter.category);
+    }
+    if (filter.eventType) {
+      clauses.push(`event_type = ?`);
+      params.push(filter.eventType);
+    }
+    if (filter.outcome) {
+      clauses.push(`outcome = ?`);
+      params.push(filter.outcome);
+    }
+    if (filter.actorUserId) {
+      clauses.push(`actor_user_id = ?`);
+      params.push(filter.actorUserId);
+    }
+    if (filter.resourceType) {
+      clauses.push(`resource_type = ?`);
+      params.push(filter.resourceType);
+    }
+    if (filter.resourceId) {
+      clauses.push(`resource_id = ?`);
+      params.push(filter.resourceId);
+    }
+    if (filter.projectId) {
+      clauses.push(`project_id = ?`);
+      params.push(filter.projectId);
+    }
+    if (filter.from) {
+      clauses.push(`created_at >= ?`);
+      params.push(filter.from);
+    }
+    if (filter.to) {
+      clauses.push(`created_at <= ?`);
+      params.push(filter.to);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+    const totalRow = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM audit_logs ${where}`,
+      params
+    );
+    const total = totalRow ? toNumber(totalRow.count) : 0;
+
+    const pageSize = Math.max(1, Math.min(500, filter.pageSize ?? 50));
+    const page = Math.max(1, filter.page ?? 1);
+    const offset = (page - 1) * pageSize;
+
+    const rows = this.queryAll<{
+      id: string;
+      event_type: string;
+      category: string;
+      action: string;
+      outcome: string;
+      actor_user_id: string | null;
+      actor_email: string | null;
+      actor_type: string;
+      resource_type: string | null;
+      resource_id: string | null;
+      project_id: string | null;
+      ip_address: string | null;
+      user_agent: string | null;
+      metadata_json: string | null;
+      message: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
+              resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message, created_at
+       FROM audit_logs ${where}
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    );
+
+    return {
+      items: rows.map((row) => {
+        let metadata: unknown = null;
+        if (row.metadata_json) {
+          try {
+            metadata = JSON.parse(toString(row.metadata_json));
+          } catch {
+            metadata = null;
+          }
+        }
+        return {
+          id: toString(row.id),
+          eventType: toString(row.event_type),
+          category: toString(row.category),
+          action: toString(row.action),
+          outcome: toString(row.outcome),
+          actorUserId: row.actor_user_id ? toString(row.actor_user_id) : null,
+          actorEmail: row.actor_email ? toString(row.actor_email) : null,
+          actorType: toString(row.actor_type),
+          resourceType: row.resource_type ? toString(row.resource_type) : null,
+          resourceId: row.resource_id ? toString(row.resource_id) : null,
+          projectId: row.project_id ? toString(row.project_id) : null,
+          ipAddress: row.ip_address ? toString(row.ip_address) : null,
+          userAgent: row.user_agent ? toString(row.user_agent) : null,
+          metadata,
+          message: row.message ? toString(row.message) : null,
+          createdAt: toString(row.created_at)
+        };
+      }),
+      total,
+      page,
+      pageSize
+    };
+  }
+
+  pruneAuditLogs(options: { before: string }): number {
+    const existing = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM audit_logs WHERE created_at < ?`,
+      [options.before]
+    );
+    const count = existing ? toNumber(existing.count) : 0;
+    if (count === 0) return 0;
+    this.db.run(`DELETE FROM audit_logs WHERE created_at < ?`, [options.before]);
+    this.persist();
+    return count;
   }
 
   /**

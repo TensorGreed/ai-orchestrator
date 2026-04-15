@@ -358,6 +358,68 @@ export const MIGRATIONS: Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_sso_group_mappings_provider_group ON sso_group_mappings(provider, group_name);
     `
+  },
+  {
+    version: 7,
+    description: "External secrets providers + rotation cache + comprehensive audit log (Phase 5.3/5.4)",
+    up: `
+      CREATE TABLE IF NOT EXISTS external_secret_providers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        credentials_secret_id TEXT,
+        cache_ttl_ms INTEGER NOT NULL DEFAULT 300000,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_external_secret_providers_type ON external_secret_providers(type);
+
+      CREATE TABLE IF NOT EXISTS external_secret_cache (
+        secret_id TEXT PRIMARY KEY,
+        iv TEXT NOT NULL,
+        auth_tag TEXT NOT NULL,
+        ciphertext TEXT NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_external_secret_cache_expires_at ON external_secret_cache(expires_at);
+
+      ALTER TABLE secrets ADD COLUMN source TEXT DEFAULT 'local';
+      ALTER TABLE secrets ADD COLUMN external_provider_id TEXT;
+      ALTER TABLE secrets ADD COLUMN external_key TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_secrets_external_provider_id ON secrets(external_provider_id);
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        category TEXT NOT NULL,
+        action TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        actor_user_id TEXT,
+        actor_email TEXT,
+        actor_type TEXT NOT NULL DEFAULT 'user',
+        resource_type TEXT,
+        resource_id TEXT,
+        project_id TEXT,
+        ip_address TEXT,
+        user_agent TEXT,
+        metadata_json TEXT,
+        message TEXT,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_category ON audit_logs(category);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_user_id ON audit_logs(actor_user_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_resource_type ON audit_logs(resource_type);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome ON audit_logs(outcome);
+    `
   }
 ];
 
