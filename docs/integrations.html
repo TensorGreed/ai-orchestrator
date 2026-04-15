@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="L2M ships with 24+ native integrations across communication, data, productivity, payments, and cloud storage — all first-class nodes in the workflow canvas."
+    />
+    <meta property="og:title" content="L2M | Integrations" />
+    <meta
+      property="og:description"
+      content="Native Tier 1 and Tier 2 integrations: Slack, Teams, Notion, Airtable, Jira, Salesforce, HubSpot, Stripe, AWS S3, Google Workspace, Postgres, Mongo, Redis, and more."
+    />
+    <meta property="og:type" content="website" />
+    <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>L&sup2;M | Integrations</title>
+  </head>
+  <body>
+    <div class="surface-glow" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="container topbar-inner">
+        <a class="brand" href="./index.html" aria-label="L2M home">
+          <img src="./assets/lsquarem-logo.svg" alt="L2M logo" />
+          <div>
+            <strong>L<sup>2</sup>M</strong>
+            <span>Orchestration Studio</span>
+          </div>
+        </a>
+
+        <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu" aria-expanded="false">Menu</button>
+
+        <nav class="nav" id="siteNav">
+          <a href="./index.html#features">Features</a>
+          <a href="./index.html#automation">Automation</a>
+          <a href="./index.html#architecture">Architecture</a>
+          <a href="./integrations.html" class="active">Integrations</a>
+          <a href="./index.html#oss">Open Source</a>
+        </nav>
+
+        <a class="btn btn-subtle" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">
+          GitHub
+        </a>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero reveal">
+        <div class="container">
+          <p class="eyebrow">Native Integrations</p>
+          <h1 class="integrations-title">24+ connectors, first-class on the canvas</h1>
+          <p class="integrations-lede">
+            Every integration below is a native node in the L<sup>2</sup>M workflow engine — with secret management, retry
+            semantics, webhook triggers where applicable, and a configuration schema the Studio UI renders automatically. No
+            third-party glue layer, no sidecar processes.
+          </p>
+          <div class="integrations-stats">
+            <div><strong>24+</strong><span>connectors shipped</span></div>
+            <div><strong>11</strong><span>Tier 1 foundations</span></div>
+            <div><strong>13</strong><span>Tier 2 SaaS integrations</span></div>
+            <div><strong>6</strong><span>signed webhook triggers</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tier1" class="reveal">
+        <div class="container">
+          <header class="section-header">
+            <p class="eyebrow">Tier 1 &middot; Foundations</p>
+            <h2>Protocols, databases, and the communication backbone</h2>
+            <p class="section-sub">
+              Primitives every workflow eventually needs — HTTP, SQL, NoSQL, email, Slack, GitHub. Production-hardened with
+              retries, idempotency keys, and HMAC-verified webhook triggers.
+            </p>
+          </header>
+
+          <div class="integration-grid">
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/http.svg" alt="HTTP" loading="lazy" /></div>
+              <h3>HTTP Request</h3>
+              <p class="integration-cat">Protocol</p>
+              <p class="integration-nodes">http_request &middot; webhook_input &middot; webhook_response</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/slack.svg" alt="Slack" loading="lazy" /></div>
+              <h3>Slack</h3>
+              <p class="integration-cat">Communication</p>
+              <p class="integration-nodes">slack_send_message &middot; slack_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/smtp.svg" alt="SMTP" loading="lazy" /></div>
+              <h3>Email (SMTP)</h3>
+              <p class="integration-cat">Communication</p>
+              <p class="integration-nodes">smtp_send_email</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/imap.svg" alt="IMAP" loading="lazy" /></div>
+              <h3>Email (IMAP)</h3>
+              <p class="integration-cat">Communication</p>
+              <p class="integration-nodes">imap_email_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/gmail.svg" alt="Gmail" loading="lazy" /></div>
+              <h3>Gmail</h3>
+              <p class="integration-cat">Communication</p>
+              <p class="integration-nodes">smtp_send_email &middot; imap_email_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/google-sheets.svg" alt="Google Sheets" loading="lazy" /></div>
+              <h3>Google Sheets</h3>
+              <p class="integration-cat">Productivity</p>
+              <p class="integration-nodes">google_sheets_read &middot; append &middot; update &middot; trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/postgresql.svg" alt="PostgreSQL" loading="lazy" /></div>
+              <h3>PostgreSQL</h3>
+              <p class="integration-cat">Database</p>
+              <p class="integration-nodes">postgres_query &middot; postgres_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/mysql.svg" alt="MySQL" loading="lazy" /></div>
+              <h3>MySQL</h3>
+              <p class="integration-cat">Database</p>
+              <p class="integration-nodes">mysql_query</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/mongodb.svg" alt="MongoDB" loading="lazy" /></div>
+              <h3>MongoDB</h3>
+              <p class="integration-cat">Database</p>
+              <p class="integration-nodes">mongo_operation</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/redis.svg" alt="Redis" loading="lazy" /></div>
+              <h3>Redis</h3>
+              <p class="integration-cat">Database</p>
+              <p class="integration-nodes">redis_command &middot; redis_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/github.svg" alt="GitHub" loading="lazy" /></div>
+              <h3>GitHub</h3>
+              <p class="integration-cat">DevTools</p>
+              <p class="integration-nodes">github_action &middot; github_webhook_trigger</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="tier2" class="reveal">
+        <div class="container">
+          <header class="section-header">
+            <p class="eyebrow">Tier 2 &middot; SaaS &amp; Cloud</p>
+            <h2>The SaaS landscape your AI workflows actually touch</h2>
+            <p class="section-sub">
+              CRMs, payment providers, collaboration tools, and cloud storage — each with native authentication, signed
+              webhooks where the vendor supports them, and a configuration schema rendered inline in the Studio node modal.
+            </p>
+          </header>
+
+          <div class="integration-grid">
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/microsoft-teams.svg" alt="Microsoft Teams" loading="lazy" /></div>
+              <h3>Microsoft Teams</h3>
+              <p class="integration-cat">Communication</p>
+              <p class="integration-nodes">teams_send_message</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/notion.svg" alt="Notion" loading="lazy" /></div>
+              <h3>Notion</h3>
+              <p class="integration-cat">Productivity</p>
+              <p class="integration-nodes">notion_create_page &middot; notion_query_database</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/airtable.svg" alt="Airtable" loading="lazy" /></div>
+              <h3>Airtable</h3>
+              <p class="integration-cat">Productivity</p>
+              <p class="integration-nodes">create_record &middot; list_records &middot; update_record</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/jira.svg" alt="Jira" loading="lazy" /></div>
+              <h3>Jira</h3>
+              <p class="integration-cat">Project Management</p>
+              <p class="integration-nodes">jira_create_issue &middot; jira_search_issues</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/salesforce.svg" alt="Salesforce" loading="lazy" /></div>
+              <h3>Salesforce</h3>
+              <p class="integration-cat">CRM</p>
+              <p class="integration-nodes">salesforce_create_record &middot; salesforce_query</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/hubspot.svg" alt="HubSpot" loading="lazy" /></div>
+              <h3>HubSpot</h3>
+              <p class="integration-cat">CRM</p>
+              <p class="integration-nodes">hubspot_create_contact &middot; hubspot_get_contact</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/stripe.svg" alt="Stripe" loading="lazy" /></div>
+              <h3>Stripe</h3>
+              <p class="integration-cat">Payments</p>
+              <p class="integration-nodes">create_customer &middot; create_charge &middot; webhook_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/aws-s3.svg" alt="AWS S3" loading="lazy" /></div>
+              <h3>AWS S3</h3>
+              <p class="integration-cat">Cloud Storage</p>
+              <p class="integration-nodes">put_object &middot; get_object &middot; list_objects</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/telegram.svg" alt="Telegram" loading="lazy" /></div>
+              <h3>Telegram</h3>
+              <p class="integration-cat">Communication</p>
+              <p class="integration-nodes">telegram_send_message &middot; telegram_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/discord.svg" alt="Discord" loading="lazy" /></div>
+              <h3>Discord</h3>
+              <p class="integration-cat">Communication</p>
+              <p class="integration-nodes">discord_send_message &middot; discord_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/google-drive.svg" alt="Google Drive" loading="lazy" /></div>
+              <h3>Google Drive</h3>
+              <p class="integration-cat">Cloud Storage</p>
+              <p class="integration-nodes">google_drive_trigger</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/google-calendar.svg" alt="Google Calendar" loading="lazy" /></div>
+              <h3>Google Calendar</h3>
+              <p class="integration-cat">Productivity</p>
+              <p class="integration-nodes">create_event &middot; list_events</p>
+            </article>
+
+            <article class="integration-card">
+              <div class="integration-logo"><img src="./assets/logos/twilio.svg" alt="Twilio" loading="lazy" /></div>
+              <h3>Twilio</h3>
+              <p class="integration-cat">Communication</p>
+              <p class="integration-nodes">twilio_send_sms</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="webhook-security" class="reveal">
+        <div class="container">
+          <header class="section-header">
+            <p class="eyebrow">Security</p>
+            <h2>Every inbound webhook is signature-verified</h2>
+            <p class="section-sub">
+              Triggers don't just listen on a path — they validate the vendor's signature scheme before the workflow runs, and
+              they enforce replay windows where the vendor supports them.
+            </p>
+          </header>
+          <div class="webhook-grid">
+            <div class="webhook-card">
+              <h3>Stripe</h3>
+              <p>HMAC-SHA256 over <code>{t}.{body}</code> with a 5-minute replay window.</p>
+            </div>
+            <div class="webhook-card">
+              <h3>GitHub</h3>
+              <p>HMAC-SHA256 over the raw body, matched in constant time against <code>X-Hub-Signature-256</code>.</p>
+            </div>
+            <div class="webhook-card">
+              <h3>Slack</h3>
+              <p>Signed-secret verification with timestamp skew protection and a granular event filter.</p>
+            </div>
+            <div class="webhook-card">
+              <h3>Discord</h3>
+              <p>Ed25519 signature verification using the application public key, with PING/PONG handshake.</p>
+            </div>
+            <div class="webhook-card">
+              <h3>Telegram</h3>
+              <p>Constant-time match of <code>X-Telegram-Bot-Api-Secret-Token</code> against the configured secret.</p>
+            </div>
+            <div class="webhook-card">
+              <h3>Generic HMAC</h3>
+              <p>Pluggable <code>hmac_sha256</code> mode on any <code>webhook_input</code> node for custom vendors.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="roadmap" class="reveal cta">
+        <div class="container cta-inner">
+          <h2>More integrations land every release</h2>
+          <p>
+            Track upcoming Tier 3 connectors — Zendesk, Intercom, Shopify, Asana, Trello, Monday, ClickUp, Box, Dropbox, and
+            Azure Blob — in the parity roadmap. Pull requests welcome.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://github.com/TensorGreed/ai-orchestrator/blob/main/N8N_PARITY_ROADMAP.md" target="_blank" rel="noreferrer">
+              View Roadmap
+            </a>
+            <a class="btn btn-subtle" href="./index.html">Back to Home</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer-inner">
+        <p><strong>L<sup>2</sup>M</strong> <span id="year"></span></p>
+        <p>
+          Powered by
+          <a href="https://tensorgreed.com" target="_blank" rel="noreferrer">tensorgreed.com</a>
+        </p>
+      </div>
+    </footer>
+
+    <script src="./main.js"></script>
+  </body>
+</html>

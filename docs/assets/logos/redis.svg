@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Redis">
+  <path fill="#A41E11" d="M12 3 3 6.5 12 10l9-3.5z"/>
+  <path fill="#DC382D" d="M3 10.5 12 14l9-3.5V6.5L12 10 3 6.5z"/>
+  <path fill="#A41E11" d="M3 14.5 12 18l9-3.5v-4L12 14l-9-3.5z"/>
+  <path fill="#fff" d="M9 8.8 12 9.5l3-.7-3-1z"/>
+  <circle fill="#fff" cx="16" cy="7.5" r="0.4"/>
+</svg>
