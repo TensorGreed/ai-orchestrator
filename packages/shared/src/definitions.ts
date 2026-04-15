@@ -2093,6 +2093,576 @@ export const nodeDefinitions: NodeDefinition[] = [
       qos: 1,
       active: true
     }
+  },
+  // ---------------------------------------------------------------------------
+  // Phase 3.2 — Tier 2 integrations (Teams, Notion, Airtable, Jira, Salesforce,
+  // HubSpot, Stripe, AWS S3, Telegram, Discord, Google Drive trigger,
+  // Google Calendar, Twilio)
+  // ---------------------------------------------------------------------------
+  {
+    type: "teams_send_message",
+    label: "Microsoft Teams: Send Message",
+    category: "Connector",
+    description: "Post a card or text message to a Microsoft Teams channel via an incoming webhook.",
+    configSchema: {
+      type: "object",
+      properties: {
+        webhookUrl: { type: "string" },
+        secretRef: { type: "object" },
+        text: { type: "string" },
+        title: { type: "string" },
+        themeColor: { type: "string" },
+        cardJson: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      webhookUrl: "https://outlook.office.com/webhook/...",
+      text: "Hello from ai-orchestrator {{user_prompt}}",
+      title: "Notification",
+      themeColor: "0078D4"
+    }
+  },
+  {
+    type: "notion_create_page",
+    label: "Notion: Create Page",
+    category: "Connector",
+    description: "Create a page in a Notion database using an integration token.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        databaseId: { type: "string" },
+        titleProperty: { type: "string" },
+        title: { type: "string" },
+        propertiesJson: { type: "string" },
+        contentMarkdown: { type: "string" }
+      },
+      required: ["databaseId"]
+    },
+    sampleConfig: {
+      databaseId: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      titleProperty: "Name",
+      title: "New entry from {{user_prompt}}",
+      propertiesJson: "{}"
+    }
+  },
+  {
+    type: "notion_query_database",
+    label: "Notion: Query Database",
+    category: "Connector",
+    description: "Query a Notion database with optional filter/sort JSON.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        databaseId: { type: "string" },
+        filterJson: { type: "string" },
+        sortsJson: { type: "string" },
+        pageSize: { type: "number" }
+      },
+      required: ["databaseId"]
+    },
+    sampleConfig: {
+      databaseId: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      pageSize: 50
+    }
+  },
+  {
+    type: "airtable_create_record",
+    label: "Airtable: Create Record",
+    category: "Connector",
+    description: "Create one or more records in an Airtable table (personal access token).",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        baseId: { type: "string" },
+        table: { type: "string" },
+        fieldsJson: { type: "string" },
+        typecast: { type: "boolean" }
+      },
+      required: ["baseId", "table"]
+    },
+    sampleConfig: {
+      baseId: "appXXXXXXXXXXXXXX",
+      table: "Leads",
+      fieldsJson: "{\"Name\":\"{{user_prompt}}\"}",
+      typecast: true
+    }
+  },
+  {
+    type: "airtable_list_records",
+    label: "Airtable: List Records",
+    category: "Connector",
+    description: "List records from an Airtable table with optional formula + max page size.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        baseId: { type: "string" },
+        table: { type: "string" },
+        filterByFormula: { type: "string" },
+        maxRecords: { type: "number" },
+        view: { type: "string" }
+      },
+      required: ["baseId", "table"]
+    },
+    sampleConfig: {
+      baseId: "appXXXXXXXXXXXXXX",
+      table: "Leads",
+      maxRecords: 100
+    }
+  },
+  {
+    type: "airtable_update_record",
+    label: "Airtable: Update Record",
+    category: "Connector",
+    description: "Patch an Airtable record by ID.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        baseId: { type: "string" },
+        table: { type: "string" },
+        recordId: { type: "string" },
+        fieldsJson: { type: "string" }
+      },
+      required: ["baseId", "table", "recordId"]
+    },
+    sampleConfig: {
+      baseId: "appXXXXXXXXXXXXXX",
+      table: "Leads",
+      recordId: "recXXXXXXXXXXXXXX",
+      fieldsJson: "{\"Status\":\"Contacted\"}"
+    }
+  },
+  {
+    type: "jira_create_issue",
+    label: "Jira: Create Issue",
+    category: "Connector",
+    description: "Create a Jira Cloud issue. Auth via Atlassian API token (email:token basic auth stored in the secret).",
+    configSchema: {
+      type: "object",
+      properties: {
+        baseUrl: { type: "string" },
+        secretRef: { type: "object" },
+        email: { type: "string" },
+        projectKey: { type: "string" },
+        issueType: { type: "string" },
+        summary: { type: "string" },
+        description: { type: "string" },
+        fieldsJson: { type: "string" }
+      },
+      required: ["baseUrl", "projectKey", "issueType", "summary"]
+    },
+    sampleConfig: {
+      baseUrl: "https://your-domain.atlassian.net",
+      email: "you@example.com",
+      projectKey: "ENG",
+      issueType: "Task",
+      summary: "New ticket from {{user_prompt}}"
+    }
+  },
+  {
+    type: "jira_search_issues",
+    label: "Jira: Search Issues",
+    category: "Connector",
+    description: "Run a JQL search against Jira Cloud.",
+    configSchema: {
+      type: "object",
+      properties: {
+        baseUrl: { type: "string" },
+        secretRef: { type: "object" },
+        email: { type: "string" },
+        jql: { type: "string" },
+        maxResults: { type: "number" }
+      },
+      required: ["baseUrl", "jql"]
+    },
+    sampleConfig: {
+      baseUrl: "https://your-domain.atlassian.net",
+      email: "you@example.com",
+      jql: "project = ENG AND status = \"To Do\"",
+      maxResults: 50
+    }
+  },
+  {
+    type: "salesforce_create_record",
+    label: "Salesforce: Create Record",
+    category: "Connector",
+    description: "Create a record on a Salesforce sObject. Auth via OAuth access token stored as a secret.",
+    configSchema: {
+      type: "object",
+      properties: {
+        instanceUrl: { type: "string" },
+        apiVersion: { type: "string" },
+        secretRef: { type: "object" },
+        sobject: { type: "string" },
+        fieldsJson: { type: "string" }
+      },
+      required: ["instanceUrl", "sobject"]
+    },
+    sampleConfig: {
+      instanceUrl: "https://your-instance.my.salesforce.com",
+      apiVersion: "v58.0",
+      sobject: "Lead",
+      fieldsJson: "{\"LastName\":\"Smith\",\"Company\":\"Acme\"}"
+    }
+  },
+  {
+    type: "salesforce_query",
+    label: "Salesforce: SOQL Query",
+    category: "Connector",
+    description: "Run a SOQL query against Salesforce.",
+    configSchema: {
+      type: "object",
+      properties: {
+        instanceUrl: { type: "string" },
+        apiVersion: { type: "string" },
+        secretRef: { type: "object" },
+        soql: { type: "string" }
+      },
+      required: ["instanceUrl", "soql"]
+    },
+    sampleConfig: {
+      instanceUrl: "https://your-instance.my.salesforce.com",
+      apiVersion: "v58.0",
+      soql: "SELECT Id, Name FROM Account LIMIT 10"
+    }
+  },
+  {
+    type: "hubspot_create_contact",
+    label: "HubSpot: Create Contact",
+    category: "Connector",
+    description: "Create a HubSpot contact using a private app access token.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        propertiesJson: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      propertiesJson: "{\"email\":\"{{user_prompt}}\",\"firstname\":\"Jane\"}"
+    }
+  },
+  {
+    type: "hubspot_get_contact",
+    label: "HubSpot: Get Contact",
+    category: "Connector",
+    description: "Fetch a HubSpot contact by ID or email.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        identifier: { type: "string" },
+        idProperty: { type: "string" }
+      },
+      required: ["identifier"]
+    },
+    sampleConfig: {
+      identifier: "someone@example.com",
+      idProperty: "email"
+    }
+  },
+  {
+    type: "stripe_create_customer",
+    label: "Stripe: Create Customer",
+    category: "Connector",
+    description: "Create a Stripe customer. Secret must contain a restricted/private API key.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        email: { type: "string" },
+        name: { type: "string" },
+        description: { type: "string" },
+        metadataJson: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      email: "{{user_prompt}}",
+      name: "Customer from ai-orchestrator"
+    }
+  },
+  {
+    type: "stripe_create_charge",
+    label: "Stripe: Create PaymentIntent",
+    category: "Connector",
+    description: "Create a Stripe PaymentIntent (the modern replacement for Charges).",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        amount: { type: "number" },
+        currency: { type: "string" },
+        customerId: { type: "string" },
+        description: { type: "string" },
+        metadataJson: { type: "string" }
+      },
+      required: ["amount", "currency"]
+    },
+    sampleConfig: {
+      amount: 1000,
+      currency: "usd",
+      description: "Charge from ai-orchestrator"
+    }
+  },
+  {
+    type: "stripe_webhook_trigger",
+    label: "Stripe Webhook Trigger",
+    category: "Input",
+    description: "Webhook-based trigger that validates Stripe signatures. Point Stripe at /api/webhooks/stripe/:workflowId.",
+    configSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        signingSecretRef: { type: "object" },
+        replayToleranceSeconds: { type: "number" }
+      }
+    },
+    sampleConfig: {
+      path: "stripe-events",
+      replayToleranceSeconds: 300
+    }
+  },
+  {
+    type: "aws_s3_put_object",
+    label: "AWS S3: Put Object",
+    category: "Connector",
+    description: "Upload an object to S3 via SigV4. Credentials secret stores JSON {accessKeyId, secretAccessKey, sessionToken?}.",
+    configSchema: {
+      type: "object",
+      properties: {
+        region: { type: "string" },
+        bucket: { type: "string" },
+        key: { type: "string" },
+        body: { type: "string" },
+        contentType: { type: "string" },
+        secretRef: { type: "object" }
+      },
+      required: ["region", "bucket", "key"]
+    },
+    sampleConfig: {
+      region: "us-east-1",
+      bucket: "my-bucket",
+      key: "reports/{{result}}.json",
+      body: "{{result}}",
+      contentType: "application/json"
+    }
+  },
+  {
+    type: "aws_s3_get_object",
+    label: "AWS S3: Get Object",
+    category: "Connector",
+    description: "Download an object from S3. Returns text for text/* and application/json, otherwise base64.",
+    configSchema: {
+      type: "object",
+      properties: {
+        region: { type: "string" },
+        bucket: { type: "string" },
+        key: { type: "string" },
+        secretRef: { type: "object" }
+      },
+      required: ["region", "bucket", "key"]
+    },
+    sampleConfig: {
+      region: "us-east-1",
+      bucket: "my-bucket",
+      key: "reports/input.json"
+    }
+  },
+  {
+    type: "aws_s3_list_objects",
+    label: "AWS S3: List Objects",
+    category: "Connector",
+    description: "List objects under a prefix via S3 ListObjectsV2.",
+    configSchema: {
+      type: "object",
+      properties: {
+        region: { type: "string" },
+        bucket: { type: "string" },
+        prefix: { type: "string" },
+        maxKeys: { type: "number" },
+        secretRef: { type: "object" }
+      },
+      required: ["region", "bucket"]
+    },
+    sampleConfig: {
+      region: "us-east-1",
+      bucket: "my-bucket",
+      prefix: "reports/",
+      maxKeys: 100
+    }
+  },
+  {
+    type: "telegram_send_message",
+    label: "Telegram: Send Message",
+    category: "Connector",
+    description: "Send a Telegram message via the Bot API. Secret stores the bot token.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        chatId: { type: "string" },
+        text: { type: "string" },
+        parseMode: { type: "string", enum: ["", "Markdown", "MarkdownV2", "HTML"] },
+        disableWebPagePreview: { type: "boolean" }
+      },
+      required: ["chatId", "text"]
+    },
+    sampleConfig: {
+      chatId: "@my_channel",
+      text: "Hello from ai-orchestrator {{user_prompt}}",
+      parseMode: "Markdown"
+    }
+  },
+  {
+    type: "telegram_trigger",
+    label: "Telegram Trigger",
+    category: "Input",
+    description: "Webhook-based trigger validated by X-Telegram-Bot-Api-Secret-Token. Point setWebhook at /api/webhooks/telegram/:workflowId.",
+    configSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        signingSecretRef: { type: "object" }
+      }
+    },
+    sampleConfig: {
+      path: "telegram-events"
+    }
+  },
+  {
+    type: "discord_send_message",
+    label: "Discord: Send Message",
+    category: "Connector",
+    description: "Send a message via a Discord webhook URL (or bot token).",
+    configSchema: {
+      type: "object",
+      properties: {
+        webhookUrl: { type: "string" },
+        secretRef: { type: "object" },
+        content: { type: "string" },
+        username: { type: "string" },
+        embedsJson: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      webhookUrl: "https://discord.com/api/webhooks/.../.../",
+      content: "Notification from ai-orchestrator: {{user_prompt}}",
+      username: "orchestrator-bot"
+    }
+  },
+  {
+    type: "discord_trigger",
+    label: "Discord Trigger",
+    category: "Input",
+    description: "Webhook-based trigger validated with Ed25519 signature (X-Signature-Ed25519 + X-Signature-Timestamp).",
+    configSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        publicKey: { type: "string" }
+      },
+      required: ["publicKey"]
+    },
+    sampleConfig: {
+      path: "discord-interactions",
+      publicKey: "<application public key (hex)>"
+    }
+  },
+  {
+    type: "google_drive_trigger",
+    label: "Google Drive Trigger",
+    category: "Input",
+    description: "Poll a Google Drive folder for new or modified files using an access token.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        folderId: { type: "string" },
+        query: { type: "string" },
+        pollIntervalSeconds: { type: "number" }
+      },
+      required: ["folderId"]
+    },
+    sampleConfig: {
+      folderId: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      pollIntervalSeconds: 60
+    }
+  },
+  {
+    type: "google_calendar_create_event",
+    label: "Google Calendar: Create Event",
+    category: "Connector",
+    description: "Create a calendar event using an OAuth access token stored as a secret.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        calendarId: { type: "string" },
+        summary: { type: "string" },
+        description: { type: "string" },
+        start: { type: "string" },
+        end: { type: "string" },
+        timeZone: { type: "string" },
+        attendeesCsv: { type: "string" }
+      },
+      required: ["calendarId", "summary", "start", "end"]
+    },
+    sampleConfig: {
+      calendarId: "primary",
+      summary: "Kick-off — {{user_prompt}}",
+      start: "2026-05-01T10:00:00",
+      end: "2026-05-01T11:00:00",
+      timeZone: "America/New_York"
+    }
+  },
+  {
+    type: "google_calendar_list_events",
+    label: "Google Calendar: List Events",
+    category: "Connector",
+    description: "List upcoming events from a Google Calendar.",
+    configSchema: {
+      type: "object",
+      properties: {
+        secretRef: { type: "object" },
+        calendarId: { type: "string" },
+        timeMin: { type: "string" },
+        timeMax: { type: "string" },
+        maxResults: { type: "number" },
+        q: { type: "string" }
+      },
+      required: ["calendarId"]
+    },
+    sampleConfig: {
+      calendarId: "primary",
+      maxResults: 25
+    }
+  },
+  {
+    type: "twilio_send_sms",
+    label: "Twilio: Send SMS",
+    category: "Connector",
+    description: "Send an SMS via Twilio. Secret stores the auth token paired with the Account SID in config.",
+    configSchema: {
+      type: "object",
+      properties: {
+        accountSid: { type: "string" },
+        secretRef: { type: "object" },
+        from: { type: "string" },
+        to: { type: "string" },
+        body: { type: "string" }
+      },
+      required: ["accountSid", "from", "to", "body"]
+    },
+    sampleConfig: {
+      accountSid: "AC...",
+      from: "+15551234567",
+      to: "+15557654321",
+      body: "Alert: {{user_prompt}}"
+    }
   }
 ];
 

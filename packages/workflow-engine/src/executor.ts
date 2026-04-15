@@ -34,6 +34,7 @@ import {
 import { renderTemplate, tryParseJson } from "./template";
 import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
+import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch";
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
 import { executePythonCodeNode } from "./python-runner";
 import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
@@ -3490,6 +3491,38 @@ async function executeNode(
       });
     }
 
+    case "teams_send_message":
+    case "notion_create_page":
+    case "notion_query_database":
+    case "airtable_create_record":
+    case "airtable_list_records":
+    case "airtable_update_record":
+    case "jira_create_issue":
+    case "jira_search_issues":
+    case "salesforce_create_record":
+    case "salesforce_query":
+    case "hubspot_create_contact":
+    case "hubspot_get_contact":
+    case "stripe_create_customer":
+    case "stripe_create_charge":
+    case "stripe_webhook_trigger":
+    case "aws_s3_put_object":
+    case "aws_s3_get_object":
+    case "aws_s3_list_objects":
+    case "telegram_send_message":
+    case "telegram_trigger":
+    case "discord_send_message":
+    case "discord_trigger":
+    case "google_drive_trigger":
+    case "google_calendar_create_event":
+    case "google_calendar_list_events":
+    case "twilio_send_sms": {
+      return executeTier2Node(node, config, {
+        templateData,
+        resolveSecret: dependencies.resolveSecret
+      });
+    }
+
     case "manual_trigger":
     case "form_trigger":
     case "chat_trigger":
@@ -3547,7 +3580,8 @@ const RETRYABLE_NODE_TYPES = new Set([
   "http_request",
   "rag_retrieve",
   "embeddings_azure_openai",
-  ...Array.from(TIER1_NODE_TYPES)
+  ...Array.from(TIER1_NODE_TYPES),
+  ...Array.from(TIER2_NODE_TYPES)
 ]);
 
 function getRetryConfigForNode(node: WorkflowNode): RetryConfig | undefined {

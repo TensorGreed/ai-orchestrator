@@ -75,6 +75,22 @@ const TIER1_INTEGRATIONS: Tier1IntegrationSpec[] = [
   { id: "github", label: "GitHub", category: "DevTools", logoPath: "/logos/github.svg", nodeTypes: ["github_action", "github_webhook_trigger"] }
 ];
 
+const TIER2_INTEGRATIONS: Tier1IntegrationSpec[] = [
+  { id: "microsoft-teams", label: "Microsoft Teams", category: "Communication", logoPath: "/logos/microsoft-teams.svg", nodeTypes: ["teams_send_message"] },
+  { id: "notion", label: "Notion", category: "Productivity", logoPath: "/logos/notion.svg", nodeTypes: ["notion_create_page", "notion_query_database"] },
+  { id: "airtable", label: "Airtable", category: "Productivity", logoPath: "/logos/airtable.svg", nodeTypes: ["airtable_create_record", "airtable_list_records", "airtable_update_record"] },
+  { id: "jira", label: "Jira", category: "Project Management", logoPath: "/logos/jira.svg", nodeTypes: ["jira_create_issue", "jira_search_issues"] },
+  { id: "salesforce", label: "Salesforce", category: "CRM", logoPath: "/logos/salesforce.svg", nodeTypes: ["salesforce_create_record", "salesforce_query"] },
+  { id: "hubspot", label: "HubSpot", category: "CRM", logoPath: "/logos/hubspot.svg", nodeTypes: ["hubspot_create_contact", "hubspot_get_contact"] },
+  { id: "stripe", label: "Stripe", category: "Payments", logoPath: "/logos/stripe.svg", nodeTypes: ["stripe_create_customer", "stripe_create_charge", "stripe_webhook_trigger"] },
+  { id: "aws-s3", label: "AWS S3", category: "Cloud Storage", logoPath: "/logos/aws-s3.svg", nodeTypes: ["aws_s3_put_object", "aws_s3_get_object", "aws_s3_list_objects"] },
+  { id: "telegram", label: "Telegram", category: "Communication", logoPath: "/logos/telegram.svg", nodeTypes: ["telegram_send_message", "telegram_trigger"] },
+  { id: "discord", label: "Discord", category: "Communication", logoPath: "/logos/discord.svg", nodeTypes: ["discord_send_message", "discord_trigger"] },
+  { id: "google-drive", label: "Google Drive", category: "Cloud Storage", logoPath: "/logos/google-drive.svg", nodeTypes: ["google_drive_trigger"] },
+  { id: "google-calendar", label: "Google Calendar", category: "Productivity", logoPath: "/logos/google-calendar.svg", nodeTypes: ["google_calendar_create_event", "google_calendar_list_events"] },
+  { id: "twilio", label: "Twilio", category: "Communication", logoPath: "/logos/twilio.svg", nodeTypes: ["twilio_send_sms"] }
+];
+
 const secretCreateSchema = z
   .object({
     name: z.string().min(1),
@@ -3134,7 +3150,7 @@ export function createApp(
     if (!user) {
       return;
     }
-    return { integrations: TIER1_INTEGRATIONS };
+    return { integrations: [...TIER1_INTEGRATIONS, ...TIER2_INTEGRATIONS] };
   });
 
   app.get<{ Querystring: { projectId?: string; folderId?: string; tag?: string; search?: string } }>(
@@ -4609,6 +4625,219 @@ export function createApp(
         result,
         triggerType: "github_webhook",
         triggeredBy: "github",
+        requestInput: body ?? {}
+      });
+      return { ok: true, status: result.status };
+    }
+  );
+
+  // Phase 3.2 — Stripe webhook. Signature: t=<unix_seconds>,v1=<hex hmac-sha256(t.payload, secret)>
+  app.post<{ Params: { workflowId: string }; Body: unknown }>(
+    "/api/webhooks/stripe/:workflowId",
+    { config: { rawBody: true } },
+    async (request, reply) => {
+      const workflow = store.getWorkflow(request.params.workflowId);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const stripeNode = workflow.nodes.find((n) => n.type === "stripe_webhook_trigger");
+      if (!stripeNode) {
+        reply.code(400);
+        return { error: "Workflow has no stripe_webhook_trigger node" };
+      }
+      const rawBody = getRawRequestBody(request);
+      const secretRef = toSecretReference((stripeNode.config as Record<string, unknown>).signingSecretRef);
+      const signingSecret = await secretService.resolveSecret(secretRef);
+      if (!signingSecret) {
+        reply.code(500);
+        return { error: "Stripe signing secret not configured" };
+      }
+      const sigHeader = getHeaderValue(request.headers, "stripe-signature");
+      if (!sigHeader) {
+        reply.code(401);
+        return { error: "Missing Stripe-Signature header" };
+      }
+      const parts = sigHeader.split(",").map((p) => p.trim());
+      const ts = parts.find((p) => p.startsWith("t="))?.slice(2) ?? "";
+      const v1Signatures = parts.filter((p) => p.startsWith("v1=")).map((p) => p.slice(3));
+      if (!ts || v1Signatures.length === 0) {
+        reply.code(401);
+        return { error: "Malformed Stripe-Signature header" };
+      }
+      const tsMs = Number(ts) * 1000;
+      const tolerance = Number((stripeNode.config as Record<string, unknown>).replayToleranceSeconds ?? 300) * 1000;
+      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) {
+        reply.code(401);
+        return { error: "Stripe timestamp outside tolerance" };
+      }
+      const expected = crypto.createHmac("sha256", signingSecret).update(`${ts}.${rawBody}`).digest("hex");
+      const matches = v1Signatures.some((sig) => safeEqualSecret(expected, sig));
+      if (!matches) {
+        reply.code(401);
+        return { error: "Stripe signature mismatch" };
+      }
+
+      const body = request.body as Record<string, unknown> | undefined;
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "stripe_webhook",
+        triggeredBy: "stripe",
+        requestInput: body ?? {}
+      });
+      const result = await runWorkflowExecution({
+        workflow,
+        webhookPayload: body ?? {},
+        executionId,
+        triggerType: "stripe_webhook",
+        triggeredBy: "stripe",
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "stripe_webhook",
+        triggeredBy: "stripe",
+        requestInput: body ?? {}
+      });
+      return { ok: true, status: result.status };
+    }
+  );
+
+  // Phase 3.2 — Telegram webhook. Bot API sends X-Telegram-Bot-Api-Secret-Token if configured on setWebhook.
+  app.post<{ Params: { workflowId: string }; Body: unknown }>(
+    "/api/webhooks/telegram/:workflowId",
+    { config: { rawBody: true } },
+    async (request, reply) => {
+      const workflow = store.getWorkflow(request.params.workflowId);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const tgNode = workflow.nodes.find((n) => n.type === "telegram_trigger");
+      if (!tgNode) {
+        reply.code(400);
+        return { error: "Workflow has no telegram_trigger node" };
+      }
+      const secretRef = toSecretReference((tgNode.config as Record<string, unknown>).signingSecretRef);
+      const configuredSecret = await secretService.resolveSecret(secretRef);
+      if (configuredSecret) {
+        const headerValue = getHeaderValue(request.headers, "x-telegram-bot-api-secret-token");
+        if (!headerValue || !safeEqualSecret(configuredSecret, headerValue)) {
+          reply.code(401);
+          return { error: "Telegram secret token mismatch" };
+        }
+      }
+
+      const body = request.body as Record<string, unknown> | undefined;
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "telegram_webhook",
+        triggeredBy: "telegram",
+        requestInput: body ?? {}
+      });
+      const result = await runWorkflowExecution({
+        workflow,
+        webhookPayload: body ?? {},
+        executionId,
+        triggerType: "telegram_webhook",
+        triggeredBy: "telegram",
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "telegram_webhook",
+        triggeredBy: "telegram",
+        requestInput: body ?? {}
+      });
+      return { ok: true, status: result.status };
+    }
+  );
+
+  // Phase 3.2 — Discord interactions webhook. Validates Ed25519 signature with the app's public key.
+  app.post<{ Params: { workflowId: string }; Body: unknown }>(
+    "/api/webhooks/discord/:workflowId",
+    { config: { rawBody: true } },
+    async (request, reply) => {
+      const workflow = store.getWorkflow(request.params.workflowId);
+      if (!workflow) {
+        reply.code(404);
+        return { error: "Workflow not found" };
+      }
+      const dcNode = workflow.nodes.find((n) => n.type === "discord_trigger");
+      if (!dcNode) {
+        reply.code(400);
+        return { error: "Workflow has no discord_trigger node" };
+      }
+      const rawBody = getRawRequestBody(request);
+      const nodeConfig = dcNode.config as Record<string, unknown>;
+      const publicKeyHex = typeof nodeConfig.publicKey === "string" ? nodeConfig.publicKey.trim() : "";
+      if (!publicKeyHex) {
+        reply.code(500);
+        return { error: "Discord publicKey not configured" };
+      }
+      const signature = getHeaderValue(request.headers, "x-signature-ed25519");
+      const timestamp = getHeaderValue(request.headers, "x-signature-timestamp");
+      if (!signature || !timestamp) {
+        reply.code(401);
+        return { error: "Missing Discord signature headers" };
+      }
+      try {
+        const publicKey = Buffer.from(publicKeyHex, "hex");
+        const sig = Buffer.from(signature, "hex");
+        const message = Buffer.concat([Buffer.from(timestamp, "utf8"), Buffer.from(rawBody, "utf8")]);
+        const keyObject = crypto.createPublicKey({
+          key: Buffer.concat([
+            Buffer.from("302a300506032b6570032100", "hex"), // SubjectPublicKeyInfo prefix for Ed25519
+            publicKey
+          ]),
+          format: "der",
+          type: "spki"
+        });
+        const verified = crypto.verify(null, message, keyObject, sig);
+        if (!verified) {
+          reply.code(401);
+          return { error: "Discord signature mismatch" };
+        }
+      } catch (err) {
+        reply.code(401);
+        return { error: `Discord signature verification failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+
+      const body = request.body as Record<string, unknown> | undefined;
+      // Discord interactions ping — must reply with type=1 immediately.
+      if (body && body.type === 1) {
+        return { type: 1 };
+      }
+      const executionId = crypto.randomUUID();
+      const progressHooks = createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "discord_webhook",
+        triggeredBy: "discord",
+        requestInput: body ?? {}
+      });
+      const result = await runWorkflowExecution({
+        workflow,
+        webhookPayload: body ?? {},
+        executionId,
+        triggerType: "discord_webhook",
+        triggeredBy: "discord",
+        hooks: progressHooks
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "discord_webhook",
+        triggeredBy: "discord",
         requestInput: body ?? {}
       });
       return { ok: true, status: result.status };
