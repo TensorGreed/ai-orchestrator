@@ -1,0 +1,60 @@
+{
+  "family": "ai-orchestrator-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ai-orchestrator-task-role",
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/ai-orchestrator:latest",
+      "essential": true,
+      "portMappings": [{ "containerPort": 4000, "protocol": "tcp" }],
+      "environment": [
+        { "name": "API_HOST", "value": "0.0.0.0" },
+        { "name": "API_PORT", "value": "4000" },
+        { "name": "WEB_ORIGIN", "value": "https://ai-orchestrator.example.com" },
+        { "name": "DB_TYPE", "value": "postgres" },
+        { "name": "DB_POSTGRESDB_SSL", "value": "true" },
+        { "name": "AUTH_ALLOW_PUBLIC_REGISTER", "value": "false" },
+        { "name": "COOKIE_SECURE", "value": "true" },
+        { "name": "METRICS_ENABLED", "value": "true" },
+        { "name": "WORKER_MODE", "value": "all" },
+        { "name": "HA_ENABLED", "value": "true" },
+        { "name": "HA_LEASE_TTL_MS", "value": "30000" },
+        { "name": "HA_RENEW_INTERVAL_MS", "value": "10000" }
+      ],
+      "secrets": [
+        {
+          "name": "SECRET_MASTER_KEY_BASE64",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ai-orchestrator/master-key"
+        },
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ai-orchestrator/db-url"
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ai-orchestrator/openai-key"
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"],
+        "interval": 10,
+        "timeout": 3,
+        "retries": 5,
+        "startPeriod": 30
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ai-orchestrator",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "api"
+        }
+      }
+    }
+  ]
+}

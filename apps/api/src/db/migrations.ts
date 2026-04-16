@@ -514,6 +514,21 @@ export const MIGRATIONS: Migration[] = [
         updated_at TIMESTAMPTZ NOT NULL
       );
     `
+  },
+  {
+    version: 10,
+    description: "Multi-main HA leader election (Phase 7.1)",
+    up: `
+      CREATE TABLE IF NOT EXISTS leader_leases (
+        lease_name TEXT PRIMARY KEY,
+        holder_id TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        acquired_at TIMESTAMPTZ NOT NULL,
+        renewed_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_leader_leases_expires_at ON leader_leases(expires_at);
+    `
   }
 ];
 

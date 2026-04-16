@@ -1,0 +1,158 @@
+## Production docker-compose topology for ai-orchestrator.
+##
+## Features:
+##  - Two API replicas (multi-main HA via DB leader lease)
+##  - Dedicated webhook replicas (WORKER_MODE=webhook)
+##  - Web UI behind Nginx
+##  - PostgreSQL (required for HA; SQLite is single-writer)
+##  - Redis placeholder (reserved for Phase 7.2 external queue)
+##  - A front-end Nginx that routes /webhook/* to the webhook replicas and
+##    everything else to the API replicas (round-robin across 2).
+##
+## Before `docker compose -f docker-compose.prod.yml up -d --build`:
+##   1. Copy .env.example to .env.prod and fill in SECRET_MASTER_KEY_BASE64,
+##      BOOTSTRAP_ADMIN_EMAIL, BOOTSTRAP_ADMIN_PASSWORD, LLM keys, etc.
+##   2. Ensure ports 80/443 are free on the host.
+##
+## See ops/helm/ai-orchestrator for the Kubernetes equivalent.
+
+version: "3.9"
+
+x-api-env: &api-env
+  API_HOST: 0.0.0.0
+  API_PORT: "4000"
+  WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost}
+  DB_TYPE: postgres
+  DB_POSTGRESDB_HOST: postgres
+  DB_POSTGRESDB_PORT: "5432"
+  DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-ai_orchestrator}
+  DB_POSTGRESDB_USER: ${POSTGRES_USER:-ao}
+  DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+  SECRET_MASTER_KEY_BASE64: ${SECRET_MASTER_KEY_BASE64:?required — generate with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"}
+  BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+  BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+  AUTH_ALLOW_PUBLIC_REGISTER: "false"
+  COOKIE_SECURE: "true"
+  METRICS_ENABLED: "true"
+  # Phase 7.1 HA
+  HA_ENABLED: "true"
+  HA_LEASE_TTL_MS: "30000"
+  HA_RENEW_INTERVAL_MS: "10000"
+  # LLM providers — pass through from environment
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_orchestrator}
+      POSTGRES_USER: ${POSTGRES_USER:-ao}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ao} -d ${POSTGRES_DB:-ai_orchestrator}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api-1:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+      WORKER_MODE: all
+      HA_INSTANCE_ID: api-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "4000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api-2:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+      WORKER_MODE: all
+      HA_INSTANCE_ID: api-2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "4000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  webhook:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+      WORKER_MODE: webhook
+      HA_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "4000"
+    deploy:
+      replicas: 2
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api-1
+      - api-2
+    expose:
+      - "80"
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./ops/nginx/ai-orchestrator.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - web
+      - api-1
+      - api-2
+      - webhook
+
+volumes:
+  postgres_data:
+  redis_data:

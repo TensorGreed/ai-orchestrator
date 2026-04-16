@@ -756,6 +756,17 @@ export class SqliteStore {
         last_error TEXT,
         updated_at TEXT NOT NULL
       );
+
+      -- Phase 7.1 multi-main HA leader leases
+      CREATE TABLE IF NOT EXISTS leader_leases (
+        lease_name TEXT PRIMARY KEY,
+        holder_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        acquired_at TEXT NOT NULL,
+        renewed_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_leader_leases_expires_at ON leader_leases(expires_at);
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -4345,6 +4356,116 @@ export class SqliteStore {
       [now, input.error ?? null, now]
     );
     this.persist();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 7.1 — Multi-main HA leader leases
+  // ---------------------------------------------------------------------------
+
+  getLease(leaseName: string): {
+    leaseName: string;
+    holderId: string;
+    expiresAt: string;
+    acquiredAt: string;
+    renewedAt: string;
+  } | null {
+    const row = this.queryOne<{
+      lease_name: string;
+      holder_id: string;
+      expires_at: string;
+      acquired_at: string;
+      renewed_at: string;
+    }>(
+      `SELECT lease_name, holder_id, expires_at, acquired_at, renewed_at
+       FROM leader_leases WHERE lease_name = ?`,
+      [leaseName]
+    );
+    if (!row) return null;
+    return {
+      leaseName: toString(row.lease_name),
+      holderId: toString(row.holder_id),
+      expiresAt: toString(row.expires_at),
+      acquiredAt: toString(row.acquired_at),
+      renewedAt: toString(row.renewed_at)
+    };
+  }
+
+  /**
+   * Atomic compare-and-set lease acquisition. Returns true if this holder
+   * now owns the lease, false if another non-expired holder owns it.
+   */
+  tryAcquireLease(input: { leaseName: string; holderId: string; ttlMs: number }): boolean {
+    const now = Date.now();
+    const existing = this.getLease(input.leaseName);
+    const expiresAt = new Date(now + input.ttlMs).toISOString();
+    const nowIso = new Date(now).toISOString();
+
+    if (!existing) {
+      this.db.run(
+        `INSERT INTO leader_leases (lease_name, holder_id, expires_at, acquired_at, renewed_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [input.leaseName, input.holderId, expiresAt, nowIso, nowIso]
+      );
+      this.persist();
+      return true;
+    }
+
+    const existingExpiresMs = Date.parse(existing.expiresAt);
+    if (existing.holderId === input.holderId) {
+      // We already hold it — renew.
+      this.db.run(
+        `UPDATE leader_leases SET expires_at = ?, renewed_at = ? WHERE lease_name = ?`,
+        [expiresAt, nowIso, input.leaseName]
+      );
+      this.persist();
+      return true;
+    }
+    if (!Number.isFinite(existingExpiresMs) || existingExpiresMs <= now) {
+      // Expired — steal it.
+      this.db.run(
+        `UPDATE leader_leases
+         SET holder_id = ?, expires_at = ?, acquired_at = ?, renewed_at = ?
+         WHERE lease_name = ?`,
+        [input.holderId, expiresAt, nowIso, nowIso, input.leaseName]
+      );
+      this.persist();
+      return true;
+    }
+    return false;
+  }
+
+  releaseLease(leaseName: string, holderId: string): boolean {
+    const existing = this.getLease(leaseName);
+    if (!existing || existing.holderId !== holderId) return false;
+    this.db.run(`DELETE FROM leader_leases WHERE lease_name = ?`, [leaseName]);
+    this.persist();
+    return true;
+  }
+
+  listLeases(): Array<{
+    leaseName: string;
+    holderId: string;
+    expiresAt: string;
+    acquiredAt: string;
+    renewedAt: string;
+  }> {
+    const rows = this.queryAll<{
+      lease_name: string;
+      holder_id: string;
+      expires_at: string;
+      acquired_at: string;
+      renewed_at: string;
+    }>(
+      `SELECT lease_name, holder_id, expires_at, acquired_at, renewed_at FROM leader_leases
+       ORDER BY lease_name`
+    );
+    return rows.map((row) => ({
+      leaseName: toString(row.lease_name),
+      holderId: toString(row.holder_id),
+      expiresAt: toString(row.expires_at),
+      acquiredAt: toString(row.acquired_at),
+      renewedAt: toString(row.renewed_at)
+    }));
   }
 
   /**

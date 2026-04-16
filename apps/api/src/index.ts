@@ -46,11 +46,12 @@ async function bootstrap() {
   // Ensure the default project exists and backfill any legacy rows that predate Phase 4.2.
   store.ensureDefaultProject();
 
-  const schedulerService = new SchedulerService(store);
-  const queueService = new QueueService(store, {
-    concurrency: Number(process.env.QUEUE_CONCURRENCY) || 5
-  });
-  const triggerService = new TriggerService(store);
+  const runsBackgroundWorkers = config.WORKER_MODE === "all" || config.WORKER_MODE === "worker";
+  const schedulerService = runsBackgroundWorkers ? new SchedulerService(store) : undefined;
+  const queueService = runsBackgroundWorkers
+    ? new QueueService(store, { concurrency: Number(process.env.QUEUE_CONCURRENCY) || 5 })
+    : undefined;
+  const triggerService = runsBackgroundWorkers ? new TriggerService(store) : undefined;
   const app = createApp(
     config,
     store,
@@ -60,14 +61,18 @@ async function bootstrap() {
     queueService,
     triggerService
   );
-  schedulerService.initialize();
-  triggerService.initialize();
+  // scheduler/trigger initialize() is called from the leader-election
+  // onBecomeLeader callback inside createApp so only one replica at a time
+  // fires cron/trigger work. When HA is disabled, the callback fires
+  // immediately during `leaderElection.start()` at onReady.
   await app.listen({
     host: config.API_HOST,
     port: config.API_PORT
   });
 
-  app.log.info(`API listening on http://${config.API_HOST}:${config.API_PORT}`);
+  app.log.info(
+    `API listening on http://${config.API_HOST}:${config.API_PORT} (worker_mode=${config.WORKER_MODE}, ha=${config.HA_ENABLED})`
+  );
 }
 
 bootstrap().catch((error) => {

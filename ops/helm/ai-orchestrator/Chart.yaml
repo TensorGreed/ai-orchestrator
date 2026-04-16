@@ -1,0 +1,16 @@
+apiVersion: v2
+name: ai-orchestrator
+description: Visual AI workflow builder/runtime (Fastify API, React Studio, Postgres-backed)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/TensorGreed/ai-orchestrator
+sources:
+  - https://github.com/TensorGreed/ai-orchestrator
+maintainers:
+  - name: ai-orchestrator
+keywords:
+  - ai
+  - workflow
+  - llm
+  - orchestration

@@ -84,6 +84,11 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     TRACING_ENABLED: false,
     TRACING_ENDPOINT: undefined,
     TRACING_SERVICE_NAME: "ai-orchestrator",
+    WORKER_MODE: "all",
+    HA_ENABLED: false,
+    HA_INSTANCE_ID: undefined,
+    HA_LEASE_TTL_MS: 30000,
+    HA_RENEW_INTERVAL_MS: 10000,
     ...overrides
   };
 }

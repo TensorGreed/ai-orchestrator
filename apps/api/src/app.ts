@@ -52,6 +52,7 @@ import {
 } from "./services/rbac-service";
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GitSyncService } from "./services/git-sync-service";
+import { LeaderElectionService } from "./services/leader-election-service";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService } from "./services/tracing-service";
 import { VariablesService } from "./services/variables-service";
@@ -1685,6 +1686,41 @@ export function createApp(
     commandTimeoutMs: config.GIT_COMMAND_TIMEOUT_MS,
     enabled: config.GIT_SYNC_ENABLED
   });
+  const workerMode = config.WORKER_MODE;
+  const runsBackgroundWorkers = workerMode === "all" || workerMode === "worker";
+  const leaderElection = new LeaderElectionService(
+    store,
+    {
+      enabled: config.HA_ENABLED,
+      instanceId: config.HA_INSTANCE_ID,
+      leaseTtlMs: config.HA_LEASE_TTL_MS,
+      renewIntervalMs: config.HA_RENEW_INTERVAL_MS,
+      onBecomeLeader: () => {
+        if (!runsBackgroundWorkers) return;
+        try {
+          schedulerService?.initialize();
+          triggerService?.initialize();
+          app.log.info({ instanceId: leaderElection.getInstanceId() }, "Acquired leader lease — scheduler + trigger services started");
+        } catch (err) {
+          app.log.warn(
+            { err: err instanceof Error ? err.message : String(err) },
+            "Failed to start leader-gated services"
+          );
+        }
+      },
+      onResignLeader: () => {
+        if (!runsBackgroundWorkers) return;
+        try {
+          schedulerService?.stop();
+          void triggerService?.stop();
+          app.log.info({ instanceId: leaderElection.getInstanceId() }, "Resigned leader lease — scheduler + trigger services stopped");
+        } catch {
+          // ignore
+        }
+      }
+    },
+    "primary"
+  );
   const metricsService = new MetricsService({
     enabled: config.METRICS_ENABLED,
     prefix: config.METRICS_PREFIX,
@@ -2110,6 +2146,24 @@ export function createApp(
     }
     const limit = Math.min(200, Math.max(1, Number(query?.limit ?? 50)));
     return { spans: tracingService.recentSpans(limit) };
+  });
+
+  // Phase 7.1 — HA status
+  app.get("/api/ha/status", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return {
+      workerMode,
+      leader: leaderElection.getStatus(),
+      leases: store.listLeases()
+    };
+  });
+
+  app.addHook("onReady", async () => {
+    await leaderElection.start();
+  });
+  app.addHook("onClose", async () => {
+    await leaderElection.stop();
   });
 
   app.get("/widget.js", async (_request, reply) => {

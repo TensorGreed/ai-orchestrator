@@ -85,7 +85,14 @@ const envSchema = z.object({
   METRICS_SLO_P95_LATENCY_MS: z.coerce.number().int().positive().default(30000),
   TRACING_ENABLED: booleanFromEnv.default(false),
   TRACING_ENDPOINT: z.string().optional(),
-  TRACING_SERVICE_NAME: z.string().default("ai-orchestrator")
+  TRACING_SERVICE_NAME: z.string().default("ai-orchestrator"),
+
+  // Phase 7.1 — Deployment & HA
+  WORKER_MODE: z.enum(["all", "api", "webhook", "worker"]).default("all"),
+  HA_ENABLED: booleanFromEnv.default(false),
+  HA_INSTANCE_ID: z.string().optional(),
+  HA_LEASE_TTL_MS: z.coerce.number().int().positive().default(30000),
+  HA_RENEW_INTERVAL_MS: z.coerce.number().int().positive().default(10000)
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

@@ -1,0 +1,173 @@
+## ai-orchestrator Helm values
+##
+## Example: helm install ao ./ops/helm/ai-orchestrator \
+##   --set image.repository=ghcr.io/your-org/ai-orchestrator \
+##   --set image.tag=latest \
+##   --set api.env.BOOTSTRAP_ADMIN_EMAIL=admin@example.com
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/tensorgreed/ai-orchestrator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podSecurityContext: {}
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: false
+
+# ---------------------------------------------------------------------------
+# API replicas — run the full Fastify API with scheduler/trigger gated on
+# a single leader via HA_ENABLED. Scale to 2+ for HA; at most one replica
+# will run scheduler/trigger cron work at a time.
+# ---------------------------------------------------------------------------
+api:
+  replicaCount: 2
+  workerMode: all
+  haEnabled: true
+  service:
+    type: ClusterIP
+    port: 4000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+  env:
+    BOOTSTRAP_ADMIN_EMAIL: ""
+    BOOTSTRAP_ADMIN_PASSWORD: ""
+
+# ---------------------------------------------------------------------------
+# Dedicated webhook replicas — horizontally scalable, auth-free ingress path.
+# Set enabled: true to deploy. Skips scheduler/trigger/queue cold paths;
+# suitable for auto-scaling independently of the control plane.
+# ---------------------------------------------------------------------------
+webhook:
+  enabled: false
+  replicaCount: 3
+  service:
+    type: ClusterIP
+    port: 4000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Web (Studio UI)
+# ---------------------------------------------------------------------------
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: ghcr.io/tensorgreed/ai-orchestrator-web
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: ai-orchestrator.local
+      paths:
+        - path: /
+          pathType: Prefix
+          service: web
+        - path: /api
+          pathType: Prefix
+          service: api
+        - path: /webhook
+          pathType: Prefix
+          service: webhook
+  tls: []
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# ---------------------------------------------------------------------------
+# Shared config — surfaced into API + webhook replicas as env vars.
+# Override any config.ts variable via `config.KEY=value`.
+# ---------------------------------------------------------------------------
+config:
+  API_HOST: "0.0.0.0"
+  API_PORT: "4000"
+  WEB_ORIGIN: ""
+  COOKIE_SECURE: "true"
+  AUTH_ALLOW_PUBLIC_REGISTER: "false"
+  # Phase 5.7 observability
+  METRICS_ENABLED: "true"
+  # Phase 7.1 HA — set per-deployment in the templates
+  # WORKER_MODE: controlled by api.workerMode / webhook replicas
+  # HA_ENABLED: controlled by api.haEnabled
+
+# ---------------------------------------------------------------------------
+# Secrets — reference an existing Secret or let the chart create one from
+# these plaintext values. For production, use existingSecret + sealed-secrets.
+# ---------------------------------------------------------------------------
+secrets:
+  existingSecret: ""
+  # Required: base64(32 random bytes).
+  secretMasterKeyBase64: ""
+  # Database URL — Postgres recommended for HA (SQLite is single-writer).
+  databaseUrl: ""
+  openaiApiKey: ""
+  geminiApiKey: ""
+  anthropicApiKey: ""
+
+# ---------------------------------------------------------------------------
+# Postgres subchart — set enabled: false to use an external DB via
+# secrets.databaseUrl.
+# ---------------------------------------------------------------------------
+postgresql:
+  enabled: false
+  auth:
+    database: ai_orchestrator
+    username: ao
+    existingSecret: ""
+
+# ---------------------------------------------------------------------------
+# Redis subchart — reserved for Phase 7.2 queue externalization.
+# ---------------------------------------------------------------------------
+redis:
+  enabled: false
