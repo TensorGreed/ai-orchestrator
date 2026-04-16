@@ -10,28 +10,37 @@ import {
   createExternalProvider,
   createLogStreamDestination,
   createSsoMapping,
+  createVariable,
   deleteCustomRole,
   deleteExternalProvider,
   deleteLogStreamDestination,
   deleteSsoMapping,
+  deleteVariable,
   disableMfa,
+  disconnectGit,
   enrollMfa,
   fetchApiKeys,
   fetchAuditLogs,
   fetchCustomRoles,
   fetchExternalProviders,
+  fetchGitConfig,
   fetchLogStreamDeliveryEvents,
   fetchLogStreamDestinations,
   fetchMfaStatus,
   fetchProjectMembers,
   fetchSecrets,
   fetchSsoMappings,
+  fetchVariables,
+  pullGit,
+  pushGit,
   removeProjectMember,
   revokeApiKey,
   testExternalProvider,
   testLogStreamDestination,
   updateExternalProvider,
+  updateGitConfig,
   updateLogStreamDestination,
+  updateVariable,
   type ApiKeyRecord,
   type AuditLogEntry,
   type AuditLogFilter,
@@ -39,6 +48,9 @@ import {
   type CustomRoleRecord,
   type ExternalSecretProviderRecord,
   type ExternalSecretProviderType,
+  type GitConfigRecord,
+  type GitStatusRecord,
+  type GitSyncResult,
   type LogLevel,
   type LogStreamDeliveryEvent,
   type LogStreamDestination,
@@ -46,7 +58,8 @@ import {
   type MfaStatus,
   type ProjectMembership,
   type SecretListItem,
-  type SsoGroupMapping
+  type SsoGroupMapping,
+  type VariableRecord
 } from "../lib/api";
 
 type SettingsTab =
@@ -57,7 +70,9 @@ type SettingsTab =
   | "sso"
   | "external-secrets"
   | "audit-log"
-  | "log-streams";
+  | "log-streams"
+  | "source-control"
+  | "variables";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -96,7 +111,9 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
     { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
     { id: "audit-log", label: "Audit Log", restricted: !isAdmin },
-    { id: "log-streams", label: "Log Streams", restricted: !isAdmin }
+    { id: "log-streams", label: "Log Streams", restricted: !isAdmin },
+    { id: "source-control", label: "Source Control", restricted: !isAdmin },
+    { id: "variables", label: "Variables" }
   ];
 
   return (
@@ -145,6 +162,10 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         )}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
         {tab === "log-streams" && isAdmin && <LogStreamsTab />}
+        {tab === "source-control" && isAdmin && <SourceControlTab />}
+        {tab === "variables" && (
+          <VariablesTab projects={projects} initialProjectId={activeProjectId} isAdmin={isAdmin} />
+        )}
       </div>
     </section>
   );
@@ -1955,6 +1976,454 @@ function LogStreamsTab() {
                   </Fragment>
                 );
               })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Source control (Phase 5.6)
+// ---------------------------------------------------------------------------
+
+function SourceControlTab() {
+  const [config, setConfig] = useState<GitConfigRecord | null>(null);
+  const [status, setStatus] = useState<GitStatusRecord | null>(null);
+  const [secrets, setSecrets] = useState<SecretListItem[]>([]);
+  const [repoUrl, setRepoUrl] = useState("");
+  const [defaultBranch, setDefaultBranch] = useState("main");
+  const [workflowsDir, setWorkflowsDir] = useState("workflows");
+  const [variablesFile, setVariablesFile] = useState("variables.json");
+  const [authSecretId, setAuthSecretId] = useState("");
+  const [userName, setUserName] = useState("ai-orchestrator");
+  const [userEmail, setUserEmail] = useState("sync@ai-orchestrator.local");
+  const [enabled, setEnabled] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [lastResult, setLastResult] = useState<GitSyncResult | null>(null);
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const [gitResponse, secretList] = await Promise.all([fetchGitConfig(), fetchSecrets({})]);
+      setConfig(gitResponse.config);
+      setStatus(gitResponse.status);
+      setSecrets(secretList);
+      if (gitResponse.config) {
+        setRepoUrl(gitResponse.config.repoUrl);
+        setDefaultBranch(gitResponse.config.defaultBranch);
+        setWorkflowsDir(gitResponse.config.workflowsDir);
+        setVariablesFile(gitResponse.config.variablesFile);
+        setAuthSecretId(gitResponse.config.authSecretId ?? "");
+        setUserName(gitResponse.config.userName);
+        setUserEmail(gitResponse.config.userEmail);
+        setEnabled(gitResponse.config.enabled);
+      }
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleSave = async () => {
+    if (!repoUrl.trim()) {
+      setError("Repo URL is required");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await updateGitConfig({
+        repoUrl: repoUrl.trim(),
+        defaultBranch: defaultBranch.trim() || "main",
+        workflowsDir: workflowsDir.trim() || "workflows",
+        variablesFile: variablesFile.trim() || "variables.json",
+        authSecretId: authSecretId || null,
+        userName: userName.trim(),
+        userEmail: userEmail.trim(),
+        enabled
+      });
+      setConfig(response.config);
+      setStatus(response.status);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (!window.confirm("Disconnect git and clear the local mirror?")) return;
+    setBusy(true);
+    try {
+      await disconnectGit();
+      await refresh();
+      setConfig(null);
+      setLastResult(null);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePush = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await pushGit({ branch: defaultBranch });
+      setLastResult(result);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePull = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await pullGit({ branch: defaultBranch });
+      setLastResult(result);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <h3>Git source control</h3>
+      <p className="settings-help">
+        Back every workflow and variable into a git repository. Push serialises each workflow as
+        JSON with credential stubs (secret names, not IDs) so exports are safe to commit. Pull
+        replays the repo into the local database, mapping stubs back to local secrets by name.
+        Branch-per-environment is supported: set the default branch (e.g. <code>main</code>,{" "}
+        <code>staging</code>) and override per push/pull.
+      </p>
+      {error && <div className="settings-error">{error}</div>}
+
+      <div className="settings-card">
+        <h4>Configuration</h4>
+        <label htmlFor="git-repo">Repo URL</label>
+        <input
+          id="git-repo"
+          value={repoUrl}
+          onChange={(event) => setRepoUrl(event.target.value)}
+          placeholder="https://github.com/your-org/workflows.git"
+        />
+        <label htmlFor="git-branch">Default branch (environment)</label>
+        <input
+          id="git-branch"
+          value={defaultBranch}
+          onChange={(event) => setDefaultBranch(event.target.value)}
+          placeholder="main"
+        />
+        <label htmlFor="git-workflows-dir">Workflows directory</label>
+        <input
+          id="git-workflows-dir"
+          value={workflowsDir}
+          onChange={(event) => setWorkflowsDir(event.target.value)}
+        />
+        <label htmlFor="git-vars-file">Variables file</label>
+        <input
+          id="git-vars-file"
+          value={variablesFile}
+          onChange={(event) => setVariablesFile(event.target.value)}
+        />
+        <label htmlFor="git-auth">Auth secret (optional)</label>
+        <select id="git-auth" value={authSecretId} onChange={(event) => setAuthSecretId(event.target.value)}>
+          <option value="">(none — repo must be public or embed token in URL)</option>
+          {secrets.map((secret) => (
+            <option key={secret.id} value={secret.id}>
+              {secret.name} — {secret.id}
+            </option>
+          ))}
+        </select>
+        <label htmlFor="git-user-name">Commit author name</label>
+        <input
+          id="git-user-name"
+          value={userName}
+          onChange={(event) => setUserName(event.target.value)}
+        />
+        <label htmlFor="git-user-email">Commit author email</label>
+        <input
+          id="git-user-email"
+          value={userEmail}
+          onChange={(event) => setUserEmail(event.target.value)}
+        />
+        <label className="settings-permission-option">
+          <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+          Sync enabled
+        </label>
+        <div className="settings-actions">
+          <button className="header-btn" onClick={handleSave} disabled={busy || !repoUrl.trim()}>
+            {config ? "Update" : "Connect"}
+          </button>
+          {config && (
+            <button className="header-btn ghost" onClick={handleDisconnect} disabled={busy}>
+              Disconnect
+            </button>
+          )}
+        </div>
+      </div>
+
+      {loaded && config && (
+        <div className="settings-card">
+          <h4>Sync</h4>
+          <p className="settings-muted">
+            Branch: <code>{status?.branch ?? config.defaultBranch}</code>
+            {" · "}Last push: {formatDate(config.lastPushAt)}
+            {" · "}Last pull: {formatDate(config.lastPullAt)}
+            {status?.dirty ? " · pending local changes" : ""}
+          </p>
+          {config.lastError && <div className="settings-error">Last error: {config.lastError}</div>}
+          <div className="settings-actions">
+            <button className="header-btn" onClick={handlePush} disabled={busy}>
+              Push
+            </button>
+            <button className="header-btn ghost" onClick={handlePull} disabled={busy}>
+              Pull
+            </button>
+          </div>
+          {lastResult && (
+            <p className="settings-muted" style={{ fontSize: "0.85rem", marginTop: "8px" }}>
+              {lastResult.ok
+                ? `✓ ${lastResult.workflowsExported !== undefined ? `Exported ${lastResult.workflowsExported} workflow(s)` : ""}${
+                    lastResult.workflowsImported !== undefined ? `Imported ${lastResult.workflowsImported} workflow(s)` : ""
+                  } · ${lastResult.variablesSynced ?? 0} variable(s) · commit ${lastResult.commit?.slice(0, 8) ?? "—"}`
+                : `✗ ${lastResult.error ?? "failed"}`}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Variables (Phase 5.6)
+// ---------------------------------------------------------------------------
+
+function VariablesTab({
+  projects,
+  initialProjectId,
+  isAdmin
+}: {
+  projects: Project[];
+  initialProjectId: string;
+  isAdmin: boolean;
+}) {
+  const [projectId, setProjectId] = useState(initialProjectId);
+  const [variables, setVariables] = useState<VariableRecord[]>([]);
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  void isAdmin;
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const response = await fetchVariables(projectId);
+      setVariables(response.variables);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoaded(true);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleCreate = async () => {
+    if (!newKey.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await createVariable({ projectId, key: newKey.trim(), value: newValue });
+      setNewKey("");
+      setNewValue("");
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveEdit = async (id: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await updateVariable(id, { value: editValue });
+      setEditingId(null);
+      setEditValue("");
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!window.confirm("Delete this variable?")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteVariable(id);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <h3>Project variables</h3>
+      <p className="settings-help">
+        Plain-text key/value pairs exposed to every workflow in this project as{" "}
+        <code>{'{{vars.KEY}}'}</code>. Not secrets — use the Secrets manager for credentials.
+        Variables are included in git pushes/pulls (stored at the repository root).
+      </p>
+      {error && <div className="settings-error">{error}</div>}
+
+      <div className="settings-card">
+        <label htmlFor="var-project">Project</label>
+        <select id="var-project" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="settings-card">
+        <h4>Add variable</h4>
+        <label htmlFor="var-key">Key</label>
+        <input
+          id="var-key"
+          value={newKey}
+          onChange={(event) => setNewKey(event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))}
+          placeholder="API_BASE_URL"
+        />
+        <label htmlFor="var-value">Value</label>
+        <textarea
+          id="var-value"
+          value={newValue}
+          onChange={(event) => setNewValue(event.target.value)}
+          rows={3}
+          className="settings-textarea"
+        />
+        <div className="settings-actions">
+          <button className="header-btn" onClick={handleCreate} disabled={busy || !newKey.trim()}>
+            Add variable
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <h4>Variables ({variables.length})</h4>
+        {!loaded ? (
+          <div className="settings-loading">Loading…</div>
+        ) : variables.length === 0 ? (
+          <p className="settings-muted">No variables yet in this project.</p>
+        ) : (
+          <table className="settings-table">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Value</th>
+                <th>Updated</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {variables.map((variable) => (
+                <tr key={variable.id}>
+                  <td>
+                    <code>{variable.key}</code>
+                  </td>
+                  <td>
+                    {editingId === variable.id ? (
+                      <textarea
+                        value={editValue}
+                        onChange={(event) => setEditValue(event.target.value)}
+                        rows={2}
+                        className="settings-textarea"
+                      />
+                    ) : (
+                      <span
+                        className="settings-muted"
+                        style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
+                      >
+                        {variable.value.length > 80
+                          ? `${variable.value.slice(0, 80)}…`
+                          : variable.value || "—"}
+                      </span>
+                    )}
+                  </td>
+                  <td>{formatDate(variable.updatedAt)}</td>
+                  <td>
+                    {editingId === variable.id ? (
+                      <>
+                        <button
+                          className="mini-btn"
+                          onClick={() => handleSaveEdit(variable.id)}
+                          disabled={busy}
+                        >
+                          Save
+                        </button>
+                        <button
+                          className="mini-btn"
+                          onClick={() => {
+                            setEditingId(null);
+                            setEditValue("");
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="mini-btn"
+                          onClick={() => {
+                            setEditingId(variable.id);
+                            setEditValue(variable.value);
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button className="mini-btn" onClick={() => handleDelete(variable.id)}>
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}

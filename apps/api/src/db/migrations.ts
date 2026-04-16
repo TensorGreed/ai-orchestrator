@@ -466,6 +466,54 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_log_stream_events_status ON log_stream_events(status);
       CREATE INDEX IF NOT EXISTS idx_log_stream_events_created_at ON log_stream_events(created_at);
     `
+  },
+  {
+    version: 9,
+    description: "Version control & environments (Phase 5.6): variables, workflow_versions, git_configs",
+    up: `
+      CREATE TABLE IF NOT EXISTS variables (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE(project_id, key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_variables_project_id ON variables(project_id);
+
+      CREATE TABLE IF NOT EXISTS workflow_versions (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        workflow_json TEXT NOT NULL,
+        created_by TEXT,
+        change_note TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        UNIQUE(workflow_id, version)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_versions_workflow_created
+        ON workflow_versions(workflow_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS git_configs (
+        id TEXT PRIMARY KEY,
+        repo_url TEXT NOT NULL,
+        default_branch TEXT NOT NULL DEFAULT 'main',
+        auth_secret_id TEXT,
+        workflows_dir TEXT NOT NULL DEFAULT 'workflows',
+        variables_file TEXT NOT NULL DEFAULT 'variables.json',
+        user_name TEXT NOT NULL DEFAULT 'ai-orchestrator',
+        user_email TEXT NOT NULL DEFAULT 'sync@ai-orchestrator.local',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_push_at TIMESTAMPTZ,
+        last_pull_at TIMESTAMPTZ,
+        last_error TEXT,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+    `
   }
 ];
 

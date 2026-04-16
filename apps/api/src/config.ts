@@ -68,7 +68,14 @@ const envSchema = z.object({
   LOG_STREAM_BUFFER_SIZE: z.coerce.number().int().positive().default(1000),
   LOG_STREAM_RETRY_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
   LOG_STREAM_EVENT_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(14),
-  LOG_STREAM_EVENT_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000)
+  LOG_STREAM_EVENT_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),
+
+  // Phase 5.6 — Version control & environments
+  GIT_SYNC_ENABLED: booleanFromEnv.default(true),
+  GIT_SYNC_WORKDIR: z.string().default("apps/api/data/git"),
+  GIT_BIN: z.string().default("git"),
+  GIT_COMMAND_TIMEOUT_MS: z.coerce.number().int().positive().default(60000),
+  WORKFLOW_VERSION_RETENTION: z.coerce.number().int().nonnegative().default(100)
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

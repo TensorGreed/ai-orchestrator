@@ -1265,3 +1265,158 @@ export async function fetchLogStreamDeliveryEvents(id: string) {
     `/api/log-streams/${encodeURIComponent(id)}/events`
   );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5.6 — Variables
+// ---------------------------------------------------------------------------
+
+export interface VariableRecord {
+  id: string;
+  projectId: string;
+  key: string;
+  value: string;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchVariables(projectId?: string) {
+  const suffix = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ variables: VariableRecord[] }>(`/api/variables${suffix}`);
+}
+
+export async function createVariable(payload: { projectId: string; key: string; value: string }) {
+  return apiRequest<{ variable: VariableRecord }>("/api/variables", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateVariable(id: string, payload: { key?: string; value?: string }) {
+  return apiRequest<{ variable: VariableRecord }>(
+    `/api/variables/${encodeURIComponent(id)}`,
+    { method: "PUT", body: JSON.stringify(payload) }
+  );
+}
+
+export async function deleteVariable(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/variables/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.6 — Workflow version history
+// ---------------------------------------------------------------------------
+
+export interface WorkflowVersionSummary {
+  id: string;
+  workflowId: string;
+  version: number;
+  createdBy: string | null;
+  changeNote: string | null;
+  createdAt: string;
+}
+
+export async function fetchWorkflowVersions(workflowId: string) {
+  return apiRequest<{ versions: WorkflowVersionSummary[] }>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/versions`
+  );
+}
+
+export async function fetchWorkflowVersion(workflowId: string, version: number) {
+  return apiRequest<{
+    id: string;
+    workflowId: string;
+    version: number;
+    createdBy: string | null;
+    changeNote: string | null;
+    createdAt: string;
+    workflow: unknown;
+  }>(`/api/workflows/${encodeURIComponent(workflowId)}/versions/${version}`);
+}
+
+export async function restoreWorkflowVersion(workflowId: string, version: number) {
+  return apiRequest<unknown>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/versions/${version}/restore`,
+    { method: "POST", body: "{}" }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5.6 — Git source control
+// ---------------------------------------------------------------------------
+
+export interface GitConfigRecord {
+  repoUrl: string;
+  defaultBranch: string;
+  authSecretId: string | null;
+  workflowsDir: string;
+  variablesFile: string;
+  userName: string;
+  userEmail: string;
+  enabled: boolean;
+  lastPushAt: string | null;
+  lastPullAt: string | null;
+  lastError: string | null;
+  updatedAt: string;
+}
+
+export interface GitStatusRecord {
+  configured: boolean;
+  branch: string | null;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  lastPushAt: string | null;
+  lastPullAt: string | null;
+  lastError: string | null;
+}
+
+export interface GitSyncResult {
+  ok: boolean;
+  branch?: string;
+  commit?: string;
+  error?: string;
+  workflowsExported?: number;
+  workflowsImported?: number;
+  variablesSynced?: number;
+}
+
+export async function fetchGitConfig() {
+  return apiRequest<{ config: GitConfigRecord | null; status: GitStatusRecord }>("/api/git");
+}
+
+export async function updateGitConfig(payload: {
+  repoUrl: string;
+  defaultBranch?: string;
+  authSecretId?: string | null;
+  workflowsDir?: string;
+  variablesFile?: string;
+  userName?: string;
+  userEmail?: string;
+  enabled?: boolean;
+}) {
+  return apiRequest<{ config: GitConfigRecord; status: GitStatusRecord }>("/api/git", {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function disconnectGit() {
+  return apiRequest<{ ok: boolean }>("/api/git", { method: "DELETE" });
+}
+
+export async function pushGit(payload: { branch?: string; message?: string } = {}) {
+  return apiRequest<GitSyncResult>("/api/git/push", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function pullGit(payload: { branch?: string } = {}) {
+  return apiRequest<GitSyncResult>("/api/git/pull", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}

@@ -308,6 +308,62 @@ export interface SecretReference {
   secretId: string;
 }
 
+/**
+ * Export-time representation of a secret reference used when a workflow is
+ * serialised for version control. Contains the human-readable name + provider
+ * so the target instance can resolve to a local `secretId` on import.
+ */
+export interface SecretReferenceStub {
+  secretName: string;
+  secretProvider?: string;
+}
+
+export interface VariableRecord {
+  id: string;
+  projectId: string;
+  key: string;
+  value: string;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowVersionRecord {
+  id: string;
+  workflowId: string;
+  version: number;
+  workflowJson: string;
+  createdBy: string | null;
+  changeNote: string | null;
+  createdAt: string;
+}
+
+export interface GitSyncConfig {
+  repoUrl: string;
+  defaultBranch: string;
+  authSecretId: string | null;
+  workflowsDir: string;
+  variablesFile: string;
+  userName: string;
+  userEmail: string;
+  enabled: boolean;
+  lastPushAt: string | null;
+  lastPullAt: string | null;
+  lastError: string | null;
+  updatedAt: string;
+}
+
+export interface GitSyncStatus {
+  configured: boolean;
+  branch: string | null;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  lastPushAt: string | null;
+  lastPullAt: string | null;
+  lastError: string | null;
+}
+
 export type LLMProviderId = "ollama" | "openai_compatible" | "openai" | "azure_openai" | "gemini" | (string & {});
 
 export interface ProviderDefinition {

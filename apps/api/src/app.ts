@@ -51,6 +51,9 @@ import {
   type ProjectRole
 } from "./services/rbac-service";
 import { ExternalSecretsService } from "./services/external-secrets-service";
+import { GitSyncService } from "./services/git-sync-service";
+import { VariablesService } from "./services/variables-service";
+import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
 import { LogStreamingService } from "./services/log-streaming-service";
 
@@ -1067,10 +1070,15 @@ export function createApp(
           triggeredBy: input.triggeredBy
         })
       : undefined;
+    const projectVars = variablesService.resolveForProject(input.workflow.projectId ?? "default");
+    const mergedWorkflow: Workflow = {
+      ...input.workflow,
+      variables: { ...projectVars, ...(input.workflow.variables ?? {}) }
+    };
     try {
       const result = await executeWorkflow(
         {
-          workflow: input.workflow,
+          workflow: mergedWorkflow,
           startNodeId: input.startNodeId,
           runMode: input.runMode,
           usePinnedData: input.usePinnedData,
@@ -1663,6 +1671,14 @@ export function createApp(
   const mfaService = new MfaService(store, config.SECRET_MASTER_KEY_BASE64, config.MFA_ISSUER);
   const rbacService = new RbacService(store);
   const externalSecretsService = new ExternalSecretsService(store);
+  const variablesService = new VariablesService(store);
+  const workflowVersionService = new WorkflowVersionService(store, config.WORKFLOW_VERSION_RETENTION);
+  const gitSyncService = new GitSyncService(store, secretService, variablesService, {
+    workdirRoot: config.GIT_SYNC_WORKDIR,
+    gitBin: config.GIT_BIN,
+    commandTimeoutMs: config.GIT_COMMAND_TIMEOUT_MS,
+    enabled: config.GIT_SYNC_ENABLED
+  });
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
   const logStreamingService = new LogStreamingService(store, config.SECRET_MASTER_KEY_BASE64, {
@@ -2925,6 +2941,347 @@ export function createApp(
   });
 
   // ---------------------------------------------------------------------------
+  // Phase 5.6 — Variables
+  // ---------------------------------------------------------------------------
+
+  const variableCreateSchema = z.object({
+    projectId: z.string().min(1).max(120),
+    key: z.string().min(1).max(120),
+    value: z.string().max(65536)
+  });
+  const variableUpdateSchema = z.object({
+    key: z.string().min(1).max(120).optional(),
+    value: z.string().max(65536).optional()
+  });
+
+  app.get("/api/variables", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const query = request.query as { projectId?: string } | undefined;
+    const projectId = query?.projectId;
+    if (projectId) {
+      if (user.role !== "admin" && !rbacService.can(user, projectId, "workflow:read")) {
+        reply.code(403);
+        return { error: "Insufficient permissions for project" };
+      }
+      return { variables: variablesService.list(projectId) };
+    }
+    if (user.role !== "admin") {
+      reply.code(403);
+      return { error: "projectId query parameter required" };
+    }
+    return { variables: variablesService.list() };
+  });
+
+  app.post<{ Body: unknown }>("/api/variables", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = variableCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid variable payload", details: parsed.error.issues };
+    }
+    if (user.role !== "admin" && !rbacService.can(user, parsed.data.projectId, "workflow:write")) {
+      reply.code(403);
+      return { error: "Insufficient permissions to manage variables" };
+    }
+    try {
+      const record = variablesService.create({ ...parsed.data, createdBy: user.id });
+      audit(request, user, {
+        category: "project",
+        eventType: "variable.create",
+        action: "create",
+        resourceType: "variable",
+        resourceId: record.id,
+        projectId: record.projectId,
+        metadata: { key: record.key }
+      });
+      return { variable: record };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/variables/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const existing = variablesService.get(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Variable not found" };
+    }
+    if (user.role !== "admin" && !rbacService.can(user, existing.projectId, "workflow:write")) {
+      reply.code(403);
+      return { error: "Insufficient permissions to manage variables" };
+    }
+    const parsed = variableUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid variable payload", details: parsed.error.issues };
+    }
+    try {
+      const record = variablesService.update(request.params.id, parsed.data);
+      if (!record) {
+        reply.code(404);
+        return { error: "Variable not found" };
+      }
+      audit(request, user, {
+        category: "project",
+        eventType: "variable.update",
+        action: "update",
+        resourceType: "variable",
+        resourceId: record.id,
+        projectId: record.projectId,
+        metadata: { key: record.key }
+      });
+      return { variable: record };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/variables/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const existing = variablesService.get(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Variable not found" };
+    }
+    if (user.role !== "admin" && !rbacService.can(user, existing.projectId, "workflow:write")) {
+      reply.code(403);
+      return { error: "Insufficient permissions to manage variables" };
+    }
+    variablesService.delete(request.params.id);
+    audit(request, user, {
+      category: "project",
+      eventType: "variable.delete",
+      action: "delete",
+      resourceType: "variable",
+      resourceId: existing.id,
+      projectId: existing.projectId,
+      metadata: { key: existing.key }
+    });
+    return { ok: true };
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.6 — Workflow version history
+  // ---------------------------------------------------------------------------
+
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/versions", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    return { versions: workflowVersionService.list(request.params.id) };
+  });
+
+  app.get<{ Params: { id: string; version: string } }>(
+    "/api/workflows/:id/versions/:version",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["viewer"]);
+      if (!user) return;
+      const version = Number.parseInt(request.params.version, 10);
+      if (!Number.isFinite(version) || version <= 0) {
+        reply.code(400);
+        return { error: "Invalid version number" };
+      }
+      const entry = workflowVersionService.get(request.params.id, version);
+      if (!entry) {
+        reply.code(404);
+        return { error: "Version not found" };
+      }
+      return entry;
+    }
+  );
+
+  app.post<{ Params: { id: string; version: string } }>(
+    "/api/workflows/:id/versions/:version/restore",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const version = Number.parseInt(request.params.version, 10);
+      if (!Number.isFinite(version) || version <= 0) {
+        reply.code(400);
+        return { error: "Invalid version number" };
+      }
+      const entry = workflowVersionService.get(request.params.id, version);
+      if (!entry) {
+        reply.code(404);
+        return { error: "Version not found" };
+      }
+      const restoredWorkflow: Workflow = {
+        ...entry.workflow,
+        workflowVersion: (entry.workflow.workflowVersion ?? 1) + 1
+      };
+      const saved = store.upsertWorkflow(restoredWorkflow);
+      workflowVersionService.snapshot({
+        workflow: saved,
+        createdBy: user.id,
+        changeNote: `restored from v${version}`
+      });
+      schedulerService?.reloadWorkflow(saved.id);
+      triggerService?.reloadWorkflow(saved.id);
+      audit(request, user, {
+        category: "workflow",
+        eventType: "workflow.restore",
+        action: "restore",
+        resourceType: "workflow",
+        resourceId: saved.id,
+        projectId: saved.projectId,
+        metadata: { restoredFrom: version }
+      });
+      return saved;
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.6 — Git source control
+  // ---------------------------------------------------------------------------
+
+  const gitConfigSchema = z.object({
+    repoUrl: z.string().min(1).max(1024),
+    defaultBranch: z.string().min(1).max(120).optional(),
+    authSecretId: z.string().min(1).max(120).nullable().optional(),
+    workflowsDir: z.string().min(1).max(512).optional(),
+    variablesFile: z.string().min(1).max(512).optional(),
+    userName: z.string().min(1).max(120).optional(),
+    userEmail: z.string().min(1).max(240).optional(),
+    enabled: z.boolean().optional()
+  });
+  const gitSyncSchema = z.object({
+    branch: z.string().min(1).max(120).optional(),
+    message: z.string().max(2000).optional()
+  });
+
+  app.get("/api/git", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return { config: gitSyncService.getConfig(), status: gitSyncService.status() };
+  });
+
+  app.put<{ Body: unknown }>("/api/git", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = gitConfigSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid git config", details: parsed.error.issues };
+    }
+    try {
+      const config = gitSyncService.configure(parsed.data);
+      audit(request, user, {
+        category: "system",
+        eventType: "git.configure",
+        action: "update",
+        resourceType: "git_config",
+        resourceId: "default",
+        metadata: { repoUrl: parsed.data.repoUrl, defaultBranch: config.defaultBranch }
+      });
+      return { config, status: gitSyncService.status() };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.delete("/api/git", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existed = gitSyncService.disconnect();
+    if (!existed) {
+      reply.code(404);
+      return { error: "Git is not configured" };
+    }
+    audit(request, user, {
+      category: "system",
+      eventType: "git.disconnect",
+      action: "delete",
+      resourceType: "git_config",
+      resourceId: "default"
+    });
+    return { ok: true };
+  });
+
+  app.get("/api/git/status", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return gitSyncService.status();
+  });
+
+  app.post<{ Body: unknown }>("/api/git/push", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = gitSyncSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid push payload", details: parsed.error.issues };
+    }
+    try {
+      const result = await gitSyncService.push({ ...parsed.data, createdBy: user.id });
+      audit(request, user, {
+        category: "system",
+        eventType: "git.push",
+        action: "push",
+        outcome: result.ok ? "success" : "failure",
+        resourceType: "git_config",
+        resourceId: "default",
+        metadata: {
+          branch: result.branch,
+          commit: result.commit,
+          workflowsExported: result.workflowsExported,
+          variablesSynced: result.variablesSynced,
+          error: result.error
+        }
+      });
+      if (!result.ok) reply.code(400);
+      return result;
+    } catch (err) {
+      reply.code(400);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/git/pull", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = gitSyncSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid pull payload", details: parsed.error.issues };
+    }
+    try {
+      const result = await gitSyncService.pull({ ...parsed.data, createdBy: user.id });
+      audit(request, user, {
+        category: "system",
+        eventType: "git.pull",
+        action: "pull",
+        outcome: result.ok ? "success" : "failure",
+        resourceType: "git_config",
+        resourceId: "default",
+        metadata: {
+          branch: result.branch,
+          commit: result.commit,
+          workflowsImported: result.workflowsImported,
+          variablesSynced: result.variablesSynced,
+          error: result.error
+        }
+      });
+      if (!result.ok) reply.code(400);
+      return result;
+    } catch (err) {
+      reply.code(400);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // ---------------------------------------------------------------------------
   // Phase 5.2 — Project memberships
   // ---------------------------------------------------------------------------
 
@@ -3415,6 +3772,7 @@ export function createApp(
     }
 
     const savedWorkflow = store.upsertWorkflow(parsed.data);
+    workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "created" });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
     triggerService?.reloadWorkflow(savedWorkflow.id);
     audit(request, user, {
@@ -3459,6 +3817,7 @@ export function createApp(
     }
 
     const savedWorkflow = store.upsertWorkflow(parsed.data);
+    workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "updated" });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
     triggerService?.reloadWorkflow(savedWorkflow.id);
     audit(request, user, {

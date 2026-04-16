@@ -712,6 +712,50 @@ export class SqliteStore {
         ON log_stream_events(destination_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_log_stream_events_status ON log_stream_events(status);
       CREATE INDEX IF NOT EXISTS idx_log_stream_events_created_at ON log_stream_events(created_at);
+
+      -- Phase 5.6 version control & environments
+      CREATE TABLE IF NOT EXISTS variables (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(project_id, key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_variables_project_id ON variables(project_id);
+
+      CREATE TABLE IF NOT EXISTS workflow_versions (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        workflow_json TEXT NOT NULL,
+        created_by TEXT,
+        change_note TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(workflow_id, version)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_versions_workflow_created
+        ON workflow_versions(workflow_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS git_configs (
+        id TEXT PRIMARY KEY,
+        repo_url TEXT NOT NULL,
+        default_branch TEXT NOT NULL DEFAULT 'main',
+        auth_secret_id TEXT,
+        workflows_dir TEXT NOT NULL DEFAULT 'workflows',
+        variables_file TEXT NOT NULL DEFAULT 'variables.json',
+        user_name TEXT NOT NULL DEFAULT 'ai-orchestrator',
+        user_email TEXT NOT NULL DEFAULT 'sync@ai-orchestrator.local',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_push_at TEXT,
+        last_pull_at TEXT,
+        last_error TEXT,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -3945,6 +3989,362 @@ export class SqliteStore {
     this.db.run(`DELETE FROM log_stream_events WHERE created_at < ?`, [options.before]);
     this.persist();
     return count;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.6 — Variables, workflow version history, git config
+  // ---------------------------------------------------------------------------
+
+  listVariables(projectId?: string): Array<{
+    id: string;
+    projectId: string;
+    key: string;
+    value: string;
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const rows = projectId
+      ? this.queryAll<{
+          id: string;
+          project_id: string;
+          key: string;
+          value: string;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
+        }>(
+          `SELECT id, project_id, key, value, created_by, created_at, updated_at
+           FROM variables WHERE project_id = ? ORDER BY key`,
+          [projectId]
+        )
+      : this.queryAll<{
+          id: string;
+          project_id: string;
+          key: string;
+          value: string;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
+        }>(
+          `SELECT id, project_id, key, value, created_by, created_at, updated_at FROM variables ORDER BY project_id, key`
+        );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      projectId: toString(row.project_id),
+      key: toString(row.key),
+      value: toString(row.value),
+      createdBy: row.created_by ? toString(row.created_by) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  getVariable(id: string): {
+    id: string;
+    projectId: string;
+    key: string;
+    value: string;
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.queryOne<{
+      id: string;
+      project_id: string;
+      key: string;
+      value: string;
+      created_by: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT id, project_id, key, value, created_by, created_at, updated_at FROM variables WHERE id = ?`,
+      [id]
+    );
+    if (!row) return null;
+    return {
+      id: toString(row.id),
+      projectId: toString(row.project_id),
+      key: toString(row.key),
+      value: toString(row.value),
+      createdBy: row.created_by ? toString(row.created_by) : null,
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertVariable(input: {
+    id: string;
+    projectId: string;
+    key: string;
+    value: string;
+    createdBy?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    const existing = this.getVariable(input.id);
+    const createdAt = existing?.createdAt ?? now;
+    this.db.run(
+      `INSERT INTO variables (id, project_id, key, value, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         key = excluded.key,
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.projectId,
+        input.key,
+        input.value,
+        input.createdBy ?? existing?.createdBy ?? null,
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  deleteVariable(id: string): boolean {
+    const existing = this.getVariable(id);
+    if (!existing) return false;
+    this.db.run(`DELETE FROM variables WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  findVariableByKey(projectId: string, key: string): { id: string; key: string; value: string } | null {
+    const row = this.queryOne<{ id: string; key: string; value: string }>(
+      `SELECT id, key, value FROM variables WHERE project_id = ? AND key = ?`,
+      [projectId, key]
+    );
+    if (!row) return null;
+    return { id: toString(row.id), key: toString(row.key), value: toString(row.value) };
+  }
+
+  // Workflow version history
+
+  listWorkflowVersions(workflowId: string, limit = 100): Array<{
+    id: string;
+    workflowId: string;
+    version: number;
+    createdBy: string | null;
+    changeNote: string | null;
+    createdAt: string;
+  }> {
+    const rows = this.queryAll<{
+      id: string;
+      workflow_id: string;
+      version: number;
+      created_by: string | null;
+      change_note: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, workflow_id, version, created_by, change_note, created_at
+       FROM workflow_versions WHERE workflow_id = ? ORDER BY version DESC LIMIT ?`,
+      [workflowId, Math.max(1, Math.min(500, limit))]
+    );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      workflowId: toString(row.workflow_id),
+      version: toNumber(row.version),
+      createdBy: row.created_by ? toString(row.created_by) : null,
+      changeNote: row.change_note ? toString(row.change_note) : null,
+      createdAt: toString(row.created_at)
+    }));
+  }
+
+  getWorkflowVersion(workflowId: string, version: number): {
+    id: string;
+    workflowId: string;
+    version: number;
+    workflowJson: string;
+    createdBy: string | null;
+    changeNote: string | null;
+    createdAt: string;
+  } | null {
+    const row = this.queryOne<{
+      id: string;
+      workflow_id: string;
+      version: number;
+      workflow_json: string;
+      created_by: string | null;
+      change_note: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, workflow_id, version, workflow_json, created_by, change_note, created_at
+       FROM workflow_versions WHERE workflow_id = ? AND version = ?`,
+      [workflowId, version]
+    );
+    if (!row) return null;
+    return {
+      id: toString(row.id),
+      workflowId: toString(row.workflow_id),
+      version: toNumber(row.version),
+      workflowJson: toString(row.workflow_json),
+      createdBy: row.created_by ? toString(row.created_by) : null,
+      changeNote: row.change_note ? toString(row.change_note) : null,
+      createdAt: toString(row.created_at)
+    };
+  }
+
+  writeWorkflowVersion(entry: {
+    id: string;
+    workflowId: string;
+    version: number;
+    workflowJson: string;
+    createdBy?: string | null;
+    changeNote?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json, created_by, change_note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workflow_id, version) DO UPDATE SET
+         workflow_json = excluded.workflow_json,
+         change_note = excluded.change_note,
+         created_by = excluded.created_by`,
+      [
+        entry.id,
+        entry.workflowId,
+        entry.version,
+        entry.workflowJson,
+        entry.createdBy ?? null,
+        entry.changeNote ?? null,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  pruneWorkflowVersions(workflowId: string, keep: number): number {
+    if (keep <= 0) return 0;
+    const toDelete = this.queryAll<{ id: string }>(
+      `SELECT id FROM workflow_versions WHERE workflow_id = ? ORDER BY version DESC LIMIT -1 OFFSET ?`,
+      [workflowId, keep]
+    );
+    if (toDelete.length === 0) return 0;
+    for (const row of toDelete) {
+      this.db.run(`DELETE FROM workflow_versions WHERE id = ?`, [toString(row.id)]);
+    }
+    this.persist();
+    return toDelete.length;
+  }
+
+  maxWorkflowVersionNumber(workflowId: string): number {
+    const row = this.queryOne<{ max_version: number | null }>(
+      `SELECT MAX(version) as max_version FROM workflow_versions WHERE workflow_id = ?`,
+      [workflowId]
+    );
+    return row && row.max_version !== null ? toNumber(row.max_version) : 0;
+  }
+
+  // Git config (singleton row keyed by literal 'default')
+
+  getGitConfig(): {
+    id: string;
+    repoUrl: string;
+    defaultBranch: string;
+    authSecretId: string | null;
+    workflowsDir: string;
+    variablesFile: string;
+    userName: string;
+    userEmail: string;
+    enabled: boolean;
+    lastPushAt: string | null;
+    lastPullAt: string | null;
+    lastError: string | null;
+    updatedAt: string;
+  } | null {
+    const row = this.queryOne<{
+      id: string;
+      repo_url: string;
+      default_branch: string;
+      auth_secret_id: string | null;
+      workflows_dir: string;
+      variables_file: string;
+      user_name: string;
+      user_email: string;
+      enabled: number;
+      last_push_at: string | null;
+      last_pull_at: string | null;
+      last_error: string | null;
+      updated_at: string;
+    }>(`SELECT id, repo_url, default_branch, auth_secret_id, workflows_dir, variables_file,
+        user_name, user_email, enabled, last_push_at, last_pull_at, last_error, updated_at
+        FROM git_configs WHERE id = 'default'`);
+    if (!row) return null;
+    return {
+      id: toString(row.id),
+      repoUrl: toString(row.repo_url),
+      defaultBranch: toString(row.default_branch),
+      authSecretId: row.auth_secret_id ? toString(row.auth_secret_id) : null,
+      workflowsDir: toString(row.workflows_dir),
+      variablesFile: toString(row.variables_file),
+      userName: toString(row.user_name),
+      userEmail: toString(row.user_email),
+      enabled: toNumber(row.enabled) === 1,
+      lastPushAt: row.last_push_at ? toString(row.last_push_at) : null,
+      lastPullAt: row.last_pull_at ? toString(row.last_pull_at) : null,
+      lastError: row.last_error ? toString(row.last_error) : null,
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertGitConfig(input: {
+    repoUrl: string;
+    defaultBranch?: string;
+    authSecretId?: string | null;
+    workflowsDir?: string;
+    variablesFile?: string;
+    userName?: string;
+    userEmail?: string;
+    enabled?: boolean;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO git_configs (id, repo_url, default_branch, auth_secret_id, workflows_dir, variables_file,
+          user_name, user_email, enabled, updated_at)
+       VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         repo_url = excluded.repo_url,
+         default_branch = excluded.default_branch,
+         auth_secret_id = excluded.auth_secret_id,
+         workflows_dir = excluded.workflows_dir,
+         variables_file = excluded.variables_file,
+         user_name = excluded.user_name,
+         user_email = excluded.user_email,
+         enabled = excluded.enabled,
+         updated_at = excluded.updated_at`,
+      [
+        input.repoUrl,
+        input.defaultBranch ?? "main",
+        input.authSecretId ?? null,
+        input.workflowsDir ?? "workflows",
+        input.variablesFile ?? "variables.json",
+        input.userName ?? "ai-orchestrator",
+        input.userEmail ?? "sync@ai-orchestrator.local",
+        input.enabled === false ? 0 : 1,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  deleteGitConfig(): boolean {
+    const existing = this.getGitConfig();
+    if (!existing) return false;
+    this.db.run(`DELETE FROM git_configs WHERE id = 'default'`);
+    this.persist();
+    return true;
+  }
+
+  recordGitSync(input: { kind: "push" | "pull"; error?: string | null }): void {
+    const now = new Date().toISOString();
+    const column = input.kind === "push" ? "last_push_at" : "last_pull_at";
+    this.db.run(
+      `UPDATE git_configs SET ${column} = ?, last_error = ?, updated_at = ? WHERE id = 'default'`,
+      [now, input.error ?? null, now]
+    );
+    this.persist();
   }
 
   /**

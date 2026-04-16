@@ -211,6 +211,11 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     LOG_STREAM_RETRY_MAX_ATTEMPTS: 3,
     LOG_STREAM_EVENT_RETENTION_DAYS: 14,
     LOG_STREAM_EVENT_PRUNE_INTERVAL_MS: 3600000,
+    GIT_SYNC_ENABLED: true,
+    GIT_SYNC_WORKDIR: "apps/api/data/git",
+    GIT_BIN: "git",
+    GIT_COMMAND_TIMEOUT_MS: 60000,
+    WORKFLOW_VERSION_RETENTION: 100,
     ...overrides
   };
 
