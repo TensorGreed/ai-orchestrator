@@ -173,6 +173,68 @@ interface WorkflowExecutionRow {
   updated_at: string;
 }
 
+export interface LogStreamDestinationRecord {
+  id: string;
+  name: string;
+  type: string;
+  enabled: boolean;
+  categories: string[];
+  minLevel: string;
+  configIv: string | null;
+  configAuthTag: string | null;
+  configCiphertext: string | null;
+  lastSuccessAt: string | null;
+  lastErrorAt: string | null;
+  lastError: string | null;
+  dispatchedCount: number;
+  failedCount: number;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface LogStreamDestinationRow {
+  id: string;
+  name: string;
+  type: string;
+  enabled: number;
+  categories_json: string;
+  min_level: string;
+  config_iv: string | null;
+  config_auth_tag: string | null;
+  config_ciphertext: string | null;
+  last_success_at: string | null;
+  last_error_at: string | null;
+  last_error: string | null;
+  dispatched_count: number;
+  failed_count: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapLogStreamDestinationRow(row: LogStreamDestinationRow): LogStreamDestinationRecord {
+  return {
+    id: toString(row.id),
+    name: toString(row.name),
+    type: toString(row.type),
+    enabled: toNumber(row.enabled) === 1,
+    categories: parseJsonArray(row.categories_json),
+    minLevel: toString(row.min_level),
+    configIv: row.config_iv ? toString(row.config_iv) : null,
+    configAuthTag: row.config_auth_tag ? toString(row.config_auth_tag) : null,
+    configCiphertext: row.config_ciphertext ? toString(row.config_ciphertext) : null,
+    lastSuccessAt: row.last_success_at ? toString(row.last_success_at) : null,
+    lastErrorAt: row.last_error_at ? toString(row.last_error_at) : null,
+    lastError: row.last_error ? toString(row.last_error) : null,
+    dispatchedCount: toNumber(row.dispatched_count),
+    failedCount: toNumber(row.failed_count),
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
 function toString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
@@ -608,6 +670,48 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_user_id ON audit_logs(actor_user_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_resource_type ON audit_logs(resource_type);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome ON audit_logs(outcome);
+
+      -- Phase 5.5 log streaming tables
+      CREATE TABLE IF NOT EXISTS log_stream_destinations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        categories_json TEXT NOT NULL DEFAULT '[]',
+        min_level TEXT NOT NULL DEFAULT 'info',
+        config_iv TEXT,
+        config_auth_tag TEXT,
+        config_ciphertext TEXT,
+        last_success_at TEXT,
+        last_error_at TEXT,
+        last_error TEXT,
+        dispatched_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_log_stream_destinations_type ON log_stream_destinations(type);
+      CREATE INDEX IF NOT EXISTS idx_log_stream_destinations_enabled ON log_stream_destinations(enabled);
+
+      CREATE TABLE IF NOT EXISTS log_stream_events (
+        id TEXT PRIMARY KEY,
+        destination_id TEXT NOT NULL,
+        category TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        level TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        payload_json TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_log_stream_events_destination_created
+        ON log_stream_events(destination_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_log_stream_events_status ON log_stream_events(status);
+      CREATE INDEX IF NOT EXISTS idx_log_stream_events_created_at ON log_stream_events(created_at);
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -3611,6 +3715,234 @@ export class SqliteStore {
     const count = existing ? toNumber(existing.count) : 0;
     if (count === 0) return 0;
     this.db.run(`DELETE FROM audit_logs WHERE created_at < ?`, [options.before]);
+    this.persist();
+    return count;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.5 — Log streaming destinations + delivery history
+  // ---------------------------------------------------------------------------
+
+  listLogStreamDestinations(): LogStreamDestinationRecord[] {
+    const rows = this.queryAll<LogStreamDestinationRow>(
+      `SELECT id, name, type, enabled, categories_json, min_level, config_iv, config_auth_tag,
+              config_ciphertext, last_success_at, last_error_at, last_error, dispatched_count,
+              failed_count, created_by, created_at, updated_at
+       FROM log_stream_destinations ORDER BY created_at DESC`
+    );
+    return rows.map(mapLogStreamDestinationRow);
+  }
+
+  getLogStreamDestination(id: string): LogStreamDestinationRecord | null {
+    const row = this.queryOne<LogStreamDestinationRow>(
+      `SELECT id, name, type, enabled, categories_json, min_level, config_iv, config_auth_tag,
+              config_ciphertext, last_success_at, last_error_at, last_error, dispatched_count,
+              failed_count, created_by, created_at, updated_at
+       FROM log_stream_destinations WHERE id = ?`,
+      [id]
+    );
+    return row ? mapLogStreamDestinationRow(row) : null;
+  }
+
+  upsertLogStreamDestination(input: {
+    id: string;
+    name: string;
+    type: string;
+    enabled?: boolean;
+    categories?: string[];
+    minLevel?: string;
+    configIv?: string | null;
+    configAuthTag?: string | null;
+    configCiphertext?: string | null;
+    createdBy?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    const existing = this.getLogStreamDestination(input.id);
+    const createdAt = existing?.createdAt ?? now;
+    this.db.run(
+      `INSERT INTO log_stream_destinations
+         (id, name, type, enabled, categories_json, min_level, config_iv, config_auth_tag,
+          config_ciphertext, last_success_at, last_error_at, last_error, dispatched_count,
+          failed_count, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         type = excluded.type,
+         enabled = excluded.enabled,
+         categories_json = excluded.categories_json,
+         min_level = excluded.min_level,
+         config_iv = excluded.config_iv,
+         config_auth_tag = excluded.config_auth_tag,
+         config_ciphertext = excluded.config_ciphertext,
+         updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.name,
+        input.type,
+        input.enabled === false ? 0 : 1,
+        JSON.stringify(input.categories ?? []),
+        input.minLevel ?? "info",
+        input.configIv ?? null,
+        input.configAuthTag ?? null,
+        input.configCiphertext ?? null,
+        existing?.lastSuccessAt ?? null,
+        existing?.lastErrorAt ?? null,
+        existing?.lastError ?? null,
+        existing?.dispatchedCount ?? 0,
+        existing?.failedCount ?? 0,
+        input.createdBy ?? existing?.createdBy ?? null,
+        createdAt,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  deleteLogStreamDestination(id: string): boolean {
+    const existing = this.getLogStreamDestination(id);
+    if (!existing) return false;
+    this.db.run(`DELETE FROM log_stream_destinations WHERE id = ?`, [id]);
+    this.db.run(`DELETE FROM log_stream_events WHERE destination_id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  recordLogStreamDispatch(input: {
+    destinationId: string;
+    success: boolean;
+    error?: string | null;
+    at?: string;
+  }): void {
+    const now = input.at ?? new Date().toISOString();
+    if (input.success) {
+      this.db.run(
+        `UPDATE log_stream_destinations
+         SET last_success_at = ?, dispatched_count = dispatched_count + 1, updated_at = ?
+         WHERE id = ?`,
+        [now, now, input.destinationId]
+      );
+    } else {
+      this.db.run(
+        `UPDATE log_stream_destinations
+         SET last_error_at = ?, last_error = ?, failed_count = failed_count + 1, updated_at = ?
+         WHERE id = ?`,
+        [now, input.error ?? "unknown error", now, input.destinationId]
+      );
+    }
+    this.persist();
+  }
+
+  writeLogStreamEvent(entry: {
+    id: string;
+    destinationId: string;
+    category: string;
+    eventType: string;
+    level: string;
+    status: "sent" | "failed" | "pending";
+    attempts?: number;
+    error?: string | null;
+    payload?: unknown;
+    createdAt?: string;
+  }): void {
+    const createdAt = entry.createdAt ?? new Date().toISOString();
+    this.db.run(
+      `INSERT INTO log_stream_events
+         (id, destination_id, category, event_type, level, status, attempts, error, payload_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        entry.id,
+        entry.destinationId,
+        entry.category,
+        entry.eventType,
+        entry.level,
+        entry.status,
+        entry.attempts ?? 0,
+        entry.error ?? null,
+        entry.payload === undefined ? null : JSON.stringify(entry.payload),
+        createdAt
+      ]
+    );
+    this.persist();
+  }
+
+  listLogStreamEvents(filter: {
+    destinationId?: string;
+    status?: string;
+    limit?: number;
+  } = {}): Array<{
+    id: string;
+    destinationId: string;
+    category: string;
+    eventType: string;
+    level: string;
+    status: string;
+    attempts: number;
+    error: string | null;
+    payload: unknown;
+    createdAt: string;
+  }> {
+    const clauses: string[] = [];
+    const params: BindParams = [];
+    if (filter.destinationId) {
+      clauses.push(`destination_id = ?`);
+      params.push(filter.destinationId);
+    }
+    if (filter.status) {
+      clauses.push(`status = ?`);
+      params.push(filter.status);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limit = Math.max(1, Math.min(500, filter.limit ?? 100));
+    const rows = this.queryAll<{
+      id: string;
+      destination_id: string;
+      category: string;
+      event_type: string;
+      level: string;
+      status: string;
+      attempts: number;
+      error: string | null;
+      payload_json: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, destination_id, category, event_type, level, status, attempts, error, payload_json, created_at
+       FROM log_stream_events ${where}
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [...params, limit]
+    );
+    return rows.map((row) => {
+      let payload: unknown = null;
+      if (row.payload_json) {
+        try {
+          payload = JSON.parse(toString(row.payload_json));
+        } catch {
+          payload = null;
+        }
+      }
+      return {
+        id: toString(row.id),
+        destinationId: toString(row.destination_id),
+        category: toString(row.category),
+        eventType: toString(row.event_type),
+        level: toString(row.level),
+        status: toString(row.status),
+        attempts: toNumber(row.attempts),
+        error: row.error ? toString(row.error) : null,
+        payload,
+        createdAt: toString(row.created_at)
+      };
+    });
+  }
+
+  pruneLogStreamEvents(options: { before: string }): number {
+    const existing = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM log_stream_events WHERE created_at < ?`,
+      [options.before]
+    );
+    const count = existing ? toNumber(existing.count) : 0;
+    if (count === 0) return 0;
+    this.db.run(`DELETE FROM log_stream_events WHERE created_at < ?`, [options.before]);
     this.persist();
     return count;
   }

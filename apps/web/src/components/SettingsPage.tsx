@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { Project } from "@ai-orchestrator/shared";
 import {
   activateMfa,
@@ -8,9 +8,11 @@ import {
   createApiKey,
   createCustomRole,
   createExternalProvider,
+  createLogStreamDestination,
   createSsoMapping,
   deleteCustomRole,
   deleteExternalProvider,
+  deleteLogStreamDestination,
   deleteSsoMapping,
   disableMfa,
   enrollMfa,
@@ -18,6 +20,8 @@ import {
   fetchAuditLogs,
   fetchCustomRoles,
   fetchExternalProviders,
+  fetchLogStreamDeliveryEvents,
+  fetchLogStreamDestinations,
   fetchMfaStatus,
   fetchProjectMembers,
   fetchSecrets,
@@ -25,7 +29,9 @@ import {
   removeProjectMember,
   revokeApiKey,
   testExternalProvider,
+  testLogStreamDestination,
   updateExternalProvider,
+  updateLogStreamDestination,
   type ApiKeyRecord,
   type AuditLogEntry,
   type AuditLogFilter,
@@ -33,6 +39,10 @@ import {
   type CustomRoleRecord,
   type ExternalSecretProviderRecord,
   type ExternalSecretProviderType,
+  type LogLevel,
+  type LogStreamDeliveryEvent,
+  type LogStreamDestination,
+  type LogStreamDestinationType,
   type MfaStatus,
   type ProjectMembership,
   type SecretListItem,
@@ -46,7 +56,8 @@ type SettingsTab =
   | "roles"
   | "sso"
   | "external-secrets"
-  | "audit-log";
+  | "audit-log"
+  | "log-streams";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -84,7 +95,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "roles", label: "Custom Roles", restricted: !isAdmin },
     { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
     { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
-    { id: "audit-log", label: "Audit Log", restricted: !isAdmin }
+    { id: "audit-log", label: "Audit Log", restricted: !isAdmin },
+    { id: "log-streams", label: "Log Streams", restricted: !isAdmin }
   ];
 
   return (
@@ -132,6 +144,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
           <ExternalSecretsTab activeProjectId={activeProjectId} />
         )}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
+        {tab === "log-streams" && isAdmin && <LogStreamsTab />}
       </div>
     </section>
   );
@@ -1549,6 +1562,402 @@ function AuditLogTab() {
             Next →
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Log streams (Phase 5.5)
+// ---------------------------------------------------------------------------
+
+const LOG_STREAM_TYPES: Array<{
+  value: LogStreamDestinationType;
+  label: string;
+  hint: string;
+  sampleConfig: string;
+}> = [
+  {
+    value: "syslog",
+    label: "Syslog (RFC 5424)",
+    hint: "Streams each event as an RFC 5424 message over UDP or TCP.",
+    sampleConfig: JSON.stringify(
+      { host: "syslog.example.com", port: 514, transport: "udp", facility: 16, appName: "ai-orchestrator" },
+      null,
+      2
+    )
+  },
+  {
+    value: "webhook",
+    label: "HTTP webhook",
+    hint: "POSTs JSON to a URL. Optional HMAC signing and custom headers.",
+    sampleConfig: JSON.stringify(
+      {
+        url: "https://logs.example.com/ingest",
+        method: "POST",
+        headers: { "x-source": "ai-orchestrator" },
+        hmacSecret: "change-me",
+        hmacHeader: "x-ao-signature"
+      },
+      null,
+      2
+    )
+  },
+  {
+    value: "sentry",
+    label: "Sentry",
+    hint: "Sends events to a Sentry project via a classic DSN.",
+    sampleConfig: JSON.stringify(
+      { dsn: "https://<key>@o12345.ingest.sentry.io/67890", environment: "production" },
+      null,
+      2
+    )
+  }
+];
+
+const LOG_STREAM_CATEGORIES = [
+  "auth",
+  "mfa",
+  "sso",
+  "api_key",
+  "secret",
+  "external_secret",
+  "workflow",
+  "execution",
+  "project",
+  "rbac",
+  "sharing",
+  "system"
+];
+
+function LogStreamsTab() {
+  const [destinations, setDestinations] = useState<LogStreamDestination[]>([]);
+  const [name, setName] = useState("");
+  const [type, setType] = useState<LogStreamDestinationType>("webhook");
+  const [minLevel, setMinLevel] = useState<LogLevel>("info");
+  const [categoriesInput, setCategoriesInput] = useState<string[]>([]);
+  const [configJson, setConfigJson] = useState(
+    LOG_STREAM_TYPES.find((t) => t.value === "webhook")!.sampleConfig
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [testResult, setTestResult] = useState<Record<string, string>>({});
+  const [expandedEvents, setExpandedEvents] = useState<Record<string, LogStreamDeliveryEvent[] | "loading">>({});
+
+  const typeMeta = LOG_STREAM_TYPES.find((t) => t.value === type);
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const response = await fetchLogStreamDestinations();
+      setDestinations(response.destinations);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleTypeChange = (next: LogStreamDestinationType) => {
+    setType(next);
+    const meta = LOG_STREAM_TYPES.find((t) => t.value === next);
+    if (meta) setConfigJson(meta.sampleConfig);
+  };
+
+  const toggleCategory = (category: string) => {
+    setCategoriesInput((prev) =>
+      prev.includes(category) ? prev.filter((c) => c !== category) : [...prev, category]
+    );
+  };
+
+  const handleCreate = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let parsedConfig: Record<string, unknown>;
+      try {
+        parsedConfig = JSON.parse(configJson) as Record<string, unknown>;
+      } catch {
+        setError("Config must be valid JSON");
+        setBusy(false);
+        return;
+      }
+      await createLogStreamDestination({
+        name: name.trim(),
+        type,
+        minLevel,
+        categories: categoriesInput,
+        config: parsedConfig
+      });
+      setName("");
+      setCategoriesInput([]);
+      if (typeMeta) setConfigJson(typeMeta.sampleConfig);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleToggle = async (dest: LogStreamDestination) => {
+    setError(null);
+    try {
+      await updateLogStreamDestination(dest.id, { enabled: !dest.enabled });
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!window.confirm("Delete this log stream destination?")) return;
+    setError(null);
+    try {
+      await deleteLogStreamDestination(id);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    }
+  };
+
+  const handleTest = async (id: string) => {
+    setTestResult((prev) => ({ ...prev, [id]: "Sending…" }));
+    try {
+      const response = await testLogStreamDestination(id);
+      setTestResult((prev) => ({
+        ...prev,
+        [id]: response.ok ? "✓ delivered" : `✗ ${response.error ?? "failed"}`
+      }));
+      await refresh();
+    } catch (err) {
+      setTestResult((prev) => ({ ...prev, [id]: `✗ ${formatError(err)}` }));
+    }
+  };
+
+  const handleToggleEvents = async (id: string) => {
+    if (expandedEvents[id]) {
+      setExpandedEvents((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      return;
+    }
+    setExpandedEvents((prev) => ({ ...prev, [id]: "loading" }));
+    try {
+      const response = await fetchLogStreamDeliveryEvents(id);
+      setExpandedEvents((prev) => ({ ...prev, [id]: response.events }));
+    } catch (err) {
+      setExpandedEvents((prev) => ({ ...prev, [id]: [] }));
+      setError(formatError(err));
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <h3>Log streaming destinations</h3>
+      <p className="settings-help">
+        Forward audit, workflow, and system events to external log systems. Every destination encrypts
+        its config at rest, streams asynchronously, and tracks success/failure counters plus recent
+        delivery events for debugging. Leave categories empty to send every event.
+      </p>
+      {error && <div className="settings-error">{error}</div>}
+
+      <div className="settings-card">
+        <h4>Register destination</h4>
+        <label htmlFor="lsd-name">Name</label>
+        <input id="lsd-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="prod-syslog" />
+        <label htmlFor="lsd-type">Type</label>
+        <select
+          id="lsd-type"
+          value={type}
+          onChange={(event) => handleTypeChange(event.target.value as LogStreamDestinationType)}
+        >
+          {LOG_STREAM_TYPES.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <p className="settings-muted" style={{ fontSize: "0.8rem" }}>
+          {typeMeta?.hint}
+        </p>
+        <label htmlFor="lsd-min-level">Minimum level</label>
+        <select id="lsd-min-level" value={minLevel} onChange={(event) => setMinLevel(event.target.value as LogLevel)}>
+          <option value="debug">debug</option>
+          <option value="info">info</option>
+          <option value="warn">warn</option>
+          <option value="error">error</option>
+        </select>
+        <label>Categories</label>
+        <div className="settings-permissions-grid">
+          {LOG_STREAM_CATEGORIES.map((category) => (
+            <label key={category} className="settings-permission-option">
+              <input
+                type="checkbox"
+                checked={categoriesInput.includes(category)}
+                onChange={() => toggleCategory(category)}
+              />
+              {category}
+            </label>
+          ))}
+        </div>
+        <p className="settings-muted" style={{ fontSize: "0.75rem" }}>
+          {categoriesInput.length === 0
+            ? "No filter — all categories will be forwarded."
+            : `Filtering to ${categoriesInput.length} categor${categoriesInput.length === 1 ? "y" : "ies"}.`}
+        </p>
+        <label htmlFor="lsd-config">Config JSON</label>
+        <textarea
+          id="lsd-config"
+          value={configJson}
+          onChange={(event) => setConfigJson(event.target.value)}
+          rows={8}
+          className="settings-textarea"
+        />
+        <div className="settings-actions">
+          <button className="header-btn" onClick={handleCreate} disabled={busy || !name.trim()}>
+            Register destination
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <h4>Registered destinations ({destinations.length})</h4>
+        {!loaded ? (
+          <div className="settings-loading">Loading…</div>
+        ) : destinations.length === 0 ? (
+          <p className="settings-muted">No log stream destinations yet.</p>
+        ) : (
+          <table className="settings-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Min level</th>
+                <th>Categories</th>
+                <th>Dispatched / Failed</th>
+                <th>Last success</th>
+                <th>Last error</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {destinations.map((dest) => {
+                const events = expandedEvents[dest.id];
+                return (
+                  <Fragment key={dest.id}>
+                    <tr>
+                      <td>
+                        <strong>{dest.name}</strong>
+                        <div className="settings-muted">
+                          <code>{dest.id}</code>
+                        </div>
+                      </td>
+                      <td>{dest.type}</td>
+                      <td>{dest.minLevel}</td>
+                      <td>
+                        {dest.categories.length === 0 ? (
+                          <span className="settings-muted">all</span>
+                        ) : (
+                          <span className="settings-muted">{dest.categories.join(", ")}</span>
+                        )}
+                      </td>
+                      <td>
+                        {dest.dispatchedCount} / {dest.failedCount}
+                      </td>
+                      <td>{formatDate(dest.lastSuccessAt)}</td>
+                      <td>
+                        {dest.lastError ? (
+                          <span className="settings-muted" title={dest.lastError}>
+                            {dest.lastError.length > 40
+                              ? `${dest.lastError.slice(0, 40)}…`
+                              : dest.lastError}
+                          </span>
+                        ) : (
+                          <span className="settings-muted">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <button className="mini-btn" onClick={() => handleToggle(dest)}>
+                          {dest.enabled ? "Disable" : "Enable"}
+                        </button>
+                      </td>
+                      <td>
+                        <button className="mini-btn" onClick={() => handleTest(dest.id)}>
+                          Test
+                        </button>
+                        <button className="mini-btn" onClick={() => handleToggleEvents(dest.id)}>
+                          {events ? "Hide events" : "Events"}
+                        </button>
+                        <button className="mini-btn" onClick={() => handleDelete(dest.id)}>
+                          Delete
+                        </button>
+                        {testResult[dest.id] && (
+                          <div className="settings-muted" style={{ fontSize: "0.75rem" }}>
+                            {testResult[dest.id]}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                    {events && (
+                      <tr>
+                        <td colSpan={9}>
+                          {events === "loading" ? (
+                            <div className="settings-loading">Loading events…</div>
+                          ) : events.length === 0 ? (
+                            <p className="settings-muted">No delivery events recorded yet.</p>
+                          ) : (
+                            <table className="settings-table">
+                              <thead>
+                                <tr>
+                                  <th>Time</th>
+                                  <th>Category</th>
+                                  <th>Event</th>
+                                  <th>Level</th>
+                                  <th>Status</th>
+                                  <th>Attempts</th>
+                                  <th>Error</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {events.map((event) => (
+                                  <tr key={event.id}>
+                                    <td>{formatDate(event.createdAt)}</td>
+                                    <td>{event.category}</td>
+                                    <td>{event.eventType}</td>
+                                    <td>{event.level}</td>
+                                    <td>{event.status}</td>
+                                    <td>{event.attempts}</td>
+                                    <td>
+                                      {event.error ? (
+                                        <span className="settings-muted">{event.error}</span>
+                                      ) : (
+                                        <span className="settings-muted">—</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

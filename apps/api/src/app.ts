@@ -52,6 +52,7 @@ import {
 } from "./services/rbac-service";
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
+import { LogStreamingService } from "./services/log-streaming-service";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -1664,6 +1665,18 @@ export function createApp(
   const externalSecretsService = new ExternalSecretsService(store);
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
+  const logStreamingService = new LogStreamingService(store, config.SECRET_MASTER_KEY_BASE64, {
+    enabled: config.LOG_STREAM_ENABLED,
+    flushIntervalMs: config.LOG_STREAM_FLUSH_INTERVAL_MS,
+    bufferSize: config.LOG_STREAM_BUFFER_SIZE,
+    retryMaxAttempts: config.LOG_STREAM_RETRY_MAX_ATTEMPTS,
+    eventRetentionDays: config.LOG_STREAM_EVENT_RETENTION_DAYS,
+    eventPruneIntervalMs: config.LOG_STREAM_EVENT_PRUNE_INTERVAL_MS
+  });
+  logStreamingService.start();
+  app.addHook("onClose", async () => {
+    await logStreamingService.stop();
+  });
 
   const pruneAuditLogs = (reason: "startup" | "interval") => {
     const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
@@ -1733,10 +1746,10 @@ export function createApp(
     user: SafeUser | null,
     event: Omit<AuditEventInput, "actor"> & { actor?: Partial<AuditActor> }
   ) => {
-    auditService.record({
-      ...event,
-      actor: buildActor(request, user, event.actor)
-    });
+    const actor = buildActor(request, user, event.actor);
+    const full = { ...event, actor };
+    auditService.record(full);
+    logStreamingService.dispatchAudit(full);
   };
   const samlService = new SamlService(store, {
     enabled: config.SAML_ENABLED,
@@ -2776,6 +2789,139 @@ export function createApp(
       `attachment; filename="audit-log-${new Date().toISOString().slice(0, 10)}.csv"`
     );
     return reply.send(csv);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5.5 — Log streaming
+  // ---------------------------------------------------------------------------
+
+  const logStreamTypeSchema = z.enum(["syslog", "webhook", "sentry"]);
+  const logLevelSchema = z.enum(["debug", "info", "warn", "error"]);
+  const logStreamCreateSchema = z.object({
+    name: z.string().min(1).max(120),
+    type: logStreamTypeSchema,
+    enabled: z.boolean().optional(),
+    categories: z.array(z.string().min(1).max(60)).optional(),
+    minLevel: logLevelSchema.optional(),
+    config: z.record(z.string(), z.unknown())
+  });
+  const logStreamUpdateSchema = z.object({
+    name: z.string().min(1).max(120).optional(),
+    enabled: z.boolean().optional(),
+    categories: z.array(z.string().min(1).max(60)).optional(),
+    minLevel: logLevelSchema.optional(),
+    config: z.record(z.string(), z.unknown()).optional()
+  });
+
+  app.get("/api/log-streams", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return { destinations: logStreamingService.listDestinations() };
+  });
+
+  app.post("/api/log-streams", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = logStreamCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid log stream destination payload", details: parsed.error.issues };
+    }
+    try {
+      const destination = logStreamingService.createDestination({
+        ...parsed.data,
+        createdBy: user.id
+      });
+      audit(request, user, {
+        category: "system",
+        eventType: "log_stream.destination.create",
+        action: "create",
+        resourceType: "log_stream_destination",
+        resourceId: destination.id,
+        metadata: { type: destination.type, name: destination.name }
+      });
+      return { destination };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/log-streams/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = logStreamUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid log stream destination payload", details: parsed.error.issues };
+    }
+    try {
+      const destination = logStreamingService.updateDestination(request.params.id, parsed.data);
+      if (!destination) {
+        reply.code(404);
+        return { error: "Log stream destination not found" };
+      }
+      audit(request, user, {
+        category: "system",
+        eventType: "log_stream.destination.update",
+        action: "update",
+        resourceType: "log_stream_destination",
+        resourceId: destination.id,
+        metadata: { keys: Object.keys(parsed.data) }
+      });
+      return { destination };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/log-streams/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = logStreamingService.getDestination(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Log stream destination not found" };
+    }
+    logStreamingService.deleteDestination(request.params.id);
+    audit(request, user, {
+      category: "system",
+      eventType: "log_stream.destination.delete",
+      action: "delete",
+      resourceType: "log_stream_destination",
+      resourceId: request.params.id,
+      metadata: { type: existing.type, name: existing.name }
+    });
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/log-streams/:id/test", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const result = await logStreamingService.test(request.params.id);
+    audit(request, user, {
+      category: "system",
+      eventType: "log_stream.destination.test",
+      action: "test",
+      outcome: result.ok ? "success" : "failure",
+      resourceType: "log_stream_destination",
+      resourceId: request.params.id,
+      metadata: result.ok ? null : { error: result.error }
+    });
+    if (!result.ok) reply.code(400);
+    return result;
+  });
+
+  app.get<{ Params: { id: string } }>("/api/log-streams/:id/events", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = logStreamingService.getDestination(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Log stream destination not found" };
+    }
+    return { events: logStreamingService.listDeliveryEvents(request.params.id, 100) };
   });
 
   // ---------------------------------------------------------------------------

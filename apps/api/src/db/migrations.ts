@@ -420,6 +420,52 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_audit_logs_resource_type ON audit_logs(resource_type);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome ON audit_logs(outcome);
     `
+  },
+  {
+    version: 8,
+    description: "Log streaming destinations + delivery history (Phase 5.5)",
+    up: `
+      CREATE TABLE IF NOT EXISTS log_stream_destinations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        categories_json TEXT NOT NULL DEFAULT '[]',
+        min_level TEXT NOT NULL DEFAULT 'info',
+        config_iv TEXT,
+        config_auth_tag TEXT,
+        config_ciphertext TEXT,
+        last_success_at TIMESTAMPTZ,
+        last_error_at TIMESTAMPTZ,
+        last_error TEXT,
+        dispatched_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_log_stream_destinations_type ON log_stream_destinations(type);
+      CREATE INDEX IF NOT EXISTS idx_log_stream_destinations_enabled ON log_stream_destinations(enabled);
+
+      CREATE TABLE IF NOT EXISTS log_stream_events (
+        id TEXT PRIMARY KEY,
+        destination_id TEXT NOT NULL,
+        category TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        level TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        payload_json TEXT,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_log_stream_events_destination_created
+        ON log_stream_events(destination_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_log_stream_events_status ON log_stream_events(status);
+      CREATE INDEX IF NOT EXISTS idx_log_stream_events_created_at ON log_stream_events(created_at);
+    `
   }
 ];
 

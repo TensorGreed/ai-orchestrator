@@ -60,7 +60,15 @@ const envSchema = z.object({
   // Phase 5.4 — Audit logging
   AUDIT_LOG_ENABLED: booleanFromEnv.default(true),
   AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(365),
-  AUDIT_LOG_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000)
+  AUDIT_LOG_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),
+
+  // Phase 5.5 — Log streaming
+  LOG_STREAM_ENABLED: booleanFromEnv.default(true),
+  LOG_STREAM_FLUSH_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
+  LOG_STREAM_BUFFER_SIZE: z.coerce.number().int().positive().default(1000),
+  LOG_STREAM_RETRY_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
+  LOG_STREAM_EVENT_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(14),
+  LOG_STREAM_EVENT_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000)
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

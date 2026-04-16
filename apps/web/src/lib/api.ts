@@ -1176,3 +1176,92 @@ export function auditExportUrl(filter: AuditLogFilter = {}): string {
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return `${API_BASE}/api/audit/export${suffix}`;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5.5 — Log streaming
+// ---------------------------------------------------------------------------
+
+export type LogStreamDestinationType = "syslog" | "webhook" | "sentry";
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface LogStreamDestination {
+  id: string;
+  name: string;
+  type: LogStreamDestinationType | string;
+  enabled: boolean;
+  categories: string[];
+  minLevel: LogLevel | string;
+  config: Record<string, unknown>;
+  lastSuccessAt: string | null;
+  lastErrorAt: string | null;
+  lastError: string | null;
+  dispatchedCount: number;
+  failedCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LogStreamDeliveryEvent {
+  id: string;
+  destinationId: string;
+  category: string;
+  eventType: string;
+  level: string;
+  status: string;
+  attempts: number;
+  error: string | null;
+  createdAt: string;
+}
+
+export async function fetchLogStreamDestinations() {
+  return apiRequest<{ destinations: LogStreamDestination[] }>("/api/log-streams");
+}
+
+export async function createLogStreamDestination(payload: {
+  name: string;
+  type: LogStreamDestinationType;
+  enabled?: boolean;
+  categories?: string[];
+  minLevel?: LogLevel;
+  config: Record<string, unknown>;
+}) {
+  return apiRequest<{ destination: LogStreamDestination }>("/api/log-streams", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateLogStreamDestination(
+  id: string,
+  payload: {
+    name?: string;
+    enabled?: boolean;
+    categories?: string[];
+    minLevel?: LogLevel;
+    config?: Record<string, unknown>;
+  }
+) {
+  return apiRequest<{ destination: LogStreamDestination }>(
+    `/api/log-streams/${encodeURIComponent(id)}`,
+    { method: "PUT", body: JSON.stringify(payload) }
+  );
+}
+
+export async function deleteLogStreamDestination(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/log-streams/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+export async function testLogStreamDestination(id: string) {
+  return apiRequest<{ ok: boolean; error?: string }>(
+    `/api/log-streams/${encodeURIComponent(id)}/test`,
+    { method: "POST", body: "{}" }
+  );
+}
+
+export async function fetchLogStreamDeliveryEvents(id: string) {
+  return apiRequest<{ events: LogStreamDeliveryEvent[] }>(
+    `/api/log-streams/${encodeURIComponent(id)}/events`
+  );
+}
