@@ -52,6 +52,8 @@ import {
 } from "./services/rbac-service";
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GitSyncService } from "./services/git-sync-service";
+import { MetricsService } from "./services/metrics-service";
+import { TracingService } from "./services/tracing-service";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -982,6 +984,7 @@ export function createApp(
     const current = activeExecutions.get(executionId);
     if (current?.controller === controller) {
       activeExecutions.delete(executionId);
+      metricsService.setActiveExecutions(activeExecutions.size);
     }
   };
 
@@ -1003,6 +1006,9 @@ export function createApp(
       store.saveExecutionHistory(record);
       if (meta.phase === "final") {
         pruneExecutionHistory("write");
+        const status = meta.status === "success" ? "success" : meta.status === "canceled" ? "canceled" : "error";
+        metricsService.recordExecution(status, record.durationMs ?? 0);
+        metricsService.setActiveExecutions(activeExecutions.size);
       }
       return true;
     } catch (error) {
@@ -1679,6 +1685,18 @@ export function createApp(
     commandTimeoutMs: config.GIT_COMMAND_TIMEOUT_MS,
     enabled: config.GIT_SYNC_ENABLED
   });
+  const metricsService = new MetricsService({
+    enabled: config.METRICS_ENABLED,
+    prefix: config.METRICS_PREFIX,
+    includeProcess: config.METRICS_INCLUDE_PROCESS,
+    sloSuccessTarget: config.METRICS_SLO_SUCCESS_TARGET,
+    sloP95LatencyMs: config.METRICS_SLO_P95_LATENCY_MS
+  });
+  const tracingService = new TracingService({
+    enabled: config.TRACING_ENABLED,
+    endpoint: config.TRACING_ENDPOINT,
+    serviceName: config.TRACING_SERVICE_NAME
+  });
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
   const logStreamingService = new LogStreamingService(store, config.SECRET_MASTER_KEY_BASE64, {
@@ -2047,11 +2065,51 @@ export function createApp(
     runFirst: true
   });
 
+  // Phase 5.7 — HTTP metrics hook
+  app.addHook("onResponse", async (request, reply) => {
+    const elapsed = reply.elapsedTime ?? 0;
+    metricsService.recordHttpRequest(request.method, reply.statusCode, elapsed);
+  });
+
   app.get("/health", async () => {
+    const slo = metricsService.getSloStatus();
     return {
       ok: true,
-      now: new Date().toISOString()
+      now: new Date().toISOString(),
+      uptime: Math.floor(process.uptime()),
+      sloHealthy: slo.healthy
     };
+  });
+
+  app.get("/metrics", async (_request, reply) => {
+    reply.header("content-type", "text/plain; version=0.0.4; charset=utf-8");
+    return metricsService.formatPrometheus();
+  });
+
+  app.get("/api/observability", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return {
+      metrics: metricsService.getSnapshot(),
+      tracing: { enabled: tracingService.isEnabled() }
+    };
+  });
+
+  app.get("/api/observability/slo", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return metricsService.getSloStatus();
+  });
+
+  app.get("/api/observability/traces", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const query = request.query as { traceId?: string; limit?: string } | undefined;
+    if (query?.traceId) {
+      return { spans: tracingService.spansByTrace(query.traceId) };
+    }
+    const limit = Math.min(200, Math.max(1, Number(query?.limit ?? 50)));
+    return { spans: tracingService.recentSpans(limit) };
   });
 
   app.get("/widget.js", async (_request, reply) => {

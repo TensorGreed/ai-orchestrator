@@ -1420,3 +1420,61 @@ export async function pullGit(payload: { branch?: string } = {}) {
     body: JSON.stringify(payload)
   });
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5.7 — Observability
+// ---------------------------------------------------------------------------
+
+export interface MetricsSnapshot {
+  httpRequestsTotal: number;
+  executionsTotal: number;
+  executionsSuccess: number;
+  executionsFailure: number;
+  activeExecutions: number;
+  executionP50Ms: number;
+  executionP95Ms: number;
+  executionP99Ms: number;
+  httpP50Ms: number;
+  httpP95Ms: number;
+  slo: SloStatusRecord;
+  uptimeSeconds: number;
+}
+
+export interface SloStatusRecord {
+  successTarget: number;
+  p95LatencyTargetMs: number;
+  currentSuccessRate: number;
+  currentP95LatencyMs: number;
+  successBudgetRemaining: number;
+  latencyBudgetRemaining: number;
+  healthy: boolean;
+}
+
+export interface TraceSpan {
+  traceId: string;
+  spanId: string;
+  parentSpanId: string | null;
+  operationName: string;
+  startTimeMs: number;
+  endTimeMs: number | null;
+  durationMs: number | null;
+  attributes: Record<string, string | number | boolean>;
+  status: "ok" | "error" | "unset";
+  events: Array<{ name: string; timestampMs: number; attributes?: Record<string, unknown> }>;
+}
+
+export async function fetchObservability() {
+  return apiRequest<{ metrics: MetricsSnapshot; tracing: { enabled: boolean } }>(
+    "/api/observability"
+  );
+}
+
+export async function fetchSloStatus() {
+  return apiRequest<SloStatusRecord>("/api/observability/slo");
+}
+
+export async function fetchRecentTraces(limit = 50) {
+  return apiRequest<{ spans: TraceSpan[] }>(
+    `/api/observability/traces?limit=${Math.min(200, Math.max(1, limit))}`
+  );
+}

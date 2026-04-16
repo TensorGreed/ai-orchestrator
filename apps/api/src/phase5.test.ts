@@ -73,6 +73,14 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     GIT_BIN: "git",
     GIT_COMMAND_TIMEOUT_MS: 60000,
     WORKFLOW_VERSION_RETENTION: 100,
+    METRICS_ENABLED: true,
+    METRICS_PREFIX: "ao",
+    METRICS_INCLUDE_PROCESS: true,
+    METRICS_SLO_SUCCESS_TARGET: 0.99,
+    METRICS_SLO_P95_LATENCY_MS: 30000,
+    TRACING_ENABLED: false,
+    TRACING_ENDPOINT: undefined,
+    TRACING_SERVICE_NAME: "ai-orchestrator",
     ...overrides
   };
 }

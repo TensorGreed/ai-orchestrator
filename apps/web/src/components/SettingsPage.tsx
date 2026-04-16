@@ -25,6 +25,8 @@ import {
   fetchExternalProviders,
   fetchGitConfig,
   fetchLogStreamDeliveryEvents,
+  fetchObservability,
+  fetchRecentTraces,
   fetchLogStreamDestinations,
   fetchMfaStatus,
   fetchProjectMembers,
@@ -51,6 +53,8 @@ import {
   type GitConfigRecord,
   type GitStatusRecord,
   type GitSyncResult,
+  type MetricsSnapshot,
+  type TraceSpan,
   type LogLevel,
   type LogStreamDeliveryEvent,
   type LogStreamDestination,
@@ -72,7 +76,8 @@ type SettingsTab =
   | "audit-log"
   | "log-streams"
   | "source-control"
-  | "variables";
+  | "variables"
+  | "observability";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -113,7 +118,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "audit-log", label: "Audit Log", restricted: !isAdmin },
     { id: "log-streams", label: "Log Streams", restricted: !isAdmin },
     { id: "source-control", label: "Source Control", restricted: !isAdmin },
-    { id: "variables", label: "Variables" }
+    { id: "variables", label: "Variables" },
+    { id: "observability", label: "Observability", restricted: !isAdmin }
   ];
 
   return (
@@ -166,6 +172,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         {tab === "variables" && (
           <VariablesTab projects={projects} initialProjectId={activeProjectId} isAdmin={isAdmin} />
         )}
+        {tab === "observability" && isAdmin && <ObservabilityTab />}
       </div>
     </section>
   );
@@ -2428,6 +2435,208 @@ function VariablesTab({
           </table>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Observability (Phase 5.7)
+// ---------------------------------------------------------------------------
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m ${seconds % 60}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+function ObservabilityTab() {
+  const [snapshot, setSnapshot] = useState<MetricsSnapshot | null>(null);
+  const [tracingEnabled, setTracingEnabled] = useState(false);
+  const [traces, setTraces] = useState<TraceSpan[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const [obs, trace] = await Promise.all([
+        fetchObservability(),
+        fetchRecentTraces(50).catch(() => ({ spans: [] as TraceSpan[] }))
+      ]);
+      setSnapshot(obs.metrics);
+      setTracingEnabled(obs.tracing.enabled);
+      setTraces(trace.spans);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const interval = window.setInterval(refresh, 10000);
+    return () => window.clearInterval(interval);
+  }, [refresh]);
+
+  if (!loaded) {
+    return (
+      <div className="settings-section">
+        <div className="settings-loading">Loading observability…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="settings-section">
+      <h3>Observability &amp; metrics</h3>
+      <p className="settings-help">
+        Live metrics from this instance. Prometheus scrape endpoint: <code>GET /metrics</code>.
+        Import the Grafana dashboard template from{" "}
+        <code>ops/grafana/ai-orchestrator-dashboard.json</code> for a ready-made view of throughput,
+        latency, SLOs, and process health.
+      </p>
+      {error && <div className="settings-error">{error}</div>}
+
+      {snapshot && (
+        <>
+          <div className="settings-card">
+            <h4>SLO status</h4>
+            <div
+              className="settings-permissions-grid"
+              style={{ gridTemplateColumns: "repeat(2, 1fr)" }}
+            >
+              <div>
+                <strong>Success rate</strong>
+                <div className="settings-muted">
+                  {(snapshot.slo.currentSuccessRate * 100).toFixed(2)}% (target{" "}
+                  {(snapshot.slo.successTarget * 100).toFixed(2)}%)
+                </div>
+                <div className="settings-muted" style={{ fontSize: "0.75rem" }}>
+                  Budget remaining: {(snapshot.slo.successBudgetRemaining * 100).toFixed(2)}%
+                </div>
+              </div>
+              <div>
+                <strong>p95 latency</strong>
+                <div className="settings-muted">
+                  {snapshot.slo.currentP95LatencyMs} ms (target {snapshot.slo.p95LatencyTargetMs} ms)
+                </div>
+                <div className="settings-muted" style={{ fontSize: "0.75rem" }}>
+                  Budget remaining: {snapshot.slo.latencyBudgetRemaining} ms
+                </div>
+              </div>
+            </div>
+            <div style={{ marginTop: "10px" }}>
+              <span
+                className="settings-chip"
+                style={{
+                  background: snapshot.slo.healthy ? "#dcfce7" : "#fee2e2",
+                  color: snapshot.slo.healthy ? "#166534" : "#991b1b",
+                  borderColor: snapshot.slo.healthy ? "#86efac" : "#fca5a5"
+                }}
+              >
+                {snapshot.slo.healthy ? "SLOs healthy" : "SLOs breached"}
+              </span>
+            </div>
+          </div>
+
+          <div className="settings-card">
+            <h4>Execution metrics</h4>
+            <table className="settings-table">
+              <tbody>
+                <tr>
+                  <td>Total executions</td>
+                  <td>{snapshot.executionsTotal}</td>
+                </tr>
+                <tr>
+                  <td>Successful</td>
+                  <td>{snapshot.executionsSuccess}</td>
+                </tr>
+                <tr>
+                  <td>Failed / canceled</td>
+                  <td>{snapshot.executionsFailure}</td>
+                </tr>
+                <tr>
+                  <td>Active executions</td>
+                  <td>{snapshot.activeExecutions}</td>
+                </tr>
+                <tr>
+                  <td>Latency p50 / p95 / p99</td>
+                  <td>
+                    {snapshot.executionP50Ms} / {snapshot.executionP95Ms} / {snapshot.executionP99Ms} ms
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className="settings-card">
+            <h4>HTTP metrics</h4>
+            <table className="settings-table">
+              <tbody>
+                <tr>
+                  <td>Total requests</td>
+                  <td>{snapshot.httpRequestsTotal}</td>
+                </tr>
+                <tr>
+                  <td>Latency p50 / p95</td>
+                  <td>
+                    {snapshot.httpP50Ms} / {snapshot.httpP95Ms} ms
+                  </td>
+                </tr>
+                <tr>
+                  <td>Process uptime</td>
+                  <td>{formatUptime(snapshot.uptimeSeconds)}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="settings-muted" style={{ fontSize: "0.85rem", marginTop: "8px" }}>
+              Prometheus endpoint: <code>GET /metrics</code> · Health: <code>GET /health</code>
+            </p>
+          </div>
+
+          <div className="settings-card">
+            <h4>Distributed tracing</h4>
+            <p className="settings-muted">
+              {tracingEnabled
+                ? "Tracing is enabled. Spans are flushed to the OTLP endpoint if TRACING_ENDPOINT is set."
+                : "Tracing is disabled. Set TRACING_ENABLED=true and TRACING_ENDPOINT to forward spans to your OpenTelemetry collector."}
+            </p>
+            {traces.length > 0 && (
+              <table className="settings-table">
+                <thead>
+                  <tr>
+                    <th>Operation</th>
+                    <th>Trace ID</th>
+                    <th>Duration</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {traces.slice(0, 20).map((span) => (
+                    <tr key={span.spanId}>
+                      <td>{span.operationName}</td>
+                      <td>
+                        <code>{span.traceId.slice(0, 16)}…</code>
+                      </td>
+                      <td>{span.durationMs !== null ? `${span.durationMs} ms` : "—"}</td>
+                      <td>{span.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      <p className="settings-muted" style={{ fontSize: "0.8rem", marginTop: "12px" }}>
+        Metrics refresh every 10s. For production scraping, configure Prometheus to hit{" "}
+        <code>/metrics</code> every 15s.
+      </p>
     </div>
   );
 }

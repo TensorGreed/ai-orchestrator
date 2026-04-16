@@ -75,7 +75,17 @@ const envSchema = z.object({
   GIT_SYNC_WORKDIR: z.string().default("apps/api/data/git"),
   GIT_BIN: z.string().default("git"),
   GIT_COMMAND_TIMEOUT_MS: z.coerce.number().int().positive().default(60000),
-  WORKFLOW_VERSION_RETENTION: z.coerce.number().int().nonnegative().default(100)
+  WORKFLOW_VERSION_RETENTION: z.coerce.number().int().nonnegative().default(100),
+
+  // Phase 5.7 — Observability & metrics
+  METRICS_ENABLED: booleanFromEnv.default(true),
+  METRICS_PREFIX: z.string().default("ao"),
+  METRICS_INCLUDE_PROCESS: booleanFromEnv.default(true),
+  METRICS_SLO_SUCCESS_TARGET: z.coerce.number().min(0).max(1).default(0.99),
+  METRICS_SLO_P95_LATENCY_MS: z.coerce.number().int().positive().default(30000),
+  TRACING_ENABLED: booleanFromEnv.default(false),
+  TRACING_ENDPOINT: z.string().optional(),
+  TRACING_SERVICE_NAME: z.string().default("ai-orchestrator")
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
