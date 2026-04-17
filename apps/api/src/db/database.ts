@@ -1214,6 +1214,46 @@ export class SqliteStore {
     };
   }
 
+  listUsers(): Array<{
+    id: string;
+    email: string;
+    role: string;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const rows = this.queryAll<UserRow>(
+      `SELECT id, email, password_hash, role, created_at, updated_at FROM users ORDER BY created_at DESC`
+    );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      email: toString(row.email),
+      role: toString(row.role),
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  updateUserRole(id: string, role: string): boolean {
+    const existing = this.getUserById(id);
+    if (!existing) return false;
+    const now = new Date().toISOString();
+    this.db.run(
+      `UPDATE users SET role = ?, updated_at = ? WHERE id = ?`,
+      [role, now, id]
+    );
+    this.persist();
+    return true;
+  }
+
+  deleteUser(id: string): boolean {
+    this.db.run(`DELETE FROM sessions WHERE user_id = ?`, [id]);
+    this.db.run(`DELETE FROM users WHERE id = ?`, [id]);
+    const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
+    const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
+    this.persist();
+    return changed;
+  }
+
   getSession(sessionId: string): {
     id: string;
     userId: string;

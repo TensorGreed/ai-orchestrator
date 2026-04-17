@@ -59,6 +59,7 @@ import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
 import { LogStreamingService } from "./services/log-streaming-service";
+import { openApiSpec } from "./openapi.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -4012,6 +4013,92 @@ export function createApp(
     return savedWorkflow;
   });
 
+  // ── Phase 7.3: Workflow activate / deactivate ────────────────────────
+
+  app.post<{ Params: { id: string } }>("/api/workflows/:id/activate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    const settings = typeof workflow.settings === "object" && workflow.settings ? { ...workflow.settings } : {};
+    settings.active = true;
+    workflow.settings = settings;
+    store.upsertWorkflow(workflow);
+    schedulerService?.reloadWorkflow(workflow.id);
+    triggerService?.reloadWorkflow(workflow.id);
+    audit(request, user, {
+      category: "workflow",
+      eventType: "workflow.activate",
+      action: "update",
+      resourceType: "workflow",
+      resourceId: request.params.id
+    });
+    return { ok: true, workflowId: request.params.id, active: true };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/workflows/:id/deactivate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    const settings = typeof workflow.settings === "object" && workflow.settings ? { ...workflow.settings } : {};
+    settings.active = false;
+    workflow.settings = settings;
+    store.upsertWorkflow(workflow);
+    schedulerService?.removeWorkflow(workflow.id);
+    triggerService?.removeWorkflow(workflow.id);
+    audit(request, user, {
+      category: "workflow",
+      eventType: "workflow.deactivate",
+      action: "update",
+      resourceType: "workflow",
+      resourceId: request.params.id
+    });
+    return { ok: true, workflowId: request.params.id, active: false };
+  });
+
+  // ── Phase 7.3: Workflow transfer between projects ────────────────────
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/transfer", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const workflow = store.getWorkflow(request.params.id);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    const schema = z.object({ targetProjectId: z.string().min(1) });
+    const parsed = schema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid payload", details: parsed.error.issues };
+    }
+    const targetProject = store.getProject(parsed.data.targetProjectId);
+    if (!targetProject) {
+      reply.code(404);
+      return { error: "Target project not found" };
+    }
+    const previousProjectId = workflow.projectId;
+    workflow.projectId = parsed.data.targetProjectId;
+    workflow.folderId = undefined;
+    store.upsertWorkflow(workflow);
+    audit(request, user, {
+      category: "workflow",
+      eventType: "workflow.transfer",
+      action: "update",
+      resourceType: "workflow",
+      resourceId: request.params.id,
+      metadata: { previousProjectId, targetProjectId: parsed.data.targetProjectId }
+    });
+    return { ok: true, workflowId: request.params.id, projectId: parsed.data.targetProjectId };
+  });
+
   app.post<{ Body: unknown }>("/api/workflows/import", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
@@ -6394,6 +6481,29 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   registerConfiguredWebhookRoute("/webhook/:path");
   registerConfiguredWebhookRoute("/webhook-test/:path");
 
+  // ── Phase 7.3: Credential schema ────────────────────────────────────
+
+  app.get("/api/secrets/schema", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const dynamicProviders = providerRegistry.listDefinitions().map((p) => ({
+      id: p.id,
+      label: p.label ?? p.id,
+      fields: [{ name: "value", type: "password" as const, label: "API Key" }]
+    }));
+    const staticProviders = [
+      { id: "slack", label: "Slack", fields: [{ name: "value", type: "password" as const, label: "Bot Token / Signing Secret" }] },
+      { id: "github", label: "GitHub", fields: [{ name: "value", type: "password" as const, label: "Personal Access Token" }] },
+      { id: "custom", label: "Custom", fields: [{ name: "value", type: "password" as const, label: "Secret Value" }] }
+    ];
+    const seenIds = new Set(dynamicProviders.map((p) => p.id));
+    const combined = [...dynamicProviders];
+    for (const sp of staticProviders) {
+      if (!seenIds.has(sp.id)) combined.push(sp);
+    }
+    return { providers: combined };
+  });
+
   app.post<{ Body: unknown }>("/api/secrets", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
@@ -6628,6 +6738,158 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       }
     );
   }
+
+  // ── Phase 7.3: Tag management ─────────────────────────────────────────
+
+  app.get("/api/tags", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder", "operator", "viewer"]);
+    if (!user) return;
+    const workflows = store.listWorkflows();
+    const tagSet = new Set<string>();
+    for (const w of workflows) {
+      if (Array.isArray(w.tags)) {
+        for (const t of w.tags) {
+          if (typeof t === "string") tagSet.add(t);
+        }
+      }
+    }
+    return { tags: [...tagSet].sort() };
+  });
+
+  app.post<{ Body: unknown }>("/api/tags", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const schema = z.object({ name: z.string().min(1).max(100) });
+    const parsed = schema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid tag name", details: parsed.error.issues };
+    }
+    audit(request, user, {
+      category: "workflow",
+      eventType: "tag.create",
+      action: "create",
+      resourceType: "tag",
+      resourceId: parsed.data.name
+    });
+    return { ok: true, tag: parsed.data.name };
+  });
+
+  app.delete<{ Params: { tag: string } }>("/api/tags/:tag", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const tagToRemove = decodeURIComponent(request.params.tag);
+    const workflows = store.listWorkflows();
+    let removedCount = 0;
+    for (const w of workflows) {
+      if (Array.isArray(w.tags) && w.tags.includes(tagToRemove)) {
+        const full = store.getWorkflow(w.id);
+        if (full) {
+          full.tags = (full.tags ?? []).filter((t) => t !== tagToRemove);
+          store.upsertWorkflow(full);
+          removedCount++;
+        }
+      }
+    }
+    audit(request, user, {
+      category: "workflow",
+      eventType: "tag.delete",
+      action: "delete",
+      resourceType: "tag",
+      resourceId: tagToRemove,
+      metadata: { removedFromWorkflows: removedCount }
+    });
+    return { ok: true, tag: tagToRemove, removedFromWorkflows: removedCount };
+  });
+
+  // ── Phase 7.3: User management (admin only) ─────────────────────────
+
+  app.get("/api/users", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const users = store.listUsers();
+    return {
+      users: users.map((u) => ({
+        id: u.id,
+        email: u.email,
+        role: u.role,
+        createdAt: u.createdAt
+      }))
+    };
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/users/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const schema = z.object({ role: z.enum(["admin", "builder", "operator", "viewer"]) });
+    const parsed = schema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid payload", details: parsed.error.issues };
+    }
+    const targetUser = store.getUserById(request.params.id);
+    if (!targetUser) {
+      reply.code(404);
+      return { error: "User not found" };
+    }
+    const updated = store.updateUserRole(request.params.id, parsed.data.role);
+    if (!updated) {
+      reply.code(500);
+      return { error: "Failed to update user" };
+    }
+    audit(request, user, {
+      category: "auth",
+      eventType: "user.update.role",
+      action: "update",
+      resourceType: "user",
+      resourceId: request.params.id,
+      metadata: { previousRole: targetUser.role, newRole: parsed.data.role }
+    });
+    return { ok: true, userId: request.params.id, role: parsed.data.role };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/users/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    if (user.id === request.params.id) {
+      reply.code(400);
+      return { error: "Cannot delete your own account" };
+    }
+    const targetUser = store.getUserById(request.params.id);
+    if (!targetUser) {
+      reply.code(404);
+      return { error: "User not found" };
+    }
+    const deleted = store.deleteUser(request.params.id);
+    if (!deleted) {
+      reply.code(500);
+      return { error: "Failed to delete user" };
+    }
+    audit(request, user, {
+      category: "auth",
+      eventType: "user.delete",
+      action: "delete",
+      resourceType: "user",
+      resourceId: request.params.id,
+      metadata: { email: targetUser.email }
+    });
+    return { ok: true, userId: request.params.id };
+  });
+
+  // ── Phase 7.3: OpenAPI spec & Swagger UI ──────────────────────────────
+  app.get("/api/openapi.json", async () => openApiSpec);
+
+  app.get("/api/docs", async (_request, reply) => {
+    reply.type("text/html");
+    return `<!DOCTYPE html>
+<html><head><title>AI Orchestrator API</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+</head><body>
+<div id="swagger-ui"></div>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>SwaggerUIBundle({ url: "/api/openapi.json", dom_id: "#swagger-ui" })</script>
+</body></html>`;
+  });
 
   app.setErrorHandler((error, _request, reply) => {
     const message = error instanceof Error ? error.message : "Unknown error";

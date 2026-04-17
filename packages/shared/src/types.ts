@@ -169,6 +169,8 @@ export interface WorkflowSettings {
   executionTimeoutMs?: number;
   saveDataSuccessExecution?: "all" | "none";
   saveDataErrorExecution?: "all" | "none";
+  /** Phase 7.3 — workflow activation state. */
+  active?: boolean;
 }
 
 export const DEFAULT_PROJECT_ID = "default";

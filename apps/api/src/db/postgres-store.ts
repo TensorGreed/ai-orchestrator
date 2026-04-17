@@ -660,6 +660,48 @@ export class PostgresStore {
     return { id: input.id, email: input.email.toLowerCase(), role: input.role, createdAt, updatedAt: now };
   }
 
+  async listUsers(): Promise<Array<{
+    id: string;
+    email: string;
+    role: string;
+    createdAt: string;
+    updatedAt: string;
+  }>> {
+    const rows = await this.query<{
+      id: string;
+      email: string;
+      role: string;
+      created_at: string;
+      updated_at: string;
+    }>(`SELECT id, email, role, created_at, updated_at FROM users ORDER BY created_at DESC`);
+    return rows.map((r: { id: string; email: string; role: string; created_at: string; updated_at: string }) => ({
+      id: r.id,
+      email: r.email,
+      role: r.role,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at
+    }));
+  }
+
+  async updateUserRole(id: string, role: string): Promise<boolean> {
+    const existing = await this.getUserById(id);
+    if (!existing) return false;
+    const now = new Date().toISOString();
+    await this.execute(
+      `UPDATE users SET role = $1, updated_at = $2 WHERE id = $3`,
+      [role, now, id]
+    );
+    return true;
+  }
+
+  async deleteUser(id: string): Promise<boolean> {
+    const existing = await this.getUserById(id);
+    if (!existing) return false;
+    await this.execute(`DELETE FROM sessions WHERE user_id = $1`, [id]);
+    await this.execute(`DELETE FROM users WHERE id = $1`, [id]);
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // Sessions
   // ---------------------------------------------------------------------------
