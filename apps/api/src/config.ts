@@ -93,7 +93,19 @@ const envSchema = z.object({
   HA_ENABLED: booleanFromEnv.default(false),
   HA_INSTANCE_ID: z.string().optional(),
   HA_LEASE_TTL_MS: z.coerce.number().int().positive().default(30000),
-  HA_RENEW_INTERVAL_MS: z.coerce.number().int().positive().default(10000)
+  HA_RENEW_INTERVAL_MS: z.coerce.number().int().positive().default(10000),
+
+  // Phase 7.5 — Notifications
+  NOTIFICATIONS_ENABLED: booleanFromEnv.default(false),
+  NOTIFICATION_SMTP_HOST: z.string().optional(),
+  NOTIFICATION_SMTP_PORT: z.coerce.number().int().positive().default(587),
+  NOTIFICATION_SMTP_SECURE: booleanFromEnv.default(false),
+  NOTIFICATION_SMTP_USER: z.string().optional(),
+  NOTIFICATION_SMTP_PASS: z.string().optional(),
+  NOTIFICATION_EMAIL_FROM: z.string().optional(),
+  NOTIFICATION_EMAIL_TO: z.string().optional(),
+  NOTIFICATION_SLACK_WEBHOOK_URL: z.string().optional(),
+  NOTIFICATION_TEAMS_WEBHOOK_URL: z.string().optional()
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

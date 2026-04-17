@@ -59,6 +59,7 @@ import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
 import { LogStreamingService } from "./services/log-streaming-service";
+import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 
 interface Tier1IntegrationSpec {
@@ -1164,6 +1165,57 @@ export function createApp(
               state: paused.state
             });
           },
+          triggerErrorWorkflow: async (payload) => {
+            // Fire-and-forget: execute the error workflow + send notifications
+            notificationService.notify({
+              type: "execution.failure",
+              workflowId: payload.sourceWorkflowId,
+              workflowName: payload.sourceWorkflowName,
+              executionId: payload.executionId,
+              error: payload.error,
+              errorStack: payload.errorStack,
+              timestamp: payload.timestamp
+            }).catch(err => {
+              app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Notification send failed");
+            });
+            // Execute the designated error handler workflow
+            const errorWf = store.getWorkflow(payload.errorWorkflowId);
+            if (!errorWf) {
+              app.log.warn({ errorWorkflowId: payload.errorWorkflowId }, "Error workflow not found");
+              return;
+            }
+            try {
+              await executeWorkflow(
+                {
+                  workflow: errorWf,
+                  input: {
+                    error: payload.error,
+                    errorStack: payload.errorStack,
+                    sourceWorkflowId: payload.sourceWorkflowId,
+                    sourceWorkflowName: payload.sourceWorkflowName,
+                    executionId: payload.executionId,
+                    timestamp: payload.timestamp
+                  },
+                  triggerType: "error",
+                  executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
+                },
+                {
+                  providerRegistry,
+                  connectorRegistry,
+                  mcpRegistry,
+                  agentRuntime,
+                  memoryStore: {
+                    loadMessages: async (ns, sid) => store.loadSessionMemory(ns, sid),
+                    saveMessages: async (ns, sid, msgs) => { store.saveSessionMemory(ns, sid, msgs); }
+                  },
+                  loadWorkflow: (wid) => store.getWorkflow(wid) ?? undefined,
+                  resolveSecret: (ref) => secretService.resolveSecret(ref)
+                }
+              );
+            } catch (err) {
+              app.log.warn({ err: err instanceof Error ? err.message : String(err), errorWorkflowId: payload.errorWorkflowId }, "Error workflow execution failed");
+            }
+          },
           onNodeStart: input.hooks?.onNodeStart,
           onNodeComplete: input.hooks?.onNodeComplete,
           onLLMDelta: input.hooks?.onLLMDelta,
@@ -1748,6 +1800,15 @@ export function createApp(
   app.addHook("onClose", async () => {
     await logStreamingService.stop();
   });
+
+  const notificationService = new NotificationService(config, () =>
+    store.listNotificationConfigs().map(c => ({
+      channel: c.channel,
+      enabled: c.enabled,
+      config: c.config,
+      events: c.events
+    }))
+  );
 
   const pruneAuditLogs = (reason: "startup" | "interval") => {
     const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
@@ -6876,6 +6937,149 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return { ok: true, userId: request.params.id };
   });
 
+  // ── Phase 7.4: Workflow Templates & Sharing ───────────────────────────
+
+  // List templates (any authenticated user)
+  app.get("/api/templates", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin", "builder", "operator", "viewer"]);
+    if (!user) return;
+    const query = request.query as Record<string, string>;
+    const category = query.category || undefined;
+    const search = query.search || undefined;
+    const templates = store.listTemplates({ category, search });
+    return { templates };
+  });
+
+  // Get single template
+  app.get<{ Params: { id: string } }>("/api/templates/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin", "builder", "operator", "viewer"]);
+    if (!user) return;
+    const template = store.getTemplate(request.params.id);
+    if (!template) { reply.code(404); return { error: "Template not found" }; }
+    return template;
+  });
+
+  // Create template from workflow (admin/builder)
+  app.post("/api/templates", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin", "builder"]);
+    if (!user) return;
+    const schema = z.object({
+      name: z.string().min(1),
+      description: z.string().default(""),
+      category: z.string().default("General"),
+      tags: z.array(z.string()).default([]),
+      author: z.string().default(""),
+      workflowId: z.string().optional(),
+      workflowJson: z.string().optional()
+    });
+    const parsed = schema.safeParse(request.body ?? {});
+    if (!parsed.success) { reply.code(400); return { error: "Invalid payload", details: parsed.error.issues }; }
+
+    let workflowJson: string;
+    if (parsed.data.workflowId) {
+      const wf = store.getWorkflow(parsed.data.workflowId);
+      if (!wf) { reply.code(404); return { error: "Workflow not found" }; }
+      workflowJson = JSON.stringify(wf);
+    } else if (parsed.data.workflowJson) {
+      workflowJson = parsed.data.workflowJson;
+    } else {
+      reply.code(400);
+      return { error: "Either workflowId or workflowJson is required" };
+    }
+
+    const wfData = JSON.parse(workflowJson);
+    const id = crypto.randomUUID();
+    store.upsertTemplate({
+      id,
+      name: parsed.data.name,
+      description: parsed.data.description,
+      category: parsed.data.category,
+      tags: parsed.data.tags,
+      author: parsed.data.author || user.email,
+      workflowJson,
+      nodeCount: Array.isArray(wfData.nodes) ? wfData.nodes.length : 0
+    });
+
+    audit(request, user, {
+      category: "workflow",
+      eventType: "template.create",
+      action: "create",
+      resourceType: "template",
+      resourceId: id
+    });
+    return { id, name: parsed.data.name };
+  });
+
+  // Import template as new workflow (admin/builder)
+  app.post<{ Params: { id: string } }>("/api/templates/:id/use", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin", "builder"]);
+    if (!user) return;
+    const template = store.getTemplate(request.params.id);
+    if (!template) { reply.code(404); return { error: "Template not found" }; }
+
+    const imported = importWorkflowFromJson(template.workflowJson);
+    imported.id = crypto.randomUUID();
+    imported.name = `${template.name} (from template)`;
+    store.upsertWorkflow(imported);
+
+    audit(request, user, {
+      category: "workflow",
+      eventType: "template.use",
+      action: "use",
+      resourceType: "template",
+      resourceId: template.id,
+      metadata: { newWorkflowId: imported.id }
+    });
+    return { workflowId: imported.id, name: imported.name };
+  });
+
+  // Delete template (admin)
+  app.delete<{ Params: { id: string } }>("/api/templates/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const deleted = store.deleteTemplate(request.params.id);
+    if (!deleted) { reply.code(404); return { error: "Template not found" }; }
+    audit(request, user, {
+      category: "workflow",
+      eventType: "template.delete",
+      action: "delete",
+      resourceType: "template",
+      resourceId: request.params.id
+    });
+    return { ok: true };
+  });
+
+  // Share workflow via URL (generate a shareable export link)
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/share-link", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin", "builder"]);
+    if (!user) return;
+    const wf = store.getWorkflow(request.params.id);
+    if (!wf) { reply.code(404); return { error: "Workflow not found" }; }
+    const exported = exportWorkflowToJson(wf);
+    const encoded = Buffer.from(exported).toString("base64url");
+    return { shareUrl: `/api/workflows/import-shared?data=${encoded}`, expiresIn: "permanent" };
+  });
+
+  // Import shared workflow from URL
+  app.get("/api/workflows/import-shared", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin", "builder"]);
+    if (!user) return;
+    const query = request.query as Record<string, string>;
+    const data = query.data;
+    if (!data) { reply.code(400); return { error: "Missing data parameter" }; }
+    try {
+      const json = Buffer.from(data, "base64url").toString("utf-8");
+      const imported = importWorkflowFromJson(json);
+      imported.id = crypto.randomUUID();
+      imported.name = `${imported.name} (imported)`;
+      store.upsertWorkflow(imported);
+      return { workflowId: imported.id, name: imported.name };
+    } catch {
+      reply.code(400);
+      return { error: "Invalid shared workflow data" };
+    }
+  });
+
   // ── Phase 7.3: OpenAPI spec & Swagger UI ──────────────────────────────
   app.get("/api/openapi.json", async () => openApiSpec);
 
@@ -6889,6 +7093,94 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
 <script>SwaggerUIBundle({ url: "/api/openapi.json", dom_id: "#swagger-ui" })</script>
 </body></html>`;
+  });
+
+  // ── Phase 7.5: Notifications ───────────────────────────────────────────
+
+  app.get("/api/notifications", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const configs = store.listNotificationConfigs();
+    return { configs };
+  });
+
+  app.post("/api/notifications", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const body = request.body as Record<string, unknown> | null;
+    if (!body) { reply.code(400); return { error: "Missing body" }; }
+    const id = typeof body.id === "string" && body.id ? body.id : crypto.randomUUID();
+    const channel = typeof body.channel === "string" ? body.channel : "";
+    if (!channel || !["email", "slack", "teams"].includes(channel)) {
+      reply.code(400);
+      return { error: "Invalid channel. Must be email, slack, or teams." };
+    }
+    const enabled = body.enabled !== false;
+    const configObj = (body.config && typeof body.config === "object" && !Array.isArray(body.config))
+      ? body.config as Record<string, unknown>
+      : {};
+    const events = Array.isArray(body.events) ? body.events.filter((e): e is string => typeof e === "string") : ["execution.failure"];
+    store.upsertNotificationConfig({ id, channel, enabled, config: configObj, events });
+    notificationService.reload();
+    audit(request, user, {
+      category: "system",
+      eventType: "notification.upsert",
+      action: "upsert",
+      resourceType: "notification_config",
+      resourceId: id
+    });
+    return { id, channel, enabled, events };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/notifications/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const deleted = store.deleteNotificationConfig(request.params.id);
+    if (!deleted) { reply.code(404); return { error: "Notification config not found" }; }
+    notificationService.reload();
+    audit(request, user, {
+      category: "system",
+      eventType: "notification.delete",
+      action: "delete",
+      resourceType: "notification_config",
+      resourceId: request.params.id
+    });
+    return { ok: true };
+  });
+
+  app.post("/api/notifications/test", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const body = request.body as Record<string, unknown> | null;
+    if (!body) { reply.code(400); return { error: "Missing body" }; }
+    const channel = typeof body.channel === "string" ? body.channel : "";
+    if (!channel || !["email", "slack", "teams"].includes(channel)) {
+      reply.code(400);
+      return { error: "Invalid channel" };
+    }
+    const configObj = (body.config && typeof body.config === "object" && !Array.isArray(body.config))
+      ? body.config as Record<string, unknown>
+      : {};
+    try {
+      const svc = new NotificationService(config, () => [{
+        channel,
+        enabled: true,
+        config: configObj,
+        events: ["execution.failure"]
+      }]);
+      await svc.notify({
+        type: "execution.failure",
+        workflowId: "test-workflow-id",
+        workflowName: "Test Notification Workflow",
+        executionId: "test-execution-id",
+        error: "This is a test notification from AI Orchestrator.",
+        timestamp: new Date().toISOString()
+      });
+      return { ok: true, message: "Test notification sent" };
+    } catch (err) {
+      reply.code(500);
+      return { error: "Failed to send test notification", details: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   app.setErrorHandler((error, _request, reply) => {

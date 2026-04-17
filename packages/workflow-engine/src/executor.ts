@@ -3030,6 +3030,7 @@ async function executeNode(
           userPrompt,
           maxIterations,
           toolCallingEnabled,
+          agentType: typeof config.agentType === "string" ? config.agentType as "tools" | "react" | "plan-and-execute" | "sql" : "tools",
           tools: allToolsForModel,
           toolOutputLimits: hasCustomToolOutputLimits ? toolOutputLimits : undefined,
           sessionId,

@@ -25,6 +25,9 @@ const contexts: TestContext[] = [];
 function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     LOG_LEVEL: "warn",
+    NOTIFICATIONS_ENABLED: false,
+    NOTIFICATION_SMTP_PORT: 587,
+    NOTIFICATION_SMTP_SECURE: false,
     API_PORT: 0,
     API_HOST: "127.0.0.1",
     WEB_ORIGIN: "http://localhost:5173",

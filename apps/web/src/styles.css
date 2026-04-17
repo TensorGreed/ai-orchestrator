@@ -3737,3 +3737,114 @@ select {
   border-color: rgba(220, 38, 38, 0.4);
   color: #fca5a5;
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 7.4 — Template Gallery
+   --------------------------------------------------------------------------- */
+
+.tpl-gallery { padding: 1.5rem; }
+.tpl-title { margin: 0; font-size: 1.25rem; font-weight: 700; }
+.tpl-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+.tpl-search {
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  width: 260px;
+}
+.tpl-categories { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.tpl-category-btn {
+  padding: 0.4rem 0.8rem;
+  border-radius: 1rem;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.15s, color 0.15s;
+}
+.tpl-category-btn:hover { background: var(--bg-tertiary); }
+.tpl-category-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
+.tpl-card {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+  background: var(--bg-primary);
+  transition: box-shadow 0.15s;
+}
+.tpl-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+.tpl-card-name { font-weight: 600; font-size: 1rem; margin-bottom: 0.4rem; }
+.tpl-card-desc {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+  min-height: 2.5rem;
+}
+.tpl-card-meta { display: flex; gap: 0.75rem; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem; align-items: center; }
+.tpl-card-tags { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.tpl-tag {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.5rem;
+  font-size: 0.7rem;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+.tpl-card-actions { display: flex; gap: 0.5rem; }
+.tpl-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.75rem;
+  font-size: 0.75rem;
+  background: var(--bg-tertiary);
+}
+.tpl-use-btn {
+  padding: 0.4rem 1rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.tpl-use-btn:hover { opacity: 0.85; }
+.tpl-use-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.tpl-error {
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  border-radius: 0.5rem;
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  font-size: 0.85rem;
+}
+:root[data-theme="dark"] .tpl-error {
+  background: rgba(153, 27, 27, 0.22);
+  border-color: rgba(220, 38, 38, 0.4);
+  color: #fca5a5;
+}
+.tpl-loading, .tpl-empty {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+/* Phase 7.5 — Notifications */
+.ntf-list { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.5rem; }
+.ntf-card { border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; display: flex; justify-content: space-between; align-items: center; }
+.ntf-card-info { display: flex; align-items: center; gap: 1rem; }
+.ntf-channel-badge { padding: 0.25rem 0.6rem; border-radius: 0.75rem; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; }
+.ntf-channel-badge.email { background: #DBEAFE; color: #1D4ED8; }
+.ntf-channel-badge.slack { background: #FEF3C7; color: #92400E; }
+.ntf-channel-badge.teams { background: #EDE9FE; color: #6D28D9; }
+.ntf-card-actions { display: flex; gap: 0.5rem; }
+.ntf-form { border: 1px solid var(--border); border-radius: 0.5rem; padding: 1.25rem; }
+.ntf-form h4 { margin-bottom: 1rem; }
+.ntf-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+.ntf-events { display: flex; gap: 1rem; margin: 0.75rem 0; }
+.ntf-events label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }

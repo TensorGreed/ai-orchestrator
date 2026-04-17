@@ -368,6 +368,7 @@ export const nodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        agentType: { type: "string", enum: ["tools", "react", "plan-and-execute", "sql"] },
         systemPromptTemplate: { type: "string" },
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
@@ -382,6 +383,7 @@ export const nodeDefinitions: NodeDefinition[] = [
       required: ["maxIterations"]
     },
     sampleConfig: {
+      agentType: "tools",
       systemPromptTemplate: "{{system_prompt}}",
       userPromptTemplate: "{{user_prompt}}",
       sessionIdTemplate: "{{session_id}}",

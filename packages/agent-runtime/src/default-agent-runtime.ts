@@ -644,10 +644,79 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
       memoryMessages = normalizeStoredMessages(loaded, memoryMaxMessages, toolOutputLimits.messageMaxChars);
     }
 
+    let effectiveSystemPrompt = request.systemPrompt;
+
+    if (request.agentType === "react") {
+      effectiveSystemPrompt = `You are a ReAct (Reasoning + Acting) agent. Follow this format strictly for every response:
+
+Thought: <analyze the current situation and decide what to do>
+Action: <name of tool to use, or "none" if providing final answer>
+Action Input: <JSON arguments for the tool>
+
+After receiving a tool result:
+Thought: <analyze the result and decide next step>
+
+When you have the final answer:
+Thought: I now have enough information.
+Final Answer: <your complete response to the user>
+
+Rules:
+- Every response MUST start with "Thought:"
+- Use tools to gather information before concluding
+- Be thorough in reasoning
+
+${effectiveSystemPrompt}`;
+    }
+
+    if (request.agentType === "plan-and-execute") {
+      effectiveSystemPrompt = `You are a Plan-and-Execute agent. Before taking any actions, create a plan.
+
+Step 1 - PLAN: Create a numbered step-by-step plan to accomplish the user's task.
+Step 2 - EXECUTE: Execute each step one at a time, using available tools as needed.
+Step 3 - VERIFY: After executing all steps, verify the results meet the user's requirements.
+Step 4 - RESPOND: Provide a comprehensive final answer.
+
+Format your initial response as:
+## Plan
+1. [First step]
+2. [Second step]
+...
+
+## Executing Step 1
+[Use tools and provide results]
+
+Rules:
+- Always create a plan before taking action
+- Execute steps in order
+- If a step fails, revise the plan
+- Report progress after each step
+
+${effectiveSystemPrompt}`;
+    }
+
+    if (request.agentType === "sql") {
+      effectiveSystemPrompt = `You are a SQL Agent specialized in database querying. Help users by translating natural language into SQL queries.
+
+Workflow:
+1. First, discover the database schema (list tables, describe columns)
+2. Write a SQL query to answer the user's question
+3. Execute the query using available tools
+4. Interpret and explain the results in natural language
+
+Safety rules:
+- Only execute SELECT queries (read-only)
+- Never execute DELETE, DROP, UPDATE, INSERT, ALTER, CREATE, or TRUNCATE
+- Always add LIMIT to prevent excessive results (default LIMIT 100)
+- If the schema is unknown, discover it first before querying
+- Validate SQL syntax before execution
+
+${effectiveSystemPrompt}`;
+    }
+
     const messages: ChatMessage[] = [
       {
         role: "system",
-        content: normalizeMessageContent(`${request.systemPrompt}${sessionCacheHint}`, MAX_SYSTEM_MESSAGE_CHARS)
+        content: normalizeMessageContent(`${effectiveSystemPrompt}${sessionCacheHint}`, MAX_SYSTEM_MESSAGE_CHARS)
       },
       ...memoryMessages,
       { role: "user", content: normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS) }

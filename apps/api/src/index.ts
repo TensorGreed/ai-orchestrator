@@ -6,7 +6,7 @@ import { getConfig } from "./config";
 import { SqliteStore } from "./db/database";
 import { createStore } from "./db/create-store";
 import { createApp } from "./app";
-import { seedWorkflowsIfEmpty } from "./services/seed-service";
+import { seedWorkflowsIfEmpty, seedTemplatesIfEmpty } from "./services/seed-service";
 import { SecretService } from "./services/secret-service";
 import { AuthService } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
@@ -41,6 +41,7 @@ async function bootstrap() {
 
   if (config.SEED_SAMPLE_WORKFLOWS) {
     seedWorkflowsIfEmpty(store, workspaceRoot);
+    seedTemplatesIfEmpty(store, workspaceRoot);
   }
 
   // Ensure the default project exists and backfill any legacy rows that predate Phase 4.2.

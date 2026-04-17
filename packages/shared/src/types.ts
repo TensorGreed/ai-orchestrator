@@ -504,6 +504,7 @@ export interface AgentRunRequest {
   tools: MCPToolDefinition[];
   maxIterations: number;
   toolCallingEnabled: boolean;
+  agentType?: "tools" | "react" | "plan-and-execute" | "sql";
   sessionId?: string;
   memory?: AgentMemoryConfig;
   toolOutputLimits?: AgentToolOutputLimits;

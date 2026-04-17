@@ -529,6 +529,41 @@ export const MIGRATIONS: Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_leader_leases_expires_at ON leader_leases(expires_at);
     `
+  },
+  {
+    version: 11,
+    description: "Workflow templates & sharing (Phase 7.4)",
+    up: `
+      CREATE TABLE IF NOT EXISTS workflow_templates (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'General',
+        tags TEXT NOT NULL DEFAULT '[]',
+        author TEXT NOT NULL DEFAULT 'ai-orchestrator',
+        workflow_json TEXT NOT NULL,
+        node_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_templates_category ON workflow_templates(category);
+    `
+  },
+  {
+    version: 12,
+    description: "Notification configs (Phase 7.5)",
+    up: `
+      CREATE TABLE IF NOT EXISTS notification_configs (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        events TEXT NOT NULL DEFAULT '["execution.failure"]',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `
   }
 ];
 

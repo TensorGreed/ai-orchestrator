@@ -1608,6 +1608,18 @@ export function NodeConfigModal({
           Tip: Attach a Chat Model on the <code>chat_model</code> port. Optionally attach Memory and one or more MCP Tool nodes on their dedicated ports.
         </div>
 
+        <SelectField
+          label="Agent Type"
+          value={toStringValue(config.agentType, "tools")}
+          options={[
+            { value: "tools", label: "Tools Agent (Default)" },
+            { value: "react", label: "ReAct (Reasoning + Acting)" },
+            { value: "plan-and-execute", label: "Plan and Execute" },
+            { value: "sql", label: "SQL Agent" }
+          ]}
+          onChange={(next) => setConfig((current) => ({ ...current, agentType: next }))}
+        />
+
         <ExpressionField
           label="Prompt (User Message)"
           value={toStringValue(config.userPromptTemplate, "{{user_prompt}}")}

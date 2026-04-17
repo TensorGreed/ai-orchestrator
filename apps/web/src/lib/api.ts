@@ -1504,3 +1504,108 @@ export async function fetchRecentTraces(limit = 50) {
     `/api/observability/traces?limit=${Math.min(200, Math.max(1, limit))}`
   );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7.4 — Workflow templates & sharing
+// ---------------------------------------------------------------------------
+
+export interface TemplateListItem {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  author: string;
+  nodeCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchTemplates(filters?: { category?: string; search?: string }) {
+  const params = new URLSearchParams();
+  if (filters?.category) params.set("category", filters.category);
+  if (filters?.search) params.set("search", filters.search);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{ templates: TemplateListItem[] }>(`/api/templates${suffix}`);
+}
+
+export async function fetchTemplate(id: string) {
+  return apiRequest<TemplateListItem & { workflowJson: string }>(`/api/templates/${id}`);
+}
+
+export async function useTemplate(templateId: string) {
+  return apiRequest<{ workflowId: string; name: string }>(`/api/templates/${templateId}/use`, {
+    method: "POST"
+  });
+}
+
+export async function createTemplate(payload: {
+  name: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  workflowId?: string;
+  workflowJson?: string;
+}) {
+  return apiRequest<{ id: string; name: string }>("/api/templates", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteTemplate(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/templates/${id}`, {
+    method: "DELETE"
+  });
+}
+
+export async function getWorkflowShareLink(workflowId: string) {
+  return apiRequest<{ shareUrl: string }>(`/api/workflows/${workflowId}/share-link`);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7.5 — Notifications
+// ---------------------------------------------------------------------------
+
+export interface NotificationConfig {
+  id: string;
+  channel: "email" | "slack" | "teams";
+  enabled: boolean;
+  config: Record<string, unknown>;
+  events: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function fetchNotificationConfigs() {
+  return apiRequest<{ configs: NotificationConfig[] }>("/api/notifications");
+}
+
+export async function upsertNotificationConfig(payload: {
+  id?: string;
+  channel: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  events: string[];
+}) {
+  return apiRequest<{ id: string }>("/api/notifications", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteNotificationConfig(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/notifications/${id}`, {
+    method: "DELETE"
+  });
+}
+
+export async function testNotificationConfig(payload: {
+  channel: string;
+  config: Record<string, unknown>;
+}) {
+  return apiRequest<{ ok: boolean; message: string }>("/api/notifications/test", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}

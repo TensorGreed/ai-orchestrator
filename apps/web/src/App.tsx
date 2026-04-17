@@ -81,6 +81,7 @@ import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
 import { SettingsPage } from "./components/SettingsPage";
+import { TemplateGallery } from "./components/TemplateGallery";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WorkflowCanvasArea } from "./components/WorkflowCanvasArea";
 import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
@@ -4562,6 +4563,15 @@ function StudioApp() {
               <h2>Evaluations</h2>
               <p>Evaluation dashboards are out of scope for V1. Use Editor and Executions for runtime validation.</p>
             </section>
+          )}
+
+          {activeMode === "templates" && (
+            <TemplateGallery
+              onWorkflowCreated={(workflowId) => {
+                void loadWorkflowById(workflowId);
+                setActiveMode("editor");
+              }}
+            />
           )}
 
           {activeMode === "secrets" && (

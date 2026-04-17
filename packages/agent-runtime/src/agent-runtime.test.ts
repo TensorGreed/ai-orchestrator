@@ -895,4 +895,178 @@ describe("DefaultAgentRuntime", () => {
     // but without sessionId, sessioncache tools are not created.
     expect(requestTools.length).toBe(20);
   });
+
+  it("defaults to tools agent type when agentType is not specified", async () => {
+    const providerRegistry = new ProviderRegistry();
+    const provider = new ToolCaptureProvider();
+    providerRegistry.register(provider);
+    const runtime = new DefaultAgentRuntime();
+
+    await runtime.run(
+      {
+        provider: { providerId: "tool-capture", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Hello",
+        tools: [],
+        maxIterations: 1,
+        toolCallingEnabled: false
+      },
+      {
+        tools: [],
+        invokeTool: async () => ({})
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    const systemMessage = provider.calls[0]?.messages.find((m) => m.role === "system");
+    expect(systemMessage?.content).toContain("You are helpful");
+    expect(systemMessage?.content).not.toContain("ReAct");
+    expect(systemMessage?.content).not.toContain("Plan-and-Execute");
+    expect(systemMessage?.content).not.toContain("SQL Agent");
+  });
+
+  it("prepends ReAct instructions to system prompt when agentType is react", async () => {
+    const providerRegistry = new ProviderRegistry();
+    const provider = new ToolCaptureProvider();
+    providerRegistry.register(provider);
+    const runtime = new DefaultAgentRuntime();
+
+    await runtime.run(
+      {
+        provider: { providerId: "tool-capture", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Think step by step",
+        tools: [],
+        maxIterations: 1,
+        toolCallingEnabled: false,
+        agentType: "react"
+      },
+      {
+        tools: [],
+        invokeTool: async () => ({})
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    const systemMessage = provider.calls[0]?.messages.find((m) => m.role === "system");
+    expect(systemMessage?.content).toContain("ReAct");
+    expect(systemMessage?.content).toContain("Thought:");
+    expect(systemMessage?.content).toContain("You are helpful");
+  });
+
+  it("prepends plan-and-execute instructions to system prompt when agentType is plan-and-execute", async () => {
+    const providerRegistry = new ProviderRegistry();
+    const provider = new ToolCaptureProvider();
+    providerRegistry.register(provider);
+    const runtime = new DefaultAgentRuntime();
+
+    await runtime.run(
+      {
+        provider: { providerId: "tool-capture", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Create a report",
+        tools: [],
+        maxIterations: 1,
+        toolCallingEnabled: false,
+        agentType: "plan-and-execute"
+      },
+      {
+        tools: [],
+        invokeTool: async () => ({})
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    const systemMessage = provider.calls[0]?.messages.find((m) => m.role === "system");
+    expect(systemMessage?.content).toContain("Plan-and-Execute");
+    expect(systemMessage?.content).toContain("PLAN");
+    expect(systemMessage?.content).toContain("EXECUTE");
+    expect(systemMessage?.content).toContain("You are helpful");
+  });
+
+  it("prepends SQL safety instructions to system prompt when agentType is sql", async () => {
+    const providerRegistry = new ProviderRegistry();
+    const provider = new ToolCaptureProvider();
+    providerRegistry.register(provider);
+    const runtime = new DefaultAgentRuntime();
+
+    await runtime.run(
+      {
+        provider: { providerId: "tool-capture", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "Show me all users",
+        tools: [],
+        maxIterations: 1,
+        toolCallingEnabled: false,
+        agentType: "sql"
+      },
+      {
+        tools: [],
+        invokeTool: async () => ({})
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    const systemMessage = provider.calls[0]?.messages.find((m) => m.role === "system");
+    expect(systemMessage?.content).toContain("SQL Agent");
+    expect(systemMessage?.content).toContain("SELECT");
+    expect(systemMessage?.content).toContain("Never execute DELETE");
+    expect(systemMessage?.content).toContain("You are helpful");
+  });
+
+  it("react agent type still processes tool calls correctly", async () => {
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new FakeToolCallingProvider());
+    const runtime = new DefaultAgentRuntime();
+
+    const output = await runtime.run(
+      {
+        provider: { providerId: "fake", model: "fake-model" },
+        systemPrompt: "You are helpful",
+        userPrompt: "What is 2+2?",
+        tools: [
+          {
+            serverId: "mock-mcp",
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object" }
+          }
+        ],
+        maxIterations: 3,
+        toolCallingEnabled: true,
+        agentType: "react"
+      },
+      {
+        tools: [
+          {
+            name: "mock-mcp__calculator",
+            description: "calc",
+            inputSchema: { type: "object" }
+          }
+        ],
+        invokeTool: async () => ({ result: 4 })
+      },
+      {
+        providerRegistry,
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(output.stopReason).toBe("final_answer");
+    expect(output.finalAnswer).toContain("4");
+    expect(output.steps.length).toBe(2);
+    expect(output.steps[0].requestedTools.length).toBe(1);
+  });
 });

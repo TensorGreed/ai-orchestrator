@@ -173,6 +173,19 @@ interface WorkflowExecutionRow {
   updated_at: string;
 }
 
+interface WorkflowTemplateRow {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string;
+  author: string;
+  workflow_json: string;
+  node_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface LogStreamDestinationRecord {
   id: string;
   name: string;
@@ -767,6 +780,31 @@ export class SqliteStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_leader_leases_expires_at ON leader_leases(expires_at);
+
+      CREATE TABLE IF NOT EXISTS workflow_templates (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'General',
+        tags TEXT NOT NULL DEFAULT '[]',
+        author TEXT NOT NULL DEFAULT 'ai-orchestrator',
+        workflow_json TEXT NOT NULL,
+        node_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workflow_templates_category ON workflow_templates(category);
+
+      CREATE TABLE IF NOT EXISTS notification_configs (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        events TEXT NOT NULL DEFAULT '["execution.failure"]',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -4506,6 +4544,167 @@ export class SqliteStore {
       acquiredAt: toString(row.acquired_at),
       renewedAt: toString(row.renewed_at)
     }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Workflow Templates (Phase 7.4)
+  // ---------------------------------------------------------------------------
+
+  listTemplates(filters?: { category?: string; search?: string }): Array<{
+    id: string; name: string; description: string; category: string;
+    tags: string[]; author: string; nodeCount: number;
+    createdAt: string; updatedAt: string;
+  }> {
+    const clauses: string[] = [];
+    const params: BindParams = [];
+    if (filters?.category) {
+      clauses.push(`category = ?`);
+      params.push(filters.category);
+    }
+    if (filters?.search && filters.search.trim()) {
+      clauses.push(`(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)`);
+      const needle = `%${filters.search.trim().toLowerCase()}%`;
+      params.push(needle, needle);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.queryAll<WorkflowTemplateRow>(
+      `SELECT id, name, description, category, tags, author, node_count, created_at, updated_at
+       FROM workflow_templates
+       ${where}
+       ORDER BY category, name`,
+      params
+    );
+    return rows.map((row) => ({
+      id: toString(row.id),
+      name: toString(row.name),
+      description: toString(row.description),
+      category: toString(row.category),
+      tags: parseJsonArray(row.tags),
+      author: toString(row.author),
+      nodeCount: toNumber(row.node_count),
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    }));
+  }
+
+  getTemplate(id: string): {
+    id: string; name: string; description: string; category: string;
+    tags: string[]; author: string; workflowJson: string; nodeCount: number;
+    createdAt: string; updatedAt: string;
+  } | undefined {
+    const row = this.queryOne<WorkflowTemplateRow>(
+      `SELECT id, name, description, category, tags, author, workflow_json, node_count, created_at, updated_at
+       FROM workflow_templates WHERE id = ?`,
+      [id]
+    );
+    if (!row) return undefined;
+    return {
+      id: toString(row.id),
+      name: toString(row.name),
+      description: toString(row.description),
+      category: toString(row.category),
+      tags: parseJsonArray(row.tags),
+      author: toString(row.author),
+      workflowJson: toString(row.workflow_json),
+      nodeCount: toNumber(row.node_count),
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
+    };
+  }
+
+  upsertTemplate(input: {
+    id: string; name: string; description: string; category: string;
+    tags: string[]; author: string; workflowJson: string; nodeCount: number;
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO workflow_templates (id, name, description, category, tags, author, workflow_json, node_count, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         description = excluded.description,
+         category = excluded.category,
+         tags = excluded.tags,
+         author = excluded.author,
+         workflow_json = excluded.workflow_json,
+         node_count = excluded.node_count,
+         updated_at = excluded.updated_at`,
+      [
+        input.id,
+        input.name,
+        input.description,
+        input.category,
+        JSON.stringify(input.tags),
+        input.author,
+        input.workflowJson,
+        input.nodeCount,
+        now,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  deleteTemplate(id: string): boolean {
+    this.db.run(`DELETE FROM workflow_templates WHERE id = ?`, [id]);
+    const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
+    const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
+    if (changed) this.persist();
+    return changed;
+  }
+
+  countTemplates(): number {
+    const row = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflow_templates");
+    return row ? toNumber(row.count) : 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notification Configs (Phase 7.5)
+  // ---------------------------------------------------------------------------
+
+  listNotificationConfigs(): Array<{
+    id: string; channel: string; enabled: boolean;
+    config: Record<string, unknown>; events: string[];
+    createdAt: string; updatedAt: string;
+  }> {
+    const rows = this.queryAll<{
+      id: string; channel: string; enabled: number;
+      config_json: string; events: string;
+      created_at: string; updated_at: string;
+    }>(`SELECT id, channel, enabled, config_json, events, created_at, updated_at FROM notification_configs ORDER BY created_at`);
+    return rows.map(r => ({
+      id: toString(r.id),
+      channel: toString(r.channel),
+      enabled: toNumber(r.enabled) === 1,
+      config: JSON.parse(toString(r.config_json) || "{}"),
+      events: JSON.parse(toString(r.events) || '["execution.failure"]'),
+      createdAt: toString(r.created_at),
+      updatedAt: toString(r.updated_at)
+    }));
+  }
+
+  upsertNotificationConfig(input: {
+    id: string; channel: string; enabled: boolean;
+    config: Record<string, unknown>; events: string[];
+  }): void {
+    const now = new Date().toISOString();
+    this.db.run(
+      `INSERT INTO notification_configs (id, channel, enabled, config_json, events, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, enabled=excluded.enabled,
+         config_json=excluded.config_json, events=excluded.events, updated_at=excluded.updated_at`,
+      [input.id, input.channel, input.enabled ? 1 : 0,
+       JSON.stringify(input.config), JSON.stringify(input.events), now, now]
+    );
+    this.persist();
+  }
+
+  deleteNotificationConfig(id: string): boolean {
+    this.db.run(`DELETE FROM notification_configs WHERE id = ?`, [id]);
+    const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
+    const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
+    if (changed) this.persist();
+    return changed;
   }
 
   /**

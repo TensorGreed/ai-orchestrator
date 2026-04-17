@@ -63,7 +63,12 @@ import {
   type ProjectMembership,
   type SecretListItem,
   type SsoGroupMapping,
-  type VariableRecord
+  type VariableRecord,
+  deleteNotificationConfig,
+  fetchNotificationConfigs,
+  testNotificationConfig,
+  upsertNotificationConfig,
+  type NotificationConfig
 } from "../lib/api";
 
 type SettingsTab =
@@ -77,7 +82,8 @@ type SettingsTab =
   | "log-streams"
   | "source-control"
   | "variables"
-  | "observability";
+  | "observability"
+  | "notifications";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -119,7 +125,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "log-streams", label: "Log Streams", restricted: !isAdmin },
     { id: "source-control", label: "Source Control", restricted: !isAdmin },
     { id: "variables", label: "Variables" },
-    { id: "observability", label: "Observability", restricted: !isAdmin }
+    { id: "observability", label: "Observability", restricted: !isAdmin },
+    { id: "notifications", label: "Notifications", restricted: !isAdmin }
   ];
 
   return (
@@ -173,6 +180,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
           <VariablesTab projects={projects} initialProjectId={activeProjectId} isAdmin={isAdmin} />
         )}
         {tab === "observability" && isAdmin && <ObservabilityTab />}
+        {tab === "notifications" && isAdmin && <NotificationsTab />}
       </div>
     </section>
   );
@@ -2637,6 +2645,379 @@ function ObservabilityTab() {
         Metrics refresh every 10s. For production scraping, configure Prometheus to hit{" "}
         <code>/metrics</code> every 15s.
       </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7.5 — Notifications tab
+// ---------------------------------------------------------------------------
+
+const NOTIFICATION_CHANNELS = [
+  { value: "email" as const, label: "Email" },
+  { value: "slack" as const, label: "Slack" },
+  { value: "teams" as const, label: "Teams" }
+];
+
+const NOTIFICATION_EVENTS = [
+  { value: "workflow_failure", label: "Workflow Failure" },
+  { value: "workflow_success", label: "Workflow Success" }
+];
+
+function NotificationsTab() {
+  const [configs, setConfigs] = useState<NotificationConfig[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  // form state
+  const [formChannel, setFormChannel] = useState<"email" | "slack" | "teams">("email");
+  const [formEnabled, setFormEnabled] = useState(true);
+  const [formEvents, setFormEvents] = useState<string[]>(["workflow_failure"]);
+
+  // email fields
+  const [smtpHost, setSmtpHost] = useState("");
+  const [smtpPort, setSmtpPort] = useState("587");
+  const [smtpSecure, setSmtpSecure] = useState(false);
+  const [smtpUser, setSmtpUser] = useState("");
+  const [smtpPass, setSmtpPass] = useState("");
+  const [emailFrom, setEmailFrom] = useState("");
+  const [emailTo, setEmailTo] = useState("");
+
+  // slack / teams
+  const [webhookUrl, setWebhookUrl] = useState("");
+
+  const loadConfigs = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await fetchNotificationConfigs();
+      setConfigs(result.configs);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadConfigs();
+  }, [loadConfigs]);
+
+  function resetForm() {
+    setFormChannel("email");
+    setFormEnabled(true);
+    setFormEvents(["workflow_failure"]);
+    setSmtpHost("");
+    setSmtpPort("587");
+    setSmtpSecure(false);
+    setSmtpUser("");
+    setSmtpPass("");
+    setEmailFrom("");
+    setEmailTo("");
+    setWebhookUrl("");
+    setTestResult(null);
+    setShowForm(false);
+  }
+
+  function buildConfig(): Record<string, unknown> {
+    if (formChannel === "email") {
+      return {
+        host: smtpHost,
+        port: Number(smtpPort),
+        secure: smtpSecure,
+        username: smtpUser,
+        password: smtpPass,
+        from: emailFrom,
+        to: emailTo
+      };
+    }
+    return { webhookUrl };
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError("");
+    try {
+      await upsertNotificationConfig({
+        channel: formChannel,
+        enabled: formEnabled,
+        config: buildConfig(),
+        events: formEvents
+      });
+      resetForm();
+      await loadConfigs();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await testNotificationConfig({
+        channel: formChannel,
+        config: buildConfig()
+      });
+      setTestResult(result);
+    } catch (err) {
+      setTestResult({ ok: false, message: formatError(err) });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    setError("");
+    try {
+      await deleteNotificationConfig(id);
+      await loadConfigs();
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  async function handleToggle(cfg: NotificationConfig) {
+    setError("");
+    try {
+      await upsertNotificationConfig({
+        id: cfg.id,
+        channel: cfg.channel,
+        enabled: !cfg.enabled,
+        config: cfg.config,
+        events: cfg.events
+      });
+      await loadConfigs();
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  function toggleEvent(event: string) {
+    setFormEvents((prev) =>
+      prev.includes(event) ? prev.filter((e) => e !== event) : [...prev, event]
+    );
+  }
+
+  return (
+    <div>
+      <h3>Notification Channels</h3>
+      <p className="settings-muted">
+        Configure channels to receive alerts for workflow events.
+      </p>
+
+      {error && (
+        <div className="settings-error" style={{ marginBottom: "1rem" }}>
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="settings-muted">Loading...</p>
+      ) : (
+        <>
+          {configs.length > 0 && (
+            <div className="ntf-list">
+              {configs.map((cfg) => (
+                <div key={cfg.id} className="ntf-card">
+                  <div className="ntf-card-info">
+                    <span className={`ntf-channel-badge ${cfg.channel}`}>
+                      {cfg.channel}
+                    </span>
+                    <span style={{ fontSize: "0.85rem" }}>
+                      {cfg.events.join(", ")}
+                    </span>
+                  </div>
+                  <div className="ntf-card-actions">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void handleToggle(cfg)}
+                    >
+                      {cfg.enabled ? "Disable" : "Enable"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-danger"
+                      onClick={() => void handleDelete(cfg.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!showForm ? (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setShowForm(true)}
+            >
+              + Add Channel
+            </button>
+          ) : (
+            <div className="ntf-form">
+              <h4>Add Notification Channel</h4>
+
+              <div style={{ marginBottom: "0.75rem" }}>
+                <label>Channel Type</label>
+                <select
+                  className="input"
+                  value={formChannel}
+                  onChange={(e) => setFormChannel(e.target.value as "email" | "slack" | "teams")}
+                >
+                  {NOTIFICATION_CHANNELS.map((ch) => (
+                    <option key={ch.value} value={ch.value}>
+                      {ch.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {formChannel === "email" && (
+                <div className="ntf-form-grid">
+                  <div>
+                    <label>SMTP Host</label>
+                    <input
+                      className="input"
+                      value={smtpHost}
+                      onChange={(e) => setSmtpHost(e.target.value)}
+                      placeholder="smtp.example.com"
+                    />
+                  </div>
+                  <div>
+                    <label>Port</label>
+                    <input
+                      className="input"
+                      value={smtpPort}
+                      onChange={(e) => setSmtpPort(e.target.value)}
+                      placeholder="587"
+                    />
+                  </div>
+                  <div>
+                    <label>Username</label>
+                    <input
+                      className="input"
+                      value={smtpUser}
+                      onChange={(e) => setSmtpUser(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>Password</label>
+                    <input
+                      className="input"
+                      type="password"
+                      value={smtpPass}
+                      onChange={(e) => setSmtpPass(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label>From</label>
+                    <input
+                      className="input"
+                      value={emailFrom}
+                      onChange={(e) => setEmailFrom(e.target.value)}
+                      placeholder="alerts@example.com"
+                    />
+                  </div>
+                  <div>
+                    <label>To</label>
+                    <input
+                      className="input"
+                      value={emailTo}
+                      onChange={(e) => setEmailTo(e.target.value)}
+                      placeholder="team@example.com"
+                    />
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <input
+                      type="checkbox"
+                      checked={smtpSecure}
+                      onChange={(e) => setSmtpSecure(e.target.checked)}
+                      id="smtp-secure"
+                    />
+                    <label htmlFor="smtp-secure">Secure (TLS)</label>
+                  </div>
+                </div>
+              )}
+
+              {(formChannel === "slack" || formChannel === "teams") && (
+                <div style={{ marginBottom: "0.75rem" }}>
+                  <label>Webhook URL</label>
+                  <input
+                    className="input"
+                    value={webhookUrl}
+                    onChange={(e) => setWebhookUrl(e.target.value)}
+                    placeholder="https://hooks.slack.com/services/..."
+                  />
+                </div>
+              )}
+
+              <div className="ntf-events">
+                {NOTIFICATION_EVENTS.map((ev) => (
+                  <label key={ev.value}>
+                    <input
+                      type="checkbox"
+                      checked={formEvents.includes(ev.value)}
+                      onChange={() => toggleEvent(ev.value)}
+                    />
+                    {ev.label}
+                  </label>
+                ))}
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                <input
+                  type="checkbox"
+                  checked={formEnabled}
+                  onChange={(e) => setFormEnabled(e.target.checked)}
+                  id="ntf-enabled"
+                />
+                <label htmlFor="ntf-enabled">Enabled</label>
+              </div>
+
+              {testResult && (
+                <div
+                  className={testResult.ok ? "settings-success" : "settings-error"}
+                  style={{ marginBottom: "0.75rem" }}
+                >
+                  {testResult.message}
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={saving}
+                  onClick={() => void handleSave()}
+                >
+                  {saving ? "Saving..." : "Save"}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={testing}
+                  onClick={() => void handleTest()}
+                >
+                  {testing ? "Testing..." : "Test"}
+                </button>
+                <button type="button" className="btn" onClick={resetForm}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

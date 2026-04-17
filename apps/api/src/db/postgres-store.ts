@@ -1763,4 +1763,171 @@ export class PostgresStore {
   async deleteTriggerStatesForWorkflow(workflowId: string): Promise<void> {
     await this.query(`DELETE FROM trigger_state WHERE workflow_id = $1`, [workflowId]);
   }
+
+  // ---------------------------------------------------------------------------
+  // Workflow Templates (Phase 7.4)
+  // ---------------------------------------------------------------------------
+
+  async listTemplates(filters?: { category?: string; search?: string }): Promise<Array<{
+    id: string; name: string; description: string; category: string;
+    tags: string[]; author: string; nodeCount: number;
+    createdAt: string; updatedAt: string;
+  }>> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    let paramIdx = 1;
+    if (filters?.category) {
+      clauses.push(`category = $${paramIdx++}`);
+      params.push(filters.category);
+    }
+    if (filters?.search && filters.search.trim()) {
+      const needle = `%${filters.search.trim().toLowerCase()}%`;
+      clauses.push(`(LOWER(name) LIKE $${paramIdx} OR LOWER(description) LIKE $${paramIdx + 1})`);
+      paramIdx += 2;
+      params.push(needle, needle);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = await this.query<{
+      id: string; name: string; description: string; category: string;
+      tags: string; author: string; node_count: number;
+      created_at: string; updated_at: string;
+    }>(
+      `SELECT id, name, description, category, tags, author, node_count, created_at, updated_at
+       FROM workflow_templates ${where} ORDER BY category, name`,
+      params
+    );
+    return rows.map((row) => {
+      let tags: string[] = [];
+      try { const parsed = JSON.parse(toStr(row.tags)); if (Array.isArray(parsed)) tags = parsed.filter((t: unknown): t is string => typeof t === "string"); } catch { /* ignore */ }
+      return {
+        id: toStr(row.id),
+        name: toStr(row.name),
+        description: toStr(row.description),
+        category: toStr(row.category),
+        tags,
+        author: toStr(row.author),
+        nodeCount: toNum(row.node_count),
+        createdAt: toStr(row.created_at),
+        updatedAt: toStr(row.updated_at)
+      };
+    });
+  }
+
+  async getTemplate(id: string): Promise<{
+    id: string; name: string; description: string; category: string;
+    tags: string[]; author: string; workflowJson: string; nodeCount: number;
+    createdAt: string; updatedAt: string;
+  } | undefined> {
+    const row = await this.queryOne<{
+      id: string; name: string; description: string; category: string;
+      tags: string; author: string; workflow_json: string; node_count: number;
+      created_at: string; updated_at: string;
+    }>(
+      `SELECT id, name, description, category, tags, author, workflow_json, node_count, created_at, updated_at
+       FROM workflow_templates WHERE id = $1`,
+      [id]
+    );
+    if (!row) return undefined;
+    let tags: string[] = [];
+    try { const parsed = JSON.parse(toStr(row.tags)); if (Array.isArray(parsed)) tags = parsed.filter((t: unknown): t is string => typeof t === "string"); } catch { /* ignore */ }
+    return {
+      id: toStr(row.id),
+      name: toStr(row.name),
+      description: toStr(row.description),
+      category: toStr(row.category),
+      tags,
+      author: toStr(row.author),
+      workflowJson: toStr(row.workflow_json),
+      nodeCount: toNum(row.node_count),
+      createdAt: toStr(row.created_at),
+      updatedAt: toStr(row.updated_at)
+    };
+  }
+
+  async upsertTemplate(input: {
+    id: string; name: string; description: string; category: string;
+    tags: string[]; author: string; workflowJson: string; nodeCount: number;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.execute(
+      `INSERT INTO workflow_templates (id, name, description, category, tags, author, workflow_json, node_count, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         description = EXCLUDED.description,
+         category = EXCLUDED.category,
+         tags = EXCLUDED.tags,
+         author = EXCLUDED.author,
+         workflow_json = EXCLUDED.workflow_json,
+         node_count = EXCLUDED.node_count,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        input.id,
+        input.name,
+        input.description,
+        input.category,
+        JSON.stringify(input.tags),
+        input.author,
+        input.workflowJson,
+        input.nodeCount,
+        now,
+        now
+      ]
+    );
+  }
+
+  async deleteTemplate(id: string): Promise<boolean> {
+    const result = await this.pool.query(`DELETE FROM workflow_templates WHERE id = $1`, [id]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async countTemplates(): Promise<number> {
+    const row = await this.queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM workflow_templates`);
+    return row ? toNum(row.count) : 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notification Configs (Phase 7.5)
+  // ---------------------------------------------------------------------------
+
+  async listNotificationConfigs(): Promise<Array<{
+    id: string; channel: string; enabled: boolean;
+    config: Record<string, unknown>; events: string[];
+    createdAt: string; updatedAt: string;
+  }>> {
+    const rows = await this.query<{
+      id: string; channel: string; enabled: number;
+      config_json: string; events: string;
+      created_at: string; updated_at: string;
+    }>(`SELECT id, channel, enabled, config_json, events, created_at, updated_at FROM notification_configs ORDER BY created_at`);
+    return rows.map(r => ({
+      id: toStr(r.id),
+      channel: toStr(r.channel),
+      enabled: toNum(r.enabled) === 1,
+      config: JSON.parse(toStr(r.config_json) || "{}"),
+      events: JSON.parse(toStr(r.events) || '["execution.failure"]'),
+      createdAt: toStr(r.created_at),
+      updatedAt: toStr(r.updated_at)
+    }));
+  }
+
+  async upsertNotificationConfig(input: {
+    id: string; channel: string; enabled: boolean;
+    config: Record<string, unknown>; events: string[];
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await this.execute(
+      `INSERT INTO notification_configs (id, channel, enabled, config_json, events, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT(id) DO UPDATE SET channel=EXCLUDED.channel, enabled=EXCLUDED.enabled,
+         config_json=EXCLUDED.config_json, events=EXCLUDED.events, updated_at=EXCLUDED.updated_at`,
+      [input.id, input.channel, input.enabled ? 1 : 0,
+       JSON.stringify(input.config), JSON.stringify(input.events), now, now]
+    );
+  }
+
+  async deleteNotificationConfig(id: string): Promise<boolean> {
+    const result = await this.pool.query(`DELETE FROM notification_configs WHERE id = $1`, [id]);
+    return (result.rowCount ?? 0) > 0;
+  }
 }

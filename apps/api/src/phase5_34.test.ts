@@ -90,6 +90,9 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     HA_INSTANCE_ID: undefined,
     HA_LEASE_TTL_MS: 30000,
     HA_RENEW_INTERVAL_MS: 10000,
+    NOTIFICATIONS_ENABLED: false,
+    NOTIFICATION_SMTP_PORT: 587,
+    NOTIFICATION_SMTP_SECURE: false,
     ...overrides
   };
 }
