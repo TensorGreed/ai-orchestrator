@@ -78,7 +78,13 @@ export type NodePaletteIconKey =
   | "mqtt_trigger"
   | "manual_trigger"
   | "sticky_note"
-  | "text_input";
+  | "text_input"
+  | "basic_llm_chain"
+  | "qa_chain"
+  | "summarization_chain"
+  | "information_extractor"
+  | "text_classifier"
+  | "sentiment_analysis";
 
 export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element {
   // ─── Category icons ───
@@ -902,6 +908,63 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
     );
   }
 
+  // ─── LLM Chain nodes ───
+  if (icon === "basic_llm_chain") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 6h16v3H4zM4 11h16v3H4zM4 16h16v3H4z" fill="none" stroke="#7C3AED" strokeWidth="1.4" strokeLinejoin="round" />
+        <path d="M12 9v2M12 14v2" fill="none" stroke="#A78BFA" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (icon === "qa_chain") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="10" r="7" fill="none" stroke="#0EA5E9" strokeWidth="1.6" />
+        <text x="9" y="14" fontSize="10" fontWeight="bold" fill="#0EA5E9" fontFamily="sans-serif">?</text>
+        <path d="M12 17v2M12 21v1" fill="none" stroke="#38BDF8" strokeWidth="2" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (icon === "summarization_chain") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 6h16M4 10h14M4 14h10M4 18h6" fill="none" stroke="#F97316" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M18 14l2-2 2 2M20 12v8" fill="none" stroke="#FB923C" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (icon === "information_extractor") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="3" width="18" height="18" rx="3" fill="none" stroke="#10B981" strokeWidth="1.4" />
+        <path d="M7 8h4M7 12h6M7 16h3" fill="none" stroke="#6EE7B7" strokeWidth="1.4" strokeLinecap="round" />
+        <path d="M15 8h2M15 12h2M15 16h2" fill="none" stroke="#10B981" strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (icon === "text_classifier") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="4" width="7" height="7" rx="1.5" fill="none" stroke="#3B82F6" strokeWidth="1.4" />
+        <rect x="14" y="4" width="7" height="7" rx="1.5" fill="none" stroke="#F59E0B" strokeWidth="1.4" />
+        <rect x="3" y="14" width="7" height="7" rx="1.5" fill="none" stroke="#10B981" strokeWidth="1.4" />
+        <rect x="14" y="14" width="7" height="7" rx="1.5" fill="none" stroke="#EF4444" strokeWidth="1.4" />
+        <path d="M10 7.5h4M10 17.5h4M6.5 11v3M17.5 11v3" fill="none" stroke="#94A3B8" strokeWidth="1" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (icon === "sentiment_analysis") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="none" stroke="#EC4899" strokeWidth="1.6" />
+        <circle cx="8.5" cy="10" r="1" fill="#EC4899" />
+        <circle cx="15.5" cy="10" r="1" fill="#EC4899" />
+        <path d="M8 15c1.5 2 6.5 2 8 0" fill="none" stroke="#EC4899" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
   // ─── Fallback ───
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1061,7 +1124,13 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   mqtt_trigger: "mqtt_trigger",
   error_trigger: "error_trigger",
   sub_workflow_trigger: "sub_workflow_trigger",
-  sticky_note: "sticky_note"
+  sticky_note: "sticky_note",
+  basic_llm_chain: "basic_llm_chain",
+  qa_chain: "qa_chain",
+  summarization_chain: "summarization_chain",
+  information_extractor: "information_extractor",
+  text_classifier: "text_classifier",
+  sentiment_analysis: "sentiment_analysis"
 };
 
 export function resolveNodeIcon(nodeType: string, fallbackIcon: PaletteCategoryIconKey = "core"): NodePaletteIconKey {

@@ -852,6 +852,114 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "basic_llm_chain",
+    label: "Basic LLM Chain",
+    category: "LLM",
+    description: "Simple prompt-to-response chain with configurable system and user prompt templates.",
+    configSchema: {
+      type: "object",
+      properties: {
+        promptKey: { type: "string" },
+        systemPromptKey: { type: "string" },
+        outputFormat: { type: "string", enum: ["text", "json"] }
+      }
+    },
+    sampleConfig: {
+      promptKey: "prompt",
+      systemPromptKey: "system_prompt",
+      outputFormat: "text"
+    }
+  },
+  {
+    type: "qa_chain",
+    label: "Q&A Chain",
+    category: "LLM",
+    description: "Answers questions using provided context documents. Returns answer with source citations.",
+    configSchema: {
+      type: "object",
+      properties: {
+        contextKey: { type: "string" },
+        questionKey: { type: "string" },
+        maxContextLength: { type: "number" }
+      }
+    },
+    sampleConfig: {
+      contextKey: "context",
+      questionKey: "question",
+      maxContextLength: 4000
+    }
+  },
+  {
+    type: "summarization_chain",
+    label: "Summarization Chain",
+    category: "LLM",
+    description: "Summarizes input text with configurable length and style.",
+    configSchema: {
+      type: "object",
+      properties: {
+        textKey: { type: "string" },
+        maxLength: { type: "number" },
+        style: { type: "string", enum: ["brief", "detailed", "bullet_points", "executive"] }
+      }
+    },
+    sampleConfig: {
+      textKey: "text",
+      maxLength: 500,
+      style: "brief"
+    }
+  },
+  {
+    type: "information_extractor",
+    label: "Information Extractor",
+    category: "LLM",
+    description: "Extracts structured information from text based on a configurable schema.",
+    configSchema: {
+      type: "object",
+      properties: {
+        textKey: { type: "string" },
+        extractionSchema: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      textKey: "text",
+      extractionSchema: "{ \"name\": \"string\", \"email\": \"string\", \"company\": \"string\" }"
+    }
+  },
+  {
+    type: "text_classifier",
+    label: "Text Classifier",
+    category: "LLM",
+    description: "Classifies input text into one of the configured categories.",
+    configSchema: {
+      type: "object",
+      properties: {
+        textKey: { type: "string" },
+        categories: { type: "string" },
+        multiLabel: { type: "boolean" }
+      }
+    },
+    sampleConfig: {
+      textKey: "text",
+      categories: "positive, negative, neutral",
+      multiLabel: false
+    }
+  },
+  {
+    type: "sentiment_analysis",
+    label: "Sentiment Analysis",
+    category: "LLM",
+    description: "Analyzes sentiment of input text. Returns sentiment label, confidence score, and explanation.",
+    configSchema: {
+      type: "object",
+      properties: {
+        textKey: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      textKey: "text"
+    }
+  },
+  {
     type: "if_node",
     label: "IF",
     category: "Utility",

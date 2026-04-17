@@ -52,7 +52,13 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "rag_retrieve",
         "local_memory",
         "output_guardrail",
-        "output_parser"
+        "output_parser",
+        "basic_llm_chain",
+        "qa_chain",
+        "summarization_chain",
+        "information_extractor",
+        "text_classifier",
+        "sentiment_analysis"
       ].includes(node.type)
   },
   {

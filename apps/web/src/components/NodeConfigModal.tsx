@@ -2215,6 +2215,139 @@ export function NodeConfigModal({
     );
   };
 
+  const renderBasicLlmChainParameters = () => (
+    <>
+      {renderProviderSection()}
+      <SelectField
+        label="Output Format"
+        value={toStringValue(config.outputFormat, "text")}
+        options={[
+          { value: "text", label: "Text" },
+          { value: "json", label: "JSON" }
+        ]}
+        onChange={(next) => setConfig((current) => ({ ...current, outputFormat: next }))}
+      />
+      <TextField
+        label="Prompt Key"
+        value={toStringValue(config.promptKey, "prompt")}
+        onChange={(next) => setConfig((current) => ({ ...current, promptKey: next }))}
+      />
+      <TextField
+        label="System Prompt Key"
+        value={toStringValue(config.systemPromptKey, "system_prompt")}
+        onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
+      />
+    </>
+  );
+
+  const renderQaChainParameters = () => (
+    <>
+      {renderProviderSection()}
+      <TextField
+        label="Context Key"
+        value={toStringValue(config.contextKey, "context")}
+        onChange={(next) => setConfig((current) => ({ ...current, contextKey: next }))}
+      />
+      <TextField
+        label="Question Key"
+        value={toStringValue(config.questionKey, "question")}
+        onChange={(next) => setConfig((current) => ({ ...current, questionKey: next }))}
+      />
+      <NumberField
+        label="Max Context Length"
+        value={toNumberValue(config.maxContextLength, 4000)}
+        min={100}
+        step={500}
+        onChange={(next) => setConfig((current) => ({ ...current, maxContextLength: next }))}
+      />
+    </>
+  );
+
+  const renderSummarizationChainParameters = () => (
+    <>
+      {renderProviderSection()}
+      <TextField
+        label="Text Key"
+        value={toStringValue(config.textKey, "text")}
+        onChange={(next) => setConfig((current) => ({ ...current, textKey: next }))}
+      />
+      <SelectField
+        label="Summary Style"
+        value={toStringValue(config.style, "brief")}
+        options={[
+          { value: "brief", label: "Brief" },
+          { value: "detailed", label: "Detailed" },
+          { value: "bullet_points", label: "Bullet Points" },
+          { value: "executive", label: "Executive Summary" }
+        ]}
+        onChange={(next) => setConfig((current) => ({ ...current, style: next }))}
+      />
+      <NumberField
+        label="Max Length (chars)"
+        value={toNumberValue(config.maxLength, 500)}
+        min={50}
+        step={50}
+        onChange={(next) => setConfig((current) => ({ ...current, maxLength: next }))}
+      />
+    </>
+  );
+
+  const renderInformationExtractorParameters = () => (
+    <>
+      {renderProviderSection()}
+      <TextField
+        label="Text Key"
+        value={toStringValue(config.textKey, "text")}
+        onChange={(next) => setConfig((current) => ({ ...current, textKey: next }))}
+      />
+      <label className="cfg-field">
+        <span>Extraction Schema (JSON)</span>
+        <textarea
+          className="cfg-code-editor"
+          value={toStringValue(config.extractionSchema, '{ "name": "string", "email": "string" }')}
+          onChange={(e) => setConfig((current) => ({ ...current, extractionSchema: e.target.value }))}
+          rows={5}
+          spellCheck={false}
+        />
+      </label>
+    </>
+  );
+
+  const renderTextClassifierParameters = () => (
+    <>
+      {renderProviderSection()}
+      <TextField
+        label="Text Key"
+        value={toStringValue(config.textKey, "text")}
+        onChange={(next) => setConfig((current) => ({ ...current, textKey: next }))}
+      />
+      <TextField
+        label="Categories (comma-separated)"
+        value={toStringValue(config.categories, "positive, negative, neutral")}
+        onChange={(next) => setConfig((current) => ({ ...current, categories: next }))}
+      />
+      <label className="cfg-field" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <input
+          type="checkbox"
+          checked={config.multiLabel === true}
+          onChange={(e) => setConfig((current) => ({ ...current, multiLabel: e.target.checked }))}
+        />
+        <span>Multi-label (allow multiple categories)</span>
+      </label>
+    </>
+  );
+
+  const renderSentimentAnalysisParameters = () => (
+    <>
+      {renderProviderSection()}
+      <TextField
+        label="Text Key"
+        value={toStringValue(config.textKey, "text")}
+        onChange={(next) => setConfig((current) => ({ ...current, textKey: next }))}
+      />
+    </>
+  );
+
   const renderPromptTemplateParameters = () => {
     return (
       <>
@@ -3564,6 +3697,18 @@ export function NodeConfigModal({
         return renderLocalMemoryParameters();
       case "llm_call":
         return renderLlmParameters();
+      case "basic_llm_chain":
+        return renderBasicLlmChainParameters();
+      case "qa_chain":
+        return renderQaChainParameters();
+      case "summarization_chain":
+        return renderSummarizationChainParameters();
+      case "information_extractor":
+        return renderInformationExtractorParameters();
+      case "text_classifier":
+        return renderTextClassifierParameters();
+      case "sentiment_analysis":
+        return renderSentimentAnalysisParameters();
       case "azure_openai_chat_model":
         return renderAzureOpenAIChatModelParameters();
       case "google_gemini_chat_model":

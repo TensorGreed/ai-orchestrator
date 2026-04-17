@@ -3318,6 +3318,95 @@ async function executeNode(
       };
     }
 
+    case "basic_llm_chain": {
+      const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
+      if (!provider) throw new Error("Basic LLM Chain requires a provider. Attach a Chat Model node upstream or configure provider in settings.");
+      const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
+      const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
+      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
+      const systemPrompt = String(templateData[systemPromptKey] ?? "You are a helpful assistant.");
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+    }
+
+    case "qa_chain": {
+      const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
+      if (!provider) throw new Error("Q&A Chain requires a provider.");
+      const contextKey = typeof config.contextKey === "string" ? config.contextKey : "context";
+      const questionKey = typeof config.questionKey === "string" ? config.questionKey : "question";
+      const context = String(templateData[contextKey] ?? "");
+      const question = String(templateData[questionKey] ?? templateData.user_prompt ?? "");
+      const maxLen = typeof config.maxContextLength === "number" ? config.maxContextLength : 4000;
+      const truncatedContext = context.slice(0, maxLen);
+      const systemPrompt = "You are a question-answering assistant. Answer the question based ONLY on the provided context. If the answer is not found in the context, say so. Cite specific parts of the context that support your answer.";
+      const userPrompt = `Context:\n${truncatedContext}\n\nQuestion: ${question}`;
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+    }
+
+    case "summarization_chain": {
+      const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
+      if (!provider) throw new Error("Summarization Chain requires a provider.");
+      const textKey = typeof config.textKey === "string" ? config.textKey : "text";
+      const text = String(templateData[textKey] ?? templateData.prompt ?? "");
+      const maxLength = typeof config.maxLength === "number" ? config.maxLength : 500;
+      const style = typeof config.style === "string" ? config.style : "brief";
+      const styleInstructions: Record<string, string> = {
+        brief: `Provide a brief summary in ${maxLength} characters or less.`,
+        detailed: `Provide a detailed summary covering all key points. Target length: ${maxLength} characters.`,
+        bullet_points: `Summarize as bullet points. Maximum ${Math.ceil(maxLength / 80)} bullet points.`,
+        executive: `Write an executive summary suitable for senior leadership. Be concise and focus on actionable insights. Target: ${maxLength} characters.`
+      };
+      const systemPrompt = `You are a summarization assistant. ${styleInstructions[style] ?? styleInstructions.brief}`;
+      const userPrompt = `Summarize the following text:\n\n${text}`;
+      return runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+    }
+
+    case "information_extractor": {
+      const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
+      if (!provider) throw new Error("Information Extractor requires a provider.");
+      const textKey = typeof config.textKey === "string" ? config.textKey : "text";
+      const text = String(templateData[textKey] ?? templateData.prompt ?? "");
+      const schema = typeof config.extractionSchema === "string" ? config.extractionSchema : '{ "key": "value" }';
+      const systemPrompt = `You are an information extraction assistant. Extract structured data from the provided text according to the given schema. Return ONLY valid JSON matching the schema. If a field cannot be found, use null.`;
+      const userPrompt = `Schema to extract:\n${schema}\n\nText:\n${text}`;
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
+      let extracted: unknown = answer;
+      try { extracted = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
+      return { ...result, extracted, answer };
+    }
+
+    case "text_classifier": {
+      const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
+      if (!provider) throw new Error("Text Classifier requires a provider.");
+      const textKey = typeof config.textKey === "string" ? config.textKey : "text";
+      const text = String(templateData[textKey] ?? templateData.prompt ?? "");
+      const categories = typeof config.categories === "string" ? config.categories : "positive, negative, neutral";
+      const multiLabel = config.multiLabel === true;
+      const systemPrompt = multiLabel
+        ? `You are a text classification assistant. Classify the text into one or more of these categories: ${categories}. Return a JSON object with: { "categories": ["category1", "category2"], "confidence": { "category1": 0.9, "category2": 0.7 }, "reasoning": "brief explanation" }`
+        : `You are a text classification assistant. Classify the text into exactly ONE of these categories: ${categories}. Return a JSON object with: { "category": "chosen_category", "confidence": 0.95, "reasoning": "brief explanation" }`;
+      const userPrompt = `Classify this text:\n\n${text}`;
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
+      let classification: unknown = answer;
+      try { classification = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
+      return { ...result, classification, answer };
+    }
+
+    case "sentiment_analysis": {
+      const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
+      if (!provider) throw new Error("Sentiment Analysis requires a provider.");
+      const textKey = typeof config.textKey === "string" ? config.textKey : "text";
+      const text = String(templateData[textKey] ?? templateData.prompt ?? "");
+      const systemPrompt = `You are a sentiment analysis assistant. Analyze the sentiment of the provided text. Return a JSON object with: { "sentiment": "positive" | "negative" | "neutral" | "mixed", "score": <number from -1.0 to 1.0>, "confidence": <number from 0.0 to 1.0>, "explanation": "brief explanation of the sentiment" }`;
+      const userPrompt = `Analyze the sentiment of this text:\n\n${text}`;
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      const answer = typeof result.answer === "string" ? result.answer : String(result.text ?? "");
+      let sentiment: unknown = answer;
+      try { sentiment = JSON.parse(answer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
+      return { ...result, sentiment, answer };
+    }
+
     case "if_node": {
       const conditionTemplate = typeof config.condition === "string" ? config.condition : "";
       const evaluated = renderTemplate(conditionTemplate, templateData).trim();
@@ -3628,6 +3717,12 @@ const RETRYABLE_NODE_TYPES = new Set([
   "google_gemini_chat_model",
   "agent_orchestrator",
   "supervisor_node",
+  "basic_llm_chain",
+  "qa_chain",
+  "summarization_chain",
+  "information_extractor",
+  "text_classifier",
+  "sentiment_analysis",
   "mcp_tool",
   "connector_source",
   "google_drive_source",
