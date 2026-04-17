@@ -46,11 +46,12 @@ function toOpenAIMessages(messages: ChatMessage[]): Array<Record<string, unknown
     };
 
     // Support multipart content with images (OpenAI vision format)
-    if (message.images && message.images.length > 0 && message.role === "user") {
+    const validImages = (message.images ?? []).filter(img => img.data && img.mimeType && img.mimeType.startsWith("image/"));
+    if (validImages.length > 0 && message.role === "user") {
       const parts: Array<Record<string, unknown>> = [
         { type: "text", text: message.content }
       ];
-      for (const img of message.images) {
+      for (const img of validImages) {
         parts.push({
           type: "image_url",
           image_url: { url: `data:${img.mimeType};base64,${img.data}` }

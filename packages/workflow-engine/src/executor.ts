@@ -3021,7 +3021,9 @@ async function executeNode(
         ...workerTools
       ];
 
-      const images = Array.isArray(templateData.images) ? templateData.images as Array<{data: string; mimeType: string}> : undefined;
+      const rawImages = Array.isArray(templateData.images) ? templateData.images as Array<{data: string; mimeType: string}> : [];
+      const images = rawImages.filter(img => img && typeof img.data === "string" && img.data && typeof img.mimeType === "string" && img.mimeType.startsWith("image/"));
+
 
       const modelRunStarted = Date.now();
       const modelRunStartedAt = nowIso();
@@ -3038,7 +3040,7 @@ async function executeNode(
           sessionId,
           memory,
           bypassToolFiltering: attachedToolServerConfigs.length > 0,
-          images
+          images: images.length > 0 ? images : undefined
         },
         {
           tools: [
@@ -3827,8 +3829,11 @@ async function executeNodeWithRetry(
       } else {
         lastError = error instanceof Error ? error : new Error("Node execution failed");
       }
+      const errMsg = lastError.message.toLowerCase();
+      if (errMsg.includes("quota") || errMsg.includes("billing") || errMsg.includes("limit: 0") || errMsg.includes("rate_limit_exceeded")) {
+        throw lastError;
+      }
       if (attempt < retry.maxAttempts) {
-
         const delay = retry.delayMs * Math.pow(retry.backoffMultiplier, attempt - 1);
         await sleep(delay, dependencies.abortSignal);
       }

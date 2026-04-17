@@ -178,6 +178,19 @@ export async function resilientFetch(
         // Read body so the connection is freed for retry
         const errorBody = await response.text().catch(() => "");
 
+        // Don't retry 429 quota errors that indicate daily/billing limits (not transient rate limits)
+        if (response.status === 429 && /quota|billing|exceeded.*plan|limit: 0/i.test(errorBody)) {
+          lastError = new Error(
+            `${provider} returned ${response.status}: ${errorBody.slice(0, 500)}`
+          );
+          // Return the response clone-equivalent so the caller can handle it
+          return new Response(errorBody, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+        }
+
         // Determine delay
         let delayMs: number;
         if (response.status === 429) {

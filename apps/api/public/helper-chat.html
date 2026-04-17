@@ -545,61 +545,84 @@
           }
         }
 
+        function tryParseAgentJson(str) {
+          if (typeof str !== "string") return null;
+          try {
+            return JSON.parse(str.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim());
+          } catch { return null; }
+        }
+
+        function extractFromStructuredOutput(parsed) {
+          if (!parsed || typeof parsed !== "object") return null;
+          // Handle the standard agent output contract: { status, final_html, follow_up_question }
+          if ("status" in parsed || "final_html" in parsed) {
+            if (typeof parsed.final_html === "string" && parsed.final_html.trim()) {
+              return parsed.final_html;
+            }
+            if (typeof parsed.follow_up_question === "string" && parsed.follow_up_question.trim()) {
+              return parsed.follow_up_question;
+            }
+            if (parsed.status === "needs_more_info") {
+              return "The agent needs more information but did not specify what. Please retry with a more specific prompt.";
+            }
+          }
+          // Generic structured fields
+          for (const key of ["final_html", "html", "report", "result", "answer", "text", "content", "message", "response"]) {
+            if (typeof parsed[key] === "string" && parsed[key].trim()) return parsed[key];
+          }
+          return null;
+        }
+
         function extractAssistantText(payload) {
           const rootDecoded = decodeBufferLikeText(payload);
           if (typeof rootDecoded === "string") return rootDecoded;
-          if (typeof payload === "string") return payload;
+          if (typeof payload === "string") {
+            const parsed = tryParseAgentJson(payload);
+            const extracted = extractFromStructuredOutput(parsed);
+            if (extracted) return extracted;
+            return payload;
+          }
           if (payload && typeof payload === "object") {
-            // If the workflow returned an error, show it clearly
+            // Workflow error with no output
             if (payload.error && typeof payload.error === "string") {
               const output = payload.output;
-              if (!output || (typeof output === "object" && Object.keys(output).length === 0)) {
+              if (!output || output === null || (typeof output === "object" && Object.keys(output).length === 0)) {
                 return `Error: ${payload.error}`;
               }
             }
 
             const output = payload.output;
             const decodedOutput = decodeBufferLikeText(output);
-            if (typeof decodedOutput === "string") return decodedOutput;
-            if (typeof output === "string") return output;
+            if (typeof decodedOutput === "string") {
+              const parsed = tryParseAgentJson(decodedOutput);
+              const extracted = extractFromStructuredOutput(parsed);
+              if (extracted) return extracted;
+              return decodedOutput;
+            }
+            if (typeof output === "string") {
+              const parsed = tryParseAgentJson(output);
+              const extracted = extractFromStructuredOutput(parsed);
+              if (extracted) return extracted;
+              return output;
+            }
             if (output && typeof output === "object") {
-              // Try to parse agent answer as JSON and extract structured fields
+              // Check output itself as structured data
+              const directExtract = extractFromStructuredOutput(output);
+              if (directExtract) return directExtract;
+
+              // Try parsing the agent's text answer as JSON
               const agentAnswer = output.answer || output.result || output.text || output.content;
               if (typeof agentAnswer === "string" && agentAnswer.trim()) {
-                // Try to parse the answer as JSON — the agent may have returned structured output
-                try {
-                  const parsed = JSON.parse(agentAnswer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim());
-                  if (parsed && typeof parsed === "object") {
-                    // Check for common structured output patterns
-                    if (typeof parsed.final_html === "string" && parsed.final_html.trim()) {
-                      return parsed.final_html;
-                    }
-                    if (typeof parsed.follow_up_question === "string" && parsed.follow_up_question.trim()) {
-                      return parsed.follow_up_question;
-                    }
-                    if (typeof parsed.message === "string" && parsed.message.trim()) {
-                      return parsed.message;
-                    }
-                  }
-                } catch {
-                  // Not JSON — use as-is
-                }
+                const parsed = tryParseAgentJson(agentAnswer);
+                const extracted = extractFromStructuredOutput(parsed);
+                if (extracted) return extracted;
                 return agentAnswer;
               }
-              // Direct field lookup on output object
-              const outputCandidates = [output.final_html, output.result, output.answer, output.text, output.content, output.message, output.response];
-              for (const candidate of outputCandidates) {
-                const decoded = decodeBufferLikeText(candidate);
-                if (typeof decoded === "string") return decoded;
-                if (typeof candidate === "string" && candidate.trim()) return candidate;
-              }
             }
-            const rootCandidates = [payload.final_html, payload.result, payload.answer, payload.text, payload.content, payload.message, payload.response];
-            for (const candidate of rootCandidates) {
-              const decoded = decodeBufferLikeText(candidate);
-              if (typeof decoded === "string") return decoded;
-              if (typeof candidate === "string" && candidate.trim()) return candidate;
-            }
+
+            // Root-level field search
+            const directExtract = extractFromStructuredOutput(payload);
+            if (directExtract) return directExtract;
           }
           return toJson(payload);
         }

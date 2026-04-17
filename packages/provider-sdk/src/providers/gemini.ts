@@ -13,6 +13,7 @@ interface GeminiPart {
     response: { name: string; content: unknown };
   };
   inlineData?: { mimeType: string; data: string };
+  thoughtSignature?: string;
 }
 
 interface GeminiContent {
@@ -96,7 +97,16 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
          if (msg.toolCalls && msg.toolCalls.length > 0) {
            contents.push({
              role: "model",
-             parts: msg.toolCalls.map(tc => ({ functionCall: { name: tc.name, args: typeof tc.arguments === "string" ? JSON.parse(tc.arguments) : tc.arguments } }))
+             parts: msg.toolCalls.map(tc => {
+               const part: Record<string, unknown> = {
+                 functionCall: { name: tc.name, args: typeof tc.arguments === "string" ? JSON.parse(tc.arguments) : tc.arguments }
+               };
+               const sig = tc.meta?.thoughtSignature;
+               if (typeof sig === "string" && sig) {
+                 part.thoughtSignature = sig;
+               }
+               return part as GeminiPart;
+             })
            });
          } else {
            contents.push({
@@ -118,12 +128,14 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
         const parts: GeminiPart[] = [{ text: msg.content }];
         if (msg.images && msg.images.length > 0) {
           for (const img of msg.images) {
-            (parts as Array<Record<string, unknown>>).push({
-              inlineData: {
-                mimeType: img.mimeType,
-                data: img.data
-              }
-            });
+            if (img.data && img.mimeType && img.mimeType.startsWith("image/")) {
+              (parts as Array<Record<string, unknown>>).push({
+                inlineData: {
+                  mimeType: img.mimeType,
+                  data: img.data
+                }
+              });
+            }
           }
         }
         contents.push({
@@ -187,10 +199,15 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
         content += part.text;
       }
       if (part.functionCall) {
+        const rawPart = part as Record<string, unknown>;
+        const thoughtSig = typeof rawPart.thoughtSignature === "string" ? rawPart.thoughtSignature
+          : typeof (rawPart as Record<string, unknown>).thought_signature === "string" ? (rawPart as Record<string, unknown>).thought_signature as string
+          : undefined;
         toolCalls.push({
            id: "call_" + Math.random().toString(36).substring(2, 9),
            name: part.functionCall.name,
-           arguments: part.functionCall.args
+           arguments: part.functionCall.args,
+           ...(thoughtSig ? { meta: { thoughtSignature: thoughtSig } } : {})
         });
       }
     }

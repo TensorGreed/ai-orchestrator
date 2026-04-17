@@ -787,6 +787,11 @@ ${effectiveSystemPrompt}`;
             break;
           } catch (error) {
             llmError = error instanceof Error ? error : new Error(String(error));
+            const errorMsg = llmError.message.toLowerCase();
+            const isQuotaError = errorMsg.includes("quota") || errorMsg.includes("billing") || errorMsg.includes("limit: 0") || errorMsg.includes("rate_limit_exceeded");
+            if (isQuotaError) {
+              break;
+            }
             if (llmAttempt < LLM_RETRY_MAX) {
               const delay = LLM_RETRY_BASE_DELAY_MS * Math.pow(2, llmAttempt);
               await new Promise((resolve) => setTimeout(resolve, delay));
@@ -795,6 +800,12 @@ ${effectiveSystemPrompt}`;
         }
 
         if (!modelResponse) {
+          // Quota/billing errors should fail immediately — no graceful degradation
+          const errorMsg = llmError?.message?.toLowerCase() ?? "";
+          const isQuotaError = errorMsg.includes("quota") || errorMsg.includes("billing") || errorMsg.includes("limit: 0") || errorMsg.includes("rate_limit_exceeded");
+          if (isQuotaError) {
+            throw llmError ?? new Error("LLM quota exceeded");
+          }
           // All LLM retries exhausted
           if (steps.length > 0 && lastAssistantMessage) {
             // We have a prior successful iteration — return gracefully
