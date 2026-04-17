@@ -3021,6 +3021,8 @@ async function executeNode(
         ...workerTools
       ];
 
+      const images = Array.isArray(templateData.images) ? templateData.images as Array<{data: string; mimeType: string}> : undefined;
+
       const modelRunStarted = Date.now();
       const modelRunStartedAt = nowIso();
       const agentState = await dependencies.agentRuntime.run(
@@ -3035,7 +3037,8 @@ async function executeNode(
           toolOutputLimits: hasCustomToolOutputLimits ? toolOutputLimits : undefined,
           sessionId,
           memory,
-          bypassToolFiltering: attachedToolServerConfigs.length > 0
+          bypassToolFiltering: attachedToolServerConfigs.length > 0,
+          images
         },
         {
           tools: [
@@ -4053,6 +4056,7 @@ export async function executeWorkflow(
         session_id:
           request.sessionId ??
           (typeof request.webhookPayload?.session_id === "string" ? request.webhookPayload.session_id : undefined),
+        images: Array.isArray(request.webhookPayload?.images) ? request.webhookPayload.images : undefined,
         trigger_type: request.triggerType ?? "manual",
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };

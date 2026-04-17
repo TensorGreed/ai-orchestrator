@@ -42,9 +42,24 @@ function normalizeBaseUrl(baseUrl: string): string {
 function toOpenAIMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
   return messages.map((message) => {
     const payload: Record<string, unknown> = {
-      role: message.role,
-      content: message.content
+      role: message.role
     };
+
+    // Support multipart content with images (OpenAI vision format)
+    if (message.images && message.images.length > 0 && message.role === "user") {
+      const parts: Array<Record<string, unknown>> = [
+        { type: "text", text: message.content }
+      ];
+      for (const img of message.images) {
+        parts.push({
+          type: "image_url",
+          image_url: { url: `data:${img.mimeType};base64,${img.data}` }
+        });
+      }
+      payload.content = parts;
+    } else {
+      payload.content = message.content;
+    }
 
     if (message.role === "tool") {
       payload.tool_call_id = message.toolCallId;

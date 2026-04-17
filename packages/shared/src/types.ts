@@ -400,12 +400,18 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
 }
 
+export interface ChatMessageImage {
+  data: string;      // base64-encoded image data (no data URL prefix)
+  mimeType: string;  // "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
   name?: string;
   toolCallId?: string;
   toolCalls?: ToolCall[];
+  images?: ChatMessageImage[];
 }
 
 export interface ToolDefinition {
@@ -515,6 +521,7 @@ export interface AgentRunRequest {
   memory?: AgentMemoryConfig;
   toolOutputLimits?: AgentToolOutputLimits;
   bypassToolFiltering?: boolean;
+  images?: ChatMessageImage[];
 }
 
 export interface AgentRunStep {

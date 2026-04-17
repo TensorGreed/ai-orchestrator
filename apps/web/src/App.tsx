@@ -107,6 +107,7 @@ interface ChatMessageEntry {
   role: "assistant" | "user";
   text: string;
   status?: "streaming" | "done" | "error";
+  images?: Array<{ data: string; mimeType: string }>;
 }
 
 interface WorkflowVariableRow {
@@ -849,6 +850,7 @@ function StudioApp() {
   const [userPrompt, setUserPrompt] = useState("What time is it in America/Toronto? Use tools when needed.");
   const [sessionId, setSessionId] = useState("session-local-dev");
   const [chatInput, setChatInput] = useState("");
+  const [chatPendingImages, setChatPendingImages] = useState<Array<{ data: string; mimeType: string }>>([]);
   const [chatSystemPrompt, setChatSystemPrompt] = useState("You are a precise tool-using AI assistant.");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -2532,12 +2534,14 @@ function StudioApp() {
   ]);
 
   const handleChatSend = useCallback(async () => {
-    if (!chatInput.trim() || chatBusy) {
+    if ((!chatInput.trim() && chatPendingImages.length === 0) || chatBusy) {
       return;
     }
 
-    const message = chatInput.trim();
+    const message = chatInput.trim() || "(image attached)";
     setChatInput("");
+    const pendingImages = [...chatPendingImages];
+    setChatPendingImages([]);
     setChatBusy(true);
     setChatError(null);
     setChatNodeTrace([]);
@@ -2565,7 +2569,8 @@ function StudioApp() {
         id: `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         role: "user",
         text: message,
-        status: "done"
+        status: "done",
+        images: pendingImages.length > 0 ? pendingImages : undefined
       });
 
       const assistantMessageId = `assistant-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2580,15 +2585,11 @@ function StudioApp() {
       chatDeltaBufferRef.current = "";
       startChatDeltaFlusher(workflowId);
 
-      const chatExecutionPayload: {
-        user_prompt: string;
-        system_prompt?: string;
-        sessionId: string;
-        session_id: string;
-      } = {
+      const chatExecutionPayload: Record<string, unknown> = {
         user_prompt: message,
         sessionId: sessionForWorkflow,
-        session_id: sessionForWorkflow
+        session_id: sessionForWorkflow,
+        ...(pendingImages.length > 0 ? { images: pendingImages } : {})
       };
       if (!promptNodeSources.systemPromptFromNodes) {
         chatExecutionPayload.system_prompt = chatSystemPrompt;
@@ -2709,6 +2710,7 @@ function StudioApp() {
     appendChatMessage,
     chatBusy,
     chatInput,
+    chatPendingImages,
     chatSessionsByWorkflow,
     chatSystemPrompt,
     currentWorkflow.id,
@@ -4512,6 +4514,13 @@ function StudioApp() {
                     >
                       <div className="chat-bubble-label">{entry.role === "user" ? "You" : "Assistant"}</div>
                       <div className="chat-bubble-text">
+                        {entry.images && entry.images.length > 0 && (
+                          <div className="chat-images">
+                            {entry.images.map((img, idx) => (
+                              <img key={idx} src={`data:${img.mimeType};base64,${img.data}`} alt="" className="chat-image" />
+                            ))}
+                          </div>
+                        )}
                         {entry.role === "assistant" && entry.text && isPdfDataUrl(entry.text) ? (
                           <a href={entry.text} download="workflow-output.pdf" target="_blank" rel="noreferrer">
                             Download PDF
@@ -4545,12 +4554,41 @@ function StudioApp() {
                   rows={2}
                   placeholder="Fallback system prompt (used when no System Prompt node sets one)"
                 />
+                {chatPendingImages.length > 0 && (
+                  <div className="chat-pending-images">
+                    {chatPendingImages.map((img, idx) => (
+                      <div key={idx} className="chat-pending-image-thumb">
+                        <img src={`data:${img.mimeType};base64,${img.data}`} alt="" />
+                        <button type="button" onClick={() => setChatPendingImages((prev) => prev.filter((_, i) => i !== idx))}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <input
                   value={chatInput}
                   onChange={(event) => setChatInput(event.target.value)}
-                  placeholder="Ask something..."
+                  onPaste={(event) => {
+                    const items = event.clipboardData?.items;
+                    if (!items) return;
+                    for (let i = 0; i < items.length; i++) {
+                      const item = items[i];
+                      if (item.type.startsWith("image/")) {
+                        event.preventDefault();
+                        const file = item.getAsFile();
+                        if (!file) continue;
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                          const result = reader.result as string;
+                          const base64 = result.split(",")[1] ?? "";
+                          setChatPendingImages((prev) => [...prev, { data: base64, mimeType: item.type }]);
+                        };
+                        reader.readAsDataURL(file);
+                      }
+                    }
+                  }}
+                  placeholder={chatPendingImages.length > 0 ? `${chatPendingImages.length} image(s) attached — type your message...` : "Ask something..."}
                 />
-                <button type="submit" disabled={chatBusy || !chatInput.trim()}>
+                <button type="submit" disabled={chatBusy || (!chatInput.trim() && chatPendingImages.length === 0)}>
                   {chatBusy ? "Streaming..." : "Send"}
                 </button>
               </form>

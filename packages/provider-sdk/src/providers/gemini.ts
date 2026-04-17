@@ -12,6 +12,7 @@ interface GeminiPart {
     name: string;
     response: { name: string; content: unknown };
   };
+  inlineData?: { mimeType: string; data: string };
 }
 
 interface GeminiContent {
@@ -114,9 +115,20 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
            }]
          });
       } else {
+        const parts: GeminiPart[] = [{ text: msg.content }];
+        if (msg.images && msg.images.length > 0) {
+          for (const img of msg.images) {
+            (parts as Array<Record<string, unknown>>).push({
+              inlineData: {
+                mimeType: img.mimeType,
+                data: img.data
+              }
+            });
+          }
+        }
         contents.push({
           role: "user",
-          parts: [{ text: msg.content }]
+          parts
         });
       }
     }

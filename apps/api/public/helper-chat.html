@@ -265,6 +265,114 @@
         cursor: not-allowed;
       }
 
+      .pending-images {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        padding: 8px 10px 0;
+      }
+
+      .pending-thumb {
+        position: relative;
+        width: 56px;
+        height: 56px;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid #d7e2ef;
+      }
+
+      .pending-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .pending-thumb button {
+        position: absolute;
+        top: -1px;
+        right: -1px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: none;
+        background: #ef4444;
+        color: #fff;
+        font-size: 11px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        line-height: 1;
+      }
+
+      .msg-images {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 6px;
+      }
+
+      .msg-images img {
+        max-width: 180px;
+        max-height: 180px;
+        border-radius: 8px;
+        border: 1px solid #d7e2ef;
+      }
+
+      .html-report {
+        max-width: 100%;
+        overflow-x: auto;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .html-report table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 8px 0;
+        font-size: 12px;
+      }
+
+      .html-report th,
+      .html-report td {
+        border: 1px solid #d7e2ef;
+        padding: 6px 8px;
+        text-align: left;
+      }
+
+      .html-report th {
+        background: #f1f5f9;
+        font-weight: 600;
+      }
+
+      .html-report tr:nth-child(even) {
+        background: #f8fafc;
+      }
+
+      .html-report h1,
+      .html-report h2,
+      .html-report h3 {
+        margin: 12px 0 6px;
+      }
+
+      .html-report h1 { font-size: 18px; }
+      .html-report h2 { font-size: 15px; }
+      .html-report h3 { font-size: 13px; }
+
+      .message:has(.html-report) {
+        max-width: 100%;
+      }
+
+      .composer-wrap {
+        border-top: 1px solid #e2e8f0;
+        background: #fff;
+      }
+
+      .composer-wrap .composer {
+        border-top: none;
+      }
+
       .open-chat-btn {
         position: fixed;
         right: 20px;
@@ -336,9 +444,12 @@
         <div id="statusLine" class="status-line">Ready</div>
         <div id="chatLog" class="chat-log"></div>
 
-        <footer class="composer">
-          <textarea id="userInput" placeholder="Type your message"></textarea>
-          <button id="sendBtn" class="send-btn" type="button" title="Send">&#8594;</button>
+        <footer class="composer-wrap">
+          <div id="pendingImages" class="pending-images" style="display:none;"></div>
+          <div class="composer">
+            <textarea id="userInput" placeholder="Type your message (paste images with Ctrl+V)"></textarea>
+            <button id="sendBtn" class="send-btn" type="button" title="Send">&#8594;</button>
+          </div>
         </footer>
       </section>
 
@@ -364,8 +475,10 @@
         const userInputEl = document.getElementById("userInput");
         const sendBtn = document.getElementById("sendBtn");
 
+        const pendingImagesEl = document.getElementById("pendingImages");
         let busy = false;
         let sessionId = "";
+        let pendingImages = []; // Array of { data: base64, mimeType: string }
 
         function createSessionId() {
           if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -437,19 +550,51 @@
           if (typeof rootDecoded === "string") return rootDecoded;
           if (typeof payload === "string") return payload;
           if (payload && typeof payload === "object") {
+            // If the workflow returned an error, show it clearly
+            if (payload.error && typeof payload.error === "string") {
+              const output = payload.output;
+              if (!output || (typeof output === "object" && Object.keys(output).length === 0)) {
+                return `Error: ${payload.error}`;
+              }
+            }
+
             const output = payload.output;
             const decodedOutput = decodeBufferLikeText(output);
             if (typeof decodedOutput === "string") return decodedOutput;
             if (typeof output === "string") return output;
             if (output && typeof output === "object") {
-              const outputCandidates = [output.result, output.answer, output.text, output.content];
+              // Try to parse agent answer as JSON and extract structured fields
+              const agentAnswer = output.answer || output.result || output.text || output.content;
+              if (typeof agentAnswer === "string" && agentAnswer.trim()) {
+                // Try to parse the answer as JSON — the agent may have returned structured output
+                try {
+                  const parsed = JSON.parse(agentAnswer.replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim());
+                  if (parsed && typeof parsed === "object") {
+                    // Check for common structured output patterns
+                    if (typeof parsed.final_html === "string" && parsed.final_html.trim()) {
+                      return parsed.final_html;
+                    }
+                    if (typeof parsed.follow_up_question === "string" && parsed.follow_up_question.trim()) {
+                      return parsed.follow_up_question;
+                    }
+                    if (typeof parsed.message === "string" && parsed.message.trim()) {
+                      return parsed.message;
+                    }
+                  }
+                } catch {
+                  // Not JSON — use as-is
+                }
+                return agentAnswer;
+              }
+              // Direct field lookup on output object
+              const outputCandidates = [output.final_html, output.result, output.answer, output.text, output.content, output.message, output.response];
               for (const candidate of outputCandidates) {
                 const decoded = decodeBufferLikeText(candidate);
                 if (typeof decoded === "string") return decoded;
                 if (typeof candidate === "string" && candidate.trim()) return candidate;
               }
             }
-            const rootCandidates = [payload.result, payload.answer, payload.text, payload.content];
+            const rootCandidates = [payload.final_html, payload.result, payload.answer, payload.text, payload.content, payload.message, payload.response];
             for (const candidate of rootCandidates) {
               const decoded = decodeBufferLikeText(candidate);
               if (typeof decoded === "string") return decoded;
@@ -463,9 +608,24 @@
           return typeof value === "string" && /^data:application\/pdf;base64,/i.test(value.trim());
         }
 
-        function addMessage(role, text) {
+        function looksLikeHtml(value) {
+          return typeof value === "string" && /^\s*<(!doctype|html|div|h[1-6]|p|table|section|article|ul|ol|style)/i.test(value.trim());
+        }
+
+        function addMessage(role, text, images) {
           const messageEl = document.createElement("div");
           messageEl.className = `message ${role}`;
+          if (images && images.length > 0) {
+            const imagesWrap = document.createElement("div");
+            imagesWrap.className = "msg-images";
+            for (const img of images) {
+              const imgEl = document.createElement("img");
+              imgEl.src = `data:${img.mimeType};base64,${img.data}`;
+              imgEl.alt = "";
+              imagesWrap.appendChild(imgEl);
+            }
+            messageEl.appendChild(imagesWrap);
+          }
           if (role === "assistant" && isPdfDataUrl(text)) {
             const link = document.createElement("a");
             link.href = text;
@@ -474,12 +634,45 @@
             link.rel = "noreferrer";
             link.textContent = "Download PDF";
             messageEl.appendChild(link);
+          } else if (role === "assistant" && looksLikeHtml(text)) {
+            const htmlWrap = document.createElement("div");
+            htmlWrap.className = "html-report";
+            htmlWrap.innerHTML = text;
+            messageEl.appendChild(htmlWrap);
           } else {
-            messageEl.textContent = text || "";
+            const textNode = document.createElement("span");
+            textNode.textContent = text || "";
+            messageEl.appendChild(textNode);
           }
           chatLogEl.appendChild(messageEl);
           chatLogEl.scrollTop = chatLogEl.scrollHeight;
           return messageEl;
+        }
+
+        function renderPendingImages() {
+          pendingImagesEl.innerHTML = "";
+          if (pendingImages.length === 0) {
+            pendingImagesEl.style.display = "none";
+            return;
+          }
+          pendingImagesEl.style.display = "flex";
+          pendingImages.forEach((img, idx) => {
+            const thumb = document.createElement("div");
+            thumb.className = "pending-thumb";
+            const imgEl = document.createElement("img");
+            imgEl.src = `data:${img.mimeType};base64,${img.data}`;
+            imgEl.alt = "";
+            thumb.appendChild(imgEl);
+            const removeBtn = document.createElement("button");
+            removeBtn.textContent = "\u00d7";
+            removeBtn.type = "button";
+            removeBtn.addEventListener("click", () => {
+              pendingImages.splice(idx, 1);
+              renderPendingImages();
+            });
+            thumb.appendChild(removeBtn);
+            pendingImagesEl.appendChild(thumb);
+          });
         }
 
         function setStatus(text, tone) {
@@ -516,7 +709,7 @@
         async function sendMessage() {
           if (busy) return;
           const userPrompt = userInputEl.value.trim();
-          if (!userPrompt) return;
+          if (!userPrompt && pendingImages.length === 0) return;
 
           const base = apiBaseEl.value.trim();
           const webhookPath = webhookPathEl.value.trim();
@@ -528,15 +721,22 @@
           busy = true;
           sendBtn.disabled = true;
 
-          addMessage("user", userPrompt);
+          const imagesToSend = [...pendingImages];
+          pendingImages = [];
+          renderPendingImages();
+
+          addMessage("user", userPrompt || "(image attached)", imagesToSend.length > 0 ? imagesToSend : undefined);
           userInputEl.value = "";
           const pendingEl = addMessage("assistant", "Typing...");
           setStatus("Calling webhook...", "");
 
           const payload = {
-            user_prompt: userPrompt,
+            user_prompt: userPrompt || "(image attached)",
             session_id: sessionId
           };
+          if (imagesToSend.length > 0) {
+            payload.images = imagesToSend;
+          }
 
           try {
             const webhookUrl = buildWebhookUrl(base, webhookPath);
@@ -560,16 +760,22 @@
             }
 
             pendingEl.textContent = "";
-            if (isPdfDataUrl(extractAssistantText(body))) {
+            const assistantText = extractAssistantText(body);
+            if (isPdfDataUrl(assistantText)) {
               const link = document.createElement("a");
-              link.href = extractAssistantText(body);
+              link.href = assistantText;
               link.download = "workflow-output.pdf";
               link.target = "_blank";
               link.rel = "noreferrer";
               link.textContent = "Download PDF";
               pendingEl.appendChild(link);
+            } else if (looksLikeHtml(assistantText)) {
+              const htmlWrap = document.createElement("div");
+              htmlWrap.className = "html-report";
+              htmlWrap.innerHTML = assistantText;
+              pendingEl.appendChild(htmlWrap);
             } else {
-              pendingEl.textContent = extractAssistantText(body);
+              pendingEl.textContent = assistantText;
             }
             setStatus("Response received.", "ok");
           } catch (error) {
@@ -628,6 +834,29 @@
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             void sendMessage();
+          }
+        });
+
+        userInputEl.addEventListener("paste", (event) => {
+          const items = event.clipboardData && event.clipboardData.items;
+          if (!items) return;
+          for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            if (item.type && item.type.startsWith("image/")) {
+              event.preventDefault();
+              const file = item.getAsFile();
+              if (!file) continue;
+              const reader = new FileReader();
+              reader.onload = () => {
+                const result = reader.result;
+                if (typeof result !== "string") return;
+                const base64 = result.split(",")[1] || "";
+                pendingImages.push({ data: base64, mimeType: item.type });
+                renderPendingImages();
+                userInputEl.focus();
+              };
+              reader.readAsDataURL(file);
+            }
           }
         });
       })();

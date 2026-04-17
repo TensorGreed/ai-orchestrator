@@ -719,7 +719,7 @@ ${effectiveSystemPrompt}`;
         content: normalizeMessageContent(`${effectiveSystemPrompt}${sessionCacheHint}`, MAX_SYSTEM_MESSAGE_CHARS)
       },
       ...memoryMessages,
-      { role: "user", content: normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS) }
+      { role: "user", content: normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS), images: request.images }
     ];
     const externalToolDefinitions = tools.tools;
     const internalToolDefinitions = sessionCacheTools.map((tool) => tool.definition);

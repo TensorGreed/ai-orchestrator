@@ -3848,3 +3848,11 @@ select {
 .ntf-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
 .ntf-events { display: flex; gap: 1rem; margin: 0.75rem 0; }
 .ntf-events label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; }
+
+/* Chat image paste support */
+.chat-pending-images { display: flex; gap: 0.5rem; padding: 0.5rem; flex-wrap: wrap; }
+.chat-pending-image-thumb { position: relative; width: 60px; height: 60px; border-radius: 0.5rem; overflow: hidden; border: 1px solid var(--border); }
+.chat-pending-image-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.chat-pending-image-thumb button { position: absolute; top: -2px; right: -2px; width: 18px; height: 18px; border-radius: 50%; border: none; background: #EF4444; color: white; font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; line-height: 1; }
+.chat-images { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.chat-image { max-width: 200px; max-height: 200px; border-radius: 0.5rem; border: 1px solid var(--border); }
