@@ -1,5 +1,5 @@
-import type { LLMCallResponse, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
-import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import type { LLMCallResponse, LLMProviderConfig, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
+import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext, ProviderTestResult } from "../types";
 import { resilientFetch } from "../resilient-fetch";
 
 interface GeminiPart {
@@ -27,6 +27,37 @@ interface GeminiResponse {
   }>;
 }
 
+function sanitizeSchemaForGemini(schema: unknown): unknown {
+  if (!schema || typeof schema !== "object") return schema;
+  const s = schema as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(s)) {
+    if (key === "default" || key === "examples" || key === "$schema" || key === "additionalProperties") {
+      continue;
+    }
+    result[key] = value;
+  }
+
+  if (result.type === "array" && !result.items) {
+    result.items = { type: "string" };
+  }
+
+  if (result.items && typeof result.items === "object") {
+    result.items = sanitizeSchemaForGemini(result.items);
+  }
+
+  if (result.properties && typeof result.properties === "object") {
+    const cleaned: Record<string, unknown> = {};
+    for (const [propKey, propValue] of Object.entries(result.properties as Record<string, unknown>)) {
+      cleaned[propKey] = sanitizeSchemaForGemini(propValue);
+    }
+    result.properties = cleaned;
+  }
+
+  return result;
+}
+
 export class GeminiProviderAdapter implements LLMProviderAdapter {
   readonly definition: ProviderDefinition = {
     id: "gemini",
@@ -35,7 +66,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
     configSchema: {
       type: "object",
       properties: {
-        model: { type: "string", default: "gemini-2.0-flash" },
+        model: { type: "string", default: "gemini-2.5-flash" },
         secretRef: { type: "object", properties: { secretId: { type: "string" } } }
       },
       required: ["model"]
@@ -48,7 +79,8 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       throw new Error("Gemini requires API key via secretRef or GEMINI_API_KEY env var");
     }
 
-    const model = request.provider.model || "gemini-2.0-flash";
+    const rawModel = request.provider.model || "gemini-2.5-flash";
+    const model = rawModel.replace(/^models\//, "");
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
     let systemInstruction: { parts: GeminiPart[] } | undefined;
@@ -96,28 +128,40 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
         functionDeclarations: request.tools.map(t => ({
           name: t.name,
           description: t.description || "",
-          parameters: t.inputSchema || { type: "object", properties: {} }
+          parameters: sanitizeSchemaForGemini(t.inputSchema || { type: "object", properties: {} })
         }))
       }];
     }
 
+    const requestBody = {
+      systemInstruction,
+      contents,
+      tools: toolsObj,
+      generationConfig: {
+        temperature: request.provider.temperature ?? 0.2,
+        maxOutputTokens: request.provider.maxTokens ?? 1024
+      }
+    };
+
+    console.warn(`[Gemini] POST models/${model}:generateContent | messages=${contents.length} tools=${request.tools?.length ?? 0} key=${apiKey.slice(0, 6)}...${apiKey.slice(-4)}`);
+
     const response = await resilientFetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction,
-        contents,
-        tools: toolsObj,
-        generationConfig: {
-          temperature: request.provider.temperature ?? 0.2,
-          maxOutputTokens: request.provider.maxTokens ?? 1024
-        }
-      })
+      body: JSON.stringify(requestBody)
     }, { timeoutMs: 60_000, maxRetries: 3, provider: "gemini" });
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Gemini request failed (${response.status}): ${body}`);
+      console.warn(`[Gemini] ERROR ${response.status} for model=${model}:`, body.slice(0, 500));
+      let message = body;
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed?.error?.message) {
+          message = parsed.error.message.split("\n")[0];
+        }
+      } catch { /* use raw body */ }
+      throw new Error(`Gemini request failed (${response.status}): ${message}`);
     }
 
     const json = (await response.json()) as GeminiResponse;
@@ -143,6 +187,43 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       content,
       toolCalls,
       raw: json
+    };
+  }
+
+  async testConnection(provider: LLMProviderConfig, context: ProviderExecutionContext): Promise<ProviderTestResult> {
+    const apiKey = (await context.resolveSecret(provider.secretRef)) || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return { ok: false, message: "Gemini requires an API key via secret or GEMINI_API_KEY env var." };
+    }
+
+    const rawModel = provider.model || "gemini-2.5-flash";
+    const model = rawModel.replace(/^models\//, "");
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}?key=${apiKey}`;
+    const startedAt = Date.now();
+    const response = await resilientFetch(endpoint, {
+      method: "GET",
+      headers: { "content-type": "application/json" }
+    }, { timeoutMs: 15_000, maxRetries: 1, provider: "gemini" });
+
+    const latencyMs = Date.now() - startedAt;
+
+    if (!response.ok) {
+      const body = await response.text();
+      let message = body;
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed?.error?.message) {
+          message = parsed.error.message.split("\n")[0];
+        }
+      } catch { /* use raw body */ }
+      return { ok: false, message: `Gemini connection failed (${response.status}): ${message}` };
+    }
+
+    const json = await response.json() as { displayName?: string; name?: string };
+    return {
+      ok: true,
+      message: `Connection successful — model: ${json.displayName || json.name || model}`,
+      latencyMs
     };
   }
 }

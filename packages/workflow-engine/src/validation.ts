@@ -69,8 +69,9 @@ function topoSort(workflow: Workflow): { order: string[]; cyclic: boolean } {
   }
 
   const order: string[] = [];
-  while (queue.length) {
-    const nodeId = queue.shift()!;
+  let head = 0;
+  while (head < queue.length) {
+    const nodeId = queue[head++];
     order.push(nodeId);
 
     for (const target of outgoing.get(nodeId) ?? []) {
@@ -1111,4 +1112,25 @@ export function sortWorkflowNodes(workflow: Workflow): string[] {
     throw new Error("Workflow graph contains a cycle");
   }
   return topology.order;
+}
+
+export function computeDepthLevels(
+  order: string[],
+  incomingExecution: Map<string, string[]>
+): string[][] {
+  const depth = new Map<string, number>();
+  const levels: string[][] = [];
+
+  for (const nodeId of order) {
+    const parents = incomingExecution.get(nodeId) ?? [];
+    let maxParentDepth = -1;
+    for (const p of parents) {
+      maxParentDepth = Math.max(maxParentDepth, depth.get(p) ?? -1);
+    }
+    const d = maxParentDepth + 1;
+    depth.set(nodeId, d);
+    while (levels.length <= d) levels.push([]);
+    levels[d].push(nodeId);
+  }
+  return levels;
 }

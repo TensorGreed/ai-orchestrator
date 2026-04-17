@@ -29,6 +29,12 @@ export type LLMStreamChunk =
       argumentsDelta?: string;
     };
 
+export interface ProviderTestResult {
+  ok: boolean;
+  message: string;
+  latencyMs?: number;
+}
+
 export interface LLMProviderAdapter {
   definition: ProviderDefinition;
   generate(request: ProviderCallRequest, context: ProviderExecutionContext): Promise<LLMCallResponse>;
@@ -36,4 +42,8 @@ export interface LLMProviderAdapter {
     request: ProviderCallRequest,
     context: ProviderExecutionContext
   ): AsyncGenerator<LLMStreamChunk>;
+  testConnection?(
+    provider: LLMProviderConfig,
+    context: ProviderExecutionContext
+  ): Promise<ProviderTestResult>;
 }

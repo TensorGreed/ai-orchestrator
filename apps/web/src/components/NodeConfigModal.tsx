@@ -4,6 +4,7 @@ import type { EditorNode, EditorNodeData } from "../lib/workflow";
 import {
   createSecret,
   discoverMcpTools,
+  fetchProviderModels,
   fetchWorkflows,
   previewExpression,
   testCodeNode,
@@ -683,6 +684,10 @@ export function NodeConfigModal({
   const [workflowOptions, setWorkflowOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [workflowOptionsError, setWorkflowOptionsError] = useState<string | null>(null);
   const [inlineCreatedSecrets, setInlineCreatedSecrets] = useState<SecretListItem[]>([]);
+  const [geminiModels, setGeminiModels] = useState<Array<{ value: string; label: string }> | null>(null);
+  const [geminiModelsLoading, setGeminiModelsLoading] = useState(false);
+  const [llmModels, setLlmModels] = useState<Array<{ value: string; label: string }> | null>(null);
+  const [llmModelsLoading, setLlmModelsLoading] = useState(false);
   const [activeSecretFieldKey, setActiveSecretFieldKey] = useState<string | null>(null);
   const [inlineSecretProvider, setInlineSecretProvider] = useState("custom");
   const [inlineSecretName, setInlineSecretName] = useState("");
@@ -692,6 +697,73 @@ export function NodeConfigModal({
   const [inlineGoogleServiceAccountJson, setInlineGoogleServiceAccountJson] = useState("");
   const [inlineSecretBusy, setInlineSecretBusy] = useState(false);
   const [inlineSecretError, setInlineSecretError] = useState<string | null>(null);
+
+  const geminiSecretId = node.data.nodeType === "google_gemini_chat_model"
+    ? toStringValue(asRecord(config.secretRef).secretId)
+    : "";
+
+  useEffect(() => {
+    if (node.data.nodeType !== "google_gemini_chat_model" || !geminiSecretId) {
+      return;
+    }
+    let canceled = false;
+    setGeminiModelsLoading(true);
+    fetchProviderModels({ providerId: "gemini", secretRef: { secretId: geminiSecretId } })
+      .then((result) => {
+        if (canceled) return;
+        setGeminiModels(
+          result.models.map((m) => ({ value: m.id, label: m.label }))
+        );
+      })
+      .catch(() => {
+        if (!canceled) setGeminiModels(null);
+      })
+      .finally(() => {
+        if (!canceled) setGeminiModelsLoading(false);
+      });
+    return () => { canceled = true; };
+  }, [node.data.nodeType, geminiSecretId]);
+
+  const llmProviderId = node.data.nodeType === "llm_call"
+    ? toStringValue(asRecord(config.provider).providerId, "ollama")
+    : "";
+  const llmSecretId = node.data.nodeType === "llm_call"
+    ? toStringValue(asRecord(asRecord(config.provider).secretRef).secretId)
+    : "";
+  const llmBaseUrl = node.data.nodeType === "llm_call"
+    ? toStringValue(asRecord(config.provider).baseUrl)
+    : "";
+
+  useEffect(() => {
+    if (node.data.nodeType !== "llm_call" || !llmProviderId) {
+      return;
+    }
+    const needsSecret = llmProviderId === "openai" || llmProviderId === "anthropic" || llmProviderId === "gemini";
+    const needsBaseUrl = llmProviderId === "openai_compatible";
+    if (needsSecret && !llmSecretId) { setLlmModels(null); return; }
+    if (needsBaseUrl && !llmBaseUrl) { setLlmModels(null); return; }
+
+    let canceled = false;
+    setLlmModelsLoading(true);
+    const providerExtra = asRecord(asRecord(config.provider).extra);
+    fetchProviderModels({
+      providerId: llmProviderId,
+      ...(llmSecretId ? { secretRef: { secretId: llmSecretId } } : {}),
+      ...(llmBaseUrl ? { baseUrl: llmBaseUrl } : {}),
+      ...(Object.keys(providerExtra).length > 0 ? { extra: providerExtra } : {})
+    })
+      .then((result) => {
+        if (canceled) return;
+        setLlmModels(result.models.map((m) => ({ value: m.id, label: m.label })));
+      })
+      .catch(() => {
+        if (!canceled) setLlmModels(null);
+      })
+      .finally(() => {
+        if (!canceled) setLlmModelsLoading(false);
+      });
+    return () => { canceled = true; };
+  }, [node.data.nodeType, llmProviderId, llmSecretId, llmBaseUrl]);
 
   useEffect(() => {
     const initialConfig = asRecord(node.data.config);
@@ -1371,7 +1443,7 @@ export function NodeConfigModal({
     }
 
     if (node.data.nodeType === "google_gemini_chat_model") {
-      const model = toStringValue(config.model, "gemini-2.0-flash").trim();
+      const model = toStringValue(config.model, "gemini-2.5-flash").trim();
       if (!model) {
         return null;
       }
@@ -1454,12 +1526,21 @@ export function NodeConfigModal({
             { value: "anthropic", label: "Anthropic" }
           ]}
         />
-        <TextField
-          label={isAzureOpenAI ? "Deployment" : "Model"}
-          value={toStringValue(provider.model)}
-          onChange={(next) => setProvider({ model: next })}
-          placeholder={isAzureOpenAI ? "gpt-4o-mini" : "gpt-4.1-mini / llama3.1"}
-        />
+        {llmModels && llmModels.length > 0 && !isAzureOpenAI ? (
+          <SelectField
+            label={llmModelsLoading ? "Model (loading...)" : "Model"}
+            value={toStringValue(provider.model)}
+            options={llmModels}
+            onChange={(next) => setProvider({ model: next })}
+          />
+        ) : (
+          <TextField
+            label={isAzureOpenAI ? "Deployment" : (llmModelsLoading ? "Model (loading...)" : "Model")}
+            value={toStringValue(provider.model)}
+            onChange={(next) => setProvider({ model: next })}
+            placeholder={isAzureOpenAI ? "gpt-4o-mini" : "gpt-4.1-mini / llama3.1"}
+          />
+        )}
         {!hideBaseUrl && (
           <TextField
             label={isAzureOpenAI ? "Endpoint" : "Base URL"}
@@ -2709,21 +2790,18 @@ export function NodeConfigModal({
   };
 
   const renderGoogleGeminiChatModelParameters = () => {
+    const fallbackModels = [
+      { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+      { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+      { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+      { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite" },
+      { value: "gemini-1.5-pro", label: "Gemini 1.5 Pro" },
+      { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash" }
+    ];
+    const modelOptions = geminiModels && geminiModels.length > 0 ? geminiModels : fallbackModels;
+
     return (
       <>
-        <SelectField
-          label="Model"
-          value={toStringValue(config.model, "gemini-2.0-flash")}
-          options={[
-            { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
-            { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite" },
-            { value: "gemini-2.5-flash-preview-04-17", label: "Gemini 2.5 Flash Preview" },
-            { value: "gemini-2.5-pro-preview-03-25", label: "Gemini 2.5 Pro Preview" },
-            { value: "gemini-1.5-pro", label: "Gemini 1.5 Pro" },
-            { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash" }
-          ]}
-          onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
-        />
         {renderCredentialSecretField({
           fieldKey: "gemini_chat_secret",
           label: "Google Gemini API Key",
@@ -2736,6 +2814,12 @@ export function NodeConfigModal({
               secretRef: next ? { secretId: next } : undefined
             }))
         })}
+        <SelectField
+          label={geminiModelsLoading ? "Model (loading...)" : "Model"}
+          value={toStringValue(config.model, "gemini-2.5-flash")}
+          options={modelOptions}
+          onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
+        />
         <div className="cfg-grid-2">
           <NumberField
             label="Temperature"

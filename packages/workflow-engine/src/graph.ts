@@ -34,3 +34,42 @@ export function isBranchingEdge(edge: WorkflowEdge): boolean {
   return false;
 }
 
+export class DescendantCache {
+  private cache = new Map<string, Set<string>>();
+
+  constructor(private outgoingExecution: Map<string, string[]>) {}
+
+  getDescendants(nodeId: string): Set<string> {
+    let cached = this.cache.get(nodeId);
+    if (cached) return cached;
+    cached = new Set<string>();
+    const queue = [nodeId];
+    let head = 0;
+    while (head < queue.length) {
+      const current = queue[head++];
+      for (const target of this.outgoingExecution.get(current) ?? []) {
+        if (!cached.has(target)) {
+          cached.add(target);
+          queue.push(target);
+        }
+      }
+    }
+    this.cache.set(nodeId, cached);
+    return cached;
+  }
+
+  getNodeAndDescendants(nodeId: string): Set<string> {
+    const result = new Set([nodeId]);
+    for (const d of this.getDescendants(nodeId)) result.add(d);
+    return result;
+  }
+
+  getReachableFromRoots(roots: Iterable<string>): Set<string> {
+    const result = new Set<string>();
+    for (const root of roots) {
+      for (const n of this.getNodeAndDescendants(root)) result.add(n);
+    }
+    return result;
+  }
+}
+

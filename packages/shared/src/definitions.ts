@@ -328,7 +328,7 @@ export const nodeDefinitions: NodeDefinition[] = [
       required: ["model"]
     },
     sampleConfig: {
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       temperature: 0.2,
       maxTokens: 1024,
       promptKey: "prompt",

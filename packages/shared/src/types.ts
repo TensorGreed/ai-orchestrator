@@ -557,3 +557,28 @@ export interface AgentWebhookPayload {
   user_prompt?: string;
   variables?: Record<string, unknown>;
 }
+
+export interface BinaryDataReference {
+  __binaryRef: true;
+  id: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  storagePath: string;
+}
+
+export function isBinaryDataReference(value: unknown): value is BinaryDataReference {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).__binaryRef === true &&
+    typeof (value as Record<string, unknown>).id === "string"
+  );
+}
+
+export interface BinaryDataStore {
+  write(id: string, data: Uint8Array, meta: { fileName: string; mimeType: string }): Promise<BinaryDataReference>;
+  read(ref: BinaryDataReference): Promise<Uint8Array>;
+  delete(ref: BinaryDataReference): Promise<void>;
+  cleanup(executionId: string): Promise<void>;
+}

@@ -575,15 +575,41 @@ export async function testProvider(payload: {
   provider: LLMProviderConfig;
   prompt?: string;
   systemPrompt?: string;
+}): Promise<{
+  ok: boolean;
+  message: string;
+  providerId?: string;
+  model?: string;
+  latencyMs?: number;
+  preview?: string;
+}> {
+  const response = await fetch(`${API_BASE}/api/providers/test`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const json = await response.json().catch(() => null);
+  if (json && typeof json === "object" && "ok" in json) {
+    return json as { ok: boolean; message: string; providerId?: string; model?: string; latencyMs?: number; preview?: string };
+  }
+
+  throw new ApiError(
+    (json && typeof json === "object" && "error" in json) ? String((json as Record<string, unknown>).error) : "API request failed",
+    response.status
+  );
+}
+
+export async function fetchProviderModels(payload: {
+  providerId: string;
+  secretRef?: { secretId: string };
+  baseUrl?: string;
+  extra?: Record<string, unknown>;
 }) {
   return apiRequest<{
-    ok: boolean;
-    message: string;
-    providerId?: string;
-    model?: string;
-    latencyMs?: number;
-    preview?: string;
-  }>("/api/providers/test", {
+    models: Array<{ id: string; label: string }>;
+  }>("/api/providers/models", {
     method: "POST",
     body: JSON.stringify(payload)
   });

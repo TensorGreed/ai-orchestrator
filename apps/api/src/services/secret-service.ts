@@ -220,7 +220,11 @@ export class SecretService {
 
   redact(value: unknown): unknown {
     if (typeof value === "string") {
-      if (/sk-[a-zA-Z0-9]/.test(value) || value.length > 20) {
+      if (
+        /sk-[a-zA-Z0-9]{20,}/.test(value) ||
+        /^(AIza|ya29\.|AKIA|ghp_|gho_|github_pat_|xox[bpas]-|glpat-|sk-ant-)[a-zA-Z0-9_-]{10,}/.test(value) ||
+        /^[a-zA-Z0-9+/=_-]{40,}$/.test(value)
+      ) {
         return "[REDACTED]";
       }
       return value;

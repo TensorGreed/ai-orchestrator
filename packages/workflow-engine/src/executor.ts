@@ -16,7 +16,7 @@ import type {
   WorkflowExecutionState,
   WorkflowNode
 } from "@ai-orchestrator/shared";
-import { isAuxiliaryEdge, isExecutionEdge } from "./graph";
+import { isAuxiliaryEdge, isExecutionEdge, DescendantCache } from "./graph";
 import {
   type RetrieverAdapter,
   InMemoryRetrieverAdapter,
@@ -37,7 +37,7 @@ import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch"
 import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch";
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
 import { executePythonCodeNode } from "./python-runner";
-import { sortWorkflowNodes, validateWorkflowGraph } from "./validation";
+import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 
 const MAX_SUB_WORKFLOW_DEPTH = 10;
@@ -85,6 +85,12 @@ export interface WorkflowExecutionDependencies {
     delta: string;
     index: number;
   }) => Promise<void> | void;
+  binaryDataStore?: import("@ai-orchestrator/shared").BinaryDataStore;
+  onNodeProgress?: (event: {
+    nodeId: string;
+    processed: number;
+    total: number;
+  }) => Promise<void> | void;
   abortSignal?: AbortSignal;
   logger?: (message: string, metadata?: unknown) => void;
   triggerErrorWorkflow?: (input: {
@@ -123,6 +129,7 @@ export interface ExecuteWorkflowRequest {
     reason?: string;
   };
   executionTimeoutMs?: number;
+  maxConcurrency?: number;
 }
 
 export interface ResumeWorkflowRequest {
@@ -277,7 +284,7 @@ function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | und
   }
 
   if (node.type === "google_gemini_chat_model") {
-    const model = typeof nodeConfig.model === "string" ? nodeConfig.model.trim() : "gemini-2.0-flash";
+    const model = typeof nodeConfig.model === "string" ? nodeConfig.model.trim() : "gemini-2.5-flash";
     if (!model) {
       return undefined;
     }
@@ -2376,7 +2383,7 @@ async function executeNode(
     }
 
     case "google_gemini_chat_model": {
-      const model = typeof config.model === "string" ? config.model.trim() : "gemini-2.0-flash";
+      const model = typeof config.model === "string" ? config.model.trim() : "gemini-2.5-flash";
       if (!model) {
         throw new Error("Google Gemini Chat Model requires a model name.");
       }
@@ -3739,8 +3746,9 @@ function collectDescendants(
 ): Set<string> {
   const descendants = new Set<string>();
   const queue = [nodeId];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
+  let head = 0;
+  while (head < queue.length) {
+    const current = queue[head++];
     const targets = outgoingExecution.get(current) ?? [];
     for (const target of targets) {
       if (!descendants.has(target)) {
@@ -3880,6 +3888,7 @@ export async function executeWorkflow(
   let nodeOrder =
     request.resumeState?.nodeOrder?.length ? request.resumeState.nodeOrder : validation.orderedNodeIds ?? sortWorkflowNodes(workflow);
   const graphIndexes = buildGraphIndexes(workflow);
+  const descendantCache = new DescendantCache(graphIndexes.outgoingExecution);
   const runMode = request.runMode === "single_node" ? "single_node" : "workflow";
   const explicitStartNodeId =
     !request.resumeState && typeof request.startNodeId === "string" && request.startNodeId.trim()
@@ -3906,7 +3915,7 @@ export async function executeWorkflow(
       nodeOrder = [explicitStartNodeId];
     } else {
       const executableNodeIds = new Set<string>(
-        collectNodeAndDescendants(explicitStartNodeId, graphIndexes.outgoingExecution, workflow)
+        descendantCache.getNodeAndDescendants(explicitStartNodeId)
       );
       const queue = [...executableNodeIds];
 
@@ -4132,14 +4141,14 @@ export async function executeWorkflow(
           takenTargets.add(target);
         }
       }
-      const protectedNodes = collectReachableFromRoots(takenTargets, graphIndexes.outgoingExecution, workflow);
+      const protectedNodes = descendantCache.getReachableFromRoots(takenTargets);
 
       for (const [handle, targets] of handleMap.entries()) {
         if (takenHandles.has(handle)) {
           continue;
         }
         for (const target of targets) {
-          for (const candidate of collectNodeAndDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+          for (const candidate of descendantCache.getNodeAndDescendants(target)) {
             if (!protectedNodes.has(candidate)) {
               skippedByBranch.add(candidate);
             }
@@ -4155,7 +4164,7 @@ export async function executeWorkflow(
       const successDescendants = new Set<string>();
       for (const target of successTargets) {
         successDescendants.add(target);
-        for (const descendant of collectDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+        for (const descendant of descendantCache.getDescendants(target)) {
           successDescendants.add(descendant);
         }
       }
@@ -4229,7 +4238,7 @@ export async function executeWorkflow(
           }
           for (const errorTarget of scope.errorTargets) {
             skippedByBranch.delete(errorTarget);
-            for (const desc of collectDescendants(errorTarget, graphIndexes.outgoingExecution, workflow)) {
+            for (const desc of descendantCache.getDescendants(errorTarget)) {
               skippedByBranch.delete(desc);
             }
           }
@@ -4257,22 +4266,18 @@ export async function executeWorkflow(
           const handleMap = branchTargets.get(waitingNode.id)!;
           const errorBranchTargets = handleMap.get("error") ?? [];
           if (errorBranchTargets.length > 0) {
-            const protectedNodes = collectReachableFromRoots(
-              errorBranchTargets,
-              graphIndexes.outgoingExecution,
-              workflow
-            );
+            const protectedNodes = descendantCache.getReachableFromRoots(errorBranchTargets);
             for (const [handle, targets] of handleMap.entries()) {
               if (handle === "error") {
                 for (const target of targets) {
                   skippedByBranch.delete(target);
-                  for (const desc of collectDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+                  for (const desc of descendantCache.getDescendants(target)) {
                     skippedByBranch.delete(desc);
                   }
                 }
               } else {
                 for (const target of targets) {
-                  for (const candidate of collectNodeAndDescendants(target, graphIndexes.outgoingExecution, workflow)) {
+                  for (const candidate of descendantCache.getNodeAndDescendants(target)) {
                     if (!protectedNodes.has(candidate)) {
                       skippedByBranch.add(candidate);
                     }
@@ -4883,7 +4888,7 @@ export async function executeWorkflow(
           // Un-skip error branch targets (they were initially skipped by branch routing)
           for (const errorTarget of scope.errorTargets) {
             skippedByBranch.delete(errorTarget);
-            for (const desc of collectDescendants(errorTarget, graphIndexes.outgoingExecution, workflow)) {
+            for (const desc of descendantCache.getDescendants(errorTarget)) {
               skippedByBranch.delete(desc);
             }
           }
@@ -4948,23 +4953,19 @@ export async function executeWorkflow(
           const handleMap = branchTargets.get(node.id)!;
           const errorBranchTargets = handleMap.get("error") ?? [];
           if (errorBranchTargets.length > 0) {
-            const protectedNodes = collectReachableFromRoots(
-              errorBranchTargets,
-              graphIndexes.outgoingExecution,
-              workflow
-            );
+            const protectedNodes = descendantCache.getReachableFromRoots(errorBranchTargets);
             // Skip non-error branches, un-skip error branch
             for (const [handle, targets] of handleMap.entries()) {
               if (handle === "error") {
                 for (const t of targets) {
                   skippedByBranch.delete(t);
-                  for (const desc of collectDescendants(t, graphIndexes.outgoingExecution, workflow)) {
+                  for (const desc of descendantCache.getDescendants(t)) {
                     skippedByBranch.delete(desc);
                   }
                 }
               } else {
                 for (const t of targets) {
-                  for (const candidate of collectNodeAndDescendants(t, graphIndexes.outgoingExecution, workflow)) {
+                  for (const candidate of descendantCache.getNodeAndDescendants(t)) {
                     if (!protectedNodes.has(candidate)) {
                       skippedByBranch.add(candidate);
                     }

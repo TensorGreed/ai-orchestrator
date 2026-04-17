@@ -4647,6 +4647,20 @@ export function createApp(
 
     try {
       const providerAdapter = providerRegistry.get(testProvider.providerId);
+      const resolveCtx = { resolveSecret: (secretRef: Parameters<typeof secretService.resolveSecret>[0]) => secretService.resolveSecret(secretRef) };
+
+      if (providerAdapter.testConnection) {
+        const result = await providerAdapter.testConnection(testProvider, resolveCtx);
+        if (!result.ok) {
+          reply.code(400);
+        }
+        return {
+          ...result,
+          providerId: testProvider.providerId,
+          model: testProvider.model
+        };
+      }
+
       const startedAt = Date.now();
       const response = await providerAdapter.generate(
         {
@@ -4666,9 +4680,7 @@ export function createApp(
             { role: "user" as const, content: probePrompt }
           ]
         },
-        {
-          resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
-        }
+        resolveCtx
       );
 
       return {
@@ -4686,6 +4698,106 @@ export function createApp(
         message: secretService.redact(error instanceof Error ? error.message : "Provider connection test failed")
       };
     }
+  });
+
+  app.post<{ Body: unknown }>("/api/providers/models", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+
+    const modelsPayloadSchema = z.object({
+      providerId: z.string().min(1),
+      secretRef: z.object({ secretId: z.string().min(1) }).optional(),
+      baseUrl: z.string().optional(),
+      extra: z.record(z.string(), z.unknown()).optional()
+    });
+    const parsed = modelsPayloadSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid payload", details: parsed.error.issues };
+    }
+
+    const { providerId, secretRef, baseUrl, extra } = parsed.data;
+
+    try {
+      if (providerId === "gemini") {
+        const apiKey = (await secretService.resolveSecret(secretRef)) || process.env.GEMINI_API_KEY;
+        if (!apiKey) return { models: [] };
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        if (!res.ok) return { models: [] };
+        const json = await res.json() as { models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }> };
+        return {
+          models: (json.models ?? [])
+            .filter(m => m.supportedGenerationMethods?.includes("generateContent"))
+            .map(m => ({ id: (m.name ?? "").replace(/^models\//, ""), label: m.displayName ?? m.name ?? "" }))
+            .filter(m => m.id)
+        };
+      }
+
+      if (providerId === "openai") {
+        const apiKey = (await secretService.resolveSecret(secretRef)) || process.env.OPENAI_API_KEY;
+        if (!apiKey) return { models: [] };
+        const res = await fetch("https://api.openai.com/v1/models", {
+          headers: { "Authorization": `Bearer ${apiKey}` }
+        });
+        if (!res.ok) return { models: [] };
+        const json = await res.json() as { data?: Array<{ id: string; owned_by?: string }> };
+        const chatModels = (json.data ?? [])
+          .filter(m => /^(gpt-|o[1-9]|chatgpt-)/.test(m.id) && !m.id.includes("instruct") && !m.id.includes("realtime") && !m.id.includes("audio") && !m.id.includes("transcribe"))
+          .sort((a, b) => a.id.localeCompare(b.id));
+        return { models: chatModels.map(m => ({ id: m.id, label: m.id })) };
+      }
+
+      if (providerId === "anthropic") {
+        const apiKey = (await secretService.resolveSecret(secretRef)) || process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) return { models: [] };
+        const res = await fetch("https://api.anthropic.com/v1/models", {
+          headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
+        });
+        if (!res.ok) return { models: [] };
+        const json = await res.json() as { data?: Array<{ id: string; display_name?: string }> };
+        return {
+          models: (json.data ?? []).map(m => ({ id: m.id, label: m.display_name ?? m.id }))
+        };
+      }
+
+      if (providerId === "ollama") {
+        const ollamaBase = (baseUrl ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1").replace(/\/v1\/?$/, "");
+        const res = await fetch(`${ollamaBase}/api/tags`);
+        if (!res.ok) return { models: [] };
+        const json = await res.json() as { models?: Array<{ name: string; modified_at?: string }> };
+        return {
+          models: (json.models ?? []).map(m => ({ id: m.name, label: m.name }))
+        };
+      }
+
+      if (providerId === "openai_compatible") {
+        if (!baseUrl) return { models: [] };
+        const apiKey = await secretService.resolveSecret(secretRef);
+        const headers: Record<string, string> = {};
+        if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+        const res = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, { headers });
+        if (!res.ok) return { models: [] };
+        const json = await res.json() as { data?: Array<{ id: string }> };
+        return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
+      }
+
+      if (providerId === "azure_openai") {
+        const endpoint = (baseUrl ?? process.env.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/+$/, "");
+        const apiKey = (await secretService.resolveSecret(secretRef)) || process.env.AZURE_OPENAI_API_KEY;
+        if (!endpoint || !apiKey) return { models: [] };
+        const apiVersion = (typeof extra?.apiVersion === "string" && extra.apiVersion.trim()) ? extra.apiVersion.trim() : "2024-10-21";
+        const res = await fetch(`${endpoint}/openai/models?api-version=${apiVersion}`, {
+          headers: { "api-key": apiKey }
+        });
+        if (!res.ok) return { models: [] };
+        const json = await res.json() as { data?: Array<{ id: string }> };
+        return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
+      }
+    } catch {
+      return { models: [] };
+    }
+
+    return { models: [] };
   });
 
   app.post<{ Body: unknown }>("/api/expressions/preview", async (request, reply) => {
