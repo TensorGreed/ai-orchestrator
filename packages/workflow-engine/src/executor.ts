@@ -276,6 +276,27 @@ function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | und
     };
   }
 
+  if (node.type === "google_gemini_chat_model") {
+    const model = typeof nodeConfig.model === "string" ? nodeConfig.model.trim() : "gemini-2.0-flash";
+    if (!model) {
+      return undefined;
+    }
+
+    return {
+      providerId: "gemini",
+      model,
+      secretRef: normalizeSecretRef(nodeConfig.secretRef),
+      temperature:
+        typeof nodeConfig.temperature === "number" && Number.isFinite(nodeConfig.temperature)
+          ? nodeConfig.temperature
+          : undefined,
+      maxTokens:
+        typeof nodeConfig.maxTokens === "number" && Number.isFinite(nodeConfig.maxTokens)
+          ? Math.max(1, Math.floor(nodeConfig.maxTokens))
+          : undefined
+    };
+  }
+
   return undefined;
 }
 
@@ -2354,6 +2375,33 @@ async function executeNode(
       });
     }
 
+    case "google_gemini_chat_model": {
+      const model = typeof config.model === "string" ? config.model.trim() : "gemini-2.0-flash";
+      if (!model) {
+        throw new Error("Google Gemini Chat Model requires a model name.");
+      }
+
+      const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
+      const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
+      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
+      const systemPrompt = String(templateData[systemPromptKey] ?? "");
+      const provider: LLMProviderConfig = {
+        providerId: "gemini",
+        model,
+        secretRef: normalizeSecretRef(config.secretRef),
+        temperature: typeof config.temperature === "number" && Number.isFinite(config.temperature) ? config.temperature : undefined,
+        maxTokens: typeof config.maxTokens === "number" && Number.isFinite(config.maxTokens) ? Math.max(1, Math.floor(config.maxTokens)) : undefined
+      };
+
+      return runLlmNode({
+        nodeId: node.id,
+        provider,
+        userPrompt,
+        systemPrompt,
+        dependencies
+      });
+    }
+
     case "connector_source": {
       const connectorId = String(config.connectorId ?? "");
       const connector = dependencies.connectorRegistry.get(connectorId);
@@ -2772,7 +2820,7 @@ async function executeNode(
       };
 
       const attachedModelNodes = getAttachedNodes("chat_model").filter(
-        (attached) => attached.type === "llm_call" || attached.type === "azure_openai_chat_model"
+        (attached) => attached.type === "llm_call" || attached.type === "azure_openai_chat_model" || attached.type === "google_gemini_chat_model"
       );
       const attachedModelNode = attachedModelNodes.length ? attachedModelNodes[attachedModelNodes.length - 1] : undefined;
       const provider = attachedModelNode ? buildProviderFromModelNode(attachedModelNode) : undefined;
@@ -3569,6 +3617,7 @@ function getRetryConfig(config: Record<string, unknown>): RetryConfig | undefine
 const RETRYABLE_NODE_TYPES = new Set([
   "llm_call",
   "azure_openai_chat_model",
+  "google_gemini_chat_model",
   "agent_orchestrator",
   "supervisor_node",
   "mcp_tool",

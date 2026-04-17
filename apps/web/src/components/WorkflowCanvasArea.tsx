@@ -45,6 +45,7 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
       [
         "llm_call",
         "azure_openai_chat_model",
+        "google_gemini_chat_model",
         "embeddings_azure_openai",
         "agent_orchestrator",
         "prompt_template",

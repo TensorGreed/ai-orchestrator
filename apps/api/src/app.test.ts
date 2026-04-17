@@ -167,6 +167,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
   const masterKey = crypto.randomBytes(32).toString("base64");
 
   const config: AppConfig = {
+    LOG_LEVEL: "warn",
     API_PORT: 0,
     API_HOST: "127.0.0.1",
     WEB_ORIGIN: "http://localhost:5173",

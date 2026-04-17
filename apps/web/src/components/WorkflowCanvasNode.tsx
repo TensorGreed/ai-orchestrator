@@ -36,6 +36,7 @@ function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "a
     nodeType === "http_request" ||
     nodeType === "llm_call" ||
     nodeType === "azure_openai_chat_model" ||
+    nodeType === "google_gemini_chat_model" ||
     nodeType === "local_memory"
   ) {
     return "resource";

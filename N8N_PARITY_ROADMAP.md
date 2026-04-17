@@ -9,7 +9,7 @@
 
 | Area | n8n | ai-orchestrator | Parity % |
 |---|---|---|---|
-| Integrations/Connectors | 400+ built-in | 7 legacy + 11 Tier 1 (HTTP, Slack, SMTP/IMAP, Google Sheets, Postgres, MySQL, MongoDB, Redis, GitHub) | ~15% |
+| Integrations/Connectors | 400+ built-in | 7 legacy + 11 Tier 1 + 13 Tier 2 (MS Teams, Notion, Airtable, Jira, Salesforce, HubSpot, Stripe, AWS S3, Telegram, Discord, Google Drive trigger, Google Calendar, Twilio) = 24 integrations / 50+ node types | ~25% |
 | Trigger Types | 15 core + 90 app-specific | webhook, schedule, slack, github, imap, google_sheets, postgres, redis, error, sub_workflow, manual, form, chat, file, rss, sse, mcp_server, kafka/rabbitmq/mqtt (stubs) (19) | ~19% |
 | Workflow Engine | Full (sub-workflows, parallel, queue) | Sub-workflows, queue, flow control, per-node error settings, error workflows | ~65% |
 | Data Transformation | 25+ dedicated nodes | 23 (5 base + 18 Phase 2 transformation nodes) | ~80% |
@@ -17,17 +17,17 @@
 | Error Handling | Error workflows, retry, continue-on-fail | Try/catch, error categories | ~35% |
 | Execution History | Full with debug/replay/pin | Basic history table | ~25% |
 | Version Control | Git integration, workflow history | None | 0% |
-| User Management | RBAC, projects, SAML, LDAP | RBAC (4 roles), session auth | ~30% |
+| User Management | RBAC, projects, SAML, LDAP | Global RBAC (4 roles) + per-project RBAC (3 built-in + custom), session auth, API keys, MFA/TOTP, SAML + LDAP (optional-dep), SSO group-to-role mapping | ~75% |
 | AI/LLM Features | LangChain, 15+ models, 12 vector stores | Agent loop, 6 providers, 5 vector stores | ~50% |
 | Self-Hosting/Scaling | Queue mode, workers, PostgreSQL, K8s | SQLite + PostgreSQL, in-process queue, concurrency control | ~35% |
 | Community/Marketplace | 5800+ community nodes, 9100+ templates | 8 sample workflows | ~1% |
 | API | Full REST API (OpenAPI 3.0) | Partial REST API | ~40% |
-| UI Features | Mini-map, sticky notes, tags, folders, dark mode, undo/redo | Mini-map + Controls, multi-select, copy/paste/duplicate, undo/redo, sticky notes (markdown), node color coding, disable toggle, shortcuts panel, dark mode; structured config editors for all Phase 1 + 2 nodes | ~70% |
-| Testing/Debug | Pin data, debug executions, single-node run | Manual execute only | ~10% |
+| UI Features | Mini-map, sticky notes, tags, folders, dark mode, undo/redo | Mini-map + Controls, multi-select, copy/paste/duplicate, undo/redo, sticky notes (markdown), node color coding, disable toggle, shortcuts panel, dark mode, project switcher, folder sidebar, tag chips + filter; structured config editors for all Phase 1 + 2 nodes | ~80% |
+| Testing/Debug | Pin data, debug executions, single-node run | Workflow-level pinned node data, single-node execution, failed-run debug load/re-run, inline execution preview, schema/table inspector, expression preview/autocomplete | ~70% |
 | Notifications/Alerting | Error workflow pattern | None | 0% |
-| Logging/Observability | Log streaming (Syslog, Webhook, Sentry), audit | Basic execution logs | ~10% |
+| Logging/Observability | Log streaming (Syslog, Webhook, Sentry), audit | Comprehensive audit log (auth/MFA/SSO/API keys/secrets/workflows/executions/RBAC/sharing) with filters + CSV export + configurable retention; execution logs; still missing log streaming destinations | ~45% |
 | Variables/Environments | Global + project vars, 200+ env config | Workflow variables only | ~20% |
-| Enterprise Features | SSO, LDAP, audit logs, external secrets, HA | Basic auth + encrypted secrets | ~15% |
+| Enterprise Features | SSO, LDAP, audit logs, external secrets, HA | SAML + LDAP SSO (optional-dep) with group-based provisioning, MFA/TOTP, API keys, encrypted secrets, workflow/secret sharing, external secret providers (AWS/Vault/GCP/Azure) with rotation cache, comprehensive audit log with CSV export. Still missing: HA | ~70% |
 
 ---
 
@@ -141,21 +141,23 @@
 | **HTTP/Webhook** | Already exists — enhance with response modes | P0 | [x] responseMode (onReceived/lastNode/responseNode) + responseCode/responseHeaders/responseBody |
 
 ### 3.2 Priority Tier 2 — High Value (Sprint 7)
-| Integration | Category |
-|---|---|
-| **Microsoft Teams** | Communication |
-| **Notion** | Productivity |
-| **Airtable** | Productivity/Database |
-| **Jira** | Project Management |
-| **Salesforce** | CRM |
-| **HubSpot** | CRM/Marketing |
-| **Stripe** | Payments |
-| **AWS S3** | Cloud Storage |
-| **Telegram** | Communication |
-| **Discord** | Communication |
-| **Google Drive** | Already exists — enhance with triggers |
-| **Google Calendar** | Productivity |
-| **Twilio** | SMS/Voice |
+| Integration | Category | Status |
+|---|---|---|
+| **Microsoft Teams** | Communication | [x] `teams_send_message` (incoming webhook, MessageCard payload) |
+| **Notion** | Productivity | [x] `notion_create_page` (title + markdown → blocks) + `notion_query_database` (filter/sort JSON) |
+| **Airtable** | Productivity/Database | [x] `airtable_create_record` / `_list_records` / `_update_record` |
+| **Jira** | Project Management | [x] `jira_create_issue` (ADF description) + `jira_search_issues` (JQL); email+token Basic or Bearer |
+| **Salesforce** | CRM | [x] `salesforce_create_record` + `salesforce_query` (SOQL via OAuth access token) |
+| **HubSpot** | CRM/Marketing | [x] `hubspot_create_contact` + `hubspot_get_contact` (private app token, idProperty= id\|email) |
+| **Stripe** | Payments | [x] `stripe_create_customer` + `stripe_create_charge` (PaymentIntent, form-encoded) + `stripe_webhook_trigger` with HMAC-SHA256 signature validation |
+| **AWS S3** | Cloud Storage | [x] `aws_s3_put_object` / `_get_object` / `_list_objects` — **hand-rolled SigV4** (no SDK dependency), base64 output for non-text |
+| **Telegram** | Communication | [x] `telegram_send_message` (Bot API) + `telegram_trigger` validating `X-Telegram-Bot-Api-Secret-Token` |
+| **Discord** | Communication | [x] `discord_send_message` (webhook URL) + `discord_trigger` with **Ed25519 signature verification** (handles PING interaction type=1) |
+| **Google Drive** | Cloud Storage | [x] `google_drive_trigger` (polling via Drive API v3) |
+| **Google Calendar** | Productivity | [x] `google_calendar_create_event` + `google_calendar_list_events` |
+| **Twilio** | SMS/Voice | [x] `twilio_send_sms` (Messages API, Basic auth) |
+
+**Summary** — 26 new node types across 13 integrations, all using `fetch` (no new deps). Three new webhook routes: `/api/webhooks/stripe/:workflowId`, `/api/webhooks/telegram/:workflowId`, `/api/webhooks/discord/:workflowId`. Shipped with 36 unit + integration tests covering action handlers, SigV4 signing, and all three signature-verified webhook routes. Each integration ships a brand-colored SVG logo in `apps/web/public/logos/` and appears in `/api/integrations` alongside the Tier 1 set.
 
 ### 3.3 Priority Tier 3 — Ecosystem Expansion (Sprints 8-9)
 | Category | Integrations |
@@ -209,84 +211,85 @@
 - [x] Dark mode via `data-theme` attribute on `<html>` + CSS variable swap; toggle in header + respects `prefers-color-scheme`; persists to localStorage
 
 ### 4.2 Workflow Organization
-- [ ] Tags — categorize and filter workflows
-- [ ] Folders — organize workflows in hierarchy
-- [ ] Projects — isolated workspaces (workflows + credentials + variables)
-- [ ] Workflow search by name, tag, content
-- [ ] Workflow duplication (already exists — verify parity)
+- [x] Tags — `tags: string[]` on `WorkflowNode`/`Workflow`; sidebar tag-filter chips; per-card chip display; click-to-toggle filter. Editable via "Tags" button on each card (comma-separated prompt) or `POST /api/workflows/:id/move { tags }`.
+- [x] Folders — `folders` table with `parentId` (hierarchy supported in schema) + `project_id` FK; folder sidebar on dashboard with workflow counts; create/delete via `POST|DELETE /api/folders`; deleting a folder orphans workflows back to root (doesn't delete them) and re-parents child folders one level up.
+- [x] Projects — `projects` table; `project_id` on workflows and secrets (isolated workspaces); project switcher in top bar; default project bootstrapped on first run + backfills legacy rows; workflow variables stay per-workflow (project-level vars deferred to 5.x). Deleting a non-default project moves its workflows + secrets back to the default project.
+- [x] Workflow search by name, tag, content — `GET /api/workflows?search=...&tag=...&folderId=...&projectId=...`; dashboard client-side filter matches name/id/tag substring plus server filters by project. Full workflow-content grep deferred (not yet needed for the card-list UX).
+- [x] Workflow duplication — verified end-to-end: duplicates preserve `tags`, `projectId`, and `folderId` from the source (covered by API integration test).
 
 ### 4.3 Testing & Debug Tools
 **n8n equivalent:** Pin data, debug executions, single-node run
-- [ ] **Data pinning** — save node output, reuse in test runs without calling external services
-- [ ] **Execute single node** — run one node using previous output or pinned data
-- [ ] **Debug past executions** — load failed execution data into editor, re-run
-- [ ] **Execution preview** — see input/output at each node inline on canvas
-- [ ] **Schema view** — show data structure at each node
-- [ ] **Table view** — tabular data inspection
-- [ ] Expression editor with autocomplete and preview
+- [x] **Data pinning** — `workflow.pinnedData` stores node output by node ID; editor can pin/unpin last-run output and executor reuses pins without calling node handlers.
+- [x] **Execute single node** — `runMode: "single_node"` executes only the selected node using supplied previous `nodeOutputs` and/or pinned parent data.
+- [x] **Debug past executions** — execution history rows can load run data back into the editor or re-run from `sourceExecutionId`.
+- [x] **Execution preview** — debug mode renders compact input/output/error previews inline on canvas nodes.
+- [x] **Schema view** — node inspector infers and displays payload structure from runtime input/output data.
+- [x] **Table view** — node inspector includes flattened table inspection for payloads.
+- [x] Expression editor with autocomplete and preview — expression fields provide insertable built-in snippets and server-side preview.
 
 ### 4.4 Execution History Enhancements
-- [ ] Filter by status, workflow, date range
-- [ ] Custom execution metadata (`$execution.customData`)
-- [ ] Manual retry of failed executions from history
-- [ ] Execution data retention configuration (max age, pruning)
-- [ ] Cancel running executions
+- [x] Filter by status, workflow, date range
+- [x] Custom execution metadata (`$execution.customData`)
+- [x] Manual retry of failed executions from history
+- [x] Execution data retention configuration (max age, pruning)
+- [x] Cancel running executions
 
 ---
 
 ## Phase 5: Enterprise & Operations (Sprints 12-14)
 
 ### 5.1 Authentication Enhancements
-- [ ] SAML 2.0 SSO (Okta, Azure AD, OneLogin)
-- [ ] LDAP / Active Directory integration
-- [ ] MFA / 2FA with enforcement option
-- [ ] User provisioning via SSO (group-based role mapping)
-- [ ] API key authentication (for programmatic access)
+- [x] SAML 2.0 SSO (Okta, Azure AD, OneLogin) — `SamlService` with `@node-saml/node-saml` as optional dep; graceful 503 when dep/config missing. `GET /api/auth/saml/login`, `POST /api/auth/saml/callback` wire IdP-initiated and SP-initiated flows.
+- [x] LDAP / Active Directory integration — `LdapService` with `ldapts` as optional dep; `POST /api/auth/ldap/login` resolves bind DN via user filter and verifies password with a rebind.
+- [x] MFA / 2FA with enforcement option — hand-rolled RFC 6238 TOTP in `MfaService` (AES-256-GCM secret at rest, single-use SHA-256-hashed backup codes). `/api/auth/mfa/enroll|activate|disable|status` + login MFA challenge at `/api/auth/login/mfa`; `MFA_ENFORCE=true` forces admin enrolment on next login.
+- [x] User provisioning via SSO (group-based role mapping) — `sso_group_mappings` table with global or per-project assignment; SAML/LDAP callbacks auto-provision users, update their global role (never downgrading admins), and seed project memberships from matching groups. Admin-only CRUD at `/api/auth/sso/mappings`.
+- [x] API key authentication (for programmatic access) — `ApiKeyService` issues `ao_<prefix>.<secret>` bearer tokens (SHA-256 hashed at rest, optional expiry). `Authorization: Bearer …` now authenticates any `/api/*` route alongside session cookies; `/api/auth/api-keys` CRUD + revoke.
 
 ### 5.2 Advanced RBAC & Multi-Tenancy
-- [ ] Project-level roles (Admin, Editor, Viewer)
-- [ ] Custom roles with granular permissions (Enterprise)
-- [ ] Credential sharing scoped to projects
-- [ ] Cross-project workflow sharing controls
+- [x] Project-level roles (Admin, Editor, Viewer) — `user_project_roles` table + `RbacService` with built-in `project_admin` / `editor` / `viewer` roles. Routes: `GET|POST /api/projects/:id/members`, `DELETE /api/projects/:id/members/:userId`. Permission checks fall back to the existing global role when no membership exists (backwards-compatible).
+- [x] Custom roles with granular permissions (Enterprise) — `custom_roles` table with a permission vocabulary (`workflow:read|write|execute|delete`, `secret:read|write|use`, `project:manage|invite`, `role:manage`). Admin-only CRUD at `/api/custom-roles`; assignable to members via `role: "custom", customRoleId: …`.
+- [x] Credential sharing scoped to projects — `secret_shares` table + `/api/secrets/:id/shares` CRUD. Secrets still carry an owning `project_id`; shares grant read access from additional projects.
+- [x] Cross-project workflow sharing controls — `workflow_shares` table + `/api/workflows/:id/shares` CRUD with `accessLevel: "read" | "execute"`. `RbacService.canAccessWorkflow` honours shares when evaluating permissions.
 
 ### 5.3 External Secrets
 **n8n equivalent:** AWS Secrets Manager, HashiCorp Vault, Google Secret Manager
-- [ ] External secrets provider interface
-- [ ] AWS Secrets Manager adapter
-- [ ] HashiCorp Vault adapter
-- [ ] Google Secret Manager adapter
-- [ ] Azure Key Vault adapter (extending existing Azure ecosystem)
-- [ ] Automatic rotation — updated secrets used without workflow changes
+- [x] External secrets provider interface — `ExternalSecretsService` with a pluggable `ProviderAdapter` registry (`apps/api/src/services/external-secrets-service.ts`). `SecretService.resolveSecret` transparently dispatches to the adapter when a secret's `source === "external"`.
+- [x] AWS Secrets Manager adapter — optional-dep pattern (`@aws-sdk/client-secrets-manager`); 503/CONFIGURATION_ERROR if the SDK is not installed.
+- [x] HashiCorp Vault adapter — native `fetch`-based (no extra dep), KV v1 + v2 aware, configurable `field` extraction.
+- [x] Google Secret Manager adapter — optional-dep (`@google-cloud/secret-manager`); supports full-path keys (`projects/.../secrets/.../versions/latest`) and short names.
+- [x] Azure Key Vault adapter — optional-dep (`@azure/keyvault-secrets` + `@azure/identity`); supports `ClientSecretCredential` via stored JSON or `DefaultAzureCredential` fallback.
+- [x] Automatic rotation — `external_secret_cache` table stores each resolved value (re-encrypted with the local master key) with a TTL from the provider config (`cacheTtlMs`). Cache hits within TTL; after expiry the next resolve round-trips to the upstream source. Admin routes: `POST|PUT|DELETE /api/external-providers`, `POST /api/external-providers/:id/test`. `POST /api/secrets` accepts `{ externalProviderId, externalKey }` to register a reference instead of a literal value.
 
 ### 5.4 Audit Logging
-- [ ] Comprehensive audit trail: user auth, credential CRUD, workflow CRUD, execution events
-- [ ] Configurable retention (default 12 months)
-- [ ] Audit report generation via API
+- [x] Comprehensive audit trail: user auth (register/login/logout/mfa-challenge), MFA enrol/activate/disable, API-key create/revoke, SSO mapping CRUD, secret CRUD (local + external), external-provider CRUD + test, workflow CRUD, execution completion (success/failure), project CRUD, project-member add/remove, custom-role CRUD, workflow/secret sharing. Stored in `audit_logs` with category, event_type, outcome, actor (user/api_key/system), ip, user agent, resource refs, and structured metadata.
+- [x] Configurable retention — `AUDIT_LOG_RETENTION_DAYS` (default 365) with a background purge loop mirroring the execution-history pattern; set to 0 to keep entries forever.
+- [x] Audit report generation via API — `GET /api/audit` (admin) with filters `category`, `eventType`, `outcome`, `actorUserId`, `resourceType`, `resourceId`, `projectId`, `from`, `to`, `page`, `pageSize`. `GET /api/audit/export` streams a CSV attachment.
 
 ### 5.5 Log Streaming
 **n8n equivalent:** Syslog, Webhook, Sentry destinations
-- [ ] Log streaming framework with pluggable destinations
-- [ ] Syslog destination
-- [ ] Webhook destination (custom headers)
-- [ ] Sentry destination
-- [ ] Event categories: workflow, node, audit, worker, AI, queue events
-- [ ] Configure from Settings UI
+- [x] Log streaming framework with pluggable destinations — `LogStreamingService` with adapter registry (`registerAdapter`), encrypted-at-rest config (AES-256-GCM with the shared master key), asynchronous buffered dispatch (`LOG_STREAM_BUFFER_SIZE`, `LOG_STREAM_FLUSH_INTERVAL_MS`) with bounded retries (`LOG_STREAM_RETRY_MAX_ATTEMPTS`), per-destination delivery history in `log_stream_events` (retention governed by `LOG_STREAM_EVENT_RETENTION_DAYS`).
+- [x] Syslog destination — RFC 5424 framing with configurable facility/appName/hostname; UDP (`dgram`) or TCP (`net`) transport. Severity derived from level (debug/info/warn/error → 7/6/4/3).
+- [x] Webhook destination (custom headers) — POSTs JSON via native `fetch`, arbitrary header map, optional HMAC-SHA256 signing with configurable header name (default `x-ao-signature: sha256=<hex>`), method override.
+- [x] Sentry destination — classic DSN parsing → event envelope POST to `/api/<projectId>/store/` with `X-Sentry-Auth`; maps level `warn → warning`, tags with category/event_type/outcome.
+- [x] Event categories: auth, mfa, sso, api_key, secret, external_secret, workflow, execution, project, rbac, sharing, system — fanned out automatically from the existing `audit()` helper in `apps/api/src/app.ts`. Per-destination category filter + minimum level threshold.
+- [x] Configure from Settings UI — new `Log Streams` tab in `SettingsPage` (admin only): destination registration with type-specific sample config, category multi-select, min-level selector, live enable/disable toggle, test button, delivery-event drawer showing attempts/status/errors. Secret config fields (`hmacSecret`, `dsn`) masked as `__secret__` in API responses.
+- [x] Routes: `GET|POST /api/log-streams`, `PUT|DELETE /api/log-streams/:id`, `POST /api/log-streams/:id/test`, `GET /api/log-streams/:id/events` — all admin-gated and audit-logged.
 
 ### 5.6 Version Control & Environments
 **n8n equivalent:** Git-based source control with branch-per-environment
-- [ ] Connect instance to Git repository
-- [ ] Push/pull workflows from UI
-- [ ] Branch-per-environment (dev, staging, prod)
-- [ ] Workflow history with restore (built-in versioning)
-- [ ] Credential stubs in export (not secrets)
-- [ ] Variables included in source control
+- [x] Connect instance to Git repository — admin-only `PUT /api/git` registers a singleton `git_configs` row (repo URL, default branch, auth secret ref, workflows dir, variables file, commit author). `DELETE /api/git` disconnects and clears the local mirror. `GitSyncService` drives the `git` CLI via `child_process.spawnSync` with `GIT_TERMINAL_PROMPT=0` and a configurable command timeout.
+- [x] Push/pull workflows from UI — new `Source Control` tab in `SettingsPage` surfaces repo config, current branch/status, last push/pull timestamps, last error, and exposes Push/Pull buttons. Backend routes: `POST /api/git/push`, `POST /api/git/pull`, `GET /api/git/status`.
+- [x] Branch-per-environment (dev, staging, prod) — config stores a default branch; every push/pull call accepts a `branch` override so the same instance can sync different branches for different environments. Working tree is checked out to the requested branch on each operation.
+- [x] Workflow history with restore (built-in versioning) — new `workflow_versions` table snapshots every `POST|PUT /api/workflows` (and every git pull/restore) with monotonically increasing version numbers, author, and change note. `GET /api/workflows/:id/versions`, `GET /api/workflows/:id/versions/:n`, `POST /api/workflows/:id/versions/:n/restore`. Retention governed by `WORKFLOW_VERSION_RETENTION` (default 100).
+- [x] Credential stubs in export (not secrets) — `GitSyncService.stubCredentials` walks the workflow JSON on push and rewrites every `{ secretId: "sec_..." }` to `{ secretName, secretProvider }` using `SecretService.listSecrets`. `resolveCredentials` reverses the mapping on pull by looking up a local secret with matching name (and provider when present). Unknown stubs are dropped with a warning instead of failing the import.
+- [x] Variables included in source control — new `variables` table (project-scoped key/value) drives `{{vars.KEY}}` template interpolation at execution time. Variables are serialised to `variables.json` at the repo root on push and merged back on pull. `GET|POST /api/variables`, `PUT|DELETE /api/variables/:id`, plus a new `Variables` tab in `SettingsPage`. Project vars merged into `workflow.variables` before `executeWorkflow`.
 
 ### 5.7 Observability & Metrics
-- [ ] Prometheus metrics endpoint (`/metrics`)
-- [ ] Grafana dashboard templates
-- [ ] Distributed tracing (OpenTelemetry)
-- [ ] Health check endpoint
-- [ ] SLO tracking (execution success rate, p95 latency)
+- [x] Prometheus metrics endpoint (`/metrics`) — `GET /metrics` returns text/plain with prefixed counters (`ao_http_requests_total`, `ao_workflow_executions_total`, `ao_workflow_executions_success_total`, `ao_workflow_executions_failure_total`), gauges (`ao_workflow_executions_active`, `ao_uptime_seconds`, `ao_process_heap_used_bytes`, `ao_process_rss_bytes`, `ao_system_load_avg_1m`), and histograms (`ao_http_request_duration_ms`, `ao_workflow_execution_duration_ms`, `ao_node_execution_duration_ms`) with canonical `_bucket{le="..."}`, `_sum`, `_count` triples. Prefix overridable via `METRICS_PREFIX`. Public endpoint (no auth) so Prometheus scrapers can hit it directly.
+- [x] Grafana dashboard templates — [ops/grafana/ai-orchestrator-dashboard.json](ops/grafana/ai-orchestrator-dashboard.json) ships a ready-to-import dashboard with 10 panels: active executions, SLO stats, throughput/success/failure rates, histogram quantile latency, HTTP status class distribution, process memory, and system load. See [ops/grafana/README.md](ops/grafana/README.md) for scrape config.
+- [x] Distributed tracing (OpenTelemetry) — new `TracingService` produces OTLP-compatible span objects (`traceId`, `spanId`, `parentSpanId`, `operationName`, `attributes`, `events`, `status`, `startTimeMs`/`endTimeMs`/`durationMs`). When `TRACING_ENABLED=true` and `TRACING_ENDPOINT` is set, spans are flushed to the OTLP/HTTP collector in `resourceSpans` format; otherwise the last 5000 spans are retained in memory and exposed via `GET /api/observability/traces` (admin only) for UI visibility.
+- [x] Health check endpoint — `GET /health` returns `{ ok, now, uptime, sloHealthy }`. Lightweight and auth-free for liveness/readiness probes. Extended from the previous minimal implementation.
+- [x] SLO tracking (execution success rate, p95 latency) — `MetricsService.getSloStatus` computes current success rate and p95 execution latency and compares against `METRICS_SLO_SUCCESS_TARGET` (default 0.99) and `METRICS_SLO_P95_LATENCY_MS` (default 30000). Budgets surfaced as `ao_slo_*` Prometheus gauges and `GET /api/observability/slo`. New `Observability` tab in the Settings UI (admin only) polls every 10s, shows SLO status with healthy/breached chip, execution/HTTP/uptime tables, and recent trace spans.
 
 ---
 
@@ -333,11 +336,11 @@
 ## Phase 7: Scaling & Production Hardening (Sprints 17-18)
 
 ### 7.1 Deployment & Infrastructure
-- [ ] Kubernetes Helm chart
-- [ ] Docker Compose production template (API + Web + PostgreSQL + Redis)
-- [ ] AWS ECS Fargate deployment guide
-- [ ] Multi-main high availability (leader election)
-- [ ] Webhook-specific process separation
+- [x] Kubernetes Helm chart — [ops/helm/ai-orchestrator](ops/helm/ai-orchestrator/) with Chart.yaml, values.yaml, and templates for API deployment, dedicated webhook deployment, web UI, Service, Ingress, ConfigMap, Secret, HPA, ServiceAccount, _helpers.tpl. Supports `api.replicaCount`, `api.haEnabled`, `webhook.enabled`, `ingress.hosts[*].paths[*].service` per-path routing, and optional CPU-based autoscaling.
+- [x] Docker Compose production template — [docker-compose.prod.yml](docker-compose.prod.yml) spins up Postgres 16, Redis 7, two API replicas (`HA_ENABLED=true`, distinct `HA_INSTANCE_ID` per container), a `webhook` service (2 replicas, `WORKER_MODE=webhook`), the web UI, and an Nginx front-end that routes `/webhook/*`, `/webhook-test/*`, `/api/webhooks/*` to webhook replicas and everything else to the API replicas. Nginx config at [ops/nginx/ai-orchestrator.conf](ops/nginx/ai-orchestrator.conf).
+- [x] AWS ECS Fargate deployment guide — [ops/aws/ecs-fargate.md](ops/aws/ecs-fargate.md) end-to-end walkthrough with topology diagram, Secrets Manager wiring, ALB path-based routing, autoscaling policy, CloudWatch Logs Insights queries for leader transitions. Ready-to-edit task definitions at [ops/aws/task-definition-api.example.json](ops/aws/task-definition-api.example.json) and [ops/aws/task-definition-webhook.example.json](ops/aws/task-definition-webhook.example.json).
+- [x] Multi-main high availability (leader election) — `LeaderElectionService` in [apps/api/src/services/leader-election-service.ts](apps/api/src/services/leader-election-service.ts) uses a new `leader_leases` DB table (v10 migration) with atomic `tryAcquireLease` (insert-or-steal-if-expired, renew-if-owner). Enabled via `HA_ENABLED=true`; each replica advertises its `HA_INSTANCE_ID` (fed by downward API in Helm / env in ECS). `onBecomeLeader` callback starts `SchedulerService.initialize()` + `TriggerService.initialize()`; `onResignLeader` stops them. Lease TTL/renew configurable (`HA_LEASE_TTL_MS` / `HA_RENEW_INTERVAL_MS`). Admin status route `GET /api/ha/status` returns current holder + lease expiry + all tracked leases.
+- [x] Webhook-specific process separation — new `WORKER_MODE` config var (`all` | `api` | `webhook` | `worker`). In `webhook` mode, `index.ts` skips scheduler/queue/trigger service construction entirely; the surviving Fastify app serves `/health`, `/metrics`, `/widget.js`, and every webhook route without running cron or background workers. Covered by both the Helm chart (`webhook.enabled=true`) and the compose/ECS topologies.
 
 ### 7.2 Performance
 - [ ] Parallel node execution within workflows (independent branches)

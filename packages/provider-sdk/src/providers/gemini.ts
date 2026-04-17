@@ -51,13 +51,12 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
     const model = request.provider.model || "gemini-2.0-flash";
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-    let systemInstruction: { role: "system"; parts: GeminiPart[] } | undefined;
+    let systemInstruction: { parts: GeminiPart[] } | undefined;
     const contents: GeminiContent[] = [];
 
     for (const msg of request.messages) {
       if (msg.role === "system") {
         systemInstruction = {
-          role: "system",
           parts: [{ text: msg.content }]
         };
       } else if (msg.role === "assistant") {

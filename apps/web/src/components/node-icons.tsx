@@ -25,7 +25,8 @@ export type NodePaletteIconKey =
   | "azure_monitor"
   | "azure_search"
   | "azure_embedding"
-  | "qdrant";
+  | "qdrant"
+  | "gemini";
 
 export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element {
   if (icon === "ai") {
@@ -360,6 +361,44 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
       </svg>
     );
   }
+  if (icon === "gemini") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M12 2C12 2 14.5 8.5 12 12C9.5 8.5 12 2 12 2Z"
+          fill="none"
+          stroke="#4285F4"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M12 22C12 22 14.5 15.5 12 12C9.5 15.5 12 22 12 22Z"
+          fill="none"
+          stroke="#34A853"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M2 12C2 12 8.5 9.5 12 12C8.5 14.5 2 12 2 12Z"
+          fill="none"
+          stroke="#EA4335"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M22 12C22 12 15.5 9.5 12 12C15.5 14.5 22 12 22 12Z"
+          fill="none"
+          stroke="#FBBC05"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
 
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -427,6 +466,7 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   prompt_template: "ai",
   llm_call: "ai",
   azure_openai_chat_model: "azure_openai",
+  google_gemini_chat_model: "gemini",
   embeddings_azure_openai: "azure_embedding",
   agent_orchestrator: "ai",
   output_guardrail: "ai",

@@ -3336,13 +3336,15 @@ function StudioApp() {
       const sourceNode = nodes.find((node) => node.id === source);
       const targetNode = nodes.find((node) => node.id === target);
       const expectedTargetType: Record<string, EditorNodeData["nodeType"] | EditorNodeData["nodeType"][]> = {
-        chat_model: "llm_call",
+        chat_model: ["llm_call", "azure_openai_chat_model", "google_gemini_chat_model"],
         memory: "local_memory",
         tool: "mcp_tool",
         worker: ["agent_orchestrator", "supervisor_node"]
       };
       const expectedHandleByTargetType: Partial<Record<EditorNodeData["nodeType"], string>> = {
         llm_call: "chat_model",
+        azure_openai_chat_model: "chat_model",
+        google_gemini_chat_model: "chat_model",
         local_memory: "memory",
         mcp_tool: "tool"
       };

@@ -311,6 +311,31 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "google_gemini_chat_model",
+    label: "Google Gemini Chat Model",
+    category: "LLM",
+    description: "Calls Google Gemini chat completions using an API key.",
+    configSchema: {
+      type: "object",
+      properties: {
+        model: { type: "string" },
+        secretRef: { type: "object" },
+        temperature: { type: "number" },
+        maxTokens: { type: "number" },
+        promptKey: { type: "string" },
+        systemPromptKey: { type: "string" }
+      },
+      required: ["model"]
+    },
+    sampleConfig: {
+      model: "gemini-2.0-flash",
+      temperature: 0.2,
+      maxTokens: 1024,
+      promptKey: "prompt",
+      systemPromptKey: "system_prompt"
+    }
+  },
+  {
     type: "embeddings_azure_openai",
     label: "Embeddings Azure OpenAI",
     category: "RAG",

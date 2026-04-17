@@ -885,7 +885,7 @@ export function createApp(
   queueService?: QueueService,
   triggerService?: TriggerService
 ) {
-  const app = Fastify({ logger: true });
+  const app = Fastify({ logger: { level: config.LOG_LEVEL } });
   const providerRegistry = createDefaultProviderRegistry();
   const connectorRegistry = createDefaultConnectorRegistry();
   const mcpRegistry = createDefaultMCPRegistry();

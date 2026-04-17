@@ -37,6 +37,7 @@ export type WorkflowNodeType =
   | "azure_cosmos_db"
   | "azure_monitor_http"
   | "azure_openai_chat_model"
+  | "google_gemini_chat_model"
   | "embeddings_azure_openai"
   | "azure_ai_search_vector_store"
   | "qdrant_vector_store"

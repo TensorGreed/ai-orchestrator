@@ -357,6 +357,18 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
+    if (node.type === "google_gemini_chat_model") {
+      const model = typeof config.model === "string" ? config.model.trim() : "";
+
+      if (!model) {
+        issues.push({
+          code: "missing_gemini_model",
+          message: "Google Gemini Chat Model node requires model.",
+          nodeId: node.id
+        });
+      }
+    }
+
     if (node.type === "agent_orchestrator") {
       const hasAttachedChatModel = workflow.edges.some(
         (edge) => edge.source === node.id && edge.sourceHandle === "chat_model"
@@ -987,11 +999,12 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     if (
       edge.sourceHandle === "chat_model" &&
       targetNode.type !== "llm_call" &&
-      targetNode.type !== "azure_openai_chat_model"
+      targetNode.type !== "azure_openai_chat_model" &&
+      targetNode.type !== "google_gemini_chat_model"
     ) {
       issues.push({
         code: "invalid_chat_model_attachment",
-        message: "Agent chat_model attachment must target an LLM Call or Azure OpenAI Chat Model node.",
+        message: "Agent chat_model attachment must target an LLM Call, Azure OpenAI Chat Model, or Google Gemini Chat Model node.",
         edgeId: edge.id
       });
     }

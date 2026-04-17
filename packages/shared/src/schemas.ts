@@ -33,6 +33,7 @@ export const workflowNodeSchema = z.object({
     "prompt_template",
     "llm_call",
     "azure_openai_chat_model",
+    "google_gemini_chat_model",
     "agent_orchestrator",
     "supervisor_node",
     "local_memory",

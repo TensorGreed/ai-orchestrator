@@ -1370,6 +1370,28 @@ export function NodeConfigModal({
       };
     }
 
+    if (node.data.nodeType === "google_gemini_chat_model") {
+      const model = toStringValue(config.model, "gemini-2.0-flash").trim();
+      if (!model) {
+        return null;
+      }
+
+      const secretId = toStringValue(asRecord(config.secretRef).secretId).trim();
+      const provider: LLMProviderConfig = {
+        providerId: "gemini",
+        model,
+        ...(secretId ? { secretRef: { secretId } } : {}),
+        ...(typeof config.temperature === "number" && Number.isFinite(config.temperature)
+          ? { temperature: config.temperature }
+          : {}),
+        ...(typeof config.maxTokens === "number" && Number.isFinite(config.maxTokens)
+          ? { maxTokens: Math.max(1, Math.floor(config.maxTokens)) }
+          : {})
+      };
+
+      return { provider };
+    }
+
     return null;
   }, [config, node.data.nodeType]);
 
@@ -2686,6 +2708,77 @@ export function NodeConfigModal({
     );
   };
 
+  const renderGoogleGeminiChatModelParameters = () => {
+    return (
+      <>
+        <SelectField
+          label="Model"
+          value={toStringValue(config.model, "gemini-2.0-flash")}
+          options={[
+            { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+            { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite" },
+            { value: "gemini-2.5-flash-preview-04-17", label: "Gemini 2.5 Flash Preview" },
+            { value: "gemini-2.5-pro-preview-03-25", label: "Gemini 2.5 Pro Preview" },
+            { value: "gemini-1.5-pro", label: "Gemini 1.5 Pro" },
+            { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash" }
+          ]}
+          onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
+        />
+        {renderCredentialSecretField({
+          fieldKey: "gemini_chat_secret",
+          label: "Google Gemini API Key",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "Select secret",
+          preferredProvider: "gemini",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <div className="cfg-grid-2">
+          <NumberField
+            label="Temperature"
+            value={toNumberValue(config.temperature, 0.2)}
+            min={0}
+            max={2}
+            step={0.1}
+            onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
+          />
+          <NumberField
+            label="Max Tokens"
+            value={toNumberValue(config.maxTokens, 1024)}
+            min={1}
+            step={1}
+            onChange={(next) => setConfig((current) => ({ ...current, maxTokens: next }))}
+          />
+        </div>
+        <TextField
+          label="Prompt Key"
+          value={toStringValue(config.promptKey, "prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, promptKey: next }))}
+        />
+        <TextField
+          label="System Prompt Key"
+          value={toStringValue(config.systemPromptKey, "system_prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
+        />
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() => void handleProviderTestRun()}
+            disabled={providerTestBusy}
+          >
+            {providerTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
+        </div>
+        {providerTestError && <div className="error-banner">{providerTestError}</div>}
+      </>
+    );
+  };
+
   const renderEmbeddingsAzureOpenAIParameters = () => {
     return (
       <>
@@ -3377,6 +3470,8 @@ export function NodeConfigModal({
         return renderLlmParameters();
       case "azure_openai_chat_model":
         return renderAzureOpenAIChatModelParameters();
+      case "google_gemini_chat_model":
+        return renderGoogleGeminiChatModelParameters();
       case "prompt_template":
         return renderPromptTemplateParameters();
       case "code_node":
