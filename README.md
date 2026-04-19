@@ -204,6 +204,18 @@ pnpm docs:dev
 pnpm test
 ```
 
+Run only web unit/component tests:
+
+```bash
+pnpm --filter @ai-orchestrator/web test
+```
+
+Run web Playwright golden-journey E2E:
+
+```bash
+pnpm --filter @ai-orchestrator/web e2e
+```
+
 ### 5) Build all packages/apps
 
 ```bash
@@ -218,6 +230,16 @@ docker compose up --build
 
 - Web: `http://localhost:5173`
 - API: `http://localhost:4000`
+
+## CI
+
+GitHub Actions CI is defined in `.github/workflows/ci.yml` and runs:
+
+- `pnpm lint`
+- `pnpm test`
+- `pnpm build`
+- `pnpm docs:build`
+- `pnpm --filter @ai-orchestrator/web e2e`
 
 ## Authentication and RBAC
 

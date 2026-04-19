@@ -5,8 +5,10 @@
 Run before merge/release:
 
 ```bash
-pnpm -r --if-present build
-pnpm -r --if-present test
+pnpm lint
+pnpm test
+pnpm build
+pnpm docs:build
 ```
 
 ## Current coverage areas
@@ -19,8 +21,10 @@ pnpm -r --if-present test
 - Auth + RBAC APIs
 - Secure webhook auth/replay/idempotency behavior
 - Azure connector test endpoint flows
+- Web unit/component tests in `apps/web`
+- Playwright golden-journey E2E in `apps/web/e2e`
 
-## Focused parser regression tests
+## Focused suites
 
 Run only workflow-engine tests:
 
@@ -28,7 +32,19 @@ Run only workflow-engine tests:
 pnpm --filter @ai-orchestrator/workflow-engine test
 ```
 
-The suite includes parser cases for:
+Run only web unit/component tests:
+
+```bash
+pnpm --filter @ai-orchestrator/web test
+```
+
+Run only web E2E:
+
+```bash
+pnpm --filter @ai-orchestrator/web e2e
+```
+
+The workflow-engine suite includes parser cases for:
 
 - strict rejection of non-JSON payloads
 - lenient repair of JSON-like payloads
@@ -36,8 +52,12 @@ The suite includes parser cases for:
 - prose + JSON extraction
 - nested + moustache input path resolution
 
-## Suggested additional gates
+The web E2E suite currently covers:
 
-- Playwright UI e2e for editor flows
-- Contract tests for provider/connector adapters
-- Performance tests for large tool catalogs and large graph executions
+- login/auth gate
+- create workflow from dashboard
+- configure node and save workflow
+- execute workflow and inspect run history
+- create secret via UI
+- use template from gallery
+- human approval journey through approvals APIs

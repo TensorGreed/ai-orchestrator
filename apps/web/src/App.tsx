@@ -1618,10 +1618,10 @@ function StudioApp() {
       setSecrets([]);
       return [];
     }
-    const items = await fetchSecrets();
+    const items = await fetchSecrets({ projectId: activeProjectId });
     setSecrets(items);
     return items;
-  }, [canManageSecrets]);
+  }, [activeProjectId, canManageSecrets]);
 
   const refreshExecutionHistory = useCallback(async () => {
     try {
@@ -1711,22 +1711,13 @@ function StudioApp() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [workflowItems, definitionPayload, secretItems, executionPayload, projectPayload, folderPayload] =
-        await Promise.all([
-          fetchWorkflows({ projectId: activeProjectId }),
-          fetchDefinitions(),
-          canManageSecrets ? fetchSecrets({ projectId: activeProjectId }) : Promise.resolve([]),
-          fetchExecutions({ page: 1, pageSize: 40 }),
-          fetchProjects().catch(() => ({ projects: [] })),
-          fetchFolders(activeProjectId).catch(() => ({ folders: [] }))
-        ]);
+      const [workflowItems, projectPayload, folderPayload] = await Promise.all([
+        fetchWorkflows({ projectId: activeProjectId }),
+        fetchProjects().catch(() => ({ projects: [] })),
+        fetchFolders(activeProjectId).catch(() => ({ folders: [] }))
+      ]);
 
       setWorkflowList(workflowItems);
-      setDefinitions(definitionPayload.nodes);
-      setMcpServerDefinitions(definitionPayload.mcpServers);
-      setSecrets(secretItems);
-      setExecutionHistoryItems(executionPayload.items);
-      setExecutionHistoryTotal(executionPayload.total);
       setProjects(projectPayload.projects ?? []);
       setFolders(folderPayload.folders ?? []);
 
@@ -1736,7 +1727,7 @@ function StudioApp() {
         return;
       }
 
-      if (workflowItems[0]) {
+      if (activeMode !== "dashboard" && workflowItems[0]) {
         const rememberedId = localStorage.getItem(LAST_WORKFLOW_ID_STORAGE_KEY);
         const chosenWorkflow =
           rememberedId && workflowItems.some((item) => item.id === rememberedId) ? rememberedId : workflowItems[0].id;
@@ -1753,7 +1744,7 @@ function StudioApp() {
     } finally {
       setLoading(false);
     }
-  }, [activeProjectId, canManageSecrets, hydrateWorkflow, readWipWorkflow]);
+  }, [activeMode, activeProjectId, hydrateWorkflow, readWipWorkflow]);
 
   // Persist the active project id so switching survives a refresh.
   useEffect(() => {
@@ -1806,6 +1797,67 @@ function StudioApp() {
     }
     void loadData();
   }, [authUser, loadData]);
+
+  useEffect(() => {
+    if (!authUser) {
+      return;
+    }
+
+    let cancelled = false;
+    const loadDefinitions = async () => {
+      try {
+        const definitionPayload = await fetchDefinitions();
+        if (cancelled) {
+          return;
+        }
+        setDefinitions(definitionPayload.nodes);
+        setMcpServerDefinitions(definitionPayload.mcpServers);
+      } catch (definitionError) {
+        if (cancelled) {
+          return;
+        }
+        if (definitionError instanceof ApiError && definitionError.status === 401) {
+          setAuthUser(null);
+          setAuthError("Session expired. Sign in again.");
+        }
+      }
+    };
+
+    void loadDefinitions();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser || !canManageSecrets) {
+      setSecrets([]);
+      return;
+    }
+
+    let cancelled = false;
+    const loadSecrets = async () => {
+      try {
+        const items = await fetchSecrets({ projectId: activeProjectId });
+        if (!cancelled) {
+          setSecrets(items);
+        }
+      } catch (secretError) {
+        if (cancelled) {
+          return;
+        }
+        if (secretError instanceof ApiError && secretError.status === 401) {
+          setAuthUser(null);
+          setAuthError("Session expired. Sign in again.");
+        }
+      }
+    };
+
+    void loadSecrets();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId, authUser, canManageSecrets]);
 
   useEffect(() => {
     if (activeMode === "secrets" && !canManageSecrets) {
@@ -2108,6 +2160,32 @@ function StudioApp() {
     },
     [handleApiError, hydrateWorkflow]
   );
+
+  useEffect(() => {
+    if (!authUser || loading) {
+      return;
+    }
+
+    const modeNeedsWorkflow =
+      activeMode === "editor" || activeMode === "variables" || activeMode === "chat" || activeMode === "evaluations";
+    if (!modeNeedsWorkflow) {
+      return;
+    }
+
+    if (workflowList.length === 0) {
+      return;
+    }
+
+    const currentExists = workflowList.some((item) => item.id === currentWorkflow.id);
+    if (currentExists) {
+      return;
+    }
+
+    const rememberedId = localStorage.getItem(LAST_WORKFLOW_ID_STORAGE_KEY);
+    const chosenWorkflowId =
+      rememberedId && workflowList.some((item) => item.id === rememberedId) ? rememberedId : workflowList[0]!.id;
+    void loadWorkflowById(chosenWorkflowId);
+  }, [activeMode, authUser, currentWorkflow.id, loadWorkflowById, loading, workflowList]);
 
   const buildCurrentWorkflow = useCallback(() => {
     return editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
@@ -3620,8 +3698,9 @@ function StudioApp() {
             </div>
             <p>Enter the 6-digit code from your authenticator app (or a backup code).</p>
             {authError && <div className="error-banner">{authError}</div>}
-            <label>Verification code</label>
+            <label htmlFor="mfa-verification-code">Verification code</label>
             <input
+              id="mfa-verification-code"
               type="text"
               inputMode="numeric"
               value={mfaCode}
@@ -3659,16 +3738,18 @@ function StudioApp() {
           </div>
           <p>Sign in to view, edit, and run workflows.</p>
           {authError && <div className="error-banner">{authError}</div>}
-          <label>Email</label>
+          <label htmlFor="login-email">Email</label>
           <input
+            id="login-email"
             type="email"
             value={loginEmail}
             onChange={(event) => setLoginEmail(event.target.value)}
             autoComplete="username"
             required
           />
-          <label>Password</label>
+          <label htmlFor="login-password">Password</label>
           <input
+            id="login-password"
             type="password"
             value={loginPassword}
             onChange={(event) => setLoginPassword(event.target.value)}
@@ -3683,7 +3764,7 @@ function StudioApp() {
     );
   }
 
-  if (loading) {
+  if (loading && workflowList.length === 0) {
     return <div className="loading-screen">Loading L²M...</div>;
   }
 

@@ -26,6 +26,8 @@ AI Orchestrator is a low-code workflow automation platform for:
 - [Secrets handling](/security/secrets)
 - [Secure webhooks](/security/secure-webhooks)
 - [API endpoints](/api/endpoints)
+- [CI pipeline](/operations/ci)
+- [Testing and quality gates](/operations/testing-and-quality)
 - [Extension SDKs](/extensions/providers)
 
 ## Implementation status

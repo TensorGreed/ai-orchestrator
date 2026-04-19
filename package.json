@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "concurrently -n api,web,docs -c cyan,magenta,green \"pnpm --filter @ai-orchestrator/api dev\" \"pnpm --filter @ai-orchestrator/web dev\" \"pnpm --filter @ai-orchestrator/docs dev\"",
     "dev:product": "concurrently -n api,web -c cyan,magenta \"pnpm --filter @ai-orchestrator/api dev\" \"pnpm --filter @ai-orchestrator/web dev\"",
+    "e2e:prepare": "node scripts/e2e-prepare.mjs",
+    "e2e:dev": "pnpm e2e:prepare && pnpm dev:product",
+    "e2e": "pnpm --filter @ai-orchestrator/web e2e",
     "docs:dev": "pnpm --filter @ai-orchestrator/docs dev",
     "docs:build": "pnpm --filter @ai-orchestrator/docs build",
     "docs:preview": "pnpm --filter @ai-orchestrator/docs preview",

@@ -108,6 +108,7 @@ export function TopBar({
         <div className="project-switcher" title="Active project">
           <select
             className="project-switcher-select"
+            aria-label="Project"
             value={activeProjectId}
             onChange={(event) => {
               const value = event.target.value;
@@ -129,11 +130,13 @@ export function TopBar({
         </div>
         <input
           className="workflow-name-input"
+          aria-label="Workflow name"
           value={currentWorkflowName}
           onChange={(event) => onWorkflowNameChange(event.target.value)}
         />
         <select
           className="workflow-select"
+          aria-label="Workflow"
           value={currentWorkflowExists ? currentWorkflowId : ""}
           onChange={(event) => {
             const selectedId = event.target.value;
@@ -166,7 +169,7 @@ export function TopBar({
         >
           Editor
         </button>
-        <button
+        {/* <button
           className={activeMode === "variables" ? "tab active" : "tab"}
           type="button"
           onClick={() => onModeChange("variables")}
@@ -202,7 +205,7 @@ export function TopBar({
           >
             Secrets
           </button>
-        )}
+        )} */}
       </div>
 
       <div className="header-actions">
