@@ -58,6 +58,7 @@ export const workflowNodeSchema = z.object({
     "information_extractor",
     "text_classifier",
     "sentiment_analysis",
+    "ai_transform",
     "if_node",
     "switch_node",
     "try_catch",

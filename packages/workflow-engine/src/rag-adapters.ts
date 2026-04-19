@@ -563,6 +563,176 @@ export class QdrantVectorStoreAdapter implements VectorStoreAdapter {
   }
 }
 
+export class CohereEmbeddingAdapter implements EmbeddingAdapter {
+  readonly id = "cohere-embedder";
+  constructor(private config: { apiKey: string; model?: string }) {}
+  async embed(text: string): Promise<number[]> {
+    const model = this.config.model || "embed-english-v3.0";
+    const res = await fetch("https://api.cohere.ai/v1/embed", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${this.config.apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ texts: [text], model, input_type: "search_document", truncate: "END" })
+    });
+    if (!res.ok) throw new Error(`Cohere embedding failed (${res.status})`);
+    const json = await res.json() as { embeddings?: number[][] };
+    return json.embeddings?.[0] ?? [];
+  }
+}
+
+export class MistralEmbeddingAdapter implements EmbeddingAdapter {
+  readonly id = "mistral-embedder";
+  constructor(private config: { apiKey: string; model?: string }) {}
+  async embed(text: string): Promise<number[]> {
+    const model = this.config.model || "mistral-embed";
+    const res = await fetch("https://api.mistral.ai/v1/embeddings", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${this.config.apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ model, input: [text] })
+    });
+    if (!res.ok) throw new Error(`Mistral embedding failed (${res.status})`);
+    const json = await res.json() as { data?: Array<{ embedding: number[] }> };
+    return json.data?.[0]?.embedding ?? [];
+  }
+}
+
+export class GoogleVertexEmbeddingAdapter implements EmbeddingAdapter {
+  readonly id = "google-vertex-embedder";
+  constructor(private config: { apiKey: string; model?: string }) {}
+  async embed(text: string): Promise<number[]> {
+    const model = this.config.model || "text-embedding-004";
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${this.config.apiKey}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] } })
+    });
+    if (!res.ok) throw new Error(`Google embedding failed (${res.status})`);
+    const json = await res.json() as { embedding?: { values: number[] } };
+    return json.embedding?.values ?? [];
+  }
+}
+
+export class HuggingFaceEmbeddingAdapter implements EmbeddingAdapter {
+  readonly id = "huggingface-embedder";
+  constructor(private config: { apiKey: string; model?: string }) {}
+  async embed(text: string): Promise<number[]> {
+    const model = this.config.model || "sentence-transformers/all-MiniLM-L6-v2";
+    const res = await fetch(`https://api-inference.huggingface.co/pipeline/feature-extraction/${model}`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${this.config.apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ inputs: text, options: { wait_for_model: true } })
+    });
+    if (!res.ok) throw new Error(`HuggingFace embedding failed (${res.status})`);
+    const json = await res.json() as number[] | number[][];
+    return Array.isArray(json[0]) ? (json as number[][])[0] : json as number[];
+  }
+}
+
+export class ChromaVectorStoreAdapter implements VectorStoreAdapter {
+  readonly id = "chroma-vector-store";
+  constructor(private config: { endpoint: string; collectionName: string; apiKey?: string }) {}
+
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    const ids: string[] = [];
+    const embeddings: number[][] = [];
+    const docs: string[] = [];
+    const metadatas: Array<Record<string, unknown>> = [];
+    for (const doc of documents) {
+      ids.push(doc.id);
+      embeddings.push(await embedder.embed(doc.text));
+      docs.push(doc.text);
+      metadatas.push(doc.metadata ?? {});
+    }
+    const endpoint = this.config.endpoint.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    await fetch(`${endpoint}/api/v1/collections/${this.config.collectionName}/upsert`, {
+      method: "POST", headers,
+      body: JSON.stringify({ ids, embeddings, documents: docs, metadatas })
+    });
+  }
+
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    const queryEmbedding = await embedder.embed(query);
+    const endpoint = this.config.endpoint.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    const res = await fetch(`${endpoint}/api/v1/collections/${this.config.collectionName}/query`, {
+      method: "POST", headers,
+      body: JSON.stringify({ query_embeddings: [queryEmbedding], n_results: topK })
+    });
+    if (!res.ok) return [];
+    const json = await res.json() as { ids?: string[][]; documents?: string[][]; metadatas?: Array<Array<Record<string, unknown>>> };
+    const ids = json.ids?.[0] ?? [];
+    const texts = json.documents?.[0] ?? [];
+    const metas = json.metadatas?.[0] ?? [];
+    return ids.map((id, i) => ({ id, text: texts[i] ?? "", metadata: metas[i] ?? {} }));
+  }
+}
+
+export class WeaviateVectorStoreAdapter implements VectorStoreAdapter {
+  readonly id = "weaviate-vector-store";
+  constructor(private config: { endpoint: string; className: string; apiKey?: string }) {}
+
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    const endpoint = this.config.endpoint.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    for (const doc of documents) {
+      const vector = await embedder.embed(doc.text);
+      await fetch(`${endpoint}/v1/objects`, {
+        method: "POST", headers,
+        body: JSON.stringify({ class: this.config.className, id: doc.id, properties: { content: doc.text, metadata: JSON.stringify(doc.metadata ?? {}) }, vector })
+      });
+    }
+  }
+
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    const queryVector = await embedder.embed(query);
+    const endpoint = this.config.endpoint.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    const graphql = { query: `{ Get { ${this.config.className}(limit: ${topK}, nearVector: { vector: [${queryVector.join(",")}] }) { content metadata _additional { id distance } } } }` };
+    const res = await fetch(`${endpoint}/v1/graphql`, { method: "POST", headers, body: JSON.stringify(graphql) });
+    if (!res.ok) return [];
+    const json = await res.json() as { data?: { Get?: Record<string, Array<{ content: string; metadata?: string; _additional?: { id: string } }>> } };
+    const results = json.data?.Get?.[this.config.className] ?? [];
+    return results.map((r, i) => ({ id: r._additional?.id ?? `result-${i}`, text: r.content ?? "", metadata: r.metadata ? JSON.parse(r.metadata) : {} }));
+  }
+}
+
+export class RedisVectorStoreAdapter implements VectorStoreAdapter {
+  readonly id = "redis-vector-store";
+  constructor(private config: { endpoint: string; indexName: string; apiKey?: string }) {}
+
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    // Redis vector store uses the Redis Stack JSON + Search API via HTTP
+    const endpoint = this.config.endpoint.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    for (const doc of documents) {
+      const vector = await embedder.embed(doc.text);
+      await fetch(`${endpoint}/JSON.SET/${this.config.indexName}:${doc.id}/$`, {
+        method: "POST", headers,
+        body: JSON.stringify({ content: doc.text, metadata: doc.metadata ?? {}, embedding: vector })
+      });
+    }
+  }
+
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    const queryVector = await embedder.embed(query);
+    const endpoint = this.config.endpoint.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    const vectorStr = queryVector.map(v => v.toFixed(6)).join(",");
+    const res = await fetch(`${endpoint}/FT.SEARCH/${this.config.indexName}/*=>[KNN ${topK} @embedding $vec AS score]/PARAMS/2/vec/${vectorStr}/SORTBY/score/LIMIT/0/${topK}`, {
+      method: "POST", headers
+    });
+    if (!res.ok) return [];
+    const json = await res.json() as { results?: Array<{ id: string; extra_attributes?: { content?: string; metadata?: string } }> };
+    return (json.results ?? []).map(r => ({ id: r.id, text: r.extra_attributes?.content ?? "", metadata: r.extra_attributes?.metadata ? JSON.parse(r.extra_attributes.metadata) : {} }));
+  }
+}
+
 export class InMemoryRetrieverAdapter implements RetrieverAdapter {
   readonly id = "in-memory-retriever";
 

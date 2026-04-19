@@ -2348,6 +2348,38 @@ export function NodeConfigModal({
     </>
   );
 
+  const renderAiTransformParameters = () => (
+    <>
+      {renderProviderSection()}
+      <label className="cfg-field">
+        <span>Transformation Instruction</span>
+        <textarea
+          className="cfg-code-editor"
+          value={toStringValue(config.instruction, "")}
+          onChange={(e) => setConfig((current) => ({ ...current, instruction: e.target.value }))}
+          rows={4}
+          spellCheck={false}
+          placeholder="Convert this CSV data to a markdown table..."
+        />
+      </label>
+      <TextField
+        label="Input Key"
+        value={toStringValue(config.inputKey, "text")}
+        onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
+      />
+      <SelectField
+        label="Output Format"
+        value={toStringValue(config.outputFormat, "text")}
+        options={[
+          { value: "text", label: "Text" },
+          { value: "json", label: "JSON" },
+          { value: "code", label: "Code" }
+        ]}
+        onChange={(next) => setConfig((current) => ({ ...current, outputFormat: next }))}
+      />
+    </>
+  );
+
   const renderPromptTemplateParameters = () => {
     return (
       <>
@@ -3709,6 +3741,8 @@ export function NodeConfigModal({
         return renderTextClassifierParameters();
       case "sentiment_analysis":
         return renderSentimentAnalysisParameters();
+      case "ai_transform":
+        return renderAiTransformParameters();
       case "azure_openai_chat_model":
         return renderAzureOpenAIChatModelParameters();
       case "google_gemini_chat_model":
@@ -4199,6 +4233,17 @@ export function NodeConfigModal({
       case "document_chunker":
         return (
           <>
+            <SelectField
+              label="Split Strategy"
+              value={toStringValue(config.strategy, "separator")}
+              options={[
+                { value: "separator", label: "By Separator" },
+                { value: "character", label: "By Character Count" },
+                { value: "recursive", label: "Recursive (Multi-separator)" },
+                { value: "token", label: "By Token Count (Approximate)" }
+              ]}
+              onChange={(next) => setConfig((current) => ({ ...current, strategy: next }))}
+            />
             <NumberField
               label="Chunk Size"
               value={toNumberValue(config.chunkSize, 500)}

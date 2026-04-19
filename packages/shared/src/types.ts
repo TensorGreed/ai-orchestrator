@@ -52,6 +52,7 @@ export type WorkflowNodeType =
   | "information_extractor"
   | "text_classifier"
   | "sentiment_analysis"
+  | "ai_transform"
   | "if_node"
   | "switch_node"
   | "try_catch"

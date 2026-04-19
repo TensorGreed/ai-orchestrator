@@ -514,10 +514,11 @@ export const nodeDefinitions: NodeDefinition[] = [
       properties: {
         chunkSize: { type: "number" },
         chunkOverlap: { type: "number" },
-        separator: { type: "string" }
+        separator: { type: "string" },
+        strategy: { type: "string", enum: ["separator", "character", "recursive", "token"] }
       }
     },
-    sampleConfig: { chunkSize: 500, chunkOverlap: 50, separator: "\\n\\n" }
+    sampleConfig: { chunkSize: 500, chunkOverlap: 50, separator: "\\n\\n", strategy: "separator" }
   },
   {
     type: "connector_source",
@@ -837,7 +838,7 @@ export const nodeDefinitions: NodeDefinition[] = [
           type: "array",
           items: {
             type: "string",
-            enum: ["no_pii", "no_profanity", "must_contain_json"]
+            enum: ["no_pii", "no_profanity", "must_contain_json", "matches_schema"]
           }
         },
         onFail: { type: "string", enum: ["retry", "error"] },
@@ -957,6 +958,26 @@ export const nodeDefinitions: NodeDefinition[] = [
     },
     sampleConfig: {
       textKey: "text"
+    }
+  },
+  {
+    type: "ai_transform",
+    label: "AI Transform",
+    category: "LLM",
+    description: "Transform data using natural language instructions. The LLM generates and applies a transformation based on your description.",
+    configSchema: {
+      type: "object",
+      properties: {
+        instruction: { type: "string" },
+        inputKey: { type: "string" },
+        outputFormat: { type: "string", enum: ["text", "json", "code"] }
+      },
+      required: ["instruction"]
+    },
+    sampleConfig: {
+      instruction: "Convert this data to a markdown table",
+      inputKey: "text",
+      outputFormat: "text"
     }
   },
   {

@@ -84,7 +84,8 @@ export type NodePaletteIconKey =
   | "summarization_chain"
   | "information_extractor"
   | "text_classifier"
-  | "sentiment_analysis";
+  | "sentiment_analysis"
+  | "ai_transform";
 
 export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element {
   // ─── Category icons ───
@@ -964,6 +965,16 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
       </svg>
     );
   }
+  if (icon === "ai_transform") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 6h7v5H4z" fill="none" stroke="#8B5CF6" strokeWidth="1.4" strokeLinejoin="round" />
+        <path d="M13 13h7v5h-7z" fill="none" stroke="#10B981" strokeWidth="1.4" strokeLinejoin="round" />
+        <path d="M11 8.5h2l3 3.5h-2" fill="none" stroke="#F59E0B" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M14 10l1.5 2" fill="none" stroke="#F59E0B" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+    );
+  }
 
   // ─── Fallback ───
   return (
@@ -1130,7 +1141,8 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   summarization_chain: "summarization_chain",
   information_extractor: "information_extractor",
   text_classifier: "text_classifier",
-  sentiment_analysis: "sentiment_analysis"
+  sentiment_analysis: "sentiment_analysis",
+  ai_transform: "ai_transform"
 };
 
 export function resolveNodeIcon(nodeType: string, fallbackIcon: PaletteCategoryIconKey = "core"): NodePaletteIconKey {

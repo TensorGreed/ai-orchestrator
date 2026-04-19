@@ -23,11 +23,18 @@ import {
   TokenEmbeddingAdapter,
   OpenAIEmbeddingAdapter,
   AzureOpenAIEmbeddingAdapter,
+  CohereEmbeddingAdapter,
+  MistralEmbeddingAdapter,
+  GoogleVertexEmbeddingAdapter,
+  HuggingFaceEmbeddingAdapter,
   InMemoryVectorStoreAdapter,
   PineconeVectorStoreAdapter,
   PGVectorStoreAdapter,
   AzureAiSearchVectorStoreAdapter,
   QdrantVectorStoreAdapter,
+  ChromaVectorStoreAdapter,
+  WeaviateVectorStoreAdapter,
+  RedisVectorStoreAdapter,
   type EmbeddingRegistry,
   type VectorStoreRegistry
 } from "./rag-adapters";
@@ -1414,6 +1421,15 @@ function validateGuardrailChecks(text: string, checks: string[]): string[] {
         failures.push("must_contain_json");
       }
     }
+
+    if (check === "matches_schema") {
+      // Check if content is valid JSON matching a provided schema structure
+      try {
+        JSON.parse(normalizedText);
+      } catch {
+        failures.push("matches_schema");
+      }
+    }
   }
 
   return failures;
@@ -2538,40 +2554,115 @@ async function executeNode(
       const chunkSize = typeof config.chunkSize === "number" && config.chunkSize > 0 ? Math.floor(config.chunkSize) : 500;
       const chunkOverlap = typeof config.chunkOverlap === "number" && config.chunkOverlap >= 0 ? Math.floor(config.chunkOverlap) : 50;
       const separator = typeof config.separator === "string" ? config.separator : "\n\n";
+      const strategy = typeof config.strategy === "string" ? config.strategy : "separator";
 
       const upstreamDocs = normalizeDocuments(templateData.documents);
       const chunkedDocs: ConnectorDocument[] = [];
 
-      for (const doc of upstreamDocs) {
-        const text = doc.text.trim();
-        if (!text) continue;
+      if (strategy === "separator") {
+        for (const doc of upstreamDocs) {
+          const text = doc.text.trim();
+          if (!text) continue;
 
-        const chunks = text.split(separator).filter(Boolean);
-        let currentChunk = "";
-        let index = 0;
+          const chunks = text.split(separator).filter(Boolean);
+          let currentChunk = "";
+          let index = 0;
 
-        for (const chunk of chunks) {
-          if ((currentChunk + separator + chunk).length > chunkSize && currentChunk.length > 0) {
+          for (const chunk of chunks) {
+            if ((currentChunk + separator + chunk).length > chunkSize && currentChunk.length > 0) {
+              chunkedDocs.push({
+                id: `${doc.id}-chunk-${index++}`,
+                text: currentChunk,
+                metadata: { ...toRecord(doc.metadata), chunkIndex: index - 1, originalId: doc.id }
+              });
+
+              // Very naive overlap implementation for string lengths
+              const overlapAmount = Math.min(chunkOverlap, currentChunk.length);
+              currentChunk = currentChunk.slice(-overlapAmount) + separator + chunk;
+            } else {
+              currentChunk = currentChunk ? currentChunk + separator + chunk : chunk;
+            }
+          }
+
+          if (currentChunk) {
             chunkedDocs.push({
-              id: `${doc.id}-chunk-${index++}`,
-              text: currentChunk,
-              metadata: { ...toRecord(doc.metadata), chunkIndex: index - 1, originalId: doc.id }
+               id: `${doc.id}-chunk-${index}`,
+               text: currentChunk,
+               metadata: { ...toRecord(doc.metadata), chunkIndex: index, originalId: doc.id }
             });
-
-            // Very naive overlap implementation for string lengths
-            const overlapAmount = Math.min(chunkOverlap, currentChunk.length);
-            currentChunk = currentChunk.slice(-overlapAmount) + separator + chunk;
-          } else {
-            currentChunk = currentChunk ? currentChunk + separator + chunk : chunk;
           }
         }
+      }
 
-        if (currentChunk) {
-          chunkedDocs.push({
-             id: `${doc.id}-chunk-${index}`,
-             text: currentChunk,
-             metadata: { ...toRecord(doc.metadata), chunkIndex: index, originalId: doc.id }
-          });
+      if (strategy === "character") {
+        // Split by character count
+        for (const doc of upstreamDocs) {
+          const text = doc.text;
+          for (let i = 0; i < text.length; i += chunkSize - chunkOverlap) {
+            const chunk = text.slice(i, i + chunkSize);
+            if (!chunk.trim()) continue;
+            chunkedDocs.push({ id: `${doc.id}-chunk-${chunkedDocs.length}`, text: chunk, metadata: { ...toRecord(doc.metadata), chunkIndex: chunkedDocs.length, originalId: doc.id } });
+          }
+        }
+      }
+
+      if (strategy === "recursive") {
+        // Recursively split using multiple separators: \n\n, \n, ". ", " "
+        const separators = ["\n\n", "\n", ". ", " "];
+        function recursiveSplit(text: string, seps: string[], maxSize: number): string[] {
+          if (text.length <= maxSize) return [text];
+          const sep = seps[0] || "";
+          const parts = sep ? text.split(sep) : [text];
+          const chunks: string[] = [];
+          let current = "";
+          for (const part of parts) {
+            const candidate = current ? current + sep + part : part;
+            if (candidate.length > maxSize && current) {
+              chunks.push(current);
+              current = part;
+            } else {
+              current = candidate;
+            }
+          }
+          if (current) chunks.push(current);
+          // Recursively split chunks that are still too large
+          const result: string[] = [];
+          for (const chunk of chunks) {
+            if (chunk.length > maxSize && seps.length > 1) {
+              result.push(...recursiveSplit(chunk, seps.slice(1), maxSize));
+            } else {
+              result.push(chunk);
+            }
+          }
+          return result;
+        }
+        for (const doc of upstreamDocs) {
+          const pieces = recursiveSplit(doc.text, separators, chunkSize);
+          for (const piece of pieces) {
+            if (!piece.trim()) continue;
+            chunkedDocs.push({ id: `${doc.id}-chunk-${chunkedDocs.length}`, text: piece, metadata: { ...toRecord(doc.metadata), chunkIndex: chunkedDocs.length, originalId: doc.id } });
+          }
+        }
+      }
+
+      if (strategy === "token") {
+        // Approximate token-based splitting (1 token ≈ 4 chars)
+        const charsPerToken = 4;
+        const charLimit = chunkSize * charsPerToken;
+        const charOverlap = chunkOverlap * charsPerToken;
+        for (const doc of upstreamDocs) {
+          const text = doc.text;
+          for (let i = 0; i < text.length; i += charLimit - charOverlap) {
+            // Try to break at word boundaries
+            let end = Math.min(i + charLimit, text.length);
+            if (end < text.length) {
+              const lastSpace = text.lastIndexOf(" ", end);
+              if (lastSpace > i + charLimit * 0.8) end = lastSpace;
+            }
+            const chunk = text.slice(i, end).trim();
+            if (!chunk) continue;
+            chunkedDocs.push({ id: `${doc.id}-chunk-${chunkedDocs.length}`, text: chunk, metadata: { ...toRecord(doc.metadata), chunkIndex: chunkedDocs.length, originalId: doc.id } });
+          }
         }
       }
 
@@ -2655,6 +2746,22 @@ async function executeNode(
              apiVersion: typeof vectorStoreConfig.apiVersion === "string" ? vectorStoreConfig.apiVersion : process.env.AZURE_OPENAI_API_VERSION,
              apiKey: apiKey || ""
            });
+        } else if (embedderId === "cohere-embedder") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.COHERE_API_KEY;
+           embedder = new CohereEmbeddingAdapter({ apiKey: apiKey || "", model: typeof vectorStoreConfig.model === "string" ? vectorStoreConfig.model : undefined });
+        } else if (embedderId === "mistral-embedder") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.MISTRAL_API_KEY;
+           embedder = new MistralEmbeddingAdapter({ apiKey: apiKey || "", model: typeof vectorStoreConfig.model === "string" ? vectorStoreConfig.model : undefined });
+        } else if (embedderId === "google-vertex-embedder") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.GEMINI_API_KEY;
+           embedder = new GoogleVertexEmbeddingAdapter({ apiKey: apiKey || "", model: typeof vectorStoreConfig.model === "string" ? vectorStoreConfig.model : undefined });
+        } else if (embedderId === "huggingface-embedder") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.HUGGINGFACE_API_KEY;
+           embedder = new HuggingFaceEmbeddingAdapter({ apiKey: apiKey || "", model: typeof vectorStoreConfig.model === "string" ? vectorStoreConfig.model : undefined });
         }
         else throw new Error(`Unknown embedder ID: ${embedderId}`);
       }
@@ -2731,6 +2838,30 @@ async function executeNode(
                  ? vectorStoreConfig.metadataField
                  : undefined,
              filter: parsedFilter
+           });
+         } else if (vectorStoreId === "chroma-vector-store") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.CHROMA_API_KEY;
+           store = new ChromaVectorStoreAdapter({
+             endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.CHROMA_ENDPOINT || "http://localhost:8000",
+             collectionName: typeof vectorStoreConfig.collectionName === "string" ? vectorStoreConfig.collectionName : "",
+             apiKey: apiKey || undefined
+           });
+         } else if (vectorStoreId === "weaviate-vector-store") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.WEAVIATE_API_KEY;
+           store = new WeaviateVectorStoreAdapter({
+             endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.WEAVIATE_ENDPOINT || "http://localhost:8080",
+             className: typeof vectorStoreConfig.className === "string" ? vectorStoreConfig.className : "",
+             apiKey: apiKey || undefined
+           });
+         } else if (vectorStoreId === "redis-vector-store") {
+           const apiKeyRef = config.embeddingSecretRef;
+           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.REDIS_API_KEY;
+           store = new RedisVectorStoreAdapter({
+             endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.REDIS_ENDPOINT || "http://localhost:6379",
+             indexName: typeof vectorStoreConfig.indexName === "string" ? vectorStoreConfig.indexName : "",
+             apiKey: apiKey || undefined
            });
          }
          else throw new Error(`Unknown vector store ID: ${vectorStoreId}`);
@@ -3412,6 +3543,28 @@ async function executeNode(
       return { ...result, sentiment, answer };
     }
 
+    case "ai_transform": {
+      const provider = normalizeProvider(config.provider) ?? normalizeProvider(templateData._provider);
+      if (!provider) throw new Error("AI Transform requires a provider.");
+      const inputKey = typeof config.inputKey === "string" ? config.inputKey : "text";
+      const input = String(templateData[inputKey] ?? templateData.prompt ?? "");
+      const instruction = typeof config.instruction === "string" ? config.instruction : "Transform the input";
+      const outputFormat = typeof config.outputFormat === "string" ? config.outputFormat : "text";
+      const formatInstructions: Record<string, string> = {
+        text: "Return plain text.",
+        json: "Return valid JSON only. No markdown fences.",
+        code: "Return code only. No explanations."
+      };
+      const systemPrompt = `You are a data transformation assistant. Apply the user's transformation instruction to the input data. ${formatInstructions[outputFormat] ?? formatInstructions.text}`;
+      const userPrompt = `Instruction: ${instruction}\n\nInput:\n${input}`;
+      const result = await runLlmNode({ nodeId: node.id, provider, userPrompt, systemPrompt, dependencies });
+      let transformed: unknown = result.answer ?? result.text;
+      if (outputFormat === "json" && typeof transformed === "string") {
+        try { transformed = JSON.parse((transformed as string).replace(/^```json?\s*/i, "").replace(/```\s*$/i, "").trim()); } catch { /* keep as string */ }
+      }
+      return { ...result, transformed };
+    }
+
     case "if_node": {
       const conditionTemplate = typeof config.condition === "string" ? config.condition : "";
       const evaluated = renderTemplate(conditionTemplate, templateData).trim();
@@ -3728,6 +3881,7 @@ const RETRYABLE_NODE_TYPES = new Set([
   "information_extractor",
   "text_classifier",
   "sentiment_analysis",
+  "ai_transform",
   "mcp_tool",
   "connector_source",
   "google_drive_source",

@@ -58,7 +58,8 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "summarization_chain",
         "information_extractor",
         "text_classifier",
-        "sentiment_analysis"
+        "sentiment_analysis",
+        "ai_transform"
       ].includes(node.type)
   },
   {
