@@ -171,6 +171,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     API_PORT: 0,
     API_HOST: "127.0.0.1",
     WEB_ORIGIN: "http://localhost:5173",
+    API_BODY_LIMIT_BYTES: 10 * 1024 * 1024,
     WORKFLOW_EXECUTION_TIMEOUT_MS: 300000,
     EXECUTION_HISTORY_RETENTION_DAYS: 30,
     EXECUTION_HISTORY_PRUNE_INTERVAL_MS: 3600000,
@@ -276,6 +277,23 @@ describe("helper chat page", () => {
     expect(response.statusCode).toBe(200);
     expect(String(response.headers["content-type"] ?? "")).toContain("text/html");
     expect(response.body).toContain("Workflow Chat Helper");
+  });
+});
+
+describe("request body limit", () => {
+  it("returns 413 when request payload exceeds configured API_BODY_LIMIT_BYTES", async () => {
+    const context = await createTestContext({ API_BODY_LIMIT_BYTES: 1024 });
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: {
+        email: "admin@example.com",
+        password: "x".repeat(4096)
+      }
+    });
+
+    expect(response.statusCode).toBe(413);
+    expect(response.json<{ error: string }>().error).toBe("Request body is too large");
   });
 });
 

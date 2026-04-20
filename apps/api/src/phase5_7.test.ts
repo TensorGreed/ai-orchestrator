@@ -29,6 +29,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     API_PORT: 0,
     API_HOST: "127.0.0.1",
     WEB_ORIGIN: "http://localhost:5173",
+    API_BODY_LIMIT_BYTES: 10 * 1024 * 1024,
     WORKFLOW_EXECUTION_TIMEOUT_MS: 300000,
     EXECUTION_HISTORY_RETENTION_DAYS: 30,
     EXECUTION_HISTORY_PRUNE_INTERVAL_MS: 3600000,

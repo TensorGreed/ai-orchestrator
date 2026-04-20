@@ -21,6 +21,7 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().int().positive().default(4000),
   API_HOST: z.string().default("0.0.0.0"),
   WEB_ORIGIN: z.string().default("http://localhost:5173"),
+  API_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   WORKFLOW_EXECUTION_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
   EXECUTION_HISTORY_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(30),
   EXECUTION_HISTORY_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),

@@ -887,7 +887,10 @@ export function createApp(
   queueService?: QueueService,
   triggerService?: TriggerService
 ) {
-  const app = Fastify({ logger: { level: config.LOG_LEVEL } });
+  const app = Fastify({
+    logger: { level: config.LOG_LEVEL },
+    bodyLimit: config.API_BODY_LIMIT_BYTES
+  });
   const providerRegistry = createDefaultProviderRegistry();
   const connectorRegistry = createDefaultConnectorRegistry();
   const mcpRegistry = createDefaultMCPRegistry();
@@ -7185,6 +7188,29 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   app.setErrorHandler((error, _request, reply) => {
     const message = error instanceof Error ? error.message : "Unknown error";
+    const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number"
+      ? Number((error as { statusCode?: unknown }).statusCode)
+      : 500;
+    const errorCode = typeof (error as { code?: unknown }).code === "string"
+      ? String((error as { code?: unknown }).code)
+      : "";
+    const isPayloadTooLarge =
+      errorCode === "FST_ERR_CTP_BODY_TOO_LARGE" ||
+      statusCode === 413 ||
+      message.toLowerCase().includes("request body is too large");
+
+    if (isPayloadTooLarge) {
+      app.log.warn(
+        { limitBytes: config.API_BODY_LIMIT_BYTES, err: secretService.redact(message) },
+        "Rejected request: body exceeds configured limit"
+      );
+      reply.code(413).send({
+        error: "Request body is too large",
+        limitBytes: config.API_BODY_LIMIT_BYTES
+      });
+      return;
+    }
+
     app.log.error({ err: secretService.redact(message) }, "Unhandled API error");
     reply.code(500).send({
       error: "Internal server error"
