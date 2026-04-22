@@ -27,6 +27,16 @@ interface DefinitionNode {
 
 type LogsTab = "logs" | "inputs";
 
+type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
+
+interface NodeDrawerContext {
+  title: string;
+  description: string;
+  allowedTypes: string[];
+  sourceNodeId?: string;
+  sourceHandle?: AgentAttachmentHandle;
+}
+
 interface PaletteCategoryMeta {
   key: string;
   title: string;
@@ -44,6 +54,10 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     match: (node) =>
       [
         "llm_call",
+        "openai_chat_model",
+        "anthropic_chat_model",
+        "ollama_chat_model",
+        "openai_compatible_chat_model",
         "azure_openai_chat_model",
         "google_gemini_chat_model",
         "embeddings_azure_openai",
@@ -140,10 +154,12 @@ interface WorkflowCanvasAreaProps {
   onDrop: (event: DragEvent<HTMLDivElement>) => void;
   onDragOver: (event: DragEvent<HTMLDivElement>) => void;
   showNodeDrawer: boolean;
+  nodeDrawerContext?: NodeDrawerContext | null;
   onCloseNodeDrawer: () => void;
   onOpenNodeDrawer: () => void;
   groupedDefinitions: Map<string, DefinitionNode[]>;
   onCreateNodeFromDefinition: (definition: DefinitionNode) => void;
+  onOpenAgentAttachmentDrawer?: (sourceNodeId: string, sourceHandle: AgentAttachmentHandle) => void;
   nodes: Node<EditorNodeData>[];
   edges: Edge[];
   nodeTypes: NodeTypes;
@@ -200,10 +216,12 @@ export function WorkflowCanvasArea({
   onDrop,
   onDragOver,
   showNodeDrawer,
+  nodeDrawerContext,
   onCloseNodeDrawer,
   onOpenNodeDrawer,
   groupedDefinitions,
   onCreateNodeFromDefinition,
+  onOpenAgentAttachmentDrawer,
   nodes,
   edges,
   nodeTypes,
@@ -252,13 +270,22 @@ export function WorkflowCanvasArea({
     return [...byType.values()].sort((a, b) => a.label.localeCompare(b.label));
   }, [groupedDefinitions]);
 
+  const visibleDefinitions = useMemo(() => {
+    if (!nodeDrawerContext) {
+      return allDefinitions;
+    }
+
+    const allowedTypes = new Set(nodeDrawerContext.allowedTypes);
+    return allDefinitions.filter((definition) => allowedTypes.has(definition.type));
+  }, [allDefinitions, nodeDrawerContext]);
+
   const paletteSections = useMemo(
     () =>
       PALETTE_CATEGORIES.map((section) => ({
         ...section,
-        items: allDefinitions.filter((node) => section.match(node))
+        items: visibleDefinitions.filter((node) => section.match(node))
       })).filter((section) => section.items.length > 0),
-    [allDefinitions]
+    [visibleDefinitions]
   );
 
   const activeSection = useMemo(
@@ -271,14 +298,14 @@ export function WorkflowCanvasArea({
     if (!query) {
       return [];
     }
-    return allDefinitions.filter((node) => {
+    return visibleDefinitions.filter((node) => {
       return (
         node.label.toLowerCase().includes(query) ||
         node.type.toLowerCase().includes(query) ||
         node.description.toLowerCase().includes(query)
       );
     });
-  }, [allDefinitions, paletteSearch]);
+  }, [paletteSearch, visibleDefinitions]);
 
   const renderEdges = useMemo(
     () =>
@@ -290,6 +317,28 @@ export function WorkflowCanvasArea({
         }
       })),
     [edges, onDeleteEdge]
+  );
+
+  const renderNodes = useMemo(
+    () =>
+      nodes.map((node) => {
+        if (
+          !onOpenAgentAttachmentDrawer ||
+          (node.data.nodeType !== "agent_orchestrator" && node.data.nodeType !== "supervisor_node")
+        ) {
+          return node;
+        }
+
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            onOpenAgentAttachmentDrawer: (sourceHandle: AgentAttachmentHandle) =>
+              onOpenAgentAttachmentDrawer(node.id, sourceHandle)
+          }
+        };
+      }),
+    [nodes, onOpenAgentAttachmentDrawer]
   );
 
   const nodeMetaById = useMemo(() => {
@@ -349,6 +398,21 @@ export function WorkflowCanvasArea({
     };
   }, [showNodeDrawer, onCloseNodeDrawer]);
 
+  useEffect(() => {
+    if (!showNodeDrawer) {
+      return;
+    }
+    setPaletteSearch("");
+    setActivePaletteCategory(null);
+  }, [nodeDrawerContext?.sourceHandle, nodeDrawerContext?.sourceNodeId, nodeDrawerContext?.title, showNodeDrawer]);
+
+  const isFilteredDrawer = Boolean(nodeDrawerContext);
+  const effectiveActiveSection = isFilteredDrawer ? null : activeSection;
+  const paletteTitle = effectiveActiveSection ? effectiveActiveSection.title : nodeDrawerContext?.title ?? "What happens next?";
+  const paletteSubtitle = effectiveActiveSection
+    ? `Select a ${effectiveActiveSection.title} node to add`
+    : nodeDrawerContext?.description ?? "Pick a category or search directly";
+
   return (
     <div className="editor-layout">
       <section className={isLogsPanelCollapsed ? "canvas-and-logs logs-collapsed" : "canvas-and-logs"} style={canvasAndLogsStyle}>
@@ -363,7 +427,7 @@ export function WorkflowCanvasArea({
               >
                 <div className="node-palette-header">
                   <div className="node-palette-heading-row">
-                    {activeSection ? (
+                    {effectiveActiveSection ? (
                       <button
                         className="node-palette-back-btn"
                         onClick={() => setActivePaletteCategory(null)}
@@ -383,8 +447,8 @@ export function WorkflowCanvasArea({
                       </button>
                     ) : null}
                     <div>
-                      <h3>{activeSection ? activeSection.title : "What happens next?"}</h3>
-                      <p>{activeSection ? `Select a ${activeSection.title} node to add` : "Pick a category or search directly"}</p>
+                      <h3>{paletteTitle}</h3>
+                      <p>{paletteSubtitle}</p>
                     </div>
                     <button
                       className="node-palette-close-btn"
@@ -453,6 +517,39 @@ export function WorkflowCanvasArea({
                         );
                       })}
                     </div>
+                  ) : isFilteredDrawer ? (
+                    <div className="node-palette-list">
+                      {visibleDefinitions.length === 0 && (
+                        <div className="node-palette-empty">No compatible nodes are available for this port.</div>
+                      )}
+                      {visibleDefinitions.map((item) => {
+                        const parentSection = paletteSections.find((section) => section.match(item));
+                        return (
+                          <button
+                            key={item.type}
+                            className="node-palette-node-row"
+                            draggable
+                            onDragStart={(event) => {
+                              event.dataTransfer.setData("application/reactflow", item.type);
+                              event.dataTransfer.effectAllowed = "move";
+                            }}
+                            onClick={() => handleAddNode(item)}
+                            title={item.description}
+                          >
+                            <span className="node-palette-icon-wrap">
+                              <NodeTypeIcon nodeType={item.type} fallbackIcon={parentSection?.icon ?? "ai"} />
+                            </span>
+                            <span className="node-palette-row-copy">
+                              <strong>{item.label}</strong>
+                              <small>{item.description || item.type}</small>
+                            </span>
+                            <span className="node-palette-row-arrow" aria-hidden="true">
+                              +
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   ) : activeSection ? (
                     <div className="node-palette-list">
                       {activeSection.items.map((item) => (
@@ -508,7 +605,7 @@ export function WorkflowCanvasArea({
           )}
 
           <ReactFlow
-            nodes={nodes}
+            nodes={renderNodes}
             edges={renderEdges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}

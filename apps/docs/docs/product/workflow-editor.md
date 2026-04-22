@@ -10,16 +10,17 @@
 - Save/import/export workflows
 - Execution logs pane and run-inputs pane
 - Per-node execution status visualization
+- Agent port `+` buttons that open filtered drawers for Language Models, Memory, Tools, and Workers
 
 ## Typical flow patterns
 
 1. Basic LLM:
-   - `text_input -> prompt_template -> llm_call -> output`
+   - `text_input -> prompt_template -> ollama_chat_model -> output`
 2. Agentic tool loop:
    - `webhook_input -> agent_orchestrator -> output`
    - Attachments:
-     - `chat_model`: `llm_call` or `azure_openai_chat_model`
-     - `memory`: `simple_memory`
+     - `chat_model`: any Chat Model node, including OpenAI, Anthropic, Ollama, OpenAI Compatible, Azure OpenAI, Gemini, or legacy `llm_call`
+     - `memory`: `local_memory`
      - `tool`: one or more `mcp_tool`
 3. RAG:
    - `text_input -> rag_retrieve -> prompt_template -> llm_call -> output`

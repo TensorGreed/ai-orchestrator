@@ -2086,6 +2086,19 @@ select {
   font-size: 0.82rem;
   margin-left: 8px;
   vertical-align: middle;
+  padding: 0;
+  font: inherit;
+  line-height: 1;
+  pointer-events: all;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.wf-agent-plus:hover {
+  border-color: #9eb0c9;
+  color: #243b5a;
+  box-shadow: 0 4px 10px rgba(38, 59, 90, 0.14);
+  transform: translateY(-1px);
 }
 
 .status-success {

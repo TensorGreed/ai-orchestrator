@@ -34,7 +34,12 @@ AI Orchestrator is a low-code workflow automation platform for:
 
 This docs site tracks the current monorepo implementation (apps + packages) and includes the newly added Azure node suite:
 
+- `openai_chat_model`
+- `anthropic_chat_model`
+- `ollama_chat_model`
+- `openai_compatible_chat_model`
 - `azure_openai_chat_model`
+- `google_gemini_chat_model`
 - `embeddings_azure_openai`
 - `azure_storage`
 - `azure_cosmos_db`

@@ -282,6 +282,109 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "openai_chat_model",
+    label: "OpenAI Chat Model",
+    category: "LLM",
+    description: "Calls OpenAI chat models with an API key or OPENAI_API_KEY.",
+    configSchema: {
+      type: "object",
+      properties: {
+        model: { type: "string" },
+        secretRef: { type: "object" },
+        temperature: { type: "number" },
+        maxTokens: { type: "number" },
+        promptKey: { type: "string" },
+        systemPromptKey: { type: "string" }
+      },
+      required: ["model"]
+    },
+    sampleConfig: {
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      maxTokens: 1024,
+      promptKey: "prompt",
+      systemPromptKey: "system_prompt"
+    }
+  },
+  {
+    type: "anthropic_chat_model",
+    label: "Anthropic Chat Model",
+    category: "LLM",
+    description: "Calls Anthropic Claude models with an API key or ANTHROPIC_API_KEY.",
+    configSchema: {
+      type: "object",
+      properties: {
+        model: { type: "string" },
+        secretRef: { type: "object" },
+        temperature: { type: "number" },
+        maxTokens: { type: "number" },
+        promptKey: { type: "string" },
+        systemPromptKey: { type: "string" }
+      },
+      required: ["model"]
+    },
+    sampleConfig: {
+      model: "claude-3-5-sonnet-latest",
+      temperature: 0.2,
+      maxTokens: 1024,
+      promptKey: "prompt",
+      systemPromptKey: "system_prompt"
+    }
+  },
+  {
+    type: "ollama_chat_model",
+    label: "Ollama Chat Model",
+    category: "LLM",
+    description: "Calls a local Ollama model through its OpenAI-compatible API.",
+    configSchema: {
+      type: "object",
+      properties: {
+        baseUrl: { type: "string" },
+        model: { type: "string" },
+        temperature: { type: "number" },
+        maxTokens: { type: "number" },
+        promptKey: { type: "string" },
+        systemPromptKey: { type: "string" }
+      },
+      required: ["model"]
+    },
+    sampleConfig: {
+      baseUrl: "http://localhost:11434/v1",
+      model: "llama3.1",
+      temperature: 0.2,
+      maxTokens: 1024,
+      promptKey: "prompt",
+      systemPromptKey: "system_prompt"
+    }
+  },
+  {
+    type: "openai_compatible_chat_model",
+    label: "OpenAI Compatible Chat Model",
+    category: "LLM",
+    description: "Calls any OpenAI-compatible chat API such as OpenRouter, Groq, vLLM, or LM Studio.",
+    configSchema: {
+      type: "object",
+      properties: {
+        baseUrl: { type: "string" },
+        model: { type: "string" },
+        secretRef: { type: "object" },
+        temperature: { type: "number" },
+        maxTokens: { type: "number" },
+        promptKey: { type: "string" },
+        systemPromptKey: { type: "string" }
+      },
+      required: ["baseUrl", "model"]
+    },
+    sampleConfig: {
+      baseUrl: "http://localhost:1234/v1",
+      model: "local-model",
+      temperature: 0.2,
+      maxTokens: 1024,
+      promptKey: "prompt",
+      systemPromptKey: "system_prompt"
+    }
+  },
+  {
     type: "azure_openai_chat_model",
     label: "Azure OpenAI Chat Model",
     category: "LLM",

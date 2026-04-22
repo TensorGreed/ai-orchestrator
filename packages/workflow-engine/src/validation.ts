@@ -11,6 +11,15 @@ const allowedWebhookAuthModes = new Set(["none", "bearer_token", "hmac_sha256"])
 const allowedHttpRequestMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const allowedOutputParserParsingModes = new Set(["strict", "lenient", "anything_goes"]);
 const agentPrimaryInputNodeTypes = new Set(["webhook_input", "text_input", "user_prompt"]);
+const chatModelNodeTypes = new Set([
+  "llm_call",
+  "openai_chat_model",
+  "anthropic_chat_model",
+  "ollama_chat_model",
+  "openai_compatible_chat_model",
+  "azure_openai_chat_model",
+  "google_gemini_chat_model"
+]);
 
 function toRecord(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -324,6 +333,33 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           message: "LLM Call node requires provider.providerId and provider.model.",
           nodeId: node.id
         });
+      }
+    }
+
+    if (
+      node.type === "openai_chat_model" ||
+      node.type === "anthropic_chat_model" ||
+      node.type === "ollama_chat_model" ||
+      node.type === "openai_compatible_chat_model"
+    ) {
+      const model = typeof config.model === "string" ? config.model.trim() : "";
+      if (!model) {
+        issues.push({
+          code: "missing_chat_model_model",
+          message: `${node.name || node.type} requires model.`,
+          nodeId: node.id
+        });
+      }
+
+      if (node.type === "openai_compatible_chat_model") {
+        const baseUrl = typeof config.baseUrl === "string" ? config.baseUrl.trim() : "";
+        if (!baseUrl) {
+          issues.push({
+            code: "missing_openai_compatible_base_url",
+            message: "OpenAI Compatible Chat Model node requires baseUrl.",
+            nodeId: node.id
+          });
+        }
       }
     }
 
@@ -988,24 +1024,19 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       continue;
     }
 
-    if (sourceNode.type !== "agent_orchestrator") {
+    if (sourceNode.type !== "agent_orchestrator" && sourceNode.type !== "supervisor_node") {
       issues.push({
         code: "invalid_attachment_source",
-        message: "Attachment handles chat_model/memory/tool are only valid when source is an Agent Orchestrator node.",
+        message: "Attachment handles chat_model/memory/tool/worker are only valid when source is an Agent Orchestrator or Supervisor node.",
         edgeId: edge.id
       });
       continue;
     }
 
-    if (
-      edge.sourceHandle === "chat_model" &&
-      targetNode.type !== "llm_call" &&
-      targetNode.type !== "azure_openai_chat_model" &&
-      targetNode.type !== "google_gemini_chat_model"
-    ) {
+    if (edge.sourceHandle === "chat_model" && !chatModelNodeTypes.has(targetNode.type)) {
       issues.push({
         code: "invalid_chat_model_attachment",
-        message: "Agent chat_model attachment must target an LLM Call, Azure OpenAI Chat Model, or Google Gemini Chat Model node.",
+        message: "Agent chat_model attachment must target a Chat Model node.",
         edgeId: edge.id
       });
     }
@@ -1022,6 +1053,18 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       issues.push({
         code: "invalid_tool_attachment",
         message: "Agent tool attachment must target an MCP Tool node.",
+        edgeId: edge.id
+      });
+    }
+
+    if (
+      edge.sourceHandle === "worker" &&
+      targetNode.type !== "agent_orchestrator" &&
+      targetNode.type !== "supervisor_node"
+    ) {
+      issues.push({
+        code: "invalid_worker_attachment",
+        message: "Supervisor worker attachment must target an Agent Orchestrator or Supervisor node.",
         edgeId: edge.id
       });
     }

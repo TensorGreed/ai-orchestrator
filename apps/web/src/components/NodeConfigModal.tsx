@@ -1411,6 +1411,50 @@ export function NodeConfigModal({
       return { provider };
     }
 
+    if (
+      node.data.nodeType === "openai_chat_model" ||
+      node.data.nodeType === "anthropic_chat_model" ||
+      node.data.nodeType === "ollama_chat_model" ||
+      node.data.nodeType === "openai_compatible_chat_model"
+    ) {
+      const providerId =
+        node.data.nodeType === "openai_chat_model"
+          ? "openai"
+          : node.data.nodeType === "anthropic_chat_model"
+            ? "anthropic"
+            : node.data.nodeType === "ollama_chat_model"
+              ? "ollama"
+              : "openai_compatible";
+      const fallbackModel =
+        node.data.nodeType === "openai_chat_model"
+          ? "gpt-4o-mini"
+          : node.data.nodeType === "anthropic_chat_model"
+            ? "claude-3-5-sonnet-latest"
+            : node.data.nodeType === "ollama_chat_model"
+              ? "llama3.1"
+              : "";
+      const model = toStringValue(config.model, fallbackModel).trim();
+      const baseUrl = toStringValue(config.baseUrl).trim();
+      if (!model || (node.data.nodeType === "openai_compatible_chat_model" && !baseUrl)) {
+        return null;
+      }
+
+      const secretId = toStringValue(asRecord(config.secretRef).secretId).trim();
+      const provider: LLMProviderConfig = {
+        providerId,
+        model,
+        ...(baseUrl ? { baseUrl } : {}),
+        ...(secretId ? { secretRef: { secretId } } : {}),
+        ...(typeof config.temperature === "number" && Number.isFinite(config.temperature)
+          ? { temperature: config.temperature }
+          : {}),
+        ...(typeof config.maxTokens === "number" && Number.isFinite(config.maxTokens)
+          ? { maxTokens: Math.max(1, Math.floor(config.maxTokens)) }
+          : {})
+      };
+      return { provider };
+    }
+
     if (node.data.nodeType === "azure_openai_chat_model") {
       const endpoint = toStringValue(config.endpoint).trim();
       const deployment = toStringValue(config.deployment).trim();
@@ -2890,6 +2934,92 @@ export function NodeConfigModal({
     );
   };
 
+  const renderDirectChatModelParameters = (options: {
+    providerId: "openai" | "anthropic" | "ollama" | "openai_compatible";
+    defaultModel: string;
+    modelPlaceholder: string;
+    secretLabel?: string;
+    secretProvider?: string;
+    baseUrlLabel?: string;
+    baseUrlPlaceholder?: string;
+    requireBaseUrl?: boolean;
+    help: string;
+  }) => {
+    const showSecret = options.providerId !== "ollama";
+    return (
+      <>
+        {showSecret && (
+          renderCredentialSecretField({
+            fieldKey: `${options.providerId}_chat_secret`,
+            label: options.secretLabel ?? "API Key Secret",
+            value: toStringValue(asRecord(config.secretRef).secretId),
+            noneLabel: "None / Environment variable",
+            preferredProvider: options.secretProvider ?? options.providerId,
+            onSelect: (next) =>
+              setConfig((current) => ({
+                ...current,
+                secretRef: next ? { secretId: next } : undefined
+              }))
+          })
+        )}
+        {(options.providerId === "ollama" || options.providerId === "openai_compatible") && (
+          <TextField
+            label={options.baseUrlLabel ?? "Base URL"}
+            value={toStringValue(config.baseUrl)}
+            onChange={(next) => setConfig((current) => ({ ...current, baseUrl: next }))}
+            placeholder={options.baseUrlPlaceholder}
+          />
+        )}
+        <TextField
+          label="Model"
+          value={toStringValue(config.model, options.defaultModel)}
+          onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
+          placeholder={options.modelPlaceholder}
+        />
+        <div className="cfg-grid-2">
+          <NumberField
+            label="Temperature"
+            value={toNumberValue(config.temperature, 0.2)}
+            min={0}
+            max={2}
+            step={0.1}
+            onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
+          />
+          <NumberField
+            label="Max Tokens"
+            value={toNumberValue(config.maxTokens, 1024)}
+            min={1}
+            step={1}
+            onChange={(next) => setConfig((current) => ({ ...current, maxTokens: next }))}
+          />
+        </div>
+        <TextField
+          label="Prompt Key"
+          value={toStringValue(config.promptKey, "prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, promptKey: next }))}
+        />
+        <TextField
+          label="System Prompt Key"
+          value={toStringValue(config.systemPromptKey, "system_prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
+        />
+        <div className="cfg-tip">{options.help}</div>
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() => void handleProviderTestRun()}
+            disabled={providerTestBusy}
+          >
+            {providerTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
+        </div>
+        {providerTestError && <div className="error-banner">{providerTestError}</div>}
+      </>
+    );
+  };
+
   const renderAzureOpenAIChatModelParameters = () => {
     return (
       <>
@@ -3729,6 +3859,45 @@ export function NodeConfigModal({
         return renderLocalMemoryParameters();
       case "llm_call":
         return renderLlmParameters();
+      case "openai_chat_model":
+        return renderDirectChatModelParameters({
+          providerId: "openai",
+          defaultModel: "gpt-4o-mini",
+          modelPlaceholder: "gpt-4o-mini",
+          secretLabel: "OpenAI API Key",
+          secretProvider: "openai",
+          help: "Uses the OpenAI API key from the selected secret or OPENAI_API_KEY on the API server."
+        });
+      case "anthropic_chat_model":
+        return renderDirectChatModelParameters({
+          providerId: "anthropic",
+          defaultModel: "claude-3-5-sonnet-latest",
+          modelPlaceholder: "claude-3-5-sonnet-latest",
+          secretLabel: "Anthropic API Key",
+          secretProvider: "anthropic",
+          help: "Uses the Anthropic API key from the selected secret or ANTHROPIC_API_KEY on the API server."
+        });
+      case "ollama_chat_model":
+        return renderDirectChatModelParameters({
+          providerId: "ollama",
+          defaultModel: "llama3.1",
+          modelPlaceholder: "llama3.1",
+          baseUrlLabel: "Ollama Base URL",
+          baseUrlPlaceholder: "http://localhost:11434/v1",
+          help: "Uses a local or remote Ollama OpenAI-compatible endpoint. No API key is required by default."
+        });
+      case "openai_compatible_chat_model":
+        return renderDirectChatModelParameters({
+          providerId: "openai_compatible",
+          defaultModel: "",
+          modelPlaceholder: "model-name",
+          secretLabel: "API Key Secret",
+          secretProvider: "openai_compatible",
+          baseUrlLabel: "Base URL",
+          baseUrlPlaceholder: "https://api.example.com/v1",
+          requireBaseUrl: true,
+          help: "Use for OpenRouter, Groq, vLLM, LM Studio, or any OpenAI-compatible chat/completions API."
+        });
       case "basic_llm_chain":
         return renderBasicLlmChainParameters();
       case "qa_chain":

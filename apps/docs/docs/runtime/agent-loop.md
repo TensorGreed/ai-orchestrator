@@ -16,10 +16,12 @@ Agent orchestration is iterative, not one-shot.
 ## Attachment ports
 
 - `chat_model`: attach model node
-  - supported: `llm_call`, `azure_openai_chat_model`
-- `memory`: attach `simple_memory`
+  - supported: `openai_chat_model`, `anthropic_chat_model`, `ollama_chat_model`, `openai_compatible_chat_model`, `azure_openai_chat_model`, `google_gemini_chat_model`, `llm_call`
+- `memory`: attach `local_memory`
 - `tool`: attach one or more `mcp_tool`
 - `worker`: attach worker agents (supervisor use cases)
+
+In the visual editor, use the `+` button below an Agent port to open a filtered drawer for compatible Language Model, Memory, or Tool nodes. Clicking an item creates and attaches it automatically.
 
 ## Common failure causes
 

@@ -16,6 +16,7 @@ export interface EditorNodeData {
   pinned?: boolean;
   disabled?: boolean;
   color?: NodeColorKey;
+  onOpenAgentAttachmentDrawer?: (sourceHandle: "chat_model" | "memory" | "tool" | "worker") => void;
 }
 
 export type EditorNode = Node<EditorNodeData>;

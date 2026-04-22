@@ -410,6 +410,18 @@ General trigger nodes:
 
 Message queue trigger nodes are registered for Kafka, RabbitMQ, and MQTT with optional-dependency detection. Their long-lived consumers are intentionally guarded until the corresponding client dependency and deployment path are configured.
 
+## Chat model nodes (implemented)
+
+Agent Chat Model attachments can use dedicated provider nodes:
+
+- `OpenAI Chat Model` (`openai_chat_model`)
+- `Anthropic Chat Model` (`anthropic_chat_model`)
+- `Ollama Chat Model` (`ollama_chat_model`)
+- `OpenAI Compatible Chat Model` (`openai_compatible_chat_model`)
+- `Azure OpenAI Chat Model` (`azure_openai_chat_model`)
+- `Google Gemini Chat Model` (`google_gemini_chat_model`)
+- Legacy generic `LLM Call` (`llm_call`)
+
 ## Azure node suite (implemented)
 
 The Azure suite from the n8n-style screenshot is implemented end-to-end in this V1:

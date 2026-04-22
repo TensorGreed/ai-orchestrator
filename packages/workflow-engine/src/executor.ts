@@ -239,6 +239,20 @@ function getAttachmentHandle(sourceHandle: string | undefined): AgentAttachmentH
   return sourceHandle as AgentAttachmentHandle;
 }
 
+const CHAT_MODEL_NODE_TYPES = new Set([
+  "llm_call",
+  "openai_chat_model",
+  "anthropic_chat_model",
+  "ollama_chat_model",
+  "openai_compatible_chat_model",
+  "azure_openai_chat_model",
+  "google_gemini_chat_model"
+]);
+
+function isChatModelNodeType(type: string): boolean {
+  return CHAT_MODEL_NODE_TYPES.has(type);
+}
+
 function normalizeProvider(value: unknown): LLMProviderConfig | undefined {
   const provider = toRecord(value);
   if (typeof provider.providerId !== "string" || typeof provider.model !== "string") {
@@ -254,10 +268,58 @@ function normalizeSecretRef(value: unknown): SecretReference | undefined {
   return secretId ? { secretId } : undefined;
 }
 
+function normalizeOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function buildSimpleChatProvider(
+  providerId: string,
+  config: Record<string, unknown>,
+  fallbackModel: string,
+  options: { requiresBaseUrl?: boolean; defaultBaseUrl?: string; allowSecret?: boolean } = {}
+): LLMProviderConfig | undefined {
+  const model = typeof config.model === "string" && config.model.trim() ? config.model.trim() : fallbackModel;
+  const baseUrl = typeof config.baseUrl === "string" && config.baseUrl.trim() ? config.baseUrl.trim() : options.defaultBaseUrl;
+  if (!model || (options.requiresBaseUrl && !baseUrl)) {
+    return undefined;
+  }
+
+  return {
+    providerId,
+    model,
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(options.allowSecret === false ? {} : { secretRef: normalizeSecretRef(config.secretRef) }),
+    temperature: normalizeOptionalNumber(config.temperature),
+    maxTokens:
+      typeof config.maxTokens === "number" && Number.isFinite(config.maxTokens)
+        ? Math.max(1, Math.floor(config.maxTokens))
+        : undefined
+  };
+}
+
 function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | undefined {
   const nodeConfig = toRecord(node.config);
   if (node.type === "llm_call") {
     return normalizeProvider(nodeConfig.provider);
+  }
+
+  if (node.type === "openai_chat_model") {
+    return buildSimpleChatProvider("openai", nodeConfig, "gpt-4o-mini");
+  }
+
+  if (node.type === "anthropic_chat_model") {
+    return buildSimpleChatProvider("anthropic", nodeConfig, "claude-3-5-sonnet-latest");
+  }
+
+  if (node.type === "ollama_chat_model") {
+    return buildSimpleChatProvider("ollama", nodeConfig, "llama3.1", {
+      defaultBaseUrl: "http://localhost:11434/v1",
+      allowSecret: false
+    });
+  }
+
+  if (node.type === "openai_compatible_chat_model") {
+    return buildSimpleChatProvider("openai_compatible", nodeConfig, "", { requiresBaseUrl: true });
   }
 
   if (node.type === "azure_openai_chat_model") {
@@ -2363,6 +2425,28 @@ async function executeNode(
       });
     }
 
+    case "openai_chat_model":
+    case "anthropic_chat_model":
+    case "ollama_chat_model":
+    case "openai_compatible_chat_model": {
+      const provider = buildProviderFromModelNode(node);
+      if (!provider) {
+        throw new Error(`${node.name || node.type} requires a valid model configuration.`);
+      }
+
+      const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
+      const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
+      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
+      const systemPrompt = String(templateData[systemPromptKey] ?? "");
+      return runLlmNode({
+        nodeId: node.id,
+        provider,
+        userPrompt,
+        systemPrompt,
+        dependencies
+      });
+    }
+
     case "azure_openai_chat_model": {
       const endpoint = typeof config.endpoint === "string" ? config.endpoint.trim() : "";
       const deployment = typeof config.deployment === "string" ? config.deployment.trim() : "";
@@ -2958,9 +3042,7 @@ async function executeNode(
           .filter((attached): attached is WorkflowNode => Boolean(attached));
       };
 
-      const attachedModelNodes = getAttachedNodes("chat_model").filter(
-        (attached) => attached.type === "llm_call" || attached.type === "azure_openai_chat_model" || attached.type === "google_gemini_chat_model"
-      );
+      const attachedModelNodes = getAttachedNodes("chat_model").filter((attached) => isChatModelNodeType(attached.type));
       const attachedModelNode = attachedModelNodes.length ? attachedModelNodes[attachedModelNodes.length - 1] : undefined;
       const provider = attachedModelNode ? buildProviderFromModelNode(attachedModelNode) : undefined;
       if (!provider) {
@@ -3872,6 +3954,10 @@ function getRetryConfig(config: Record<string, unknown>): RetryConfig | undefine
 
 const RETRYABLE_NODE_TYPES = new Set([
   "llm_call",
+  "openai_chat_model",
+  "anthropic_chat_model",
+  "ollama_chat_model",
+  "openai_compatible_chat_model",
   "azure_openai_chat_model",
   "google_gemini_chat_model",
   "agent_orchestrator",

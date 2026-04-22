@@ -27,6 +27,10 @@ export type NodePaletteIconKey =
   | "azure_embedding"
   | "qdrant"
   | "gemini"
+  | "openai"
+  | "anthropic"
+  | "ollama"
+  | "openai_compatible"
   | "system_prompt"
   | "user_prompt"
   | "prompt_template"
@@ -187,6 +191,55 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
         <path d="M7 10h4M7 13h6" fill="none" stroke="#A78BFA" strokeWidth="1.4" strokeLinecap="round" />
         <circle cx="17" cy="12" r="2.5" fill="none" stroke="#7C3AED" strokeWidth="1.4" />
         <path d="M16.2 11.2l.8.8.8-.8" fill="none" stroke="#7C3AED" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (icon === "openai") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="8.5" fill="#F2F4F7" stroke="#9AA4B2" strokeWidth="1.2" />
+        <path
+          d="M12 5.8c1.9 0 3.6 1 4.5 2.5 1.8.2 3.1 1.7 3.1 3.6 0 1.6-1 3-2.4 3.5-.5 1.6-2 2.8-3.8 2.8-.8 0-1.5-.2-2.1-.6-.7.4-1.4.6-2.2.6-1.9 0-3.5-1.3-3.9-3.1-1.2-.6-2-1.9-2-3.3 0-1.8 1.3-3.3 3-3.6.8-1.7 3-2.9 5.8-2.9Z"
+          fill="none"
+          stroke="#111827"
+          strokeWidth="1.3"
+          strokeLinejoin="round"
+        />
+        <path d="M8 12h8M12 8v8" fill="none" stroke="#111827" strokeWidth="1.1" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (icon === "anthropic") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="#F6F0E8" />
+        <path d="M7 17 11.1 7h1.8L17 17h-1.8l-.9-2.4H9.7L8.8 17H7Zm3.2-3.8h3.6L12 8.8l-1.8 4.4Z" fill="#1F2937" />
+      </svg>
+    );
+  }
+  if (icon === "ollama") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="#F3F4F6" />
+        <path
+          d="M7.4 16.8V9.2c0-2.2 1.6-4 3.6-4h2c2 0 3.6 1.8 3.6 4v7.6"
+          fill="none"
+          stroke="#111827"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+        />
+        <path d="M9 11.2h6M9.4 16.8h5.2" fill="none" stroke="#111827" strokeWidth="1.3" strokeLinecap="round" />
+        <circle cx="10" cy="9.4" r="0.8" fill="#111827" />
+        <circle cx="14" cy="9.4" r="0.8" fill="#111827" />
+      </svg>
+    );
+  }
+  if (icon === "openai_compatible") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" fill="#EFF6FF" />
+        <path d="M6 12h12M12 6v12" fill="none" stroke="#2563EB" strokeWidth="1.7" strokeLinecap="round" />
+        <path d="M8.5 8.5h7v7h-7z" fill="none" stroke="#1D4ED8" strokeWidth="1.4" />
       </svg>
     );
   }
@@ -1069,6 +1122,10 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   user_prompt: "user_prompt",
   prompt_template: "prompt_template",
   llm_call: "llm_call",
+  openai_chat_model: "openai",
+  anthropic_chat_model: "anthropic",
+  ollama_chat_model: "ollama",
+  openai_compatible_chat_model: "openai_compatible",
   azure_openai_chat_model: "azure_openai",
   google_gemini_chat_model: "gemini",
   embeddings_azure_openai: "azure_embedding",

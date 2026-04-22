@@ -88,4 +88,59 @@ describe("WorkflowCanvasArea", () => {
     await user.click(screen.getByRole("button", { name: "Stop run" }));
     expect(onCancelRun).toHaveBeenCalledTimes(1);
   });
+
+  it("filters node drawer for agent attachment ports", async () => {
+    const user = userEvent.setup();
+    const onCreateNodeFromDefinition = vi.fn();
+    const groupedDefinitions = new Map([
+      [
+        "LLM",
+        [
+          {
+            type: "openai_chat_model",
+            label: "OpenAI Chat Model",
+            category: "LLM",
+            description: "Calls OpenAI chat models.",
+            sampleConfig: {}
+          }
+        ]
+      ],
+      [
+        "MCP",
+        [
+          {
+            type: "mcp_tool",
+            label: "MCP Tool",
+            category: "MCP",
+            description: "Calls an MCP tool.",
+            sampleConfig: {}
+          }
+        ]
+      ]
+    ]);
+
+    render(
+      <WorkflowCanvasArea
+        {...makeProps({
+          showNodeDrawer: true,
+          groupedDefinitions,
+          nodeDrawerContext: {
+            title: "Language Models",
+            description: "Choose a chat model.",
+            allowedTypes: ["openai_chat_model"],
+            sourceNodeId: "agent-1",
+            sourceHandle: "chat_model"
+          },
+          onCreateNodeFromDefinition
+        })}
+      />
+    );
+
+    expect(screen.getByText("Language Models")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI Chat Model")).toBeInTheDocument();
+    expect(screen.queryByText("MCP Tool")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /OpenAI Chat Model/i }));
+    expect(onCreateNodeFromDefinition).toHaveBeenCalledWith(expect.objectContaining({ type: "openai_chat_model" }));
+  });
 });

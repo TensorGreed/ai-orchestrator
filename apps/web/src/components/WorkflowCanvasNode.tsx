@@ -35,6 +35,10 @@ function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "a
     nodeType === "embeddings_azure_openai" ||
     nodeType === "http_request" ||
     nodeType === "llm_call" ||
+    nodeType === "openai_chat_model" ||
+    nodeType === "anthropic_chat_model" ||
+    nodeType === "ollama_chat_model" ||
+    nodeType === "openai_compatible_chat_model" ||
     nodeType === "azure_openai_chat_model" ||
     nodeType === "google_gemini_chat_model" ||
     nodeType === "local_memory"
@@ -62,6 +66,29 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
   const preview = data.executionPreview;
   const disabledClass = data.disabled ? " wf-node-disabled" : "";
   const colorClass = data.color ? ` wf-node-color-${data.color}` : "";
+  const renderAgentPlus = (sourceHandle: "chat_model" | "memory" | "tool" | "worker", label: string) => {
+    if (!data.onOpenAgentAttachmentDrawer) {
+      return <span className="wf-agent-plus">+</span>;
+    }
+
+    return (
+      <button
+        type="button"
+        className="wf-agent-plus"
+        aria-label={`Add ${label}`}
+        title={`Add ${label}`}
+        onMouseDown={(event) => {
+          event.stopPropagation();
+        }}
+        onClick={(event) => {
+          event.stopPropagation();
+          data.onOpenAgentAttachmentDrawer?.(sourceHandle);
+        }}
+      >
+        +
+      </button>
+    );
+  };
 
   return (
     <div
@@ -106,6 +133,7 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
                 className="wf-handle wf-handle-diamond"
                 style={{ left: data.nodeType === "supervisor_node" ? "16%" : "24%" }}
               />
+              {renderAgentPlus("chat_model", "chat model")}
             </div>
             <div className="wf-agent-port">
               <span>Memory</span>
@@ -116,6 +144,7 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
                 className="wf-handle wf-handle-diamond"
                 style={{ left: data.nodeType === "supervisor_node" ? "38%" : "52%" }}
               />
+              {renderAgentPlus("memory", "memory")}
             </div>
             <div className="wf-agent-port">
               <span>Tool</span>
@@ -126,7 +155,7 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
                 className="wf-handle wf-handle-diamond"
                 style={{ left: data.nodeType === "supervisor_node" ? "62%" : "80%" }}
               />
-              {data.nodeType !== "supervisor_node" && <span className="wf-agent-plus">+</span>}
+              {renderAgentPlus("tool", "tool")}
             </div>
             {data.nodeType === "supervisor_node" && (
               <div className="wf-agent-port">
@@ -138,7 +167,7 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
                   className="wf-handle wf-handle-diamond"
                   style={{ left: "86%" }}
                 />
-                <span className="wf-agent-plus">+</span>
+                {renderAgentPlus("worker", "worker")}
               </div>
             )}
           </div>

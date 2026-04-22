@@ -95,6 +95,16 @@ interface DefinitionNode {
   sampleConfig: Record<string, unknown>;
 }
 
+type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
+
+interface NodeDrawerContext {
+  title: string;
+  description: string;
+  allowedTypes: string[];
+  sourceNodeId?: string;
+  sourceHandle?: AgentAttachmentHandle;
+}
+
 interface MCPServerDefinition {
   id: string;
   label: string;
@@ -159,7 +169,58 @@ const statusColors: Record<string, string> = {
   canceled: "#8a5a44"
 };
 const auxiliaryHandles = new Set(["chat_model", "memory", "tool", "worker"]);
+const chatModelNodeTypes: EditorNodeData["nodeType"][] = [
+  "openai_chat_model",
+  "anthropic_chat_model",
+  "ollama_chat_model",
+  "openai_compatible_chat_model",
+  "azure_openai_chat_model",
+  "google_gemini_chat_model",
+  "llm_call"
+];
+const chatModelDrawerNodeTypes = chatModelNodeTypes.filter((type) => type !== "llm_call");
 const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
+
+function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: AgentAttachmentHandle): NodeDrawerContext {
+  if (sourceHandle === "chat_model") {
+    return {
+      title: "Language Models",
+      description: "Choose a chat model to attach to this AI Agent.",
+      allowedTypes: chatModelDrawerNodeTypes,
+      sourceNodeId,
+      sourceHandle
+    };
+  }
+
+  if (sourceHandle === "memory") {
+    return {
+      title: "Memory",
+      description: "Choose memory storage for this AI Agent.",
+      allowedTypes: ["local_memory"],
+      sourceNodeId,
+      sourceHandle
+    };
+  }
+
+  if (sourceHandle === "worker") {
+    return {
+      title: "Workers",
+      description: "Choose a worker agent to attach to this supervisor.",
+      allowedTypes: ["agent_orchestrator", "supervisor_node"],
+      sourceNodeId,
+      sourceHandle
+    };
+  }
+
+  return {
+    title: "Tools",
+    description: "Choose a tool node to attach to this AI Agent.",
+    allowedTypes: ["mcp_tool"],
+    sourceNodeId,
+    sourceHandle
+  };
+}
+
 const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
 const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
 const DEBUG_MODE_STORAGE_KEY = "ai-orchestrator:debug-mode";
@@ -890,6 +951,7 @@ function StudioApp() {
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
+  const [nodeDrawerContext, setNodeDrawerContext] = useState<NodeDrawerContext | null>(null);
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     try {
@@ -3435,17 +3497,39 @@ function StudioApp() {
     [editingNodeId, pushHistorySnapshot, setNodes]
   );
 
+  const handleOpenAgentAttachmentDrawer = useCallback((sourceNodeId: string, sourceHandle: AgentAttachmentHandle) => {
+    setNodeDrawerContext(buildAgentAttachmentDrawerContext(sourceNodeId, sourceHandle));
+    setShowNodeDrawer(true);
+  }, []);
+
   const createNodeFromDefinition = useCallback(
-    (definition: DefinitionNode, position?: { x: number; y: number }) => {
+    (definition: DefinitionNode, position?: { x: number; y: number }, attachContext?: NodeDrawerContext | null) => {
       const id = createNodeId(definition.type as EditorNodeData["nodeType"]);
       const fallbackPosition = reactFlowInstance
         ? reactFlowInstance.project({ x: window.innerWidth / 2 - 120, y: 180 })
         : { x: 160, y: 120 };
+      const sourceNode = attachContext?.sourceNodeId
+        ? nodes.find((node) => node.id === attachContext.sourceNodeId)
+        : undefined;
+      const attachmentPosition = sourceNode
+        ? {
+            x: sourceNode.position.x + 310,
+            y:
+              sourceNode.position.y +
+              (attachContext?.sourceHandle === "chat_model"
+                ? 92
+                : attachContext?.sourceHandle === "memory"
+                  ? 172
+                  : attachContext?.sourceHandle === "worker"
+                    ? 252
+                    : 212)
+          }
+        : undefined;
 
       const newNode: Node<EditorNodeData> = {
         id,
         type: definition.type === "sticky_note" ? "stickyNote" : "workflowNode",
-        position: position ?? fallbackPosition,
+        position: position ?? attachmentPosition ?? fallbackPosition,
         data: {
           label: definition.label,
           nodeType: definition.type as EditorNodeData["nodeType"],
@@ -3455,8 +3539,34 @@ function StudioApp() {
 
       pushHistorySnapshot();
       setNodes((existing) => [...existing, newNode]);
+      if (attachContext?.sourceNodeId && attachContext.sourceHandle) {
+        const edgeNodes = [...(nodes as EditorNode[]), newNode as EditorNode];
+        const edge = decorateEdge(
+          {
+            id: createEdgeId(attachContext.sourceNodeId, id),
+            source: attachContext.sourceNodeId,
+            target: id,
+            sourceHandle: attachContext.sourceHandle,
+            targetHandle: undefined
+          },
+          edgeNodes
+        );
+        setEdges((existing) => {
+          const shouldReplaceExisting =
+            attachContext.sourceHandle === "chat_model" || attachContext.sourceHandle === "memory";
+          const baseEdges = shouldReplaceExisting
+            ? existing.filter(
+                (candidate) =>
+                  candidate.source !== attachContext.sourceNodeId ||
+                  candidate.sourceHandle !== attachContext.sourceHandle
+              )
+            : existing;
+          return addEdge(edge, baseEdges);
+        });
+      }
+      setError(null);
     },
-    [pushHistorySnapshot, reactFlowInstance, setNodes]
+    [nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]
   );
 
   const onConnect = useCallback(
@@ -3469,13 +3579,17 @@ function StudioApp() {
       const sourceNode = nodes.find((node) => node.id === source);
       const targetNode = nodes.find((node) => node.id === target);
       const expectedTargetType: Record<string, EditorNodeData["nodeType"] | EditorNodeData["nodeType"][]> = {
-        chat_model: ["llm_call", "azure_openai_chat_model", "google_gemini_chat_model"],
+        chat_model: chatModelNodeTypes,
         memory: "local_memory",
         tool: "mcp_tool",
         worker: ["agent_orchestrator", "supervisor_node"]
       };
       const expectedHandleByTargetType: Partial<Record<EditorNodeData["nodeType"], string>> = {
         llm_call: "chat_model",
+        openai_chat_model: "chat_model",
+        anthropic_chat_model: "chat_model",
+        ollama_chat_model: "chat_model",
+        openai_compatible_chat_model: "chat_model",
         azure_openai_chat_model: "chat_model",
         google_gemini_chat_model: "chat_model",
         local_memory: "memory",
@@ -4159,10 +4273,18 @@ function StudioApp() {
               onDrop={onDrop}
               onDragOver={(event) => event.preventDefault()}
               showNodeDrawer={showNodeDrawer}
-              onCloseNodeDrawer={() => setShowNodeDrawer(false)}
-              onOpenNodeDrawer={() => setShowNodeDrawer(true)}
+              nodeDrawerContext={nodeDrawerContext}
+              onCloseNodeDrawer={() => {
+                setShowNodeDrawer(false);
+                setNodeDrawerContext(null);
+              }}
+              onOpenNodeDrawer={() => {
+                setNodeDrawerContext(null);
+                setShowNodeDrawer(true);
+              }}
               groupedDefinitions={groupedDefinitions}
-              onCreateNodeFromDefinition={(definition) => createNodeFromDefinition(definition)}
+              onCreateNodeFromDefinition={(definition) => createNodeFromDefinition(definition, undefined, nodeDrawerContext)}
+              onOpenAgentAttachmentDrawer={handleOpenAgentAttachmentDrawer}
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
