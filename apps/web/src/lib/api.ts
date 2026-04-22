@@ -183,6 +183,14 @@ export interface StreamNodeStartEvent {
   nodeId: string;
   nodeType: string;
   startedAt: string;
+  input?: unknown;
+}
+
+export interface StreamExecutionStartedEvent {
+  executionId: string;
+  workflowId?: string;
+  triggerType?: string;
+  startedAt?: string;
 }
 
 export interface StreamNodeCompleteEvent {
@@ -207,6 +215,7 @@ export interface StreamErrorEvent {
 }
 
 interface WorkflowExecuteStreamHandlers {
+  onExecutionStarted?: (event: StreamExecutionStartedEvent) => void;
   onNodeStart?: (event: StreamNodeStartEvent) => void;
   onNodeComplete?: (event: StreamNodeCompleteEvent) => void;
   onLlmDelta?: (event: StreamLlmDeltaEvent) => void;
@@ -303,6 +312,11 @@ async function streamWorkflowExecutionRequest(
 
       if (parsedFrame.event === "node_start" && data && typeof data === "object") {
         handlers.onNodeStart?.(data as StreamNodeStartEvent);
+        continue;
+      }
+
+      if (parsedFrame.event === "execution_started" && data && typeof data === "object") {
+        handlers.onExecutionStarted?.(data as StreamExecutionStartedEvent);
         continue;
       }
 

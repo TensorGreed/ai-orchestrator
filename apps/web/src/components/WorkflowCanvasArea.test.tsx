@@ -78,4 +78,14 @@ describe("WorkflowCanvasArea", () => {
     await user.click(screen.getByRole("button", { name: "Debug mode: OFF" }));
     expect(onDebugModeChange).toHaveBeenCalledWith(true);
   });
+
+  it("shows stop run and invokes cancel callback when a run is cancelable", async () => {
+    const user = userEvent.setup();
+    const onCancelRun = vi.fn();
+
+    render(<WorkflowCanvasArea {...makeProps({ canCancelRun: true, onCancelRun })} />);
+
+    await user.click(screen.getByRole("button", { name: "Stop run" }));
+    expect(onCancelRun).toHaveBeenCalledTimes(1);
+  });
 });

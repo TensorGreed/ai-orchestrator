@@ -76,6 +76,7 @@ export interface WorkflowExecutionDependencies {
     nodeId: string;
     nodeType: string;
     startedAt: string;
+    input?: unknown;
   }) => Promise<void> | void;
   onNodeComplete?: (event: {
     nodeId: string;
@@ -4736,24 +4737,23 @@ export async function executeWorkflow(
     const nodeConfig = toRecord(node.config);
     const onError: "stop" | "continue" | "branch" =
       node.errorConfig?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
+    const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
+    const parentOutputs: Record<string, unknown> = {};
+    for (const parentId of parentIds) {
+      if (nodeOutputs.has(parentId)) {
+        parentOutputs[parentId] = nodeOutputs.get(parentId);
+      }
+    }
+    const merged = mergeParentOutputs(parentOutputs);
+    let nodeInput: unknown = captureNodeInputSnapshot(globals, merged, parentOutputs);
     await dependencies.onNodeStart?.({
       nodeId: node.id,
       nodeType: node.type,
-      startedAt: startedAtNode
+      startedAt: startedAtNode,
+      input: nodeInput
     });
 
-    let nodeInput: unknown = null;
     try {
-      const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
-      const parentOutputs: Record<string, unknown> = {};
-      for (const parentId of parentIds) {
-        if (nodeOutputs.has(parentId)) {
-          parentOutputs[parentId] = nodeOutputs.get(parentId);
-        }
-      }
-
-      const merged = mergeParentOutputs(parentOutputs);
-      nodeInput = captureNodeInputSnapshot(globals, merged, parentOutputs);
       if (hasOwnRecordKey(pinnedData, node.id)) {
         const output = pinnedData[node.id];
         nodeOutputs.set(node.id, output);
@@ -4837,35 +4837,35 @@ export async function executeWorkflow(
           for (const childNode of downstreamNodes) {
             const childStarted = Date.now();
             const childStartedAt = nowIso();
-            let childInput: unknown = null;
+            const childParentIds = graphIndexes.incomingExecution.get(childNode.id) ?? [];
+            const childParentOutputs: Record<string, unknown> = {};
+            for (const parentId of childParentIds) {
+              if (parentId === node.id) {
+                childParentOutputs[parentId] = {
+                  [itemVariable]: loopItem,
+                  item: loopItem,
+                  _loop_index: loopIndex
+                };
+                continue;
+              }
+
+              if (nodeOutputs.has(parentId)) {
+                childParentOutputs[parentId] = nodeOutputs.get(parentId);
+              }
+            }
+
+            const childMerged = mergeParentOutputs(childParentOutputs);
+            childMerged[itemVariable] = loopItem;
+            childMerged._loop_index = loopIndex;
+            const childInput = captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
             await dependencies.onNodeStart?.({
               nodeId: childNode.id,
               nodeType: childNode.type,
-              startedAt: childStartedAt
+              startedAt: childStartedAt,
+              input: childInput
             });
 
             try {
-              const childParentIds = graphIndexes.incomingExecution.get(childNode.id) ?? [];
-              const childParentOutputs: Record<string, unknown> = {};
-              for (const parentId of childParentIds) {
-                if (parentId === node.id) {
-                  childParentOutputs[parentId] = {
-                    [itemVariable]: loopItem,
-                    item: loopItem,
-                    _loop_index: loopIndex
-                  };
-                  continue;
-                }
-
-                if (nodeOutputs.has(parentId)) {
-                  childParentOutputs[parentId] = nodeOutputs.get(parentId);
-                }
-              }
-
-              const childMerged = mergeParentOutputs(childParentOutputs);
-              childMerged[itemVariable] = loopItem;
-              childMerged._loop_index = loopIndex;
-              childInput = captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
               const { output: childOutput, attempts: childAttempts } = await executeNodeWithRetry(
                 childNode,
                 {

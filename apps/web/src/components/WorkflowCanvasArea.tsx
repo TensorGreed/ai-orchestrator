@@ -160,6 +160,9 @@ interface WorkflowCanvasAreaProps {
   onDebugModeChange: (next: boolean) => void;
   onExecuteWorkflow: () => void;
   onExecuteWebhook: () => void;
+  onCancelRun?: () => void;
+  canCancelRun?: boolean;
+  activeRunExecutionId?: string | null;
   busy: boolean;
   onLogsResizeStart: (event: ReactMouseEvent<HTMLDivElement>) => void;
   logsTab: LogsTab;
@@ -217,6 +220,9 @@ export function WorkflowCanvasArea({
   onDebugModeChange,
   onExecuteWorkflow,
   onExecuteWebhook,
+  onCancelRun,
+  canCancelRun = false,
+  activeRunExecutionId,
   busy,
   onLogsResizeStart,
   logsTab,
@@ -572,6 +578,15 @@ export function WorkflowCanvasArea({
             <button className="execute-btn secondary" onClick={onExecuteWebhook} disabled={busy}>
               Webhook run
             </button>
+            {canCancelRun && (
+              <button
+                className="execute-btn secondary"
+                onClick={onCancelRun}
+                title={activeRunExecutionId ? `Stop run ${activeRunExecutionId}` : "Stop running workflow"}
+              >
+                Stop run
+              </button>
+            )}
             <button
               className={debugMode ? "execute-btn" : "execute-btn secondary"}
               onClick={() => onDebugModeChange(!debugMode)}

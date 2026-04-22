@@ -59,6 +59,7 @@ import {
   type AuthUser,
   type ExecutionHistoryDetail,
   type SecretListItem,
+  type StreamExecutionStartedEvent,
   type StreamNodeCompleteEvent,
   type StreamNodeStartEvent
 } from "./lib/api";
@@ -393,10 +394,14 @@ function applyNodeStartToExecutionResult(
   current: WorkflowExecutionResult,
   event: StreamNodeStartEvent
 ): WorkflowExecutionResult {
+  const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId);
   const nextNodeResult: WorkflowExecutionResult["nodeResults"][number] = {
     nodeId: event.nodeId,
     status: "running",
-    startedAt: event.startedAt
+    startedAt: existing?.startedAt ?? event.startedAt,
+    input: event.input ?? existing?.input,
+    output: existing?.output,
+    error: existing?.error
   };
 
   return {
@@ -833,6 +838,7 @@ function StudioApp() {
 
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [runningExecutionId, setRunningExecutionId] = useState<string | null>(null);
   const [secretBusy, setSecretBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [secretMessage, setSecretMessage] = useState<string | null>(null);
@@ -1268,6 +1274,7 @@ function StudioApp() {
 
   useEffect(() => {
     latestDebugExecutionIdRef.current = null;
+    setRunningExecutionId(null);
     pasteCountRef.current = 0;
   }, [currentWorkflow.id]);
 
@@ -1282,6 +1289,7 @@ function StudioApp() {
     setExecutionResult(null);
     setLiveNodeStatuses({});
     setChatNodeTrace([]);
+    setRunningExecutionId(null);
     stopVisualRun();
   }, [isDebugMode, stopVisualRun]);
 
@@ -2012,6 +2020,38 @@ function StudioApp() {
     [refreshExecutionHistory, setExecutionDetailById]
   );
 
+  const handleStreamExecutionStarted = useCallback((event: StreamExecutionStartedEvent) => {
+    if (!event.executionId) {
+      return;
+    }
+    latestDebugExecutionIdRef.current = event.executionId;
+    setRunningExecutionId(event.executionId);
+    setExecutionResult((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        executionId: current.executionId ?? event.executionId
+      };
+    });
+  }, []);
+
+  const handleCancelActiveRun = useCallback(async () => {
+    const executionId = runningExecutionId ?? latestDebugExecutionIdRef.current;
+    if (!executionId) {
+      setError("No active execution is registered yet.");
+      return;
+    }
+    try {
+      await cancelExecution(executionId);
+      setError((current) => current ?? "Cancellation requested. Waiting for workflow to stop.");
+      void refreshExecutionHistory();
+    } catch (cancelError) {
+      handleApiError(cancelError, "Failed to stop active workflow");
+    }
+  }, [handleApiError, refreshExecutionHistory, runningExecutionId]);
+
   useEffect(() => {
     let cancelled = false;
     if (activeMode !== "variables" || !authUser || !currentWorkflowExists) {
@@ -2436,11 +2476,15 @@ function StudioApp() {
   const handleExecute = useCallback(async (options?: { startNodeId?: string; runMode?: "workflow" | "single_node" }) => {
     try {
       setBusy(true);
+      setRunningExecutionId(null);
       setError(null);
       let initializedTrace = false;
       let initializedStatuses = false;
       const saved = await persistWorkflow();
       const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(options?.startNodeId, options?.runMode), {
+        onExecutionStarted: (event) => {
+          handleStreamExecutionStarted(event);
+        },
         onNodeStart: (event) => {
           if (!isDebugMode) {
             return;
@@ -2507,12 +2551,14 @@ function StudioApp() {
       }
     } finally {
       setLiveNodeStatuses({});
+      setRunningExecutionId(null);
       setBusy(false);
     }
   }, [
     currentWorkflow.id,
     buildEditorExecutionPayload,
     executeWorkflowStream,
+    handleStreamExecutionStarted,
     handleApiError,
     isDebugMode,
     persistWorkflow,
@@ -2522,6 +2568,7 @@ function StudioApp() {
   const handleWebhookExecute = useCallback(async () => {
     try {
       setBusy(true);
+      setRunningExecutionId(null);
       setError(null);
       startVisualRun();
       let initializedTrace = false;
@@ -2531,6 +2578,9 @@ function StudioApp() {
         workflow_id: saved.id,
         ...buildWebhookExecutionPayload()
       }, {
+        onExecutionStarted: (event) => {
+          handleStreamExecutionStarted(event);
+        },
         onNodeStart: (event) => {
           if (!isDebugMode) {
             return;
@@ -2597,11 +2647,13 @@ function StudioApp() {
       }
     } finally {
       stopVisualRun();
+      setRunningExecutionId(null);
       setBusy(false);
     }
   }, [
     currentWorkflow.id,
     buildWebhookExecutionPayload,
+    handleStreamExecutionStarted,
     handleApiError,
     isDebugMode,
     persistWorkflow,
@@ -4139,6 +4191,11 @@ function StudioApp() {
               onExecuteWebhook={() => {
                 void handleWebhookExecute();
               }}
+              onCancelRun={() => {
+                void handleCancelActiveRun();
+              }}
+              canCancelRun={busy && Boolean(runningExecutionId)}
+              activeRunExecutionId={runningExecutionId}
               busy={busy}
               onLogsResizeStart={handleLogsResizeStart}
               logsTab={logsTab}

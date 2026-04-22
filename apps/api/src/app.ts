@@ -947,7 +947,7 @@ export function createApp(
   }
 
   type WorkflowExecutionEventHooks = {
-    onNodeStart?: (event: { nodeId: string; nodeType: string; startedAt: string }) => Promise<void> | void;
+    onNodeStart?: (event: { nodeId: string; nodeType: string; startedAt: string; input?: unknown }) => Promise<void> | void;
     onNodeComplete?: (event: {
       nodeId: string;
       nodeType: string;
@@ -1452,7 +1452,7 @@ export function createApp(
           nodeId: event.nodeId,
           status: "running",
           startedAt: existing?.startedAt ?? event.startedAt,
-          input: existing?.input,
+          input: event.input ?? existing?.input,
           output: existing?.output,
           error: existing?.error
         });
@@ -4650,6 +4650,13 @@ export function createApp(
       reply.raw.flushHeaders();
     }
 
+    sendSseEvent("execution_started", {
+      executionId,
+      workflowId: workflow.id,
+      triggerType: "manual_stream",
+      startedAt: new Date().toISOString()
+    });
+
     try {
       const progressHooks = createProgressTrackingHooks({
         executionId,
@@ -6152,6 +6159,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (typeof reply.raw.flushHeaders === "function") {
       reply.raw.flushHeaders();
     }
+
+    sendSseEvent("execution_started", {
+      executionId,
+      workflowId: workflow.id,
+      triggerType: "webhook_api_stream",
+      startedAt: new Date().toISOString()
+    });
 
     try {
       const progressHooks = createProgressTrackingHooks({
