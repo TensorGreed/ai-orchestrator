@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http, { type IncomingHttpHeaders } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -803,6 +804,69 @@ describe("auth + rbac API", () => {
     expect(response.statusCode).toBe(400);
     const body = response.json<{ error: string }>();
     expect(body.error).toBe("Invalid provider test payload");
+  });
+
+  it("lists provider models through a custom gateway base URL", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-provider-models@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+    const secretRef = context.secretService.createSecret({
+      name: "gateway-model-list-key",
+      provider: "anthropic",
+      value: "gateway-secret"
+    });
+
+    const requests: Array<{ url: string; headers: IncomingHttpHeaders }> = [];
+    const server = http.createServer((request, response) => {
+      requests.push({ url: request.url ?? "", headers: request.headers });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          data: [{ id: "claude-haiku-4-5-20251001", display_name: "Claude Haiku 4.5" }]
+        })
+      );
+    });
+
+    try {
+      await new Promise<void>((resolve) => {
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Unable to bind test model gateway");
+      }
+      const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+      const response = await context.app.inject({
+        method: "POST",
+        url: "/api/providers/models",
+        headers: {
+          cookie: builderCookie
+        },
+        payload: {
+          providerId: "anthropic",
+          secretRef,
+          baseUrl
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        url: "/v1/models"
+      });
+      expect(requests[0]?.headers["x-api-key"]).toBe("gateway-secret");
+      expect(requests[0]?.headers["anthropic-version"]).toBe("2023-06-01");
+      expect(response.json()).toEqual({
+        models: [{ id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" }]
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 });
 

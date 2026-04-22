@@ -10,6 +10,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
     configSchema: {
       type: "object",
       properties: {
+        baseUrl: { type: "string", format: "uri" },
         model: { type: "string", default: "claude-3-5-sonnet-latest" },
         secretRef: { type: "object", properties: { secretId: { type: "string" } } }
       },

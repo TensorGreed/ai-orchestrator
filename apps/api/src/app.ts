@@ -4894,13 +4894,16 @@ export function createApp(
       if (providerId === "openai") {
         const apiKey = (await secretService.resolveSecret(secretRef)) || process.env.OPENAI_API_KEY;
         if (!apiKey) return { models: [] };
-        const res = await fetch("https://api.openai.com/v1/models", {
+        const modelBaseUrl = (baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
+        const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
+        const res = await fetch(modelEndpoint, {
           headers: { "Authorization": `Bearer ${apiKey}` }
         });
         if (!res.ok) return { models: [] };
         const json = await res.json() as { data?: Array<{ id: string; owned_by?: string }> };
-        const chatModels = (json.data ?? [])
-          .filter(m => /^(gpt-|o[1-9]|chatgpt-)/.test(m.id) && !m.id.includes("instruct") && !m.id.includes("realtime") && !m.id.includes("audio") && !m.id.includes("transcribe"))
+        const listedModels = json.data ?? [];
+        const chatModels = (baseUrl ? listedModels : listedModels
+          .filter(m => /^(gpt-|o[1-9]|chatgpt-)/.test(m.id) && !m.id.includes("instruct") && !m.id.includes("realtime") && !m.id.includes("audio") && !m.id.includes("transcribe")))
           .sort((a, b) => a.id.localeCompare(b.id));
         return { models: chatModels.map(m => ({ id: m.id, label: m.id })) };
       }
@@ -4908,7 +4911,9 @@ export function createApp(
       if (providerId === "anthropic") {
         const apiKey = (await secretService.resolveSecret(secretRef)) || process.env.ANTHROPIC_API_KEY;
         if (!apiKey) return { models: [] };
-        const res = await fetch("https://api.anthropic.com/v1/models", {
+        const modelBaseUrl = (baseUrl || "https://api.anthropic.com/v1").replace(/\/+$/, "");
+        const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
+        const res = await fetch(modelEndpoint, {
           headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
         });
         if (!res.ok) return { models: [] };
@@ -4933,7 +4938,9 @@ export function createApp(
         const apiKey = await secretService.resolveSecret(secretRef);
         const headers: Record<string, string> = {};
         if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-        const res = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, { headers });
+        const modelBaseUrl = baseUrl.replace(/\/+$/, "");
+        const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
+        const res = await fetch(modelEndpoint, { headers });
         if (!res.ok) return { models: [] };
         const json = await res.json() as { data?: Array<{ id: string }> };
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };

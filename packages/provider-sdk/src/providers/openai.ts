@@ -10,6 +10,7 @@ export class OpenAICloudProviderAdapter implements LLMProviderAdapter {
     configSchema: {
       type: "object",
       properties: {
+        baseUrl: { type: "string", format: "uri" },
         model: { type: "string" },
         secretRef: { type: "object", properties: { secretId: { type: "string" } } }
       },

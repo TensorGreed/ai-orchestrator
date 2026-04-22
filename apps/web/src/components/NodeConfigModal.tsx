@@ -79,6 +79,39 @@ function toProviderLabel(provider: string): string {
     .join(" ");
 }
 
+type ModelOption = { value: string; label: string };
+
+function getSecretId(value: unknown): string {
+  return toStringValue(asRecord(value).secretId).trim();
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function withCurrentModelOption(options: ModelOption[], currentValue: string, emptyLabel = "Select model"): ModelOption[] {
+  const current = currentValue.trim();
+  const base = current
+    ? options.some((option) => option.value === current)
+      ? options
+      : [{ value: current, label: `${current} (current)` }, ...options]
+    : [{ value: "", label: emptyLabel }, ...options];
+
+  const seen = new Set<string>();
+  return base.filter((option) => {
+    if (seen.has(option.value)) {
+      return false;
+    }
+    seen.add(option.value);
+    return true;
+  });
+}
+
 function ToggleField({
   label,
   checked,
@@ -684,9 +717,7 @@ export function NodeConfigModal({
   const [workflowOptions, setWorkflowOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [workflowOptionsError, setWorkflowOptionsError] = useState<string | null>(null);
   const [inlineCreatedSecrets, setInlineCreatedSecrets] = useState<SecretListItem[]>([]);
-  const [geminiModels, setGeminiModels] = useState<Array<{ value: string; label: string }> | null>(null);
-  const [geminiModelsLoading, setGeminiModelsLoading] = useState(false);
-  const [llmModels, setLlmModels] = useState<Array<{ value: string; label: string }> | null>(null);
+  const [llmModels, setLlmModels] = useState<ModelOption[] | null>(null);
   const [llmModelsLoading, setLlmModelsLoading] = useState(false);
   const [activeSecretFieldKey, setActiveSecretFieldKey] = useState<string | null>(null);
   const [inlineSecretProvider, setInlineSecretProvider] = useState("custom");
@@ -697,60 +728,99 @@ export function NodeConfigModal({
   const [inlineGoogleServiceAccountJson, setInlineGoogleServiceAccountJson] = useState("");
   const [inlineSecretBusy, setInlineSecretBusy] = useState(false);
   const [inlineSecretError, setInlineSecretError] = useState<string | null>(null);
+  const provider = useMemo(() => asRecord(config.provider), [config.provider]);
+  const directSecretId = getSecretId(config.secretRef);
+  const directBaseUrl = toStringValue(config.baseUrl).trim();
+  const gatewayApiProvider = toStringValue(config.apiProvider, "openai_compatible").trim() || "openai_compatible";
+  const azureEndpoint = toStringValue(config.endpoint).trim();
+  const azureApiVersion = toStringValue(config.apiVersion, "2024-10-21").trim() || "2024-10-21";
 
-  const geminiSecretId = node.data.nodeType === "google_gemini_chat_model"
-    ? toStringValue(asRecord(config.secretRef).secretId)
-    : "";
+  const modelLookup = useMemo(() => {
+    const type = node.data.nodeType;
+
+    if (type === "llm_call") {
+      const providerId = toStringValue(provider.providerId, "ollama").trim() || "ollama";
+      const secretId = getSecretId(provider.secretRef);
+      const baseUrl = toStringValue(provider.baseUrl).trim();
+      const extra = asRecord(provider.extra);
+      return {
+        providerId,
+        secretId,
+        baseUrl,
+        extra: Object.keys(extra).length > 0 ? extra : undefined,
+        requiresBaseUrl: providerId === "openai_compatible"
+      };
+    }
+
+    if (type === "openai_chat_model") {
+      return { providerId: "openai", secretId: directSecretId, baseUrl: directBaseUrl, requiresBaseUrl: false };
+    }
+
+    if (type === "anthropic_chat_model") {
+      return { providerId: "anthropic", secretId: directSecretId, baseUrl: directBaseUrl, requiresBaseUrl: false };
+    }
+
+    if (type === "ollama_chat_model") {
+      return { providerId: "ollama", secretId: "", baseUrl: directBaseUrl, requiresBaseUrl: false };
+    }
+
+    if (type === "openai_compatible_chat_model") {
+      return { providerId: "openai_compatible", secretId: directSecretId, baseUrl: directBaseUrl, requiresBaseUrl: true };
+    }
+
+    if (type === "ai_gateway_chat_model") {
+      return { providerId: gatewayApiProvider, secretId: directSecretId, baseUrl: directBaseUrl, requiresBaseUrl: true };
+    }
+
+    if (type === "google_gemini_chat_model") {
+      return { providerId: "gemini", secretId: directSecretId, baseUrl: "", requiresBaseUrl: false };
+    }
+
+    if (type === "azure_openai_chat_model") {
+      return {
+        providerId: "azure_openai",
+        secretId: directSecretId,
+        baseUrl: azureEndpoint,
+        extra: { apiVersion: azureApiVersion },
+        requiresBaseUrl: true
+      };
+    }
+
+    return null;
+  }, [
+    node.data.nodeType,
+    provider.providerId,
+    provider.secretRef,
+    provider.baseUrl,
+    provider.extra,
+    directSecretId,
+    directBaseUrl,
+    gatewayApiProvider,
+    azureEndpoint,
+    azureApiVersion
+  ]);
 
   useEffect(() => {
-    if (node.data.nodeType !== "google_gemini_chat_model" || !geminiSecretId) {
+    if (!modelLookup?.providerId) {
+      setLlmModels(null);
+      setLlmModelsLoading(false);
       return;
     }
-    let canceled = false;
-    setGeminiModelsLoading(true);
-    fetchProviderModels({ providerId: "gemini", secretRef: { secretId: geminiSecretId } })
-      .then((result) => {
-        if (canceled) return;
-        setGeminiModels(
-          result.models.map((m) => ({ value: m.id, label: m.label }))
-        );
-      })
-      .catch(() => {
-        if (!canceled) setGeminiModels(null);
-      })
-      .finally(() => {
-        if (!canceled) setGeminiModelsLoading(false);
-      });
-    return () => { canceled = true; };
-  }, [node.data.nodeType, geminiSecretId]);
 
-  const llmProviderId = node.data.nodeType === "llm_call"
-    ? toStringValue(asRecord(config.provider).providerId, "ollama")
-    : "";
-  const llmSecretId = node.data.nodeType === "llm_call"
-    ? toStringValue(asRecord(asRecord(config.provider).secretRef).secretId)
-    : "";
-  const llmBaseUrl = node.data.nodeType === "llm_call"
-    ? toStringValue(asRecord(config.provider).baseUrl)
-    : "";
-
-  useEffect(() => {
-    if (node.data.nodeType !== "llm_call" || !llmProviderId) {
+    const baseUrl = modelLookup.baseUrl?.trim() ?? "";
+    if ((modelLookup.requiresBaseUrl && !baseUrl) || (baseUrl && !isHttpUrl(baseUrl))) {
+      setLlmModels(null);
+      setLlmModelsLoading(false);
       return;
     }
-    const needsSecret = llmProviderId === "openai" || llmProviderId === "anthropic" || llmProviderId === "gemini";
-    const needsBaseUrl = llmProviderId === "openai_compatible";
-    if (needsSecret && !llmSecretId) { setLlmModels(null); return; }
-    if (needsBaseUrl && !llmBaseUrl) { setLlmModels(null); return; }
 
     let canceled = false;
     setLlmModelsLoading(true);
-    const providerExtra = asRecord(asRecord(config.provider).extra);
     fetchProviderModels({
-      providerId: llmProviderId,
-      ...(llmSecretId ? { secretRef: { secretId: llmSecretId } } : {}),
-      ...(llmBaseUrl ? { baseUrl: llmBaseUrl } : {}),
-      ...(Object.keys(providerExtra).length > 0 ? { extra: providerExtra } : {})
+      providerId: modelLookup.providerId,
+      ...(modelLookup.secretId ? { secretRef: { secretId: modelLookup.secretId } } : {}),
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(modelLookup.extra ? { extra: modelLookup.extra } : {})
     })
       .then((result) => {
         if (canceled) return;
@@ -763,7 +833,7 @@ export function NodeConfigModal({
         if (!canceled) setLlmModelsLoading(false);
       });
     return () => { canceled = true; };
-  }, [node.data.nodeType, llmProviderId, llmSecretId, llmBaseUrl]);
+  }, [modelLookup]);
 
   useEffect(() => {
     const initialConfig = asRecord(node.data.config);
@@ -874,7 +944,6 @@ export function NodeConfigModal({
     };
   }, [node.data.nodeType]);
 
-  const provider = useMemo(() => asRecord(config.provider), [config.provider]);
   const discoveredToolByName = useMemo(
     () => new Map(discoveredTools.map((tool) => [tool.name, tool])),
     [discoveredTools]
@@ -1568,11 +1637,58 @@ export function NodeConfigModal({
     }
   }, [buildProviderTestConfig]);
 
+  const renderModelChoiceField = (input: {
+    label?: string;
+    value: string;
+    fallbackValue?: string;
+    placeholder: string;
+    emptyLabel?: string;
+    onChange: (next: string) => void;
+  }) => {
+    const label = input.label ?? "Model";
+    const currentValue = input.value.trim() || input.fallbackValue?.trim() || "";
+    const fieldLabel = llmModelsLoading ? `${label} (loading...)` : label;
+
+    if (llmModels && llmModels.length > 0) {
+      return (
+        <SelectField
+          label={fieldLabel}
+          value={currentValue}
+          options={withCurrentModelOption(llmModels, currentValue, input.emptyLabel ?? `Select ${label.toLowerCase()}`)}
+          onChange={input.onChange}
+        />
+      );
+    }
+
+    return (
+      <TextField
+        label={fieldLabel}
+        value={currentValue}
+        onChange={input.onChange}
+        placeholder={input.placeholder}
+      />
+    );
+  };
+
   const renderProviderSection = () => {
     const providerId = toStringValue(provider.providerId, "ollama");
     const providerExtra = asRecord(provider.extra);
     const isAzureOpenAI = providerId === "azure_openai";
-    const hideBaseUrl = providerId === "openai" || providerId === "gemini" || providerId === "anthropic";
+    const hideBaseUrl = providerId === "gemini";
+    const baseUrlLabel =
+      isAzureOpenAI
+        ? "Endpoint"
+        : providerId === "openai" || providerId === "anthropic"
+          ? "Custom Base URL (optional)"
+          : "Base URL";
+    const baseUrlPlaceholder =
+      isAzureOpenAI
+        ? "https://<resource>.openai.azure.com"
+        : providerId === "anthropic"
+          ? "https://api.anthropic.com/v1"
+          : providerId === "openai"
+            ? "https://api.openai.com/v1"
+            : "http://localhost:11434/v1";
 
     return (
       <div className="cfg-group">
@@ -1590,27 +1706,26 @@ export function NodeConfigModal({
             { value: "anthropic", label: "Anthropic" }
           ]}
         />
-        {llmModels && llmModels.length > 0 && !isAzureOpenAI ? (
-          <SelectField
-            label={llmModelsLoading ? "Model (loading...)" : "Model"}
-            value={toStringValue(provider.model)}
-            options={llmModels}
-            onChange={(next) => setProvider({ model: next })}
-          />
+        {!isAzureOpenAI ? (
+          renderModelChoiceField({
+            value: toStringValue(provider.model),
+            placeholder: "gpt-4.1-mini / llama3.1",
+            onChange: (next) => setProvider({ model: next })
+          })
         ) : (
           <TextField
-            label={isAzureOpenAI ? "Deployment" : (llmModelsLoading ? "Model (loading...)" : "Model")}
+            label={llmModelsLoading ? "Deployment (loading...)" : "Deployment"}
             value={toStringValue(provider.model)}
             onChange={(next) => setProvider({ model: next })}
-            placeholder={isAzureOpenAI ? "gpt-4o-mini" : "gpt-4.1-mini / llama3.1"}
+            placeholder="gpt-4o-mini"
           />
         )}
         {!hideBaseUrl && (
           <TextField
-            label={isAzureOpenAI ? "Endpoint" : "Base URL"}
+            label={baseUrlLabel}
             value={toStringValue(provider.baseUrl)}
             onChange={(next) => setProvider({ baseUrl: next })}
-            placeholder={isAzureOpenAI ? "https://<resource>.openai.azure.com" : "http://localhost:11434/v1"}
+            placeholder={baseUrlPlaceholder}
           />
         )}
         {isAzureOpenAI && (
@@ -2966,6 +3081,17 @@ export function NodeConfigModal({
     help: string;
   }) => {
     const showSecret = options.providerId !== "ollama";
+    const showBaseUrl = true;
+    const defaultBaseUrlLabel =
+      options.providerId === "openai" || options.providerId === "anthropic"
+        ? "Custom Base URL (optional)"
+        : "Base URL";
+    const defaultBaseUrlPlaceholder =
+      options.providerId === "openai"
+        ? "https://api.openai.com/v1"
+        : options.providerId === "anthropic"
+          ? "https://api.anthropic.com/v1"
+          : options.baseUrlPlaceholder;
     return (
       <>
         {showSecret && (
@@ -2982,20 +3108,20 @@ export function NodeConfigModal({
               }))
           })
         )}
-        {(options.providerId === "ollama" || options.providerId === "openai_compatible") && (
+        {showBaseUrl && (
           <TextField
-            label={options.baseUrlLabel ?? "Base URL"}
+            label={options.baseUrlLabel ?? defaultBaseUrlLabel}
             value={toStringValue(config.baseUrl)}
             onChange={(next) => setConfig((current) => ({ ...current, baseUrl: next }))}
-            placeholder={options.baseUrlPlaceholder}
+            placeholder={defaultBaseUrlPlaceholder}
           />
         )}
-        <TextField
-          label="Model"
-          value={toStringValue(config.model, options.defaultModel)}
-          onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
-          placeholder={options.modelPlaceholder}
-        />
+        {renderModelChoiceField({
+          value: toStringValue(config.model),
+          fallbackValue: options.defaultModel,
+          placeholder: options.modelPlaceholder,
+          onChange: (next) => setConfig((current) => ({ ...current, model: next }))
+        })}
         <div className="cfg-grid-2">
           <NumberField
             label="Temperature"
@@ -3072,12 +3198,11 @@ export function NodeConfigModal({
           onChange={(next) => setConfig((current) => ({ ...current, baseUrl: next }))}
           placeholder={apiProvider === "anthropic" ? "https://llm.company.example/v1" : "https://llm.company.example/v1"}
         />
-        <TextField
-          label="Model"
-          value={toStringValue(config.model)}
-          onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
-          placeholder={apiProvider === "anthropic" ? "claude-haiku-4-5-20251001" : "gpt-4o-mini"}
-        />
+        {renderModelChoiceField({
+          value: toStringValue(config.model),
+          placeholder: apiProvider === "anthropic" ? "claude-haiku-4-5-20251001" : "gpt-4o-mini",
+          onChange: (next) => setConfig((current) => ({ ...current, model: next }))
+        })}
         <div className="cfg-grid-2">
           <NumberField
             label="Temperature"
@@ -3224,7 +3349,8 @@ export function NodeConfigModal({
       { value: "gemini-1.5-pro", label: "Gemini 1.5 Pro" },
       { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash" }
     ];
-    const modelOptions = geminiModels && geminiModels.length > 0 ? geminiModels : fallbackModels;
+    const modelValue = toStringValue(config.model, "gemini-2.5-flash");
+    const modelOptions = llmModels && llmModels.length > 0 ? llmModels : fallbackModels;
 
     return (
       <>
@@ -3241,9 +3367,9 @@ export function NodeConfigModal({
             }))
         })}
         <SelectField
-          label={geminiModelsLoading ? "Model (loading...)" : "Model"}
-          value={toStringValue(config.model, "gemini-2.5-flash")}
-          options={modelOptions}
+          label={llmModelsLoading ? "Model (loading...)" : "Model"}
+          value={modelValue}
+          options={withCurrentModelOption(modelOptions, modelValue)}
           onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
         />
         <div className="cfg-grid-2">

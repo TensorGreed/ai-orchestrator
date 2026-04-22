@@ -289,6 +289,7 @@ export const nodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        baseUrl: { type: "string" },
         model: { type: "string" },
         secretRef: { type: "object" },
         temperature: { type: "number" },
@@ -314,6 +315,7 @@ export const nodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        baseUrl: { type: "string" },
         model: { type: "string" },
         secretRef: { type: "object" },
         temperature: { type: "number" },
