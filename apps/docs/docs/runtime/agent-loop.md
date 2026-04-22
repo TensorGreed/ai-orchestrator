@@ -16,7 +16,7 @@ Agent orchestration is iterative, not one-shot.
 ## Attachment ports
 
 - `chat_model`: attach model node
-  - supported: `openai_chat_model`, `anthropic_chat_model`, `ollama_chat_model`, `openai_compatible_chat_model`, `azure_openai_chat_model`, `google_gemini_chat_model`, `llm_call`
+  - supported: `openai_chat_model`, `anthropic_chat_model`, `ollama_chat_model`, `openai_compatible_chat_model`, `ai_gateway_chat_model`, `azure_openai_chat_model`, `google_gemini_chat_model`, `llm_call`
 - `memory`: attach `local_memory`
 - `tool`: attach one or more `mcp_tool`
 - `worker`: attach worker agents (supervisor use cases)

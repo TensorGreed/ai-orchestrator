@@ -17,6 +17,7 @@ const chatModelNodeTypes = new Set([
   "anthropic_chat_model",
   "ollama_chat_model",
   "openai_compatible_chat_model",
+  "ai_gateway_chat_model",
   "azure_openai_chat_model",
   "google_gemini_chat_model"
 ]);
@@ -340,7 +341,8 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       node.type === "openai_chat_model" ||
       node.type === "anthropic_chat_model" ||
       node.type === "ollama_chat_model" ||
-      node.type === "openai_compatible_chat_model"
+      node.type === "openai_compatible_chat_model" ||
+      node.type === "ai_gateway_chat_model"
     ) {
       const model = typeof config.model === "string" ? config.model.trim() : "";
       if (!model) {
@@ -351,12 +353,23 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         });
       }
 
-      if (node.type === "openai_compatible_chat_model") {
+      if (node.type === "openai_compatible_chat_model" || node.type === "ai_gateway_chat_model") {
         const baseUrl = typeof config.baseUrl === "string" ? config.baseUrl.trim() : "";
         if (!baseUrl) {
           issues.push({
-            code: "missing_openai_compatible_base_url",
-            message: "OpenAI Compatible Chat Model node requires baseUrl.",
+            code: "missing_chat_gateway_base_url",
+            message: `${node.name || node.type} requires baseUrl.`,
+            nodeId: node.id
+          });
+        }
+      }
+
+      if (node.type === "ai_gateway_chat_model") {
+        const apiProvider = typeof config.apiProvider === "string" ? config.apiProvider.trim() : "";
+        if (!["openai_compatible", "openai", "anthropic"].includes(apiProvider)) {
+          issues.push({
+            code: "invalid_chat_gateway_provider",
+            message: "AI Gateway Chat Model apiProvider must be openai_compatible, openai, or anthropic.",
             nodeId: node.id
           });
         }

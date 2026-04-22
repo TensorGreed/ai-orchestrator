@@ -24,7 +24,9 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
     }
 
     const model = request.provider.model || "claude-3-5-sonnet-latest";
-    const endpoint = `https://api.anthropic.com/v1/messages`;
+    const rawBaseUrl = request.provider.baseUrl || "https://api.anthropic.com/v1";
+    const normalizedBaseUrl = rawBaseUrl.replace(/\/+$/, "");
+    const endpoint = normalizedBaseUrl.endsWith("/messages") ? normalizedBaseUrl : `${normalizedBaseUrl}/messages`;
 
     // Extract system prompt
     let system = "";
@@ -75,6 +77,17 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       max_tokens: request.provider.maxTokens || 4096,
       temperature: request.provider.temperature ?? 0.2
     };
+
+    if (request.provider.extra?.enableThinking === true) {
+      const thinkingTokens =
+        typeof request.provider.extra.thinkingTokens === "number" && Number.isFinite(request.provider.extra.thinkingTokens)
+          ? Math.max(1, Math.floor(request.provider.extra.thinkingTokens))
+          : 1024;
+      body.thinking = {
+        type: "enabled",
+        budget_tokens: thinkingTokens
+      };
+    }
 
     if (tools && tools.length > 0) {
       body.tools = tools;

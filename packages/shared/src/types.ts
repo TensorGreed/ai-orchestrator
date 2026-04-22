@@ -30,6 +30,7 @@ export type WorkflowNodeType =
   | "anthropic_chat_model"
   | "ollama_chat_model"
   | "openai_compatible_chat_model"
+  | "ai_gateway_chat_model"
   | "agent_orchestrator"
   | "supervisor_node"
   | "local_memory"

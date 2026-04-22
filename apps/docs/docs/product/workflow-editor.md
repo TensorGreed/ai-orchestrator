@@ -19,7 +19,7 @@
 2. Agentic tool loop:
    - `webhook_input -> agent_orchestrator -> output`
    - Attachments:
-     - `chat_model`: any Chat Model node, including OpenAI, Anthropic, Ollama, OpenAI Compatible, Azure OpenAI, Gemini, or legacy `llm_call`
+     - `chat_model`: any Chat Model node, including OpenAI, Anthropic, Ollama, OpenAI Compatible, AI Gateway, Azure OpenAI, Gemini, or legacy `llm_call`
      - `memory`: `local_memory`
      - `tool`: one or more `mcp_tool`
 3. RAG:

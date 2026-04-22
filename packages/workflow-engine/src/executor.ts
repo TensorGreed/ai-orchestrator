@@ -245,6 +245,7 @@ const CHAT_MODEL_NODE_TYPES = new Set([
   "anthropic_chat_model",
   "ollama_chat_model",
   "openai_compatible_chat_model",
+  "ai_gateway_chat_model",
   "azure_openai_chat_model",
   "google_gemini_chat_model"
 ]);
@@ -320,6 +321,29 @@ function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | und
 
   if (node.type === "openai_compatible_chat_model") {
     return buildSimpleChatProvider("openai_compatible", nodeConfig, "", { requiresBaseUrl: true });
+  }
+
+  if (node.type === "ai_gateway_chat_model") {
+    const rawProvider = typeof nodeConfig.apiProvider === "string" ? nodeConfig.apiProvider.trim() : "openai_compatible";
+    const providerId =
+      rawProvider === "openai" || rawProvider === "anthropic" || rawProvider === "openai_compatible"
+        ? rawProvider
+        : "openai_compatible";
+    const provider = buildSimpleChatProvider(providerId, nodeConfig, "", { requiresBaseUrl: true });
+    if (!provider) {
+      return undefined;
+    }
+
+    return {
+      ...provider,
+      extra: {
+        ...(provider.extra ?? {}),
+        ...(nodeConfig.enableThinking === true ? { enableThinking: true } : {}),
+        ...(typeof nodeConfig.thinkingTokens === "number" && Number.isFinite(nodeConfig.thinkingTokens)
+          ? { thinkingTokens: Math.max(1, Math.floor(nodeConfig.thinkingTokens)) }
+          : {})
+      }
+    };
   }
 
   if (node.type === "azure_openai_chat_model") {
@@ -2428,7 +2452,8 @@ async function executeNode(
     case "openai_chat_model":
     case "anthropic_chat_model":
     case "ollama_chat_model":
-    case "openai_compatible_chat_model": {
+    case "openai_compatible_chat_model":
+    case "ai_gateway_chat_model": {
       const provider = buildProviderFromModelNode(node);
       if (!provider) {
         throw new Error(`${node.name || node.type} requires a valid model configuration.`);
@@ -3958,6 +3983,7 @@ const RETRYABLE_NODE_TYPES = new Set([
   "anthropic_chat_model",
   "ollama_chat_model",
   "openai_compatible_chat_model",
+  "ai_gateway_chat_model",
   "azure_openai_chat_model",
   "google_gemini_chat_model",
   "agent_orchestrator",

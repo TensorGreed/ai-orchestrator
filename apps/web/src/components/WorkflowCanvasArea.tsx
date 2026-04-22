@@ -58,6 +58,7 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "anthropic_chat_model",
         "ollama_chat_model",
         "openai_compatible_chat_model",
+        "ai_gateway_chat_model",
         "azure_openai_chat_model",
         "google_gemini_chat_model",
         "embeddings_azure_openai",

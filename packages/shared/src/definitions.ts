@@ -385,6 +385,39 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "ai_gateway_chat_model",
+    label: "AI Gateway Chat Model",
+    category: "LLM",
+    description: "Calls a corporate AI gateway using OpenAI-compatible, OpenAI, or Anthropic protocol.",
+    configSchema: {
+      type: "object",
+      properties: {
+        apiProvider: { type: "string", enum: ["openai_compatible", "openai", "anthropic"] },
+        baseUrl: { type: "string" },
+        model: { type: "string" },
+        secretRef: { type: "object" },
+        temperature: { type: "number" },
+        maxTokens: { type: "number" },
+        enableThinking: { type: "boolean" },
+        thinkingTokens: { type: "number" },
+        promptKey: { type: "string" },
+        systemPromptKey: { type: "string" }
+      },
+      required: ["apiProvider", "baseUrl", "model"]
+    },
+    sampleConfig: {
+      apiProvider: "openai_compatible",
+      baseUrl: "https://llm.company.example/v1",
+      model: "claude-haiku-4-5-20251001",
+      temperature: 0.2,
+      maxTokens: 1024,
+      enableThinking: false,
+      thinkingTokens: 1024,
+      promptKey: "prompt",
+      systemPromptKey: "system_prompt"
+    }
+  },
+  {
     type: "azure_openai_chat_model",
     label: "Azure OpenAI Chat Model",
     category: "LLM",

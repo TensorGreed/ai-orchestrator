@@ -1415,10 +1415,13 @@ export function NodeConfigModal({
       node.data.nodeType === "openai_chat_model" ||
       node.data.nodeType === "anthropic_chat_model" ||
       node.data.nodeType === "ollama_chat_model" ||
-      node.data.nodeType === "openai_compatible_chat_model"
+      node.data.nodeType === "openai_compatible_chat_model" ||
+      node.data.nodeType === "ai_gateway_chat_model"
     ) {
       const providerId =
-        node.data.nodeType === "openai_chat_model"
+        node.data.nodeType === "ai_gateway_chat_model"
+          ? toStringValue(config.apiProvider, "openai_compatible").trim()
+          : node.data.nodeType === "openai_chat_model"
           ? "openai"
           : node.data.nodeType === "anthropic_chat_model"
             ? "anthropic"
@@ -1435,11 +1438,20 @@ export function NodeConfigModal({
               : "";
       const model = toStringValue(config.model, fallbackModel).trim();
       const baseUrl = toStringValue(config.baseUrl).trim();
-      if (!model || (node.data.nodeType === "openai_compatible_chat_model" && !baseUrl)) {
+      if (
+        !model ||
+        ((node.data.nodeType === "openai_compatible_chat_model" || node.data.nodeType === "ai_gateway_chat_model") &&
+          !baseUrl)
+      ) {
         return null;
       }
 
       const secretId = toStringValue(asRecord(config.secretRef).secretId).trim();
+      const enableThinking = config.enableThinking === true;
+      const thinkingTokens =
+        typeof config.thinkingTokens === "number" && Number.isFinite(config.thinkingTokens)
+          ? Math.max(1, Math.floor(config.thinkingTokens))
+          : undefined;
       const provider: LLMProviderConfig = {
         providerId,
         model,
@@ -1450,6 +1462,14 @@ export function NodeConfigModal({
           : {}),
         ...(typeof config.maxTokens === "number" && Number.isFinite(config.maxTokens)
           ? { maxTokens: Math.max(1, Math.floor(config.maxTokens)) }
+          : {}),
+        ...(enableThinking || thinkingTokens
+          ? {
+              extra: {
+                ...(enableThinking ? { enableThinking } : {}),
+                ...(thinkingTokens ? { thinkingTokens } : {})
+              }
+            }
           : {})
       };
       return { provider };
@@ -3020,6 +3040,105 @@ export function NodeConfigModal({
     );
   };
 
+  const renderAiGatewayChatModelParameters = () => {
+    const apiProvider = toStringValue(config.apiProvider, "openai_compatible");
+    return (
+      <>
+        <SelectField
+          label="API Provider"
+          value={apiProvider}
+          onChange={(next) => setConfig((current) => ({ ...current, apiProvider: next }))}
+          options={[
+            { value: "openai_compatible", label: "OpenAI Compatible" },
+            { value: "openai", label: "OpenAI" },
+            { value: "anthropic", label: "Anthropic" }
+          ]}
+        />
+        {renderCredentialSecretField({
+          fieldKey: "ai_gateway_chat_secret",
+          label: "Gateway API Key",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "Select secret",
+          preferredProvider: "openai_compatible",
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        })}
+        <TextField
+          label="Custom Base URL"
+          value={toStringValue(config.baseUrl)}
+          onChange={(next) => setConfig((current) => ({ ...current, baseUrl: next }))}
+          placeholder={apiProvider === "anthropic" ? "https://llm.company.example/v1" : "https://llm.company.example/v1"}
+        />
+        <TextField
+          label="Model"
+          value={toStringValue(config.model)}
+          onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
+          placeholder={apiProvider === "anthropic" ? "claude-haiku-4-5-20251001" : "gpt-4o-mini"}
+        />
+        <div className="cfg-grid-2">
+          <NumberField
+            label="Temperature"
+            value={toNumberValue(config.temperature, 0.2)}
+            min={0}
+            max={2}
+            step={0.1}
+            onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
+          />
+          <NumberField
+            label="Max Tokens"
+            value={toNumberValue(config.maxTokens, 1024)}
+            min={1}
+            step={1}
+            onChange={(next) => setConfig((current) => ({ ...current, maxTokens: next }))}
+          />
+        </div>
+        <ToggleField
+          label="Enable Thinking"
+          checked={config.enableThinking === true}
+          onChange={(next) => setConfig((current) => ({ ...current, enableThinking: next }))}
+        />
+        {config.enableThinking === true && (
+          <NumberField
+            label="Thinking Tokens"
+            value={toNumberValue(config.thinkingTokens, 1024)}
+            min={1}
+            step={128}
+            onChange={(next) => setConfig((current) => ({ ...current, thinkingTokens: next }))}
+          />
+        )}
+        <TextField
+          label="Prompt Key"
+          value={toStringValue(config.promptKey, "prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, promptKey: next }))}
+        />
+        <TextField
+          label="System Prompt Key"
+          value={toStringValue(config.systemPromptKey, "system_prompt")}
+          onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
+        />
+        <div className="cfg-tip">
+          Use <code>OpenAI Compatible</code> when the gateway exposes <code>/v1/chat/completions</code>.
+          Use <code>Anthropic</code> when it exposes Anthropic-compatible <code>/v1/messages</code>.
+        </div>
+        <div className="cfg-inline-actions">
+          <button
+            type="button"
+            className="node-btn"
+            onClick={() => void handleProviderTestRun()}
+            disabled={providerTestBusy}
+          >
+            {providerTestBusy ? "Testing..." : "Test Connection"}
+          </button>
+          {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
+        </div>
+        {providerTestError && <div className="error-banner">{providerTestError}</div>}
+      </>
+    );
+  };
+
   const renderAzureOpenAIChatModelParameters = () => {
     return (
       <>
@@ -3898,6 +4017,8 @@ export function NodeConfigModal({
           requireBaseUrl: true,
           help: "Use for OpenRouter, Groq, vLLM, LM Studio, or any OpenAI-compatible chat/completions API."
         });
+      case "ai_gateway_chat_model":
+        return renderAiGatewayChatModelParameters();
       case "basic_llm_chain":
         return renderBasicLlmChainParameters();
       case "qa_chain":

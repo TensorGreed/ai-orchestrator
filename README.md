@@ -418,6 +418,7 @@ Agent Chat Model attachments can use dedicated provider nodes:
 - `Anthropic Chat Model` (`anthropic_chat_model`)
 - `Ollama Chat Model` (`ollama_chat_model`)
 - `OpenAI Compatible Chat Model` (`openai_compatible_chat_model`)
+- `AI Gateway Chat Model` (`ai_gateway_chat_model`)
 - `Azure OpenAI Chat Model` (`azure_openai_chat_model`)
 - `Google Gemini Chat Model` (`google_gemini_chat_model`)
 - Legacy generic `LLM Call` (`llm_call`)

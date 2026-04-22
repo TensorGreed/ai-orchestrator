@@ -39,6 +39,7 @@ function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "a
     nodeType === "anthropic_chat_model" ||
     nodeType === "ollama_chat_model" ||
     nodeType === "openai_compatible_chat_model" ||
+    nodeType === "ai_gateway_chat_model" ||
     nodeType === "azure_openai_chat_model" ||
     nodeType === "google_gemini_chat_model" ||
     nodeType === "local_memory"
