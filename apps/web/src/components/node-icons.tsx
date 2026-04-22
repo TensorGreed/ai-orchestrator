@@ -1042,6 +1042,12 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
  * Logos live at apps/web/public/logos/*.svg and are served statically.
  */
 export const NODE_LOGO_MAP: Record<string, string> = {
+  openai_chat_model: "/logos/openai.svg",
+  anthropic_chat_model: "/logos/anthropic.svg",
+  ollama_chat_model: "/logos/ollama.svg",
+  openai_compatible_chat_model: "/logos/openai-compatible.svg",
+  azure_openai_chat_model: "/logos/azure-openai.svg",
+  google_gemini_chat_model: "/logos/gemini.svg",
   http_request: "/logos/http.svg",
   webhook_input: "/logos/http.svg",
   webhook_response: "/logos/http.svg",

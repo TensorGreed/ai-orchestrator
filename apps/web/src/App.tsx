@@ -225,6 +225,7 @@ const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
 const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
 const DEBUG_MODE_STORAGE_KEY = "ai-orchestrator:debug-mode";
 const NODE_CLIPBOARD_STORAGE_KEY = "ai-orchestrator:node-clipboard";
+const MAX_LOCAL_WIP_CHARS = 1_000_000;
 const NODE_PASTE_OFFSET_PX = 28;
 const THEME_STORAGE_KEY = "ai-orchestrator:theme";
 const HISTORY_STACK_LIMIT = 50;
@@ -352,6 +353,29 @@ function stringifyPretty(value: unknown) {
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function toLocalWipWorkflow(workflow: Workflow): Workflow {
+  const next: Workflow = { ...workflow };
+  delete next.pinnedData;
+  return next;
+}
+
+function storeLocalWipWorkflow(workflow: Workflow): void {
+  try {
+    const serialized = JSON.stringify(toLocalWipWorkflow(workflow));
+    if (serialized.length > MAX_LOCAL_WIP_CHARS) {
+      localStorage.removeItem(WIP_WORKFLOW_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, serialized);
+  } catch {
+    try {
+      localStorage.removeItem(WIP_WORKFLOW_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 function formatDuration(value: number | null | undefined): string {
@@ -997,6 +1021,7 @@ function StudioApp() {
   const latestExecutionResultRef = useRef<WorkflowExecutionResult | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
   const pasteCountRef = useRef(0);
+  const didAttemptInitialWipRef = useRef(false);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<EditorNodeData>([]);
@@ -1356,7 +1381,7 @@ function StudioApp() {
   }, [isDebugMode, stopVisualRun]);
 
   useEffect(() => {
-    if (!isDebugMode || !authUser || !currentWorkflowExists) {
+    if (activeMode !== "editor" || !isDebugMode || !authUser || !currentWorkflowExists) {
       return;
     }
 
@@ -1395,6 +1420,11 @@ function StudioApp() {
           return;
         }
 
+        if (!sameExecution && !isInProgressStatus) {
+          latestDebugExecutionIdRef.current = latest.id;
+          return;
+        }
+
         // New external execution detected (e.g., REST client / webhook call).
         // Reset previous debug trace immediately before loading full details.
         if (!sameExecution) {
@@ -1420,29 +1450,47 @@ function StudioApp() {
       }
     };
 
-    void syncLatestExecution();
+    const firstPollTimerId = window.setTimeout(() => {
+      void syncLatestExecution();
+    }, 2000);
     const timerId = window.setInterval(() => {
       void syncLatestExecution();
     }, 2000);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(firstPollTimerId);
       window.clearInterval(timerId);
     };
-  }, [authUser, busy, currentWorkflow.id, currentWorkflowExists, isDebugMode]);
+  }, [activeMode, authUser, busy, currentWorkflow.id, currentWorkflowExists, isDebugMode]);
 
   useEffect(() => {
-    setNodes((currentNodes) =>
-      currentNodes.map((node) => ({
-        ...node,
-        data: {
-          ...node.data,
-          executionStatus: executionStatuses.get(node.id) as EditorNodeData["executionStatus"],
-          executionPreview: executionPreviewByNodeId.get(node.id),
-          pinned: pinnedNodeIds.has(node.id)
+    setNodes((currentNodes) => {
+      let changed = false;
+      const nextNodes = currentNodes.map((node) => {
+        const executionStatus = executionStatuses.get(node.id) as EditorNodeData["executionStatus"];
+        const executionPreview = executionPreviewByNodeId.get(node.id);
+        const pinned = pinnedNodeIds.has(node.id);
+        if (
+          node.data.executionStatus === executionStatus &&
+          node.data.executionPreview === executionPreview &&
+          node.data.pinned === pinned
+        ) {
+          return node;
         }
-      }))
-    );
+        changed = true;
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            executionStatus,
+            executionPreview,
+            pinned
+          }
+        };
+      });
+      return changed ? nextNodes : currentNodes;
+    });
   }, [executionPreviewByNodeId, executionStatuses, pinnedNodeIds, setNodes]);
 
   useEffect(() => {
@@ -1746,6 +1794,10 @@ function StudioApp() {
       if (!raw) {
         return null;
       }
+      if (raw.length > MAX_LOCAL_WIP_CHARS) {
+        localStorage.removeItem(WIP_WORKFLOW_STORAGE_KEY);
+        return null;
+      }
       const parsed = JSON.parse(raw) as Workflow;
       if (
         !parsed ||
@@ -1790,20 +1842,6 @@ function StudioApp() {
       setWorkflowList(workflowItems);
       setProjects(projectPayload.projects ?? []);
       setFolders(folderPayload.folders ?? []);
-
-      const wipWorkflow = readWipWorkflow();
-      if (wipWorkflow) {
-        hydrateWorkflow(wipWorkflow);
-        return;
-      }
-
-      if (activeMode !== "dashboard" && workflowItems[0]) {
-        const rememberedId = localStorage.getItem(LAST_WORKFLOW_ID_STORAGE_KEY);
-        const chosenWorkflow =
-          rememberedId && workflowItems.some((item) => item.id === rememberedId) ? rememberedId : workflowItems[0].id;
-        const workflow = await fetchWorkflow(chosenWorkflow);
-        hydrateWorkflow(workflow);
-      }
     } catch (loadError) {
       if (loadError instanceof ApiError && loadError.status === 401) {
         setAuthUser(null);
@@ -1814,7 +1852,7 @@ function StudioApp() {
     } finally {
       setLoading(false);
     }
-  }, [activeMode, activeProjectId, hydrateWorkflow, readWipWorkflow]);
+  }, [activeProjectId, setWorkflowList]);
 
   // Persist the active project id so switching survives a refresh.
   useEffect(() => {
@@ -1829,6 +1867,7 @@ function StudioApp() {
   useEffect(() => {
     setActiveFolderFilter(undefined);
     setActiveTagFilter(null);
+    didAttemptInitialWipRef.current = false;
   }, [activeProjectId]);
 
   useEffect(() => {
@@ -1869,7 +1908,7 @@ function StudioApp() {
   }, [authUser, loadData]);
 
   useEffect(() => {
-    if (!authUser) {
+    if (!authUser || activeMode !== "editor") {
       return;
     }
 
@@ -1897,11 +1936,14 @@ function StudioApp() {
     return () => {
       cancelled = true;
     };
-  }, [authUser]);
+  }, [activeMode, authUser]);
 
   useEffect(() => {
     if (!authUser || !canManageSecrets) {
       setSecrets([]);
+      return;
+    }
+    if (activeMode !== "editor" && activeMode !== "secrets") {
       return;
     }
 
@@ -1927,7 +1969,7 @@ function StudioApp() {
     return () => {
       cancelled = true;
     };
-  }, [activeProjectId, authUser, canManageSecrets]);
+  }, [activeMode, activeProjectId, authUser, canManageSecrets]);
 
   useEffect(() => {
     if (activeMode === "secrets" && !canManageSecrets) {
@@ -1980,7 +2022,7 @@ function StudioApp() {
 
     try {
       const snapshot = editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
-      localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(snapshot));
+      storeLocalWipWorkflow(snapshot);
     } catch {
       // localStorage may fail in private mode or quota edge cases.
     }
@@ -2283,11 +2325,21 @@ function StudioApp() {
       return;
     }
 
+    if (!didAttemptInitialWipRef.current) {
+      didAttemptInitialWipRef.current = true;
+      const wipWorkflow = readWipWorkflow();
+      const wipMatchesProject = !wipWorkflow?.projectId || wipWorkflow.projectId === activeProjectId;
+      if (wipWorkflow && wipMatchesProject && workflowList.some((item) => item.id === wipWorkflow.id)) {
+        hydrateWorkflow(wipWorkflow);
+        return;
+      }
+    }
+
     const rememberedId = localStorage.getItem(LAST_WORKFLOW_ID_STORAGE_KEY);
     const chosenWorkflowId =
       rememberedId && workflowList.some((item) => item.id === rememberedId) ? rememberedId : workflowList[0]!.id;
     void loadWorkflowById(chosenWorkflowId);
-  }, [activeMode, authUser, currentWorkflow.id, loadWorkflowById, loading, workflowList]);
+  }, [activeMode, activeProjectId, authUser, currentWorkflow.id, hydrateWorkflow, loadWorkflowById, loading, readWipWorkflow, workflowList]);
 
   const buildCurrentWorkflow = useCallback(() => {
     return editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
@@ -2300,7 +2352,7 @@ function StudioApp() {
     setWorkflowList(workflows);
     setCurrentWorkflow(saved);
     localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, saved.id);
-    localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(saved));
+    storeLocalWipWorkflow(saved);
     return saved;
   }, [buildCurrentWorkflow]);
 
@@ -2379,7 +2431,7 @@ function StudioApp() {
           nodes as EditorNode[],
           edges as Edge[]
         );
-        localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(snapshot));
+        storeLocalWipWorkflow(snapshot);
       } catch {
         // localStorage can fail in private mode or due quota limits.
       }
@@ -2960,7 +3012,7 @@ function StudioApp() {
         setWorkflowList(workflows);
         hydrateWorkflow(imported);
         localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, imported.id);
-        localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(imported));
+        storeLocalWipWorkflow(imported);
       } catch (importError) {
         handleApiError(importError, "Failed to import workflow");
       } finally {
@@ -3020,7 +3072,7 @@ function StudioApp() {
       hydrateWorkflow(savedDraft);
       setActiveMode("editor");
       localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, savedDraft.id);
-      localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(savedDraft));
+      storeLocalWipWorkflow(savedDraft);
     } catch (createError) {
       handleApiError(createError, "Failed to create workflow");
     } finally {
@@ -3057,7 +3109,7 @@ function StudioApp() {
         hydrateWorkflow(duplicated);
         setActiveMode("editor");
         localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, duplicated.id);
-        localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, JSON.stringify(duplicated));
+        storeLocalWipWorkflow(duplicated);
       } catch (duplicateError) {
         handleApiError(duplicateError, "Failed to duplicate workflow");
       } finally {
@@ -3307,13 +3359,10 @@ function StudioApp() {
               }
             : current
         );
-        localStorage.setItem(
-          WIP_WORKFLOW_STORAGE_KEY,
-          JSON.stringify({
-            ...buildCurrentWorkflow(),
-            pinnedData: response.pinnedData
-          })
-        );
+        storeLocalWipWorkflow({
+          ...buildCurrentWorkflow(),
+          pinnedData: response.pinnedData
+        });
       } catch (pinError) {
         handleApiError(pinError, "Failed to pin node output");
       } finally {
@@ -3338,13 +3387,10 @@ function StudioApp() {
               }
             : current
         );
-        localStorage.setItem(
-          WIP_WORKFLOW_STORAGE_KEY,
-          JSON.stringify({
-            ...buildCurrentWorkflow(),
-            pinnedData: response.pinnedData
-          })
-        );
+        storeLocalWipWorkflow({
+          ...buildCurrentWorkflow(),
+          pinnedData: response.pinnedData
+        });
       } catch (pinError) {
         handleApiError(pinError, "Failed to remove pinned node output");
       } finally {

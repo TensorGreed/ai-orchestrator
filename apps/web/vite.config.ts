@@ -7,6 +7,8 @@ export default defineConfig(({ mode }) => {
   const envDir = path.resolve(__dirname, "../../");
   const env = loadEnv(mode, envDir, "");
   const targetPort = env.API_PORT || env.VITE_API_PORT || 4000;
+  const configuredHost = env.VITE_API_HOST || env.API_HOST || "127.0.0.1";
+  const targetHost = configuredHost === "0.0.0.0" ? "127.0.0.1" : configuredHost;
 
   if (isWidgetBuild) {
     return {
@@ -41,19 +43,19 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       proxy: {
         "/api": {
-          target: `http://localhost:${targetPort}`,
+          target: `http://${targetHost}:${targetPort}`,
           changeOrigin: true
         },
         "/webhook": {
-          target: `http://localhost:${targetPort}`,
+          target: `http://${targetHost}:${targetPort}`,
           changeOrigin: true
         },
         "/webhook-test": {
-          target: `http://localhost:${targetPort}`,
+          target: `http://${targetHost}:${targetPort}`,
           changeOrigin: true
         },
         "/health": {
-          target: `http://localhost:${targetPort}`,
+          target: `http://${targetHost}:${targetPort}`,
           changeOrigin: true
         }
       }
