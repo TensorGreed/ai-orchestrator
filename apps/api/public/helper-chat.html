@@ -761,6 +761,67 @@
         text-align: center;
       }
 
+      /* ---------- Output attachments (assistant downloads) ---------- */
+      .attachments-block {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .attachment-card {
+        display: grid;
+        grid-template-columns: 28px 1fr auto;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 12px;
+        background: var(--bg-2);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        text-decoration: none;
+        color: var(--text);
+        transition: background 0.12s ease, border-color 0.12s ease;
+      }
+
+      .attachment-card:hover {
+        background: var(--bg-3);
+        border-color: var(--accent);
+      }
+
+      .attachment-icon {
+        font-size: 20px;
+        line-height: 1;
+        text-align: center;
+      }
+
+      .attachment-meta {
+        display: grid;
+        gap: 2px;
+        min-width: 0;
+      }
+
+      .attachment-meta strong {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .attachment-meta small {
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+
+      .attachment-arrow {
+        color: var(--text-dim);
+        font-size: 16px;
+      }
+
+      .attachment-card:hover .attachment-arrow {
+        color: var(--accent);
+      }
+
       /* ---------- Saved webhooks list ---------- */
       .saved-list {
         background: var(--bg);
@@ -1054,6 +1115,33 @@
           });
         }
 
+        // ---------- DOMPurify hooks ----------
+        // DOMPurify strips data: URLs from anchor href by default. Workflows commonly
+        // return downloadable artefacts as `data:<mime>;base64,...` (PDF, CSV, Excel, ZIP).
+        // Allow safe data: URIs on <a href> — but explicitly REJECT data:text/html (XSS vector).
+        if (window.DOMPurify) {
+          const SAFE_DATA_RE = /^data:(?!text\/html)[a-z0-9.+\-/]+;base64,/i;
+          DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+            if (
+              data.attrName === "href" &&
+              typeof data.attrValue === "string" &&
+              SAFE_DATA_RE.test(data.attrValue)
+            ) {
+              data.forceKeepAttr = true;
+            }
+          });
+          DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+            if (node.tagName === "A") {
+              const href = node.getAttribute("href") || "";
+              if (SAFE_DATA_RE.test(href)) {
+                if (!node.hasAttribute("download")) node.setAttribute("download", "download");
+                node.setAttribute("target", "_blank");
+                node.setAttribute("rel", "noreferrer");
+              }
+            }
+          });
+        }
+
         // ---------- Utilities ----------
         function uid(prefix) {
           if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -1254,15 +1342,100 @@
           chatLogEl.scrollTop = chatLogEl.scrollHeight;
         }
 
+        // Renders one attachment as a download "card". `attachment` is the harvested shape:
+        // { filename, mimeType, dataUrl, sizeBytes }
+        function appendAttachmentCard(container, attachment) {
+          const card = document.createElement("a");
+          card.className = "attachment-card";
+          card.href = attachment.dataUrl;
+          card.download = attachment.filename || "download";
+          card.target = "_blank";
+          card.rel = "noreferrer";
+
+          const icon = document.createElement("span");
+          icon.className = "attachment-icon";
+          icon.textContent = iconForMime(attachment.mimeType);
+
+          const meta = document.createElement("span");
+          meta.className = "attachment-meta";
+          const name = document.createElement("strong");
+          name.textContent = attachment.filename || "download";
+          const sub = document.createElement("small");
+          sub.textContent = `${attachment.mimeType || "file"}${attachment.sizeBytes ? " · " + formatBytes(attachment.sizeBytes) : ""}`;
+          meta.appendChild(name);
+          meta.appendChild(sub);
+
+          const arrow = document.createElement("span");
+          arrow.className = "attachment-arrow";
+          arrow.textContent = "↓";
+
+          card.appendChild(icon);
+          card.appendChild(meta);
+          card.appendChild(arrow);
+          container.appendChild(card);
+        }
+
+        function appendAttachmentsBlock(container, attachments) {
+          if (!attachments || attachments.length === 0) return;
+          const block = document.createElement("div");
+          block.className = "attachments-block";
+          for (const att of attachments) appendAttachmentCard(block, att);
+          container.appendChild(block);
+        }
+
+        function appendCodeBlock(container, code, lang, label) {
+          const block = document.createElement("div");
+          block.className = "code-block";
+          const head = document.createElement("div");
+          head.className = "code-head";
+          const langSpan = document.createElement("span");
+          langSpan.textContent = label ? `${label} — ${lang || "code"}` : (lang || "code");
+          const copyBtn = document.createElement("button");
+          copyBtn.type = "button";
+          copyBtn.className = "code-copy";
+          copyBtn.textContent = "Copy";
+          copyBtn.addEventListener("click", () => {
+            navigator.clipboard.writeText(code).then(
+              () => {
+                copyBtn.textContent = "Copied";
+                setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
+              },
+              () => (copyBtn.textContent = "Failed")
+            );
+          });
+          head.appendChild(langSpan);
+          head.appendChild(copyBtn);
+          const body = document.createElement("pre");
+          body.className = "code-body";
+          const codeEl = document.createElement("code");
+          codeEl.className = lang ? `language-${lang}` : "";
+          if (window.hljs && lang && hljs.getLanguage(lang)) {
+            try { codeEl.innerHTML = hljs.highlight(code, { language: lang }).value; }
+            catch { codeEl.textContent = code; }
+          } else {
+            codeEl.textContent = code;
+          }
+          body.appendChild(codeEl);
+          block.appendChild(head);
+          block.appendChild(body);
+          container.appendChild(block);
+        }
+
+        function appendCodeBlocks(container, codes) {
+          if (!codes || codes.length === 0) return;
+          for (const c of codes) {
+            appendCodeBlock(container, c.source, c.language || "code", c.label || "");
+          }
+        }
+
         function renderContentInto(container, role, text) {
           if (role === "assistant" && isPdfDataUrl(text)) {
-            const link = document.createElement("a");
-            link.href = text;
-            link.download = "workflow-output.pdf";
-            link.target = "_blank";
-            link.rel = "noreferrer";
-            link.textContent = "📄 Download PDF";
-            container.appendChild(link);
+            appendAttachmentCard(container, {
+              filename: "workflow-output.pdf",
+              mimeType: "application/pdf",
+              dataUrl: text,
+              sizeBytes: dataUrlByteSize(text)
+            });
             return;
           }
           if (role === "assistant") {
@@ -1287,7 +1460,15 @@
           meta.textContent = msg.role === "user" ? "You" : "Assistant";
           const bubble = document.createElement("div");
           bubble.className = "msg-bubble";
-          renderContentInto(bubble, msg.role, msg.text || "");
+          if (msg.role === "assistant") {
+            appendAttachmentsBlock(bubble, msg.downloads);
+          }
+          if (msg.text || msg.role === "user") {
+            renderContentInto(bubble, msg.role, msg.text || "");
+          }
+          if (msg.role === "assistant" && msg.codes && msg.codes.length > 0) {
+            appendCodeBlocks(bubble, msg.codes);
+          }
           if (msg.attachments && msg.attachments.length > 0) {
             const wrap = document.createElement("div");
             wrap.className = "msg-attachments";
@@ -1526,65 +1707,263 @@
           } catch { return null; }
         }
 
+        // ---------- Mime / language helpers ----------
+        // Map a mime type → a sensible default extension (used when filename is missing).
+        const MIME_EXT = {
+          "application/pdf": "pdf",
+          "text/csv": "csv",
+          "application/csv": "csv",
+          "text/plain": "txt",
+          "text/markdown": "md",
+          "application/json": "json",
+          "application/xml": "xml",
+          "text/xml": "xml",
+          "application/zip": "zip",
+          "application/x-zip-compressed": "zip",
+          "application/vnd.ms-excel": "xls",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+          "application/msword": "doc",
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+          "image/png": "png",
+          "image/jpeg": "jpg",
+          "image/gif": "gif",
+          "image/svg+xml": "svg",
+          "text/html": "html"
+        };
+
+        function iconForMime(mime) {
+          if (!mime) return "📎";
+          if (mime === "application/pdf") return "📄";
+          if (mime.startsWith("image/")) return "🖼️";
+          if (mime === "text/csv" || mime === "application/csv" || mime.includes("excel") || mime.includes("spreadsheet")) return "📊";
+          if (mime.includes("zip") || mime.includes("compressed")) return "📦";
+          if (mime.includes("word") || mime.includes("document")) return "📝";
+          if (mime === "application/json" || mime.includes("xml")) return "🧾";
+          return "📎";
+        }
+
+        function dataUrlMime(dataUrl) {
+          const m = /^data:([^;,]+)/i.exec(dataUrl || "");
+          return m ? m[1].toLowerCase() : "";
+        }
+
+        function dataUrlByteSize(dataUrl) {
+          const m = /^data:[^;,]+;base64,(.*)$/i.exec(dataUrl || "");
+          if (!m) return 0;
+          const b = m[1];
+          const padding = (b.endsWith("==") ? 2 : b.endsWith("=") ? 1 : 0);
+          return Math.max(0, Math.floor((b.length * 3) / 4) - padding);
+        }
+
+        // Parses common variations of language metadata: "javascript", "JavaScript", "js" → "javascript"
+        const LANG_ALIAS = {
+          js: "javascript", ts: "typescript", py: "python", rb: "ruby",
+          sh: "bash", shell: "bash", yml: "yaml"
+        };
+        function normalizeLang(lang) {
+          if (!lang) return "";
+          const lower = String(lang).trim().toLowerCase();
+          return LANG_ALIAS[lower] || lower;
+        }
+
+        // Pulls multiple code blocks and multiple attachments from a parsed agent envelope.
+        // Returns:
+        //   {
+        //     codes: [{ language, source, label? }],
+        //     attachments: [{ filename, mimeType, dataUrl, sizeBytes }]
+        //   }
+        function harvestExtras(parsed) {
+          const extras = { codes: [], attachments: [] };
+          if (!parsed || typeof parsed !== "object") return extras;
+
+          // ----- CODE BLOCKS -----
+          // 1) Any "<language>_code" key (python_code, javascript_code, ruby_code, sql_code, ...).
+          const CODE_KEY_RE = /^([\w+\-]+)_code$/i;
+          for (const [key, value] of Object.entries(parsed)) {
+            const m = CODE_KEY_RE.exec(key);
+            if (m && typeof value === "string" && value.trim()) {
+              extras.codes.push({ language: normalizeLang(m[1]), source: value });
+            }
+          }
+
+          // 2) Explicit `code` field, optionally as object { language, source, label }.
+          if (parsed.code && typeof parsed.code === "object" && !Array.isArray(parsed.code) && typeof parsed.code.source === "string") {
+            extras.codes.push({
+              language: normalizeLang(parsed.code.language),
+              source: parsed.code.source,
+              label: typeof parsed.code.label === "string" ? parsed.code.label : ""
+            });
+          } else if (typeof parsed.code === "string" && parsed.code.trim()) {
+            extras.codes.push({
+              language: normalizeLang(parsed.code_language || parsed.language),
+              source: parsed.code
+            });
+          }
+
+          // 3) Array form: codes: [{ language, source }, ...]
+          if (Array.isArray(parsed.codes)) {
+            for (const c of parsed.codes) {
+              if (c && typeof c === "object" && typeof c.source === "string" && c.source.trim()) {
+                extras.codes.push({
+                  language: normalizeLang(c.language),
+                  source: c.source,
+                  label: typeof c.label === "string" ? c.label : ""
+                });
+              }
+            }
+          }
+
+          // ----- ATTACHMENTS -----
+          const pushAttachment = (att) => {
+            const exists = extras.attachments.some((a) => a.dataUrl === att.dataUrl);
+            if (!exists) extras.attachments.push(att);
+          };
+
+          const buildAttachment = (raw) => {
+            if (!raw || typeof raw !== "object") return null;
+            let dataUrl = "";
+            if (typeof raw.downloadUrl === "string" && raw.downloadUrl.startsWith("data:")) dataUrl = raw.downloadUrl;
+            else if (typeof raw.url === "string" && raw.url.startsWith("data:")) dataUrl = raw.url;
+            else if (typeof raw.dataUrl === "string" && raw.dataUrl.startsWith("data:")) dataUrl = raw.dataUrl;
+            else if (typeof raw.base64 === "string" && typeof raw.mimeType === "string") {
+              dataUrl = `data:${raw.mimeType};base64,${raw.base64}`;
+            } else if (typeof raw.data === "string") {
+              if (raw.data.startsWith("data:")) dataUrl = raw.data;
+              else if (typeof raw.mimeType === "string") dataUrl = `data:${raw.mimeType};base64,${raw.data}`;
+            }
+            if (!dataUrl) return null;
+            const mimeType = raw.mimeType || dataUrlMime(dataUrl);
+            const ext = MIME_EXT[mimeType] || "bin";
+            const filename = raw.filename || raw.name || `download.${ext}`;
+            const sizeBytes = typeof raw.sizeBytes === "number" ? raw.sizeBytes : dataUrlByteSize(dataUrl);
+            return { filename, mimeType, dataUrl, sizeBytes };
+          };
+
+          // 1) Explicit attachments[] array (preferred).
+          if (Array.isArray(parsed.attachments)) {
+            for (const a of parsed.attachments) {
+              const att = buildAttachment(a);
+              if (att) pushAttachment(att);
+            }
+          }
+
+          // 2) Common workflow shapes: pdf, csv, excel, file, etc. — either object or raw data: URL.
+          for (const key of ["pdf", "csv", "excel", "file", "report"]) {
+            const v = parsed[key];
+            if (!v) continue;
+            if (typeof v === "string" && v.startsWith("data:")) {
+              const att = buildAttachment({ downloadUrl: v, filename: parsed[`${key}_filename`] });
+              if (att) pushAttachment(att);
+            } else if (typeof v === "object" && !Array.isArray(v)) {
+              const att = buildAttachment(v);
+              if (att) pushAttachment(att);
+            }
+          }
+
+          // 3) Side keys like pdfUrl/pdf_url/csvUrl
+          for (const [key, value] of Object.entries(parsed)) {
+            if (typeof value === "string" && value.startsWith("data:") && /url$|_url$/i.test(key)) {
+              const att = buildAttachment({ downloadUrl: value });
+              if (att) pushAttachment(att);
+            }
+          }
+
+          // 4) `result` happens to be a data: URL (legacy PDF Output behavior).
+          if (typeof parsed.result === "string" && parsed.result.startsWith("data:")) {
+            const att = buildAttachment({ downloadUrl: parsed.result });
+            if (att) pushAttachment(att);
+          }
+
+          return extras;
+        }
+
+        // Returns string OR { text, codes: [], attachments: [] }
         function extractFromStructuredOutput(parsed) {
           if (!parsed || typeof parsed !== "object") return null;
+          const extras = harvestExtras(parsed);
+          const hasExtras = (extras.codes && extras.codes.length > 0) || (extras.attachments && extras.attachments.length > 0);
+
           if ("status" in parsed || "final_html" in parsed) {
-            if (typeof parsed.final_html === "string" && parsed.final_html.trim()) return parsed.final_html;
-            if (typeof parsed.follow_up_question === "string" && parsed.follow_up_question.trim()) return parsed.follow_up_question;
-            if (parsed.status === "needs_more_info") return "The agent needs more information but did not specify what.";
+            if (typeof parsed.final_html === "string" && parsed.final_html.trim()) {
+              return { text: parsed.final_html, ...extras };
+            }
+            if (typeof parsed.follow_up_question === "string" && parsed.follow_up_question.trim()) {
+              return { text: parsed.follow_up_question, ...extras };
+            }
+            if (parsed.status === "needs_more_info") {
+              return { text: "The agent needs more information but did not specify what.", ...extras };
+            }
           }
-          for (const key of ["final_html", "html", "report", "result", "answer", "text", "content", "message", "response"]) {
-            if (typeof parsed[key] === "string" && parsed[key].trim()) return parsed[key];
+          for (const key of ["final_html", "html", "report", "answer", "text", "content", "message", "response"]) {
+            if (typeof parsed[key] === "string" && parsed[key].trim()) {
+              return { text: parsed[key], ...extras };
+            }
+          }
+          // `result` may itself be a data: URL (already harvested as attachment).
+          if (typeof parsed.result === "string" && parsed.result.trim() && !parsed.result.startsWith("data:")) {
+            return { text: parsed.result, ...extras };
+          }
+          // No primary text but we still found extras — return just them with empty text.
+          if (hasExtras) {
+            return { text: "", ...extras };
           }
           return null;
         }
 
+        function asExtractResult(value) {
+          if (value == null) return null;
+          if (typeof value === "string") return { text: value };
+          if (typeof value === "object" && typeof value.text === "string") return value;
+          return null;
+        }
+
+        // Returns { text, pythonCode?, pdfUrl? } — text may be empty if only extras matter.
         function extractAssistantText(payload) {
           const rootDecoded = decodeBufferLikeText(payload);
-          if (typeof rootDecoded === "string") return rootDecoded;
+          if (typeof rootDecoded === "string") return { text: rootDecoded };
           if (typeof payload === "string") {
             const parsed = tryParseAgentJson(payload);
-            const extracted = extractFromStructuredOutput(parsed);
+            const extracted = asExtractResult(extractFromStructuredOutput(parsed));
             if (extracted) return extracted;
-            return payload;
+            return { text: payload };
           }
           if (payload && typeof payload === "object") {
             if (payload.error && typeof payload.error === "string") {
               const output = payload.output;
               if (!output || (typeof output === "object" && Object.keys(output).length === 0)) {
-                return `**Error:** ${payload.error}`;
+                return { text: `**Error:** ${payload.error}` };
               }
             }
             const output = payload.output;
             const decodedOutput = decodeBufferLikeText(output);
             if (typeof decodedOutput === "string") {
               const parsed = tryParseAgentJson(decodedOutput);
-              const extracted = extractFromStructuredOutput(parsed);
+              const extracted = asExtractResult(extractFromStructuredOutput(parsed));
               if (extracted) return extracted;
-              return decodedOutput;
+              return { text: decodedOutput };
             }
             if (typeof output === "string") {
               const parsed = tryParseAgentJson(output);
-              const extracted = extractFromStructuredOutput(parsed);
+              const extracted = asExtractResult(extractFromStructuredOutput(parsed));
               if (extracted) return extracted;
-              return output;
+              return { text: output };
             }
             if (output && typeof output === "object") {
-              const directExtract = extractFromStructuredOutput(output);
+              const directExtract = asExtractResult(extractFromStructuredOutput(output));
               if (directExtract) return directExtract;
               const agentAnswer = output.answer || output.result || output.text || output.content;
               if (typeof agentAnswer === "string" && agentAnswer.trim()) {
                 const parsed = tryParseAgentJson(agentAnswer);
-                const extracted = extractFromStructuredOutput(parsed);
+                const extracted = asExtractResult(extractFromStructuredOutput(parsed));
                 if (extracted) return extracted;
-                return agentAnswer;
+                return { text: agentAnswer };
               }
             }
-            const directExtract = extractFromStructuredOutput(payload);
+            const directExtract = asExtractResult(extractFromStructuredOutput(payload));
             if (directExtract) return directExtract;
           }
-          try { return "```json\n" + JSON.stringify(payload, null, 2) + "\n```"; }
-          catch { return String(payload); }
+          try { return { text: "```json\n" + JSON.stringify(payload, null, 2) + "\n```" }; }
+          catch { return { text: String(payload) }; }
         }
 
         // ---------- Attachments ----------
@@ -1755,10 +2134,16 @@
               throw new Error(message);
             }
 
-            const assistantText = extractAssistantText(body);
-            pendingMessage.text = assistantText;
+            const extracted = extractAssistantText(body);
+            pendingMessage.text = extracted.text || "";
+            if (extracted.codes && extracted.codes.length > 0) pendingMessage.codes = extracted.codes;
+            if (extracted.attachments && extracted.attachments.length > 0) pendingMessage.downloads = extracted.attachments;
             bubble.innerHTML = "";
-            renderContentInto(bubble, "assistant", assistantText);
+            appendAttachmentsBlock(bubble, pendingMessage.downloads);
+            if (pendingMessage.text) {
+              renderContentInto(bubble, "assistant", pendingMessage.text);
+            }
+            appendCodeBlocks(bubble, pendingMessage.codes);
             session.messages.push(pendingMessage);
             saveSessions();
             renderSessions();
