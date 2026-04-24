@@ -3,6 +3,7 @@ import type { Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
 import type { ExecutionHistoryDetail, ExecutionHistorySummary } from "../lib/api";
 import { createBlankWorkflow } from "../lib/workflow";
 import type { StudioMode } from "../components/studio-layout-types";
+import { readStudioUrlState } from "../lib/studio-session";
 
 interface StudioContextValue {
   workflowList: WorkflowListItem[];
@@ -26,7 +27,7 @@ const StudioContext = createContext<StudioContextValue | undefined>(undefined);
 export function StudioProvider({ children }: { children: ReactNode }) {
   const [workflowList, setWorkflowList] = useState<WorkflowListItem[]>([]);
   const [currentWorkflow, setCurrentWorkflow] = useState<Workflow>(createBlankWorkflow());
-  const [activeMode, setActiveMode] = useState<StudioMode>("dashboard");
+  const [activeMode, setActiveMode] = useState<StudioMode>(() => readStudioUrlState().mode ?? "dashboard");
   const [executionHistoryItems, setExecutionHistoryItems] = useState<ExecutionHistorySummary[]>([]);
   const [executionHistoryTotal, setExecutionHistoryTotal] = useState(0);
   const [expandedExecutionIds, setExpandedExecutionIds] = useState<string[]>([]);

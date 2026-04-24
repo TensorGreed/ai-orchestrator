@@ -72,6 +72,18 @@ import {
   type EditorNode,
   type EditorNodeData
 } from "./lib/workflow";
+import {
+  deleteTabWipWorkflow,
+  readLegacyLocalWipWorkflow,
+  readRememberedTabProjectId,
+  readRememberedTabWorkflowId,
+  readStudioUrlState,
+  readTabWipWorkflow,
+  rememberTabProjectId,
+  rememberTabWorkflowId,
+  replaceStudioUrlState,
+  storeTabWipWorkflow
+} from "./lib/studio-session";
 import { WorkflowCanvasNode } from "./components/WorkflowCanvasNode";
 import { StickyNoteNode } from "./components/StickyNoteNode";
 import { KeyboardShortcutsPanel } from "./components/KeyboardShortcutsPanel";
@@ -222,15 +234,12 @@ function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: A
   };
 }
 
-const WIP_WORKFLOW_STORAGE_KEY = "ai-orchestrator:wip-workflow";
-const LAST_WORKFLOW_ID_STORAGE_KEY = "ai-orchestrator:last-workflow-id";
 const DEBUG_MODE_STORAGE_KEY = "ai-orchestrator:debug-mode";
 const NODE_CLIPBOARD_STORAGE_KEY = "ai-orchestrator:node-clipboard";
 const MAX_LOCAL_WIP_CHARS = 1_000_000;
 const NODE_PASTE_OFFSET_PX = 28;
 const THEME_STORAGE_KEY = "ai-orchestrator:theme";
 const HISTORY_STACK_LIMIT = 50;
-const ACTIVE_PROJECT_STORAGE_KEY = "ai-orchestrator:active-project";
 const DEFAULT_LOGS_PANEL_HEIGHT = 210;
 const MIN_LOGS_PANEL_HEIGHT = 140;
 const MAX_LOGS_PANEL_HEIGHT = 620;
@@ -356,27 +365,8 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function toLocalWipWorkflow(workflow: Workflow): Workflow {
-  const next: Workflow = { ...workflow };
-  delete next.pinnedData;
-  return next;
-}
-
 function storeLocalWipWorkflow(workflow: Workflow): void {
-  try {
-    const serialized = JSON.stringify(toLocalWipWorkflow(workflow));
-    if (serialized.length > MAX_LOCAL_WIP_CHARS) {
-      localStorage.removeItem(WIP_WORKFLOW_STORAGE_KEY);
-      return;
-    }
-    localStorage.setItem(WIP_WORKFLOW_STORAGE_KEY, serialized);
-  } catch {
-    try {
-      localStorage.removeItem(WIP_WORKFLOW_STORAGE_KEY);
-    } catch {
-      /* ignore */
-    }
-  }
+  storeTabWipWorkflow(workflow, MAX_LOCAL_WIP_CHARS);
 }
 
 function formatDuration(value: number | null | undefined): string {
@@ -962,11 +952,8 @@ function StudioApp() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string>(() => {
-    try {
-      return localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || DEFAULT_PROJECT_ID;
-    } catch {
-      return DEFAULT_PROJECT_ID;
-    }
+    const urlState = readStudioUrlState();
+    return urlState.projectId ?? readRememberedTabProjectId() ?? DEFAULT_PROJECT_ID;
   });
   // null = "No folder (root)", undefined = "All folders"
   const [activeFolderFilter, setActiveFolderFilter] = useState<string | null | undefined>(undefined);
@@ -1789,30 +1776,14 @@ function StudioApp() {
     }
   }, [executionDetailById, expandedExecutionIds]);
 
-  const readWipWorkflow = useCallback((): Workflow | null => {
-    try {
-      const raw = localStorage.getItem(WIP_WORKFLOW_STORAGE_KEY);
-      if (!raw) {
-        return null;
-      }
-      if (raw.length > MAX_LOCAL_WIP_CHARS) {
-        localStorage.removeItem(WIP_WORKFLOW_STORAGE_KEY);
-        return null;
-      }
-      const parsed = JSON.parse(raw) as Workflow;
-      if (
-        !parsed ||
-        typeof parsed !== "object" ||
-        typeof parsed.id !== "string" ||
-        !Array.isArray(parsed.nodes) ||
-        !Array.isArray(parsed.edges)
-      ) {
-        return null;
-      }
-      return parsed;
-    } catch {
-      return null;
+  const readWipWorkflow = useCallback((workflowId: string): Workflow | null => {
+    const sessionWip = readTabWipWorkflow(workflowId, MAX_LOCAL_WIP_CHARS);
+    if (sessionWip) {
+      return sessionWip;
     }
+
+    const legacyWip = readLegacyLocalWipWorkflow(MAX_LOCAL_WIP_CHARS);
+    return legacyWip?.id === workflowId ? legacyWip : null;
   }, []);
 
   const hydrateWorkflow = useCallback(
@@ -1855,14 +1826,30 @@ function StudioApp() {
     }
   }, [activeProjectId, setWorkflowList]);
 
-  // Persist the active project id so switching survives a refresh.
+  // Persist the active project id so switching survives a refresh without leaking across tabs.
   useEffect(() => {
-    try {
-      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, activeProjectId);
-    } catch {
-      /* ignore */
-    }
+    rememberTabProjectId(activeProjectId);
   }, [activeProjectId]);
+
+  useEffect(() => {
+    if (!currentWorkflowExists) {
+      return;
+    }
+    rememberTabWorkflowId(currentWorkflow.id);
+  }, [currentWorkflow.id, currentWorkflowExists]);
+
+  useEffect(() => {
+    if (!authUser) {
+      return;
+    }
+
+    const existingUrlState = readStudioUrlState();
+    replaceStudioUrlState({
+      workflowId: currentWorkflowExists ? currentWorkflow.id : existingUrlState.workflowId,
+      projectId: activeProjectId,
+      mode: activeMode
+    });
+  }, [activeMode, activeProjectId, authUser, currentWorkflow.id, currentWorkflowExists]);
 
   // Reset folder/tag selection when switching project.
   useEffect(() => {
@@ -2296,14 +2283,19 @@ function StudioApp() {
   const loadWorkflowById = useCallback(
     async (id: string) => {
       try {
+        const localWip = readWipWorkflow(id);
+        if (localWip) {
+          hydrateWorkflow(localWip);
+          return;
+        }
+
         const workflow = await fetchWorkflow(id);
         hydrateWorkflow(workflow);
-        localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, id);
       } catch (loadError) {
         handleApiError(loadError, "Failed to load workflow");
       }
     },
-    [handleApiError, hydrateWorkflow]
+    [handleApiError, hydrateWorkflow, readWipWorkflow]
   );
 
   useEffect(() => {
@@ -2328,7 +2320,12 @@ function StudioApp() {
 
     if (!didAttemptInitialWipRef.current) {
       didAttemptInitialWipRef.current = true;
-      const wipWorkflow = readWipWorkflow();
+      const urlState = readStudioUrlState();
+      const preferredWorkflowId =
+        urlState.workflowId && workflowList.some((item) => item.id === urlState.workflowId)
+          ? urlState.workflowId
+          : readRememberedTabWorkflowId();
+      const wipWorkflow = preferredWorkflowId ? readWipWorkflow(preferredWorkflowId) : null;
       const wipMatchesProject = !wipWorkflow?.projectId || wipWorkflow.projectId === activeProjectId;
       if (wipWorkflow && wipMatchesProject && workflowList.some((item) => item.id === wipWorkflow.id)) {
         hydrateWorkflow(wipWorkflow);
@@ -2336,9 +2333,14 @@ function StudioApp() {
       }
     }
 
-    const rememberedId = localStorage.getItem(LAST_WORKFLOW_ID_STORAGE_KEY);
+    const urlState = readStudioUrlState();
+    const rememberedId = readRememberedTabWorkflowId();
     const chosenWorkflowId =
-      rememberedId && workflowList.some((item) => item.id === rememberedId) ? rememberedId : workflowList[0]!.id;
+      urlState.workflowId && workflowList.some((item) => item.id === urlState.workflowId)
+        ? urlState.workflowId
+        : rememberedId && workflowList.some((item) => item.id === rememberedId)
+          ? rememberedId
+          : workflowList[0]!.id;
     void loadWorkflowById(chosenWorkflowId);
   }, [activeMode, activeProjectId, authUser, currentWorkflow.id, hydrateWorkflow, loadWorkflowById, loading, readWipWorkflow, workflowList]);
 
@@ -2352,7 +2354,6 @@ function StudioApp() {
     const workflows = await fetchWorkflows({ projectId: activeProjectId });
     setWorkflowList(workflows);
     setCurrentWorkflow(saved);
-    localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, saved.id);
     storeLocalWipWorkflow(saved);
     return saved;
   }, [buildCurrentWorkflow]);
@@ -3012,7 +3013,6 @@ function StudioApp() {
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
         setWorkflowList(workflows);
         hydrateWorkflow(imported);
-        localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, imported.id);
         storeLocalWipWorkflow(imported);
       } catch (importError) {
         handleApiError(importError, "Failed to import workflow");
@@ -3072,7 +3072,6 @@ function StudioApp() {
       setWorkflowList(workflows);
       hydrateWorkflow(savedDraft);
       setActiveMode("editor");
-      localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, savedDraft.id);
       storeLocalWipWorkflow(savedDraft);
     } catch (createError) {
       handleApiError(createError, "Failed to create workflow");
@@ -3109,7 +3108,6 @@ function StudioApp() {
         setWorkflowList(workflows);
         hydrateWorkflow(duplicated);
         setActiveMode("editor");
-        localStorage.setItem(LAST_WORKFLOW_ID_STORAGE_KEY, duplicated.id);
         storeLocalWipWorkflow(duplicated);
       } catch (duplicateError) {
         handleApiError(duplicateError, "Failed to duplicate workflow");
@@ -3137,6 +3135,7 @@ function StudioApp() {
         setBusy(true);
         setError(null);
         await deleteWorkflow(workflowId);
+        deleteTabWipWorkflow(workflowId);
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
         setWorkflowList(workflows);
 
@@ -3150,6 +3149,11 @@ function StudioApp() {
             setCurrentWorkflow(blank);
             setNodes([]);
             setEdges([]);
+            replaceStudioUrlState({
+              workflowId: null,
+              projectId: activeProjectId,
+              mode: activeMode
+            });
           }
         }
       } catch (deleteError) {
@@ -3158,7 +3162,7 @@ function StudioApp() {
         setBusy(false);
       }
     },
-    [activeProjectId, canManageWorkflows, currentWorkflow.id, handleApiError, hydrateWorkflow, setEdges, setNodes, workflowList]
+    [activeMode, activeProjectId, canManageWorkflows, currentWorkflow.id, handleApiError, hydrateWorkflow, setEdges, setNodes, workflowList]
   );
 
   // --- Phase 4.2: project/folder/tag handlers --------------------------------
@@ -3893,6 +3897,7 @@ function StudioApp() {
     setSecretMessage(null);
     setWorkflowVariableRows([]);
     setVariablesBusy(false);
+    replaceStudioUrlState({ workflowId: null, projectId: null, mode: null });
   }, [setEdges, setNodes, stopVisualRun]);
 
   if (authChecking) {
