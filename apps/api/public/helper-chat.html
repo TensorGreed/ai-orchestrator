@@ -1951,12 +1951,31 @@
             if (output && typeof output === "object") {
               const directExtract = asExtractResult(extractFromStructuredOutput(output));
               if (directExtract) return directExtract;
-              const agentAnswer = output.answer || output.result || output.text || output.content;
-              if (typeof agentAnswer === "string" && agentAnswer.trim()) {
-                const parsed = tryParseAgentJson(agentAnswer);
-                const extracted = asExtractResult(extractFromStructuredOutput(parsed));
-                if (extracted) return extracted;
-                return { text: agentAnswer };
+
+              // The Output node typically wraps the value as { result: <answer>, <outputKey>: <answer> }.
+              // Walk into common nested keys — the actual envelope can sit one or two levels deep
+              // and may be either an OBJECT (Code Node B's `answer` shape) or a JSON STRING.
+              for (const key of ["answer", "result", "text", "content", "message", "response"]) {
+                const nested = output[key];
+                if (!nested) continue;
+                if (typeof nested === "object" && !Array.isArray(nested)) {
+                  // Recurse: maybe the envelope sits at output.result, or even output.result.answer
+                  const ext = asExtractResult(extractFromStructuredOutput(nested));
+                  if (ext) return ext;
+                  // One more level (Output may double-wrap as { result: { answer: {...} } })
+                  for (const innerKey of ["answer", "result", "text", "content"]) {
+                    const inner = nested[innerKey];
+                    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+                      const ext2 = asExtractResult(extractFromStructuredOutput(inner));
+                      if (ext2) return ext2;
+                    }
+                  }
+                } else if (typeof nested === "string" && nested.trim()) {
+                  const parsed = tryParseAgentJson(nested);
+                  const extracted = asExtractResult(extractFromStructuredOutput(parsed));
+                  if (extracted) return extracted;
+                  return { text: nested };
+                }
               }
             }
             const directExtract = asExtractResult(extractFromStructuredOutput(payload));
