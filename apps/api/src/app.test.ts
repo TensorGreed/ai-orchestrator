@@ -277,7 +277,7 @@ describe("helper chat page", () => {
 
     expect(response.statusCode).toBe(200);
     expect(String(response.headers["content-type"] ?? "")).toContain("text/html");
-    expect(response.body).toContain("Workflow Chat Helper");
+    expect(response.body).toContain("Workflow Chat");
   });
 });
 

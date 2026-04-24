@@ -2262,6 +2262,42 @@ export function createApp(
     return reply.send(html);
   });
 
+  app.get("/api/webhook-endpoints", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+
+    const endpoints: Array<{
+      workflowId: string;
+      workflowName: string;
+      nodeId: string;
+      path: string;
+      method: string;
+      testUrl: string;
+      prodUrl: string;
+    }> = [];
+
+    const workflows = store.listWorkflows();
+    for (const summary of workflows) {
+      const workflow = store.getWorkflow(summary.id);
+      if (!workflow) continue;
+      for (const endpoint of listWebhookEndpoints(workflow)) {
+        endpoints.push({
+          workflowId: workflow.id,
+          workflowName: workflow.name,
+          nodeId: endpoint.nodeId,
+          path: endpoint.path,
+          method: endpoint.method,
+          testUrl: `/webhook-test/${endpoint.path}`,
+          prodUrl: `/webhook/${endpoint.path}`
+        });
+      }
+    }
+
+    return { endpoints };
+  });
+
   app.post<{ Body: unknown }>("/api/auth/register", async (request, reply) => {
     const parsed = authRegisterSchema.safeParse(request.body);
     if (!parsed.success) {

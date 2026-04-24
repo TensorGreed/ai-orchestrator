@@ -3,21 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Workflow Chat Helper</title>
+    <title>Workflow Chat</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/styles/github.min.css"
+    />
     <style>
       :root {
-        --bg: #eef2f6;
-        --widget-bg: #ffffff;
-        --widget-border: #d7dde7;
-        --header-bg: #1e293b;
-        --header-text: #f8fafc;
-        --text: #1f2937;
-        --muted: #667085;
-        --user-bg: #dbeafe;
-        --assistant-bg: #f8fafc;
-        --accent: #0ea5a5;
-        --accent-2: #0284c7;
+        color-scheme: light;
+        --bg: #ffffff;
+        --bg-2: #f5f7fa;
+        --bg-3: #eef2f7;
+        --panel: #fafbfc;
+        --panel-2: #f0f3f7;
+        --border: #e2e6ec;
+        --border-soft: #ecf0f4;
+        --text: #1a1f2c;
+        --text-muted: #4a5466;
+        --text-dim: #8a93a3;
+        --accent: #2563eb;
+        --accent-2: #1d4ed8;
+        --user-bubble: #eaf1ff;
+        --assistant-bubble: #f7f9fc;
         --error: #dc2626;
+        --ok: #059669;
+        --code-bg: #f6f8fa;
+        --code-border: #e1e6ed;
       }
 
       * {
@@ -27,108 +38,245 @@
       html,
       body {
         margin: 0;
-        width: 100%;
         height: 100%;
-        font-family: "Inter", "Segoe UI", Arial, sans-serif;
-        background: linear-gradient(160deg, #f2f4f8 0%, #e5ecf5 100%);
+        font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: var(--bg);
         color: var(--text);
+        font-size: 14px;
       }
 
-      .page-shell {
-        width: 100%;
-        height: 100%;
-        position: relative;
+      .app {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        height: 100vh;
+        min-height: 0;
       }
 
-      .helper-label {
-        position: absolute;
-        top: 12px;
-        left: 16px;
-        font-size: 12px;
-        color: #64748b;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-      }
-
-      .chat-widget {
-        position: fixed;
-        right: 20px;
-        bottom: 20px;
-        width: min(430px, calc(100vw - 24px));
-        height: min(680px, calc(100vh - 24px));
-        border: 1px solid var(--widget-border);
-        border-radius: 18px;
-        background: var(--widget-bg);
-        box-shadow:
-          0 20px 48px rgba(15, 23, 42, 0.22),
-          0 2px 8px rgba(15, 23, 42, 0.08);
-        overflow: hidden;
+      /* ---------- Sidebar ---------- */
+      .sidebar {
+        background: var(--panel);
+        border-right: 1px solid var(--border);
         display: grid;
         grid-template-rows: auto auto 1fr auto;
+        min-height: 0;
+        overflow: hidden;
       }
 
-      .chat-widget.minimized {
-        display: none;
-      }
-
-      .chat-header {
-        background: var(--header-bg);
-        color: var(--header-text);
-        padding: 12px 14px;
+      .sidebar-header {
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border);
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 10px;
       }
 
-      .title-wrap {
-        min-width: 0;
-      }
-
-      .chat-title {
-        margin: 0;
-        font-size: 16px;
+      .brand {
         font-weight: 700;
+        font-size: 15px;
+        letter-spacing: 0.01em;
+      }
+
+      .brand-tag {
+        font-size: 10px;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .sidebar-section {
+        padding: 12px 12px 8px;
+      }
+
+      .new-chat-btn {
+        width: 100%;
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+
+      .new-chat-btn:hover {
+        background: var(--accent-2);
+      }
+
+      .session-list {
+        overflow: auto;
+        padding: 4px 8px 16px;
+      }
+
+      .session-list-empty {
+        padding: 14px 8px;
+        font-size: 12px;
+        color: var(--text-dim);
+        text-align: center;
+      }
+
+      .session-item {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--text-muted);
+        margin-bottom: 2px;
+      }
+
+      .session-item:hover {
+        background: var(--bg-2);
+        color: var(--text);
+      }
+
+      .session-item.active {
+        background: var(--bg-3);
+        color: var(--text);
+      }
+
+      .session-title {
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
-      .chat-subtitle {
-        margin: 2px 0 0;
-        font-size: 11px;
-        color: #c6d0de;
+      .session-del {
+        background: transparent;
+        border: 0;
+        color: var(--text-dim);
+        padding: 2px 6px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 14px;
+        line-height: 1;
+        opacity: 0;
       }
 
-      .header-actions {
+      .session-item:hover .session-del {
+        opacity: 1;
+      }
+
+      .session-del:hover {
+        background: rgba(248, 113, 113, 0.15);
+        color: var(--error);
+      }
+
+      .sidebar-footer {
+        border-top: 1px solid var(--border);
+        padding: 10px 12px;
+        display: grid;
+        gap: 6px;
+      }
+
+      .footer-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+
+      .link-btn {
+        background: transparent;
+        border: 0;
+        color: var(--text-muted);
+        cursor: pointer;
+        font-size: 12px;
+        padding: 2px 6px;
+        border-radius: 6px;
+      }
+
+      .link-btn:hover {
+        color: var(--text);
+        background: var(--bg-2);
+      }
+
+      /* ---------- Main pane ---------- */
+      .main {
+        display: grid;
+        grid-template-rows: auto auto 1fr auto;
+        min-height: 0;
+        background: var(--bg);
+      }
+
+      .topbar {
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        align-items: center;
+        background: var(--panel);
+      }
+
+      .workflow-pick {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .workflow-pick label {
+        font-size: 12px;
+        color: var(--text-dim);
+        white-space: nowrap;
+      }
+
+      .workflow-select {
+        background: var(--bg-2);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 8px 10px;
+        border-radius: 8px;
+        font: inherit;
+        min-width: 240px;
+        max-width: 100%;
+      }
+
+      .topbar-actions {
         display: flex;
         gap: 6px;
       }
 
       .icon-btn {
-        border: 0;
-        width: 31px;
-        height: 31px;
-        border-radius: 9px;
+        background: var(--bg-2);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        cursor: pointer;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        font-size: 16px;
-        cursor: pointer;
-        background: rgba(255, 255, 255, 0.12);
-        color: var(--header-text);
+        font-size: 15px;
       }
 
       .icon-btn:hover {
-        background: rgba(255, 255, 255, 0.2);
+        color: var(--text);
+        background: var(--bg-3);
+      }
+
+      .icon-btn.warn:hover {
+        color: var(--error);
+        border-color: rgba(248, 113, 113, 0.4);
       }
 
       .settings {
-        padding: 12px;
-        border-bottom: 1px solid #e5e7eb;
-        background: #fbfdff;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border);
+        background: var(--bg-2);
         display: none;
         gap: 10px;
+        grid-template-columns: 1fr 1fr;
       }
 
       .settings.open {
@@ -141,47 +289,63 @@
       }
 
       .field label {
-        font-size: 12px;
-        color: #4b5563;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
       }
 
-      .field input {
-        width: 100%;
-        border: 1px solid #cbd5e1;
-        border-radius: 10px;
-        padding: 9px 10px;
+      .field input,
+      .field select {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 8px 10px;
+        border-radius: 8px;
         font: inherit;
       }
 
-      .settings-actions {
+      .settings-foot {
+        grid-column: 1 / -1;
         display: flex;
-        justify-content: flex-end;
-        gap: 8px;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        font-size: 11px;
+        color: var(--text-dim);
       }
 
       .btn {
-        border: 1px solid #cbd5e1;
-        border-radius: 10px;
-        padding: 8px 12px;
-        font-size: 13px;
-        font-weight: 600;
+        background: var(--bg-3);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 7px 12px;
+        border-radius: 8px;
         cursor: pointer;
-        background: #fff;
-        color: #334155;
+        font-size: 12px;
+        font-weight: 600;
       }
 
       .btn.primary {
-        border-color: #0284c7;
-        background: #0284c7;
-        color: #fff;
+        background: var(--accent);
+        border-color: var(--accent);
+      }
+
+      .btn.primary:hover {
+        background: var(--accent-2);
       }
 
       .status-line {
-        padding: 9px 12px;
-        font-size: 12px;
-        color: var(--muted);
-        border-bottom: 1px solid #e5e7eb;
-        background: #ffffff;
+        padding: 6px 16px;
+        font-size: 11px;
+        color: var(--text-dim);
+        background: var(--panel);
+        border-bottom: 1px solid var(--border-soft);
+        display: none;
+      }
+
+      .status-line.show {
+        display: block;
       }
 
       .status-line.error {
@@ -189,96 +353,273 @@
       }
 
       .status-line.ok {
-        color: #0f766e;
+        color: var(--ok);
       }
 
       .chat-log {
-        min-height: 0;
         overflow: auto;
-        padding: 14px 12px;
-        display: grid;
-        align-content: start;
-        gap: 10px;
-        background: #f7fafc;
+        padding: 24px 0;
       }
 
-      .message {
-        max-width: 88%;
-        border: 1px solid #dbe4ef;
-        border-radius: 12px;
-        padding: 10px 12px;
-        font-size: 14px;
-        line-height: 1.45;
-        white-space: pre-wrap;
-        word-break: break-word;
+      .empty-state {
+        text-align: center;
+        padding: 80px 24px;
+        color: var(--text-dim);
       }
 
-      .message.user {
-        justify-self: end;
-        background: var(--user-bg);
-        border-color: #bfdbfe;
-      }
-
-      .message.assistant {
-        justify-self: start;
-        background: var(--assistant-bg);
-      }
-
-      .message a {
-        color: #0f6fd6;
+      .empty-state h2 {
+        font-size: 22px;
         font-weight: 600;
+        margin: 0 0 8px;
+        color: var(--text);
       }
 
-      .composer {
-        border-top: 1px solid #e2e8f0;
-        background: #fff;
-        padding: 10px;
+      .empty-state p {
+        margin: 0;
+        font-size: 13px;
+      }
+
+      .msg-row {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 10px 24px;
         display: grid;
-        grid-template-columns: 1fr auto;
         gap: 8px;
       }
 
-      .composer textarea {
-        min-height: 44px;
-        max-height: 140px;
-        resize: vertical;
-        border: 2px solid #d7e2ef;
-        border-radius: 10px;
-        padding: 10px;
-        font: inherit;
+      .msg-meta {
+        font-size: 11px;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-weight: 600;
       }
 
-      .send-btn {
-        align-self: end;
-        height: 44px;
-        min-width: 44px;
+      .msg-row.user .msg-meta {
+        color: var(--accent);
+      }
+
+      .msg-bubble {
+        background: var(--assistant-bubble);
+        border: 1px solid var(--border-soft);
+        border-radius: 12px;
+        padding: 14px 16px;
+        line-height: 1.6;
+        word-wrap: break-word;
+      }
+
+      .msg-row.user .msg-bubble {
+        background: var(--user-bubble);
+      }
+
+      .msg-bubble p {
+        margin: 0 0 10px;
+      }
+
+      .msg-bubble p:last-child {
+        margin-bottom: 0;
+      }
+
+      .msg-bubble ul,
+      .msg-bubble ol {
+        margin: 0 0 10px;
+        padding-left: 22px;
+      }
+
+      .msg-bubble li {
+        margin: 2px 0;
+      }
+
+      .msg-bubble h1,
+      .msg-bubble h2,
+      .msg-bubble h3,
+      .msg-bubble h4 {
+        margin: 14px 0 8px;
+        line-height: 1.3;
+      }
+
+      .msg-bubble h1 { font-size: 19px; }
+      .msg-bubble h2 { font-size: 17px; }
+      .msg-bubble h3 { font-size: 15px; }
+      .msg-bubble h4 { font-size: 14px; }
+
+      .msg-bubble a {
+        color: var(--accent);
+      }
+
+      .msg-bubble code:not(pre code) {
+        background: var(--bg-3);
+        padding: 1px 6px;
+        border-radius: 5px;
+        font-size: 12.5px;
+        font-family: "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+      }
+
+      .msg-bubble pre {
+        margin: 10px 0;
+        padding: 0;
+        background: transparent;
+        border: 0;
+        overflow: visible;
+      }
+
+      .code-block {
+        background: var(--code-bg);
+        border: 1px solid var(--code-border);
         border-radius: 10px;
-        border: 1px solid #0284c7;
-        background: #0284c7;
-        color: #fff;
-        font-size: 18px;
+        overflow: hidden;
+        margin: 10px 0;
+      }
+
+      .code-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 6px 10px 6px 12px;
+        background: #eef2f7;
+        border-bottom: 1px solid var(--code-border);
+        font-size: 11px;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .code-copy {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        padding: 3px 8px;
+        border-radius: 6px;
         cursor: pointer;
+        font-size: 11px;
+        text-transform: none;
+        letter-spacing: 0;
       }
 
-      .send-btn:disabled {
-        opacity: 0.55;
-        cursor: not-allowed;
+      .code-copy:hover {
+        color: var(--text);
+        background: var(--bg-3);
       }
 
-      .pending-images {
+      .code-body {
+        margin: 0;
+        padding: 12px 14px;
+        overflow: auto;
+        font-size: 12.5px;
+        line-height: 1.55;
+        font-family: "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+      }
+
+      .code-body code {
+        background: transparent;
+        padding: 0;
+        white-space: pre;
+      }
+
+      .msg-bubble table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 10px 0;
+        font-size: 12.5px;
+      }
+
+      .msg-bubble th,
+      .msg-bubble td {
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        text-align: left;
+      }
+
+      .msg-bubble th {
+        background: var(--bg-3);
+      }
+
+      .msg-bubble blockquote {
+        margin: 10px 0;
+        padding: 6px 12px;
+        border-left: 3px solid var(--accent);
+        background: var(--bg-2);
+        color: var(--text-muted);
+        border-radius: 0 8px 8px 0;
+      }
+
+      .msg-attachments {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+
+      .att-image {
+        max-width: 220px;
+        max-height: 220px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+      }
+
+      .att-file {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--bg-3);
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        border-radius: 8px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      .typing {
+        display: inline-flex;
+        gap: 4px;
+        align-items: center;
+        color: var(--text-dim);
+        font-size: 13px;
+      }
+
+      .typing-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--text-dim);
+        animation: typing 1.2s infinite ease-in-out;
+      }
+
+      .typing-dot:nth-child(2) { animation-delay: 0.15s; }
+      .typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+      @keyframes typing {
+        0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+        30% { opacity: 1; transform: translateY(-3px); }
+      }
+
+      /* ---------- Composer ---------- */
+      .composer-wrap {
+        border-top: 1px solid var(--border);
+        background: var(--panel);
+        padding: 14px 24px 18px;
+      }
+
+      .composer-inner {
+        max-width: 880px;
+        margin: 0 auto;
+      }
+
+      .pending-attachments {
         display: flex;
         gap: 6px;
         flex-wrap: wrap;
-        padding: 8px 10px 0;
+        margin-bottom: 8px;
       }
 
       .pending-thumb {
         position: relative;
-        width: 56px;
-        height: 56px;
+        width: 60px;
+        height: 60px;
         border-radius: 8px;
         overflow: hidden;
-        border: 1px solid #d7e2ef;
+        border: 1px solid var(--border);
+        background: var(--bg-2);
       }
 
       .pending-thumb img {
@@ -287,262 +628,884 @@
         object-fit: cover;
       }
 
-      .pending-thumb button {
+      .pending-file {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: var(--bg-2);
+        border: 1px solid var(--border);
+        padding: 8px 32px 8px 10px;
+        border-radius: 8px;
+        font-size: 12px;
+        color: var(--text-muted);
+        max-width: 240px;
+      }
+
+      .pending-file-name {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .pending-thumb .pending-x,
+      .pending-file .pending-x {
         position: absolute;
-        top: -1px;
-        right: -1px;
+        top: 2px;
+        right: 2px;
+        background: rgba(0, 0, 0, 0.65);
+        color: #fff;
+        border: 0;
         width: 18px;
         height: 18px;
         border-radius: 50%;
-        border: none;
-        background: #ef4444;
-        color: #fff;
         font-size: 11px;
         cursor: pointer;
+        line-height: 1;
         display: flex;
         align-items: center;
         justify-content: center;
         padding: 0;
-        line-height: 1;
       }
 
-      .msg-images {
-        display: flex;
+      .composer {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
         gap: 6px;
-        flex-wrap: wrap;
-        margin-bottom: 6px;
+        align-items: end;
+        background: var(--bg-2);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 8px;
       }
 
-      .msg-images img {
-        max-width: 180px;
-        max-height: 180px;
+      .composer:focus-within {
+        border-color: var(--accent);
+      }
+
+      .composer textarea {
+        background: transparent;
+        border: 0;
+        color: var(--text);
+        font: inherit;
+        font-size: 14px;
+        padding: 8px 6px;
+        resize: none;
+        min-height: 24px;
+        max-height: 220px;
+        outline: none;
+      }
+
+      .composer textarea::placeholder {
+        color: var(--text-dim);
+      }
+
+      .composer-icon {
+        background: transparent;
+        border: 0;
+        color: var(--text-muted);
+        width: 36px;
+        height: 36px;
         border-radius: 8px;
-        border: 1px solid #d7e2ef;
+        cursor: pointer;
+        font-size: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
 
-      .html-report {
-        max-width: 100%;
-        overflow-x: auto;
-        font-size: 13px;
-        line-height: 1.5;
+      .composer-icon:hover {
+        background: var(--bg-3);
+        color: var(--text);
       }
 
-      .html-report table {
-        border-collapse: collapse;
-        width: 100%;
-        margin: 8px 0;
+      .send-btn {
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .send-btn:hover {
+        background: var(--accent-2);
+      }
+
+      .send-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .composer-foot {
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: center;
+      }
+
+      /* ---------- Saved webhooks list ---------- */
+      .saved-list {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        max-height: 180px;
+        overflow: auto;
+      }
+
+      .saved-empty {
+        padding: 12px;
+        font-size: 12px;
+        color: var(--text-dim);
+        text-align: center;
+      }
+
+      .saved-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr auto;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border-soft);
         font-size: 12px;
       }
 
-      .html-report th,
-      .html-report td {
-        border: 1px solid #d7e2ef;
-        padding: 6px 8px;
-        text-align: left;
+      .saved-row:last-child {
+        border-bottom: 0;
       }
 
-      .html-report th {
-        background: #f1f5f9;
+      .saved-name {
         font-weight: 600;
+        color: var(--text);
       }
 
-      .html-report tr:nth-child(even) {
-        background: #f8fafc;
+      .saved-url {
+        color: var(--text-muted);
+        word-break: break-all;
+        font-family: "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+        font-size: 11px;
       }
 
-      .html-report h1,
-      .html-report h2,
-      .html-report h3 {
-        margin: 12px 0 6px;
-      }
-
-      .html-report h1 { font-size: 18px; }
-      .html-report h2 { font-size: 15px; }
-      .html-report h3 { font-size: 13px; }
-
-      .message:has(.html-report) {
-        max-width: 100%;
-      }
-
-      .composer-wrap {
-        border-top: 1px solid #e2e8f0;
-        background: #fff;
-      }
-
-      .composer-wrap .composer {
-        border-top: none;
-      }
-
-      .open-chat-btn {
-        position: fixed;
-        right: 20px;
-        bottom: 20px;
-        border: 0;
-        border-radius: 999px;
-        padding: 12px 16px;
-        background: linear-gradient(135deg, var(--accent), var(--accent-2));
-        color: #fff;
-        font-size: 14px;
-        font-weight: 700;
+      .saved-del {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+        padding: 4px 8px;
+        border-radius: 6px;
         cursor: pointer;
-        box-shadow: 0 10px 25px rgba(2, 132, 199, 0.35);
+        font-size: 11px;
+      }
+
+      .saved-del:hover {
+        color: var(--error);
+        border-color: rgba(220, 38, 38, 0.4);
+      }
+
+      /* ---------- Mobile ---------- */
+      .mobile-toggle {
         display: none;
       }
 
-      .open-chat-btn.visible {
-        display: inline-flex;
-      }
-
-      @media (max-width: 640px) {
-        .chat-widget {
-          right: 0;
-          bottom: 0;
-          width: 100vw;
-          height: 100vh;
-          border-radius: 0;
+      @media (max-width: 760px) {
+        .app {
+          grid-template-columns: 1fr;
         }
-
-        .open-chat-btn {
-          right: 12px;
-          bottom: 12px;
+        .sidebar {
+          position: fixed;
+          inset: 0 auto 0 0;
+          width: 280px;
+          z-index: 20;
+          transform: translateX(-100%);
+          transition: transform 0.18s ease;
+        }
+        .sidebar.open {
+          transform: translateX(0);
+        }
+        .mobile-toggle {
+          display: inline-flex;
+        }
+        .settings {
+          grid-template-columns: 1fr;
         }
       }
     </style>
   </head>
   <body>
-    <div class="page-shell">
-      <div class="helper-label">Workflow Chat Helper</div>
+    <div class="app">
+      <!-- ============ SIDEBAR ============ -->
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+          <div>
+            <div class="brand">Workflow Chat</div>
+            <div class="brand-tag">Helper</div>
+          </div>
+          <button id="closeSidebar" class="link-btn mobile-toggle" type="button" title="Close">&times;</button>
+        </div>
+        <div class="sidebar-section">
+          <button id="newChatBtn" class="new-chat-btn" type="button">+ New chat</button>
+        </div>
+        <div id="sessionList" class="session-list">
+          <div class="session-list-empty">No conversations yet.</div>
+        </div>
+        <div class="sidebar-footer">
+          <div class="footer-row">
+            <span>Session</span>
+            <span id="activeSessionLabel" title="">—</span>
+          </div>
+          <div class="footer-row">
+            <button id="clearAllBtn" class="link-btn" type="button" title="Delete all sessions">Clear all</button>
+            <button id="settingsToggle" class="link-btn" type="button">Settings</button>
+          </div>
+        </div>
+      </aside>
 
-      <section id="chatWidget" class="chat-widget" aria-label="Workflow Chat Helper">
-        <header class="chat-header">
-          <div class="title-wrap">
-            <h1 class="chat-title">L2M Assistant</h1>
-            <p class="chat-subtitle">Webhook chat</p>
+      <!-- ============ MAIN ============ -->
+      <main class="main">
+        <div class="topbar">
+          <div class="workflow-pick">
+            <button id="openSidebar" class="icon-btn mobile-toggle" type="button" title="Menu">&#9776;</button>
+            <label for="workflowSelect">Workflow</label>
+            <select id="workflowSelect" class="workflow-select">
+              <option value="">Loading webhooks...</option>
+            </select>
+            <button id="refreshWebhooks" class="icon-btn" type="button" title="Refresh webhooks">&#8634;</button>
           </div>
-          <div class="header-actions">
-            <button id="settingsBtn" class="icon-btn" title="Settings" type="button">&#9881;</button>
-            <button id="newSessionBtn" class="icon-btn" title="New Session" type="button">&#10227;</button>
-            <button id="minimizeBtn" class="icon-btn" title="Minimize" type="button">&#8722;</button>
+          <div class="topbar-actions">
+            <button id="clearSessionBtn" class="icon-btn warn" type="button" title="Clear current chat">&#128465;</button>
+            <button id="settingsBtn" class="icon-btn" type="button" title="Settings">&#9881;</button>
           </div>
-        </header>
+        </div>
 
         <section id="settingsPanel" class="settings" aria-label="Connection settings">
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Saved webhooks</label>
+            <div id="savedWebhooksList" class="saved-list">
+              <div class="saved-empty">No saved webhooks yet.</div>
+            </div>
+          </div>
+
           <div class="field">
-            <label for="apiBase">Base URL</label>
-            <input id="apiBase" type="text" placeholder="http://localhost:4001" />
+            <label for="newSavedName">Add saved webhook — Name</label>
+            <input id="newSavedName" type="text" placeholder="e.g. Agent demo (test)" />
           </div>
           <div class="field">
-            <label for="webhookPath">Webhook Path or Full URL</label>
-            <input id="webhookPath" type="text" placeholder="/webhook-test/agent-demo" />
+            <label for="newSavedUrl">URL or path</label>
+            <input id="newSavedUrl" type="text" placeholder="/webhook-test/agent-demo or https://..." />
           </div>
-          <div class="settings-actions">
-            <button id="closeSettingsBtn" class="btn" type="button">Close</button>
-            <button id="saveSettingsBtn" class="btn primary" type="button">Save</button>
+          <div class="field" style="grid-column: 1 / -1;">
+            <button id="addSavedWebhookBtn" class="btn primary" type="button" style="justify-self: start;">+ Add saved webhook</button>
+          </div>
+
+          <div class="field">
+            <label for="apiBase">API Base URL (for sending)</label>
+            <input id="apiBase" type="text" placeholder="http://localhost:4000" />
+          </div>
+          <div class="field">
+            <label for="webhookMode">Discovery mode</label>
+            <select id="webhookMode">
+              <option value="test">Test (/webhook-test/...)</option>
+              <option value="prod">Prod (/webhook/...)</option>
+            </select>
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <label for="bearerToken">Bearer Token (optional, sent as Authorization header)</label>
+            <input id="bearerToken" type="text" placeholder="Bearer token for webhook auth" />
+          </div>
+          <div class="settings-foot">
+            <span>Settings persist locally in this browser.</span>
+            <span>
+              <button id="closeSettingsBtn" class="btn" type="button">Close</button>
+              <button id="saveSettingsBtn" class="btn primary" type="button">Save</button>
+            </span>
           </div>
         </section>
 
         <div id="statusLine" class="status-line">Ready</div>
         <div id="chatLog" class="chat-log"></div>
 
-        <footer class="composer-wrap">
-          <div id="pendingImages" class="pending-images" style="display:none;"></div>
-          <div class="composer">
-            <textarea id="userInput" placeholder="Type your message (paste images with Ctrl+V)"></textarea>
-            <button id="sendBtn" class="send-btn" type="button" title="Send">&#8594;</button>
+        <div class="composer-wrap">
+          <div class="composer-inner">
+            <div id="pendingAttachments" class="pending-attachments" style="display:none;"></div>
+            <div class="composer">
+              <button id="attachBtn" class="composer-icon" type="button" title="Attach file">&#128206;</button>
+              <textarea
+                id="userInput"
+                rows="1"
+                placeholder="Send a message... (Shift+Enter for newline, paste images directly)"
+              ></textarea>
+              <button id="sendBtn" class="send-btn" type="button" title="Send">&#9650;</button>
+            </div>
+            <div class="composer-foot">
+              Connected to selected workflow webhook. Files are attached as base64 in <code>files</code>; images in <code>images</code>.
+            </div>
+            <input id="fileInput" type="file" multiple style="display:none;" />
           </div>
-        </footer>
-      </section>
-
-      <button id="openChatBtn" class="open-chat-btn" type="button">Open chat</button>
+        </div>
+      </main>
     </div>
+
+    <!-- Markdown / syntax highlight / sanitizer -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/highlight.min.js"></script>
 
     <script>
       (() => {
-        const STORAGE_KEY = "workflow-helper-chat-settings-v2";
+        const STORAGE_KEY = "workflow-helper-chat-v3";
+        const SESSIONS_KEY = "workflow-helper-chat-sessions-v1";
+        const ACTIVE_KEY = "workflow-helper-chat-active-v1";
+        const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB per file
 
-        const chatWidgetEl = document.getElementById("chatWidget");
-        const openChatBtn = document.getElementById("openChatBtn");
+        // ---------- DOM refs ----------
+        const sidebarEl = document.getElementById("sidebar");
+        const newChatBtn = document.getElementById("newChatBtn");
+        const sessionListEl = document.getElementById("sessionList");
+        const activeSessionLabelEl = document.getElementById("activeSessionLabel");
+        const clearAllBtn = document.getElementById("clearAllBtn");
+        const settingsToggle = document.getElementById("settingsToggle");
+        const openSidebarBtn = document.getElementById("openSidebar");
+        const closeSidebarBtn = document.getElementById("closeSidebar");
+
+        const workflowSelectEl = document.getElementById("workflowSelect");
+        const refreshWebhooksBtn = document.getElementById("refreshWebhooks");
+        const clearSessionBtn = document.getElementById("clearSessionBtn");
         const settingsBtn = document.getElementById("settingsBtn");
-        const newSessionBtn = document.getElementById("newSessionBtn");
-        const minimizeBtn = document.getElementById("minimizeBtn");
         const settingsPanelEl = document.getElementById("settingsPanel");
+        const apiBaseEl = document.getElementById("apiBase");
+        const webhookModeEl = document.getElementById("webhookMode");
+        const bearerTokenEl = document.getElementById("bearerToken");
         const saveSettingsBtn = document.getElementById("saveSettingsBtn");
         const closeSettingsBtn = document.getElementById("closeSettingsBtn");
-        const apiBaseEl = document.getElementById("apiBase");
-        const webhookPathEl = document.getElementById("webhookPath");
+        const savedWebhooksListEl = document.getElementById("savedWebhooksList");
+        const newSavedNameEl = document.getElementById("newSavedName");
+        const newSavedUrlEl = document.getElementById("newSavedUrl");
+        const addSavedWebhookBtn = document.getElementById("addSavedWebhookBtn");
+
         const statusLineEl = document.getElementById("statusLine");
         const chatLogEl = document.getElementById("chatLog");
         const userInputEl = document.getElementById("userInput");
         const sendBtn = document.getElementById("sendBtn");
+        const attachBtn = document.getElementById("attachBtn");
+        const fileInputEl = document.getElementById("fileInput");
+        const pendingAttachmentsEl = document.getElementById("pendingAttachments");
 
-        const pendingImagesEl = document.getElementById("pendingImages");
+        // ---------- State ----------
         let busy = false;
-        let sessionId = "";
-        let pendingImages = []; // Array of { data: base64, mimeType: string }
+        let pendingAttachments = []; // { kind: "image"|"file", data, mimeType, name, size }
+        let sessions = []; // [{ id, title, createdAt, messages: [{role, text, attachments}] }]
+        let activeSessionId = "";
+        let webhookEndpoints = []; // discovered { workflowName, path, method, testUrl, prodUrl }
+        let savedWebhooks = []; // user-defined { id, name, url }
+        // The page is normally served by the API (http://localhost:4000/helper-chat).
+        // Detect file:// or null-origin (sandboxed) cases — those can't host same-origin fetches.
+        const IS_FILE_ORIGIN =
+          window.location.protocol === "file:" ||
+          !window.location.origin ||
+          window.location.origin === "null";
 
-        function createSessionId() {
+        let settings = {
+          apiBase: IS_FILE_ORIGIN ? "http://localhost:4000" : (window.location.origin || "http://localhost:4000"),
+          webhookMode: "test",
+          bearerToken: ""
+        };
+
+        // Where to send the /api/webhook-endpoints discovery call.
+        // - When served by the API (http://...): use that origin (same-origin, no CORS).
+        // - When opened via file://: fall back to settings.apiBase. Discovery will only
+        //   work if the API has CORS enabled for null origin (it usually does not), so the
+        //   recommended path in that case is to open http://localhost:4000/helper-chat.
+        function getDiscoveryOrigin() {
+          if (IS_FILE_ORIGIN) {
+            return normalizeBase(settings.apiBase) || "http://localhost:4000";
+          }
+          return window.location.origin;
+        }
+
+        // ---------- Marked + highlight setup ----------
+        if (window.marked) {
+          marked.setOptions({
+            breaks: true,
+            gfm: true,
+            highlight: (code, lang) => {
+              if (window.hljs && lang && hljs.getLanguage(lang)) {
+                try { return hljs.highlight(code, { language: lang }).value; } catch {}
+              }
+              if (window.hljs) {
+                try { return hljs.highlightAuto(code).value; } catch {}
+              }
+              return escapeHtml(code);
+            }
+          });
+        }
+
+        // ---------- Utilities ----------
+        function uid(prefix) {
           if (window.crypto && typeof window.crypto.randomUUID === "function") {
-            return `helper-${window.crypto.randomUUID()}`;
+            return `${prefix}-${window.crypto.randomUUID()}`;
           }
-          return `helper-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+          return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         }
 
-        function loadSettings() {
-          const defaults = {
-            apiBase: window.location.origin || "http://localhost:4001",
-            webhookPath: "/webhook-test/agent-demo",
-            sessionId: createSessionId(),
-            minimized: false
-          };
-          try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-            return { ...defaults, ...parsed };
-          } catch {
-            return defaults;
-          }
-        }
-
-        function saveSettings() {
-          const payload = {
-            apiBase: apiBaseEl.value.trim(),
-            webhookPath: webhookPathEl.value.trim(),
-            sessionId,
-            minimized: chatWidgetEl.classList.contains("minimized")
-          };
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        function escapeHtml(s) {
+          return String(s ?? "")
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#39;");
         }
 
         function normalizeBase(base) {
           return String(base || "").trim().replace(/\/+$/, "");
         }
 
-        function buildWebhookUrl(base, pathOrUrl) {
-          const input = String(pathOrUrl || "").trim();
-          if (/^https?:\/\//i.test(input)) {
-            return input;
+        function resolveWebhookUrl(value) {
+          // Selected option value can be a full URL (http/https) or a relative path.
+          if (!value) return "";
+          if (/^https?:\/\//i.test(value)) return value;
+          const base = normalizeBase(settings.apiBase) || getDiscoveryOrigin();
+          const path = value.startsWith("/") ? value : `/${value}`;
+          return `${base}${path}`;
+        }
+
+        function buildWebhookUrl() {
+          return resolveWebhookUrl(workflowSelectEl.value);
+        }
+
+        function formatBytes(n) {
+          if (!n && n !== 0) return "";
+          if (n < 1024) return `${n} B`;
+          if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+          return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+        }
+
+        // ---------- Persistence ----------
+        const SAVED_WEBHOOKS_KEY = "workflow-helper-chat-saved-webhooks-v1";
+
+        function loadSettings() {
+          try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              // Drop legacy fields (webhookPath was removed in favor of saved webhooks).
+              delete parsed.webhookPath;
+              settings = { ...settings, ...parsed };
+            }
+          } catch {}
+          // Self-heal: if apiBase is missing or not http(s), fall back to a sensible default.
+          if (!settings.apiBase || !/^https?:\/\//i.test(settings.apiBase)) {
+            settings.apiBase = IS_FILE_ORIGIN ? "http://localhost:4000" : window.location.origin;
           }
-          const normalizedPath = input.startsWith("/") ? input : `/${input}`;
-          return `${normalizeBase(base)}${normalizedPath}`;
+        }
+
+        function saveSettings() {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        }
+
+        function loadSavedWebhooks() {
+          try {
+            const raw = localStorage.getItem(SAVED_WEBHOOKS_KEY);
+            savedWebhooks = raw ? JSON.parse(raw) : [];
+            if (!Array.isArray(savedWebhooks)) savedWebhooks = [];
+          } catch { savedWebhooks = []; }
+        }
+
+        function saveSavedWebhooks() {
+          localStorage.setItem(SAVED_WEBHOOKS_KEY, JSON.stringify(savedWebhooks));
+        }
+
+        function loadSessions() {
+          try {
+            const raw = localStorage.getItem(SESSIONS_KEY);
+            if (raw) sessions = JSON.parse(raw) || [];
+          } catch { sessions = []; }
+          activeSessionId = localStorage.getItem(ACTIVE_KEY) || "";
+          if (!sessions.find((s) => s.id === activeSessionId)) {
+            activeSessionId = sessions[0]?.id || "";
+          }
+        }
+
+        function saveSessions() {
+          localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+          localStorage.setItem(ACTIVE_KEY, activeSessionId);
+        }
+
+        function getActiveSession() {
+          return sessions.find((s) => s.id === activeSessionId) || null;
+        }
+
+        function ensureActiveSession() {
+          if (getActiveSession()) return getActiveSession();
+          const created = createSession();
+          return created;
+        }
+
+        function createSession(title) {
+          const session = {
+            id: uid("helper"),
+            title: title || "New chat",
+            createdAt: Date.now(),
+            messages: []
+          };
+          sessions.unshift(session);
+          activeSessionId = session.id;
+          saveSessions();
+          renderSessions();
+          renderActiveSession();
+          return session;
+        }
+
+        function deleteSession(id) {
+          sessions = sessions.filter((s) => s.id !== id);
+          if (activeSessionId === id) {
+            activeSessionId = sessions[0]?.id || "";
+          }
+          saveSessions();
+          renderSessions();
+          renderActiveSession();
+        }
+
+        // ---------- Status ----------
+        function setStatus(text, tone) {
+          statusLineEl.textContent = text || "";
+          statusLineEl.className = "status-line";
+          if (text) statusLineEl.classList.add("show");
+          if (tone === "ok") statusLineEl.classList.add("ok");
+          if (tone === "error") statusLineEl.classList.add("error");
+          if (tone === "ok") {
+            setTimeout(() => statusLineEl.classList.remove("show"), 2500);
+          }
+        }
+
+        // ---------- Render: sidebar sessions ----------
+        function renderSessions() {
+          sessionListEl.innerHTML = "";
+          if (sessions.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "session-list-empty";
+            empty.textContent = "No conversations yet.";
+            sessionListEl.appendChild(empty);
+          } else {
+            for (const s of sessions) {
+              const item = document.createElement("div");
+              item.className = "session-item" + (s.id === activeSessionId ? " active" : "");
+              const title = document.createElement("div");
+              title.className = "session-title";
+              title.textContent = s.title || "Untitled";
+              title.title = s.title;
+              title.addEventListener("click", () => {
+                activeSessionId = s.id;
+                saveSessions();
+                renderSessions();
+                renderActiveSession();
+                if (window.innerWidth <= 760) sidebarEl.classList.remove("open");
+              });
+              const del = document.createElement("button");
+              del.className = "session-del";
+              del.type = "button";
+              del.title = "Delete chat";
+              del.innerHTML = "&times;";
+              del.addEventListener("click", (e) => {
+                e.stopPropagation();
+                deleteSession(s.id);
+              });
+              item.appendChild(title);
+              item.appendChild(del);
+              sessionListEl.appendChild(item);
+            }
+          }
+          activeSessionLabelEl.textContent = activeSessionId ? activeSessionId.slice(-8) : "—";
+          activeSessionLabelEl.title = activeSessionId;
+        }
+
+        // ---------- Render: messages ----------
+        function renderActiveSession() {
+          chatLogEl.innerHTML = "";
+          const session = getActiveSession();
+          if (!session || session.messages.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "empty-state";
+            empty.innerHTML = `
+              <h2>How can I help?</h2>
+              <p>Pick a workflow above and send a prompt. Replies render markdown, code, and tables.</p>
+            `;
+            chatLogEl.appendChild(empty);
+            return;
+          }
+          for (const msg of session.messages) {
+            chatLogEl.appendChild(buildMessageEl(msg));
+          }
+          chatLogEl.scrollTop = chatLogEl.scrollHeight;
+        }
+
+        function renderContentInto(container, role, text) {
+          if (role === "assistant" && isPdfDataUrl(text)) {
+            const link = document.createElement("a");
+            link.href = text;
+            link.download = "workflow-output.pdf";
+            link.target = "_blank";
+            link.rel = "noreferrer";
+            link.textContent = "📄 Download PDF";
+            container.appendChild(link);
+            return;
+          }
+          if (role === "assistant") {
+            const html = renderMarkdown(text || "");
+            const wrap = document.createElement("div");
+            wrap.innerHTML = html;
+            decorateCodeBlocks(wrap);
+            container.appendChild(wrap);
+          } else {
+            const p = document.createElement("div");
+            p.style.whiteSpace = "pre-wrap";
+            p.textContent = text || "";
+            container.appendChild(p);
+          }
+        }
+
+        function buildMessageEl(msg) {
+          const row = document.createElement("div");
+          row.className = `msg-row ${msg.role}`;
+          const meta = document.createElement("div");
+          meta.className = "msg-meta";
+          meta.textContent = msg.role === "user" ? "You" : "Assistant";
+          const bubble = document.createElement("div");
+          bubble.className = "msg-bubble";
+          renderContentInto(bubble, msg.role, msg.text || "");
+          if (msg.attachments && msg.attachments.length > 0) {
+            const wrap = document.createElement("div");
+            wrap.className = "msg-attachments";
+            for (const att of msg.attachments) {
+              if (att.kind === "image") {
+                const img = document.createElement("img");
+                img.className = "att-image";
+                img.src = `data:${att.mimeType};base64,${att.data}`;
+                img.alt = att.name || "";
+                wrap.appendChild(img);
+              } else {
+                const f = document.createElement("span");
+                f.className = "att-file";
+                f.innerHTML = `📎 ${escapeHtml(att.name || "file")} <small>(${formatBytes(att.size)})</small>`;
+                wrap.appendChild(f);
+              }
+            }
+            bubble.appendChild(wrap);
+          }
+          row.appendChild(meta);
+          row.appendChild(bubble);
+          return row;
+        }
+
+        function renderMarkdown(text) {
+          if (!text) return "";
+          // Handle pure HTML payloads (legacy) — render as-is, sanitized.
+          if (looksLikeHtml(text)) {
+            return window.DOMPurify ? DOMPurify.sanitize(text) : text;
+          }
+          if (!window.marked) return escapeHtml(text);
+          try {
+            const html = marked.parse(text);
+            return window.DOMPurify ? DOMPurify.sanitize(html) : html;
+          } catch {
+            return escapeHtml(text);
+          }
+        }
+
+        function decorateCodeBlocks(root) {
+          const pres = root.querySelectorAll("pre > code");
+          pres.forEach((codeEl) => {
+            const pre = codeEl.parentElement;
+            const langClass = (codeEl.className || "").match(/language-([\w+-]+)/);
+            const lang = langClass ? langClass[1] : "code";
+
+            const block = document.createElement("div");
+            block.className = "code-block";
+            const head = document.createElement("div");
+            head.className = "code-head";
+            const langSpan = document.createElement("span");
+            langSpan.textContent = lang;
+            const copyBtn = document.createElement("button");
+            copyBtn.type = "button";
+            copyBtn.className = "code-copy";
+            copyBtn.textContent = "Copy";
+            copyBtn.addEventListener("click", () => {
+              navigator.clipboard.writeText(codeEl.textContent || "").then(
+                () => {
+                  copyBtn.textContent = "Copied";
+                  setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
+                },
+                () => (copyBtn.textContent = "Failed")
+              );
+            });
+            head.appendChild(langSpan);
+            head.appendChild(copyBtn);
+
+            const body = document.createElement("pre");
+            body.className = "code-body";
+            const newCode = document.createElement("code");
+            newCode.className = codeEl.className;
+            newCode.innerHTML = codeEl.innerHTML;
+            body.appendChild(newCode);
+
+            block.appendChild(head);
+            block.appendChild(body);
+            pre.replaceWith(block);
+          });
+        }
+
+        // ---------- Webhook list ----------
+        async function loadWebhookEndpoints() {
+          const previousValue = workflowSelectEl.value;
+          workflowSelectEl.innerHTML = '<option value="">Loading webhooks...</option>';
+          // When served by the API, this is same-origin. When opened via file://, this falls
+          // back to settings.apiBase (and may fail with CORS — a banner above advises the user).
+          try {
+            const res = await fetch(`${getDiscoveryOrigin()}/api/webhook-endpoints`, {
+              credentials: "include"
+            });
+            if (res.status === 401 || res.status === 403) {
+              webhookEndpoints = [];
+              renderWebhookOptions(previousValue);
+              setStatus("Not signed in — sign in to the app to discover workflows, or add a saved webhook below.", "error");
+              return;
+            }
+            if (!res.ok) {
+              throw new Error(`HTTP ${res.status}`);
+            }
+            const body = await res.json();
+            webhookEndpoints = Array.isArray(body.endpoints) ? body.endpoints : [];
+            renderWebhookOptions(previousValue);
+            setStatus(`Discovered ${webhookEndpoints.length} webhook endpoint(s).`, "ok");
+          } catch (err) {
+            webhookEndpoints = [];
+            renderWebhookOptions(previousValue);
+            const msg = err instanceof Error ? err.message : "Failed to load webhooks";
+            setStatus(`Couldn't fetch webhooks: ${msg}. Add saved webhooks in Settings.`, "error");
+          }
+        }
+
+        function renderWebhookOptions(restoreValue) {
+          workflowSelectEl.innerHTML = "";
+
+          // Group 1: user-saved (named) webhooks
+          if (savedWebhooks.length > 0) {
+            const group = document.createElement("optgroup");
+            group.label = "Saved";
+            for (const sw of savedWebhooks) {
+              const opt = document.createElement("option");
+              opt.value = sw.url;
+              opt.textContent = sw.name;
+              group.appendChild(opt);
+            }
+            workflowSelectEl.appendChild(group);
+          }
+
+          // Group 2: auto-discovered from /api/webhook-endpoints
+          if (webhookEndpoints.length > 0) {
+            const grouped = new Map();
+            for (const ep of webhookEndpoints) {
+              if (!grouped.has(ep.workflowName)) grouped.set(ep.workflowName, []);
+              grouped.get(ep.workflowName).push(ep);
+            }
+            for (const [wfName, eps] of grouped) {
+              const group = document.createElement("optgroup");
+              group.label = `Discovered — ${wfName}`;
+              for (const ep of eps) {
+                const opt = document.createElement("option");
+                const path = settings.webhookMode === "prod" ? ep.prodUrl : ep.testUrl;
+                opt.value = path;
+                opt.textContent = `${ep.method} ${path}`;
+                group.appendChild(opt);
+              }
+              workflowSelectEl.appendChild(group);
+            }
+          }
+
+          if (workflowSelectEl.children.length === 0) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "No webhooks — add one in Settings";
+            workflowSelectEl.appendChild(opt);
+            return;
+          }
+
+          // Restore previously selected value if it still exists.
+          if (restoreValue) {
+            const match = Array.from(workflowSelectEl.options).find((o) => o.value === restoreValue);
+            if (match) workflowSelectEl.value = restoreValue;
+          }
+        }
+
+        function renderSavedWebhooksList() {
+          savedWebhooksListEl.innerHTML = "";
+          if (savedWebhooks.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "saved-empty";
+            empty.textContent = "No saved webhooks yet.";
+            savedWebhooksListEl.appendChild(empty);
+            return;
+          }
+          for (const sw of savedWebhooks) {
+            const row = document.createElement("div");
+            row.className = "saved-row";
+            const name = document.createElement("div");
+            name.className = "saved-name";
+            name.textContent = sw.name;
+            const url = document.createElement("div");
+            url.className = "saved-url";
+            url.textContent = sw.url;
+            const del = document.createElement("button");
+            del.className = "saved-del";
+            del.type = "button";
+            del.textContent = "Remove";
+            del.addEventListener("click", () => {
+              savedWebhooks = savedWebhooks.filter((x) => x.id !== sw.id);
+              saveSavedWebhooks();
+              renderSavedWebhooksList();
+              renderWebhookOptions(workflowSelectEl.value);
+            });
+            row.appendChild(name);
+            row.appendChild(url);
+            row.appendChild(del);
+            savedWebhooksListEl.appendChild(row);
+          }
+        }
+
+        function addSavedWebhook(name, url) {
+          const trimmedName = String(name || "").trim();
+          const trimmedUrl = String(url || "").trim();
+          if (!trimmedName || !trimmedUrl) {
+            setStatus("Both name and URL are required.", "error");
+            return;
+          }
+          savedWebhooks.push({ id: uid("sw"), name: trimmedName, url: trimmedUrl });
+          saveSavedWebhooks();
+          renderSavedWebhooksList();
+          renderWebhookOptions(trimmedUrl);
+          workflowSelectEl.value = trimmedUrl;
+          setStatus(`Saved "${trimmedName}".`, "ok");
+        }
+
+        // ---------- Format detection ----------
+        function isPdfDataUrl(value) {
+          return typeof value === "string" && /^data:application\/pdf;base64,/i.test(value.trim());
+        }
+
+        function looksLikeHtml(value) {
+          return typeof value === "string" && /^\s*<(!doctype|html|div|h[1-6]|p|table|section|article|ul|ol|style)/i.test(value.trim());
         }
 
         function decodeBufferLikeText(value) {
           if (!value || typeof value !== "object" || Array.isArray(value)) return null;
           if (value.type !== "Buffer" || !Array.isArray(value.data)) return null;
           const bytes = value.data;
-          if (!bytes.every((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255)) return null;
-          try {
-            return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
-          } catch {
-            return null;
-          }
-        }
-
-        function toJson(value) {
-          try {
-            return JSON.stringify(value ?? null, null, 2);
-          } catch {
-            return String(value);
-          }
+          if (!bytes.every((e) => Number.isInteger(e) && e >= 0 && e <= 255)) return null;
+          try { return new TextDecoder("utf-8").decode(new Uint8Array(bytes)); } catch { return null; }
         }
 
         function tryParseAgentJson(str) {
@@ -554,19 +1517,11 @@
 
         function extractFromStructuredOutput(parsed) {
           if (!parsed || typeof parsed !== "object") return null;
-          // Handle the standard agent output contract: { status, final_html, follow_up_question }
           if ("status" in parsed || "final_html" in parsed) {
-            if (typeof parsed.final_html === "string" && parsed.final_html.trim()) {
-              return parsed.final_html;
-            }
-            if (typeof parsed.follow_up_question === "string" && parsed.follow_up_question.trim()) {
-              return parsed.follow_up_question;
-            }
-            if (parsed.status === "needs_more_info") {
-              return "The agent needs more information but did not specify what. Please retry with a more specific prompt.";
-            }
+            if (typeof parsed.final_html === "string" && parsed.final_html.trim()) return parsed.final_html;
+            if (typeof parsed.follow_up_question === "string" && parsed.follow_up_question.trim()) return parsed.follow_up_question;
+            if (parsed.status === "needs_more_info") return "The agent needs more information but did not specify what.";
           }
-          // Generic structured fields
           for (const key of ["final_html", "html", "report", "result", "answer", "text", "content", "message", "response"]) {
             if (typeof parsed[key] === "string" && parsed[key].trim()) return parsed[key];
           }
@@ -583,14 +1538,12 @@
             return payload;
           }
           if (payload && typeof payload === "object") {
-            // Workflow error with no output
             if (payload.error && typeof payload.error === "string") {
               const output = payload.output;
-              if (!output || output === null || (typeof output === "object" && Object.keys(output).length === 0)) {
-                return `Error: ${payload.error}`;
+              if (!output || (typeof output === "object" && Object.keys(output).length === 0)) {
+                return `**Error:** ${payload.error}`;
               }
             }
-
             const output = payload.output;
             const decodedOutput = decodeBufferLikeText(output);
             if (typeof decodedOutput === "string") {
@@ -606,11 +1559,8 @@
               return output;
             }
             if (output && typeof output === "object") {
-              // Check output itself as structured data
               const directExtract = extractFromStructuredOutput(output);
               if (directExtract) return directExtract;
-
-              // Try parsing the agent's text answer as JSON
               const agentAnswer = output.answer || output.result || output.text || output.content;
               if (typeof agentAnswer === "string" && agentAnswer.trim()) {
                 const parsed = tryParseAgentJson(agentAnswer);
@@ -619,239 +1569,295 @@
                 return agentAnswer;
               }
             }
-
-            // Root-level field search
             const directExtract = extractFromStructuredOutput(payload);
             if (directExtract) return directExtract;
           }
-          return toJson(payload);
+          try { return "```json\n" + JSON.stringify(payload, null, 2) + "\n```"; }
+          catch { return String(payload); }
         }
 
-        function isPdfDataUrl(value) {
-          return typeof value === "string" && /^data:application\/pdf;base64,/i.test(value.trim());
-        }
-
-        function looksLikeHtml(value) {
-          return typeof value === "string" && /^\s*<(!doctype|html|div|h[1-6]|p|table|section|article|ul|ol|style)/i.test(value.trim());
-        }
-
-        function addMessage(role, text, images) {
-          const messageEl = document.createElement("div");
-          messageEl.className = `message ${role}`;
-          if (images && images.length > 0) {
-            const imagesWrap = document.createElement("div");
-            imagesWrap.className = "msg-images";
-            for (const img of images) {
-              const imgEl = document.createElement("img");
-              imgEl.src = `data:${img.mimeType};base64,${img.data}`;
-              imgEl.alt = "";
-              imagesWrap.appendChild(imgEl);
-            }
-            messageEl.appendChild(imagesWrap);
-          }
-          if (role === "assistant" && isPdfDataUrl(text)) {
-            const link = document.createElement("a");
-            link.href = text;
-            link.download = "workflow-output.pdf";
-            link.target = "_blank";
-            link.rel = "noreferrer";
-            link.textContent = "Download PDF";
-            messageEl.appendChild(link);
-          } else if (role === "assistant" && looksLikeHtml(text)) {
-            const htmlWrap = document.createElement("div");
-            htmlWrap.className = "html-report";
-            htmlWrap.innerHTML = text;
-            messageEl.appendChild(htmlWrap);
-          } else {
-            const textNode = document.createElement("span");
-            textNode.textContent = text || "";
-            messageEl.appendChild(textNode);
-          }
-          chatLogEl.appendChild(messageEl);
-          chatLogEl.scrollTop = chatLogEl.scrollHeight;
-          return messageEl;
-        }
-
-        function renderPendingImages() {
-          pendingImagesEl.innerHTML = "";
-          if (pendingImages.length === 0) {
-            pendingImagesEl.style.display = "none";
-            return;
-          }
-          pendingImagesEl.style.display = "flex";
-          pendingImages.forEach((img, idx) => {
-            const thumb = document.createElement("div");
-            thumb.className = "pending-thumb";
-            const imgEl = document.createElement("img");
-            imgEl.src = `data:${img.mimeType};base64,${img.data}`;
-            imgEl.alt = "";
-            thumb.appendChild(imgEl);
-            const removeBtn = document.createElement("button");
-            removeBtn.textContent = "\u00d7";
-            removeBtn.type = "button";
-            removeBtn.addEventListener("click", () => {
-              pendingImages.splice(idx, 1);
-              renderPendingImages();
-            });
-            thumb.appendChild(removeBtn);
-            pendingImagesEl.appendChild(thumb);
+        // ---------- Attachments ----------
+        function readAsBase64(file) {
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const result = reader.result;
+              if (typeof result !== "string") return reject(new Error("Read failed"));
+              const idx = result.indexOf(",");
+              resolve(idx >= 0 ? result.slice(idx + 1) : result);
+            };
+            reader.onerror = () => reject(reader.error || new Error("Read failed"));
+            reader.readAsDataURL(file);
           });
         }
 
-        function setStatus(text, tone) {
-          statusLineEl.textContent = text;
-          statusLineEl.className = "status-line";
-          if (tone === "ok") {
-            statusLineEl.classList.add("ok");
-          } else if (tone === "error") {
-            statusLineEl.classList.add("error");
+        async function addFiles(fileList) {
+          for (const file of Array.from(fileList || [])) {
+            if (!file) continue;
+            if (file.size > MAX_FILE_BYTES) {
+              setStatus(`"${file.name}" exceeds 8MB limit.`, "error");
+              continue;
+            }
+            try {
+              const data = await readAsBase64(file);
+              const isImage = file.type && file.type.startsWith("image/");
+              pendingAttachments.push({
+                kind: isImage ? "image" : "file",
+                data,
+                mimeType: file.type || "application/octet-stream",
+                name: file.name || "file",
+                size: file.size
+              });
+            } catch (err) {
+              setStatus(`Failed to read "${file.name}".`, "error");
+            }
           }
+          renderPendingAttachments();
         }
 
-        function setMinimized(isMinimized) {
-          if (isMinimized) {
-            chatWidgetEl.classList.add("minimized");
-            openChatBtn.classList.add("visible");
-          } else {
-            chatWidgetEl.classList.remove("minimized");
-            openChatBtn.classList.remove("visible");
-          }
-          saveSettings();
-        }
-
-        function showWelcomeMessage() {
-          if (chatLogEl.childElementCount > 0) {
+        function renderPendingAttachments() {
+          pendingAttachmentsEl.innerHTML = "";
+          if (pendingAttachments.length === 0) {
+            pendingAttachmentsEl.style.display = "none";
             return;
           }
-          addMessage(
-            "assistant",
-            "Hi, this is your workflow assistant. Send a prompt and I will call your configured webhook."
-          );
+          pendingAttachmentsEl.style.display = "flex";
+          pendingAttachments.forEach((att, idx) => {
+            if (att.kind === "image") {
+              const thumb = document.createElement("div");
+              thumb.className = "pending-thumb";
+              const img = document.createElement("img");
+              img.src = `data:${att.mimeType};base64,${att.data}`;
+              thumb.appendChild(img);
+              const x = document.createElement("button");
+              x.type = "button";
+              x.className = "pending-x";
+              x.innerHTML = "&times;";
+              x.addEventListener("click", () => {
+                pendingAttachments.splice(idx, 1);
+                renderPendingAttachments();
+              });
+              thumb.appendChild(x);
+              pendingAttachmentsEl.appendChild(thumb);
+            } else {
+              const f = document.createElement("div");
+              f.className = "pending-file";
+              const name = document.createElement("span");
+              name.className = "pending-file-name";
+              name.textContent = `📎 ${att.name}`;
+              name.title = `${att.name} (${formatBytes(att.size)})`;
+              f.appendChild(name);
+              const x = document.createElement("button");
+              x.type = "button";
+              x.className = "pending-x";
+              x.innerHTML = "&times;";
+              x.addEventListener("click", () => {
+                pendingAttachments.splice(idx, 1);
+                renderPendingAttachments();
+              });
+              f.appendChild(x);
+              pendingAttachmentsEl.appendChild(f);
+            }
+          });
         }
 
+        // ---------- Send ----------
         async function sendMessage() {
           if (busy) return;
           const userPrompt = userInputEl.value.trim();
-          if (!userPrompt && pendingImages.length === 0) return;
+          if (!userPrompt && pendingAttachments.length === 0) return;
 
-          const base = apiBaseEl.value.trim();
-          const webhookPath = webhookPathEl.value.trim();
-          if (!base || !webhookPath) {
-            setStatus("Set Base URL and Webhook Path in settings.", "error");
+          const webhookUrl = buildWebhookUrl();
+          if (!webhookUrl) {
+            setStatus("Pick a workflow or set a webhook path in Settings.", "error");
             return;
+          }
+
+          const session = ensureActiveSession();
+          if (session.messages.length === 0 && userPrompt) {
+            session.title = userPrompt.slice(0, 60);
           }
 
           busy = true;
           sendBtn.disabled = true;
 
-          const imagesToSend = [...pendingImages];
-          pendingImages = [];
-          renderPendingImages();
+          const attachmentsToSend = [...pendingAttachments];
+          pendingAttachments = [];
+          renderPendingAttachments();
 
-          addMessage("user", userPrompt || "(image attached)", imagesToSend.length > 0 ? imagesToSend : undefined);
+          const userMessage = {
+            role: "user",
+            text: userPrompt || (attachmentsToSend.length ? "(attachments)" : ""),
+            attachments: attachmentsToSend
+          };
+          session.messages.push(userMessage);
+          chatLogEl.querySelector(".empty-state")?.remove();
+          chatLogEl.appendChild(buildMessageEl(userMessage));
           userInputEl.value = "";
-          const pendingEl = addMessage("assistant", "Typing...");
+          autosizeTextarea();
+          chatLogEl.scrollTop = chatLogEl.scrollHeight;
+
+          // Pending assistant placeholder
+          const pendingMessage = { role: "assistant", text: "" };
+          const pendingEl = buildMessageEl(pendingMessage);
+          const bubble = pendingEl.querySelector(".msg-bubble");
+          bubble.innerHTML = '<span class="typing"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></span>';
+          chatLogEl.appendChild(pendingEl);
+          chatLogEl.scrollTop = chatLogEl.scrollHeight;
           setStatus("Calling webhook...", "");
 
+          const images = attachmentsToSend.filter((a) => a.kind === "image").map((a) => ({
+            data: a.data,
+            mimeType: a.mimeType,
+            name: a.name
+          }));
+          const files = attachmentsToSend.filter((a) => a.kind !== "image").map((a) => ({
+            data: a.data,
+            mimeType: a.mimeType,
+            name: a.name,
+            size: a.size
+          }));
+
           const payload = {
-            user_prompt: userPrompt || "(image attached)",
-            session_id: sessionId
+            user_prompt: userPrompt || "",
+            session_id: session.id
           };
-          if (imagesToSend.length > 0) {
-            payload.images = imagesToSend;
-          }
+          if (images.length) payload.images = images;
+          if (files.length) payload.files = files;
 
           try {
-            const webhookUrl = buildWebhookUrl(base, webhookPath);
+            const headers = { "content-type": "application/json" };
+            if (settings.bearerToken) {
+              headers["authorization"] = `Bearer ${settings.bearerToken}`;
+            }
             const response = await fetch(webhookUrl, {
               method: "POST",
-              headers: { "content-type": "application/json" },
+              headers,
               body: JSON.stringify(payload)
             });
-
             const raw = await response.text();
             let body = raw;
-            try {
-              body = raw ? JSON.parse(raw) : null;
-            } catch {
-              // leave as string
-            }
+            try { body = raw ? JSON.parse(raw) : null; } catch {}
 
             if (!response.ok) {
-              const message = typeof body === "object" && body && body.error ? body.error : `Webhook failed (${response.status})`;
+              const message = (body && typeof body === "object" && body.error) || `Webhook failed (${response.status})`;
               throw new Error(message);
             }
 
-            pendingEl.textContent = "";
             const assistantText = extractAssistantText(body);
-            if (isPdfDataUrl(assistantText)) {
-              const link = document.createElement("a");
-              link.href = assistantText;
-              link.download = "workflow-output.pdf";
-              link.target = "_blank";
-              link.rel = "noreferrer";
-              link.textContent = "Download PDF";
-              pendingEl.appendChild(link);
-            } else if (looksLikeHtml(assistantText)) {
-              const htmlWrap = document.createElement("div");
-              htmlWrap.className = "html-report";
-              htmlWrap.innerHTML = assistantText;
-              pendingEl.appendChild(htmlWrap);
-            } else {
-              pendingEl.textContent = assistantText;
-            }
+            pendingMessage.text = assistantText;
+            bubble.innerHTML = "";
+            renderContentInto(bubble, "assistant", assistantText);
+            session.messages.push(pendingMessage);
+            saveSessions();
+            renderSessions();
             setStatus("Response received.", "ok");
           } catch (error) {
             const message = error instanceof Error ? error.message : "Request failed.";
-            pendingEl.textContent = `Error: ${message}`;
+            pendingMessage.text = `**Error:** ${message}`;
+            bubble.innerHTML = "";
+            renderContentInto(bubble, "assistant", pendingMessage.text);
+            session.messages.push(pendingMessage);
+            saveSessions();
             setStatus(message, "error");
           } finally {
             busy = false;
             sendBtn.disabled = false;
-            saveSettings();
+            chatLogEl.scrollTop = chatLogEl.scrollHeight;
           }
         }
 
-        const initial = loadSettings();
-        apiBaseEl.value = initial.apiBase;
-        webhookPathEl.value = initial.webhookPath;
-        sessionId = typeof initial.sessionId === "string" && initial.sessionId ? initial.sessionId : createSessionId();
+        // ---------- Composer behaviors ----------
+        function autosizeTextarea() {
+          userInputEl.style.height = "auto";
+          userInputEl.style.height = Math.min(userInputEl.scrollHeight, 220) + "px";
+        }
 
-        showWelcomeMessage();
-        setMinimized(Boolean(initial.minimized));
+        // ---------- Init / event wiring ----------
+        loadSettings();
+        loadSavedWebhooks();
+        loadSessions();
+        apiBaseEl.value = settings.apiBase;
+        webhookModeEl.value = settings.webhookMode;
+        bearerTokenEl.value = settings.bearerToken;
+        renderSessions();
+        renderActiveSession();
+        renderSavedWebhooksList();
+        renderWebhookOptions();
+        if (IS_FILE_ORIGIN) {
+          // Browsers won't let a file:// page reach http://localhost via fetch (CORS / mixed-protocol).
+          // Show a persistent hint instead of attempting discovery.
+          setStatus(
+            `This page is opened from disk (file://). Open ${settings.apiBase}/helper-chat in your browser to enable webhook discovery, or just use saved webhooks.`,
+            "error"
+          );
+        } else {
+          loadWebhookEndpoints();
+        }
 
-        settingsBtn.addEventListener("click", () => {
-          settingsPanelEl.classList.toggle("open");
+        newChatBtn.addEventListener("click", () => {
+          createSession();
+          if (window.innerWidth <= 760) sidebarEl.classList.remove("open");
         });
 
+        clearAllBtn.addEventListener("click", () => {
+          if (!confirm("Delete all chat sessions? This cannot be undone.")) return;
+          sessions = [];
+          activeSessionId = "";
+          saveSessions();
+          renderSessions();
+          renderActiveSession();
+        });
+
+        clearSessionBtn.addEventListener("click", () => {
+          const session = getActiveSession();
+          if (!session) return;
+          if (!confirm("Clear messages in this chat?")) return;
+          session.messages = [];
+          session.title = "New chat";
+          saveSessions();
+          renderSessions();
+          renderActiveSession();
+        });
+
+        settingsBtn.addEventListener("click", () => settingsPanelEl.classList.toggle("open"));
+        settingsToggle.addEventListener("click", () => settingsPanelEl.classList.toggle("open"));
+        closeSettingsBtn.addEventListener("click", () => settingsPanelEl.classList.remove("open"));
+
         saveSettingsBtn.addEventListener("click", () => {
+          settings = {
+            apiBase: apiBaseEl.value.trim() || (IS_FILE_ORIGIN ? "http://localhost:4000" : window.location.origin),
+            webhookMode: webhookModeEl.value || "test",
+            bearerToken: bearerTokenEl.value.trim()
+          };
           saveSettings();
           settingsPanelEl.classList.remove("open");
           setStatus("Settings saved.", "ok");
+          loadWebhookEndpoints();
         });
 
-        closeSettingsBtn.addEventListener("click", () => {
-          settingsPanelEl.classList.remove("open");
-        });
-
-        newSessionBtn.addEventListener("click", () => {
-          sessionId = createSessionId();
-          addMessage("assistant", `New session started (${sessionId}).`);
-          setStatus("Started new session.", "ok");
+        webhookModeEl.addEventListener("change", () => {
+          settings.webhookMode = webhookModeEl.value;
           saveSettings();
+          renderWebhookOptions(workflowSelectEl.value);
         });
 
-        minimizeBtn.addEventListener("click", () => {
-          setMinimized(true);
+        addSavedWebhookBtn.addEventListener("click", () => {
+          addSavedWebhook(newSavedNameEl.value, newSavedUrlEl.value);
+          newSavedNameEl.value = "";
+          newSavedUrlEl.value = "";
         });
 
-        openChatBtn.addEventListener("click", () => {
-          setMinimized(false);
+        newSavedUrlEl.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            addSavedWebhookBtn.click();
+          }
         });
 
-        sendBtn.addEventListener("click", () => {
-          void sendMessage();
-        });
+        refreshWebhooksBtn.addEventListener("click", () => loadWebhookEndpoints());
+
+        sendBtn.addEventListener("click", () => void sendMessage());
 
         userInputEl.addEventListener("keydown", (event) => {
           if (event.key === "Enter" && !event.shiftKey) {
@@ -860,28 +1866,53 @@
           }
         });
 
+        userInputEl.addEventListener("input", autosizeTextarea);
+
+        attachBtn.addEventListener("click", () => fileInputEl.click());
+        fileInputEl.addEventListener("change", () => {
+          void addFiles(fileInputEl.files);
+          fileInputEl.value = "";
+        });
+
         userInputEl.addEventListener("paste", (event) => {
           const items = event.clipboardData && event.clipboardData.items;
           if (!items) return;
+          const files = [];
           for (let i = 0; i < items.length; i++) {
             const item = items[i];
-            if (item.type && item.type.startsWith("image/")) {
-              event.preventDefault();
-              const file = item.getAsFile();
-              if (!file) continue;
-              const reader = new FileReader();
-              reader.onload = () => {
-                const result = reader.result;
-                if (typeof result !== "string") return;
-                const base64 = result.split(",")[1] || "";
-                pendingImages.push({ data: base64, mimeType: item.type });
-                renderPendingImages();
-                userInputEl.focus();
-              };
-              reader.readAsDataURL(file);
+            if (item.kind === "file") {
+              const f = item.getAsFile();
+              if (f) files.push(f);
             }
           }
+          if (files.length > 0) {
+            event.preventDefault();
+            void addFiles(files);
+          }
         });
+
+        // Drag & drop into composer
+        const composerWrap = document.querySelector(".composer-wrap");
+        ["dragenter", "dragover"].forEach((evt) =>
+          composerWrap.addEventListener(evt, (e) => {
+            e.preventDefault();
+            composerWrap.style.background = "var(--bg-2)";
+          })
+        );
+        ["dragleave", "drop"].forEach((evt) =>
+          composerWrap.addEventListener(evt, (e) => {
+            e.preventDefault();
+            composerWrap.style.background = "";
+          })
+        );
+        composerWrap.addEventListener("drop", (e) => {
+          if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            void addFiles(e.dataTransfer.files);
+          }
+        });
+
+        openSidebarBtn.addEventListener("click", () => sidebarEl.classList.add("open"));
+        closeSidebarBtn.addEventListener("click", () => sidebarEl.classList.remove("open"));
       })();
     </script>
   </body>
