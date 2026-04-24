@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentRuntimeAdapter } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
@@ -7,6 +7,22 @@ import type { AgentRunRequest, AgentRunState, Workflow } from "@ai-orchestrator/
 import { executeWorkflow } from "./executor";
 import { exportWorkflowToJson, importWorkflowFromJson } from "./serialization";
 import { validateWorkflowGraph } from "./validation";
+
+const playwrightMockState = vi.hoisted(() => ({ lastHtml: "" }));
+
+vi.mock("playwright", () => ({
+  chromium: {
+    launch: vi.fn(async () => ({
+      newPage: vi.fn(async () => ({
+        setContent: vi.fn(async (html: string) => {
+          playwrightMockState.lastHtml = html;
+        }),
+        pdf: vi.fn(async () => Buffer.from(`pdf:${playwrightMockState.lastHtml}`, "utf8"))
+      })),
+      close: vi.fn(async () => undefined)
+    }))
+  }
+}));
 
 class FakeProvider implements LLMProviderAdapter {
   readonly definition = {
@@ -1682,6 +1698,59 @@ describe("workflow engine", () => {
     ).toMatch(/^data:application\/pdf;base64,/);
   });
 
+  it("pdf_output: unwraps structured final_html before rendering html PDFs", async () => {
+    const structuredAnswer = JSON.stringify({
+      status: "complete",
+      final_html: "<!doctype html><html><body><h1>Report Only</h1></body></html>",
+      python_code: "print('should not be in the PDF')",
+      follow_up_question: "",
+      chart_data: { title: "CSP distribution", labels: ["Azure"], values: [1] }
+    });
+    const workflow: Workflow = {
+      id: "wf-pdf-structured-html-output",
+      name: "PDF structured HTML flow",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: structuredAnswer } },
+        {
+          id: "n2",
+          type: "pdf_output",
+          name: "PDF Output",
+          position: { x: 200, y: 0 },
+          config: {
+            renderMode: "html",
+            inputKey: "text",
+            filenameTemplate: "structured.pdf",
+            outputKey: "pdf"
+          }
+        },
+        { id: "n3", type: "output", name: "Output", position: { x: 420, y: 0 }, config: { responseTemplate: "{{pdf.downloadUrl}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" }
+      ]
+    };
+
+    playwrightMockState.lastHtml = "";
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect(playwrightMockState.lastHtml).toContain("Report Only");
+    expect(playwrightMockState.lastHtml).not.toContain("python_code");
+    expect(playwrightMockState.lastHtml).not.toContain("should not be in the PDF");
+  });
+
   it("pdf_output: decodes buffer-like upstream values into readable PDF text", async () => {
     const workflow: Workflow = {
       id: "wf-pdf-buffer-input",
@@ -2333,7 +2402,6 @@ describe("workflow engine", () => {
 // Phase 1 Feature Tests
 // ---------------------------------------------------------------------------
 
-import { vi } from "vitest";
 import type { NodeErrorConfig, WorkflowSettings } from "@ai-orchestrator/shared";
 import type { WorkflowExecutionDependencies } from "./executor";
 

@@ -944,7 +944,70 @@ function wrapTextAsHtmlDocument(text: string): string {
 </html>`;
 }
 
+function stripJsonFence(value: string): string {
+  return value
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  const trimmed = stripJsonFence(value);
+  if (!looksLikeJson(trimmed)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractFinalHtmlFromStructuredOutput(value: unknown, depth = 0): string | null {
+  if (depth > 4 || value === undefined || value === null) {
+    return null;
+  }
+
+  const decodedBufferText = decodeBufferLikeText(value);
+  if (decodedBufferText !== null) {
+    return extractFinalHtmlFromStructuredOutput(decodedBufferText, depth + 1);
+  }
+
+  if (typeof value === "string") {
+    const parsed = parseJsonObject(value);
+    return parsed ? extractFinalHtmlFromStructuredOutput(parsed, depth + 1) : null;
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const direct = record.final_html;
+  if (typeof direct === "string" && direct.trim()) {
+    return direct;
+  }
+
+  for (const key of ["parsed", "answer", "result", "output", "code_result"]) {
+    const nested = record[key];
+    const nestedHtml = extractFinalHtmlFromStructuredOutput(nested, depth + 1);
+    if (nestedHtml) {
+      return nestedHtml;
+    }
+  }
+
+  return null;
+}
+
 function toPdfHtmlSource(value: unknown): string {
+  const structuredHtml = extractFinalHtmlFromStructuredOutput(value);
+  if (structuredHtml !== null) {
+    return structuredHtml;
+  }
+
   const text = toPdfSourceText(value);
   if (looksLikeHtmlDocument(text)) {
     return text;
