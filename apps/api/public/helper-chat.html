@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Workflow Chat</title>
+    <title>L2M Chat</title>
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/styles/github.min.css"
@@ -201,10 +201,22 @@
 
       /* ---------- Main pane ---------- */
       .main {
-        display: grid;
-        grid-template-rows: auto auto 1fr auto;
+        display: flex;
+        flex-direction: column;
         min-height: 0;
         background: var(--bg);
+      }
+
+      .main > .topbar,
+      .main > .settings,
+      .main > .status-line,
+      .main > .composer-wrap {
+        flex: none;
+      }
+
+      .main > .chat-log {
+        flex: 1 1 auto;
+        min-height: 0;
       }
 
       .topbar {
@@ -841,8 +853,7 @@
       <aside id="sidebar" class="sidebar">
         <div class="sidebar-header">
           <div>
-            <div class="brand">Workflow Chat</div>
-            <div class="brand-tag">Helper</div>
+            <div class="brand">L2M Chat</div>
           </div>
           <button id="closeSidebar" class="link-btn mobile-toggle" type="button" title="Close">&times;</button>
         </div>
