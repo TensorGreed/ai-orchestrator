@@ -67,6 +67,24 @@ function toBooleanValue(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+function shouldOfferJsonFormatting(label: string): boolean {
+  return /\bjson\b/i.test(label);
+}
+
+function formatJsonForEditor(value: string): { formatted: string; error: string } {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { formatted: value, error: "" };
+  }
+
+  try {
+    return { formatted: JSON.stringify(JSON.parse(trimmed), null, 2), error: "" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid JSON.";
+    return { formatted: value, error: `Cannot format invalid JSON: ${message}` };
+  }
+}
+
 function toProviderLabel(provider: string): string {
   const normalized = provider.trim();
   if (!normalized) {
@@ -215,19 +233,46 @@ function TextAreaField({
   value,
   onChange,
   rows = 4,
-  readOnly = false
+  readOnly = false,
+  allowJsonFormat
 }: {
   label: string;
   value: string;
   onChange: (next: string) => void;
   rows?: number;
   readOnly?: boolean;
+  allowJsonFormat?: boolean;
 }) {
+  const [formatError, setFormatError] = useState("");
+  const showJsonFormat = !readOnly && (allowJsonFormat ?? shouldOfferJsonFormatting(label));
+
+  useEffect(() => {
+    setFormatError("");
+  }, [value]);
+
+  const handleFormatJson = () => {
+    const result = formatJsonForEditor(value);
+    if (result.error) {
+      setFormatError(result.error);
+      return;
+    }
+    setFormatError("");
+    onChange(result.formatted);
+  };
+
   return (
-    <label className="cfg-field">
-      <span>{label}</span>
+    <div className="cfg-field">
+      <div className="cfg-field-header">
+        <span>{label}</span>
+        {showJsonFormat && (
+          <button type="button" className="mini-btn" onClick={handleFormatJson}>
+            Format JSON
+          </button>
+        )}
+      </div>
       <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={rows} readOnly={readOnly} />
-    </label>
+      {formatError && <div className="cfg-field-error">{formatError}</div>}
+    </div>
   );
 }
 
@@ -573,8 +618,11 @@ function ExpressionField({
 }) {
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
+  const [formatError, setFormatError] = useState("");
+  const showJsonFormat = shouldOfferJsonFormatting(label);
 
   useEffect(() => {
+    setFormatError("");
     const expression = value.trim();
     if (!expression) {
       setPreviewText("");
@@ -614,8 +662,28 @@ function ExpressionField({
 
   return (
     <div className="cfg-field expression-field">
-      <span>{label}</span>
+      <div className="cfg-field-header">
+        <span>{label}</span>
+        {showJsonFormat && (
+          <button
+            type="button"
+            className="mini-btn"
+            onClick={() => {
+              const result = formatJsonForEditor(value);
+              if (result.error) {
+                setFormatError(result.error);
+                return;
+              }
+              setFormatError("");
+              onChange(result.formatted);
+            }}
+          >
+            Format JSON
+          </button>
+        )}
+      </div>
       <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={rows} />
+      {formatError && <div className="cfg-field-error">{formatError}</div>}
       <div className="expression-suggestions" aria-label={`${label} suggestions`}>
         {EXPRESSION_SUGGESTIONS.map((item) => (
           <button

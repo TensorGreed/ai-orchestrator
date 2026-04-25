@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { importWorkflowFromJson } from "@ai-orchestrator/workflow-engine";
@@ -28,6 +27,10 @@ const TEMPLATE_DESCRIPTION_MAP: Record<string, string> = {
   "azure-connectors-demo-flow.json": "Demo of Azure Storage, Cosmos DB, Monitor, and AI Search connectors."
 };
 
+function builtInTemplateId(fileName: string): string {
+  return `builtin-${fileName.replace(/\.json$/i, "").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
 export function seedWorkflowsIfEmpty(store: SqliteStore, workspaceRoot: string): void {
   if (store.countWorkflows() > 0) {
     return;
@@ -48,15 +51,12 @@ export function seedWorkflowsIfEmpty(store: SqliteStore, workspaceRoot: string):
 }
 
 export function seedTemplatesIfEmpty(store: SqliteStore, workspaceRoot: string): void {
-  if (store.countTemplates() > 0) {
-    return;
-  }
-
   const sampleDir = path.resolve(workspaceRoot, "samples", "workflows");
   if (!fs.existsSync(sampleDir)) {
     return;
   }
 
+  const existingTemplatesByName = new Map(store.listTemplates().map((template) => [template.name, template.id]));
   const files = fs.readdirSync(sampleDir).filter((file) => file.endsWith(".json"));
   for (const fileName of files) {
     const fullPath = path.join(sampleDir, fileName);
@@ -67,7 +67,7 @@ export function seedTemplatesIfEmpty(store: SqliteStore, workspaceRoot: string):
     const tags: string[] = [category.toLowerCase().replace(/ & /g, "-").replace(/ /g, "-")];
 
     store.upsertTemplate({
-      id: randomUUID(),
+      id: existingTemplatesByName.get(workflow.name) ?? builtInTemplateId(fileName),
       name: workflow.name,
       description,
       category,

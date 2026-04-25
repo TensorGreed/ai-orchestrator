@@ -41,8 +41,8 @@ async function bootstrap() {
 
   if (config.SEED_SAMPLE_WORKFLOWS) {
     seedWorkflowsIfEmpty(store, workspaceRoot);
-    seedTemplatesIfEmpty(store, workspaceRoot);
   }
+  seedTemplatesIfEmpty(store, workspaceRoot);
 
   // Ensure the default project exists and backfill any legacy rows that predate Phase 4.2.
   store.ensureDefaultProject();

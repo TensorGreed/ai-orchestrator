@@ -2498,6 +2498,29 @@ select {
   font-weight: 600;
 }
 
+.cfg-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cfg-field-header > span {
+  min-width: 0;
+  font-size: 0.78rem;
+  color: #5f6b84;
+  font-weight: 600;
+}
+
+.cfg-field-error {
+  border: 1px solid #f1c8c8;
+  border-radius: 8px;
+  background: #fff5f5;
+  color: #8f2d2d;
+  padding: 6px 8px;
+  font-size: 0.78rem;
+}
+
 .cfg-field input,
 .cfg-field textarea,
 .cfg-field select {
