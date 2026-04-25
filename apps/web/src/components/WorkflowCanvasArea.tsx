@@ -111,7 +111,8 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     title: "Flow",
     description: "Branch, merge, loop, wait, and handle fallback paths.",
     icon: "flow",
-    match: (node) => ["if_node", "switch_node", "try_catch", "loop_node", "merge_node", "wait_node", "execute_workflow"].includes(node.type)
+    match: (node) =>
+      ["if_node", "switch_node", "chat_intent_router", "try_catch", "loop_node", "merge_node", "wait_node", "execute_workflow"].includes(node.type)
   },
   {
     key: "core",
@@ -125,6 +126,7 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "system_prompt",
         "user_prompt",
         "output",
+        "helper_chat_response",
         "webhook_response",
         "wait_node",
         "code_node",

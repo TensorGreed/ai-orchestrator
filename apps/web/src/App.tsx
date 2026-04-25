@@ -704,6 +704,15 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     else if (edge.sourceHandle === "success") label = "Try (Success)";
     else if (edge.sourceHandle === "error") label = "Catch (Error)";
     else if (edge.sourceHandle === "default") label = "Default";
+    else if (source?.data.nodeType === "chat_intent_router") {
+      const routerLabels: Record<string, string> = {
+        report: "Report",
+        code: "Code",
+        message: "Message",
+        missing_context: "Missing Context"
+      };
+      label = routerLabels[edge.sourceHandle] ?? edge.sourceHandle;
+    }
     else if (edge.sourceHandle.startsWith("case_")) {
       const caseIdx = parseInt(edge.sourceHandle.split("_")[1] ?? "0", 10);
       const nodeConfig = source?.data.config;

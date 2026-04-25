@@ -877,6 +877,173 @@ describe("workflow engine", () => {
     expect(saved.chart_data).toEqual({ labels: ["Azure"], values: [3] });
   });
 
+  it("chat_intent_router: routes parsed intent without custom switch conditions", async () => {
+    const workflow: Workflow = {
+      id: "wf-chat-intent-router",
+      name: "Chat intent router",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "input",
+          type: "text_input",
+          name: "Input",
+          position: { x: 0, y: 0 },
+          config: {
+            text: "{\"intent\":\"code\",\"final_html\":\"\",\"python_code\":\"print(1)\",\"follow_up_question\":\"\",\"chart_data\":{},\"artifact_context\":{}}"
+          }
+        },
+        {
+          id: "parser",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            parsingMode: "strict",
+            inputKey: "text",
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"intent\":{\"type\":\"string\"}},\"required\":[\"intent\"]}"
+          }
+        },
+        {
+          id: "router",
+          type: "chat_intent_router",
+          name: "Router",
+          position: { x: 400, y: 0 },
+          config: { intentKey: "parsed.intent", outputKey: "intent" }
+        },
+        {
+          id: "report",
+          type: "output",
+          name: "Report",
+          position: { x: 600, y: -100 },
+          config: { responseTemplate: "report", outputKey: "result" }
+        },
+        {
+          id: "code",
+          type: "output",
+          name: "Code",
+          position: { x: 600, y: 100 },
+          config: { responseTemplate: "{{intent}}", outputKey: "result" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "input", target: "parser" },
+        { id: "e2", source: "parser", target: "router" },
+        { id: "e3", source: "router", sourceHandle: "report", target: "report" },
+        { id: "e4", source: "router", sourceHandle: "code", target: "code" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect((result.output as Record<string, unknown>).result).toBe("code");
+    expect(result.nodeResults.find((item) => item.nodeId === "report")?.status).toBe("skipped");
+  });
+
+  it("helper_chat_response: packages report HTML, Python code, and PDF attachment", async () => {
+    const workflow: Workflow = {
+      id: "wf-helper-chat-response",
+      name: "Helper chat response",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "input",
+          type: "text_input",
+          name: "Input",
+          position: { x: 0, y: 0 },
+          config: {
+            text:
+              "{\"status\":\"complete\",\"intent\":\"report\",\"final_html\":\"<html><body><h1>Report</h1></body></html>\",\"python_code\":\"print(1)\",\"follow_up_question\":\"\",\"chart_data\":{\"labels\":[\"Azure\"],\"values\":[1]},\"artifact_context\":{\"endpoint\":\"/api/vaults\"}}"
+          }
+        },
+        {
+          id: "parser",
+          type: "output_parser",
+          name: "Parser",
+          position: { x: 200, y: 0 },
+          config: {
+            mode: "json_schema",
+            parsingMode: "strict",
+            inputKey: "text",
+            jsonSchema:
+              "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\"},\"final_html\":{\"type\":\"string\"},\"python_code\":{\"type\":\"string\"}},\"required\":[\"status\",\"final_html\",\"python_code\"]}"
+          }
+        },
+        {
+          id: "pdf",
+          type: "pdf_output",
+          name: "PDF",
+          position: { x: 400, y: 0 },
+          config: {
+            renderMode: "html",
+            inputKey: "parsed.final_html",
+            filenameTemplate: "report.pdf",
+            outputKey: "pdf"
+          }
+        },
+        {
+          id: "response",
+          type: "helper_chat_response",
+          name: "Helper Chat Response",
+          position: { x: 600, y: 0 },
+          config: {
+            includePdfAttachment: true,
+            outputKey: "answer"
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 800, y: 0 },
+          config: { outputKey: "result" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "input", target: "parser" },
+        { id: "e2", source: "parser", target: "pdf" },
+        { id: "e3", source: "parser", target: "response" },
+        { id: "e4", source: "pdf", target: "response" },
+        { id: "e5", source: "response", target: "output" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const output = result.output as Record<string, unknown>;
+    const answer = output.result as Record<string, unknown>;
+    expect(answer.final_html).toContain("<h1>Report</h1>");
+    expect(answer.python_code).toBe("print(1)");
+    expect(answer.codes).toEqual([{ language: "python", source: "print(1)" }]);
+    const attachments = answer.attachments as Array<Record<string, unknown>>;
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0].filename).toBe("report.pdf");
+    expect(String(attachments[0].downloadUrl)).toMatch(/^data:application\/pdf;base64,/);
+  });
+
   it("executes each agent with its own attached chat model", async () => {
     const runtime = new CollectingAgentRuntime();
     const workflow: Workflow = {

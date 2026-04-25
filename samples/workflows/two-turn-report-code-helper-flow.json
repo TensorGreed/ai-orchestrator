@@ -108,16 +108,17 @@
       },
       {
         "id": "switch_1",
-        "type": "switch_node",
+        "type": "chat_intent_router",
         "name": "Route Intent",
         "position": { "x": 970, "y": 220 },
         "config": {
-          "switchValue": "{{parsed.intent}}",
-          "cases": [
-            { "value": "report", "label": "report" },
-            { "value": "code", "label": "code" }
-          ],
-          "defaultLabel": "message"
+          "inputTemplate": "{{user_prompt}}",
+          "intentKey": "parsed.intent",
+          "artifactPath": "latest_report",
+          "requireArtifactForCode": false,
+          "reportKeywords": "report, pdf, dashboard, chart, analytics, summary, visualize",
+          "codeKeywords": "python, code, script, automate, nightly, regenerate, reproduce, without ai, without l2m",
+          "outputKey": "intent"
         }
       },
       {
@@ -138,12 +139,21 @@
       },
       {
         "id": "build_report_response",
-        "type": "code_node",
+        "type": "helper_chat_response",
         "name": "Build Report Response",
         "position": { "x": 1730, "y": 90 },
         "config": {
-          "language": "javascript",
-          "code": "function asObject(v) {\n  return v && typeof v === 'object' && !Array.isArray(v) ? v : null;\n}\n\nfunction pickString(...values) {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim()) return value.trim();\n  }\n  return '';\n}\n\nconst parsed = asObject(input.parsed) || {};\nconst pdf = asObject(input.pdf);\nconst chartData = asObject(parsed.chart_data) || { title: 'CSP distribution', labels: [], values: [] };\nconst artifactContext = asObject(parsed.artifact_context) || {};\n\nconst attachments = [];\nif (pdf && typeof pdf.downloadUrl === 'string' && pdf.downloadUrl.trim()) {\n  attachments.push({\n    filename: pdf.filename || 'report.pdf',\n    mimeType: pdf.mimeType || 'application/pdf',\n    downloadUrl: pdf.downloadUrl,\n    sizeBytes: typeof pdf.sizeBytes === 'number' ? pdf.sizeBytes : undefined\n  });\n}\n\nreturn {\n  answer: {\n    status: pickString(parsed.status) || 'complete',\n    final_html: pickString(parsed.final_html),\n    python_code: pickString(parsed.python_code),\n    follow_up_question: pickString(parsed.follow_up_question),\n    chart_data: chartData,\n    artifact_context: artifactContext,\n    attachments\n  }\n};"
+          "statusKey": "parsed.status",
+          "finalHtmlKey": "parsed.final_html",
+          "pythonCodeKey": "parsed.python_code",
+          "followUpQuestionKey": "parsed.follow_up_question",
+          "messageKey": "parsed.message",
+          "chartDataKey": "parsed.chart_data",
+          "artifactContextKey": "parsed.artifact_context",
+          "pdfKey": "pdf",
+          "includePdfAttachment": true,
+          "codeLanguage": "python",
+          "outputKey": "answer"
         }
       },
       {
@@ -176,12 +186,21 @@
       },
       {
         "id": "build_code_response",
-        "type": "code_node",
+        "type": "helper_chat_response",
         "name": "Build Code Response",
         "position": { "x": 1240, "y": 280 },
         "config": {
-          "language": "javascript",
-          "code": "function asObject(v) {\n  return v && typeof v === 'object' && !Array.isArray(v) ? v : null;\n}\n\nfunction pickString(...values) {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim()) return value.trim();\n  }\n  return '';\n}\n\nconst parsed = asObject(input.parsed) || {};\nconst chartData = asObject(parsed.chart_data) || { title: 'CSP distribution', labels: [], values: [] };\nconst artifactContext = asObject(parsed.artifact_context) || {};\n\nreturn {\n  answer: {\n    status: pickString(parsed.status) || 'complete',\n    final_html: pickString(parsed.final_html),\n    python_code: pickString(parsed.python_code),\n    follow_up_question: pickString(parsed.follow_up_question),\n    chart_data: chartData,\n    artifact_context: artifactContext,\n    attachments: []\n  }\n};"
+          "statusKey": "parsed.status",
+          "finalHtmlKey": "parsed.final_html",
+          "pythonCodeKey": "parsed.python_code",
+          "followUpQuestionKey": "parsed.follow_up_question",
+          "messageKey": "parsed.message",
+          "chartDataKey": "parsed.chart_data",
+          "artifactContextKey": "parsed.artifact_context",
+          "pdfKey": "pdf",
+          "includePdfAttachment": false,
+          "codeLanguage": "python",
+          "outputKey": "answer"
         }
       },
       {
@@ -195,12 +214,21 @@
       },
       {
         "id": "build_message_response",
-        "type": "code_node",
+        "type": "helper_chat_response",
         "name": "Build Message Response",
         "position": { "x": 1240, "y": 460 },
         "config": {
-          "language": "javascript",
-          "code": "function asObject(v) {\n  return v && typeof v === 'object' && !Array.isArray(v) ? v : null;\n}\n\nfunction pickString(...values) {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim()) return value.trim();\n  }\n  return '';\n}\n\nconst parsed = asObject(input.parsed) || {};\nconst chartData = asObject(parsed.chart_data) || { title: 'CSP distribution', labels: [], values: [] };\nconst artifactContext = asObject(parsed.artifact_context) || {};\n\nreturn {\n  answer: {\n    status: pickString(parsed.status) || 'complete',\n    final_html: pickString(parsed.final_html),\n    python_code: pickString(parsed.python_code),\n    follow_up_question: pickString(parsed.follow_up_question),\n    chart_data: chartData,\n    artifact_context: artifactContext,\n    attachments: []\n  }\n};"
+          "statusKey": "parsed.status",
+          "finalHtmlKey": "parsed.final_html",
+          "pythonCodeKey": "parsed.python_code",
+          "followUpQuestionKey": "parsed.follow_up_question",
+          "messageKey": "parsed.message",
+          "chartDataKey": "parsed.chart_data",
+          "artifactContextKey": "parsed.artifact_context",
+          "pdfKey": "pdf",
+          "includePdfAttachment": false,
+          "codeLanguage": "python",
+          "outputKey": "answer"
         }
       },
       {
@@ -225,7 +253,7 @@
       { "id": "e_report_output", "source": "build_report_response", "target": "output_report" },
       { "id": "e_switch_code_response", "source": "switch_1", "sourceHandle": "code", "target": "build_code_response" },
       { "id": "e_code_output", "source": "build_code_response", "target": "output_code" },
-      { "id": "e_switch_message_response", "source": "switch_1", "sourceHandle": "default", "target": "build_message_response" },
+      { "id": "e_switch_message_response", "source": "switch_1", "sourceHandle": "message", "target": "build_message_response" },
       { "id": "e_message_output", "source": "build_message_response", "target": "output_message" },
       { "id": "e_attach_chat_model", "source": "agent_1", "sourceHandle": "chat_model", "target": "chat_model_1" },
       { "id": "e_attach_memory", "source": "agent_1", "sourceHandle": "memory", "target": "memory_1" },

@@ -4938,6 +4938,114 @@ export function NodeConfigModal({
             </div>
           </>
         );
+      case "chat_intent_router":
+        return (
+          <>
+            <ExpressionField
+              label="Input Message Template"
+              value={toStringValue(config.inputTemplate, "{{user_prompt}}")}
+              onChange={(next) => setConfig((current) => ({ ...current, inputTemplate: next }))}
+              rows={2}
+              mode="template"
+              previewContext={expressionPreviewContext}
+            />
+            <TextField
+              label="Parsed Intent Key"
+              value={toStringValue(config.intentKey, "parsed.intent")}
+              onChange={(next) => setConfig((current) => ({ ...current, intentKey: next }))}
+            />
+            <TextField
+              label="Artifact Path"
+              value={toStringValue(config.artifactPath, "latest_report")}
+              onChange={(next) => setConfig((current) => ({ ...current, artifactPath: next }))}
+            />
+            <ToggleField
+              label="Require saved artifact for code requests"
+              checked={toBooleanValue(config.requireArtifactForCode, false)}
+              onChange={(next) => setConfig((current) => ({ ...current, requireArtifactForCode: next }))}
+            />
+            <TextAreaField
+              label="Report Keywords"
+              value={toStringValue(config.reportKeywords, "report, pdf, dashboard, chart, analytics, summary, visualize")}
+              onChange={(next) => setConfig((current) => ({ ...current, reportKeywords: next }))}
+              rows={3}
+            />
+            <TextAreaField
+              label="Code Keywords"
+              value={toStringValue(config.codeKeywords, "python, code, script, automate, nightly, regenerate, reproduce, without ai, without l2m")}
+              onChange={(next) => setConfig((current) => ({ ...current, codeKeywords: next }))}
+              rows={3}
+            />
+            <TextField
+              label="Output Key"
+              value={toStringValue(config.outputKey, "intent")}
+              onChange={(next) => setConfig((current) => ({ ...current, outputKey: next }))}
+            />
+            <div className="cfg-tip">
+              Branch ports are fixed: <code>report</code>, <code>code</code>, <code>message</code>, and <code>missing_context</code>.
+            </div>
+          </>
+        );
+      case "helper_chat_response":
+        return (
+          <>
+            <TextField
+              label="Status Key"
+              value={toStringValue(config.statusKey, "parsed.status")}
+              onChange={(next) => setConfig((current) => ({ ...current, statusKey: next }))}
+            />
+            <TextField
+              label="Final HTML Key"
+              value={toStringValue(config.finalHtmlKey, "parsed.final_html")}
+              onChange={(next) => setConfig((current) => ({ ...current, finalHtmlKey: next }))}
+            />
+            <TextField
+              label="Python Code Key"
+              value={toStringValue(config.pythonCodeKey, "parsed.python_code")}
+              onChange={(next) => setConfig((current) => ({ ...current, pythonCodeKey: next }))}
+            />
+            <TextField
+              label="Follow-up Question Key"
+              value={toStringValue(config.followUpQuestionKey, "parsed.follow_up_question")}
+              onChange={(next) => setConfig((current) => ({ ...current, followUpQuestionKey: next }))}
+            />
+            <TextField
+              label="Message Key"
+              value={toStringValue(config.messageKey, "parsed.message")}
+              onChange={(next) => setConfig((current) => ({ ...current, messageKey: next }))}
+            />
+            <TextField
+              label="Chart Data Key"
+              value={toStringValue(config.chartDataKey, "parsed.chart_data")}
+              onChange={(next) => setConfig((current) => ({ ...current, chartDataKey: next }))}
+            />
+            <TextField
+              label="Artifact Context Key"
+              value={toStringValue(config.artifactContextKey, "parsed.artifact_context")}
+              onChange={(next) => setConfig((current) => ({ ...current, artifactContextKey: next }))}
+            />
+            <TextField
+              label="PDF Attachment Key"
+              value={toStringValue(config.pdfKey, "pdf")}
+              onChange={(next) => setConfig((current) => ({ ...current, pdfKey: next }))}
+            />
+            <ToggleField
+              label="Include PDF attachment"
+              checked={toBooleanValue(config.includePdfAttachment, true)}
+              onChange={(next) => setConfig((current) => ({ ...current, includePdfAttachment: next }))}
+            />
+            <TextField
+              label="Code Language"
+              value={toStringValue(config.codeLanguage, "python")}
+              onChange={(next) => setConfig((current) => ({ ...current, codeLanguage: next }))}
+            />
+            <TextField
+              label="Output Key"
+              value={toStringValue(config.outputKey, "answer")}
+              onChange={(next) => setConfig((current) => ({ ...current, outputKey: next }))}
+            />
+          </>
+        );
       case "output":
         return (
           <>

@@ -648,6 +648,68 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "chat_intent_router",
+    label: "Chat Intent Router",
+    category: "Utility",
+    description: "Routes helper-chat requests into report, code, message, or missing-context branches without custom Switch conditions.",
+    configSchema: {
+      type: "object",
+      properties: {
+        inputTemplate: { type: "string" },
+        intentKey: { type: "string" },
+        artifactPath: { type: "string" },
+        requireArtifactForCode: { type: "boolean" },
+        reportKeywords: { type: "string" },
+        codeKeywords: { type: "string" },
+        outputKey: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      inputTemplate: "{{user_prompt}}",
+      intentKey: "parsed.intent",
+      artifactPath: "latest_report",
+      requireArtifactForCode: false,
+      reportKeywords: "report, pdf, dashboard, chart, analytics, summary, visualize",
+      codeKeywords: "python, code, script, automate, nightly, regenerate, reproduce, without ai, without l2m",
+      outputKey: "intent"
+    }
+  },
+  {
+    type: "helper_chat_response",
+    label: "Helper Chat Response",
+    category: "Output",
+    description: "Packages report HTML, code blocks, and file attachments into the response shape helper-chat understands.",
+    configSchema: {
+      type: "object",
+      properties: {
+        statusKey: { type: "string" },
+        finalHtmlKey: { type: "string" },
+        pythonCodeKey: { type: "string" },
+        followUpQuestionKey: { type: "string" },
+        messageKey: { type: "string" },
+        chartDataKey: { type: "string" },
+        artifactContextKey: { type: "string" },
+        pdfKey: { type: "string" },
+        includePdfAttachment: { type: "boolean" },
+        codeLanguage: { type: "string" },
+        outputKey: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      statusKey: "parsed.status",
+      finalHtmlKey: "parsed.final_html",
+      pythonCodeKey: "parsed.python_code",
+      followUpQuestionKey: "parsed.follow_up_question",
+      messageKey: "parsed.message",
+      chartDataKey: "parsed.chart_data",
+      artifactContextKey: "parsed.artifact_context",
+      pdfKey: "pdf",
+      includePdfAttachment: true,
+      codeLanguage: "python",
+      outputKey: "answer"
+    }
+  },
+  {
     type: "mcp_tool",
     label: "MCP Tool",
     category: "MCP",

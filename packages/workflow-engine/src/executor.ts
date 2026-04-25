@@ -691,6 +691,162 @@ function buildSessionArtifactValue(
   return resolved === undefined ? templateData : resolved;
 }
 
+function normalizeLabel(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeKeywordList(value: unknown, fallback: string[]): string[] {
+  const raw = Array.isArray(value)
+    ? value.map((item) => String(item))
+    : typeof value === "string"
+      ? value.split(/[\n,]+/)
+      : fallback;
+
+  return raw
+    .map((item) => item.trim().toLowerCase())
+    .filter((item, index, all) => item.length > 0 && all.indexOf(item) === index);
+}
+
+function valueToString(value: unknown, fallback = ""): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function resolveValueByConfiguredPath(
+  config: Record<string, unknown>,
+  pathKey: string,
+  templateData: Record<string, unknown>,
+  defaultPath = ""
+): unknown {
+  const configuredPath = typeof config[pathKey] === "string" ? config[pathKey].trim() : "";
+  const path = configuredPath || defaultPath;
+  return path ? getValueByPath(templateData, path) : undefined;
+}
+
+function resolveStringByConfiguredPath(
+  config: Record<string, unknown>,
+  pathKey: string,
+  templateData: Record<string, unknown>,
+  defaultPath = "",
+  fallback = ""
+): string {
+  return valueToString(resolveValueByConfiguredPath(config, pathKey, templateData, defaultPath), fallback);
+}
+
+function normalizeChatIntent(value: unknown): "report" | "code" | "message" | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized === "report" || normalized === "pdf" || normalized === "dashboard") {
+    return "report";
+  }
+  if (normalized === "code" || normalized === "script" || normalized === "python") {
+    return "code";
+  }
+  if (normalized === "message" || normalized === "answer" || normalized === "chat") {
+    return "message";
+  }
+  return undefined;
+}
+
+function hasSessionArtifactValue(value: unknown): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === "object") {
+    return Object.keys(value as Record<string, unknown>).length > 0;
+  }
+  return true;
+}
+
+function textMatchesKeyword(text: string, keywords: string[]): boolean {
+  const normalized = text.toLowerCase();
+  return keywords.some((keyword) => normalized.includes(keyword));
+}
+
+function inferHelperChatIntent(
+  message: string,
+  reportKeywords: string[],
+  codeKeywords: string[]
+): { intent: "report" | "code" | "message"; source: string } {
+  if (textMatchesKeyword(message, codeKeywords)) {
+    return { intent: "code", source: "keyword" };
+  }
+  if (textMatchesKeyword(message, reportKeywords)) {
+    return { intent: "report", source: "keyword" };
+  }
+  return { intent: "message", source: "default" };
+}
+
+function mimeTypeFromDataUrl(value: string): string {
+  const match = /^data:([^;,]+)/i.exec(value.trim());
+  return match ? match[1].toLowerCase() : "";
+}
+
+function normalizeHelperChatAttachment(raw: unknown): Record<string, unknown> | null {
+  const record = toRecord(raw);
+  if (!Object.keys(record).length) {
+    return null;
+  }
+
+  const explicitDataUrl =
+    typeof record.downloadUrl === "string" && record.downloadUrl.trim()
+      ? record.downloadUrl.trim()
+      : typeof record.dataUrl === "string" && record.dataUrl.trim()
+        ? record.dataUrl.trim()
+        : typeof record.url === "string" && record.url.trim()
+          ? record.url.trim()
+          : "";
+  const mimeType =
+    typeof record.mimeType === "string" && record.mimeType.trim()
+      ? record.mimeType.trim()
+      : mimeTypeFromDataUrl(explicitDataUrl) || "application/octet-stream";
+  const downloadUrl =
+    explicitDataUrl ||
+    (typeof record.base64 === "string" && record.base64.trim()
+      ? `data:${mimeType};base64,${record.base64.trim()}`
+      : "");
+
+  if (!downloadUrl) {
+    return null;
+  }
+
+  const filename =
+    typeof record.filename === "string" && record.filename.trim()
+      ? record.filename.trim()
+      : typeof record.name === "string" && record.name.trim()
+        ? record.name.trim()
+        : mimeType === "application/pdf"
+          ? "report.pdf"
+          : "download";
+
+  const attachment: Record<string, unknown> = {
+    filename,
+    mimeType,
+    downloadUrl
+  };
+  if (typeof record.sizeBytes === "number" && Number.isFinite(record.sizeBytes)) {
+    attachment.sizeBytes = record.sizeBytes;
+  }
+  return attachment;
+}
+
 function parsePathSegments(path: string): string[] {
   const input = String(path ?? "").trim();
   if (!input) {
@@ -3245,6 +3401,123 @@ async function executeNode(
         [outputKey]: record.value,
         artifact: record.value,
         session_artifact: record
+      };
+    }
+
+    case "chat_intent_router": {
+      const outputKey = normalizeLabel(config.outputKey, "intent");
+      const inputTemplate = typeof config.inputTemplate === "string" && config.inputTemplate.trim()
+        ? config.inputTemplate
+        : "{{user_prompt}}";
+      const intentKey = typeof config.intentKey === "string" ? config.intentKey.trim() : "parsed.intent";
+      const artifactPath = typeof config.artifactPath === "string" ? config.artifactPath.trim() : "latest_report";
+      const reportKeywords = normalizeKeywordList(config.reportKeywords, [
+        "report",
+        "pdf",
+        "dashboard",
+        "chart",
+        "analytics",
+        "summary",
+        "visualize",
+        "visualization"
+      ]);
+      const codeKeywords = normalizeKeywordList(config.codeKeywords, [
+        "python",
+        "code",
+        "script",
+        "automate",
+        "automation",
+        "nightly",
+        "regenerate",
+        "reproduce",
+        "without ai",
+        "without l2m"
+      ]);
+
+      const explicitIntent = intentKey ? normalizeChatIntent(getValueByPath(templateData, intentKey)) : undefined;
+      const renderedMessage = renderTemplate(inputTemplate, templateData);
+      const inferred = explicitIntent
+        ? { intent: explicitIntent, source: "explicit" }
+        : inferHelperChatIntent(renderedMessage, reportKeywords, codeKeywords);
+      const artifactValue = artifactPath ? getValueByPath(templateData, artifactPath) : undefined;
+      const artifactAvailable = hasSessionArtifactValue(artifactValue);
+      const requiresArtifact = config.requireArtifactForCode === true;
+      const route =
+        inferred.intent === "code" && requiresArtifact && !artifactAvailable
+          ? "missing_context"
+          : inferred.intent === "report"
+            ? "report"
+            : inferred.intent === "code"
+              ? "code"
+              : "message";
+
+      return {
+        ...branchPassthrough(templateData),
+        [outputKey]: inferred.intent,
+        intent: inferred.intent,
+        route,
+        intentSource: inferred.source,
+        artifactAvailable,
+        requiresArtifact,
+        _branchHandle: route,
+        _branchHandleFallback: route
+      };
+    }
+
+    case "helper_chat_response": {
+      const outputKey = normalizeLabel(config.outputKey, "answer");
+      const statusValue = resolveStringByConfiguredPath(config, "statusKey", templateData, "parsed.status", "complete").trim();
+      const status = statusValue === "needs_more_info" ? "needs_more_info" : "complete";
+      const finalHtml = resolveStringByConfiguredPath(config, "finalHtmlKey", templateData, "parsed.final_html");
+      const pythonCode = resolveStringByConfiguredPath(config, "pythonCodeKey", templateData, "parsed.python_code");
+      const followUpQuestion = resolveStringByConfiguredPath(
+        config,
+        "followUpQuestionKey",
+        templateData,
+        "parsed.follow_up_question"
+      );
+      const message = resolveStringByConfiguredPath(config, "messageKey", templateData, "parsed.message");
+      const codeLanguage = normalizeLabel(config.codeLanguage, "python");
+      const chartData =
+        resolveValueByConfiguredPath(config, "chartDataKey", templateData, "parsed.chart_data") ??
+        { title: "Chart data", labels: [], values: [] };
+      const artifactContext =
+        resolveValueByConfiguredPath(config, "artifactContextKey", templateData, "parsed.artifact_context") ?? {};
+
+      const attachments: Record<string, unknown>[] = [];
+      const includePdfAttachment = config.includePdfAttachment !== false;
+      if (includePdfAttachment) {
+        const pdfValue = resolveValueByConfiguredPath(config, "pdfKey", templateData, "pdf");
+        const pdfAttachment = normalizeHelperChatAttachment(pdfValue);
+        if (pdfAttachment) {
+          attachments.push(pdfAttachment);
+        }
+      }
+
+      const codes = pythonCode.trim()
+        ? [{ language: codeLanguage, source: pythonCode }]
+        : [];
+
+      const answer: Record<string, unknown> = {
+        status,
+        final_html: finalHtml,
+        python_code: pythonCode,
+        follow_up_question: followUpQuestion,
+        chart_data: chartData,
+        artifact_context: artifactContext,
+        codes,
+        attachments
+      };
+      if (message.trim()) {
+        answer.message = message;
+      }
+
+      return {
+        [outputKey]: answer,
+        answer,
+        result: answer,
+        codes,
+        attachments
       };
     }
 

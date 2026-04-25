@@ -44,6 +44,8 @@ export const workflowNodeSchema = z.object({
     "local_memory",
     "session_artifact_save",
     "session_artifact_load",
+    "chat_intent_router",
+    "helper_chat_response",
     "mcp_tool",
     "rag_retrieve",
     "connector_source",

@@ -18,6 +18,7 @@ function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "a
     nodeType === "schedule_trigger" ||
     nodeType === "webhook_input" ||
     nodeType === "output" ||
+    nodeType === "helper_chat_response" ||
     nodeType === "webhook_response"
   ) {
     return "terminal";
@@ -229,6 +230,20 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
                   <span className="port-label">Default</span>
                   <Handle id="default" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: (20 + ((Array.isArray(data.config?.cases) ? data.config.cases.length : 0) * 15)) + "%" }} />
                </div>
+             </div>
+          ) : data.nodeType === "chat_intent_router" ? (
+             <div className="wf-structural-ports">
+               {[
+                 { id: "report", label: "Report", top: "20%" },
+                 { id: "code", label: "Code", top: "40%" },
+                 { id: "message", label: "Message", top: "60%" },
+                 { id: "missing_context", label: "Missing", top: "80%" }
+               ].map((port) => (
+                 <div key={port.id} className="wf-structural-port">
+                    <span className="port-label" title={port.label}>{port.label}</span>
+                    <Handle id={port.id} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: port.top }} />
+                 </div>
+               ))}
              </div>
           ) : (
              <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
