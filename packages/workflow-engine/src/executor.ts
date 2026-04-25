@@ -58,6 +58,7 @@ export interface WorkflowExecutionDependencies {
   agentRuntime: AgentRuntimeAdapter;
   memoryStore?: AgentSessionMemoryStore;
   toolDataStore?: AgentSessionToolDataStore;
+  sessionArtifactStore?: AgentSessionArtifactStore;
   loadWorkflow?: (workflowId: string) => Workflow | undefined;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   persistPausedExecution?: (input: {
@@ -110,6 +111,29 @@ export interface WorkflowExecutionDependencies {
     errorStack?: string;
     timestamp: string;
   }) => Promise<void>;
+}
+
+export interface AgentSessionArtifactRecord {
+  namespace: string;
+  sessionId: string;
+  artifactKey: string;
+  value: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentSessionArtifactStore {
+  saveArtifact(input: {
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+    value: unknown;
+  }): Promise<AgentSessionArtifactRecord>;
+  loadArtifact(input: {
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+  }): Promise<AgentSessionArtifactRecord | null>;
 }
 
 export interface ExecuteWorkflowRequest {
@@ -600,6 +624,71 @@ function captureNodeInputSnapshot(
     ...merged,
     parent_outputs: parentOutputs
   });
+}
+
+function resolveSessionArtifactScope(
+  config: Record<string, unknown>,
+  templateData: Record<string, unknown>,
+  workflow: Workflow,
+  node: WorkflowNode
+): { namespace: string; sessionId: string; artifactKey: string } {
+  const namespaceTemplate =
+    typeof config.namespace === "string" && config.namespace.trim()
+      ? config.namespace
+      : `${workflow.id}:${node.id}`;
+  const sessionTemplate =
+    typeof config.sessionIdTemplate === "string" && config.sessionIdTemplate.trim()
+      ? config.sessionIdTemplate
+      : "{{session_id}}";
+  const artifactKeyTemplate =
+    typeof config.artifactKey === "string" && config.artifactKey.trim()
+      ? config.artifactKey
+      : "latest";
+
+  return {
+    namespace: renderTemplate(namespaceTemplate, templateData).trim() || `${workflow.id}:${node.id}`,
+    sessionId: renderTemplate(sessionTemplate, templateData).trim(),
+    artifactKey: renderTemplate(artifactKeyTemplate, templateData).trim() || "latest"
+  };
+}
+
+function resolveConfiguredValue(
+  config: Record<string, unknown>,
+  templateData: Record<string, unknown>
+): unknown {
+  const valueKey = typeof config.valueKey === "string" && config.valueKey.trim() ? config.valueKey.trim() : "";
+  if (valueKey) {
+    return getValueByPath(templateData, valueKey);
+  }
+
+  const valueTemplate = typeof config.valueTemplate === "string" ? config.valueTemplate : "";
+  if (valueTemplate) {
+    return parseTemplateValue(renderTemplate(valueTemplate, templateData));
+  }
+
+  return undefined;
+}
+
+function buildSessionArtifactValue(
+  config: Record<string, unknown>,
+  templateData: Record<string, unknown>
+): unknown {
+  const fields = Array.isArray(config.fields) ? config.fields.map((entry) => toRecord(entry)) : [];
+  if (fields.length > 0) {
+    const value: Record<string, unknown> = {};
+    for (const field of fields) {
+      const key = typeof field.key === "string" ? field.key.trim() : "";
+      if (!key) {
+        continue;
+      }
+      const resolved = resolveConfiguredValue(field, templateData);
+      value[key] = resolved === undefined ? null : resolved;
+    }
+    return value;
+  }
+
+  const resolved = resolveConfiguredValue(config, templateData);
+  return resolved === undefined ? templateData : resolved;
 }
 
 function parsePathSegments(path: string): string[] {
@@ -3075,6 +3164,87 @@ async function executeNode(
         sessionId,
         maxMessages,
         messages: messages.slice(-maxMessages)
+      };
+    }
+
+    case "session_artifact_load": {
+      if (!dependencies.sessionArtifactStore) {
+        throw new Error("Session Artifact Load requires a sessionArtifactStore dependency.");
+      }
+
+      const scope = resolveSessionArtifactScope(config, templateData, context.workflow, node);
+      const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "artifact";
+      if (!scope.sessionId) {
+        return {
+          ...context.merged,
+          namespace: scope.namespace,
+          sessionId: scope.sessionId,
+          artifactKey: scope.artifactKey,
+          found: false,
+          [outputKey]: null,
+          artifact: null,
+          session_artifact: null,
+          reason: "missing_session_id"
+        };
+      }
+
+      const record = await dependencies.sessionArtifactStore.loadArtifact(scope);
+      const artifact = record?.value ?? null;
+      return {
+        ...context.merged,
+        namespace: scope.namespace,
+        sessionId: scope.sessionId,
+        artifactKey: scope.artifactKey,
+        found: Boolean(record),
+        [outputKey]: artifact,
+        artifact,
+        session_artifact: record
+          ? {
+              namespace: record.namespace,
+              sessionId: record.sessionId,
+              artifactKey: record.artifactKey,
+              value: record.value,
+              createdAt: record.createdAt,
+              updatedAt: record.updatedAt
+            }
+          : null
+      };
+    }
+
+    case "session_artifact_save": {
+      if (!dependencies.sessionArtifactStore) {
+        throw new Error("Session Artifact Save requires a sessionArtifactStore dependency.");
+      }
+
+      const scope = resolveSessionArtifactScope(config, templateData, context.workflow, node);
+      const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "saved_artifact";
+      const value = buildSessionArtifactValue(config, templateData);
+      if (!scope.sessionId) {
+        return {
+          ...context.merged,
+          namespace: scope.namespace,
+          sessionId: scope.sessionId,
+          artifactKey: scope.artifactKey,
+          saved: false,
+          [outputKey]: value,
+          artifact: value,
+          reason: "missing_session_id"
+        };
+      }
+
+      const record = await dependencies.sessionArtifactStore.saveArtifact({
+        ...scope,
+        value
+      });
+      return {
+        ...context.merged,
+        namespace: record.namespace,
+        sessionId: record.sessionId,
+        artifactKey: record.artifactKey,
+        saved: true,
+        [outputKey]: record.value,
+        artifact: record.value,
+        session_artifact: record
       };
     }
 

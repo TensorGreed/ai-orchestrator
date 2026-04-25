@@ -770,6 +770,113 @@ describe("workflow engine", () => {
     expect(runtime.lastRequest?.bypassToolFiltering).toBe(true);
   });
 
+  it("session artifacts: saves and loads exact payloads by session", async () => {
+    const records = new Map<string, {
+      namespace: string;
+      sessionId: string;
+      artifactKey: string;
+      value: unknown;
+      createdAt: string;
+      updatedAt: string;
+    }>();
+    const keyFor = (namespace: string, sessionId: string, artifactKey: string) => `${namespace}:${sessionId}:${artifactKey}`;
+    const workflow: Workflow = {
+      id: "wf-session-artifacts",
+      name: "Session artifacts",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "webhook",
+          type: "webhook_input",
+          name: "Webhook",
+          position: { x: 0, y: 0 },
+          config: { passThroughFields: ["user_prompt", "session_id"] }
+        },
+        {
+          id: "save",
+          type: "session_artifact_save",
+          name: "Save Artifact",
+          position: { x: 220, y: 0 },
+          config: {
+            namespace: "reports",
+            sessionIdTemplate: "{{session_id}}",
+            artifactKey: "latest_report",
+            fields: [
+              { key: "final_html", valueTemplate: "<html>{{user_prompt}}</html>" },
+              { key: "chart_data", valueTemplate: "{\"labels\":[\"Azure\"],\"values\":[3]}" }
+            ]
+          }
+        },
+        {
+          id: "load",
+          type: "session_artifact_load",
+          name: "Load Artifact",
+          position: { x: 440, y: 0 },
+          config: {
+            namespace: "reports",
+            sessionIdTemplate: "{{session_id}}",
+            artifactKey: "latest_report",
+            outputKey: "latest_report"
+          }
+        },
+        {
+          id: "output",
+          type: "output",
+          name: "Output",
+          position: { x: 660, y: 0 },
+          config: { responseTemplate: "{{latest_report.final_html}}", outputKey: "result" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "webhook", target: "save" },
+        { id: "e2", source: "save", target: "load" },
+        { id: "e3", source: "load", target: "output" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      {
+        workflow,
+        webhookPayload: {
+          user_prompt: "exact report",
+          session_id: "session-1"
+        }
+      },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined,
+        sessionArtifactStore: {
+          saveArtifact: async (input) => {
+            const now = "2026-04-25T00:00:00.000Z";
+            const existing = records.get(keyFor(input.namespace, input.sessionId, input.artifactKey));
+            const record = {
+              namespace: input.namespace,
+              sessionId: input.sessionId,
+              artifactKey: input.artifactKey,
+              value: input.value,
+              createdAt: existing?.createdAt ?? now,
+              updatedAt: now
+            };
+            records.set(keyFor(input.namespace, input.sessionId, input.artifactKey), record);
+            return record;
+          },
+          loadArtifact: async (input) =>
+            records.get(keyFor(input.namespace, input.sessionId, input.artifactKey)) ?? null
+        }
+      }
+    );
+
+    expect(result.status).toBe("success");
+    expect((result.output as Record<string, unknown>).result).toBe("<html>exact report</html>");
+    const saved = records.get("reports:session-1:latest_report")?.value as Record<string, unknown>;
+    expect(saved.final_html).toBe("<html>exact report</html>");
+    expect(saved.chart_data).toEqual({ labels: ["Azure"], values: [3] });
+  });
+
   it("executes each agent with its own attached chat model", async () => {
     const runtime = new CollectingAgentRuntime();
     const workflow: Workflow = {

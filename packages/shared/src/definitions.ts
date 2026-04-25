@@ -588,6 +588,66 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "session_artifact_load",
+    label: "Session Artifact Load",
+    category: "Utility",
+    description: "Loads an exact JSON artifact saved for the current session, such as a prior report payload.",
+    configSchema: {
+      type: "object",
+      properties: {
+        namespace: { type: "string" },
+        sessionIdTemplate: { type: "string" },
+        artifactKey: { type: "string" },
+        outputKey: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      namespace: "default",
+      sessionIdTemplate: "{{session_id}}",
+      artifactKey: "latest_report",
+      outputKey: "artifact"
+    }
+  },
+  {
+    type: "session_artifact_save",
+    label: "Session Artifact Save",
+    category: "Utility",
+    description: "Saves an exact JSON artifact for the current session so later turns can reuse it deterministically.",
+    configSchema: {
+      type: "object",
+      properties: {
+        namespace: { type: "string" },
+        sessionIdTemplate: { type: "string" },
+        artifactKey: { type: "string" },
+        valueKey: { type: "string" },
+        valueTemplate: { type: "string" },
+        fields: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              key: { type: "string" },
+              valueKey: { type: "string" },
+              valueTemplate: { type: "string" }
+            }
+          }
+        },
+        outputKey: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      namespace: "default",
+      sessionIdTemplate: "{{session_id}}",
+      artifactKey: "latest_report",
+      fields: [
+        { key: "final_html", valueKey: "parsed.final_html" },
+        { key: "python_code", valueKey: "parsed.python_code" },
+        { key: "chart_data", valueKey: "parsed.chart_data" }
+      ],
+      outputKey: "saved_artifact"
+    }
+  },
+  {
     type: "mcp_tool",
     label: "MCP Tool",
     category: "MCP",

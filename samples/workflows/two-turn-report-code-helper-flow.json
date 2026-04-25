@@ -1,0 +1,236 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-two-turn-report-code-helper",
+    "name": "Two-Turn MCP Report + Code Helper",
+    "description": "Helper-chat workflow for first generating an MCP-backed PDF report, saving the exact structured report artifact by session, then reusing it for follow-up reproducible Python code requests.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "webhook_1",
+        "type": "webhook_input",
+        "name": "Webhook Input",
+        "position": { "x": 80, "y": 220 },
+        "config": {
+          "path": "two-turn-report-code-helper",
+          "method": "POST",
+          "passThroughFields": ["system_prompt", "user_prompt", "session_id", "variables", "images", "files"]
+        }
+      },
+      {
+        "id": "load_report_artifact",
+        "type": "session_artifact_load",
+        "name": "Load Latest Report Artifact",
+        "position": { "x": 300, "y": 220 },
+        "config": {
+          "namespace": "two-turn-report-code-helper",
+          "sessionIdTemplate": "{{session_id}}",
+          "artifactKey": "latest_report",
+          "outputKey": "latest_report"
+        }
+      },
+      {
+        "id": "agent_1",
+        "type": "agent_orchestrator",
+        "name": "Agent Orchestrator",
+        "position": { "x": 560, "y": 220 },
+        "config": {
+          "agentType": "tools",
+          "systemPromptTemplate": "You are an MCP-backed reporting assistant used from helper-chat.\n\nYou will receive multiple requests in the same helper-chat session. Treat the session_id as conversation continuity. An exact prior report artifact may be provided in the user prompt as JSON. Prefer that exact artifact for follow-up code requests. Use session cache tools before repeating expensive MCP calls.\n\nAlways return exactly one JSON object and no markdown. Required fields:\n{\n  \"status\": \"complete\" | \"needs_more_info\",\n  \"intent\": \"report\" | \"code\" | \"message\",\n  \"final_html\": \"string\",\n  \"python_code\": \"string\",\n  \"follow_up_question\": \"string\",\n  \"chart_data\": { \"title\": \"string\", \"labels\": [\"string\"], \"values\": [0] },\n  \"artifact_context\": {}\n}\n\nIntent rules:\n- Use intent=\"report\" when the user asks for a report, PDF, dashboard, analytics, or visualization.\n- Use intent=\"code\" when the user asks for Python, reproducible code, automation, nightly generation, scripts, or how to regenerate the report without L2M/AI.\n- Use intent=\"message\" for normal explanatory answers.\n\nReport requests:\n- Call attached MCP tools first to fetch the requested data.\n- Produce final_html as a complete HTML document with inline CSS only.\n- final_html is the PDF report body only. Never include Python source in final_html.\n- Populate artifact_context with stable facts needed for deterministic reuse: product/API family, REST endpoints if known, auth flow if known, pagination parameters, field mapping, provider counts, and any assumptions.\n- If the user did not ask for code in this same request, set python_code to an empty string.\n- If data is incomplete, set status=\"complete\" and explain partial data inside final_html.\n\nCode requests:\n- Use the exact prior report artifact supplied in the user prompt first. Do not refetch large inventory unless that artifact is missing or insufficient.\n- Generate one self-contained Python 3 script in python_code.\n- The script must call the underlying product REST APIs directly with requests and token auth. It must not call MCP, L2M, helper-chat, or any AI service.\n- Read secrets from environment variables. Do not hardcode credentials.\n- Include pagination, deduplication, analytics, HTML generation, and report.html output when those details are known from the prior report artifact.\n- Set final_html to an empty string unless the user asks for an explanation.\n- If the direct REST endpoints, auth flow, or pagination shape are not known from the prior artifact, memory, tool metadata, prior MCP results, or the current prompt, set status=\"needs_more_info\", intent=\"message\", python_code=\"\", and ask one specific follow_up_question. Do not invent API endpoints.\n\nOutput rules:\n- Return only valid JSON.\n- Do not wrap JSON or code in markdown fences.\n- Keep final_html and python_code as separate JSON strings.",
+          "userPromptTemplate": "Current user request:\n{{user_prompt}}\n\nExact prior report artifact for this helper-chat session, if found:\n{{latest_report}}",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxIterations": 8,
+          "toolCallingEnabled": true,
+          "toolMessageMaxChars": 90000,
+          "toolPayloadMaxDepth": 8,
+          "toolPayloadMaxObjectKeys": 256,
+          "toolPayloadMaxArrayItems": 256,
+          "toolPayloadMaxStringChars": 4096
+        }
+      },
+      {
+        "id": "chat_model_1",
+        "type": "llm_call",
+        "name": "Chat Model",
+        "position": { "x": 380, "y": 430 },
+        "config": {
+          "provider": {
+            "providerId": "ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "model": "qwen2.5:7b",
+            "temperature": 0.1
+          },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "memory_1",
+        "type": "local_memory",
+        "name": "Simple Memory",
+        "position": { "x": 590, "y": 430 },
+        "config": {
+          "namespace": "two-turn-report-code-helper",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxMessages": 20,
+          "persistToolMessages": false
+        }
+      },
+      {
+        "id": "mcp_1",
+        "type": "mcp_tool",
+        "name": "MCP Tools",
+        "position": { "x": 810, "y": 430 },
+        "config": {
+          "serverId": "ciphertrust-manager",
+          "toolName": "__all__",
+          "argsTemplate": "{}",
+          "connection": {
+            "transport": "http_streamable",
+            "endpoint": "http://127.0.0.1:7001/mcp"
+          }
+        }
+      },
+      {
+        "id": "parser_1",
+        "type": "output_parser",
+        "name": "Output Parser",
+        "position": { "x": 690, "y": 220 },
+        "config": {
+          "mode": "json_schema",
+          "parsingMode": "anything_goes",
+          "inputKey": "answer",
+          "maxRetries": 1,
+          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]},\"intent\":{\"type\":\"string\",\"enum\":[\"report\",\"code\",\"message\"]},\"final_html\":{\"type\":\"string\"},\"python_code\":{\"type\":\"string\"},\"follow_up_question\":{\"type\":\"string\"},\"chart_data\":{\"type\":\"object\"},\"artifact_context\":{\"type\":\"object\"}},\"required\":[\"status\",\"intent\",\"final_html\",\"python_code\",\"follow_up_question\",\"chart_data\",\"artifact_context\"]}"
+        }
+      },
+      {
+        "id": "switch_1",
+        "type": "switch_node",
+        "name": "Route Intent",
+        "position": { "x": 970, "y": 220 },
+        "config": {
+          "switchValue": "{{parsed.intent}}",
+          "cases": [
+            { "value": "report", "label": "report" },
+            { "value": "code", "label": "code" }
+          ],
+          "defaultLabel": "message"
+        }
+      },
+      {
+        "id": "pdf_1",
+        "type": "pdf_output",
+        "name": "PDF Output",
+        "position": { "x": 1240, "y": 90 },
+        "config": {
+          "renderMode": "html",
+          "inputKey": "parsed.final_html",
+          "htmlTemplate": "",
+          "pageFormat": "A4",
+          "printBackground": true,
+          "htmlRenderTimeoutMs": 45000,
+          "filenameTemplate": "mcp-report-{{session_id}}.pdf",
+          "outputKey": "pdf"
+        }
+      },
+      {
+        "id": "build_report_response",
+        "type": "code_node",
+        "name": "Build Report Response",
+        "position": { "x": 1730, "y": 90 },
+        "config": {
+          "language": "javascript",
+          "code": "function asObject(v) {\n  return v && typeof v === 'object' && !Array.isArray(v) ? v : null;\n}\n\nfunction pickString(...values) {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim()) return value.trim();\n  }\n  return '';\n}\n\nconst parsed = asObject(input.parsed) || {};\nconst pdf = asObject(input.pdf);\nconst chartData = asObject(parsed.chart_data) || { title: 'CSP distribution', labels: [], values: [] };\nconst artifactContext = asObject(parsed.artifact_context) || {};\n\nconst attachments = [];\nif (pdf && typeof pdf.downloadUrl === 'string' && pdf.downloadUrl.trim()) {\n  attachments.push({\n    filename: pdf.filename || 'report.pdf',\n    mimeType: pdf.mimeType || 'application/pdf',\n    downloadUrl: pdf.downloadUrl,\n    sizeBytes: typeof pdf.sizeBytes === 'number' ? pdf.sizeBytes : undefined\n  });\n}\n\nreturn {\n  answer: {\n    status: pickString(parsed.status) || 'complete',\n    final_html: pickString(parsed.final_html),\n    python_code: pickString(parsed.python_code),\n    follow_up_question: pickString(parsed.follow_up_question),\n    chart_data: chartData,\n    artifact_context: artifactContext,\n    attachments\n  }\n};"
+        }
+      },
+      {
+        "id": "save_report_artifact",
+        "type": "session_artifact_save",
+        "name": "Save Latest Report Artifact",
+        "position": { "x": 1510, "y": 90 },
+        "config": {
+          "namespace": "two-turn-report-code-helper",
+          "sessionIdTemplate": "{{session_id}}",
+          "artifactKey": "latest_report",
+          "fields": [
+            { "key": "status", "valueKey": "parsed.status" },
+            { "key": "final_html", "valueKey": "parsed.final_html" },
+            { "key": "python_code", "valueKey": "parsed.python_code" },
+            { "key": "chart_data", "valueKey": "parsed.chart_data" },
+            { "key": "artifact_context", "valueKey": "parsed.artifact_context" }
+          ],
+          "outputKey": "saved_report"
+        }
+      },
+      {
+        "id": "output_report",
+        "type": "output",
+        "name": "Report Output",
+        "position": { "x": 2000, "y": 90 },
+        "config": {
+          "outputKey": "result"
+        }
+      },
+      {
+        "id": "build_code_response",
+        "type": "code_node",
+        "name": "Build Code Response",
+        "position": { "x": 1240, "y": 280 },
+        "config": {
+          "language": "javascript",
+          "code": "function asObject(v) {\n  return v && typeof v === 'object' && !Array.isArray(v) ? v : null;\n}\n\nfunction pickString(...values) {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim()) return value.trim();\n  }\n  return '';\n}\n\nconst parsed = asObject(input.parsed) || {};\nconst chartData = asObject(parsed.chart_data) || { title: 'CSP distribution', labels: [], values: [] };\nconst artifactContext = asObject(parsed.artifact_context) || {};\n\nreturn {\n  answer: {\n    status: pickString(parsed.status) || 'complete',\n    final_html: pickString(parsed.final_html),\n    python_code: pickString(parsed.python_code),\n    follow_up_question: pickString(parsed.follow_up_question),\n    chart_data: chartData,\n    artifact_context: artifactContext,\n    attachments: []\n  }\n};"
+        }
+      },
+      {
+        "id": "output_code",
+        "type": "output",
+        "name": "Code Output",
+        "position": { "x": 1510, "y": 280 },
+        "config": {
+          "outputKey": "result"
+        }
+      },
+      {
+        "id": "build_message_response",
+        "type": "code_node",
+        "name": "Build Message Response",
+        "position": { "x": 1240, "y": 460 },
+        "config": {
+          "language": "javascript",
+          "code": "function asObject(v) {\n  return v && typeof v === 'object' && !Array.isArray(v) ? v : null;\n}\n\nfunction pickString(...values) {\n  for (const value of values) {\n    if (typeof value === 'string' && value.trim()) return value.trim();\n  }\n  return '';\n}\n\nconst parsed = asObject(input.parsed) || {};\nconst chartData = asObject(parsed.chart_data) || { title: 'CSP distribution', labels: [], values: [] };\nconst artifactContext = asObject(parsed.artifact_context) || {};\n\nreturn {\n  answer: {\n    status: pickString(parsed.status) || 'complete',\n    final_html: pickString(parsed.final_html),\n    python_code: pickString(parsed.python_code),\n    follow_up_question: pickString(parsed.follow_up_question),\n    chart_data: chartData,\n    artifact_context: artifactContext,\n    attachments: []\n  }\n};"
+        }
+      },
+      {
+        "id": "output_message",
+        "type": "output",
+        "name": "Message Output",
+        "position": { "x": 1510, "y": 460 },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "e_webhook_load_artifact", "source": "webhook_1", "target": "load_report_artifact" },
+      { "id": "e_load_artifact_agent", "source": "load_report_artifact", "target": "agent_1" },
+      { "id": "e_agent_parser", "source": "agent_1", "target": "parser_1" },
+      { "id": "e_parser_switch", "source": "parser_1", "target": "switch_1" },
+      { "id": "e_switch_pdf", "source": "switch_1", "sourceHandle": "report", "target": "pdf_1" },
+      { "id": "e_switch_save_report", "source": "switch_1", "sourceHandle": "report", "target": "save_report_artifact" },
+      { "id": "e_pdf_save_report", "source": "pdf_1", "target": "save_report_artifact" },
+      { "id": "e_save_report_response", "source": "save_report_artifact", "target": "build_report_response" },
+      { "id": "e_report_output", "source": "build_report_response", "target": "output_report" },
+      { "id": "e_switch_code_response", "source": "switch_1", "sourceHandle": "code", "target": "build_code_response" },
+      { "id": "e_code_output", "source": "build_code_response", "target": "output_code" },
+      { "id": "e_switch_message_response", "source": "switch_1", "sourceHandle": "default", "target": "build_message_response" },
+      { "id": "e_message_output", "source": "build_message_response", "target": "output_message" },
+      { "id": "e_attach_chat_model", "source": "agent_1", "sourceHandle": "chat_model", "target": "chat_model_1" },
+      { "id": "e_attach_memory", "source": "agent_1", "sourceHandle": "memory", "target": "memory_1" },
+      { "id": "e_attach_mcp", "source": "agent_1", "sourceHandle": "tool", "target": "mcp_1" }
+    ]
+  },
+  "exportedAt": "2026-04-25T00:00:00.000Z"
+}

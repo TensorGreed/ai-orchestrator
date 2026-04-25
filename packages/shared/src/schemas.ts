@@ -42,6 +42,8 @@ export const workflowNodeSchema = z.object({
     "agent_orchestrator",
     "supervisor_node",
     "local_memory",
+    "session_artifact_save",
+    "session_artifact_load",
     "mcp_tool",
     "rag_retrieve",
     "connector_source",

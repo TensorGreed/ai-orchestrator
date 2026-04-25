@@ -564,6 +564,24 @@ export const MIGRATIONS: Migration[] = [
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `
+  },
+  {
+    version: 13,
+    description: "Session artifact storage for deterministic multi-turn workflows",
+    up: `
+      CREATE TABLE IF NOT EXISTS session_artifacts (
+        namespace TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        artifact_key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (namespace, session_id, artifact_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_session_artifacts_namespace_session_updated_at
+      ON session_artifacts(namespace, session_id, updated_at DESC);
+    `
   }
 ];
 

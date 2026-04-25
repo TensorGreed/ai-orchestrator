@@ -1151,6 +1151,21 @@ export function createApp(
                 id: payload.id
               })
           },
+          sessionArtifactStore: {
+            saveArtifact: async (payload) =>
+              store.saveSessionArtifact({
+                namespace: payload.namespace,
+                sessionId: payload.sessionId,
+                artifactKey: payload.artifactKey,
+                value: payload.value
+              }),
+            loadArtifact: async (payload) =>
+              store.loadSessionArtifact({
+                namespace: payload.namespace,
+                sessionId: payload.sessionId,
+                artifactKey: payload.artifactKey
+              })
+          },
           loadWorkflow: (workflowId) => store.getWorkflow(workflowId) ?? undefined,
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
           persistPausedExecution: async (paused) => {
@@ -1210,6 +1225,10 @@ export function createApp(
                   memoryStore: {
                     loadMessages: async (ns, sid) => store.loadSessionMemory(ns, sid),
                     saveMessages: async (ns, sid, msgs) => { store.saveSessionMemory(ns, sid, msgs); }
+                  },
+                  sessionArtifactStore: {
+                    saveArtifact: async (artifact) => store.saveSessionArtifact(artifact),
+                    loadArtifact: async (artifact) => store.loadSessionArtifact(artifact)
                   },
                   loadWorkflow: (wid) => store.getWorkflow(wid) ?? undefined,
                   resolveSecret: (ref) => secretService.resolveSecret(ref)

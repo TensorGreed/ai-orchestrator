@@ -1144,6 +1144,8 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   output_parser: "output_parser",
   rag_retrieve: "rag_retrieve",
   local_memory: "memory",
+  session_artifact_load: "memory",
+  session_artifact_save: "memory",
   mcp_tool: "mcp_tool",
   connector_source: "connector",
   google_drive_source: "google_drive",

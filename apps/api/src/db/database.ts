@@ -74,6 +74,15 @@ interface SessionToolCacheRow {
   created_at: string;
 }
 
+interface SessionArtifactRow {
+  namespace: string;
+  session_id: string;
+  artifact_key: string;
+  value_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface UserRow {
   id: string;
   email: string;
@@ -381,6 +390,19 @@ export class SqliteStore {
 
       CREATE INDEX IF NOT EXISTS idx_session_tool_cache_tool_name
       ON session_tool_cache(tool_name);
+
+      CREATE TABLE IF NOT EXISTS session_artifacts (
+        namespace TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        artifact_key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (namespace, session_id, artifact_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_session_artifacts_namespace_session_updated_at
+      ON session_artifacts(namespace, session_id, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
@@ -1610,6 +1632,89 @@ export class SqliteStore {
       error: row.error ? toString(row.error) : undefined,
       summary: row.summary_json ? parseJsonSafe(row.summary_json) : undefined,
       createdAt: toString(row.created_at)
+    };
+  }
+
+  saveSessionArtifact(input: {
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+    value: unknown;
+  }): {
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+    value: unknown;
+    createdAt: string;
+    updatedAt: string;
+  } {
+    const existing = this.queryOne<SessionArtifactRow>(
+      `SELECT namespace, session_id, artifact_key, value_json, created_at, updated_at
+       FROM session_artifacts
+       WHERE namespace = ? AND session_id = ? AND artifact_key = ?`,
+      [input.namespace, input.sessionId, input.artifactKey]
+    );
+    const now = new Date().toISOString();
+    const createdAt = existing ? toString(existing.created_at) : now;
+
+    this.db.run(
+      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
+         value_json = excluded.value_json,
+         updated_at = excluded.updated_at`,
+      [
+        input.namespace,
+        input.sessionId,
+        input.artifactKey,
+        JSON.stringify(input.value ?? null),
+        createdAt,
+        now
+      ]
+    );
+
+    this.persist();
+
+    return {
+      namespace: input.namespace,
+      sessionId: input.sessionId,
+      artifactKey: input.artifactKey,
+      value: input.value ?? null,
+      createdAt,
+      updatedAt: now
+    };
+  }
+
+  loadSessionArtifact(input: {
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+  }): {
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+    value: unknown;
+    createdAt: string;
+    updatedAt: string;
+  } | null {
+    const row = this.queryOne<SessionArtifactRow>(
+      `SELECT namespace, session_id, artifact_key, value_json, created_at, updated_at
+       FROM session_artifacts
+       WHERE namespace = ? AND session_id = ? AND artifact_key = ?`,
+      [input.namespace, input.sessionId, input.artifactKey]
+    );
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      namespace: toString(row.namespace),
+      sessionId: toString(row.session_id),
+      artifactKey: toString(row.artifact_key),
+      value: parseJsonSafe(row.value_json),
+      createdAt: toString(row.created_at),
+      updatedAt: toString(row.updated_at)
     };
   }
 

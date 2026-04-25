@@ -1011,6 +1011,98 @@ export class PostgresStore {
   }
 
   // ---------------------------------------------------------------------------
+  // Session Artifacts
+  // ---------------------------------------------------------------------------
+
+  async saveSessionArtifact(input: {
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+    value: unknown;
+  }): Promise<{
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+    value: unknown;
+    createdAt: string;
+    updatedAt: string;
+  }> {
+    const existing = await this.queryOne<{ created_at: string }>(
+      `SELECT created_at
+       FROM session_artifacts
+       WHERE namespace = $1 AND session_id = $2 AND artifact_key = $3`,
+      [input.namespace, input.sessionId, input.artifactKey]
+    );
+    const now = new Date().toISOString();
+    const createdAt = existing ? toStr(existing.created_at) : now;
+
+    await this.execute(
+      `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (namespace, session_id, artifact_key) DO UPDATE SET
+         value_json = EXCLUDED.value_json,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        input.namespace,
+        input.sessionId,
+        input.artifactKey,
+        JSON.stringify(input.value ?? null),
+        createdAt,
+        now
+      ]
+    );
+
+    return {
+      namespace: input.namespace,
+      sessionId: input.sessionId,
+      artifactKey: input.artifactKey,
+      value: input.value ?? null,
+      createdAt,
+      updatedAt: now
+    };
+  }
+
+  async loadSessionArtifact(input: {
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+  }): Promise<{
+    namespace: string;
+    sessionId: string;
+    artifactKey: string;
+    value: unknown;
+    createdAt: string;
+    updatedAt: string;
+  } | null> {
+    const row = await this.queryOne<{
+      namespace: string;
+      session_id: string;
+      artifact_key: string;
+      value_json: string;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `SELECT namespace, session_id, artifact_key, value_json, created_at, updated_at
+       FROM session_artifacts
+       WHERE namespace = $1 AND session_id = $2 AND artifact_key = $3`,
+      [input.namespace, input.sessionId, input.artifactKey]
+    );
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      namespace: toStr(row.namespace),
+      sessionId: toStr(row.session_id),
+      artifactKey: toStr(row.artifact_key),
+      value: parseJsonSafe(row.value_json),
+      createdAt: toStr(row.created_at),
+      updatedAt: toStr(row.updated_at)
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Webhook security
   // ---------------------------------------------------------------------------
 

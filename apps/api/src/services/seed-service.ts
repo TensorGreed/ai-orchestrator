@@ -11,6 +11,7 @@ const TEMPLATE_CATEGORY_MAP: Record<string, string> = {
   "rag-pinecone-flow.json": "RAG & AI",
   "structured-output-flow.json": "RAG & AI",
   "agentic-mcp-flow.json": "Agents",
+  "two-turn-report-code-helper-flow.json": "Agents",
   "azure-openai-flow.json": "Cloud Integrations",
   "azure-connectors-demo-flow.json": "Cloud Integrations"
 };
@@ -22,6 +23,7 @@ const TEMPLATE_DESCRIPTION_MAP: Record<string, string> = {
   "rag-pinecone-flow.json": "RAG pipeline using Pinecone as the vector store.",
   "structured-output-flow.json": "Extract structured data from LLM responses with an output parser.",
   "agentic-mcp-flow.json": "Agent orchestrator with MCP tool calling and session memory.",
+  "two-turn-report-code-helper-flow.json": "Helper-chat workflow that saves an exact MCP-backed report artifact on the first turn and reuses it for follow-up Python code.",
   "azure-openai-flow.json": "Basic LLM flow using Azure OpenAI as the provider.",
   "azure-connectors-demo-flow.json": "Demo of Azure Storage, Cosmos DB, Monitor, and AI Search connectors."
 };
