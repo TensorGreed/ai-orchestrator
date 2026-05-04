@@ -1,0 +1,82 @@
+{
+  "name": "@ai-orchestrator/vscode-l2m-agent",
+  "displayName": "L2M Agent",
+  "description": "Interactive VS Code coding and data analytics agent backed by L2M webhook workflows.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "ai-orchestrator",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "./dist/extension.js",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:l2mAgent.openChat",
+    "onCommand:l2mAgent.newSession",
+    "onCommand:l2mAgent.pinActiveFile",
+    "onCommand:l2mAgent.sendSelection"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "L2M Agent",
+      "properties": {
+        "l2mAgent.apiBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:4000",
+          "description": "Base URL of the L2M API server."
+        },
+        "l2mAgent.workflowId": {
+          "type": "string",
+          "default": "",
+          "description": "Optional workflow ID to execute. Leave empty to let the L2M server select the webhook workflow."
+        },
+        "l2mAgent.authToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional bearer token for authenticated L2M API calls."
+        },
+        "l2mAgent.streamResponses": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use the streaming webhook endpoint when sending prompts."
+        },
+        "l2mAgent.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 5000,
+          "maximum": 1800000,
+          "description": "Client-side timeout, in milliseconds, for L2M requests."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "l2mAgent.openChat",
+        "title": "L2M Agent: Open Chat"
+      },
+      {
+        "command": "l2mAgent.newSession",
+        "title": "L2M Agent: New Session"
+      },
+      {
+        "command": "l2mAgent.pinActiveFile",
+        "title": "L2M Agent: Pin Active File"
+      },
+      {
+        "command": "l2mAgent.sendSelection",
+        "title": "L2M Agent: Send Selection"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit false",
+    "watch": "tsc -p tsconfig.json --watch"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.93.0"
+  }
+}
