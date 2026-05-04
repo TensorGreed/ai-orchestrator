@@ -1,0 +1,103 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-vscode-l2m-coding-agent",
+    "name": "VS Code L2M Coding Agent",
+    "description": "Webhook workflow for the VS Code L2M Agent extension. It returns structured chat messages, code blocks, patch actions, command actions, attachments, and compacted memory updates.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "webhook_1",
+        "type": "webhook_input",
+        "name": "VS Code Webhook Input",
+        "position": { "x": 80, "y": 220 },
+        "config": {
+          "path": "vscode-l2m-agent",
+          "method": "POST",
+          "passThroughFields": ["system_prompt", "user_prompt", "session_id", "variables"],
+          "responseMode": "lastNode"
+        }
+      },
+      {
+        "id": "agent_1",
+        "type": "agent_orchestrator",
+        "name": "Coding Agent Orchestrator",
+        "position": { "x": 420, "y": 220 },
+        "config": {
+          "agentType": "tools",
+          "systemPromptTemplate": "{{system_prompt}}\n\nYou are the L2M workflow behind an interactive VS Code coding and data analytics agent.\n\nThe VS Code extension sends bounded workspace context in variables, including activeFile, selection, selectedText, openFiles, diagnostics, git, pinnedFiles, sessionMemory, compactedMemory, recentTurns, conversationTail, and actionResults.\n\nUse actionResults as the only source of truth for whether a prior patch was applied or a command was run. Never claim files were changed or commands ran unless actionResults shows approval and execution.\n\nReturn exactly one JSON object and no markdown fences. The object must follow this contract:\n{\n  \"status\": \"complete\" | \"needs_more_info\",\n  \"message\": \"short user-facing answer\",\n  \"actions\": [],\n  \"codes\": [],\n  \"attachments\": [],\n  \"context_update\": \"compact durable memory update\",\n  \"follow_up_question\": \"\"\n}\n\nAction rules:\n- For file edits, propose actions with type=\"patch\", title, file, diff, and requiresApproval=true.\n- Patch diffs must be single-file unified diffs with --- a/path, +++ b/path, and @@ hunks.\n- Never write outside the workspace. Use relative paths from variables.workspace.\n- For terminal work, propose actions with type=\"command\", title, command, optional cwd, and requiresApproval=true.\n- Prefer patch actions over dumping full replacement files.\n- Do not ask the user to manually copy code when a patch action is appropriate.\n\nCode and attachment rules:\n- Put standalone snippets in codes as {\"language\":\"...\",\"source\":\"...\",\"label\":\"...\"}.\n- Put downloadable artifacts in attachments only when you can provide a data URL or URL.\n- Do not include base64 unless needed for an actual attachment.\n\nMemory rules:\n- context_update should be short, factual, and durable. Include decisions, filenames, APIs, project conventions, and user preferences worth remembering.\n- Leave context_update empty when there is nothing durable to retain.\n\nClarification rules:\n- Prefer proceeding with available workspace context.\n- Use status=\"needs_more_info\" only when the task cannot be completed or safely actioned from the given context.\n- If more information is needed, set follow_up_question to one specific question and leave actions empty.\n\nHelper-chat compatibility:\n- It is acceptable to also include final_html, python_code, and chart_data when the user asks for reports or reproducible scripts.\n- Keep final_html and python_code as separate strings if used.",
+          "userPromptTemplate": "Current VS Code user request:\n{{user_prompt}}\n\nWorkspace/session context JSON from the VS Code extension:\n{{variables}}\n\nRespond only with the JSON contract described in the system prompt.",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxIterations": 6,
+          "toolCallingEnabled": true,
+          "toolMessageMaxChars": 12000,
+          "toolPayloadMaxDepth": 6,
+          "toolPayloadMaxObjectKeys": 128,
+          "toolPayloadMaxArrayItems": 64,
+          "toolPayloadMaxStringChars": 2000
+        }
+      },
+      {
+        "id": "chat_model_1",
+        "type": "llm_call",
+        "name": "Chat Model",
+        "position": { "x": 420, "y": 420 },
+        "config": {
+          "provider": {
+            "providerId": "ollama",
+            "baseUrl": "http://localhost:11434/v1",
+            "model": "qwen2.5:7b",
+            "temperature": 0.1
+          },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "memory_1",
+        "type": "local_memory",
+        "name": "Workflow Memory",
+        "position": { "x": 650, "y": 420 },
+        "config": {
+          "namespace": "vscode-l2m-coding-agent",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxMessages": 24,
+          "persistToolMessages": false
+        }
+      },
+      {
+        "id": "parser_1",
+        "type": "output_parser",
+        "name": "Contract Parser",
+        "position": { "x": 760, "y": 220 },
+        "config": {
+          "mode": "json_schema",
+          "parsingMode": "anything_goes",
+          "inputKey": "answer",
+          "maxRetries": 1,
+          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"complete\",\"needs_more_info\"]},\"message\":{\"type\":\"string\"},\"actions\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"patch\",\"command\"]},\"title\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"file\":{\"type\":\"string\"},\"diff\":{\"type\":\"string\"},\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"requiresApproval\":{\"type\":\"boolean\"}},\"required\":[\"type\",\"title\"]}},\"codes\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"language\":{\"type\":\"string\"},\"source\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"}},\"required\":[\"language\",\"source\"]}},\"attachments\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"filename\":{\"type\":\"string\"},\"mimeType\":{\"type\":\"string\"},\"downloadUrl\":{\"type\":\"string\"},\"sizeBytes\":{\"type\":\"number\"}},\"required\":[\"filename\",\"mimeType\",\"downloadUrl\"]}},\"context_update\":{\"type\":\"string\"},\"follow_up_question\":{\"type\":\"string\"},\"final_html\":{\"type\":\"string\"},\"python_code\":{\"type\":\"string\"},\"chart_data\":{\"type\":\"object\"}},\"required\":[\"status\",\"message\",\"actions\",\"codes\",\"attachments\",\"context_update\",\"follow_up_question\"]}"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Structured Output",
+        "position": { "x": 1080, "y": 220 },
+        "config": {
+          "responseTemplate": "{{parsed}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "e_webhook_agent", "source": "webhook_1", "target": "agent_1" },
+      { "id": "e_agent_parser", "source": "agent_1", "target": "parser_1" },
+      { "id": "e_parser_output", "source": "parser_1", "target": "output_1" },
+      { "id": "e_attach_chat_model", "source": "agent_1", "sourceHandle": "chat_model", "target": "chat_model_1" },
+      { "id": "e_attach_memory", "source": "agent_1", "sourceHandle": "memory", "target": "memory_1" }
+    ]
+  },
+  "exportedAt": "2026-05-04T00:00:00.000Z"
+}
