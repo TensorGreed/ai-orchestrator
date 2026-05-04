@@ -1,12 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
-import initSqlJs, { type BindParams, type Database as SQLDatabase } from "sql.js";
+import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
 import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
 
-const require = createRequire(import.meta.url);
+type BindParams = unknown[];
 
 interface WorkflowRow {
   id: string;
@@ -319,30 +318,28 @@ function parseTagsJson(value: unknown): string[] | undefined {
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
 
 export class SqliteStore {
-  private constructor(
-    private readonly db: SQLDatabase,
-    private readonly dbFilePath: string
-  ) {
+  private closed = false;
+
+  private constructor(private readonly db: BetterSqlite3Database) {
+    // Pragmas tuned for typical web-app workloads: WAL gives concurrent reads
+    // during writes, NORMAL synchronous is durable across app crashes (only
+    // OS-level crashes can lose the last commit), and foreign_keys is on by
+    // default in our schema design.
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
+    this.db.pragma("foreign_keys = ON");
     this.migrate();
   }
 
   static async create(dbFilePath: string): Promise<SqliteStore> {
     const absolutePath = path.resolve(dbFilePath);
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-
-    const wasmPath = require.resolve("sql.js/dist/sql-wasm.wasm");
-    const SQL = await initSqlJs({
-      locateFile: () => wasmPath
-    });
-
-    const dbBuffer = fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath) : undefined;
-    const db = dbBuffer ? new SQL.Database(dbBuffer) : new SQL.Database();
-
-    return new SqliteStore(db, absolutePath);
+    const db = new Database(absolutePath);
+    return new SqliteStore(db);
   }
 
   private migrate(): void {
-    this.db.run(`
+    this.exec(`
       CREATE TABLE IF NOT EXISTS workflows (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -839,11 +836,12 @@ export class SqliteStore {
     this.ensureColumn("secrets", "external_key", "TEXT");
     this.ensureColumn("execution_history", "custom_data_json", "TEXT");
 
-    this.db.run(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
-    this.db.run(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
-    this.db.run(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
-    this.db.run(`CREATE INDEX IF NOT EXISTS idx_execution_history_status ON execution_history(status)`);
-    this.db.run(`CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_id ON execution_history(workflow_id)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_execution_history_status ON execution_history(status)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_id ON execution_history(workflow_id)`);
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_revoked_expires ON sessions(revoked_at, expires_at)`);
 
     this.persist();
   }
@@ -856,29 +854,38 @@ export class SqliteStore {
   private ensureColumn(table: string, column: string, type: string, defaultExpr?: string): void {
     if (this.columnExists(table, column)) return;
     const def = defaultExpr ? ` DEFAULT ${defaultExpr}` : "";
-    this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}${def}`);
+    this.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}${def}`);
   }
 
+  // better-sqlite3 commits each statement to disk synchronously; persist() is
+  // kept as a no-op so legacy callsites compile without a churn-heavy diff.
   private persist(): void {
-    const data = this.db.export();
-    fs.writeFileSync(this.dbFilePath, Buffer.from(data));
+    // intentional no-op
+  }
+
+  // Mimics sql.js's db.run(sql, params?) so the existing call sites stay
+  // unchanged after the better-sqlite3 migration. With no params we run a
+  // multi-statement script via exec(); with params we use a prepared statement.
+  private exec(sql: string, params?: BindParams): void {
+    if (!params || params.length === 0) {
+      this.db.exec(sql);
+      return;
+    }
+    this.db.prepare(sql).run(...params);
+  }
+
+  close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.db.close();
+    this.closed = true;
   }
 
   private queryAll<T extends object>(sql: string, params?: BindParams): T[] {
     const stmt = this.db.prepare(sql);
-    try {
-      if (params !== undefined) {
-        stmt.bind(params);
-      }
-
-      const rows: T[] = [];
-      while (stmt.step()) {
-        rows.push(stmt.getAsObject() as T);
-      }
-      return rows;
-    } finally {
-      stmt.free();
-    }
+    const args = params ?? [];
+    return stmt.all(...args) as T[];
   }
 
   private queryOne<T extends object>(sql: string, params?: BindParams): T | null {
@@ -909,8 +916,8 @@ export class SqliteStore {
       params.push(`%${options.search.trim().toLowerCase()}%`);
     }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-    const rows = this.queryAll<WorkflowRow>(
-      `SELECT id, name, schema_version, workflow_version, created_at, updated_at, workflow_json, tags_json, project_id, folder_id
+    const rows = this.queryAll<Omit<WorkflowRow, "workflow_json">>(
+      `SELECT id, name, schema_version, workflow_version, created_at, updated_at, tags_json, project_id, folder_id
        FROM workflows
        ${where}
        ORDER BY updated_at DESC`,
@@ -976,7 +983,7 @@ export class SqliteStore {
       updatedAt
     };
 
-    this.db.run(
+    this.exec(
       `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -1021,18 +1028,18 @@ export class SqliteStore {
     try {
       // Defensive mode for older / migrated DBs where constraints can block deletes.
       if (foreignKeysWereOn) {
-        this.db.run("PRAGMA foreign_keys = OFF");
+        this.exec("PRAGMA foreign_keys = OFF");
       }
 
       if (hasTable("execution_history")) {
-        this.db.run("DELETE FROM execution_history WHERE workflow_id = ?", [id]);
+        this.exec("DELETE FROM execution_history WHERE workflow_id = ?", [id]);
       }
 
       if (hasTable("workflow_executions")) {
-        this.db.run("DELETE FROM workflow_executions WHERE workflow_id = ?", [id]);
+        this.exec("DELETE FROM workflow_executions WHERE workflow_id = ?", [id]);
       }
 
-      this.db.run("DELETE FROM workflows WHERE id = ?", [id]);
+      this.exec("DELETE FROM workflows WHERE id = ?", [id]);
 
       const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
       const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
@@ -1040,7 +1047,7 @@ export class SqliteStore {
       return changed;
     } finally {
       if (foreignKeysWereOn) {
-        this.db.run("PRAGMA foreign_keys = ON");
+        this.exec("PRAGMA foreign_keys = ON");
       }
     }
   }
@@ -1132,7 +1139,7 @@ export class SqliteStore {
     externalProviderId?: string | null;
     externalKey?: string | null;
   }): void {
-    this.db.run(
+    this.exec(
       `INSERT INTO secrets (id, name, provider, iv, auth_tag, ciphertext, created_at, project_id,
                             source, external_provider_id, external_key)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1167,9 +1174,9 @@ export class SqliteStore {
   deleteSecret(id: string): boolean {
     const existing = this.queryOne<{ id: string }>(`SELECT id FROM secrets WHERE id = ?`, [id]);
     if (!existing) return false;
-    this.db.run(`DELETE FROM secrets WHERE id = ?`, [id]);
-    this.db.run(`DELETE FROM secret_shares WHERE secret_id = ?`, [id]);
-    this.db.run(`DELETE FROM external_secret_cache WHERE secret_id = ?`, [id]);
+    this.exec(`DELETE FROM secrets WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM secret_shares WHERE secret_id = ?`, [id]);
+    this.exec(`DELETE FROM external_secret_cache WHERE secret_id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -1253,7 +1260,7 @@ export class SqliteStore {
     const existing = this.getUserById(input.id);
     const createdAt = existing?.createdAt ?? now;
 
-    this.db.run(
+    this.exec(
       `INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -1297,7 +1304,7 @@ export class SqliteStore {
     const existing = this.getUserById(id);
     if (!existing) return false;
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `UPDATE users SET role = ?, updated_at = ? WHERE id = ?`,
       [role, now, id]
     );
@@ -1306,8 +1313,8 @@ export class SqliteStore {
   }
 
   deleteUser(id: string): boolean {
-    this.db.run(`DELETE FROM sessions WHERE user_id = ?`, [id]);
-    this.db.run(`DELETE FROM users WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM sessions WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM users WHERE id = ?`, [id]);
     const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
     const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
     this.persist();
@@ -1355,7 +1362,7 @@ export class SqliteStore {
   } {
     const now = new Date().toISOString();
 
-    this.db.run(
+    this.exec(
       `INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at, revoked_at)
        VALUES (?, ?, ?, ?, ?, NULL)`,
       [input.id, input.userId, input.expiresAt, now, now]
@@ -1372,7 +1379,7 @@ export class SqliteStore {
   }
 
   touchSession(sessionId: string): void {
-    this.db.run(
+    this.exec(
       `UPDATE sessions
        SET last_seen_at = ?
        WHERE id = ? AND revoked_at IS NULL`,
@@ -1382,7 +1389,7 @@ export class SqliteStore {
   }
 
   revokeSession(sessionId: string): void {
-    this.db.run(
+    this.exec(
       `UPDATE sessions
        SET revoked_at = ?
        WHERE id = ? AND revoked_at IS NULL`,
@@ -1392,7 +1399,7 @@ export class SqliteStore {
   }
 
   revokeExpiredSessions(): void {
-    this.db.run(
+    this.exec(
       `UPDATE sessions
        SET revoked_at = ?
        WHERE revoked_at IS NULL AND expires_at <= ?`,
@@ -1434,7 +1441,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
 
-    this.db.run(
+    this.exec(
       `INSERT INTO session_memory (namespace, session_id, messages_json, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(namespace, session_id) DO UPDATE SET
@@ -1470,7 +1477,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const id = randomUUID();
 
-    this.db.run(
+    this.exec(
       `INSERT INTO session_tool_cache (
           id,
           namespace,
@@ -1497,7 +1504,7 @@ export class SqliteStore {
       ]
     );
 
-    this.db.run(
+    this.exec(
       `DELETE FROM session_tool_cache
        WHERE id IN (
          SELECT id
@@ -1657,7 +1664,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const createdAt = existing ? toString(existing.created_at) : now;
 
-    this.db.run(
+    this.exec(
       `INSERT INTO session_artifacts (namespace, session_id, artifact_key, value_json, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(namespace, session_id, artifact_key) DO UPDATE SET
@@ -1719,8 +1726,8 @@ export class SqliteStore {
   }
 
   clearExpiredWebhookSecurityState(nowIso = new Date().toISOString()): void {
-    this.db.run(`DELETE FROM webhook_replay_keys WHERE expires_at <= ?`, [nowIso]);
-    this.db.run(`DELETE FROM webhook_idempotency WHERE expires_at <= ?`, [nowIso]);
+    this.exec(`DELETE FROM webhook_replay_keys WHERE expires_at <= ?`, [nowIso]);
+    this.exec(`DELETE FROM webhook_idempotency WHERE expires_at <= ?`, [nowIso]);
     this.persist();
   }
 
@@ -1735,7 +1742,7 @@ export class SqliteStore {
   }
 
   saveWebhookReplayKey(input: { replayKey: string; endpointKey: string; expiresAt: string }): void {
-    this.db.run(
+    this.exec(
       `INSERT INTO webhook_replay_keys (replay_key, endpoint_key, created_at, expires_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(replay_key) DO NOTHING`,
@@ -1793,7 +1800,7 @@ export class SqliteStore {
     expiresAt: string;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO webhook_idempotency (
           endpoint_key,
           idempotency_key,
@@ -1817,7 +1824,7 @@ export class SqliteStore {
     result: unknown;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `UPDATE webhook_idempotency
        SET status = ?, result_json = ?, updated_at = ?
        WHERE endpoint_key = ? AND idempotency_key = ?`,
@@ -1842,7 +1849,7 @@ export class SqliteStore {
     customData?: unknown;
     error?: string;
   }): void {
-    this.db.run(
+    this.exec(
       `INSERT INTO execution_history (
           id,
           workflow_id,
@@ -2083,7 +2090,7 @@ export class SqliteStore {
       return false;
     }
     const completedAt = input.completedAt ?? new Date().toISOString();
-    this.db.run(
+    this.exec(
       `UPDATE execution_history
        SET status = 'canceled',
            completed_at = ?,
@@ -2106,7 +2113,7 @@ export class SqliteStore {
       `SELECT COUNT(*) as count FROM execution_history WHERE started_at < ?`,
       [input.before]
     );
-    this.db.run(`DELETE FROM execution_history WHERE started_at < ?`, [input.before]);
+    this.exec(`DELETE FROM execution_history WHERE started_at < ?`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -2128,7 +2135,7 @@ export class SqliteStore {
     state: unknown;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO workflow_executions (
           id,
           workflow_id,
@@ -2290,7 +2297,7 @@ export class SqliteStore {
 
   deleteWorkflowExecution(id: string): boolean {
     const before = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflow_executions WHERE id = ?", [id]);
-    this.db.run("DELETE FROM workflow_executions WHERE id = ?", [id]);
+    this.exec("DELETE FROM workflow_executions WHERE id = ?", [id]);
     const after = this.queryOne<{ count: number }>("SELECT COUNT(*) as count FROM workflow_executions WHERE id = ?", [id]);
     const deleted = (before ? toNumber(before.count) : 0) > (after ? toNumber(after.count) : 0);
     if (deleted) {
@@ -2313,7 +2320,7 @@ export class SqliteStore {
     scheduledAt?: string;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO execution_queue (id, workflow_id, workflow_name, payload_json, status, priority, attempts, max_attempts, last_error, scheduled_at, started_at, completed_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, NULL, ?, NULL, NULL, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
@@ -2357,7 +2364,7 @@ export class SqliteStore {
 
     const ids = rows.map((row) => toString(row.id));
     for (const rowId of ids) {
-      this.db.run(
+      this.exec(
         `UPDATE execution_queue SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?`,
         [now, now, rowId]
       );
@@ -2388,7 +2395,7 @@ export class SqliteStore {
 
   markQueueItemRunning(id: string): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `UPDATE execution_queue SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?`,
       [now, now, id]
     );
@@ -2397,7 +2404,7 @@ export class SqliteStore {
 
   markQueueItemCompleted(id: string): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `UPDATE execution_queue SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?`,
       [now, now, id]
     );
@@ -2420,7 +2427,7 @@ export class SqliteStore {
     if (attempts >= maxAttempts) {
       // Move to DLQ
       const dlqId = randomUUID();
-      this.db.run(
+      this.exec(
         `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
@@ -2435,7 +2442,7 @@ export class SqliteStore {
           now
         ]
       );
-      this.db.run(`UPDATE execution_queue SET status = 'dead', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?`, [
+      this.exec(`UPDATE execution_queue SET status = 'dead', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?`, [
         attempts,
         error,
         now,
@@ -2445,7 +2452,7 @@ export class SqliteStore {
       // Exponential backoff: 1000 * 2^(attempts-1) ms
       const backoffMs = 1000 * Math.pow(2, attempts - 1);
       const retryAt = new Date(Date.now() + backoffMs).toISOString();
-      this.db.run(
+      this.exec(
         `UPDATE execution_queue SET status = 'pending', attempts = ?, last_error = ?, scheduled_at = ?, updated_at = ? WHERE id = ?`,
         [attempts, error, retryAt, now, id]
       );
@@ -2462,7 +2469,7 @@ export class SqliteStore {
     );
 
     for (const row of stuck) {
-      this.db.run(
+      this.exec(
         `UPDATE execution_queue SET status = 'pending', started_at = NULL, updated_at = ? WHERE id = ?`,
         [now, toString(row.id)]
       );
@@ -2538,7 +2545,7 @@ export class SqliteStore {
     triggerType: string;
     state: Record<string, unknown>;
   }): void {
-    this.db.run(
+    this.exec(
       `INSERT INTO trigger_state (workflow_id, node_id, trigger_type, state_json, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(workflow_id, node_id) DO UPDATE SET
@@ -2551,7 +2558,7 @@ export class SqliteStore {
   }
 
   deleteTriggerStatesForWorkflow(workflowId: string): void {
-    this.db.run(`DELETE FROM trigger_state WHERE workflow_id = ?`, [workflowId]);
+    this.exec(`DELETE FROM trigger_state WHERE workflow_id = ?`, [workflowId]);
     this.persist();
   }
 
@@ -2600,7 +2607,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.getProject(input.id);
     const createdAt = existing?.createdAt ?? now;
-    this.db.run(
+    this.exec(
       `INSERT INTO projects (id, name, description, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -2634,13 +2641,13 @@ export class SqliteStore {
     const existing = this.getProject(id);
     if (!existing) return false;
     // Move anything belonging to this project back to the default before delete.
-    this.db.run(`UPDATE workflows SET project_id = ?, folder_id = NULL WHERE project_id = ?`, [
+    this.exec(`UPDATE workflows SET project_id = ?, folder_id = NULL WHERE project_id = ?`, [
       DEFAULT_PROJECT_ID,
       id
     ]);
-    this.db.run(`UPDATE secrets SET project_id = ? WHERE project_id = ?`, [DEFAULT_PROJECT_ID, id]);
-    this.db.run(`DELETE FROM folders WHERE project_id = ?`, [id]);
-    this.db.run(`DELETE FROM projects WHERE id = ?`, [id]);
+    this.exec(`UPDATE secrets SET project_id = ? WHERE project_id = ?`, [DEFAULT_PROJECT_ID, id]);
+    this.exec(`DELETE FROM folders WHERE project_id = ?`, [id]);
+    this.exec(`DELETE FROM projects WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -2689,7 +2696,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.getFolder(input.id);
     const createdAt = existing?.createdAt ?? now;
-    this.db.run(
+    this.exec(
       `INSERT INTO folders (id, name, parent_id, project_id, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -2721,13 +2728,13 @@ export class SqliteStore {
     const existing = this.getFolder(id);
     if (!existing) return false;
     // Orphan workflows in this folder (keep them in the project, drop the folder_id).
-    this.db.run(`UPDATE workflows SET folder_id = NULL WHERE folder_id = ?`, [id]);
+    this.exec(`UPDATE workflows SET folder_id = NULL WHERE folder_id = ?`, [id]);
     // Also re-parent child folders up one level.
-    this.db.run(`UPDATE folders SET parent_id = ? WHERE parent_id = ?`, [
+    this.exec(`UPDATE folders SET parent_id = ? WHERE parent_id = ?`, [
       existing.parentId ?? null,
       id
     ]);
-    this.db.run(`DELETE FROM folders WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM folders WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -2746,7 +2753,7 @@ export class SqliteStore {
     expiresAt?: string | null;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, scopes_json, last_used_at, expires_at, revoked_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)`,
       [
@@ -2862,7 +2869,7 @@ export class SqliteStore {
   }
 
   touchApiKey(id: string): void {
-    this.db.run(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+    this.exec(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
     this.persist();
   }
 
@@ -2871,7 +2878,7 @@ export class SqliteStore {
       ? this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ? AND user_id = ?`, [id, userId])
       : this.queryOne<{ id: string }>(`SELECT id FROM api_keys WHERE id = ?`, [id]);
     if (!existing) return false;
-    this.db.run(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+    this.exec(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
     this.persist();
     return true;
   }
@@ -2932,7 +2939,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.getMfaSecret(input.userId);
     const createdAt = existing?.createdAt ?? now;
-    this.db.run(
+    this.exec(
       `INSERT INTO mfa_secrets (user_id, secret_iv, secret_auth_tag, secret_ciphertext, backup_codes_json, enabled, activated_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
@@ -2961,7 +2968,7 @@ export class SqliteStore {
   deleteMfaSecret(userId: string): boolean {
     const existing = this.getMfaSecret(userId);
     if (!existing) return false;
-    this.db.run(`DELETE FROM mfa_secrets WHERE user_id = ?`, [userId]);
+    this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [userId]);
     this.persist();
     return true;
   }
@@ -3026,7 +3033,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.findSsoIdentity(input.provider, input.subject);
     const createdAt = existing?.createdAt ?? now;
-    this.db.run(
+    this.exec(
       `INSERT INTO sso_identities (id, user_id, provider, subject, email, attributes_json, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(provider, subject) DO UPDATE SET
@@ -3140,13 +3147,13 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.getProjectRole(input.userId, input.projectId);
     if (existing) {
-      this.db.run(
+      this.exec(
         `UPDATE user_project_roles SET role = ?, custom_role_id = ?, updated_at = ?
          WHERE user_id = ? AND project_id = ?`,
         [input.role, input.customRoleId ?? null, now, input.userId, input.projectId]
       );
     } else {
-      this.db.run(
+      this.exec(
         `INSERT INTO user_project_roles (user_id, project_id, role, custom_role_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
         [input.userId, input.projectId, input.role, input.customRoleId ?? null, now, now]
@@ -3158,7 +3165,7 @@ export class SqliteStore {
   removeProjectRole(userId: string, projectId: string): boolean {
     const existing = this.getProjectRole(userId, projectId);
     if (!existing) return false;
-    this.db.run(`DELETE FROM user_project_roles WHERE user_id = ? AND project_id = ?`, [userId, projectId]);
+    this.exec(`DELETE FROM user_project_roles WHERE user_id = ? AND project_id = ?`, [userId, projectId]);
     this.persist();
     return true;
   }
@@ -3279,7 +3286,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.getCustomRole(input.id);
     const createdAt = existing?.createdAt ?? now;
-    this.db.run(
+    this.exec(
       `INSERT INTO custom_roles (id, project_id, name, description, permissions_json, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -3305,8 +3312,8 @@ export class SqliteStore {
   deleteCustomRole(id: string): boolean {
     const existing = this.getCustomRole(id);
     if (!existing) return false;
-    this.db.run(`DELETE FROM custom_roles WHERE id = ?`, [id]);
-    this.db.run(`UPDATE user_project_roles SET custom_role_id = NULL WHERE custom_role_id = ?`, [id]);
+    this.exec(`DELETE FROM custom_roles WHERE id = ?`, [id]);
+    this.exec(`UPDATE user_project_roles SET custom_role_id = NULL WHERE custom_role_id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -3368,7 +3375,7 @@ export class SqliteStore {
     accessLevel: "read" | "execute";
     sharedBy?: string | null;
   }): void {
-    this.db.run(
+    this.exec(
       `INSERT INTO workflow_shares (workflow_id, project_id, access_level, shared_by, created_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(workflow_id, project_id) DO UPDATE SET
@@ -3384,7 +3391,7 @@ export class SqliteStore {
       [workflowId, projectId]
     );
     if (!existing) return false;
-    this.db.run(`DELETE FROM workflow_shares WHERE workflow_id = ? AND project_id = ?`, [workflowId, projectId]);
+    this.exec(`DELETE FROM workflow_shares WHERE workflow_id = ? AND project_id = ?`, [workflowId, projectId]);
     this.persist();
     return true;
   }
@@ -3426,7 +3433,7 @@ export class SqliteStore {
   }
 
   upsertSecretShare(input: { secretId: string; projectId: string; sharedBy?: string | null }): void {
-    this.db.run(
+    this.exec(
       `INSERT INTO secret_shares (secret_id, project_id, shared_by, created_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(secret_id, project_id) DO NOTHING`,
@@ -3441,7 +3448,7 @@ export class SqliteStore {
       [secretId, projectId]
     );
     if (!existing) return false;
-    this.db.run(`DELETE FROM secret_shares WHERE secret_id = ? AND project_id = ?`, [secretId, projectId]);
+    this.exec(`DELETE FROM secret_shares WHERE secret_id = ? AND project_id = ?`, [secretId, projectId]);
     this.persist();
     return true;
   }
@@ -3514,7 +3521,7 @@ export class SqliteStore {
       [input.id]
     );
     const createdAt = existing ? toString(existing.created_at) : now;
-    this.db.run(
+    this.exec(
       `INSERT INTO sso_group_mappings (id, provider, group_name, project_id, role, custom_role_id, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -3541,7 +3548,7 @@ export class SqliteStore {
   deleteSsoGroupMapping(id: string): boolean {
     const existing = this.queryOne<{ id: string }>(`SELECT id FROM sso_group_mappings WHERE id = ?`, [id]);
     if (!existing) return false;
-    this.db.run(`DELETE FROM sso_group_mappings WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM sso_group_mappings WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -3647,7 +3654,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.getExternalSecretProvider(input.id);
     const createdAt = existing?.createdAt ?? now;
-    this.db.run(
+    this.exec(
       `INSERT INTO external_secret_providers
          (id, name, type, config_json, credentials_secret_id, cache_ttl_ms, enabled, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -3678,7 +3685,7 @@ export class SqliteStore {
   deleteExternalSecretProvider(id: string): boolean {
     const existing = this.getExternalSecretProvider(id);
     if (!existing) return false;
-    this.db.run(`DELETE FROM external_secret_providers WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM external_secret_providers WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -3730,7 +3737,7 @@ export class SqliteStore {
     expiresAt: string;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO external_secret_cache (secret_id, iv, auth_tag, ciphertext, fetched_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(secret_id) DO UPDATE SET
@@ -3745,7 +3752,7 @@ export class SqliteStore {
   }
 
   deleteExternalSecretCacheEntry(secretId: string): void {
-    this.db.run(`DELETE FROM external_secret_cache WHERE secret_id = ?`, [secretId]);
+    this.exec(`DELETE FROM external_secret_cache WHERE secret_id = ?`, [secretId]);
     this.persist();
   }
 
@@ -3772,7 +3779,7 @@ export class SqliteStore {
     createdAt?: string;
   }): void {
     const createdAt = entry.createdAt ?? new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO audit_logs
          (id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
           resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message, created_at)
@@ -3952,7 +3959,7 @@ export class SqliteStore {
     );
     const count = existing ? toNumber(existing.count) : 0;
     if (count === 0) return 0;
-    this.db.run(`DELETE FROM audit_logs WHERE created_at < ?`, [options.before]);
+    this.exec(`DELETE FROM audit_logs WHERE created_at < ?`, [options.before]);
     this.persist();
     return count;
   }
@@ -3997,7 +4004,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.getLogStreamDestination(input.id);
     const createdAt = existing?.createdAt ?? now;
-    this.db.run(
+    this.exec(
       `INSERT INTO log_stream_destinations
          (id, name, type, enabled, categories_json, min_level, config_iv, config_auth_tag,
           config_ciphertext, last_success_at, last_error_at, last_error, dispatched_count,
@@ -4039,8 +4046,8 @@ export class SqliteStore {
   deleteLogStreamDestination(id: string): boolean {
     const existing = this.getLogStreamDestination(id);
     if (!existing) return false;
-    this.db.run(`DELETE FROM log_stream_destinations WHERE id = ?`, [id]);
-    this.db.run(`DELETE FROM log_stream_events WHERE destination_id = ?`, [id]);
+    this.exec(`DELETE FROM log_stream_destinations WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM log_stream_events WHERE destination_id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -4053,14 +4060,14 @@ export class SqliteStore {
   }): void {
     const now = input.at ?? new Date().toISOString();
     if (input.success) {
-      this.db.run(
+      this.exec(
         `UPDATE log_stream_destinations
          SET last_success_at = ?, dispatched_count = dispatched_count + 1, updated_at = ?
          WHERE id = ?`,
         [now, now, input.destinationId]
       );
     } else {
-      this.db.run(
+      this.exec(
         `UPDATE log_stream_destinations
          SET last_error_at = ?, last_error = ?, failed_count = failed_count + 1, updated_at = ?
          WHERE id = ?`,
@@ -4083,7 +4090,7 @@ export class SqliteStore {
     createdAt?: string;
   }): void {
     const createdAt = entry.createdAt ?? new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO log_stream_events
          (id, destination_id, category, event_type, level, status, attempts, error, payload_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -4180,7 +4187,7 @@ export class SqliteStore {
     );
     const count = existing ? toNumber(existing.count) : 0;
     if (count === 0) return 0;
-    this.db.run(`DELETE FROM log_stream_events WHERE created_at < ?`, [options.before]);
+    this.exec(`DELETE FROM log_stream_events WHERE created_at < ?`, [options.before]);
     this.persist();
     return count;
   }
@@ -4277,7 +4284,7 @@ export class SqliteStore {
     const now = new Date().toISOString();
     const existing = this.getVariable(input.id);
     const createdAt = existing?.createdAt ?? now;
-    this.db.run(
+    this.exec(
       `INSERT INTO variables (id, project_id, key, value, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -4300,7 +4307,7 @@ export class SqliteStore {
   deleteVariable(id: string): boolean {
     const existing = this.getVariable(id);
     if (!existing) return false;
-    this.db.run(`DELETE FROM variables WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM variables WHERE id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -4389,7 +4396,7 @@ export class SqliteStore {
     changeNote?: string | null;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json, created_by, change_note, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(workflow_id, version) DO UPDATE SET
@@ -4417,7 +4424,7 @@ export class SqliteStore {
     );
     if (toDelete.length === 0) return 0;
     for (const row of toDelete) {
-      this.db.run(`DELETE FROM workflow_versions WHERE id = ?`, [toString(row.id)]);
+      this.exec(`DELETE FROM workflow_versions WHERE id = ?`, [toString(row.id)]);
     }
     this.persist();
     return toDelete.length;
@@ -4494,7 +4501,7 @@ export class SqliteStore {
     enabled?: boolean;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO git_configs (id, repo_url, default_branch, auth_secret_id, workflows_dir, variables_file,
           user_name, user_email, enabled, updated_at)
        VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -4526,7 +4533,7 @@ export class SqliteStore {
   deleteGitConfig(): boolean {
     const existing = this.getGitConfig();
     if (!existing) return false;
-    this.db.run(`DELETE FROM git_configs WHERE id = 'default'`);
+    this.exec(`DELETE FROM git_configs WHERE id = 'default'`);
     this.persist();
     return true;
   }
@@ -4534,7 +4541,7 @@ export class SqliteStore {
   recordGitSync(input: { kind: "push" | "pull"; error?: string | null }): void {
     const now = new Date().toISOString();
     const column = input.kind === "push" ? "last_push_at" : "last_pull_at";
-    this.db.run(
+    this.exec(
       `UPDATE git_configs SET ${column} = ?, last_error = ?, updated_at = ? WHERE id = 'default'`,
       [now, input.error ?? null, now]
     );
@@ -4584,7 +4591,7 @@ export class SqliteStore {
     const nowIso = new Date(now).toISOString();
 
     if (!existing) {
-      this.db.run(
+      this.exec(
         `INSERT INTO leader_leases (lease_name, holder_id, expires_at, acquired_at, renewed_at)
          VALUES (?, ?, ?, ?, ?)`,
         [input.leaseName, input.holderId, expiresAt, nowIso, nowIso]
@@ -4596,7 +4603,7 @@ export class SqliteStore {
     const existingExpiresMs = Date.parse(existing.expiresAt);
     if (existing.holderId === input.holderId) {
       // We already hold it — renew.
-      this.db.run(
+      this.exec(
         `UPDATE leader_leases SET expires_at = ?, renewed_at = ? WHERE lease_name = ?`,
         [expiresAt, nowIso, input.leaseName]
       );
@@ -4605,7 +4612,7 @@ export class SqliteStore {
     }
     if (!Number.isFinite(existingExpiresMs) || existingExpiresMs <= now) {
       // Expired — steal it.
-      this.db.run(
+      this.exec(
         `UPDATE leader_leases
          SET holder_id = ?, expires_at = ?, acquired_at = ?, renewed_at = ?
          WHERE lease_name = ?`,
@@ -4620,7 +4627,7 @@ export class SqliteStore {
   releaseLease(leaseName: string, holderId: string): boolean {
     const existing = this.getLease(leaseName);
     if (!existing || existing.holderId !== holderId) return false;
-    this.db.run(`DELETE FROM leader_leases WHERE lease_name = ?`, [leaseName]);
+    this.exec(`DELETE FROM leader_leases WHERE lease_name = ?`, [leaseName]);
     this.persist();
     return true;
   }
@@ -4722,7 +4729,7 @@ export class SqliteStore {
     tags: string[]; author: string; workflowJson: string; nodeCount: number;
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO workflow_templates (id, name, description, category, tags, author, workflow_json, node_count, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
@@ -4751,7 +4758,7 @@ export class SqliteStore {
   }
 
   deleteTemplate(id: string): boolean {
-    this.db.run(`DELETE FROM workflow_templates WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM workflow_templates WHERE id = ?`, [id]);
     const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
     const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
     if (changed) this.persist();
@@ -4793,7 +4800,7 @@ export class SqliteStore {
     config: Record<string, unknown>; events: string[];
   }): void {
     const now = new Date().toISOString();
-    this.db.run(
+    this.exec(
       `INSERT INTO notification_configs (id, channel, enabled, config_json, events, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, enabled=excluded.enabled,
@@ -4805,7 +4812,7 @@ export class SqliteStore {
   }
 
   deleteNotificationConfig(id: string): boolean {
-    this.db.run(`DELETE FROM notification_configs WHERE id = ?`, [id]);
+    this.exec(`DELETE FROM notification_configs WHERE id = ?`, [id]);
     const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
     const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
     if (changed) this.persist();
@@ -4820,8 +4827,8 @@ export class SqliteStore {
   ensureDefaultProject(): Project {
     const existing = this.getProject(DEFAULT_PROJECT_ID);
     if (existing) {
-      this.db.run(`UPDATE workflows SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
-      this.db.run(`UPDATE secrets SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+      this.exec(`UPDATE workflows SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+      this.exec(`UPDATE secrets SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
       return existing;
     }
     const project = this.upsertProject({
@@ -4829,8 +4836,8 @@ export class SqliteStore {
       name: "Default Project",
       description: "Personal workspace."
     });
-    this.db.run(`UPDATE workflows SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
-    this.db.run(`UPDATE secrets SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+    this.exec(`UPDATE workflows SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
+    this.exec(`UPDATE secrets SET project_id = ? WHERE project_id IS NULL`, [DEFAULT_PROJECT_ID]);
     this.persist();
     return project;
   }

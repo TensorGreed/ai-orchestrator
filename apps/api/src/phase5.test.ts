@@ -210,7 +210,7 @@ describe("Phase 5.1 — API keys", () => {
 
     // Poke the store to set the key as already expired.
     const past = new Date(Date.now() - 60_000).toISOString();
-    ctx.store["db"].run(`UPDATE api_keys SET expires_at = ? WHERE id = ?`, [past, record.id]);
+    ctx.store["db"].prepare(`UPDATE api_keys SET expires_at = ? WHERE id = ?`).run(past, record.id);
 
     const response = await ctx.app.inject({
       method: "GET",

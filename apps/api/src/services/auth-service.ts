@@ -43,6 +43,8 @@ function verifyPassword(password: string, storedHash: string): boolean {
 }
 
 export class AuthService {
+  private cleanupTimer: NodeJS.Timeout | null = null;
+
   constructor(
     private readonly store: SqliteStore,
     private readonly sessionTtlHours: number
@@ -50,6 +52,31 @@ export class AuthService {
 
   countUsers(): number {
     return this.store.countUsers();
+  }
+
+  startSessionCleanup(intervalMs = 5 * 60 * 1000): void {
+    if (this.cleanupTimer !== null) return;
+    const tick = () => {
+      try {
+        const result = this.store.revokeExpiredSessions() as unknown;
+        if (result && typeof (result as Promise<unknown>).then === "function") {
+          (result as Promise<unknown>).catch(() => undefined);
+        }
+      } catch {
+        // best-effort background cleanup; ignore failures
+      }
+    };
+    this.cleanupTimer = setInterval(tick, intervalMs);
+    if (typeof this.cleanupTimer.unref === "function") {
+      this.cleanupTimer.unref();
+    }
+  }
+
+  stopSessionCleanup(): void {
+    if (this.cleanupTimer !== null) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
   }
 
   private toSafeUser(user: { id: string; email: string; role: string }): SafeUser {
@@ -108,7 +135,6 @@ export class AuthService {
       return null;
     }
 
-    this.store.revokeExpiredSessions();
     const session = this.store.getSession(sessionId);
     if (!session || session.revokedAt) {
       return null;

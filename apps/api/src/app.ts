@@ -946,6 +946,14 @@ export function createApp(
     });
   }
 
+  authService.startSessionCleanup();
+  app.addHook("onClose", async () => {
+    authService.stopSessionCleanup();
+    if (typeof (store as { close?: () => void }).close === "function") {
+      (store as { close: () => void }).close();
+    }
+  });
+
   type WorkflowExecutionEventHooks = {
     onNodeStart?: (event: { nodeId: string; nodeType: string; startedAt: string; input?: unknown }) => Promise<void> | void;
     onNodeComplete?: (event: {

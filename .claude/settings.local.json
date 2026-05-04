@@ -8,7 +8,8 @@
       "Bash(npx tsc:*)",
       "Bash(pnpm install:*)",
       "Bash(pnpm --filter @ai-orchestrator/workflow-engine test --reporter=verbose)",
-      "Bash(node -e ':*)"
+      "Bash(node -e ':*)",
+      "Bash(pnpm --filter @ai-orchestrator/api build)"
     ]
   }
 }
