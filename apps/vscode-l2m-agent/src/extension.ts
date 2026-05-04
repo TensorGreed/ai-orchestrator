@@ -24,23 +24,28 @@ const SESSION_MEMORY_KEY = "l2mAgent.sessionMemory";
 const ACTION_RESULTS_KEY = "l2mAgent.actionResults";
 const MAX_PERSISTED_MESSAGES = 100;
 const MAX_ACTION_RESULTS = 50;
+const CHAT_VIEW_ID = "l2mAgent.chatView";
 
 export function activate(context: vscode.ExtensionContext) {
   const sessionStore = new SessionStore(context);
   const actionService = new ActionService(context);
+  const chatViewProvider = new L2MAgentChatViewProvider(context, sessionStore, actionService);
 
   context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(CHAT_VIEW_ID, chatViewProvider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    }),
     vscode.commands.registerCommand("l2mAgent.openChat", () => {
-      L2MAgentChatPanel.show(context, sessionStore, actionService);
+      void chatViewProvider.show();
     }),
     vscode.commands.registerCommand("l2mAgent.newSession", async () => {
       const sessionId = await sessionStore.rotateSession();
       await sessionStore.clearMessages();
       await sessionStore.clearActionResults();
       await sessionStore.resetMemory();
-      L2MAgentChatPanel.show(context, sessionStore, actionService);
-      L2MAgentChatPanel.current?.refresh();
-      await L2MAgentChatPanel.current?.postSystemMessage(`Started new session: ${sessionId}`);
+      await chatViewProvider.show();
+      chatViewProvider.refresh();
+      await chatViewProvider.postSystemMessage(`Started new session: ${sessionId}`);
       void vscode.window.showInformationMessage("L2M Agent session reset.");
     }),
     vscode.commands.registerCommand("l2mAgent.pinActiveFile", async () => {
@@ -52,12 +57,8 @@ export function activate(context: vscode.ExtensionContext) {
 
       const pinned = await sessionStore.pinFile(editor.document.uri);
       const message = `Pinned file: ${pinned}`;
-      if (L2MAgentChatPanel.current) {
-        L2MAgentChatPanel.current.refresh();
-        await L2MAgentChatPanel.current.postSystemMessage(message);
-      } else {
-        await sessionStore.appendMessage(createChatMessage("system", message));
-      }
+      chatViewProvider.refresh();
+      await chatViewProvider.postSystemMessage(message);
       void vscode.window.showInformationMessage(`Pinned ${pinned} for L2M Agent context.`);
     }),
     vscode.commands.registerCommand("l2mAgent.sendSelection", () => {
@@ -75,17 +76,13 @@ export function activate(context: vscode.ExtensionContext) {
 
       const relativePath = workspaceRelativePath(editor.document.uri);
       const draft = `Review this selection from ${relativePath}:\n\n\`\`\`${editor.document.languageId}\n${selection}\n\`\`\``;
-      L2MAgentChatPanel.show(context, sessionStore, actionService, draft);
+      void chatViewProvider.show(draft);
     }),
     vscode.commands.registerCommand("l2mAgent.resetMemory", async () => {
       await sessionStore.resetMemory();
       const message = "Reset compacted session memory.";
-      if (L2MAgentChatPanel.current) {
-        L2MAgentChatPanel.current.refresh();
-        await L2MAgentChatPanel.current.postSystemMessage(message);
-      } else {
-        await sessionStore.appendMessage(createChatMessage("system", message));
-      }
+      chatViewProvider.refresh();
+      await chatViewProvider.postSystemMessage(message);
       void vscode.window.showInformationMessage("L2M Agent memory reset.");
     })
   );
@@ -219,46 +216,101 @@ class SessionStore {
   }
 }
 
-class L2MAgentChatPanel {
-  static current: L2MAgentChatPanel | undefined;
+interface ChatWebviewHost {
+  webview: vscode.Webview;
+  onDidDispose: vscode.Event<void>;
+  reveal: () => void;
+}
 
-  static show(context: vscode.ExtensionContext, sessionStore: SessionStore, actionService: ActionService, draft = "") {
-    if (L2MAgentChatPanel.current) {
-      L2MAgentChatPanel.current.panel.reveal(vscode.ViewColumn.Beside);
-      if (draft) {
-        L2MAgentChatPanel.current.setDraft(draft);
-      }
-      return;
-    }
+class L2MAgentChatViewProvider implements vscode.WebviewViewProvider {
+  private current: L2MAgentChatWebviewController | undefined;
+  private pendingDraft = "";
 
-    const panel = vscode.window.createWebviewPanel(
-      "l2mAgentChat",
-      "L2M Agent",
-      vscode.ViewColumn.Beside,
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly sessionStore: SessionStore,
+    private readonly actionService: ActionService
+  ) {}
+
+  resolveWebviewView(webviewView: vscode.WebviewView): void {
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this.context.extensionUri]
+    };
+
+    let controller: L2MAgentChatWebviewController;
+    controller = new L2MAgentChatWebviewController(
+      this.context,
       {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [context.extensionUri]
+        webview: webviewView.webview,
+        onDidDispose: webviewView.onDidDispose,
+        reveal: () => webviewView.show()
+      },
+      this.sessionStore,
+      this.actionService,
+      () => {
+        if (this.current === controller) {
+          this.current = undefined;
+        }
       }
     );
+    this.current = controller;
 
-    L2MAgentChatPanel.current = new L2MAgentChatPanel(context, panel, sessionStore, actionService);
-    if (draft) {
-      L2MAgentChatPanel.current.setDraft(draft);
+    if (this.pendingDraft) {
+      controller.setDraft(this.pendingDraft);
+      this.pendingDraft = "";
     }
   }
 
-  private constructor(
+  async show(draft = ""): Promise<void> {
+    if (draft) {
+      this.pendingDraft = draft;
+    }
+
+    try {
+      await vscode.commands.executeCommand("workbench.view.extension.l2mAgent");
+    } catch {
+      // VS Code creates this command from the contributed view container.
+    }
+
+    try {
+      await vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
+    } catch {
+      // Older hosts may not expose the generated focus command until the view is first resolved.
+    }
+
+    this.current?.reveal();
+    if (draft && this.current) {
+      this.current.setDraft(draft);
+      this.pendingDraft = "";
+    }
+  }
+
+  refresh(): void {
+    this.current?.refresh();
+  }
+
+  async postSystemMessage(text: string): Promise<void> {
+    if (this.current) {
+      await this.current.postSystemMessage(text);
+      return;
+    }
+
+    await this.sessionStore.appendMessage(createChatMessage("system", text));
+  }
+}
+
+class L2MAgentChatWebviewController {
+  constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly panel: vscode.WebviewPanel,
+    private readonly host: ChatWebviewHost,
     private readonly sessionStore: SessionStore,
-    private readonly actionService: ActionService
+    private readonly actionService: ActionService,
+    onDispose: () => void
   ) {
-    this.panel.webview.html = this.renderHtml();
-    this.panel.onDidDispose(() => {
-      L2MAgentChatPanel.current = undefined;
-    });
-    this.panel.webview.onDidReceiveMessage((message: WebviewMessage) => {
+    this.host.webview.html = this.renderHtml();
+    this.host.onDidDispose(onDispose);
+    this.host.webview.onDidReceiveMessage((message: WebviewMessage) => {
       void this.handleWebviewMessage(message);
     });
   }
@@ -273,8 +325,12 @@ class L2MAgentChatPanel {
     this.postToWebview({ type: "setDraft", text });
   }
 
+  reveal() {
+    this.host.reveal();
+  }
+
   refresh() {
-    this.panel.webview.html = this.renderHtml();
+    this.host.webview.html = this.renderHtml();
   }
 
   private async handleWebviewMessage(message: WebviewMessage): Promise<void> {
@@ -315,7 +371,7 @@ class L2MAgentChatPanel {
       const variables = await this.buildRequestVariables(config);
       this.postToWebview({
         type: "progressMessage",
-        text: `Calling ${config.streamResponses ? "streaming" : "non-streaming"} L2M webhook at ${config.apiBaseUrl}.`
+        text: `Calling ${config.streamResponses ? "streaming" : "non-streaming"} L2M webhook at ${config.apiBaseUrl} (${config.workflowId || config.webhookPath}).`
       });
       const result = await client.execute(
         {
@@ -452,7 +508,7 @@ class L2MAgentChatPanel {
   }
 
   private postToWebview(message: ExtensionToWebviewMessage) {
-    void this.panel.webview.postMessage(message);
+    void this.host.webview.postMessage(message);
   }
 
   private renderHtml(): string {

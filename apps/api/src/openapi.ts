@@ -1177,7 +1177,7 @@ export const openApiSpec = {
       post: {
         tags: ["Triggers"],
         summary: "Execute a workflow via webhook payload (authenticated)",
-        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { workflow_id: { type: "string" }, system_prompt: { type: "string" }, user_prompt: { type: "string" }, session_id: { type: "string" }, variables: { type: "object" } } } } } },
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { workflow_id: { type: "string" }, webhook_path: { type: "string" }, system_prompt: { type: "string" }, user_prompt: { type: "string" }, session_id: { type: "string" }, variables: { type: "object" } } } } } },
         responses: { "200": { description: "Execution result" } }
       }
     },

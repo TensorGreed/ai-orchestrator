@@ -1122,6 +1122,60 @@ describe("secured webhook execution", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json<{ output?: { result?: string } }>().output?.result).toBe("buffer payload prompt");
   });
+
+  it("selects the authenticated webhook workflow by explicit or inferred agent path", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-agent-path@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+
+    const targetWorkflow = createWebhookWorkflow("wf-vscode-agent-target", {
+      path: "vscode-l2m-agent",
+      authMode: "none"
+    });
+    const smokeWorkflow = createWebhookWorkflow("wf-vscode-agent-smoke", {
+      path: "vscode-agent-smoke",
+      authMode: "none"
+    });
+
+    for (const workflow of [targetWorkflow, smokeWorkflow]) {
+      const saveResponse = await context.app.inject({
+        method: "POST",
+        url: "/api/workflows",
+        headers: { cookie: builderCookie },
+        payload: workflow
+      });
+      expect(saveResponse.statusCode).toBe(200);
+    }
+
+    const explicitPathResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/webhooks/execute",
+      headers: { cookie: builderCookie },
+      payload: {
+        webhook_path: "vscode-l2m-agent",
+        user_prompt: "hello explicit path"
+      }
+    });
+    expect(explicitPathResponse.statusCode).toBe(200);
+    expect(explicitPathResponse.json<{ selectedWorkflowId?: string }>().selectedWorkflowId).toBe(targetWorkflow.id);
+
+    const inferredPathResponse = await context.app.inject({
+      method: "POST",
+      url: "/api/webhooks/execute",
+      headers: { cookie: builderCookie },
+      payload: {
+        user_prompt: "hello inferred path",
+        variables: {
+          client: "vscode-l2m-agent"
+        }
+      }
+    });
+    expect(inferredPathResponse.statusCode).toBe(200);
+    expect(inferredPathResponse.json<{ selectedWorkflowId?: string }>().selectedWorkflowId).toBe(targetWorkflow.id);
+  });
 });
 
 describe("execution resilience and lifecycle", () => {

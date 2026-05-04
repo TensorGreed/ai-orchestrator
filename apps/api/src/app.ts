@@ -533,9 +533,19 @@ function isLocalDevOrigin(origin: string): boolean {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
 }
 
-async function selectWebhookWorkflow(store: SqliteStore, workflowId?: string): Promise<Workflow | null> {
+async function selectWebhookWorkflow(
+  store: SqliteStore,
+  workflowId?: string,
+  webhookPath?: string,
+  webhookMethod = "POST"
+): Promise<Workflow | null> {
   if (workflowId) {
     return store.getWorkflow(workflowId);
+  }
+
+  if (webhookPath) {
+    const match = await selectWebhookByPath(store, webhookPath, webhookMethod);
+    return match?.workflow ?? null;
   }
 
   const workflows = store.listWorkflows();
@@ -551,6 +561,30 @@ async function selectWebhookWorkflow(store: SqliteStore, workflowId?: string): P
   }
 
   return workflows.length ? store.getWorkflow(workflows[0].id) : null;
+}
+
+function inferAgentWebhookPath(payload: {
+  webhook_path?: string;
+  webhookPath?: string;
+  variables?: Record<string, unknown>;
+}): string | undefined {
+  const explicit = firstNonEmptyString(payload.webhook_path, payload.webhookPath);
+  if (explicit) {
+    return explicit;
+  }
+
+  const variables = asRecord(payload.variables);
+  const client = firstNonEmptyString(variables.client);
+  return client === "vscode-l2m-agent" ? "vscode-l2m-agent" : undefined;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
 }
 
 const allowedWebhookMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
@@ -5384,7 +5418,11 @@ export function createApp(
       };
     }
 
-    const workflow = await selectWebhookWorkflow(store, parsed.data.workflow_id);
+    const workflow = await selectWebhookWorkflow(
+      store,
+      parsed.data.workflow_id,
+      inferAgentWebhookPath(parsed.data)
+    );
     if (!workflow) {
       reply.code(404);
       return { error: "No workflows available" };
@@ -6196,7 +6234,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       };
     }
 
-    const workflow = await selectWebhookWorkflow(store, parsed.data.workflow_id);
+    const workflow = await selectWebhookWorkflow(
+      store,
+      parsed.data.workflow_id,
+      inferAgentWebhookPath(parsed.data)
+    );
     if (!workflow) {
       reply.code(404);
       return { error: "No workflows available" };

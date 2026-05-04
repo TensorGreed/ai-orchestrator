@@ -1,6 +1,7 @@
 export interface L2MAgentConfig {
   apiBaseUrl: string;
   workflowId: string;
+  webhookPath: string;
   authToken: string;
   streamResponses: boolean;
   requestTimeoutMs: number;
@@ -24,6 +25,7 @@ export interface L2MExecuteInput {
 
 export interface L2MWebhookPayload {
   workflow_id?: string;
+  webhook_path?: string;
   session_id: string;
   system_prompt?: string;
   user_prompt: string;

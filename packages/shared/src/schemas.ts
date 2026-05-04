@@ -218,6 +218,8 @@ export const workflowExecuteRequestSchema = z.object({
 
 export const agentWebhookPayloadSchema = z.object({
   workflow_id: z.string().optional(),
+  webhook_path: z.string().optional(),
+  webhookPath: z.string().optional(),
   session_id: z.string().optional(),
   executionTimeoutMs: z.number().int().positive().optional(),
   execution_timeout_ms: z.number().int().positive().optional(),

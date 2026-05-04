@@ -28,6 +28,7 @@ export class L2MClient {
   private buildPayload(input: L2MExecuteInput): L2MWebhookPayload {
     return {
       workflow_id: this.config.workflowId || undefined,
+      webhook_path: this.config.workflowId ? undefined : this.config.webhookPath || undefined,
       session_id: input.sessionId,
       system_prompt: input.systemPrompt,
       user_prompt: input.userPrompt,

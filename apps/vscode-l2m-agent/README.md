@@ -2,12 +2,15 @@
 
 Interactive coding and data analytics assistant for VS Code backed by L2M webhook workflows. The extension collects bounded workspace context, streams requests to L2M, renders structured assistant output, and lets users approve generated patches or terminal commands.
 
+After installing the VSIX and reloading VS Code, open the `L2M Agent` icon in the Activity Bar to use the sidebar chat. You can also run `L2M Agent: Open Chat` from the Command Palette; it focuses the same sidebar view.
+
 ## Setup
 
 Configure these VS Code settings before sending a prompt:
 
 - `l2mAgent.apiBaseUrl`: L2M API base URL. Defaults to `http://localhost:4000`.
-- `l2mAgent.workflowId`: Optional workflow ID for the coding-agent workflow.
+- `l2mAgent.workflowId`: Optional workflow ID for the coding-agent workflow. When empty, the extension selects by webhook path.
+- `l2mAgent.webhookPath`: Webhook input path used when `workflowId` is empty. Defaults to `vscode-l2m-agent`.
 - `l2mAgent.authToken`: Bearer API key for authenticated API calls. Create it in L2M Settings -> API Keys, then paste the plaintext key here.
 - `l2mAgent.streamResponses`: Uses `/api/webhooks/execute/stream` when enabled.
 - `l2mAgent.requestTimeoutMs`: Request timeout for L2M calls.
@@ -38,6 +41,7 @@ Payload shape:
 ```json
 {
   "workflow_id": "optional-workflow-id",
+  "webhook_path": "vscode-l2m-agent",
   "session_id": "vscode:<workspace-hash>",
   "system_prompt": "Extension-controlled operating instructions",
   "user_prompt": "Current user message",
@@ -100,7 +104,7 @@ Preferred response:
 
 ## Commands
 
-- `L2M Agent: Open Chat`: Opens the chat panel.
+- `L2M Agent: Open Chat`: Opens the `L2M Agent` Activity Bar container and focuses the sidebar chat view.
 - `L2M Agent: New Session`: Clears chat history, compacted memory, pinned files, and action results for the workspace.
 - `L2M Agent: Pin Active File`: Adds the current file to future context bundles.
 - `L2M Agent: Send Selection`: Opens chat and seeds the draft with selected text.
@@ -124,11 +128,11 @@ pnpm --filter @ai-orchestrator/web dev
 Build and test the extension:
 
 ```bash
-pnpm --filter @ai-orchestrator/vscode-l2m-agent build
-pnpm --filter @ai-orchestrator/vscode-l2m-agent test
+pnpm --filter ./apps/vscode-l2m-agent build
+pnpm --filter ./apps/vscode-l2m-agent test
 ```
 
-To run in VS Code, open this repository, build the extension, then launch an Extension Development Host from VS Code with `apps/vscode-l2m-agent` as the extension project. Configure `l2mAgent.apiBaseUrl`, `l2mAgent.workflowId`, and `l2mAgent.authToken` in the development host before sending prompts.
+To run in VS Code, open this repository, build the extension, then launch an Extension Development Host from VS Code with `apps/vscode-l2m-agent` as the extension project. Configure `l2mAgent.apiBaseUrl`, `l2mAgent.workflowId`, and `l2mAgent.authToken` in the development host before sending prompts. The development host should show an `L2M Agent` icon in the Activity Bar; use `L2M Agent: Open Chat` if the view is hidden.
 
 ## Test Coverage
 

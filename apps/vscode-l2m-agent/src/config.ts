@@ -3,6 +3,7 @@ import type { L2MAgentConfig } from "./protocol";
 
 const CONFIG_SECTION = "l2mAgent";
 const DEFAULT_API_BASE_URL = "http://localhost:4000";
+const DEFAULT_WEBHOOK_PATH = "vscode-l2m-agent";
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_CONTEXT_CHARS = 60_000;
 const DEFAULT_MAX_FILE_CHARS = 12_000;
@@ -20,6 +21,7 @@ export function getL2MAgentConfig(): L2MAgentConfig {
   return {
     apiBaseUrl: normalizeBaseUrl(config.get<string>("apiBaseUrl", DEFAULT_API_BASE_URL)),
     workflowId: normalizeString(config.get<string>("workflowId", "")),
+    webhookPath: normalizeWebhookPath(config.get<string>("webhookPath", DEFAULT_WEBHOOK_PATH)),
     authToken: normalizeString(config.get<string>("authToken", "")),
     streamResponses: config.get<boolean>("streamResponses", true),
     requestTimeoutMs: normalizeTimeout(config.get<number>("requestTimeoutMs", DEFAULT_REQUEST_TIMEOUT_MS)),
@@ -87,6 +89,10 @@ function normalizeBaseUrl(value: string): string {
 
 function normalizeString(value: string | undefined): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeWebhookPath(value: string | undefined): string {
+  return (normalizeString(value) || DEFAULT_WEBHOOK_PATH).replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
 function normalizeTimeout(value: number | undefined): number {

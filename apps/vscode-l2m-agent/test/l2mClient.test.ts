@@ -32,12 +32,29 @@ describe("L2MClient streaming", () => {
       userPrompt: "hello"
     })).rejects.toThrow("workflow failed");
   });
+
+  it("sends webhook_path when workflowId is not configured", async () => {
+    const fetchMock = stubFetchStream([
+      sse("result", { status: "success", output: { message: "ok" } })
+    ]);
+
+    await createClient({ workflowId: "" }).execute({
+      sessionId: "s1",
+      userPrompt: "hello"
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    const body = JSON.parse(String(init?.body));
+    expect(body.workflow_id).toBeUndefined();
+    expect(body.webhook_path).toBe("vscode-l2m-agent");
+  });
 });
 
-function createClient(): L2MClient {
+function createClient(overrides: Partial<L2MAgentConfig> = {}): L2MClient {
   const config: L2MAgentConfig = {
     apiBaseUrl: "http://localhost:4000",
     workflowId: "wf-test",
+    webhookPath: "vscode-l2m-agent",
     authToken: "test-token",
     streamResponses: true,
     requestTimeoutMs: 30_000,
@@ -49,12 +66,13 @@ function createClient(): L2MClient {
     maxPinnedFiles: 8,
     nearbyLineCount: 40,
     recentTurnCount: 12,
-    maxCompactedMemoryChars: 20_000
+    maxCompactedMemoryChars: 20_000,
+    ...overrides
   };
   return new L2MClient(config);
 }
 
-function stubFetchStream(chunks: string[]): void {
+function stubFetchStream(chunks: string[]): ReturnType<typeof vi.fn> {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -65,10 +83,12 @@ function stubFetchStream(chunks: string[]): void {
     }
   });
 
-  vi.stubGlobal("fetch", vi.fn(async () => new Response(body, {
+  const fetchMock = vi.fn(async () => new Response(body, {
     status: 200,
     headers: { "content-type": "text/event-stream" }
-  })));
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
 }
 
 function sse(event: string, payload: unknown): string {

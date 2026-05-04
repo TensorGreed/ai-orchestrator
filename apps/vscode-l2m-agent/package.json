@@ -1,5 +1,5 @@
 {
-  "name": "@ai-orchestrator/vscode-l2m-agent",
+  "name": "vscode-l2m-agent",
   "displayName": "L2M Agent",
   "description": "Interactive VS Code coding and data analytics agent backed by L2M webhook workflows.",
   "version": "0.1.0",
@@ -15,6 +15,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onView:l2mAgent.chatView",
     "onCommand:l2mAgent.openChat",
     "onCommand:l2mAgent.newSession",
     "onCommand:l2mAgent.pinActiveFile",
@@ -22,6 +23,24 @@
     "onCommand:l2mAgent.resetMemory"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "l2mAgent",
+          "title": "L2M Agent",
+          "icon": "resources/l2m-agent.svg"
+        }
+      ]
+    },
+    "views": {
+      "l2mAgent": [
+        {
+          "id": "l2mAgent.chatView",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
     "configuration": {
       "title": "L2M Agent",
       "properties": {
@@ -33,12 +52,17 @@
         "l2mAgent.workflowId": {
           "type": "string",
           "default": "",
-          "description": "Optional workflow ID to execute. Leave empty to let the L2M server select the webhook workflow."
+          "description": "Optional workflow ID to execute. Leave empty to select by l2mAgent.webhookPath."
+        },
+        "l2mAgent.webhookPath": {
+          "type": "string",
+          "default": "vscode-l2m-agent",
+          "description": "Webhook input path used when workflowId is empty."
         },
         "l2mAgent.authToken": {
           "type": "string",
           "default": "",
-          "description": "Optional bearer token for authenticated L2M API calls."
+          "description": "Bearer API key for authenticated L2M API calls."
         },
         "l2mAgent.streamResponses": {
           "type": "boolean",

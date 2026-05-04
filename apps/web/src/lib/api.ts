@@ -413,6 +413,8 @@ export async function deleteWorkflowPin(workflowId: string, nodeId: string) {
 
 export async function runWebhook(payload: {
   workflow_id?: string;
+  webhook_path?: string;
+  webhookPath?: string;
   session_id?: string;
   executionTimeoutMs?: number;
   execution_timeout_ms?: number;
@@ -430,6 +432,8 @@ export async function runWebhook(payload: {
 export async function runWebhookStream(
   payload: {
     workflow_id?: string;
+    webhook_path?: string;
+    webhookPath?: string;
     session_id?: string;
     executionTimeoutMs?: number;
     execution_timeout_ms?: number;
