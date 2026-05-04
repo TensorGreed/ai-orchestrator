@@ -142,6 +142,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit false",
+    "test": "vitest run",
     "watch": "tsc -p tsconfig.json --watch"
   },
   "devDependencies": {
