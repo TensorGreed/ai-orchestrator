@@ -18,7 +18,8 @@
     "onCommand:l2mAgent.openChat",
     "onCommand:l2mAgent.newSession",
     "onCommand:l2mAgent.pinActiveFile",
-    "onCommand:l2mAgent.sendSelection"
+    "onCommand:l2mAgent.sendSelection",
+    "onCommand:l2mAgent.resetMemory"
   ],
   "contributes": {
     "configuration": {
@@ -50,6 +51,69 @@
           "minimum": 5000,
           "maximum": 1800000,
           "description": "Client-side timeout, in milliseconds, for L2M requests."
+        },
+        "l2mAgent.maxContextChars": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 10000,
+          "maximum": 300000,
+          "description": "Maximum approximate text characters to include in each L2M context bundle."
+        },
+        "l2mAgent.maxFileChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "maximum": 80000,
+          "description": "Maximum text characters to include from any single active or pinned file snippet."
+        },
+        "l2mAgent.maxGitDiffChars": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 1000,
+          "maximum": 120000,
+          "description": "Maximum text characters to include from git diffs."
+        },
+        "l2mAgent.maxDiagnostics": {
+          "type": "number",
+          "default": 50,
+          "minimum": 0,
+          "maximum": 500,
+          "description": "Maximum VS Code diagnostics to include in each request."
+        },
+        "l2mAgent.maxOpenEditors": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Maximum open text editor tabs to include in each request."
+        },
+        "l2mAgent.maxPinnedFiles": {
+          "type": "number",
+          "default": 8,
+          "minimum": 0,
+          "maximum": 50,
+          "description": "Maximum pinned file contents to include in each request."
+        },
+        "l2mAgent.nearbyLineCount": {
+          "type": "number",
+          "default": 40,
+          "minimum": 0,
+          "maximum": 200,
+          "description": "Number of lines around the current selection or cursor to include from the active file."
+        },
+        "l2mAgent.recentTurnCount": {
+          "type": "number",
+          "default": 12,
+          "minimum": 2,
+          "maximum": 50,
+          "description": "Number of recent chat turns to send in full before older turns are summarized into compacted memory."
+        },
+        "l2mAgent.maxCompactedMemoryChars": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 1000,
+          "maximum": 100000,
+          "description": "Maximum characters retained in local compacted session memory."
         }
       }
     },
@@ -69,6 +133,10 @@
       {
         "command": "l2mAgent.sendSelection",
         "title": "L2M Agent: Send Selection"
+      },
+      {
+        "command": "l2mAgent.resetMemory",
+        "title": "L2M Agent: Reset Memory"
       }
     ]
   },
