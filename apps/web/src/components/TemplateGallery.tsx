@@ -15,7 +15,7 @@ const CATEGORIES = [
 ] as const;
 
 interface TemplateGalleryProps {
-  onWorkflowCreated: (workflowId: string) => void;
+  onWorkflowCreated: (workflowId: string) => void | Promise<void>;
 }
 
 export function TemplateGallery({ onWorkflowCreated }: TemplateGalleryProps) {
@@ -51,7 +51,7 @@ export function TemplateGallery({ onWorkflowCreated }: TemplateGalleryProps) {
       setUsingTemplateId(templateId);
       try {
         const result = await useTemplate(templateId);
-        onWorkflowCreated(result.workflowId);
+        await onWorkflowCreated(result.workflowId);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to create workflow from template");
       } finally {

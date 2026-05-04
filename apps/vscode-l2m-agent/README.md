@@ -8,7 +8,7 @@ Configure these VS Code settings before sending a prompt:
 
 - `l2mAgent.apiBaseUrl`: L2M API base URL. Defaults to `http://localhost:4000`.
 - `l2mAgent.workflowId`: Optional workflow ID for the coding-agent workflow.
-- `l2mAgent.authToken`: Optional bearer token for authenticated API calls.
+- `l2mAgent.authToken`: Bearer API key for authenticated API calls. Create it in L2M Settings -> API Keys, then paste the plaintext key here.
 - `l2mAgent.streamResponses`: Uses `/api/webhooks/execute/stream` when enabled.
 - `l2mAgent.requestTimeoutMs`: Request timeout for L2M calls.
 - `l2mAgent.maxContextChars`: Maximum approximate characters in one context bundle.
@@ -30,7 +30,7 @@ The extension calls:
 ```http
 POST /api/webhooks/execute/stream
 content-type: application/json
-authorization: Bearer <token>
+authorization: Bearer <api-key>
 ```
 
 Payload shape:
@@ -128,7 +128,7 @@ pnpm --filter @ai-orchestrator/vscode-l2m-agent build
 pnpm --filter @ai-orchestrator/vscode-l2m-agent test
 ```
 
-To run in VS Code, open this repository, build the extension, then launch an Extension Development Host from VS Code with `apps/vscode-l2m-agent` as the extension project. Configure the settings above in the development host before sending prompts.
+To run in VS Code, open this repository, build the extension, then launch an Extension Development Host from VS Code with `apps/vscode-l2m-agent` as the extension project. Configure `l2mAgent.apiBaseUrl`, `l2mAgent.workflowId`, and `l2mAgent.authToken` in the development host before sending prompts.
 
 ## Test Coverage
 

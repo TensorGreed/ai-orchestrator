@@ -6,6 +6,14 @@ import type {
   L2MWebhookPayload
 } from "./protocol";
 
+interface L2MHttpRequest {
+  response: Response;
+  signal: AbortSignal;
+  deadlineAt: number;
+  abort: () => void;
+  cleanup: () => void;
+}
+
 export class L2MClient {
   constructor(private readonly config: L2MAgentConfig) {}
 
@@ -29,95 +37,139 @@ export class L2MClient {
   }
 
   private async executeJson(payload: L2MWebhookPayload): Promise<unknown> {
-    const response = await this.postJson("/api/webhooks/execute", payload);
-    const text = await response.text();
-    const parsed = parseJsonSafely(text);
-    if (!response.ok) {
-      throw new Error(extractErrorMessage(parsed) || `L2M request failed (${response.status})`);
+    const request = await this.postJson("/api/webhooks/execute", payload);
+    try {
+      const text = await withRequestDeadline(request.response.text(), request, this.config.requestTimeoutMs);
+      const parsed = parseJsonSafely(text);
+      if (!request.response.ok) {
+        throw new Error(extractErrorMessage(parsed) || `L2M request failed (${request.response.status})`);
+      }
+      return parsed ?? text;
+    } catch (error) {
+      if (request.signal.aborted) {
+        throw new Error(`L2M request timed out after ${this.config.requestTimeoutMs}ms.`);
+      }
+      throw error;
+    } finally {
+      request.cleanup();
     }
-    return parsed ?? text;
   }
 
   private async executeStream(payload: L2MWebhookPayload, handlers: L2MStreamHandlers): Promise<unknown> {
-    const response = await this.postJson("/api/webhooks/execute/stream", payload);
-    if (!response.ok) {
-      const text = await response.text();
-      const parsed = parseJsonSafely(text);
-      throw new Error(extractErrorMessage(parsed) || `L2M stream failed (${response.status})`);
-    }
-    if (!response.body) {
-      throw new Error("L2M stream response did not include a readable body.");
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let finalResult: unknown = undefined;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
+    const request = await this.postJson("/api/webhooks/execute/stream", payload);
+    try {
+      if (!request.response.ok) {
+        const text = await withRequestDeadline(request.response.text(), request, this.config.requestTimeoutMs);
+        const parsed = parseJsonSafely(text);
+        throw new Error(extractErrorMessage(parsed) || `L2M stream failed (${request.response.status})`);
+      }
+      if (!request.response.body) {
+        throw new Error("L2M stream response did not include a readable body.");
       }
 
-      buffer += decoder.decode(value, { stream: true });
-      buffer = buffer.replace(/\r\n/g, "\n");
+      const reader = request.response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalResult: unknown = undefined;
+      let streamError = "";
 
-      let separatorIndex = buffer.indexOf("\n\n");
-      while (separatorIndex >= 0) {
-        const rawEvent = buffer.slice(0, separatorIndex);
-        buffer = buffer.slice(separatorIndex + 2);
-
-        const event = parseSseEvent(rawEvent);
-        if (event) {
-          handlers.onEvent?.(event);
-          const maybeResult = handleKnownEvent(event, handlers);
-          if (event.event === "result") {
-            finalResult = maybeResult ?? event.payload;
-          }
-          if (event.event === "error" && finalResult === undefined) {
-            throw new Error(extractErrorMessage(event.payload) || "L2M stream returned an error.");
-          }
+      while (true) {
+        const { done, value } = await withRequestDeadline(
+          reader.read(),
+          request,
+          this.config.requestTimeoutMs
+        );
+        if (done) {
+          break;
         }
 
-        separatorIndex = buffer.indexOf("\n\n");
-      }
-    }
+        buffer += decoder.decode(value, { stream: true });
+        buffer = buffer.replace(/\r\n/g, "\n");
 
-    const tail = decoder.decode();
-    if (tail) {
-      buffer += tail;
-    }
-    const finalEvent = parseSseEvent(buffer.trim());
-    if (finalEvent) {
-      handlers.onEvent?.(finalEvent);
-      const maybeResult = handleKnownEvent(finalEvent, handlers);
-      if (finalEvent.event === "result") {
-        finalResult = maybeResult ?? finalEvent.payload;
-      }
-    }
+        let separatorIndex = buffer.indexOf("\n\n");
+        while (separatorIndex >= 0) {
+          const rawEvent = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + 2);
 
-    return finalResult;
+          const event = parseSseEvent(rawEvent);
+          if (event) {
+            handlers.onEvent?.(event);
+            const maybeResult = handleKnownEvent(event, handlers);
+            if (event.event === "result") {
+              finalResult = maybeResult ?? event.payload;
+            }
+            if (event.event === "error") {
+              streamError = extractErrorMessage(event.payload) || "L2M stream returned an error.";
+            }
+          }
+
+          separatorIndex = buffer.indexOf("\n\n");
+        }
+      }
+
+      const tail = decoder.decode();
+      if (tail) {
+        buffer += tail;
+      }
+      const finalEvent = parseSseEvent(buffer.trim());
+      if (finalEvent) {
+        handlers.onEvent?.(finalEvent);
+        const maybeResult = handleKnownEvent(finalEvent, handlers);
+        if (finalEvent.event === "result") {
+          finalResult = maybeResult ?? finalEvent.payload;
+        } else if (finalEvent.event === "error") {
+          streamError = extractErrorMessage(finalEvent.payload) || "L2M stream returned an error.";
+        }
+      }
+
+      if (streamError) {
+        throw new Error(streamError);
+      }
+
+      const resultError = extractWorkflowResultError(finalResult);
+      if (resultError) {
+        throw new Error(resultError);
+      }
+
+      return finalResult;
+    } catch (error) {
+      if (request.signal.aborted) {
+        throw new Error(`L2M request timed out after ${this.config.requestTimeoutMs}ms.`);
+      }
+      throw error;
+    } finally {
+      request.cleanup();
+    }
   }
 
-  private async postJson(path: string, payload: L2MWebhookPayload): Promise<Response> {
+  private async postJson(
+    path: string,
+    payload: L2MWebhookPayload
+  ): Promise<L2MHttpRequest> {
     const controller = new AbortController();
+    const deadlineAt = Date.now() + this.config.requestTimeoutMs;
     const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
 
     try {
-      return await fetch(`${this.config.apiBaseUrl}${path}`, {
+      const response = await fetch(`${this.config.apiBaseUrl}${path}`, {
         method: "POST",
         headers: this.buildHeaders(),
         body: JSON.stringify(payload),
         signal: controller.signal
       });
+      return {
+        response,
+        signal: controller.signal,
+        deadlineAt,
+        abort: () => controller.abort(),
+        cleanup: () => clearTimeout(timeout)
+      };
     } catch (error) {
+      clearTimeout(timeout);
       if (controller.signal.aborted) {
         throw new Error(`L2M request timed out after ${this.config.requestTimeoutMs}ms.`);
       }
       throw error;
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
@@ -130,6 +182,32 @@ export class L2MClient {
     }
     return headers;
   }
+}
+
+function withRequestDeadline<T>(
+  operation: Promise<T>,
+  request: L2MHttpRequest,
+  timeoutMs: number
+): Promise<T> {
+  const remainingMs = request.deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    request.abort();
+    return Promise.reject(new Error(`L2M request timed out after ${timeoutMs}ms.`));
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      request.abort();
+      reject(new Error(`L2M request timed out after ${timeoutMs}ms.`));
+    }, remainingMs);
+  });
+
+  return Promise.race([operation, timeoutPromise]).finally(() => {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  });
 }
 
 function parseSseEvent(raw: string): L2MSseEvent | null {
@@ -201,6 +279,19 @@ function extractErrorMessage(value: unknown): string {
     : typeof record.message === "string"
       ? record.message
       : "";
+}
+
+function extractWorkflowResultError(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.status !== "error") {
+    return "";
+  }
+
+  return extractErrorMessage(record) || "L2M workflow execution failed.";
 }
 
 function valueAt(value: unknown, key: string): unknown {

@@ -2307,6 +2307,30 @@ function StudioApp() {
     [handleApiError, hydrateWorkflow, readWipWorkflow]
   );
 
+  const handleTemplateWorkflowCreated = useCallback(
+    async (workflowId: string) => {
+      try {
+        const workflow = await fetchWorkflow(workflowId);
+        hydrateWorkflow(workflow);
+
+        const targetProjectId = workflow.projectId || activeProjectId;
+        if (targetProjectId !== activeProjectId) {
+          setActiveProjectId(targetProjectId);
+        }
+
+        const workflows = await fetchWorkflows({ projectId: targetProjectId });
+        setWorkflowList(workflows);
+        rememberTabWorkflowId(workflow.id);
+        setError(null);
+        setActiveMode("editor");
+      } catch (templateError) {
+        handleApiError(templateError, "Failed to load workflow created from template");
+        throw templateError;
+      }
+    },
+    [activeProjectId, handleApiError, hydrateWorkflow, setWorkflowList]
+  );
+
   useEffect(() => {
     if (!authUser || loading) {
       return;
@@ -4927,10 +4951,7 @@ function StudioApp() {
 
           {activeMode === "templates" && (
             <TemplateGallery
-              onWorkflowCreated={(workflowId) => {
-                void loadWorkflowById(workflowId);
-                setActiveMode("editor");
-              }}
+              onWorkflowCreated={handleTemplateWorkflowCreated}
             />
           )}
 
