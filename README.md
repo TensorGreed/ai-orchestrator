@@ -1,37 +1,28 @@
-# AI Orchestrator V1
+# L2M
 
-A runnable V1 visual AI workflow builder and runtime inspired by n8n/Langflow, focused on workflow automation, agent orchestration, MCP tools, LLM providers, RAG/vector nodes, connector nodes, and trigger-driven execution.
+**The MCP-native agent runtime.** Visual workflow builder, multi-agent Swarm, and a first-party VS Code surface — for developers composing AI agents that do real work in real systems via the [Model Context Protocol](https://modelcontextprotocol.io).
 
-## What this V1 includes
+## What makes it different
 
-- Drag-and-drop node editor (`React Flow`) with connectable edges, persisted node positions, mini-map/controls, multi-select, copy/paste/duplicate, undo/redo, sticky notes, disable toggles, keyboard shortcuts, and dark mode
-- Workflow CRUD, duplication, import/export JSON, graph validation, execution tracing, execution history, debug replay, pinned node data, single-node execution, and streaming execution progress
-- Workflow organization with projects, folders, tags, search/filtering, and project-scoped secrets
-- Runtime support for sub-workflows, flow-control nodes, queue-backed execution, schedule triggers, webhook/form/chat/file/RSS/SSE/MCP-server triggers, per-node retry/continue-on-fail settings, and error workflows
-- LLM provider adapter model with built-in adapters for:
-  - Ollama (real)
-  - OpenAI-compatible endpoints (real)
-  - OpenAI cloud (real)
-  - Azure OpenAI (real)
-  - Gemini (basic)
-  - Anthropic (basic)
-- MCP adapter model with:
-  - `http_mcp` (real remote MCP endpoint over HTTP streamable)
-  - `mock-mcp` (local demo tools)
-- Agent Orchestrator & Supervisor Nodes with iterative tool-calling loop and Swarm delegation
-- Agent port attachments (auxiliary edges):
-  - `chat_model` -> attach `LLM Call` or `Azure OpenAI Chat Model` node
-  - `memory` -> attach `Simple Memory` node
-  - `tool` -> attach one or more `MCP Tool` nodes
-  - `worker` -> attach worker `Agent Orchestrator` or `Supervisor` nodes (applies to Supervisor nodes only)
-- RAG path with connector source, document chunking, embeddings, in-memory/vector-store retrieval, Azure AI Search, Qdrant, Pinecone, and PGVector adapter paths
-- Connector SDK + legacy connectors (`google-drive`, `sql-db`, `nosql-db`, `azure-storage`, `azure-cosmos-db`, `azure-monitor`, `azure-ai-search`, `qdrant`)
-- Tier 1 automation connectors and triggers: HTTP/webhook response, Slack, SMTP/IMAP email, Google Sheets, PostgreSQL, MySQL, MongoDB, Redis, and GitHub
-- Data transformation and utility nodes for aggregate/split/sort/limit/dedupe/summarize/diff/rename/edit fields, date/time, crypto, JWT, XML, HTML, file conversion/extraction, compression, and guarded image/PDF output paths
-- Webhook execution endpoints, configured webhook routes, manual triggers, form endpoints, chat endpoints, Slack/GitHub webhooks, and workflow-as-MCP-tool endpoints
-- Secret abstraction with encrypted server-side storage (AES-256-GCM)
-- Session-based authentication (`httpOnly` cookie) with RBAC (`admin`, `builder`, `operator`, `viewer`)
-- Monorepo with shared schemas/types and package-level extension points
+- **MCP-first.** Wire any MCP server into an agent as a tool. The runtime compacts schemas, shortlists tools by prompt relevance, and caches full tool outputs across multi-turn sessions so models stay grounded without re-calling expensive endpoints. You can also expose your own workflows back out as MCP tools that other agents invoke (`mcp_server_trigger`).
+- **Multi-agent Swarm.** Compose Supervisor → Worker hierarchies via dedicated attachment ports. Workers are exposed to the parent as synthetic tools, recursively. Other visual workflow tools either lack MCP integration entirely or treat agent delegation as chained prompts rather than first-class topology.
+- **VS Code agent surface.** First-party extension at [`apps/vscode-l2m-agent`](apps/vscode-l2m-agent) turns any workflow into a coding agent inside the editor — streaming responses, patch previews with workspace-path safety, command approval, and bounded context bundling.
+
+Plus the production basics: SAML/LDAP SSO, MFA/TOTP, encrypted secrets with rotation, external secret providers (Vault, AWS, GCP, Azure), RBAC + projects + custom roles, comprehensive audit log, Prometheus metrics, OTEL tracing, multi-main HA via leader election, Postgres or SQLite, Helm chart, Docker Compose prod template, and webhook signature validation (HMAC, Stripe, Discord Ed25519, Telegram).
+
+## What's in the box
+
+- Drag-and-drop node editor (`React Flow`) with mini-map, multi-select, copy/paste/duplicate, undo/redo, sticky notes, dark mode, and a keyboard shortcut panel
+- Workflow CRUD with import/export, duplication, projects, folders, tags, search, debug replay, pinned node data, single-node execution, and streaming execution progress
+- Runtime: sub-workflows, flow-control nodes, queue-backed execution with DLQ, per-node retry/continue-on-fail, error workflows, parallel-branch execution, and binary-data passthrough
+- Triggers: schedule, webhook, form, chat, file, RSS, SSE, MCP-server, manual, and signed Slack/GitHub/Stripe/Telegram/Discord webhooks
+- LLM providers: OpenAI, Azure OpenAI, Anthropic, Gemini, Ollama, and OpenAI-compatible endpoints
+- MCP adapters: `http_mcp` (remote streamable HTTP) and `mock-mcp` (local demo tools)
+- RAG: chunking, embeddings, in-memory + Azure AI Search + Qdrant + Pinecone + PGVector + Chroma + Weaviate retrievers
+- 50+ data-transformation, code, crypto, JWT, XML/HTML, file, and compression nodes
+- Source control sync (Git push/pull workflows + variables), workflow versioning, log streaming (Syslog/Webhook/Sentry), and a Settings UI for everything
+
+For the GA roadmap, see the public project board (link forthcoming).
 
 ## Architecture overview
 
@@ -425,7 +416,7 @@ Agent Chat Model attachments can use dedicated provider nodes:
 
 ## Azure node suite (implemented)
 
-The Azure suite from the n8n-style screenshot is implemented end-to-end in this V1:
+The Azure suite is implemented end-to-end:
 
 - `Azure OpenAI Chat Model` (`azure_openai_chat_model`)
 - `Embeddings Azure OpenAI` (`embeddings_azure_openai`)
@@ -776,10 +767,9 @@ Includes node types/config, edge graph, and node positions for canvas restoratio
 
 Set `SEED_SAMPLE_WORKFLOWS=true` to load these into the database when the workflow table is empty.
 
-## Notes
+## Status and roadmap
 
-- V1 is intentionally a working vertical slice with clear extension seams.
-- Scheduling, persisted queue execution, projects, folders, tags, and project-scoped secrets are implemented.
-- Horizontal worker scaling still requires moving the queue backend to Redis/BullMQ or another shared queue.
-- Enterprise multi-tenancy, SSO/LDAP, audit logging, external secret managers, source control sync, and full OpenAPI coverage remain roadmap items.
+L2M ships a deep capability surface today. Enterprise capabilities — SAML/LDAP SSO, MFA, audit logging, external secret managers, source control sync, OpenAPI coverage, multi-main HA via leader election — are implemented. The active focus is GA polish: deepening the MCP/Swarm/VS Code differentiators, first-run UX, production hardening (rate limiting, security headers, image build automation), and a community node SDK so connectors can be shipped as npm packages.
+
+The horizontal-scaling story moves further along when the in-process queue backend is swapped for Redis/BullMQ; the Helm chart and Docker Compose prod template already assume webhook process separation and leader-elected schedulers.
 

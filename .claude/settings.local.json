@@ -2,7 +2,6 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "WebFetch(domain:docs.n8n.io)",
       "Bash(xargs wc:*)",
       "Bash(pnpm --filter @ai-orchestrator/workflow-engine build)",
       "Bash(npx tsc:*)",

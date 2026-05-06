@@ -1,18 +1,25 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
-  title: "AI Orchestrator Docs",
-  description: "Documentation for AI Orchestrator visual workflow automation platform",
+  title: "L2M",
+  description: "The MCP-native agent runtime — visual workflow builder, multi-agent Swarm, and a VS Code surface.",
   cleanUrls: true,
   themeConfig: {
     nav: [
       { text: "Home", link: "/" },
+      { text: "Why", link: "/why" },
       { text: "Quickstart", link: "/getting-started/quickstart" },
       { text: "Architecture", link: "/architecture/overview" },
       { text: "Nodes", link: "/nodes/core-nodes" },
       { text: "API", link: "/api/endpoints" }
     ],
     sidebar: [
+      {
+        text: "Introduction",
+        items: [
+          { text: "Why L2M?", link: "/why" }
+        ]
+      },
       {
         text: "Getting Started",
         items: [
@@ -70,7 +77,7 @@ export default defineConfig({
       }
     ],
     socialLinks: [
-      { icon: "github", link: "https://github.com/your-org/ai-orchestrator" }
+      { icon: "github", link: "https://github.com/TensorGreed/ai-orchestrator" }
     ]
   }
 });

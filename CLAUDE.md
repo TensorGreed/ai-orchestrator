@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repo orientation
 
-This is a pnpm + TypeScript monorepo (`pnpm-workspace.yaml` globs `apps/*` + `packages/*`). It implements a visual AI workflow builder/runtime inspired by n8n / Langflow. Node.js 20+ and pnpm 10+ required.
+This is a pnpm + TypeScript monorepo (`pnpm-workspace.yaml` globs `apps/*` + `packages/*`). It implements **L2M** — a visual AI workflow builder and MCP-native agent runtime. Node.js 20+ and pnpm 10+ required.
 
 ## Common commands
 

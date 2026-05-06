@@ -8,7 +8,7 @@ coverage
 *.tsbuildinfo
 apps/api/data
 SprintPlan.md
-N8N_PARITY_ROADMAP.md
 PRODUCTION_BEGINNER_ROADMAP.md
 apps/web/test-results
 apps/web/playwright-report
+N8N_PARITY_ROADMAP.md
