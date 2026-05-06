@@ -38,6 +38,7 @@ import { SecretService } from "./services/secret-service";
 import { MCP_PRESETS } from "./services/mcp-presets";
 import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
+import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
@@ -7169,8 +7170,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           // Malformed JSON shouldn't break the gallery — skip badges + thumbnail silently.
         }
       }
-      return { ...tpl, dependencies, thumbnailSvg };
+      const featured = FEATURED_TEMPLATE_IDS.has(tpl.id);
+      return { ...tpl, dependencies, thumbnailSvg, featured };
     });
+    // Featured templates float to the top of the gallery; everything else
+    // keeps the store's category+name order from listTemplates.
+    enriched.sort((a, b) => Number(b.featured) - Number(a.featured));
     return { templates: enriched };
   });
 

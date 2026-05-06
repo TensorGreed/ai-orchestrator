@@ -4109,6 +4109,24 @@ select {
   box-shadow: 0 2px 8px rgba(0,0,0,0.08);
   border-color: var(--accent-line, #bfdbfe);
 }
+.tpl-card-featured {
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 1px 4px rgba(37, 99, 235, 0.12);
+  position: relative;
+}
+.tpl-card-featured-badge {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: var(--accent, #2563eb);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
 .tpl-card-thumbnail {
   margin: -1.25rem -1.25rem 0.75rem;
   padding: 0;

@@ -3,9 +3,14 @@
 node_modules/**
 src/**
 test/**
+dist/**/*.test.js
+dist/**/*.test.js.map
 **/*.test.ts
 **/*.map
 tsconfig.json
 .gitignore
 .eslintrc*
 **/tsconfig.json
+*.vsix
+.github/**
+PUBLISHING.md

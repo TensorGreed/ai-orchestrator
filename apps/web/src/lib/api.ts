@@ -1600,6 +1600,9 @@ export interface TemplateListItem {
    *  embedded inline via dangerouslySetInnerHTML. Empty string when the workflow
    *  has no nodes or its JSON failed to parse. */
   thumbnailSvg?: string;
+  /** Curated hero templates: float to the top of the gallery and render with
+   *  a "Featured" badge. Set server-side from the FEATURED_TEMPLATE_IDS list. */
+  featured?: boolean;
 }
 
 export async function fetchTemplates(filters?: { category?: string; search?: string }) {

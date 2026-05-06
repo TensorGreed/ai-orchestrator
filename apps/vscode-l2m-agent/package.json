@@ -8,11 +8,35 @@
   "license": "UNLICENSED",
   "type": "commonjs",
   "main": "./dist/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TensorGreed/ai-orchestrator.git",
+    "directory": "apps/vscode-l2m-agent"
+  },
+  "homepage": "https://github.com/TensorGreed/ai-orchestrator#readme",
+  "bugs": {
+    "url": "https://github.com/TensorGreed/ai-orchestrator/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "mcp",
+    "model-context-protocol",
+    "workflow",
+    "llm",
+    "anthropic",
+    "openai",
+    "claude",
+    "gpt",
+    "coding-agent",
+    "automation"
+  ],
   "engines": {
     "vscode": "^1.93.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Education"
   ],
   "activationEvents": [
     "onView:l2mAgent.chatView",
@@ -167,9 +191,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit false",
     "test": "vitest run",
-    "watch": "tsc -p tsconfig.json --watch"
+    "watch": "tsc -p tsconfig.json --watch",
+    "package": "vsce package --no-dependencies --out vscode-l2m-agent.vsix",
+    "publish:vsce": "vsce publish --no-dependencies",
+    "publish:openvsx": "ovsx publish vscode-l2m-agent.vsix"
   },
   "devDependencies": {
-    "@types/vscode": "^1.93.0"
+    "@types/vscode": "^1.93.0",
+    "@vscode/vsce": "^3.2.1",
+    "ovsx": "^0.10.1"
   }
 }

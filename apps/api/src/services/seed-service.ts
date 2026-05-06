@@ -33,6 +33,15 @@ function builtInTemplateId(fileName: string): string {
   return `builtin-${fileName.replace(/\.json$/i, "").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
+/**
+ * Templates that should appear first in the gallery and carry a "Featured"
+ * badge. Used to promote hero use cases (the VS Code coding-agent flow is the
+ * canonical L2M+IDE story) above the long tail of demo flows.
+ */
+export const FEATURED_TEMPLATE_IDS = new Set<string>([
+  builtInTemplateId("vscode-l2m-coding-agent-flow.json")
+]);
+
 export function seedWorkflowsIfEmpty(store: SqliteStore, workspaceRoot: string): void {
   if (store.countWorkflows() > 0) {
     return;

@@ -98,7 +98,11 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
       ) : (
         <div className="tpl-grid">
           {templates.map((tpl) => (
-            <div key={tpl.id} className="tpl-card">
+            <div
+              key={tpl.id}
+              className={tpl.featured ? "tpl-card tpl-card-featured" : "tpl-card"}
+              data-testid={`tpl-card-${tpl.id}`}
+            >
               {tpl.thumbnailSvg ? (
                 <div
                   className="tpl-card-thumbnail"
@@ -109,6 +113,11 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
                   dangerouslySetInnerHTML={{ __html: tpl.thumbnailSvg }}
                 />
               ) : null}
+              {tpl.featured && (
+                <div className="tpl-card-featured-badge" data-testid={`tpl-featured-${tpl.id}`}>
+                  ★ Featured
+                </div>
+              )}
               <div className="tpl-card-name">{tpl.name}</div>
               <div className="tpl-card-desc">
                 {tpl.description || "No description provided."}

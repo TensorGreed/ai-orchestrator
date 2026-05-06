@@ -76,3 +76,43 @@ jobs:
           name: playwright-report
           path: apps/web/playwright-report
           if-no-files-found: ignore
+
+  vscode-extension:
+    name: VS Code Extension Package
+    runs-on: ubuntu-latest
+    needs: quality
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Compile extension
+        run: pnpm --filter ./apps/vscode-l2m-agent build
+
+      - name: Run extension tests
+        run: pnpm --filter ./apps/vscode-l2m-agent test
+
+      # vsce package produces vscode-l2m-agent.vsix in the extension folder.
+      # --no-dependencies skips the npm dep walk (workspace deps would otherwise
+      # confuse vsce); the dist/ output from `build` above is what ships.
+      - name: Build .vsix
+        run: pnpm --filter ./apps/vscode-l2m-agent run package
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-l2m-agent-vsix
+          path: apps/vscode-l2m-agent/vscode-l2m-agent.vsix
+          if-no-files-found: error

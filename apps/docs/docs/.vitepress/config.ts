@@ -24,7 +24,8 @@ export default defineConfig({
         text: "Getting Started",
         items: [
           { text: "Quickstart", link: "/getting-started/quickstart" },
-          { text: "Environment", link: "/getting-started/environment" }
+          { text: "Environment", link: "/getting-started/environment" },
+          { text: "VS Code Extension", link: "/getting-started/vscode-extension" }
         ]
       },
       {
