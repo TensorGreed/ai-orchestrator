@@ -106,6 +106,11 @@ export interface ParsedAssistantResponse {
 
 export type WebviewMessage =
   | { type: "sendPrompt"; text: string }
+  | { type: "newSession" }
+  | { type: "switchSession"; sessionId: string }
+  | { type: "renameSession"; sessionId: string; title?: string }
+  | { type: "deleteSession"; sessionId: string }
+  | { type: "branchSession"; sessionId: string }
   | { type: "copyCode"; source: string }
   | { type: "insertCode"; source: string }
   | { type: "openAttachment"; attachment: ChatAttachment }
@@ -116,6 +121,7 @@ export type WebviewMessage =
 export type ExtensionToWebviewMessage =
   | { type: "setDraft"; text: string }
   | { type: "appendMessage"; message: ChatMessage }
+  | { type: "assistantDelta"; text: string }
   | { type: "updateActionStatus"; actionId: string; status: ChatActionStatus; result: ActionResult }
   | { type: "progressMessage"; text: string }
   | { type: "errorMessage"; text: string }

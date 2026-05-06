@@ -24,6 +24,12 @@ Configure these VS Code settings before sending a prompt:
 - `l2mAgent.recentTurnCount`: Recent chat turns sent in full.
 - `l2mAgent.maxCompactedMemoryChars`: Local compacted memory character limit.
 
+## Sessions
+
+The sidebar keeps a workspace-local session archive. Use **New** to start a fresh chat without deleting prior chats, select an older session from the session list to continue it with the same `session_id`, use **Branch** to fork the current chat into a new session, and use the search box to filter saved sessions by title or message text.
+
+Each session stores its own visible messages, pinned files, action results, compacted memory, and L2M `session_id`. The archive keeps the most recent 30 sessions, with up to 100 messages per session.
+
 ## L2M Workflow
 
 Use Template Gallery -> Agents -> VS Code L2M Coding Agent to create the recommended workflow, then set `l2mAgent.workflowId` to the imported workflow ID.
@@ -105,7 +111,7 @@ Preferred response:
 ## Commands
 
 - `L2M Agent: Open Chat`: Opens the `L2M Agent` Activity Bar container and focuses the sidebar chat view.
-- `L2M Agent: New Session`: Clears chat history, compacted memory, pinned files, and action results for the workspace.
+- `L2M Agent: New Session`: Starts a fresh session while keeping earlier sessions available in the sidebar archive.
 - `L2M Agent: Pin Active File`: Adds the current file to future context bundles.
 - `L2M Agent: Send Selection`: Opens chat and seeds the draft with selected text.
 - `L2M Agent: Reset Memory`: Clears local compacted memory while keeping the visible chat history.

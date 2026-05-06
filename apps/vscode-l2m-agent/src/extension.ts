@@ -7,6 +7,15 @@ import { collectWorkspaceContext } from "./contextCollector";
 import { L2MClient } from "./l2mClient";
 import { parseAssistantResponse } from "./responseParser";
 import {
+  applyMessageToSession,
+  cloneSessionAsBranch,
+  createChatSession,
+  inferSessionTitle,
+  limitSessionsKeepingActive,
+  normalizeSessions,
+  summarizeSessions
+} from "./sessionArchive";
+import {
   buildRecentTurns,
   buildSessionMemorySnapshot,
   compactSessionMemory,
@@ -15,13 +24,16 @@ import {
 } from "./sessionMemory";
 import type { L2MAgentConfig } from "./protocol";
 import type { ActionResult, ChatAction, ChatAttachment, ChatMessage, ExtensionToWebviewMessage, WebviewMessage } from "./protocol";
+import type { ChatSession } from "./sessionArchive";
 import type { SessionMemorySnapshot, SessionMemoryState } from "./sessionMemory";
 
 const SESSION_ID_KEY = "l2mAgent.sessionId";
+const SESSIONS_KEY = "l2mAgent.sessions";
 const PINNED_FILES_KEY = "l2mAgent.pinnedFiles";
 const MESSAGES_KEY = "l2mAgent.messages";
 const SESSION_MEMORY_KEY = "l2mAgent.sessionMemory";
 const ACTION_RESULTS_KEY = "l2mAgent.actionResults";
+const MAX_PERSISTED_SESSIONS = 30;
 const MAX_PERSISTED_MESSAGES = 100;
 const MAX_ACTION_RESULTS = 50;
 const CHAT_VIEW_ID = "l2mAgent.chatView";
@@ -39,14 +51,11 @@ export function activate(context: vscode.ExtensionContext) {
       void chatViewProvider.show();
     }),
     vscode.commands.registerCommand("l2mAgent.newSession", async () => {
-      const sessionId = await sessionStore.rotateSession();
-      await sessionStore.clearMessages();
-      await sessionStore.clearActionResults();
-      await sessionStore.resetMemory();
+      const sessionId = await sessionStore.createNewSession();
+      await sessionStore.appendMessage(createChatMessage("system", `Started new session: ${sessionId}`));
       await chatViewProvider.show();
       chatViewProvider.refresh();
-      await chatViewProvider.postSystemMessage(`Started new session: ${sessionId}`);
-      void vscode.window.showInformationMessage("L2M Agent session reset.");
+      void vscode.window.showInformationMessage("L2M Agent started a new session.");
     }),
     vscode.commands.registerCommand("l2mAgent.pinActiveFile", async () => {
       const editor = vscode.window.activeTextEditor;
@@ -93,81 +102,156 @@ export function deactivate() {
 }
 
 class SessionStore {
+  private sessionsCache: ChatSession[] | undefined;
+  private activeSessionIdCache: string | undefined;
+
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   getSessionId(): string {
-    const existing = this.context.workspaceState.get<string>(SESSION_ID_KEY);
-    if (existing) {
-      return existing;
-    }
-
-    const next = this.createSessionId();
-    void this.context.workspaceState.update(SESSION_ID_KEY, next);
-    return next;
+    return this.getActiveSession().id;
   }
 
-  async rotateSession(): Promise<string> {
-    const next = this.createSessionId();
-    await this.context.workspaceState.update(SESSION_ID_KEY, next);
-    return next;
+  getSessionSummaries(): ReturnType<typeof summarizeSessions> {
+    return summarizeSessions(this.getSessions());
+  }
+
+  async createNewSession(): Promise<string> {
+    const session = createChatSession(this.createSessionId());
+    await this.saveSessions([session, ...this.getSessions()], session.id);
+    return session.id;
+  }
+
+  async branchSession(sessionId: string): Promise<string> {
+    const source = this.getSessions().find((session) => session.id === sessionId) ?? this.getActiveSession();
+    const branch = cloneSessionAsBranch(source, this.createSessionId());
+    await this.saveSessions([branch, ...this.getSessions()], branch.id);
+    return branch.id;
+  }
+
+  async switchSession(sessionId: string): Promise<boolean> {
+    const sessions = this.getSessions();
+    if (!sessions.some((session) => session.id === sessionId)) {
+      return false;
+    }
+
+    await this.saveSessions(sessions, sessionId);
+    return true;
+  }
+
+  async renameSession(sessionId: string, title: string): Promise<boolean> {
+    const trimmed = title.trim();
+    if (!trimmed) {
+      return false;
+    }
+
+    const now = new Date().toISOString();
+    const sessions = this.getSessions();
+    let updated = false;
+    const next = sessions.map((session) => {
+      if (session.id !== sessionId) {
+        return session;
+      }
+      updated = true;
+      return {
+        ...session,
+        title: trimmed.slice(0, 80),
+        updatedAt: now
+      };
+    });
+
+    if (!updated) {
+      return false;
+    }
+
+    await this.saveSessions(next, this.getSessionId());
+    return true;
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    const remaining = this.getSessions().filter((session) => session.id !== sessionId);
+    if (remaining.length === 0) {
+      const replacement = createChatSession(this.createSessionId());
+      await this.saveSessions([replacement], replacement.id);
+      return;
+    }
+
+    const activeSessionId = this.getSessionId() === sessionId ? remaining[0].id : this.getSessionId();
+    await this.saveSessions(remaining, activeSessionId);
   }
 
   getPinnedFiles(): string[] {
-    return this.context.workspaceState.get<string[]>(PINNED_FILES_KEY, []);
+    return [...this.getActiveSession().pinnedFiles];
   }
 
   async pinFile(uri: vscode.Uri): Promise<string> {
     const relative = workspaceRelativePath(uri);
-    const pinned = this.getPinnedFiles();
+    const session = this.getActiveSession();
+    const pinned = [...session.pinnedFiles];
     if (!pinned.includes(relative)) {
       pinned.push(relative);
-      await this.context.workspaceState.update(PINNED_FILES_KEY, pinned);
+      await this.saveActiveSession({
+        ...session,
+        pinnedFiles: pinned,
+        updatedAt: new Date().toISOString()
+      });
     }
     return relative;
   }
 
   getMessages(): ChatMessage[] {
-    return this.context.workspaceState.get<ChatMessage[]>(MESSAGES_KEY, []);
+    return [...this.getActiveSession().messages];
   }
 
   async appendMessage(message: ChatMessage): Promise<void> {
-    const messages = [...this.getMessages(), message].slice(-MAX_PERSISTED_MESSAGES);
-    await this.context.workspaceState.update(MESSAGES_KEY, messages);
+    await this.saveActiveSession(applyMessageToSession(this.getActiveSession(), message, MAX_PERSISTED_MESSAGES));
   }
 
   async clearMessages(): Promise<void> {
-    await this.context.workspaceState.update(MESSAGES_KEY, []);
+    await this.saveActiveSession({
+      ...this.getActiveSession(),
+      messages: [],
+      updatedAt: new Date().toISOString()
+    });
   }
 
   getActionResults(): ActionResult[] {
-    return this.context.workspaceState.get<ActionResult[]>(ACTION_RESULTS_KEY, []);
+    return [...this.getActiveSession().actionResults];
   }
 
   async appendActionResult(result: ActionResult): Promise<void> {
-    const results = [...this.getActionResults(), result].slice(-MAX_ACTION_RESULTS);
-    await this.context.workspaceState.update(ACTION_RESULTS_KEY, results);
+    const session = this.getActiveSession();
+    await this.saveActiveSession({
+      ...session,
+      actionResults: [...session.actionResults, result].slice(-MAX_ACTION_RESULTS),
+      updatedAt: result.createdAt || new Date().toISOString()
+    });
   }
 
   async clearActionResults(): Promise<void> {
-    await this.context.workspaceState.update(ACTION_RESULTS_KEY, []);
+    await this.saveActiveSession({
+      ...this.getActiveSession(),
+      actionResults: [],
+      updatedAt: new Date().toISOString()
+    });
   }
 
   async updateActionStatus(actionId: string, status: ActionResult["status"]): Promise<void> {
-    const messages = this.getMessages().map((message) => ({
+    const session = this.getActiveSession();
+    const messages = session.messages.map((message) => ({
       ...message,
       actions: message.actions?.map((action) =>
         action.id === actionId ? { ...action, status } : action
       )
     }));
-    await this.context.workspaceState.update(MESSAGES_KEY, messages);
+    await this.saveActiveSession({
+      ...session,
+      messages,
+      updatedAt: new Date().toISOString()
+    });
   }
 
   getSessionMemory(): SessionMemoryState {
-    const stored = this.context.workspaceState.get<Partial<SessionMemoryState>>(SESSION_MEMORY_KEY, {});
-    return {
-      ...EMPTY_SESSION_MEMORY,
-      ...stored
-    };
+    return { ...this.getActiveSession().memory };
   }
 
   getMemorySnapshot(config: L2MAgentConfig): SessionMemorySnapshot {
@@ -206,7 +290,106 @@ class SessionStore {
   }
 
   private async updateSessionMemory(memory: SessionMemoryState): Promise<void> {
-    await this.context.workspaceState.update(SESSION_MEMORY_KEY, memory);
+    await this.saveActiveSession({
+      ...this.getActiveSession(),
+      memory,
+      updatedAt: memory.updatedAt || new Date().toISOString()
+    });
+  }
+
+  private getActiveSession(): ChatSession {
+    const sessions = this.getSessions();
+    const activeSessionId = this.getActiveSessionId(sessions);
+    const active = sessions.find((session) => session.id === activeSessionId);
+    if (active) {
+      return active;
+    }
+
+    const fallback = sessions[0] ?? createChatSession(this.createSessionId());
+    void this.saveSessions([fallback, ...sessions.filter((session) => session.id !== fallback.id)], fallback.id);
+    return fallback;
+  }
+
+  private getSessions(): ChatSession[] {
+    if (this.sessionsCache) {
+      return this.sessionsCache;
+    }
+
+    const stored = normalizeSessions(this.context.workspaceState.get<unknown>(SESSIONS_KEY));
+    if (stored.length > 0) {
+      this.sessionsCache = limitSessionsKeepingActive(stored, this.getActiveSessionId(stored), MAX_PERSISTED_SESSIONS);
+      return this.sessionsCache;
+    }
+
+    const legacySession = this.createLegacySession();
+    this.sessionsCache = [legacySession];
+    this.activeSessionIdCache = legacySession.id;
+    void this.saveSessions(this.sessionsCache, legacySession.id);
+    return this.sessionsCache;
+  }
+
+  private createLegacySession(): ChatSession {
+    const now = new Date().toISOString();
+    const messages = this.context.workspaceState.get<ChatMessage[]>(MESSAGES_KEY, []).slice(-MAX_PERSISTED_MESSAGES);
+    const storedMemory = this.context.workspaceState.get<Partial<SessionMemoryState>>(SESSION_MEMORY_KEY, {});
+    return createChatSession(
+      this.context.workspaceState.get<string>(SESSION_ID_KEY) || this.createSessionId(),
+      now,
+      {
+        title: inferSessionTitle(messages),
+        createdAt: messages[0]?.createdAt || now,
+        updatedAt: messages.at(-1)?.createdAt || now,
+        messages,
+        pinnedFiles: this.context.workspaceState.get<string[]>(PINNED_FILES_KEY, []),
+        memory: {
+          ...EMPTY_SESSION_MEMORY,
+          ...storedMemory
+        },
+        actionResults: this.context.workspaceState.get<ActionResult[]>(ACTION_RESULTS_KEY, []).slice(-MAX_ACTION_RESULTS)
+      }
+    );
+  }
+
+  private getActiveSessionId(sessions: ChatSession[]): string {
+    const cached = this.activeSessionIdCache;
+    if (cached && sessions.some((session) => session.id === cached)) {
+      return cached;
+    }
+
+    const stored = this.context.workspaceState.get<string>(SESSION_ID_KEY);
+    if (stored && sessions.some((session) => session.id === stored)) {
+      this.activeSessionIdCache = stored;
+      return stored;
+    }
+
+    const fallback = sessions[0]?.id ?? this.createSessionId();
+    this.activeSessionIdCache = fallback;
+    return fallback;
+  }
+
+  private async saveActiveSession(session: ChatSession): Promise<void> {
+    const activeSessionId = this.getSessionId();
+    const sessions = this.getSessions().map((candidate) =>
+      candidate.id === activeSessionId ? session : candidate
+    );
+    await this.saveSessions(sessions, activeSessionId);
+  }
+
+  private async saveSessions(sessions: ChatSession[], activeSessionId: string): Promise<void> {
+    const limited = limitSessionsKeepingActive(sessions, activeSessionId, MAX_PERSISTED_SESSIONS);
+    const active = limited.find((session) => session.id === activeSessionId) ?? limited[0];
+    const nextActiveSessionId = active?.id ?? activeSessionId;
+    this.sessionsCache = limited;
+    this.activeSessionIdCache = nextActiveSessionId;
+
+    await Promise.all([
+      this.context.workspaceState.update(SESSIONS_KEY, limited),
+      this.context.workspaceState.update(SESSION_ID_KEY, nextActiveSessionId),
+      this.context.workspaceState.update(PINNED_FILES_KEY, active?.pinnedFiles ?? []),
+      this.context.workspaceState.update(MESSAGES_KEY, active?.messages ?? []),
+      this.context.workspaceState.update(SESSION_MEMORY_KEY, active?.memory ?? EMPTY_SESSION_MEMORY),
+      this.context.workspaceState.update(ACTION_RESULTS_KEY, active?.actionResults ?? [])
+    ]);
   }
 
   private createSessionId(): string {
@@ -336,6 +519,16 @@ class L2MAgentChatWebviewController {
   private async handleWebviewMessage(message: WebviewMessage): Promise<void> {
     if (message.type === "sendPrompt") {
       await this.handlePrompt(message.text);
+    } else if (message.type === "newSession") {
+      await this.startNewSessionFromWebview();
+    } else if (message.type === "switchSession") {
+      await this.switchSessionFromWebview(message.sessionId);
+    } else if (message.type === "renameSession") {
+      await this.renameSessionFromWebview(message.sessionId, message.title);
+    } else if (message.type === "deleteSession") {
+      await this.deleteSessionFromWebview(message.sessionId);
+    } else if (message.type === "branchSession") {
+      await this.branchSessionFromWebview(message.sessionId);
     } else if (message.type === "copyCode") {
       await vscode.env.clipboard.writeText(message.source);
       void vscode.window.showInformationMessage("Copied code to clipboard.");
@@ -350,6 +543,57 @@ class L2MAgentChatWebviewController {
     } else if (message.type === "runAction") {
       await this.runAction(message.action);
     }
+  }
+
+  private async startNewSessionFromWebview(): Promise<void> {
+    const sessionId = await this.sessionStore.createNewSession();
+    await this.sessionStore.appendMessage(createChatMessage("system", `Started new session: ${sessionId}`));
+    this.refresh();
+    void vscode.window.showInformationMessage("L2M Agent started a new session.");
+  }
+
+  private async switchSessionFromWebview(sessionId: string): Promise<void> {
+    if (await this.sessionStore.switchSession(sessionId)) {
+      this.refresh();
+    }
+  }
+
+  private async renameSessionFromWebview(sessionId: string, title?: string): Promise<void> {
+    const currentTitle = this.sessionStore.getSessionSummaries().find((session) => session.id === sessionId)?.title ?? "New chat";
+    const nextTitle = title ?? await vscode.window.showInputBox({
+      title: "Rename L2M Agent Session",
+      prompt: "Enter a session name.",
+      value: currentTitle,
+      ignoreFocusOut: true
+    });
+
+    if (nextTitle === undefined) {
+      return;
+    }
+
+    if (await this.sessionStore.renameSession(sessionId, nextTitle)) {
+      this.refresh();
+    }
+  }
+
+  private async deleteSessionFromWebview(sessionId: string): Promise<void> {
+    const choice = await vscode.window.showWarningMessage(
+      "Delete this L2M Agent session?",
+      { modal: true, detail: "This removes the archived chat, pinned files, action results, and compacted memory for this session." },
+      "Delete"
+    );
+    if (choice !== "Delete") {
+      return;
+    }
+
+    await this.sessionStore.deleteSession(sessionId);
+    this.refresh();
+  }
+
+  private async branchSessionFromWebview(sessionId: string): Promise<void> {
+    const branchId = await this.sessionStore.branchSession(sessionId);
+    await this.sessionStore.appendMessage(createChatMessage("system", `Branched session: ${branchId}`));
+    this.refresh();
   }
 
   private async handlePrompt(text: string): Promise<void> {
@@ -382,7 +626,7 @@ class L2MAgentChatWebviewController {
         },
         {
           onProgress: (message) => this.postToWebview({ type: "progressMessage", text: message }),
-          onDelta: (delta) => this.postToWebview({ type: "progressMessage", text: `LLM: ${delta}` })
+          onDelta: (delta) => this.postToWebview({ type: "assistantDelta", text: delta })
         }
       );
       const parsed = parseAssistantResponse(result);
@@ -516,6 +760,7 @@ class L2MAgentChatWebviewController {
     const config = getL2MAgentConfig();
     const state = {
       sessionId: this.sessionStore.getSessionId(),
+      sessions: this.sessionStore.getSessionSummaries(),
       pinnedFiles: this.sessionStore.getPinnedFiles(),
       messages: this.sessionStore.getMessages(),
       memory: this.sessionStore.getMemorySnapshot(config)
@@ -545,13 +790,84 @@ class L2MAgentChatWebviewController {
         border-bottom: 1px solid var(--vscode-panel-border);
       }
       h1 {
-        margin: 0 0 6px;
+        margin: 0;
         font-size: 15px;
+      }
+      .title-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
       }
       .meta {
         color: var(--vscode-descriptionForeground);
         font-size: 12px;
         overflow-wrap: anywhere;
+      }
+      .session-history {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .session-controls {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 6px;
+      }
+      .session-list {
+        display: grid;
+        gap: 6px;
+        max-height: 220px;
+        overflow: auto;
+      }
+      .session-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: stretch;
+        border: 1px solid var(--vscode-panel-border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .session-row.active {
+        border-color: var(--vscode-focusBorder);
+      }
+      .session-pick {
+        width: auto;
+        min-width: 0;
+        display: grid;
+        gap: 2px;
+        text-align: left;
+        color: var(--vscode-foreground);
+        background: transparent;
+        border-radius: 0;
+      }
+      .session-pick:hover {
+        background: var(--vscode-list-hoverBackground);
+      }
+      .session-title,
+      .session-preview {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .session-title {
+        font-size: 12px;
+      }
+      .session-preview {
+        color: var(--vscode-descriptionForeground);
+        font-size: 11px;
+      }
+      .session-actions {
+        display: flex;
+        align-items: stretch;
+        border-left: 1px solid var(--vscode-panel-border);
+      }
+      .session-actions button {
+        width: 28px;
+        min-width: 28px;
+        border-radius: 0;
+        padding: 0;
       }
       .pinned,
       .memory {
@@ -574,7 +890,7 @@ class L2MAgentChatWebviewController {
       }
       main {
         overflow: auto;
-        padding: 14px;
+        padding: 14px 16px;
       }
       .empty {
         color: var(--vscode-descriptionForeground);
@@ -583,40 +899,77 @@ class L2MAgentChatWebviewController {
         padding: 14px;
       }
       .message {
-        border: 1px solid var(--vscode-panel-border);
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr);
+        gap: 10px;
+        padding: 8px 0 14px;
+        margin-bottom: 6px;
+        border-bottom: 1px solid var(--vscode-panel-border);
+      }
+      .message:last-child {
+        border-bottom: 0;
+      }
+      .message-icon {
+        display: grid;
+        place-items: center;
+        width: 22px;
+        height: 22px;
+        margin-top: 1px;
+        border-radius: 50%;
+        color: var(--vscode-badge-foreground);
+        background: var(--vscode-badge-background);
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1;
+      }
+      .message.assistant .message-icon {
+        color: var(--vscode-button-secondaryForeground);
+        background: var(--vscode-button-secondaryBackground);
+      }
+      .message.user .message-body {
+        width: fit-content;
+        max-width: 100%;
+        justify-self: end;
+        border: 1px solid var(--vscode-input-border);
         border-radius: 8px;
-        padding: 10px;
-        margin-bottom: 12px;
-        background: var(--vscode-editor-background);
-      }
-      .message.user {
+        padding: 8px 10px;
         background: var(--vscode-input-background);
-      }
-      .message.assistant {
-        background: var(--vscode-editor-inactiveSelectionBackground);
       }
       .message.system {
         color: var(--vscode-descriptionForeground);
-        background: transparent;
-        border-style: dashed;
       }
       .message.error {
         color: var(--vscode-errorForeground);
-        border-color: var(--vscode-inputValidation-errorBorder);
-        background: var(--vscode-inputValidation-errorBackground);
+      }
+      .message.error .message-body {
+        border-left: 2px solid var(--vscode-inputValidation-errorBorder);
+        padding-left: 10px;
+      }
+      .message.draft .message-text::after {
+        content: "";
+        display: inline-block;
+        width: 7px;
+        height: 1em;
+        margin-left: 2px;
+        vertical-align: -2px;
+        background: var(--vscode-descriptionForeground);
+        animation: caretBlink 1s step-end infinite;
       }
       .message-head {
         display: flex;
         justify-content: space-between;
         gap: 10px;
-        margin-bottom: 8px;
+        margin-bottom: 5px;
         color: var(--vscode-descriptionForeground);
-        font-size: 12px;
-        text-transform: uppercase;
+        font-size: 11px;
       }
       .message-text {
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+        line-height: 1.45;
+      }
+      .message-text > div + div {
+        margin-top: 8px;
       }
       .code-card,
       .attachment-card,
@@ -692,20 +1045,40 @@ class L2MAgentChatWebviewController {
         padding-left: 18px;
       }
       footer {
-        display: grid;
-        gap: 8px;
         padding: 12px;
         border-top: 1px solid var(--vscode-panel-border);
       }
-      textarea {
-        min-height: 96px;
-        resize: vertical;
+      .composer {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: end;
+        gap: 8px;
+        padding: 6px;
+        border: 1px solid var(--vscode-input-border);
+        border-radius: 8px;
+        background: var(--vscode-input-background);
+      }
+      input {
+        min-width: 0;
         color: var(--vscode-input-foreground);
         background: var(--vscode-input-background);
         border: 1px solid var(--vscode-input-border);
-        border-radius: 6px;
-        padding: 8px;
+        border-radius: 4px;
+        padding: 5px 7px;
+        font-family: var(--vscode-font-family);
+      }
+      textarea {
+        min-height: 32px;
+        max-height: 160px;
+        resize: none;
+        color: var(--vscode-input-foreground);
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        padding: 7px 6px;
         font-family: var(--vscode-editor-font-family);
+        line-height: 1.35;
+        outline: none;
       }
       button {
         width: max-content;
@@ -723,17 +1096,43 @@ class L2MAgentChatWebviewController {
         color: var(--vscode-button-secondaryForeground);
         background: var(--vscode-button-secondaryBackground);
       }
+      button.icon-button {
+        display: grid;
+        place-items: center;
+        font-size: 14px;
+        line-height: 1;
+      }
+      button.send-button {
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border-radius: 6px;
+        font-size: 15px;
+      }
       button:disabled {
         opacity: 0.65;
         cursor: not-allowed;
+      }
+      @keyframes caretBlink {
+        50% { opacity: 0; }
       }
     </style>
   </head>
   <body>
     <div class="shell">
       <header>
-        <h1>L2M Agent</h1>
+        <div class="title-row">
+          <h1>L2M Agent</h1>
+          <button id="newSession" class="secondary" type="button">New</button>
+        </div>
         <div class="meta">Session: <span id="sessionId"></span></div>
+        <section class="session-history">
+          <div class="session-controls">
+            <input id="sessionFilter" type="search" placeholder="Search sessions" />
+            <button id="branchSession" class="secondary" type="button">Branch</button>
+          </div>
+          <div id="sessionList" class="session-list"></div>
+        </section>
         <details class="pinned">
           <summary>Pinned files</summary>
           <ul id="pinnedFiles"></ul>
@@ -748,27 +1147,116 @@ class L2MAgentChatWebviewController {
       </header>
       <main id="messages"></main>
       <footer>
-        <textarea id="prompt" placeholder="Ask L2M Agent..."></textarea>
-        <button id="send" type="button">Send</button>
+        <div class="composer">
+          <textarea id="prompt" rows="1" placeholder="Ask L2M Agent..."></textarea>
+          <button id="send" class="send-button" type="button" title="Send (Enter)" aria-label="Send prompt">&#8593;</button>
+        </div>
       </footer>
     </div>
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
       const state = ${jsonForScript(state)};
       const messages = document.getElementById("messages");
+      const sessionList = document.getElementById("sessionList");
+      const sessionFilter = document.getElementById("sessionFilter");
       const pinnedFiles = document.getElementById("pinnedFiles");
       const memoryStatus = document.getElementById("memoryStatus");
       const sessionId = document.getElementById("sessionId");
       const prompt = document.getElementById("prompt");
       const send = document.getElementById("send");
+      const newSession = document.getElementById("newSession");
+      const branchSession = document.getElementById("branchSession");
       const resetMemory = document.getElementById("resetMemory");
       let currentProgressList = null;
       let currentProgressDetails = null;
+      let assistantDraftItem = null;
+      let assistantDraftText = "";
 
       sessionId.textContent = state.sessionId;
+      renderSessions();
       renderPinnedFiles();
       renderMemory();
       renderMessages();
+
+      function renderSessions() {
+        sessionList.replaceChildren();
+        const query = String(sessionFilter.value || "").trim().toLowerCase();
+        const sessions = normalizedArray(state.sessions).filter((session) => {
+          if (!query) return true;
+          return String(session.searchText || session.title || "").toLowerCase().includes(query);
+        });
+
+        if (sessions.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "No matching sessions.";
+          sessionList.appendChild(empty);
+          return;
+        }
+
+        for (const session of sessions) {
+          const row = document.createElement("div");
+          row.className = "session-row" + (session.id === state.sessionId ? " active" : "");
+
+          const pick = document.createElement("button");
+          pick.className = "session-pick";
+          pick.type = "button";
+          pick.title = session.id || "";
+          pick.addEventListener("click", () => {
+            if (session.id !== state.sessionId) {
+              vscode.postMessage({ type: "switchSession", sessionId: session.id });
+            }
+          });
+
+          const title = document.createElement("span");
+          title.className = "session-title";
+          title.textContent = session.title || "New chat";
+          const preview = document.createElement("span");
+          preview.className = "session-preview";
+          preview.textContent = buildSessionPreview(session);
+          pick.append(title, preview);
+
+          const actions = document.createElement("div");
+          actions.className = "session-actions";
+          const load = document.createElement("button");
+          load.className = "secondary icon-button";
+          load.type = "button";
+          load.disabled = session.id === state.sessionId;
+          setIconButton(load, String.fromCodePoint(0x21bb), "Load session");
+          load.addEventListener("click", () => {
+            if (session.id !== state.sessionId) {
+              vscode.postMessage({ type: "switchSession", sessionId: session.id });
+            }
+          });
+          const rename = document.createElement("button");
+          rename.className = "secondary icon-button";
+          rename.type = "button";
+          setIconButton(rename, String.fromCodePoint(0x270e), "Rename session");
+          rename.addEventListener("click", () => {
+            vscode.postMessage({ type: "renameSession", sessionId: session.id });
+          });
+          const remove = document.createElement("button");
+          remove.className = "secondary icon-button";
+          remove.type = "button";
+          setIconButton(remove, String.fromCodePoint(0x1f5d1), "Delete session");
+          remove.addEventListener("click", () => {
+            vscode.postMessage({ type: "deleteSession", sessionId: session.id });
+          });
+          actions.append(load, rename, remove);
+          row.append(pick, actions);
+          sessionList.appendChild(row);
+        }
+      }
+
+      function buildSessionPreview(session) {
+        const count = Number(session.messageCount || 0);
+        const pieces = [
+          count + " message" + (count === 1 ? "" : "s"),
+          session.updatedAt ? formatDateTime(session.updatedAt) : "",
+          session.lastMessageText || ""
+        ].filter(Boolean);
+        return pieces.join(" - ");
+      }
 
       function renderPinnedFiles() {
         pinnedFiles.replaceChildren();
@@ -815,16 +1303,45 @@ class L2MAgentChatWebviewController {
         if (!state.messages.some((item) => item.id === message.id)) {
           state.messages.push(message);
         }
+        updateActiveSessionSummary(message);
         const empty = messages.querySelector(".empty");
         if (empty) empty.remove();
+        if (message.role === "assistant" && assistantDraftItem) {
+          const rendered = renderMessage(message);
+          assistantDraftItem.replaceWith(rendered);
+          assistantDraftItem = null;
+          assistantDraftText = "";
+          messages.scrollTop = messages.scrollHeight;
+          return;
+        }
         messages.appendChild(renderMessage(message));
         messages.scrollTop = messages.scrollHeight;
+      }
+
+      function updateActiveSessionSummary(message) {
+        const sessions = normalizedArray(state.sessions);
+        const active = sessions.find((session) => session.id === state.sessionId);
+        if (!active) return;
+        active.messageCount = Number(active.messageCount || 0) + 1;
+        active.updatedAt = message.createdAt || new Date().toISOString();
+        active.lastMessageText = summarizeForUi(message.text || "", 180);
+        active.searchText = String([active.searchText || "", message.text || ""].join(" ")).toLowerCase();
+        if ((active.title || "New chat") === "New chat" && message.role === "user") {
+          active.title = summarizeForUi(message.text || "", 60) || "New chat";
+        }
+        renderSessions();
       }
 
       function renderMessage(message) {
         const item = document.createElement("article");
         item.className = "message " + (message.role || "assistant") + (message.variant === "error" ? " error" : "");
 
+        const icon = document.createElement("div");
+        icon.className = "message-icon";
+        icon.textContent = roleIcon(message.role || "assistant");
+
+        const body = document.createElement("div");
+        body.className = "message-body";
         const head = document.createElement("div");
         head.className = "message-head";
         const role = document.createElement("span");
@@ -832,17 +1349,19 @@ class L2MAgentChatWebviewController {
         const time = document.createElement("span");
         time.textContent = formatTime(message.createdAt);
         head.append(role, time);
-        item.appendChild(head);
+        body.appendChild(head);
 
-        if (message.text) {
+        const text = typeof message.text === "string" ? message.text : "";
+        if (text || message.role === "assistant") {
           const textWrap = document.createElement("div");
           textWrap.className = "message-text";
-          renderTextWithFences(textWrap, String(message.text));
-          item.appendChild(textWrap);
+          textWrap.dataset.messageText = "true";
+          renderTextWithFences(textWrap, text);
+          body.appendChild(textWrap);
         }
 
         for (const code of normalizedArray(message.codes)) {
-          item.appendChild(renderCodeBlock(code));
+          body.appendChild(renderCodeBlock(code));
         }
 
         const attachments = normalizedArray(message.attachments);
@@ -852,13 +1371,14 @@ class L2MAgentChatWebviewController {
           for (const attachment of attachments) {
             list.appendChild(renderAttachment(attachment));
           }
-          item.appendChild(list);
+          body.appendChild(list);
         }
 
         for (const action of normalizedArray(message.actions)) {
-          item.appendChild(renderAction(action));
+          body.appendChild(renderAction(action));
         }
 
+        item.append(icon, body);
         return item;
       }
 
@@ -1007,10 +1527,58 @@ class L2MAgentChatWebviewController {
         messages.scrollTop = messages.scrollHeight;
       }
 
+      function appendAssistantDelta(text) {
+        const delta = String(text || "");
+        if (!delta) return;
+        const draft = ensureAssistantDraft();
+        assistantDraftText += delta;
+        const textWrap = draft.querySelector("[data-message-text='true']");
+        if (textWrap) {
+          textWrap.replaceChildren();
+          renderTextWithFences(textWrap, assistantDraftText);
+        }
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      function ensureAssistantDraft() {
+        if (assistantDraftItem) return assistantDraftItem;
+        const empty = messages.querySelector(".empty");
+        if (empty) empty.remove();
+        assistantDraftText = "";
+        assistantDraftItem = renderMessage({
+          id: "__assistant_draft",
+          role: "assistant",
+          text: "",
+          createdAt: new Date().toISOString()
+        });
+        assistantDraftItem.classList.add("draft");
+        messages.appendChild(assistantDraftItem);
+        return assistantDraftItem;
+      }
+
+      function clearAssistantDraft() {
+        if (assistantDraftItem) {
+          assistantDraftItem.remove();
+        }
+        assistantDraftItem = null;
+        assistantDraftText = "";
+      }
+
+      sessionFilter.addEventListener("input", renderSessions);
+
+      newSession.addEventListener("click", () => {
+        vscode.postMessage({ type: "newSession" });
+      });
+
+      branchSession.addEventListener("click", () => {
+        vscode.postMessage({ type: "branchSession", sessionId: state.sessionId });
+      });
+
       send.addEventListener("click", () => {
         const text = prompt.value.trim();
         if (!text) return;
         prompt.value = "";
+        autoResizePrompt();
         vscode.postMessage({ type: "sendPrompt", text });
       });
 
@@ -1019,20 +1587,27 @@ class L2MAgentChatWebviewController {
       });
 
       prompt.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+          event.preventDefault();
           send.click();
         }
       });
+      prompt.addEventListener("input", autoResizePrompt);
+      autoResizePrompt();
 
       window.addEventListener("message", (event) => {
         const message = event.data;
         if (!message || typeof message !== "object") return;
         if (message.type === "setDraft") {
           prompt.value = message.text || "";
+          autoResizePrompt();
           prompt.focus();
         }
         if (message.type === "appendMessage") {
           appendMessage(message.message);
+        }
+        if (message.type === "assistantDelta") {
+          appendAssistantDelta(message.text || "");
         }
         if (message.type === "updateActionStatus") {
           updateActionStatus(message.actionId, message.status);
@@ -1054,6 +1629,8 @@ class L2MAgentChatWebviewController {
         }
         if (message.type === "requestStarted") {
           send.disabled = true;
+          clearAssistantDraft();
+          ensureAssistantDraft();
           startProgress();
         }
         if (message.type === "requestFinished") {
@@ -1066,6 +1643,23 @@ class L2MAgentChatWebviewController {
 
       function normalizedArray(value) {
         return Array.isArray(value) ? value : [];
+      }
+
+      function setIconButton(button, icon, label) {
+        button.textContent = icon;
+        button.title = label;
+        button.setAttribute("aria-label", label);
+      }
+
+      function roleIcon(role) {
+        if (role === "user") return "U";
+        if (role === "system") return "S";
+        return "A";
+      }
+
+      function autoResizePrompt() {
+        prompt.style.height = "auto";
+        prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
       }
 
       function updateActionStatus(actionId, status) {
@@ -1088,6 +1682,24 @@ class L2MAgentChatWebviewController {
         if (!value) return "";
         try { return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
         catch { return ""; }
+      }
+
+      function formatDateTime(value) {
+        if (!value) return "";
+        try {
+          return new Date(value).toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit"
+          });
+        } catch { return ""; }
+      }
+
+      function summarizeForUi(value, maxChars) {
+        const normalized = String(value || "").replace(/\\s+/g, " ").trim();
+        if (normalized.length <= maxChars) return normalized;
+        return normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd();
       }
 
       function formatBytes(value) {
