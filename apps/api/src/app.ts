@@ -9,7 +9,7 @@ import Fastify, { type FastifyReply } from "fastify";
 import { z } from "zod";
 import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
-import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
+import { createDefaultMCPRegistry, invokeDirectMCPTool } from "@ai-orchestrator/mcp-sdk";
 import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
@@ -168,6 +168,19 @@ const mcpDiscoverSchema = z.object({
     })
     .optional(),
   allowedTools: z.array(z.string()).optional()
+});
+
+const mcpTestToolSchema = z.object({
+  serverId: z.string().min(1),
+  label: z.string().optional(),
+  connection: z.record(z.string(), z.unknown()).optional(),
+  secretRef: z
+    .object({
+      secretId: z.string().min(1)
+    })
+    .optional(),
+  toolName: z.string().min(1),
+  args: z.record(z.string(), z.unknown()).optional()
 });
 
 const approvalDecisionSchema = z.object({
@@ -6826,6 +6839,57 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Failed to discover MCP tools"
+      };
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/mcp/test-tool", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const parsed = mcpTestToolSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return {
+        error: "Invalid MCP test-tool payload",
+        details: parsed.error.issues
+      };
+    }
+
+    const serverConfig: MCPServerConfig = {
+      serverId: parsed.data.serverId,
+      label: parsed.data.label,
+      connection: parsed.data.connection,
+      secretRef: parsed.data.secretRef
+    };
+
+    const startedAt = Date.now();
+    try {
+      const result = await invokeDirectMCPTool(
+        serverConfig,
+        parsed.data.toolName,
+        parsed.data.args ?? {},
+        mcpRegistry,
+        {
+          resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
+        }
+      );
+
+      return {
+        ok: result.ok,
+        output: result.output ?? null,
+        error: result.ok ? undefined : result.error,
+        durationMs: Date.now() - startedAt
+      };
+    } catch (error) {
+      reply.code(400);
+      return {
+        ok: false,
+        output: null,
+        error: error instanceof Error ? error.message : "Failed to invoke MCP tool",
+        durationMs: Date.now() - startedAt
       };
     }
   });

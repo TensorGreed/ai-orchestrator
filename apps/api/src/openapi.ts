@@ -892,6 +892,32 @@ export const openApiSpec = {
         responses: { "200": { description: "Discovered tools" } }
       }
     },
+    "/api/mcp/test-tool": {
+      post: {
+        tags: ["MCP"],
+        summary: "Invoke a single MCP tool with sample arguments (dry-run from the editor)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["serverId", "toolName"],
+                properties: {
+                  serverId: { type: "string" },
+                  label: { type: "string" },
+                  connection: { type: "object" },
+                  secretRef: { type: "object", properties: { secretId: { type: "string" } } },
+                  toolName: { type: "string" },
+                  args: { type: "object" }
+                }
+              }
+            }
+          }
+        },
+        responses: { "200": { description: "Tool invocation result" } }
+      }
+    },
 
     // ── Connectors ──────────────────────────────────────────────────────────
     "/api/connectors/test": {

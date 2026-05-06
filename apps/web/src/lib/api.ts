@@ -478,6 +478,27 @@ export async function discoverMcpTools(payload: {
   });
 }
 
+export interface McpTestToolResult {
+  ok: boolean;
+  output: unknown;
+  error?: string;
+  durationMs: number;
+}
+
+export async function testMcpTool(payload: {
+  serverId: string;
+  label?: string;
+  connection?: Record<string, unknown>;
+  secretRef?: { secretId: string };
+  toolName: string;
+  args?: Record<string, unknown>;
+}) {
+  return apiRequest<McpTestToolResult>("/api/mcp/test-tool", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export interface SecretListItem {
   id: string;
   name: string;

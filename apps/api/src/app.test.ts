@@ -2386,3 +2386,116 @@ describe("Phase 4.2 workflow organization", () => {
     expect(wf?.folderId).toBeUndefined();
   });
 });
+
+describe("Phase 1 MCP probe & inspector", () => {
+  async function loginAs(
+    context: TestContext,
+    role: "admin" | "builder" | "viewer"
+  ): Promise<string> {
+    const email = `${role}-mcp-probe-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@example.com`;
+    context.authService.register({ email, password: "TestPass123!", role });
+    const login = await context.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email, password: "TestPass123!" }
+    });
+    if (login.statusCode !== 200) throw new Error(`login failed: ${login.body}`);
+    return extractCookie(login.headers["set-cookie"], context.config.SESSION_COOKIE_NAME);
+  }
+
+  it("invokes a mock MCP tool via /api/mcp/test-tool and returns ok+output+durationMs", async () => {
+    const context = await createTestContext();
+    const cookie = await loginAs(context, "builder");
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/test-tool",
+      headers: { cookie },
+      payload: {
+        serverId: "mock-mcp",
+        toolName: "calculator",
+        args: { expression: "2+2" }
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ ok: boolean; output: unknown; durationMs: number; error?: string }>();
+    expect(body.ok).toBe(true);
+    expect(body.output).toBeDefined();
+    expect(typeof body.durationMs).toBe("number");
+    expect(body.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("returns ok=false with an error message when the tool name is unknown", async () => {
+    const context = await createTestContext();
+    const cookie = await loginAs(context, "builder");
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/test-tool",
+      headers: { cookie },
+      payload: {
+        serverId: "mock-mcp",
+        toolName: "definitely_not_a_tool",
+        args: {}
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ ok: boolean; error?: string }>();
+    expect(body.ok).toBe(false);
+    expect(typeof body.error).toBe("string");
+    expect(body.error?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("rejects missing required fields with 400 + zod issues", async () => {
+    const context = await createTestContext();
+    const cookie = await loginAs(context, "builder");
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/test-tool",
+      headers: { cookie },
+      payload: { serverId: "mock-mcp" }
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json<{ error: string; details: unknown }>();
+    expect(body.error).toMatch(/Invalid MCP test-tool payload/i);
+    expect(body.details).toBeDefined();
+  });
+
+  it("requires builder role — viewer gets 403", async () => {
+    const context = await createTestContext();
+    const cookie = await loginAs(context, "viewer");
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/test-tool",
+      headers: { cookie },
+      payload: {
+        serverId: "mock-mcp",
+        toolName: "calculator",
+        args: { expression: "1+1" }
+      }
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("requires authentication — anonymous gets 401", async () => {
+    const context = await createTestContext();
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/test-tool",
+      payload: {
+        serverId: "mock-mcp",
+        toolName: "calculator",
+        args: { expression: "1+1" }
+      }
+    });
+
+    expect(response.statusCode).toBe(401);
+  });
+});

@@ -9,7 +9,9 @@ import {
   previewExpression,
   testCodeNode,
   testConnector,
+  testMcpTool,
   testProvider,
+  type McpTestToolResult,
   type SecretListItem
 } from "../lib/api";
 
@@ -69,6 +71,41 @@ function toBooleanValue(value: unknown, fallback = false): boolean {
 
 function shouldOfferJsonFormatting(label: string): boolean {
   return /\bjson\b/i.test(label);
+}
+
+function sampleValueForSchema(propSchema: Record<string, unknown>): unknown {
+  if (propSchema.default !== undefined) return propSchema.default;
+  if (Array.isArray(propSchema.enum) && propSchema.enum.length > 0) return propSchema.enum[0];
+  if (propSchema.example !== undefined) return propSchema.example;
+  const typeRaw = propSchema.type;
+  const type = Array.isArray(typeRaw) ? typeRaw[0] : typeRaw;
+  switch (String(type ?? "string")) {
+    case "string": return "";
+    case "integer":
+    case "number": return 0;
+    case "boolean": return false;
+    case "array": return [];
+    case "object": return {};
+    default: return null;
+  }
+}
+
+function buildToolArgsSample(inputSchema: unknown): string {
+  const schema = asRecord(inputSchema);
+  const props = asRecord(schema.properties);
+  if (Object.keys(props).length === 0) {
+    return "{}";
+  }
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((value): value is string => typeof value === "string")
+    : [];
+  const sample: Record<string, unknown> = {};
+  const targets = required.length > 0 ? required : Object.keys(props);
+  for (const key of targets) {
+    const propSchema = asRecord(props[key]);
+    sample[key] = sampleValueForSchema(propSchema);
+  }
+  return JSON.stringify(sample, null, 2);
 }
 
 function formatJsonForEditor(value: string): { formatted: string; error: string } {
@@ -772,6 +809,11 @@ export function NodeConfigModal({
   const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
   const [mcpToolSearchQuery, setMcpToolSearchQuery] = useState("");
+  const [probeToolName, setProbeToolName] = useState("");
+  const [probeArgs, setProbeArgs] = useState("{}");
+  const [probeBusy, setProbeBusy] = useState(false);
+  const [probeResult, setProbeResult] = useState<McpTestToolResult | null>(null);
+  const [probeError, setProbeError] = useState<string | null>(null);
   const [codeTestInput, setCodeTestInput] = useState("{\n  \"user_prompt\": \"Hello from code node\"\n}");
   const [codeTestBusy, setCodeTestBusy] = useState(false);
   const [codeTestError, setCodeTestError] = useState<string | null>(null);
@@ -947,6 +989,11 @@ export function NodeConfigModal({
     setDiscoverError(null);
     setDiscoverMessage(null);
     setMcpToolSearchQuery("");
+    setProbeToolName("");
+    setProbeArgs("{}");
+    setProbeBusy(false);
+    setProbeResult(null);
+    setProbeError(null);
     setCodeTestInput("{\n  \"user_prompt\": \"Hello from code node\"\n}");
     setCodeTestBusy(false);
     setCodeTestError(null);
@@ -1439,6 +1486,73 @@ export function NodeConfigModal({
     discoverToolsForMcpNode,
     discoveredTools.length,
     node.data.nodeType
+  ]);
+
+  const runProbeTool = useCallback(async () => {
+    const targetName = (probeToolName || discoveredTools[0]?.name || "").trim();
+    if (!targetName) {
+      setProbeError("Pick a tool to probe (run Discover Tools first if needed).");
+      setProbeResult(null);
+      return;
+    }
+
+    let parsedArgs: Record<string, unknown> = {};
+    const trimmed = probeArgs.trim();
+    if (trimmed) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          parsedArgs = parsed as Record<string, unknown>;
+        } else {
+          setProbeError("Sample arguments must be a JSON object.");
+          setProbeResult(null);
+          return;
+        }
+      } catch (parseError) {
+        setProbeError(
+          `Invalid JSON arguments: ${parseError instanceof Error ? parseError.message : String(parseError)}`
+        );
+        setProbeResult(null);
+        return;
+      }
+    }
+
+    const serverId = toStringValue(config.serverId).trim();
+    if (!serverId) {
+      setProbeError("Set the MCP Server Adapter before probing.");
+      setProbeResult(null);
+      return;
+    }
+
+    const secretId = toStringValue(asRecord(config.secretRef).secretId).trim();
+
+    try {
+      setProbeBusy(true);
+      setProbeError(null);
+      setProbeResult(null);
+      const result = await testMcpTool({
+        serverId,
+        connection: asRecord(config.connection),
+        secretRef: secretId ? { secretId } : undefined,
+        toolName: targetName,
+        args: parsedArgs
+      });
+      setProbeResult(result);
+      if (!result.ok && result.error) {
+        setProbeError(result.error);
+      }
+    } catch (callError) {
+      setProbeError(callError instanceof Error ? callError.message : "Failed to invoke tool");
+    } finally {
+      setProbeBusy(false);
+    }
+  }, [
+    config.connection,
+    config.secretRef,
+    config.serverId,
+    discoveredTools,
+    probeArgs,
+    probeToolName
   ]);
 
   const handleCodeNodeTestRun = useCallback(async () => {
@@ -2081,89 +2195,208 @@ export function NodeConfigModal({
           ) : null}
         </div>
 
-        <SelectField
-          label="Server Transport"
-          value={toStringValue(connection.transport, "http_streamable")}
-          onChange={(next) =>
-            setConfig((current) => ({
-              ...current,
-              connection: {
-                ...asRecord(current.connection),
-                transport: next
+        {selectedServerId === "stdio_mcp" ? (
+          <>
+            <TextField
+              label="Command"
+              value={toStringValue(connection.command)}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    command: next
+                  }
+                }))
               }
-            }))
-          }
-          options={[
-            { value: "http_streamable", label: "HTTP Streamable" },
-            { value: "sse", label: "Server Sent Events" },
-            { value: "stdio", label: "STDIO" }
-          ]}
-        />
-
-        <TextField
-          label="Endpoint"
-          value={toStringValue(connection.endpoint, "http://127.0.0.1:7001/mcp")}
-          onChange={(next) =>
-            setConfig((current) => ({
-              ...current,
-              connection: {
-                ...asRecord(current.connection),
-                endpoint: next
+              placeholder="npx"
+            />
+            <TextAreaField
+              label="Arguments (one per line)"
+              value={(Array.isArray(connection.args) ? connection.args : [])
+                .filter((value): value is string => typeof value === "string")
+                .join("\n")}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    args: next.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
+                  }
+                }))
               }
-            }))
-          }
-        />
-
-        <NumberField
-          label="Request Timeout (ms)"
-          value={toNumberValue(connection.timeoutMs, 120000)}
-          min={1000}
-          step={1000}
-          onChange={(next) =>
-            setConfig((current) => ({
-              ...current,
-              connection: {
-                ...asRecord(current.connection),
-                timeoutMs: next
+              rows={4}
+            />
+            <div className="cfg-tip">
+              Example: <code>-y</code>, <code>@modelcontextprotocol/server-filesystem</code>, <code>/tmp</code>
+            </div>
+            <TextAreaField
+              label="Environment Variables (KEY=value per line)"
+              value={Object.entries(asRecord(connection.env))
+                .filter(([, value]) => typeof value === "string")
+                .map(([key, value]) => `${key}=${value as string}`)
+                .join("\n")}
+              onChange={(next) => {
+                const envEntries: Record<string, string> = {};
+                for (const line of next.split(/\r?\n/)) {
+                  const trimmed = line.trim();
+                  if (!trimmed) continue;
+                  const eq = trimmed.indexOf("=");
+                  if (eq <= 0) continue;
+                  envEntries[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1);
+                }
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    env: envEntries
+                  }
+                }));
+              }}
+              rows={3}
+            />
+            <TextField
+              label="Working Directory (optional)"
+              value={toStringValue(connection.cwd)}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    cwd: next
+                  }
+                }))
               }
-            }))
-          }
-        />
-
-        <SelectField
-          label="Authentication"
-          value={authType}
-          onChange={(next) =>
-            setConfig((current) => ({
-              ...current,
-              connection: {
-                ...asRecord(current.connection),
-                authType: next
+              placeholder="/path/to/server"
+            />
+            <NumberField
+              label="Request Timeout (ms)"
+              value={toNumberValue(connection.timeoutMs, 120000)}
+              min={1000}
+              step={1000}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    timeoutMs: next
+                  }
+                }))
               }
-            }))
-          }
-          options={[
-            { value: "none", label: "None" },
-            { value: "bearer", label: "Bearer Token" },
-            { value: "basic", label: "Basic Auth" }
-          ]}
-        />
-
-        {authType === "basic" && (
-          <TextField
-            label="Basic Auth Username"
-            value={toStringValue(connection.username)}
+            />
+            <TextField
+              label="Inject Secret as Env Var (optional)"
+              value={toStringValue(connection.secretEnvVar)}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    secretEnvVar: next
+                  }
+                }))
+              }
+              placeholder="GITHUB_TOKEN"
+            />
+            <div className="cfg-tip">
+              The configured Auth Secret (below) is injected into the child process under this env var name. Many MCP servers read credentials from the environment (e.g. <code>GITHUB_TOKEN</code>, <code>OPENAI_API_KEY</code>).
+            </div>
+          </>
+        ) : selectedServerId === "mock-mcp" ? (
+          <NumberField
+            label="Request Timeout (ms)"
+            value={toNumberValue(connection.timeoutMs, 120000)}
+            min={1000}
+            step={1000}
             onChange={(next) =>
               setConfig((current) => ({
                 ...current,
                 connection: {
                   ...asRecord(current.connection),
-                  username: next
+                  timeoutMs: next
                 }
               }))
             }
-            placeholder="api-user"
           />
+        ) : (
+          <>
+            <SelectField
+              label="Server Transport"
+              value={toStringValue(connection.transport, "http_streamable")}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    transport: next
+                  }
+                }))
+              }
+              options={[{ value: "http_streamable", label: "HTTP Streamable" }]}
+            />
+            <TextField
+              label="Endpoint"
+              value={toStringValue(connection.endpoint, "http://127.0.0.1:7001/mcp")}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    endpoint: next
+                  }
+                }))
+              }
+            />
+            <NumberField
+              label="Request Timeout (ms)"
+              value={toNumberValue(connection.timeoutMs, 120000)}
+              min={1000}
+              step={1000}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    timeoutMs: next
+                  }
+                }))
+              }
+            />
+            <SelectField
+              label="Authentication"
+              value={authType}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    authType: next
+                  }
+                }))
+              }
+              options={[
+                { value: "none", label: "None" },
+                { value: "bearer", label: "Bearer Token" },
+                { value: "basic", label: "Basic Auth" }
+              ]}
+            />
+            {authType === "basic" && (
+              <TextField
+                label="Basic Auth Username"
+                value={toStringValue(connection.username)}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      username: next
+                    }
+                  }))
+                }
+                placeholder="api-user"
+              />
+            )}
+          </>
         )}
 
         {renderCredentialSecretField({
@@ -2431,6 +2664,98 @@ export function NodeConfigModal({
             />
           </div>
         )}
+
+        {discoveredTools.length > 0 && (() => {
+          const probeTool =
+            discoveredToolByName.get(probeToolName) ??
+            (selectedTool ?? discoveredTools[0]);
+          const probeChoice = probeTool?.name ?? "";
+          return (
+            <div className="cfg-group">
+              <h4>Probe Tool</h4>
+              <div className="cfg-tip">
+                Dry-run a single tool against the configured server to verify connection,
+                auth, and argument shape before wiring this node into an agent. Returns the
+                actual tool output (or error) without touching the workflow.
+              </div>
+              <SelectField
+                label="Tool to probe"
+                value={probeChoice}
+                onChange={(next) => {
+                  setProbeToolName(next);
+                  const tool = discoveredToolByName.get(next);
+                  setProbeArgs(buildToolArgsSample(tool?.inputSchema));
+                  setProbeResult(null);
+                  setProbeError(null);
+                }}
+                options={discoveredTools.map((tool) => ({ value: tool.name, label: tool.name }))}
+              />
+              {probeTool?.description && (
+                <div className="cfg-tip">{probeTool.description}</div>
+              )}
+              {probeTool?.inputSchema && Object.keys(asRecord(probeTool.inputSchema)).length > 0 && (
+                <TextAreaField
+                  label="Tool Input Schema"
+                  value={JSON.stringify(probeTool.inputSchema, null, 2)}
+                  onChange={() => undefined}
+                  rows={5}
+                  readOnly
+                />
+              )}
+              <TextAreaField
+                label="Sample Arguments (JSON)"
+                value={probeArgs}
+                onChange={(next) => {
+                  setProbeArgs(next);
+                  setProbeResult(null);
+                  setProbeError(null);
+                }}
+                rows={5}
+              />
+              <div className="cfg-inline-actions">
+                <button
+                  type="button"
+                  className="node-btn"
+                  onClick={() => {
+                    if (!probeToolName && probeChoice) {
+                      setProbeToolName(probeChoice);
+                    }
+                    void runProbeTool();
+                  }}
+                  disabled={probeBusy || !probeChoice}
+                >
+                  {probeBusy ? "Running..." : "Run Tool"}
+                </button>
+                {probeResult?.ok && (
+                  <span className="muted">
+                    Succeeded in {probeResult.durationMs}ms
+                  </span>
+                )}
+                {probeResult && !probeResult.ok && (
+                  <span className="muted">
+                    Failed in {probeResult.durationMs}ms
+                  </span>
+                )}
+              </div>
+              {probeError && <div className="error-banner">{probeError}</div>}
+              {probeResult && (
+                <TextAreaField
+                  label={probeResult.ok ? "Tool Output" : "Tool Error"}
+                  value={
+                    probeResult.ok
+                      ? typeof probeResult.output === "string"
+                        ? probeResult.output
+                        : JSON.stringify(probeResult.output, null, 2)
+                      : probeResult.error ?? ""
+                  }
+                  onChange={() => undefined}
+                  rows={6}
+                  readOnly
+                />
+              )}
+            </div>
+          );
+        })()}
 
         <ExpressionField
           label="Tool Args Template"
