@@ -265,6 +265,11 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
           {preview.error && (
             <div className="wf-node-debug-error">
               <strong>Err</strong> {preview.error}
+              {preview.errorRemediation && (
+                <div className="wf-node-debug-remediation">
+                  <strong>Fix:</strong> {preview.errorRemediation}
+                </div>
+              )}
             </div>
           )}
         </div>

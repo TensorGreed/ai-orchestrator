@@ -1142,7 +1142,8 @@ function StudioApp() {
       map.set(nodeResult.nodeId, {
         input: nodeResult.input !== undefined ? truncatePreview(summarizePreviewValue(nodeResult.input)) : undefined,
         output: nodeResult.output !== undefined ? truncatePreview(summarizePreviewValue(nodeResult.output)) : undefined,
-        error: nodeResult.error ? truncatePreview(nodeResult.error) : undefined
+        error: nodeResult.error ? truncatePreview(nodeResult.error) : undefined,
+        errorRemediation: nodeResult.errorRemediation ?? undefined
       });
     }
     return map;

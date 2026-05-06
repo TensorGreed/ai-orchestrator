@@ -45,7 +45,7 @@ import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch"
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
 import { executePythonCodeNode } from "./python-runner";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
-import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
+import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 
 const MAX_SUB_WORKFLOW_DEPTH = 10;
 
@@ -88,6 +88,9 @@ export interface WorkflowExecutionDependencies {
     input?: unknown;
     output?: unknown;
     error?: string;
+    errorCategory?: string;
+    errorRemediation?: string;
+    retryable?: boolean;
   }) => Promise<void> | void;
   onLLMDelta?: (event: {
     nodeId: string;
@@ -5751,6 +5754,24 @@ export async function executeWorkflow(
       }
 
       const errorMessage = error instanceof Error ? error.message : "Node execution failed";
+      // Surface a structured error block (category + remediation + retryable)
+      // alongside the raw message so the UI can render an actionable hint
+      // without parsing strings. Non-WorkflowError throws fall back to UNKNOWN
+      // with its generic remediation.
+      const errorCategoryName =
+        error instanceof WorkflowError ? error.category : ErrorCategory.UNKNOWN;
+      const errorRemediation =
+        error instanceof WorkflowError
+          ? error.remediation
+          : remediationForCategory(ErrorCategory.UNKNOWN);
+      const errorRetryable =
+        error instanceof WorkflowError ? error.retryable : undefined;
+      const errorFields = {
+        error: errorMessage,
+        errorCategory: errorCategoryName,
+        errorRemediation,
+        retryable: errorRetryable
+      };
 
       // Check if this node is inside a try_catch scope
       let caughtByTryCatch = false;
@@ -5785,7 +5806,7 @@ export async function executeWorkflow(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            error: errorMessage
+            ...errorFields
           });
           await dependencies.onNodeComplete?.({
             nodeId: node.id,
@@ -5794,7 +5815,7 @@ export async function executeWorkflow(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            error: errorMessage
+            ...errorFields
           });
           hadContinuedErrors = true;
           break;
@@ -5811,7 +5832,7 @@ export async function executeWorkflow(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            error: errorMessage
+            ...errorFields
           });
           await dependencies.onNodeComplete?.({
             nodeId: node.id,
@@ -5820,7 +5841,7 @@ export async function executeWorkflow(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            error: errorMessage
+            ...errorFields
           });
           hadContinuedErrors = true;
           continue;
@@ -5858,7 +5879,7 @@ export async function executeWorkflow(
               completedAt: nowIso(),
               durationMs: Date.now() - started,
               input: nodeInput,
-              error: errorMessage
+              ...errorFields
             });
             await dependencies.onNodeComplete?.({
               nodeId: node.id,
@@ -5867,7 +5888,7 @@ export async function executeWorkflow(
               completedAt: nowIso(),
               durationMs: Date.now() - started,
               input: nodeInput,
-              error: errorMessage
+              ...errorFields
             });
             hadContinuedErrors = true;
             continue;
@@ -5883,7 +5904,7 @@ export async function executeWorkflow(
           completedAt: nowIso(),
           durationMs: Date.now() - started,
           input: nodeInput,
-          error: failedError
+          ...errorFields
         });
         await dependencies.onNodeComplete?.({
           nodeId: node.id,
@@ -5892,7 +5913,7 @@ export async function executeWorkflow(
           completedAt: nowIso(),
           durationMs: Date.now() - started,
           input: nodeInput,
-          error: failedError
+          ...errorFields
         });
 
         // Skip remaining nodes
@@ -5929,7 +5950,9 @@ export async function executeWorkflow(
           executionId: request.executionId,
           customData,
           nodeResults,
-          error: failedError
+          error: failedError,
+          errorCategory: errorCategoryName,
+          errorRemediation
         };
       }
     }

@@ -12,6 +12,9 @@ export interface EditorNodeData {
     input?: string;
     output?: string;
     error?: string;
+    /** One-sentence remediation hint produced by the executor for the failing
+     *  node. Surfaced under the raw error in the on-canvas preview. */
+    errorRemediation?: string;
   };
   pinned?: boolean;
   disabled?: boolean;

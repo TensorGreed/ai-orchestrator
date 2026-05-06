@@ -2614,10 +2614,16 @@ describe("workflow engine", () => {
     // It should fail due to empty prompt
     expect(result.status).toBe("error");
     expect(result.error).toContain("user prompt is empty");
-    
-    // We expect the workflow warning to be recorded if we throw nodeConfig!
-    // Actually, wait, WorkflowError.nodeConfig does NOT push to warnings... It just returns an error!
-    // But we test the error message. So it's fine.
+
+    // Phase 2.5: WorkflowError category + remediation should also be threaded
+    // through to both the failing node and the workflow-level result.
+    expect(result.errorCategory).toBe("node_config");
+    expect(result.errorRemediation).toMatch(/node|config/i);
+    expect(result.errorRemediation?.length ?? 0).toBeGreaterThan(20);
+    const failedNode = result.nodeResults.find((entry) => entry.status === "error");
+    expect(failedNode).toBeDefined();
+    expect(failedNode?.errorCategory).toBe("node_config");
+    expect(failedNode?.errorRemediation).toBe(result.errorRemediation);
   });
 
   it("handles workflow execution timeouts gracefully", async () => {

@@ -273,6 +273,10 @@ export interface NodeExecutionResult {
   warnings?: string[];
   retriedNodes?: Array<{ nodeId: string; attempts: number; nodeType: string }>;
   errorCategory?: string;
+  /** One-sentence human-readable hint on how to recover from this error.
+   *  Auto-derived from errorCategory by the executor; surfaced in the UI
+   *  below the raw error message so users don't have to read source. */
+  errorRemediation?: string;
   retryable?: boolean;
   attempts?: number;
 }
@@ -287,6 +291,12 @@ export interface WorkflowExecutionResult {
   nodeResults: NodeExecutionResult[];
   output?: unknown;
   error?: string;
+  /** Same shape as NodeExecutionResult.errorCategory, attached to the
+   *  workflow when execution stopped on a node error. */
+  errorCategory?: string;
+  /** Same shape as NodeExecutionResult.errorRemediation, attached to the
+   *  workflow when execution stopped on a node error. */
+  errorRemediation?: string;
   warnings?: string[];
   retriedNodes?: Array<{ nodeId: string; attempts: number; nodeType: string }>;
 }

@@ -1756,6 +1756,24 @@ select {
 .trace-error {
   color: #b23b3b;
   overflow-wrap: anywhere;
+  display: block;
+}
+
+.trace-remediation {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fbf5e8;
+  border: 1px solid #ecdab2;
+  color: #5a4e2c;
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+
+.trace-remediation strong {
+  color: #2f5a67;
+  margin-right: 4px;
 }
 
 .execution-actions-cell {
@@ -2066,6 +2084,22 @@ select {
 .wf-node-debug-error,
 .wf-node-debug-error strong {
   color: #b91c1c;
+}
+
+.wf-node-debug-remediation {
+  margin-top: 4px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: #fbf5e8;
+  border: 1px solid #ecdab2;
+  color: #5a4e2c;
+  font-size: 0.85em;
+  line-height: 1.35;
+}
+
+.wf-node-debug-remediation strong {
+  color: #2f5a67;
+  margin-right: 4px;
 }
 
 .wf-node.selected {

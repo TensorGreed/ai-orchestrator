@@ -262,13 +262,24 @@ export function ExecutionHistoryPanel({
                                 const status = typeof trace?.status === "string" ? trace.status : "unknown";
                                 const durationMs = typeof trace?.durationMs === "number" ? trace.durationMs : null;
                                 const errorMessage = typeof trace?.error === "string" ? trace.error : "";
+                                const errorRemediation =
+                                  typeof trace?.errorRemediation === "string" ? trace.errorRemediation : "";
 
                                 return (
                                   <div key={`${item.id}-${nodeId}-${index}`} className="execution-trace-item">
                                     <span>{nodeId}</span>
                                     <strong style={{ color: statusColors[status] ?? "#657087" }}>{status}</strong>
                                     <span>{formatDuration(durationMs)}</span>
-                                    {errorMessage && <span className="trace-error">{errorMessage}</span>}
+                                    {errorMessage && (
+                                      <span className="trace-error">
+                                        {errorMessage}
+                                        {errorRemediation && (
+                                          <span className="trace-remediation">
+                                            <strong>How to fix:</strong> {errorRemediation}
+                                          </span>
+                                        )}
+                                      </span>
+                                    )}
                                   </div>
                                 );
                               })}
