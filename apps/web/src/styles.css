@@ -824,6 +824,144 @@ select {
   border-radius: 999px;
 }
 
+.welcome-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.welcome-card {
+  width: 100%;
+  max-width: 720px;
+  background: #ffffff;
+  border-radius: 14px;
+  border: 1px solid #d3dfe8;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.18);
+  padding: 28px 28px 20px;
+  color: #2f5a67;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.welcome-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.welcome-title {
+  margin: 0 0 4px;
+  font-size: 22px;
+  color: #1d3a47;
+}
+
+.welcome-subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: #5a7382;
+  line-height: 1.45;
+  max-width: 560px;
+}
+
+.welcome-close {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #6b7c8c;
+  font-size: 22px;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.welcome-close:hover {
+  border-color: #d3dfe8;
+  color: #1d3a47;
+}
+
+.welcome-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+@media (min-width: 720px) {
+  .welcome-actions {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+}
+
+.welcome-action {
+  text-align: left;
+  text-decoration: none;
+  background: #f7fafc;
+  border: 1px solid #d3dfe8;
+  border-radius: 12px;
+  padding: 14px 14px 16px;
+  color: #2f5a67;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+  font: inherit;
+}
+
+.welcome-action:hover {
+  border-color: var(--accent-line, #6da6c1);
+  background: #ffffff;
+  transform: translateY(-1px);
+}
+
+.welcome-action-eyebrow {
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: #6b7c8c;
+}
+
+.welcome-action-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1d3a47;
+}
+
+.welcome-action-body {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #4a6271;
+}
+
+.welcome-footer {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid #eef3f6;
+  padding-top: 12px;
+}
+
+.welcome-skip {
+  background: transparent;
+  border: none;
+  color: #6b7c8c;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.welcome-skip:hover {
+  color: #1d3a47;
+  background: #eef3f6;
+}
+
 .logs-resize-handle {
   position: relative;
   background: #edf4f6;

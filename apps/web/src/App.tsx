@@ -96,6 +96,7 @@ import { StudioHeader } from "./components/StudioHeader";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
 import { SettingsPage } from "./components/SettingsPage";
 import { TemplateGallery } from "./components/TemplateGallery";
+import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WorkflowCanvasArea } from "./components/WorkflowCanvasArea";
 import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
@@ -943,6 +944,8 @@ function StudioApp() {
   const [loginPassword, setLoginPassword] = useState("");
   const [mfaChallengeId, setMfaChallengeId] = useState<string | null>(null);
   const [mfaCode, setMfaCode] = useState("");
+  const [showWelcome, setShowWelcome] = useState<boolean>(() => !isWelcomeDismissed());
+  const [templateInitialCategory, setTemplateInitialCategory] = useState<string | undefined>(undefined);
   const [shareWorkflowTarget, setShareWorkflowTarget] = useState<{
     id: string;
     name: string;
@@ -2362,6 +2365,32 @@ function StudioApp() {
     },
     [activeProjectId, handleApiError, hydrateWorkflow, setWorkflowList]
   );
+
+  const docsUrl = useMemo(() => {
+    const fromEnv = (import.meta.env.VITE_DOCS_URL as string | undefined)?.trim();
+    if (fromEnv) return fromEnv;
+    if (typeof window !== "undefined") {
+      return `${window.location.protocol}//${window.location.hostname}:4173`;
+    }
+    return "http://localhost:4173";
+  }, []);
+
+  const handleWelcomeDismiss = useCallback(() => {
+    markWelcomeDismissed();
+    setShowWelcome(false);
+  }, []);
+
+  const handleWelcomeTryTemplate = useCallback(() => {
+    setTemplateInitialCategory(undefined);
+    setActiveMode("templates");
+    handleWelcomeDismiss();
+  }, [handleWelcomeDismiss, setActiveMode]);
+
+  const handleWelcomeBuildAgent = useCallback(() => {
+    setTemplateInitialCategory("Agents");
+    setActiveMode("templates");
+    handleWelcomeDismiss();
+  }, [handleWelcomeDismiss, setActiveMode]);
 
   useEffect(() => {
     if (!authUser || loading) {
@@ -4054,6 +4083,13 @@ function StudioApp() {
 
   return (
     <div className="studio-shell">
+      <WelcomeModal
+        open={showWelcome}
+        docsUrl={docsUrl}
+        onTryTemplate={handleWelcomeTryTemplate}
+        onBuildAgent={handleWelcomeBuildAgent}
+        onDismiss={handleWelcomeDismiss}
+      />
       <LeftMenuBar
         activeMode={activeMode}
         canManageSecrets={canManageSecrets}
@@ -4984,6 +5020,7 @@ function StudioApp() {
           {activeMode === "templates" && (
             <TemplateGallery
               onWorkflowCreated={handleTemplateWorkflowCreated}
+              initialCategory={templateInitialCategory}
             />
           )}
 

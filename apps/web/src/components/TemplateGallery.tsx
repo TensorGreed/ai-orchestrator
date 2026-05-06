@@ -16,13 +16,16 @@ const CATEGORIES = [
 
 interface TemplateGalleryProps {
   onWorkflowCreated: (workflowId: string) => void | Promise<void>;
+  initialCategory?: string;
 }
 
-export function TemplateGallery({ onWorkflowCreated }: TemplateGalleryProps) {
+export function TemplateGallery({ onWorkflowCreated, initialCategory }: TemplateGalleryProps) {
   const [templates, setTemplates] = useState<TemplateListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeCategory, setActiveCategory] = useState<string>("All");
+  const [activeCategory, setActiveCategory] = useState<string>(
+    initialCategory && (CATEGORIES as readonly string[]).includes(initialCategory) ? initialCategory : "All"
+  );
   const [searchQuery, setSearchQuery] = useState("");
   const [usingTemplateId, setUsingTemplateId] = useState<string | null>(null);
 
