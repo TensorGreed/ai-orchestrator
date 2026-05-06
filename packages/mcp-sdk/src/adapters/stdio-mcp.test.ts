@@ -184,7 +184,7 @@ describe("StdioMCPServerAdapter", () => {
     };
 
     await expect(adapter.discoverTools(config, makeContext())).rejects.toThrow(
-      /could not start|was not found/i
+      /could not start|was not found|not recognized|exited unexpectedly|no such file/i
     );
   });
 

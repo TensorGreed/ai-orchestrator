@@ -1,5 +1,4 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
 import path from "node:path";
 import type { MCPServerConfig, MCPToolDefinition, MCPToolResult } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter } from "../types";
@@ -34,56 +33,85 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 
 interface ResolvedSpawn {
   command: string;
-  useShell: boolean;
+  args: string[];
+  shell: boolean;
 }
 
 /**
- * Resolve a command for the current platform.
+ * Quote a single token for inclusion in a Windows cmd.exe command line.
  *
- * On Windows, common executables like `npx`, `npm`, `node`, and `python` are
- * shipped as `.cmd` shims rather than `.exe`s. Node's `spawn` with
- * `shell: false` cannot execute `.cmd`/`.bat` files directly, so a config that
- * says `command: "npx"` fails with `ENOENT` even though `npx` is on PATH. This
- * helper walks PATH + PATHEXT, finds the actual file, and returns
- * `useShell: true` for batch shims (the only reliable way to run them) or the
- * resolved absolute path for native binaries.
- *
- * On non-Windows platforms (or when the command is already an absolute path or
- * contains a separator) the input is returned unchanged with `useShell: false`.
+ * cmd.exe tokenises by whitespace, so any token containing spaces or shell
+ * meta-characters must be wrapped in double quotes (with embedded quotes
+ * backslash-escaped).
  */
-function resolveSpawnCommand(command: string): ResolvedSpawn {
+function quoteForWindowsShell(value: string): string {
+  if (!/[\s"&<>|^()]/.test(value)) {
+    return value;
+  }
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Resolve a command + args pair for the current platform.
+ *
+ * On Windows, common executables like `npx`, `npm`, `node`, and `python` ship
+ * as `.cmd` shims, not `.exe`s. Node's `spawn` with `shell: false` cannot
+ * execute `.cmd`/`.bat` files directly, so a config that says
+ * `command: "npx"` fails with `ENOENT` even though `npx` is on PATH.
+ *
+ * Strategy on Windows:
+ *
+ * - Bare command name (no path separator, no extension) → `shell: true`. Node
+ *   forwards through `cmd.exe /d /s /c "<bare> <args>"`, and cmd.exe resolves
+ *   the bare name through `PATH` × `PATHEXT` correctly. Args with spaces are
+ *   pre-quoted because Node does not quote them when `shell: true`.
+ * - Explicit `.cmd`/`.bat` path → same pattern, but pre-quote the command path
+ *   too so cmd.exe doesn't tokenise on the embedded space (variant E from the
+ *   smoke test in `scripts/smoke-stdio-spawn.mjs`).
+ * - Explicit `.exe`/`.com` (or any other path) → `shell: false`. CreateProcess
+ *   handles paths with spaces in `lpApplicationName` natively, no quoting.
+ *
+ * On non-Windows everything passes through with `shell: false`.
+ *
+ * Note: an earlier attempt walked PATH × PATHEXT manually and routed through
+ * `cmd.exe /d /s /c <resolvedPath>` with `windowsVerbatimArguments: true`. The
+ * smoke test (`scripts/smoke-stdio-spawn.mjs` variants A–C) showed that
+ * approach loses the inner quotes by the time cmd.exe parses its command
+ * line, regardless of how we escape. Letting Node + cmd.exe do their normal
+ * thing is the only pattern that empirically works for every shape.
+ */
+function resolveSpawnCommand(command: string, args: string[]): ResolvedSpawn {
   if (process.platform !== "win32") {
-    return { command, useShell: false };
-  }
-  if (command.includes("/") || command.includes("\\") || path.isAbsolute(command)) {
-    return { command, useShell: false };
-  }
-  if (path.extname(command) !== "") {
-    return { command, useShell: false };
+    return { command, args, shell: false };
   }
 
-  const pathExt = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC")
-    .split(";")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-  const pathDirs = (process.env.PATH ?? "").split(";").filter((entry) => entry.trim().length > 0);
+  const ext = path.extname(command).toLowerCase();
 
-  for (const dir of pathDirs) {
-    for (const ext of pathExt) {
-      const candidate = path.join(dir, command + ext);
-      if (existsSync(candidate)) {
-        const lowerExt = ext.toLowerCase();
-        if (lowerExt === ".cmd" || lowerExt === ".bat") {
-          // Batch shims must be invoked through cmd.exe.
-          return { command: candidate, useShell: true };
-        }
-        return { command: candidate, useShell: false };
-      }
-    }
+  // Explicit native binary (e.g. an absolute path to node.exe or python.exe):
+  // CreateProcess handles paths with spaces, no shell wrapping needed.
+  if (ext === ".exe" || ext === ".com") {
+    return { command, args, shell: false };
   }
 
-  // Couldn't resolve — let spawn surface the original ENOENT with our improved message.
-  return { command, useShell: false };
+  // Explicit batch shim path (e.g. C:\path\to\foo.cmd): must go through
+  // cmd.exe; pre-quote to survive cmd.exe's `/s` parsing.
+  if (ext === ".cmd" || ext === ".bat") {
+    return {
+      command: quoteForWindowsShell(command),
+      args: args.map(quoteForWindowsShell),
+      shell: true
+    };
+  }
+
+  // Bare command name (npx, node, python, etc.) — cmd.exe resolves PATH/PATHEXT.
+  // Args with spaces still need quoting because Node doesn't quote them in shell mode.
+  if (!command.includes("/") && !command.includes("\\")) {
+    return { command, args: args.map(quoteForWindowsShell), shell: true };
+  }
+
+  // Some other path (e.g. relative path to an executable without extension):
+  // try a direct spawn and let CreateProcess decide.
+  return { command, args, shell: false };
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -259,13 +287,12 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       : undefined;
     const env = await buildEnv(config, context);
 
-    const resolved = resolveSpawnCommand(command);
-    const proc = spawn(resolved.command, args, {
+    const resolved = resolveSpawnCommand(command, args);
+    const proc = spawn(resolved.command, resolved.args, {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: resolved.useShell,
-      windowsVerbatimArguments: false
+      shell: resolved.shell
     });
 
     const session: StdioSession = {
