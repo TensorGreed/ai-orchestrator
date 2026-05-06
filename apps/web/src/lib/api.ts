@@ -499,6 +499,26 @@ export async function testMcpTool(payload: {
   });
 }
 
+export interface McpPreset {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  source: string;
+  serverAdapter: "stdio_mcp" | "http_mcp";
+  connection: Record<string, unknown>;
+  credentialHint?: {
+    envVar: string;
+    secretEnvVar?: string;
+    description: string;
+  };
+  notes?: string;
+}
+
+export async function fetchMcpPresets() {
+  return apiRequest<{ presets: McpPreset[] }>("/api/mcp/presets");
+}
+
 export interface SecretListItem {
   id: string;
   name: string;

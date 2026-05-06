@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import type { LLMProviderConfig, MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNode, EditorNodeData } from "../lib/workflow";
 import {
   createSecret,
   discoverMcpTools,
+  fetchMcpPresets,
   fetchProviderModels,
   fetchWorkflows,
   previewExpression,
@@ -11,6 +12,7 @@ import {
   testConnector,
   testMcpTool,
   testProvider,
+  type McpPreset,
   type McpTestToolResult,
   type SecretListItem
 } from "../lib/api";
@@ -282,6 +284,7 @@ function TextAreaField({
 }) {
   const [formatError, setFormatError] = useState("");
   const showJsonFormat = !readOnly && (allowJsonFormat ?? shouldOfferJsonFormatting(label));
+  const fieldId = useId();
 
   useEffect(() => {
     setFormatError("");
@@ -300,14 +303,20 @@ function TextAreaField({
   return (
     <div className="cfg-field">
       <div className="cfg-field-header">
-        <span>{label}</span>
+        <label htmlFor={fieldId}>{label}</label>
         {showJsonFormat && (
           <button type="button" className="mini-btn" onClick={handleFormatJson}>
             Format JSON
           </button>
         )}
       </div>
-      <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={rows} readOnly={readOnly} />
+      <textarea
+        id={fieldId}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        rows={rows}
+        readOnly={readOnly}
+      />
       {formatError && <div className="cfg-field-error">{formatError}</div>}
     </div>
   );
@@ -814,6 +823,8 @@ export function NodeConfigModal({
   const [probeBusy, setProbeBusy] = useState(false);
   const [probeResult, setProbeResult] = useState<McpTestToolResult | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
+  const [mcpPresets, setMcpPresets] = useState<McpPreset[]>([]);
+  const [mcpPresetSelection, setMcpPresetSelection] = useState("");
   const [codeTestInput, setCodeTestInput] = useState("{\n  \"user_prompt\": \"Hello from code node\"\n}");
   const [codeTestBusy, setCodeTestBusy] = useState(false);
   const [codeTestError, setCodeTestError] = useState<string | null>(null);
@@ -1555,6 +1566,53 @@ export function NodeConfigModal({
     probeToolName
   ]);
 
+  useEffect(() => {
+    if (node.data.nodeType !== "mcp_tool") {
+      return;
+    }
+    if (mcpPresets.length > 0) {
+      return;
+    }
+    let cancelled = false;
+    fetchMcpPresets()
+      .then((response) => {
+        if (!cancelled) {
+          setMcpPresets(response.presets);
+        }
+      })
+      .catch(() => {
+        // Presets are a discovery aid; failure is non-fatal.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mcpPresets.length, node.data.nodeType]);
+
+  const applyMcpPreset = useCallback(
+    (presetId: string) => {
+      const preset = mcpPresets.find((entry) => entry.id === presetId);
+      if (!preset) {
+        return;
+      }
+      setConfig((current) => ({
+        ...current,
+        serverId: preset.serverAdapter,
+        connection: { ...preset.connection },
+        toolName: "__all__",
+        allowedTools: undefined,
+        secretRef: current.secretRef
+      }));
+      setDiscoveredTools([]);
+      setDiscoverMessage(null);
+      setDiscoverError(null);
+      setProbeToolName("");
+      setProbeArgs("{}");
+      setProbeResult(null);
+      setProbeError(null);
+    },
+    [mcpPresets]
+  );
+
   const handleCodeNodeTestRun = useCallback(async () => {
     const code = toStringValue(config.code);
     if (!code.trim()) {
@@ -2159,6 +2217,58 @@ export function NodeConfigModal({
         <div className="cfg-tip">
           Configure MCP only on this node. Attach this MCP Tool node to an AI Agent <code>Tool</code> port to expose it.
         </div>
+
+        {mcpPresets.length > 0 && (
+          <div className="cfg-group">
+            <SelectField
+              label="Load preset (optional)"
+              value={mcpPresetSelection}
+              onChange={(next) => {
+                setMcpPresetSelection(next);
+                if (next) {
+                  applyMcpPreset(next);
+                }
+              }}
+              options={[
+                { value: "", label: "— Pick a popular MCP server —" },
+                ...mcpPresets.map((preset) => ({
+                  value: preset.id,
+                  label: `${preset.name} (${preset.category})`
+                }))
+              ]}
+            />
+            {mcpPresetSelection &&
+              (() => {
+                const preset = mcpPresets.find((entry) => entry.id === mcpPresetSelection);
+                if (!preset) {
+                  return null;
+                }
+                return (
+                  <div className="cfg-tip">
+                    <strong>{preset.name}</strong> — {preset.description}
+                    {preset.notes && (
+                      <div style={{ marginTop: "6px" }}>
+                        <em>{preset.notes}</em>
+                      </div>
+                    )}
+                    {preset.credentialHint && (
+                      <div style={{ marginTop: "6px" }}>
+                        Requires <code>{preset.credentialHint.envVar}</code>:{" "}
+                        {preset.credentialHint.description} Add it as an Auth Secret below
+                        and the value will be injected into the child process env.
+                      </div>
+                    )}
+                    <div style={{ marginTop: "6px" }}>
+                      Source:{" "}
+                      <a href={preset.source} target="_blank" rel="noreferrer">
+                        {preset.source}
+                      </a>
+                    </div>
+                  </div>
+                );
+              })()}
+          </div>
+        )}
 
         <SelectField
           label="MCP Server Adapter"

@@ -35,6 +35,7 @@ import {
 import { SqliteStore } from "./db/database";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
+import { MCP_PRESETS } from "./services/mcp-presets";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
@@ -6892,6 +6893,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         durationMs: Date.now() - startedAt
       };
     }
+  });
+
+  app.get("/api/mcp/presets", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) {
+      return;
+    }
+    return { presets: MCP_PRESETS };
   });
 
   // -------------------------------------------------------------------------

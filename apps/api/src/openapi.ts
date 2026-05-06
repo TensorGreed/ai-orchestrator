@@ -918,6 +918,13 @@ export const openApiSpec = {
         responses: { "200": { description: "Tool invocation result" } }
       }
     },
+    "/api/mcp/presets": {
+      get: {
+        tags: ["MCP"],
+        summary: "List the curated catalogue of popular MCP servers (one-click install templates)",
+        responses: { "200": { description: "Curated MCP server presets" } }
+      }
+    },
 
     // ── Connectors ──────────────────────────────────────────────────────────
     "/api/connectors/test": {

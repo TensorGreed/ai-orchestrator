@@ -2498,4 +2498,57 @@ describe("Phase 1 MCP probe & inspector", () => {
 
     expect(response.statusCode).toBe(401);
   });
+
+  it("returns the curated MCP preset catalogue from /api/mcp/presets", async () => {
+    const context = await createTestContext();
+    const cookie = await loginAs(context, "viewer");
+
+    const response = await context.app.inject({
+      method: "GET",
+      url: "/api/mcp/presets",
+      headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{
+      presets: Array<{
+        id: string;
+        name: string;
+        category: string;
+        serverAdapter: string;
+        connection: Record<string, unknown>;
+      }>;
+    }>();
+    expect(Array.isArray(body.presets)).toBe(true);
+    expect(body.presets.length).toBeGreaterThan(5);
+
+    const filesystem = body.presets.find((preset) => preset.id === "filesystem");
+    expect(filesystem).toBeDefined();
+    expect(filesystem?.serverAdapter).toBe("stdio_mcp");
+    expect(filesystem?.connection.command).toBe("npx");
+
+    const github = body.presets.find((preset) => preset.id === "github");
+    expect(github).toBeDefined();
+    expect(github?.connection.secretEnvVar).toBe("GITHUB_PERSONAL_ACCESS_TOKEN");
+
+    // Every preset must point at a registered adapter
+    for (const preset of body.presets) {
+      expect(["stdio_mcp", "http_mcp"]).toContain(preset.serverAdapter);
+    }
+
+    // Catalogue should not be all the same category — sanity check on diversity
+    const categories = new Set(body.presets.map((preset) => preset.category));
+    expect(categories.size).toBeGreaterThan(2);
+  });
+
+  it("requires authentication for the preset catalogue", async () => {
+    const context = await createTestContext();
+
+    const response = await context.app.inject({
+      method: "GET",
+      url: "/api/mcp/presets"
+    });
+
+    expect(response.statusCode).toBe(401);
+  });
 });

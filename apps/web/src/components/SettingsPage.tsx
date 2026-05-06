@@ -25,6 +25,7 @@ import {
   fetchExternalProviders,
   fetchGitConfig,
   fetchLogStreamDeliveryEvents,
+  fetchMcpPresets,
   fetchObservability,
   fetchRecentTraces,
   fetchLogStreamDestinations,
@@ -61,6 +62,7 @@ import {
   type LogStreamDestinationType,
   type MfaStatus,
   type ProjectMembership,
+  type McpPreset,
   type SecretListItem,
   type SsoGroupMapping,
   type VariableRecord,
@@ -83,7 +85,8 @@ type SettingsTab =
   | "source-control"
   | "variables"
   | "observability"
-  | "notifications";
+  | "notifications"
+  | "mcp-servers";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -126,7 +129,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "source-control", label: "Source Control", restricted: !isAdmin },
     { id: "variables", label: "Variables" },
     { id: "observability", label: "Observability", restricted: !isAdmin },
-    { id: "notifications", label: "Notifications", restricted: !isAdmin }
+    { id: "notifications", label: "Notifications", restricted: !isAdmin },
+    { id: "mcp-servers", label: "MCP Servers" }
   ];
 
   return (
@@ -181,6 +185,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         )}
         {tab === "observability" && isAdmin && <ObservabilityTab />}
         {tab === "notifications" && isAdmin && <NotificationsTab />}
+        {tab === "mcp-servers" && <McpServersTab />}
       </div>
     </section>
   );
@@ -3017,6 +3022,100 @@ function NotificationsTab() {
             </div>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+function McpServersTab() {
+  const [presets, setPresets] = useState<McpPreset[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchMcpPresets()
+      .then((response) => {
+        if (!cancelled) {
+          setPresets(response.presets);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(formatError(err));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoaded(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!loaded) {
+    return (
+      <div className="settings-section">
+        <div className="settings-loading">Loading MCP server catalogue…</div>
+      </div>
+    );
+  }
+
+  const grouped = new Map<string, McpPreset[]>();
+  for (const preset of presets) {
+    const list = grouped.get(preset.category) ?? [];
+    list.push(preset);
+    grouped.set(preset.category, list);
+  }
+  const categories = Array.from(grouped.keys()).sort();
+
+  return (
+    <div className="settings-section">
+      <h3>MCP Servers</h3>
+      <p className="settings-help">
+        Curated catalogue of popular Model Context Protocol servers from the
+        community. Open the MCP Tool node in any workflow and use the{" "}
+        <strong>Load preset</strong> dropdown to drop one in with its connection
+        and credential hints pre-filled. Servers run locally as child processes
+        via the <code>stdio_mcp</code> adapter — they do not phone home to L2M.
+      </p>
+      {error && <div className="settings-error">{error}</div>}
+      {presets.length === 0 ? (
+        <div className="settings-muted">No presets available.</div>
+      ) : (
+        categories.map((category) => (
+          <div key={category} className="settings-card">
+            <h4>{category}</h4>
+            <div className="settings-permissions-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+              {(grouped.get(category) ?? []).map((preset) => (
+                <div key={preset.id} style={{ padding: "8px 0" }}>
+                  <strong>{preset.name}</strong>
+                  <div className="settings-muted" style={{ marginTop: "4px" }}>
+                    {preset.description}
+                  </div>
+                  {preset.credentialHint && (
+                    <div className="settings-muted" style={{ marginTop: "4px", fontSize: "0.75rem" }}>
+                      Requires <code>{preset.credentialHint.envVar}</code> —{" "}
+                      {preset.credentialHint.description}
+                    </div>
+                  )}
+                  {preset.notes && (
+                    <div className="settings-muted" style={{ marginTop: "4px", fontSize: "0.75rem" }}>
+                      <em>{preset.notes}</em>
+                    </div>
+                  )}
+                  <div style={{ marginTop: "6px", fontSize: "0.75rem" }}>
+                    <a href={preset.source} target="_blank" rel="noreferrer">
+                      View source
+                    </a>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
       )}
     </div>
   );
