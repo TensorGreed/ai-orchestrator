@@ -773,6 +773,57 @@ select {
   color: #295360;
 }
 
+.canvas-attachment-legend {
+  position: absolute;
+  z-index: 5;
+  right: 14px;
+  top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid #d3dfe8;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: #2f5a67;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+  pointer-events: auto;
+  max-width: 200px;
+}
+
+.canvas-attachment-legend-title {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6b7c8c;
+  margin-bottom: 2px;
+}
+
+.canvas-attachment-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.canvas-attachment-legend-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1px solid;
+  flex-shrink: 0;
+}
+
+.canvas-attachment-legend-dash {
+  display: inline-block;
+  width: 18px;
+  height: 2px;
+  border-radius: 999px;
+}
+
 .logs-resize-handle {
   position: relative;
   background: #edf4f6;

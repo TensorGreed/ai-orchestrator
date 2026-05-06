@@ -15,6 +15,11 @@ import ReactFlow, {
 } from "reactflow";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNodeData } from "../lib/workflow";
+import {
+  AGENT_ATTACHMENT_HANDLES,
+  AGENT_ATTACHMENT_STYLES,
+  type AgentAttachmentHandle
+} from "../lib/agent-attachments";
 import { NodeTypeIcon, PaletteIcon, type PaletteCategoryIconKey } from "./node-icons";
 
 interface DefinitionNode {
@@ -26,8 +31,6 @@ interface DefinitionNode {
 }
 
 type LogsTab = "logs" | "inputs";
-
-type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
 
 interface NodeDrawerContext {
   title: string;
@@ -321,6 +324,17 @@ export function WorkflowCanvasArea({
       })),
     [edges, onDeleteEdge]
   );
+
+  const presentAttachmentHandles = useMemo(() => {
+    const present = new Set<AgentAttachmentHandle>();
+    for (const edge of edges) {
+      const handle = edge.sourceHandle ?? edge.targetHandle;
+      if (handle && (AGENT_ATTACHMENT_HANDLES as string[]).includes(handle)) {
+        present.add(handle as AgentAttachmentHandle);
+      }
+    }
+    return present;
+  }, [edges]);
 
   const renderNodes = useMemo(
     () =>
@@ -659,6 +673,43 @@ export function WorkflowCanvasArea({
             <button onClick={() => reactFlowInstance?.zoomOut()}>-</button>
             <button onClick={onClearCanvas}>Clear</button>
           </div>
+
+          {presentAttachmentHandles.size > 0 && (
+            <div
+              className="canvas-attachment-legend"
+              role="group"
+              aria-label="Agent attachment edges legend"
+            >
+              <div className="canvas-attachment-legend-title">Attachment edges</div>
+              {AGENT_ATTACHMENT_HANDLES.filter((handle) => presentAttachmentHandles.has(handle)).map(
+                (handle) => {
+                  const style = AGENT_ATTACHMENT_STYLES[handle];
+                  return (
+                    <div
+                      key={handle}
+                      className="canvas-attachment-legend-row"
+                      title={style.description}
+                    >
+                      <span
+                        className="canvas-attachment-legend-swatch"
+                        style={{
+                          background: style.bg,
+                          borderColor: style.border,
+                          color: style.stroke
+                        }}
+                      >
+                        <span
+                          className="canvas-attachment-legend-dash"
+                          style={{ background: style.stroke }}
+                        />
+                      </span>
+                      <span style={{ color: style.stroke, fontWeight: 600 }}>{style.label}</span>
+                    </div>
+                  );
+                }
+              )}
+            </div>
+          )}
 
           {!showNodeDrawer && (
             <button

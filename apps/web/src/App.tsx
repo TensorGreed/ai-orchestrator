@@ -72,6 +72,7 @@ import {
   type EditorNode,
   type EditorNodeData
 } from "./lib/workflow";
+import { AGENT_ATTACHMENT_STYLES } from "./lib/agent-attachments";
 import {
   deleteTabWipWorkflow,
   readLegacyLocalWipWorkflow,
@@ -685,20 +686,50 @@ function hasConfiguredNodeText(node: EditorNode): boolean {
 function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
   const source = nodes.find((node) => node.id === edge.source);
   const target = nodes.find((node) => node.id === edge.target);
-  const isAuxiliary =
-    edge.sourceHandle?.startsWith("aux") ||
-    edge.targetHandle?.startsWith("aux") ||
-    (edge.sourceHandle ? auxiliaryHandles.has(edge.sourceHandle) : false) ||
-    (edge.targetHandle ? auxiliaryHandles.has(edge.targetHandle) : false) ||
-    target?.data.nodeType === "mcp_tool" ||
-    target?.data.nodeType === "connector_source" ||
-    target?.data.nodeType === "google_drive_source";
 
-  const stroke = isAuxiliary ? "#a7bccc" : "#4f6881";
-  
-  // Create an explicit label for structural branches
+  // Three categories: agent attachment (named handle), generic auxiliary
+  // (aux* handles or implicit auxiliary targets), or normal execution.
+  const attachmentHandle =
+    edge.sourceHandle && auxiliaryHandles.has(edge.sourceHandle)
+      ? edge.sourceHandle
+      : edge.targetHandle && auxiliaryHandles.has(edge.targetHandle)
+        ? edge.targetHandle
+        : null;
+  const attachmentStyle =
+    attachmentHandle && attachmentHandle in AGENT_ATTACHMENT_STYLES
+      ? AGENT_ATTACHMENT_STYLES[attachmentHandle as keyof typeof AGENT_ATTACHMENT_STYLES]
+      : null;
+
+  const isGenericAuxiliary =
+    !attachmentStyle &&
+    (edge.sourceHandle?.startsWith("aux") ||
+      edge.targetHandle?.startsWith("aux") ||
+      target?.data.nodeType === "mcp_tool" ||
+      target?.data.nodeType === "connector_source" ||
+      target?.data.nodeType === "google_drive_source");
+
+  const isAuxiliary = Boolean(attachmentStyle) || Boolean(isGenericAuxiliary);
+  const stroke = attachmentStyle?.stroke ?? (isAuxiliary ? "#a7bccc" : "#4f6881");
+
+  // Workers represent recursive Supervisor delegation — give them a slightly
+  // thicker line so the hierarchy reads even in dense graphs.
+  const isWorkerEdge = attachmentHandle === "worker";
+
+  // Create an explicit label. Attachment edges carry their port name so users
+  // can distinguish chat_model / memory / tool / worker without hovering.
   let label: string | undefined = undefined;
-  if (!isAuxiliary && edge.sourceHandle) {
+  let labelBgStyle = { fill: "#f3faf9", color: "#2f5a67", border: "1px solid #cde3e2" };
+  let labelStyle = { fill: "#2f5a67", fontWeight: 600, fontSize: 10 };
+
+  if (attachmentStyle) {
+    label = attachmentStyle.label;
+    labelBgStyle = {
+      fill: attachmentStyle.bg,
+      color: attachmentStyle.stroke,
+      border: `1px solid ${attachmentStyle.border}`
+    };
+    labelStyle = { fill: attachmentStyle.stroke, fontWeight: 600, fontSize: 10 };
+  } else if (!isAuxiliary && edge.sourceHandle) {
     if (edge.sourceHandle === "true") label = "True";
     else if (edge.sourceHandle === "false") label = "False";
     else if (edge.sourceHandle === "success") label = "Try (Success)";
@@ -740,8 +771,8 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     label,
     labelBgPadding: [8, 4],
     labelBgBorderRadius: 4,
-    labelBgStyle: { fill: "#f3faf9", color: "#2f5a67", border: "1px solid #cde3e2" },
-    labelStyle: { fill: "#2f5a67", fontWeight: 600, fontSize: 10 },
+    labelBgStyle,
+    labelStyle,
     markerEnd: {
       type: MarkerType.ArrowClosed,
       color: stroke
@@ -749,13 +780,14 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     style: {
       ...(edge.style ?? {}),
       stroke,
-      strokeWidth: isAuxiliary ? 1.5 : 2,
+      strokeWidth: isWorkerEdge ? 2.25 : isAuxiliary ? 1.5 : 2,
       strokeDasharray: isAuxiliary ? "6 6" : undefined
     },
     data: {
       ...(edge.data ?? {}),
       sourceType: source?.data.nodeType,
-      targetType: target?.data.nodeType
+      targetType: target?.data.nodeType,
+      attachmentHandle: attachmentHandle ?? undefined
     }
   };
 }
