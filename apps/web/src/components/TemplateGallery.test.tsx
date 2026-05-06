@@ -127,4 +127,38 @@ describe("TemplateGallery", () => {
     await screen.findByText("Webhook Starter");
     expect(screen.queryByTestId("tpl-deps-tpl-1")).toBeNull();
   });
+
+  it("renders the inline SVG thumbnail when thumbnailSvg is present", async () => {
+    vi.mocked(api.fetchTemplates).mockResolvedValue({
+      templates: [
+        {
+          ...makeTemplate(),
+          id: "tpl-with-thumb",
+          name: "With Thumbnail",
+          thumbnailSvg: '<svg viewBox="0 0 320 96" xmlns="http://www.w3.org/2000/svg"><rect width="320" height="96" fill="#f7fafc"/></svg>'
+        }
+      ]
+    });
+
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+
+    await screen.findByText("With Thumbnail");
+    const slot = screen.getByTestId("tpl-thumbnail-tpl-with-thumb");
+    expect(slot.querySelector("svg")).not.toBeNull();
+  });
+
+  it("omits the thumbnail slot when thumbnailSvg is empty or missing", async () => {
+    vi.mocked(api.fetchTemplates).mockResolvedValue({
+      templates: [
+        { ...makeTemplate(), id: "tpl-no-thumb-1", thumbnailSvg: "" },
+        { ...makeTemplate(), id: "tpl-no-thumb-2" } // field absent
+      ]
+    });
+
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+
+    await screen.findAllByText("Webhook Starter");
+    expect(screen.queryByTestId("tpl-thumbnail-tpl-no-thumb-1")).toBeNull();
+    expect(screen.queryByTestId("tpl-thumbnail-tpl-no-thumb-2")).toBeNull();
+  });
 });

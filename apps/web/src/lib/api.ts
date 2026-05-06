@@ -1596,6 +1596,10 @@ export interface TemplateListItem {
   /** External dependencies detected from the workflow JSON (OpenAI key, Pinecone, etc.).
    *  Empty array = the template runs out-of-the-box (e.g. uses the built-in echo provider). */
   dependencies?: TemplateDependency[];
+  /** Server-generated SVG bird's-eye sketch of the workflow's nodes + edges,
+   *  embedded inline via dangerouslySetInnerHTML. Empty string when the workflow
+   *  has no nodes or its JSON failed to parse. */
+  thumbnailSvg?: string;
 }
 
 export async function fetchTemplates(filters?: { category?: string; search?: string }) {

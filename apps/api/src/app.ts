@@ -37,6 +37,7 @@ import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
 import { MCP_PRESETS } from "./services/mcp-presets";
 import { computeTemplateDependencies } from "./services/template-dependencies";
+import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
@@ -7158,14 +7159,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const enriched = templates.map((tpl) => {
       const full = store.getTemplate(tpl.id);
       let dependencies: ReturnType<typeof computeTemplateDependencies> = [];
+      let thumbnailSvg = "";
       if (full?.workflowJson) {
         try {
-          dependencies = computeTemplateDependencies(JSON.parse(full.workflowJson));
+          const parsed = JSON.parse(full.workflowJson);
+          dependencies = computeTemplateDependencies(parsed);
+          thumbnailSvg = buildTemplateThumbnail(parsed);
         } catch {
-          // Malformed JSON shouldn't break the gallery — skip badges silently.
+          // Malformed JSON shouldn't break the gallery — skip badges + thumbnail silently.
         }
       }
-      return { ...tpl, dependencies };
+      return { ...tpl, dependencies, thumbnailSvg };
     });
     return { templates: enriched };
   });

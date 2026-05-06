@@ -99,6 +99,16 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
         <div className="tpl-grid">
           {templates.map((tpl) => (
             <div key={tpl.id} className="tpl-card">
+              {tpl.thumbnailSvg ? (
+                <div
+                  className="tpl-card-thumbnail"
+                  data-testid={`tpl-thumbnail-${tpl.id}`}
+                  // SVG is generated server-side from a workflow we control —
+                  // no XSS risk. dangerouslySetInnerHTML lets us embed inline
+                  // SVG without round-tripping through a data URL.
+                  dangerouslySetInnerHTML={{ __html: tpl.thumbnailSvg }}
+                />
+              ) : null}
               <div className="tpl-card-name">{tpl.name}</div>
               <div className="tpl-card-desc">
                 {tpl.description || "No description provided."}
