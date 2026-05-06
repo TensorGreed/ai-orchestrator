@@ -1,4 +1,5 @@
 import { ProviderRegistry } from "./registry";
+import { EchoProviderAdapter } from "./providers/echo";
 import { GeminiProviderAdapter } from "./providers/gemini";
 import { OllamaProviderAdapter } from "./providers/ollama";
 import { OpenAICompatibleProviderAdapter } from "./providers/openai-compatible";
@@ -9,6 +10,7 @@ import { AzureOpenAIProviderAdapter } from "./providers/azure-openai";
 export * from "./types";
 export * from "./registry";
 export * from "./resilient-fetch";
+export * from "./providers/echo";
 export * from "./providers/openai-compatible";
 export * from "./providers/openai";
 export * from "./providers/ollama";
@@ -18,6 +20,7 @@ export * from "./providers/azure-openai";
 
 export function createDefaultProviderRegistry(): ProviderRegistry {
   const registry = new ProviderRegistry();
+  registry.register(new EchoProviderAdapter());
   registry.register(new OllamaProviderAdapter());
   registry.register(new OpenAICompatibleProviderAdapter());
   registry.register(new OpenAICloudProviderAdapter());

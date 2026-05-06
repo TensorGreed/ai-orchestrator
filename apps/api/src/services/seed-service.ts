@@ -17,7 +17,7 @@ const TEMPLATE_CATEGORY_MAP: Record<string, string> = {
 };
 
 const TEMPLATE_DESCRIPTION_MAP: Record<string, string> = {
-  "basic-flow.json": "A simple text-in, LLM-call, text-out pipeline to get started.",
+  "basic-flow.json": "Text-in, LLM-call, text-out pipeline. Runs out-of-the-box with the built-in echo provider — no Ollama, no API keys, no setup required. Swap to a real provider when you're ready.",
   "conditional-flow.json": "Demonstrates conditional branching with webhook triggers.",
   "rag-flow.json": "Retrieval-Augmented Generation with Google Drive and vector search.",
   "rag-pinecone-flow.json": "RAG pipeline using Pinecone as the vector store.",

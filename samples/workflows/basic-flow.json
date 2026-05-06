@@ -4,7 +4,7 @@
   "workflow": {
     "id": "wf-basic-llm",
     "name": "Basic LLM Flow",
-    "description": "Text Input -> Prompt Template -> LLM Call -> Output",
+    "description": "Text Input -> Prompt Template -> LLM Call -> Output. Uses the built-in 'echo' provider so it runs end-to-end on a fresh install with no Ollama, no API keys, no setup. Swap the provider on the LLM Call node to a real one (Ollama, OpenAI, Anthropic, etc.) once you've verified the workflow runs.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [
@@ -14,7 +14,7 @@
         "name": "Text Input",
         "position": { "x": 80, "y": 140 },
         "config": {
-          "text": "Explain what MCP is in one paragraph."
+          "text": "Hello from L2M! Replace this text and re-run to see the echo update."
         }
       },
       {
@@ -23,7 +23,7 @@
         "name": "Prompt Template",
         "position": { "x": 380, "y": 140 },
         "config": {
-          "template": "User request: {{user_prompt}}\n\nReturn a concise answer with one bullet list.",
+          "template": "{{user_prompt}}",
           "outputKey": "prompt"
         }
       },
@@ -34,10 +34,9 @@
         "position": { "x": 700, "y": 140 },
         "config": {
           "provider": {
-            "providerId": "ollama",
-            "baseUrl": "http://localhost:11434/v1",
-            "model": "llama3.1",
-            "temperature": 0.2
+            "providerId": "echo",
+            "model": "demo",
+            "prefix": "Echo: "
           },
           "promptKey": "prompt",
           "systemPromptKey": "system_prompt"
