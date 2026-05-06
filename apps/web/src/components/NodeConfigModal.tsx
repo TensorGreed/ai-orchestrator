@@ -169,18 +169,46 @@ function withCurrentModelOption(options: ModelOption[], currentValue: string, em
   });
 }
 
+/**
+ * Inline `?` disclosure used next to a field label to surface a one-paragraph
+ * explanation of an unfamiliar config field. Click the `?` to expand the body
+ * (a `cfg-tip`-styled card). Built on `<details>` so it stays accessible
+ * (keyboard + screen reader) without any local state.
+ */
+function HelpHint({ children }: { children: React.ReactNode }) {
+  return (
+    <details className="cfg-help">
+      <summary aria-label="Show help" title="Show help">
+        ?
+      </summary>
+      <div className="cfg-help-body cfg-tip">{children}</div>
+    </details>
+  );
+}
+
+function FieldLabel({ label, help }: { label: string; help?: React.ReactNode }) {
+  return (
+    <span className="cfg-field-label">
+      {label}
+      {help ? <HelpHint>{help}</HelpHint> : null}
+    </span>
+  );
+}
+
 function ToggleField({
   label,
   checked,
-  onChange
+  onChange,
+  help
 }: {
   label: string;
   checked: boolean;
   onChange: (next: boolean) => void;
+  help?: React.ReactNode;
 }) {
   return (
     <label className="cfg-toggle-row">
-      <span>{label}</span>
+      <FieldLabel label={label} help={help} />
       <button
         type="button"
         className={checked ? "cfg-toggle on" : "cfg-toggle"}
@@ -197,16 +225,18 @@ function TextField({
   label,
   value,
   onChange,
-  placeholder
+  placeholder,
+  help
 }: {
   label: string;
   value: string;
   onChange: (next: string) => void;
   placeholder?: string;
+  help?: React.ReactNode;
 }) {
   return (
     <label className="cfg-field">
-      <span>{label}</span>
+      <FieldLabel label={label} help={help} />
       <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
     </label>
   );
@@ -218,7 +248,8 @@ function NumberField({
   onChange,
   min,
   max,
-  step
+  step,
+  help
 }: {
   label: string;
   value: number;
@@ -226,10 +257,11 @@ function NumberField({
   min?: number;
   max?: number;
   step?: number;
+  help?: React.ReactNode;
 }) {
   return (
     <label className="cfg-field">
-      <span>{label}</span>
+      <FieldLabel label={label} help={help} />
       <input
         type="number"
         value={Number.isFinite(value) ? value : 0}
@@ -246,16 +278,18 @@ function SelectField({
   label,
   value,
   onChange,
-  options
+  options,
+  help
 }: {
   label: string;
   value: string;
   onChange: (next: string) => void;
   options: Array<{ value: string; label: string }>;
+  help?: React.ReactNode;
 }) {
   return (
     <label className="cfg-field">
-      <span>{label}</span>
+      <FieldLabel label={label} help={help} />
       <select value={value} onChange={(event) => onChange(event.target.value)}>
         {options.map((option) => (
           <option key={option.value} value={option.value}>
@@ -2037,6 +2071,17 @@ export function NodeConfigModal({
             { value: "sql", label: "SQL Agent" }
           ]}
           onChange={(next) => setConfig((current) => ({ ...current, agentType: next }))}
+          help={
+            <>
+              <strong>Tools Agent</strong> is the default OpenAI-style function-calling loop —
+              best for most cases. <strong>ReAct</strong> forces the model to emit explicit
+              <em> Thought / Action / Action Input</em> tokens before each tool call, useful
+              when reasoning quality matters more than latency. <strong>Plan and Execute</strong>
+              writes a multi-step plan up front, then executes each step — good for long-horizon
+              tasks. <strong>SQL Agent</strong> is a tools-style loop with a system prompt that
+              forces read-only SELECT queries and prohibits DML — pair with a Postgres MCP server.
+            </>
+          }
         />
 
         <ExpressionField
@@ -2083,11 +2128,28 @@ export function NodeConfigModal({
             min={1}
             step={1}
             onChange={(next) => setConfig((current) => ({ ...current, maxIterations: next }))}
+            help={
+              <>
+                Hard cap on the number of tool-call rounds before the agent must
+                produce a final answer. Each iteration is one model call plus any
+                tool invocations it requests. Raise this for multi-step research
+                agents (10–20); lower it for cost-sensitive flows (3–5). The agent
+                stops with a clear error if it exceeds the cap without converging.
+              </>
+            }
           />
           <ToggleField
             label="Tool Calling"
             checked={toBooleanValue(config.toolCallingEnabled, true)}
             onChange={(next) => setConfig((current) => ({ ...current, toolCallingEnabled: next }))}
+            help={
+              <>
+                When off, the agent runs the LLM once with no tools attached and
+                returns its answer. Useful for prompt-only flows that don't need
+                MCP tools but still want the agent shell (memory, system prompt
+                templating, retry policy).
+              </>
+            }
           />
         </div>
 
@@ -2104,6 +2166,16 @@ export function NodeConfigModal({
               min={500}
               step={500}
               onChange={(next) => setConfig((current) => ({ ...current, toolMessageMaxChars: next }))}
+              help={
+                <>
+                  Maximum characters of a single tool-call response that the agent
+                  passes back to the model. Excess content is truncated with a
+                  marker; the full payload remains retrievable from the session
+                  tool cache via the auto-injected <code>session_cache_get</code>
+                  tool. Bump for large-context models (Claude/GPT-4o); shrink for
+                  small-context local models.
+                </>
+              }
             />
             <NumberField
               label="Tool String Max Chars"
@@ -2111,6 +2183,14 @@ export function NodeConfigModal({
               min={100}
               step={100}
               onChange={(next) => setConfig((current) => ({ ...current, toolPayloadMaxStringChars: next }))}
+              help={
+                <>
+                  Per-string cap when the runtime walks a structured tool payload.
+                  Strings longer than this are truncated with <code>…[N more chars]</code>.
+                  Most useful for tools that return long text fields embedded in
+                  otherwise-small JSON.
+                </>
+              }
             />
             <NumberField
               label="Tool Object Max Keys"
@@ -2118,6 +2198,13 @@ export function NodeConfigModal({
               min={1}
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, toolPayloadMaxObjectKeys: next }))}
+              help={
+                <>
+                  Maximum keys retained per object in a tool payload. Excess keys
+                  are dropped with a count marker. Prevents wide rows (e.g. a
+                  database query with 200 columns) from blowing the model context.
+                </>
+              }
             />
             <NumberField
               label="Tool Array Max Items"
@@ -2125,6 +2212,14 @@ export function NodeConfigModal({
               min={1}
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, toolPayloadMaxArrayItems: next }))}
+              help={
+                <>
+                  Maximum array elements retained per tool payload. The first N
+                  items are kept; the rest are replaced with a count marker. Pair
+                  this with a smaller <code>maxIterations</code> when a tool can
+                  return arbitrarily large lists.
+                </>
+              }
             />
             <NumberField
               label="Tool Payload Max Depth"
@@ -2132,6 +2227,14 @@ export function NodeConfigModal({
               min={1}
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, toolPayloadMaxDepth: next }))}
+              help={
+                <>
+                  Maximum nesting depth retained in a tool payload before the
+                  walker substitutes a depth marker. Defends against cyclic or
+                  deeply-nested responses (e.g. a graph traversal returned as
+                  raw nested JSON).
+                </>
+              }
             />
           </div>
         </div>
@@ -2285,6 +2388,17 @@ export function NodeConfigModal({
             setDiscoverError(null);
           }}
           options={[...mcpServerIdOptions, { value: "__custom__", label: "Custom Adapter ID" }]}
+          help={
+            <>
+              Picks how the runtime talks to the MCP server. <strong>http_mcp</strong> is for
+              remote servers reachable over HTTP streamable. <strong>stdio_mcp</strong> spawns
+              a local child process and speaks JSON-RPC over stdin/stdout — used by 90% of
+              community MCP servers (filesystem, git, github, postgres, etc.). <strong>mock-mcp</strong>
+              ships demo tools (calculator, time) so you can wire an agent end-to-end without
+              a real server. <strong>Custom Adapter ID</strong> is for a registered third-party
+              adapter you've added via the connector SDK.
+            </>
+          }
         />
 
         {!hasKnownServerId && (
@@ -2293,6 +2407,13 @@ export function NodeConfigModal({
             value={selectedServerId}
             onChange={(next) => setConfig((current) => ({ ...current, serverId: next }))}
             placeholder="my_custom_mcp_adapter"
+            help={
+              <>
+                The id you registered with <code>createDefaultMCPRegistry().register(...)</code>.
+                Must match exactly. If you haven't built one, pick a built-in adapter above
+                instead.
+              </>
+            }
           />
         )}
 
@@ -2407,6 +2528,16 @@ export function NodeConfigModal({
                 }))
               }
               placeholder="GITHUB_TOKEN"
+              help={
+                <>
+                  Most stdio MCP servers read credentials from environment variables (e.g.
+                  <code> GITHUB_PERSONAL_ACCESS_TOKEN</code>, <code>BRAVE_API_KEY</code>,
+                  <code> SLACK_BOT_TOKEN</code>). Pick the matching <strong>Auth Secret</strong>
+                  below and put the env var name here — the resolved secret value gets injected
+                  into the spawned process under that name. Leave blank if the server reads no
+                  credentials or you prefer to set the env var globally on the host.
+                </>
+              }
             />
             <div className="cfg-tip">
               The configured Auth Secret (below) is injected into the child process under this env var name. Many MCP servers read credentials from the environment (e.g. <code>GITHUB_TOKEN</code>, <code>OPENAI_API_KEY</code>).
@@ -2595,6 +2726,18 @@ export function NodeConfigModal({
             { value: "single", label: "Single tool only" },
             { value: "multi", label: "Select multiple tools" }
           ]}
+          help={
+            <>
+              Controls which discovered tools the agent can call.
+              <strong> All</strong> exposes everything; the runtime compacts schemas and
+              prompt-shortlists to keep context manageable, so this is fine even for
+              servers with 30+ tools. <strong>Single</strong> binds the node to one tool
+              by name — best for narrow, deterministic flows. <strong>Multi</strong>
+              picks an explicit subset; agents see only those tools and can't accidentally
+              call unrelated ones (useful for safety-critical paths or destructive tools
+              you want to gate behind a separate node).
+            </>
+          }
         />
 
         {includeAllDiscoveredTools ? (
@@ -5196,6 +5339,18 @@ export function NodeConfigModal({
                 { value: "item_list", label: "Item List" },
                 { value: "auto_fix", label: "Auto Fix JSON" }
               ]}
+              help={
+                <>
+                  Picks how the parser interprets the upstream LLM output.
+                  <strong> Strict JSON Schema</strong> validates the parsed JSON against the
+                  schema below; failures bubble up unless auto-retries are enabled.
+                  <strong> Item List</strong> splits the response on the item separator and
+                  returns an array of strings — good for "list of bullet points" prompts.
+                  <strong> Auto Fix JSON</strong> calls the model again with the parse error
+                  message attached, asking it to fix its own output (uses the same provider
+                  as the upstream LLM Call).
+                </>
+              }
             />
             <SelectField
               label="Parsing Strictness"
@@ -5206,11 +5361,19 @@ export function NodeConfigModal({
                 { value: "lenient", label: "Lenient (JSON repair)" },
                 { value: "anything_goes", label: "Anything Goes (best effort)" }
               ]}
+              help={
+                <>
+                  Independent of Parser Mode — controls how forgiving the JSON tokenizer is.
+                  <strong> Strict</strong> accepts only valid JSON.
+                  <strong> Lenient</strong> repairs common LLM artifacts (single quotes,
+                  Python <code>True/False/None</code>, trailing commas, unquoted keys).
+                  <strong> Anything Goes</strong> includes Lenient and adds best-effort
+                  <code> key: value</code> extraction from mixed prose. Move up the strictness
+                  ladder when a model can't reliably emit clean JSON; move down when you need
+                  contract guarantees for downstream code.
+                </>
+              }
             />
-            <div className="cfg-tip">
-              Strict only accepts valid JSON. Lenient repairs common JSON-like formats. Anything Goes also supports
-              best-effort extraction from mixed text and simple key-value blocks.
-            </div>
             <TextField
               label="Input Key"
               value={toStringValue(config.inputKey, "answer")}

@@ -2744,6 +2744,64 @@ select {
   font-size: 0.78rem;
 }
 
+.cfg-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #5f6b84;
+  font-weight: 600;
+}
+
+.cfg-help {
+  display: inline-block;
+  margin-left: 0;
+}
+
+.cfg-help > summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid #c8d3e0;
+  color: #5f6b84;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  background: #f6f8fb;
+  user-select: none;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.cfg-help > summary:hover {
+  border-color: #6da6c1;
+  background: #ffffff;
+  color: #2f5a67;
+}
+
+.cfg-help > summary::-webkit-details-marker {
+  display: none;
+}
+
+.cfg-help-body {
+  display: block;
+  margin-top: 6px;
+  font-weight: 400;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #4a6271;
+}
+
+.cfg-help-body code {
+  background: rgba(0, 0, 0, 0.04);
+  padding: 0 3px;
+  border-radius: 3px;
+  font-size: 0.95em;
+}
+
 .cfg-field input,
 .cfg-field textarea,
 .cfg-field select {
