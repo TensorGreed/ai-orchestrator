@@ -183,7 +183,9 @@ describe("StdioMCPServerAdapter", () => {
       }
     };
 
-    await expect(adapter.discoverTools(config, makeContext())).rejects.toThrow();
+    await expect(adapter.discoverTools(config, makeContext())).rejects.toThrow(
+      /could not start|was not found/i
+    );
   });
 
   it("rejects when the connection config is missing the command field", async () => {

@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import type { MCPServerConfig, MCPToolDefinition, MCPToolResult } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter } from "../types";
 
@@ -29,6 +31,60 @@ interface StdioSession {
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const STDERR_LOG_BUFFER_LINES = 100;
 const DEFAULT_TIMEOUT_MS = 120_000;
+
+interface ResolvedSpawn {
+  command: string;
+  useShell: boolean;
+}
+
+/**
+ * Resolve a command for the current platform.
+ *
+ * On Windows, common executables like `npx`, `npm`, `node`, and `python` are
+ * shipped as `.cmd` shims rather than `.exe`s. Node's `spawn` with
+ * `shell: false` cannot execute `.cmd`/`.bat` files directly, so a config that
+ * says `command: "npx"` fails with `ENOENT` even though `npx` is on PATH. This
+ * helper walks PATH + PATHEXT, finds the actual file, and returns
+ * `useShell: true` for batch shims (the only reliable way to run them) or the
+ * resolved absolute path for native binaries.
+ *
+ * On non-Windows platforms (or when the command is already an absolute path or
+ * contains a separator) the input is returned unchanged with `useShell: false`.
+ */
+function resolveSpawnCommand(command: string): ResolvedSpawn {
+  if (process.platform !== "win32") {
+    return { command, useShell: false };
+  }
+  if (command.includes("/") || command.includes("\\") || path.isAbsolute(command)) {
+    return { command, useShell: false };
+  }
+  if (path.extname(command) !== "") {
+    return { command, useShell: false };
+  }
+
+  const pathExt = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC")
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  const pathDirs = (process.env.PATH ?? "").split(";").filter((entry) => entry.trim().length > 0);
+
+  for (const dir of pathDirs) {
+    for (const ext of pathExt) {
+      const candidate = path.join(dir, command + ext);
+      if (existsSync(candidate)) {
+        const lowerExt = ext.toLowerCase();
+        if (lowerExt === ".cmd" || lowerExt === ".bat") {
+          // Batch shims must be invoked through cmd.exe.
+          return { command: candidate, useShell: true };
+        }
+        return { command: candidate, useShell: false };
+      }
+    }
+  }
+
+  // Couldn't resolve — let spawn surface the original ENOENT with our improved message.
+  return { command, useShell: false };
+}
 
 function toRecord(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -203,11 +259,13 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       : undefined;
     const env = await buildEnv(config, context);
 
-    const proc = spawn(command, args, {
+    const resolved = resolveSpawnCommand(command);
+    const proc = spawn(resolved.command, args, {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: false
+      shell: resolved.useShell,
+      windowsVerbatimArguments: false
     });
 
     const session: StdioSession = {
@@ -313,7 +371,20 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   }
 
   private handleProcError(session: StdioSession, error: Error): void {
-    session.closeError = error;
+    const code = (error as NodeJS.ErrnoException).code;
+    const path = (error as NodeJS.ErrnoException).path;
+    if (code === "ENOENT") {
+      const target = path ?? "the configured command";
+      const hint =
+        process.platform === "win32"
+          ? " On Windows, executables like 'npx' and 'npm' are .cmd shims — make sure Node.js is installed and on PATH."
+          : " Verify the command exists on PATH or pass an absolute path.";
+      session.closeError = new Error(
+        `MCP stdio process could not start: '${target}' was not found.${hint}`
+      );
+    } else {
+      session.closeError = error;
+    }
     this.handleClose(session);
   }
 

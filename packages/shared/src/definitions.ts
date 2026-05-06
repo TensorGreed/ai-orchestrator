@@ -2392,9 +2392,9 @@ export const nodeDefinitions: NodeDefinition[] = [
   },
   {
     type: "mcp_server_trigger",
-    label: "MCP Server Trigger",
+    label: "Expose as MCP Tool",
     category: "Input",
-    description: "Exposes this workflow as an MCP tool at POST /api/mcp-server/:path/invoke. Downstream nodes see the tool arguments.",
+    description: "Turn this workflow into an MCP tool that other agents (including other L2M agents) can invoke. Serves a manifest at GET /api/mcp-server/:path/manifest and accepts calls at POST /api/mcp-server/:path/invoke. Downstream nodes receive the tool arguments as input.",
     configSchema: {
       type: "object",
       properties: {

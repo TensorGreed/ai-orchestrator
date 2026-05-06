@@ -146,9 +146,22 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
   {
     key: "trigger",
     title: "Triggers",
-    description: "Start workflow runs from schedules or external webhook calls.",
+    description: "Start workflow runs from schedules, webhooks, forms, chat, files, or expose this workflow as an MCP tool that other agents call.",
     icon: "trigger",
-    match: (node) => ["schedule_trigger", "webhook_input", "text_input"].includes(node.type)
+    match: (node) =>
+      [
+        "schedule_trigger",
+        "webhook_input",
+        "text_input",
+        "mcp_server_trigger",
+        "form_trigger",
+        "chat_trigger",
+        "file_trigger",
+        "rss_trigger",
+        "sse_trigger",
+        "manual_trigger",
+        "error_trigger"
+      ].includes(node.type)
   }
 ];
 
