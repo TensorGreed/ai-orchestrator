@@ -1571,6 +1571,18 @@ export async function fetchRecentTraces(limit = 50) {
 // Phase 7.4 — Workflow templates & sharing
 // ---------------------------------------------------------------------------
 
+export type TemplateDependencyKind =
+  | "provider"
+  | "vector_store"
+  | "mcp_server"
+  | "connector";
+
+export interface TemplateDependency {
+  kind: TemplateDependencyKind;
+  label: string;
+  envVar?: string;
+}
+
 export interface TemplateListItem {
   id: string;
   name: string;
@@ -1581,6 +1593,9 @@ export interface TemplateListItem {
   nodeCount: number;
   createdAt: string;
   updatedAt: string;
+  /** External dependencies detected from the workflow JSON (OpenAI key, Pinecone, etc.).
+   *  Empty array = the template runs out-of-the-box (e.g. uses the built-in echo provider). */
+  dependencies?: TemplateDependency[];
 }
 
 export async function fetchTemplates(filters?: { category?: string; search?: string }) {

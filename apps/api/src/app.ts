@@ -36,6 +36,7 @@ import { SqliteStore } from "./db/database";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
 import { MCP_PRESETS } from "./services/mcp-presets";
+import { computeTemplateDependencies } from "./services/template-dependencies";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
@@ -7149,7 +7150,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const category = query.category || undefined;
     const search = query.search || undefined;
     const templates = store.listTemplates({ category, search });
-    return { templates };
+    // Enrich each template with detected external dependencies (OpenAI key,
+    // Pinecone, etc.) so the gallery can show "Requires: …" pills before the
+    // user clicks Use Template. listTemplates returns metadata only, so we
+    // fetch the full row per template to get the workflowJson. Template count
+    // is small (~10s) and this read path is cold, so the extra cost is fine.
+    const enriched = templates.map((tpl) => {
+      const full = store.getTemplate(tpl.id);
+      let dependencies: ReturnType<typeof computeTemplateDependencies> = [];
+      if (full?.workflowJson) {
+        try {
+          dependencies = computeTemplateDependencies(JSON.parse(full.workflowJson));
+        } catch {
+          // Malformed JSON shouldn't break the gallery — skip badges silently.
+        }
+      }
+      return { ...tpl, dependencies };
+    });
+    return { templates: enriched };
   });
 
   // Get single template

@@ -4018,6 +4018,45 @@ select {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
 }
+.tpl-card-deps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+.tpl-deps-eyebrow {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-right: 0.15rem;
+}
+.tpl-dep-pill {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.65rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  background: #fbf5e8;
+  color: #8a6a1f;
+  border: 1px solid #ecdab2;
+}
+.tpl-dep-pill-provider { background: #eef3fb; color: #2f4f78; border-color: #c8d8ee; }
+.tpl-dep-pill-vector_store { background: #f3eefa; color: #5a3b85; border-color: #dcc7ed; }
+.tpl-dep-pill-mcp_server { background: #ecf7f0; color: #2c6440; border-color: #c4e3d1; }
+.tpl-dep-pill-connector { background: #fbf5e8; color: #8a6a1f; border-color: #ecdab2; }
+.tpl-dep-pill-none {
+  background: #ecf7f0;
+  color: #2c6440;
+  border-color: #c4e3d1;
+}
+.tpl-dep-envvar {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  opacity: 0.75;
+  font-size: 0.65rem;
+}
+.tpl-card-deps-none { margin-top: -0.25rem; }
 .tpl-card-actions { display: flex; gap: 0.5rem; }
 .tpl-badge {
   display: inline-block;

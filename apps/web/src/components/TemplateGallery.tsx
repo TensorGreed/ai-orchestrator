@@ -117,6 +117,27 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
                   ))}
                 </div>
               )}
+              {tpl.dependencies && tpl.dependencies.length === 0 ? (
+                <div className="tpl-card-deps tpl-card-deps-none" data-testid={`tpl-deps-${tpl.id}`}>
+                  <span className="tpl-dep-pill tpl-dep-pill-none">
+                    Runs out of the box — no setup
+                  </span>
+                </div>
+              ) : tpl.dependencies && tpl.dependencies.length > 0 ? (
+                <div className="tpl-card-deps" data-testid={`tpl-deps-${tpl.id}`}>
+                  <span className="tpl-deps-eyebrow">Requires</span>
+                  {tpl.dependencies.map((dep) => (
+                    <span
+                      key={`${dep.kind}:${dep.label}`}
+                      className={`tpl-dep-pill tpl-dep-pill-${dep.kind}`}
+                      title={dep.envVar ? `Set ${dep.envVar} or wire a Secret` : undefined}
+                    >
+                      {dep.label}
+                      {dep.envVar ? <span className="tpl-dep-envvar"> · {dep.envVar}</span> : null}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               <div className="tpl-card-actions">
                 <button
                   className="tpl-use-btn"

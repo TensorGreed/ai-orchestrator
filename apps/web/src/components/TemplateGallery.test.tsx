@@ -71,4 +71,60 @@ describe("TemplateGallery", () => {
     expect(api.useTemplate).toHaveBeenCalledWith("tpl-1");
     expect(onWorkflowCreated).toHaveBeenCalledWith("wf-new");
   });
+
+  it("renders dependency pills with envVar hints when the template requires external setup", async () => {
+    vi.mocked(api.fetchTemplates).mockResolvedValue({
+      templates: [
+        {
+          ...makeTemplate(),
+          id: "tpl-needs-openai",
+          name: "OpenAI flow",
+          dependencies: [
+            { kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY" },
+            { kind: "vector_store", label: "Pinecone", envVar: "PINECONE_API_KEY" }
+          ]
+        }
+      ]
+    });
+
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+
+    await screen.findByText("OpenAI flow");
+    const depsContainer = screen.getByTestId("tpl-deps-tpl-needs-openai");
+    expect(depsContainer).toHaveTextContent(/Requires/i);
+    expect(depsContainer).toHaveTextContent("OpenAI");
+    expect(depsContainer).toHaveTextContent("OPENAI_API_KEY");
+    expect(depsContainer).toHaveTextContent("Pinecone");
+    expect(depsContainer).toHaveTextContent("PINECONE_API_KEY");
+  });
+
+  it("renders the 'no setup' pill when dependencies is an empty array", async () => {
+    vi.mocked(api.fetchTemplates).mockResolvedValue({
+      templates: [
+        {
+          ...makeTemplate(),
+          id: "tpl-zero-deps",
+          name: "Echo flow",
+          dependencies: []
+        }
+      ]
+    });
+
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+
+    await screen.findByText("Echo flow");
+    const depsContainer = screen.getByTestId("tpl-deps-tpl-zero-deps");
+    expect(depsContainer).toHaveTextContent(/runs out of the box/i);
+  });
+
+  it("renders no dependency row at all when the field is undefined (back-compat)", async () => {
+    vi.mocked(api.fetchTemplates).mockResolvedValue({
+      templates: [makeTemplate()] // no `dependencies` field
+    });
+
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+
+    await screen.findByText("Webhook Starter");
+    expect(screen.queryByTestId("tpl-deps-tpl-1")).toBeNull();
+  });
 });
