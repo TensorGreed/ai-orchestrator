@@ -22,7 +22,7 @@ Plus the production basics: SAML/LDAP SSO, MFA/TOTP, encrypted secrets with rota
 - 50+ data-transformation, code, crypto, JWT, XML/HTML, file, and compression nodes
 - Source control sync (Git push/pull workflows + variables), workflow versioning, log streaming (Syslog/Webhook/Sentry), and a Settings UI for everything
 
-For the GA roadmap, see the public project board (link forthcoming).
+For the GA roadmap, see the [public project board](https://github.com/orgs/TensorGreed/projects/1).
 
 ## Architecture overview
 

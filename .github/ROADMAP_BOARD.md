@@ -1,90 +1,85 @@
-# Public Roadmap Board — One-Time Setup
+# Public Roadmap Board
 
-This is a **one-time setup** by a repo admin. It creates a public [GitHub Projects](https://docs.github.com/en/issues/planning-and-tracking-with-projects) board (a Kanban-style To Do / In Progress / Done view) so contributors and users can see what's planned, in flight, and done without reading internal markdown files. The board is optional — skip if maintaining it is not worth the overhead.
+**Status:** Live at <https://github.com/orgs/TensorGreed/projects/1> ("L2M GA roadmap"), seeded with the eight GA phases as `roadmap`-labeled tracking issues.
 
-Once it exists, link it from [README.md](../README.md) (replace the "Status and roadmap" placeholder) and from [apps/docs/docs/why.md](../apps/docs/docs/why.md).
+This document captures the one-time setup so contributors who fork this repo (or future maintainers who need to recreate the board) can reproduce it. Day-to-day, just visit the board URL above.
 
-## Where to run these commands
+## How it was set up
 
-Run them from the **repo root** (`ai-orchestrator/`). The `--owner TensorGreed` flag makes `gh project ...` calls work from anywhere, but `gh issue create` defaults to the current repo, so being in the repo folder is the path of least friction.
+All commands run from the repo root in PowerShell on Windows (this repo's primary development environment). Admins on macOS/Linux can swap PowerShell-specific syntax for the equivalent bash, but watch out for `\` line continuations and `${...}` expansion.
 
-## Prerequisites
+### Prerequisites
 
-```bash
+```powershell
 gh auth login --scopes "repo,project,read:org"
-gh auth status   # confirm "Logged in to github.com as <admin>"
+gh auth status
 ```
 
-## 1. Create the project
+### 1. Create the project
 
-```bash
-gh project create \
-  --owner TensorGreed \
-  --title "L2M GA roadmap" \
-  --format json
+```powershell
+gh project create --owner TensorGreed --title "L2M GA roadmap" --format json
 ```
 
-Capture the returned `number` (e.g. `5`); it identifies the project for every later command. Replace `<PROJECT_NUMBER>` below.
+Capture the returned `number` (here, `1`). Substitute it for `<N>` in subsequent commands.
 
-## 2. Add the GA roadmap phases as project items
+### 2. Create the `roadmap` label
 
-Each phase becomes a tracking issue, then the issue is added to the project. The phase list mirrors the GA plan; sub-task tracking happens in child issues created later.
+`gh issue create --label roadmap` will fail if the label doesn't exist on the repo, so create it first:
 
-```bash
-PHASES=(
-  "Phase 0 — Repositioning (README hero, docs landing, Why page, project board)"
-  "Phase 1 — MCP moat deepening (registry UI, probe/inspector, stdio transport, swarm visualization)"
-  "Phase 2 — First-run UX (welcome modal, self-contained samples, dependency badges, field help, friendly errors, gallery thumbnails)"
-  "Phase 3 — VS Code agent GA (Marketplace + Open VSX publication, vsce CI artifact)"
-  "Phase 4 — Production hardening (rate limit, helmet, multi-stage Docker, Helm PVC, image build CI, request IDs, migration rollback, integration tests, backup CLI)"
-  "Phase 5 — Docs & evangelism (5-min MCP tutorial, per-node reference, pattern library, samples repo, contributor guide, changelog)"
-  "Phase 6 — Community node SDK (l2m-nodes-* package format, loader, install UI, scaffold, MCP-server packaging path)"
+```powershell
+gh label create roadmap --color "5319e7" --description "GA roadmap tracking"
+```
+
+### 3. Seed the eight phase tracking issues
+
+```powershell
+$phases = @(
+  "Phase 0 — Repositioning (README hero, docs landing, Why page, project board)",
+  "Phase 1 — MCP moat deepening (registry UI, probe/inspector, stdio transport, swarm visualization)",
+  "Phase 2 — First-run UX (welcome modal, self-contained samples, dependency badges, field help, friendly errors, gallery thumbnails)",
+  "Phase 3 — VS Code agent GA (Marketplace + Open VSX publication, vsce CI artifact)",
+  "Phase 4 — Production hardening (rate limit, helmet, multi-stage Docker, Helm PVC, image build CI, request IDs, migration rollback, integration tests, backup CLI)",
+  "Phase 5 — Docs & evangelism (5-min MCP tutorial, per-node reference, pattern library, samples repo, contributor guide, changelog)",
+  "Phase 6 — Community node SDK (l2m-nodes-* package format, loader, install UI, scaffold, MCP-server packaging path)",
   "Phase 7 — Differentiation deepening (eval framework, workflow-as-tool, time-travel debug, inline cost telemetry)"
 )
 
-for phase in "${PHASES[@]}"; do
-  gh issue create \
-    --title "$phase" \
-    --body "Tracking issue for this phase. Sub-tasks tracked in child issues." \
-    --label "roadmap" \
-    --assignee "@me"
-done
+foreach ($p in $phases) {
+  gh issue create --title $p --body "Tracking issue for this phase. Sub-tasks tracked in child issues." --label roadmap --assignee "@me"
+}
 ```
 
-Then bulk-add every newly-created issue to the project:
+### 4. Bulk-add the issues to the project
 
-```bash
-gh issue list --label roadmap --json number --jq '.[].number' | while read num; do
-  gh project item-add <PROJECT_NUMBER> --owner TensorGreed --url "https://github.com/TensorGreed/ai-orchestrator/issues/$num"
-done
+```powershell
+gh issue list --label roadmap --json number --jq ".[].number" | ForEach-Object {
+  gh project item-add <N> --owner TensorGreed --url "https://github.com/TensorGreed/ai-orchestrator/issues/$_"
+}
 ```
 
-## 3. Add a Phase custom field
+GitHub's API occasionally returns transient `504 Gateway Timeout` for individual `item-add` calls. The operation is effectively idempotent — just re-run the same loop until every issue is in the project. Verify with:
 
-The defaults give you `Title`, `Status`, `Labels`, `Assignees`. Add `Phase` so the board can group by phase rather than just by status:
-
-```bash
-gh project field-create <PROJECT_NUMBER> --owner TensorGreed \
-  --name "Phase" \
-  --data-type "SINGLE_SELECT" \
-  --single-select-options "Phase 0,Phase 1,Phase 2,Phase 3,Phase 4,Phase 5,Phase 6,Phase 7"
+```powershell
+gh project item-list <N> --owner TensorGreed --limit 20 --format json | ConvertFrom-Json | Select-Object -ExpandProperty items | Measure-Object
 ```
 
-Set per-item values via the GitHub web UI (faster than scripting eight `gh project item-edit` calls).
+### 5. Add a `Phase` custom field for grouping
 
-## 4. Make the project public and link it
-
-```bash
-gh project edit <PROJECT_NUMBER> --owner TensorGreed --visibility PUBLIC
+```powershell
+gh project field-create <N> --owner TensorGreed --name "Phase" --data-type "SINGLE_SELECT" --single-select-options "Phase 0,Phase 1,Phase 2,Phase 3,Phase 4,Phase 5,Phase 6,Phase 7"
 ```
 
-Then update two files with the project URL (`https://github.com/orgs/TensorGreed/projects/<PROJECT_NUMBER>`):
+Set per-item Phase values via the GitHub web UI — faster than scripting eight `gh project item-edit` calls.
 
-- [README.md](../README.md) — paste the public URL into the "Status and roadmap" section, replacing "link forthcoming".
-- [apps/docs/docs/why.md](../apps/docs/docs/why.md) — same: replace "link forthcoming" near the end of the page.
+### 6. Make the project public
+
+```powershell
+gh project edit <N> --owner TensorGreed --visibility public
+```
 
 ## Maintenance
 
-- New work items go into the project as issues, then get a `Phase` value.
+- New work items go into the project as issues with the `roadmap` label, then receive a `Phase` value via the web UI.
 - Closing the issue moves it to Done in the board automatically.
-- The board is for *active* work; long-lived strategy lives in the GA plan.
+- The board is for *active* work; long-lived strategy lives in the GA plan stored outside the public repo.

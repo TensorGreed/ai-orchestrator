@@ -83,7 +83,7 @@ For transparency:
 - A community node SDK (so connectors can ship as installable npm packages) is on the roadmap as Phase 6 — currently every new connector is a PR to this repo.
 - Broad pre-built SaaS connector catalogue is intentionally not the goal; the community SDK is the bet for closing that gap.
 
-The active GA plan and per-phase status live on the public project board (link forthcoming).
+The active GA plan and per-phase status live on the [public project board](https://github.com/orgs/TensorGreed/projects/1).
 
 ## Who this is for
 
