@@ -2680,3 +2680,177 @@ describe("Phase 4.4 request ID propagation", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 4.9 — critical-path integration tests
+//
+// Existing coverage already reaches the executor (single-node runs, node
+// pinning, retry/cancel), auth (RBAC matrix, MFA, API keys), webhooks
+// (HMAC + bearer + idempotency + Stripe/Discord/Telegram in phase3_2), and
+// leader election handoff (phase7_1). Two genuinely-thin spots remain:
+//
+//   1. A multi-node DAG run through the public trigger API where each step
+//      depends on the previous step's output via {{results.*}} interpolation.
+//      Single-node tests don't catch ordering or template-data plumbing bugs.
+//   2. SECRET_MASTER_KEY_BASE64 rotation as a server-side flow: a freshly-
+//      booted app under the new key must be able to decrypt secrets that
+//      were re-encrypted offline (the db:import path).
+//
+// SAML and LDAP IdP simulation is intentionally NOT added here — the
+// disabled-503 paths and SSO group-mapping CRUD already live in
+// phase5.test.ts, and mocking passport-saml + ldapauth-fork end-to-end
+// adds brittle test infra for marginal additional confidence.
+// ---------------------------------------------------------------------------
+describe("Phase 4.9 — multi-node DAG executor through the public API", () => {
+  it("chains template interpolation across set_node steps and surfaces every node's output in /api/executions/:id", async () => {
+    const context = await createTestContext();
+    const cookie = await createRoleSession(context, {
+      email: "phase49-builder@example.com",
+      password: "TestPass123!",
+      role: "builder"
+    });
+
+    const workflow: Workflow = {
+      id: "wf-dag-multi",
+      name: "DAG interpolation",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        { id: "trigger", type: "manual_trigger", name: "Manual", position: { x: 0, y: 0 }, config: { label: "Run" } },
+        {
+          id: "set_a",
+          type: "set_node",
+          name: "Set A",
+          position: { x: 200, y: 0 },
+          config: {
+            assignments: [{ key: "label", valueTemplate: "alpha" }]
+          }
+        },
+        {
+          id: "set_b",
+          type: "set_node",
+          name: "Set B",
+          position: { x: 400, y: 0 },
+          config: {
+            // Set A's output (`{ label: "alpha" }`) is merged into set_b's
+            // template scope, so the dotted `{{label}}` resolves to "alpha".
+            assignments: [{ key: "chained", valueTemplate: "{{label}}-bravo" }]
+          }
+        },
+        {
+          id: "out",
+          type: "output",
+          name: "Out",
+          position: { x: 600, y: 0 },
+          config: {
+            outputKey: "final",
+            responseTemplate: "{{chained}}"
+          }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "trigger", target: "set_a" },
+        { id: "e2", source: "set_a", target: "set_b" },
+        { id: "e3", source: "set_b", target: "out" }
+      ]
+    };
+    context.store.upsertWorkflow(workflow);
+
+    const run = await context.app.inject({
+      method: "POST",
+      url: "/api/triggers/manual/wf-dag-multi",
+      headers: { cookie },
+      payload: { user_prompt: "hello" }
+    });
+    expect(run.statusCode).toBe(200);
+    const runBody = run.json<{ ok: boolean; status: string; executionId: string; output: unknown }>();
+    expect(runBody.ok).toBe(true);
+    expect(runBody.status).toBe("success");
+    expect(runBody.executionId).toBeTypeOf("string");
+
+    const detail = await context.app.inject({
+      method: "GET",
+      url: `/api/executions/${runBody.executionId}`,
+      headers: { cookie }
+    });
+    expect(detail.statusCode).toBe(200);
+    const detailBody = detail.json<{
+      status: string;
+      nodeResults: Array<{ nodeId: string; status: string; output?: unknown }>;
+    }>();
+    expect(detailBody.status).toBe("success");
+
+    const setA = detailBody.nodeResults.find((n) => n.nodeId === "set_a");
+    const setB = detailBody.nodeResults.find((n) => n.nodeId === "set_b");
+    expect(setA?.status).toBe("success");
+    expect(setB?.status).toBe("success");
+    expect((setA?.output as { label?: string } | undefined)?.label).toBe("alpha");
+    expect((setB?.output as { chained?: string } | undefined)?.chained).toBe("alpha-bravo");
+
+    const orderedNodeIds = detailBody.nodeResults
+      .filter((n) => n.status === "success")
+      .map((n) => n.nodeId);
+    expect(orderedNodeIds.indexOf("set_a")).toBeLessThan(orderedNodeIds.indexOf("set_b"));
+    expect(orderedNodeIds.indexOf("set_b")).toBeLessThan(orderedNodeIds.indexOf("out"));
+  });
+});
+
+describe("Phase 4.9 — SECRET_MASTER_KEY_BASE64 rotation end-to-end", () => {
+  it("a fresh server booted under a new master key can resolve secrets re-encrypted offline", async () => {
+    const oldContext = await createTestContext();
+    const oldKeyB64 = oldContext.config.SECRET_MASTER_KEY_BASE64;
+    const stored = oldContext.secretService.createSecret({
+      name: "STRIPE_KEY",
+      provider: "openai-compatible",
+      value: "sk-rotate-me-please"
+    });
+
+    const row = oldContext.store.getSecret(stored.secretId);
+    expect(row).not.toBeNull();
+    expect(row!.iv).toBeTruthy();
+    expect(row!.auth_tag).toBeTruthy();
+    expect(row!.ciphertext).toBeTruthy();
+
+    // Re-encrypt the row offline with a fresh master key, mirroring the
+    // db:import --source-master-key path.
+    const oldKey = Buffer.from(oldKeyB64 ?? "", "base64");
+    const newKey = crypto.randomBytes(32);
+
+    const decipher = crypto.createDecipheriv("aes-256-gcm", oldKey, Buffer.from(row!.iv, "base64"));
+    decipher.setAuthTag(Buffer.from(row!.auth_tag, "base64"));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(row!.ciphertext, "base64")),
+      decipher.final()
+    ]);
+    expect(plaintext.toString("utf8")).toBe("sk-rotate-me-please");
+
+    const newIv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", newKey, newIv);
+    const newCiphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const newAuthTag = cipher.getAuthTag();
+
+    oldContext.store.saveSecret({
+      id: stored.secretId,
+      name: row!.name,
+      provider: row!.provider,
+      iv: newIv.toString("base64"),
+      authTag: newAuthTag.toString("base64"),
+      ciphertext: newCiphertext.toString("base64"),
+      projectId: row!.projectId,
+      source: row!.source,
+      externalProviderId: row!.externalProviderId,
+      externalKey: row!.externalKey
+    });
+
+    // Old key can no longer decrypt the new ciphertext — AES-GCM auth-tag
+    // mismatch surfaces as a throw from resolveSecret.
+    await expect(
+      oldContext.secretService.resolveSecret({ secretId: stored.secretId })
+    ).rejects.toThrow();
+
+    // Fresh SecretService booted under the new key resolves the rotated row.
+    const rotatedSecrets = new SecretService(oldContext.store, newKey.toString("base64"));
+    const revealed = await rotatedSecrets.resolveSecret({ secretId: stored.secretId });
+    expect(revealed).toBe("sk-rotate-me-please");
+  });
+});
+
