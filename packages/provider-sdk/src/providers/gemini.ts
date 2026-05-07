@@ -1,4 +1,4 @@
-import type { LLMCallResponse, LLMProviderConfig, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
+import type { LLMCallResponse, LLMProviderConfig, LLMUsage, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext, ProviderTestResult } from "../types";
 import { resilientFetch } from "../resilient-fetch";
 
@@ -27,6 +27,12 @@ interface GeminiResponse {
       parts?: GeminiPart[];
     };
   }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
+    cachedContentTokenCount?: number;
+  };
 }
 
 function sanitizeSchemaForGemini(schema: unknown): unknown {
@@ -169,6 +175,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
 
     console.warn(`[Gemini] POST models/${model}:generateContent | messages=${contents.length} tools=${request.tools?.length ?? 0} key=${apiKey.slice(0, 6)}...${apiKey.slice(-4)}`);
 
+    const startedAt = Date.now();
     const response = await resilientFetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -212,10 +219,23 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       }
     }
 
+    let usage: LLMUsage | undefined;
+    const um = json.usageMetadata;
+    if (um) {
+      usage = {};
+      if (typeof um.promptTokenCount === "number") usage.inputTokens = um.promptTokenCount;
+      if (typeof um.candidatesTokenCount === "number") usage.outputTokens = um.candidatesTokenCount;
+      if (typeof um.totalTokenCount === "number") usage.totalTokens = um.totalTokenCount;
+      if (typeof um.cachedContentTokenCount === "number") usage.cachedInputTokens = um.cachedContentTokenCount;
+      if (Object.keys(usage).length === 0) usage = undefined;
+    }
+
     return {
       content,
       toolCalls,
-      raw: json
+      raw: json,
+      usage,
+      latencyMs: Date.now() - startedAt
     };
   }
 

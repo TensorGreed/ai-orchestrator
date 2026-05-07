@@ -1,4 +1,4 @@
-import type { LLMCallResponse, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
+import type { LLMCallResponse, LLMUsage, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
 import { resilientFetch } from "../resilient-fetch";
 
@@ -94,6 +94,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       body.tools = tools;
     }
 
+    const startedAt = Date.now();
     const response = await resilientFetch(endpoint, {
       method: "POST",
       headers: {
@@ -128,10 +129,24 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       }
     }
 
+    let usage: LLMUsage | undefined;
+    if (json.usage && typeof json.usage === "object") {
+      usage = {};
+      if (typeof json.usage.input_tokens === "number") usage.inputTokens = json.usage.input_tokens;
+      if (typeof json.usage.output_tokens === "number") usage.outputTokens = json.usage.output_tokens;
+      if (typeof json.usage.cache_read_input_tokens === "number") usage.cachedInputTokens = json.usage.cache_read_input_tokens;
+      if (usage.inputTokens !== undefined && usage.outputTokens !== undefined) {
+        usage.totalTokens = usage.inputTokens + usage.outputTokens;
+      }
+      if (Object.keys(usage).length === 0) usage = undefined;
+    }
+
     return {
       content,
       toolCalls,
-      raw: json
+      raw: json,
+      usage,
+      latencyMs: Date.now() - startedAt
     };
   }
 }

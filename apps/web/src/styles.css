@@ -2151,6 +2151,39 @@ select {
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.09), 0 2px 4px rgba(15, 23, 42, 0.05);
 }
 
+/* Phase 7.1 — token + latency telemetry pills, shown on llm_call and
+   agent_orchestrator nodes after a run. Sits at the bottom-right of the
+   node card; tooltip carries full breakdown (input/output/cached/calls). */
+.wf-node-telemetry {
+  position: absolute;
+  z-index: 4;
+  bottom: -10px;
+  right: 8px;
+  display: inline-flex;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.wf-telemetry-pill {
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--pill-bg-accent, var(--accent-soft));
+  border: 1px solid var(--pill-border-accent, var(--accent-line));
+  color: var(--pill-text-accent, var(--accent));
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.wf-telemetry-pill-faint {
+  background: var(--pill-bg, var(--panel));
+  border-color: var(--pill-border, var(--node-border));
+  color: var(--muted);
+}
+
 .wf-node-debug-preview {
   position: absolute;
   z-index: 5;

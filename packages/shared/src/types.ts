@@ -447,10 +447,29 @@ export interface LLMCallRequest {
   tools?: ToolDefinition[];
 }
 
+export interface LLMUsage {
+  /** Tokens consumed by the prompt + tool messages. */
+  inputTokens?: number;
+  /** Tokens generated in the response. */
+  outputTokens?: number;
+  /** Sum where the provider reports it; otherwise undefined (caller should not infer it). */
+  totalTokens?: number;
+  /** Tokens served from the provider's prompt cache, when reported (Anthropic, OpenAI). */
+  cachedInputTokens?: number;
+}
+
 export interface LLMCallResponse {
   content: string;
   toolCalls: ToolCall[];
   raw?: unknown;
+  /**
+   * Token-usage telemetry from the provider's response, when supplied.
+   * Optional because not every provider reports it (e.g. local Ollama
+   * doesn't always; the bundled `echo` provider never does).
+   */
+  usage?: LLMUsage;
+  /** Wall-clock latency of the provider call in ms. Populated by the adapter. */
+  latencyMs?: number;
 }
 
 export interface MCPToolDefinition extends ToolDefinition {
@@ -563,6 +582,19 @@ export interface AgentRunState {
   iterations: number;
   messages: ChatMessage[];
   steps: AgentRunStep[];
+  /**
+   * Cumulative LLM usage across every model call the agent made (one per
+   * iteration plus retries). Aggregated from each `LLMCallResponse.usage`.
+   * Unset if the provider didn't report token usage on any iteration.
+   */
+  usage?: LLMUsage;
+  /**
+   * Sum of every provider call's `latencyMs`. Approximates time spent
+   * waiting on the LLM; excludes tool execution and runtime overhead.
+   */
+  llmLatencyMs?: number;
+  /** How many provider calls were made (iterations + retries that succeeded). */
+  llmCallCount?: number;
 }
 
 export interface WorkflowExecuteRequest {

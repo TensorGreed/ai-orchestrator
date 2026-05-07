@@ -274,6 +274,53 @@ export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>
           )}
         </div>
       )}
+      {data.telemetry && hasMeaningfulTelemetry(data.telemetry) && (
+        <div className="wf-node-telemetry" title={telemetryTooltip(data.telemetry)}>
+          {formatTokens(data.telemetry) && (
+            <span className="wf-telemetry-pill">{formatTokens(data.telemetry)}</span>
+          )}
+          {typeof data.telemetry.latencyMs === "number" && (
+            <span className="wf-telemetry-pill">{formatLatency(data.telemetry.latencyMs)}</span>
+          )}
+          {typeof data.telemetry.llmCallCount === "number" && data.telemetry.llmCallCount > 1 && (
+            <span className="wf-telemetry-pill wf-telemetry-pill-faint">×{data.telemetry.llmCallCount}</span>
+          )}
+        </div>
+      )}
     </div>
   );
+}
+
+function hasMeaningfulTelemetry(t: NonNullable<EditorNodeData["telemetry"]>): boolean {
+  return (
+    typeof t.totalTokens === "number" ||
+    typeof t.inputTokens === "number" ||
+    typeof t.outputTokens === "number" ||
+    typeof t.latencyMs === "number"
+  );
+}
+
+function formatTokens(t: NonNullable<EditorNodeData["telemetry"]>): string | null {
+  const total = t.totalTokens ?? ((t.inputTokens ?? 0) + (t.outputTokens ?? 0));
+  if (!total) return null;
+  if (total >= 1000) return `${(total / 1000).toFixed(total >= 10000 ? 0 : 1)}k tok`;
+  return `${total} tok`;
+}
+
+function formatLatency(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
+  return `${Math.round(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+function telemetryTooltip(t: NonNullable<EditorNodeData["telemetry"]>): string {
+  const parts: string[] = [];
+  if (t.providerId) parts.push(`provider: ${t.providerId}${t.model ? ` (${t.model})` : ""}`);
+  if (typeof t.inputTokens === "number") parts.push(`input: ${t.inputTokens}`);
+  if (typeof t.outputTokens === "number") parts.push(`output: ${t.outputTokens}`);
+  if (typeof t.cachedInputTokens === "number" && t.cachedInputTokens > 0) parts.push(`cached: ${t.cachedInputTokens}`);
+  if (typeof t.totalTokens === "number") parts.push(`total: ${t.totalTokens}`);
+  if (typeof t.latencyMs === "number") parts.push(`llm latency: ${t.latencyMs}ms`);
+  if (typeof t.llmCallCount === "number") parts.push(`calls: ${t.llmCallCount}`);
+  return parts.join(" · ");
 }

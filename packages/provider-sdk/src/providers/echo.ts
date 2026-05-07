@@ -40,18 +40,31 @@ export class EchoProviderAdapter implements LLMProviderAdapter {
 
     const lastUser = [...request.messages].reverse().find((message) => message.role === "user");
     const userText = typeof lastUser?.content === "string" ? lastUser.content : "";
+    // Echo doesn't have real token counts; surface a coarse estimate so the
+    // canvas overlay still renders something rather than a blank pill.
+    const approxTokens = (s: string) => Math.max(1, Math.ceil(s.length / 4));
 
     if (!userText.trim()) {
+      const content =
+        "Echo provider received no user message. Wire a Text Input or Prompt Template into this LLM Call to see the echo.";
       return {
-        content:
-          "Echo provider received no user message. Wire a Text Input or Prompt Template into this LLM Call to see the echo.",
-        toolCalls: []
+        content,
+        toolCalls: [],
+        usage: { inputTokens: 0, outputTokens: approxTokens(content), totalTokens: approxTokens(content) },
+        latencyMs: 0
       };
     }
 
+    const content = `${prefix}${userText}`;
     return {
-      content: `${prefix}${userText}`,
-      toolCalls: []
+      content,
+      toolCalls: [],
+      usage: {
+        inputTokens: approxTokens(userText),
+        outputTokens: approxTokens(content),
+        totalTokens: approxTokens(userText) + approxTokens(content)
+      },
+      latencyMs: 0
     };
   }
 

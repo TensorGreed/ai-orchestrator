@@ -760,6 +760,28 @@ ${effectiveSystemPrompt}`;
     const disabledTools = new Set<string>();
     const toolFailureCounts = new Map<string, number>();
 
+    // Phase 7.1 — accumulate token usage + latency across every iteration's
+    // model call so the agent's final state reports cumulative cost/timing
+    // for the canvas overlay.
+    const usageAccumulator: { inputTokens: number; outputTokens: number; totalTokens: number; cachedInputTokens: number; sawAny: boolean } = {
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      cachedInputTokens: 0,
+      sawAny: false
+    };
+    let llmLatencyAccumulator = 0;
+    let llmCallCount = 0;
+    const finalizeUsage = () => {
+      if (!usageAccumulator.sawAny) return undefined;
+      const out: { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number } = {};
+      if (usageAccumulator.inputTokens > 0) out.inputTokens = usageAccumulator.inputTokens;
+      if (usageAccumulator.outputTokens > 0) out.outputTokens = usageAccumulator.outputTokens;
+      if (usageAccumulator.totalTokens > 0) out.totalTokens = usageAccumulator.totalTokens;
+      if (usageAccumulator.cachedInputTokens > 0) out.cachedInputTokens = usageAccumulator.cachedInputTokens;
+      return Object.keys(out).length ? out : undefined;
+    };
+
     try {
       for (let iteration = 1; iteration <= request.maxIterations; iteration += 1) {
         // --- LLM call with per-iteration retry ---
@@ -783,6 +805,18 @@ ${effectiveSystemPrompt}`;
                 resolveSecret: context.resolveSecret
               }
             );
+            // Telemetry: accumulate usage + latency on every successful call.
+            llmCallCount += 1;
+            if (typeof modelResponse.latencyMs === "number") {
+              llmLatencyAccumulator += modelResponse.latencyMs;
+            }
+            if (modelResponse.usage) {
+              usageAccumulator.sawAny = true;
+              if (typeof modelResponse.usage.inputTokens === "number") usageAccumulator.inputTokens += modelResponse.usage.inputTokens;
+              if (typeof modelResponse.usage.outputTokens === "number") usageAccumulator.outputTokens += modelResponse.usage.outputTokens;
+              if (typeof modelResponse.usage.totalTokens === "number") usageAccumulator.totalTokens += modelResponse.usage.totalTokens;
+              if (typeof modelResponse.usage.cachedInputTokens === "number") usageAccumulator.cachedInputTokens += modelResponse.usage.cachedInputTokens;
+            }
             llmError = undefined;
             break;
           } catch (error) {
@@ -814,7 +848,10 @@ ${effectiveSystemPrompt}`;
               stopReason: "error",
               iterations: iteration - 1,
               messages,
-              steps
+              steps,
+              usage: finalizeUsage(),
+              llmLatencyMs: llmLatencyAccumulator || undefined,
+              llmCallCount: llmCallCount || undefined
             };
             await persistConversation();
             return result;
@@ -1059,7 +1096,10 @@ ${effectiveSystemPrompt}`;
           stopReason: "final_answer",
           iterations: iteration,
           messages,
-          steps
+          steps,
+          usage: finalizeUsage(),
+          llmLatencyMs: llmLatencyAccumulator || undefined,
+          llmCallCount: llmCallCount || undefined
         };
         await persistConversation();
         return result;
@@ -1070,7 +1110,10 @@ ${effectiveSystemPrompt}`;
         stopReason: "max_iterations",
         iterations: request.maxIterations,
         messages,
-        steps
+        steps,
+        usage: finalizeUsage(),
+        llmLatencyMs: llmLatencyAccumulator || undefined,
+        llmCallCount: llmCallCount || undefined
       };
       await persistConversation();
       return result;
@@ -1080,7 +1123,10 @@ ${effectiveSystemPrompt}`;
         stopReason: "error",
         iterations: steps.length,
         messages,
-        steps
+        steps,
+        usage: finalizeUsage(),
+        llmLatencyMs: llmLatencyAccumulator || undefined,
+        llmCallCount: llmCallCount || undefined
       };
       await persistConversation();
       return result;

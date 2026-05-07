@@ -3,6 +3,20 @@ import type { Edge, Node } from "reactflow";
 
 export type NodeColorKey = "gray" | "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "pink";
 
+export interface NodeTelemetry {
+  providerId?: string;
+  model?: string;
+  /** Cumulative across all model calls in this node (1 for llm_call; n for agent_orchestrator). */
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cachedInputTokens?: number;
+  /** Sum of provider-call latencies in ms (excludes tool execution + runtime overhead). */
+  latencyMs?: number;
+  /** Number of model calls (only set for agent nodes; llm_call is always 1). */
+  llmCallCount?: number;
+}
+
 export interface EditorNodeData {
   label: string;
   nodeType: WorkflowNodeType;
@@ -16,6 +30,12 @@ export interface EditorNodeData {
      *  node. Surfaced under the raw error in the on-canvas preview. */
     errorRemediation?: string;
   };
+  /**
+   * Phase 7.1 telemetry — token usage + provider-call latency, populated by
+   * the executor on llm_call and agent_orchestrator nodes after a run.
+   * Surfaced as inline pills on the canvas card.
+   */
+  telemetry?: NodeTelemetry;
   pinned?: boolean;
   disabled?: boolean;
   color?: NodeColorKey;

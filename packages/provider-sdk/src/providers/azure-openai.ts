@@ -1,4 +1,4 @@
-import type { ProviderDefinition } from "@ai-orchestrator/shared";
+import type { ProviderDefinition, LLMUsage } from "@ai-orchestrator/shared";
 import type { ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
 import { resilientFetch } from "../resilient-fetch";
@@ -17,6 +17,12 @@ interface AzureOpenAIResponse {
       }>;
     };
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
 }
 
 interface AzureOpenAIStreamResponse {
@@ -274,6 +280,7 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
 
     const timeoutMs = typeof provider.extra?.timeoutMs === "number" ? provider.extra.timeoutMs : 60_000;
     const maxRetries = typeof provider.extra?.maxRetries === "number" ? provider.extra.maxRetries : 3;
+    const startedAt = Date.now();
     const response = await resilientFetch(
       `${connection.endpoint}/openai/deployments/${encodeURIComponent(connection.deployment)}/chat/completions?api-version=${encodeURIComponent(connection.apiVersion)}`,
       {
@@ -294,10 +301,21 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
 
     const json = (await response.json()) as AzureOpenAIResponse;
     const content = json.choices?.[0]?.message?.content ?? "";
+    let usage: LLMUsage | undefined;
+    if (json.usage) {
+      usage = {};
+      if (typeof json.usage.prompt_tokens === "number") usage.inputTokens = json.usage.prompt_tokens;
+      if (typeof json.usage.completion_tokens === "number") usage.outputTokens = json.usage.completion_tokens;
+      if (typeof json.usage.total_tokens === "number") usage.totalTokens = json.usage.total_tokens;
+      if (typeof json.usage.prompt_tokens_details?.cached_tokens === "number") usage.cachedInputTokens = json.usage.prompt_tokens_details.cached_tokens;
+      if (Object.keys(usage).length === 0) usage = undefined;
+    }
     return {
       content,
       toolCalls: parseToolCalls(json),
-      raw: json
+      raw: json,
+      usage,
+      latencyMs: Date.now() - startedAt
     };
   }
 

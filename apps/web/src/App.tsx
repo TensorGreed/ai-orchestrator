@@ -1148,6 +1148,34 @@ function StudioApp() {
     }
     return map;
   }, [executionResult, isDebugMode]);
+
+  // Phase 7.1 — extract per-node LLM telemetry (tokens + latency) from
+  // each node's output._telemetry blob. Surfaced as pills on the canvas
+  // card. Visible regardless of debug mode — token cost matters in prod
+  // too, not just when debugging.
+  const telemetryByNodeId = useMemo(() => {
+    const map = new Map<string, NonNullable<EditorNodeData["telemetry"]>>();
+    if (!executionResult) return map;
+    for (const nodeResult of executionResult.nodeResults) {
+      const output = nodeResult.output;
+      if (!output || typeof output !== "object" || Array.isArray(output)) continue;
+      const tel = (output as Record<string, unknown>)._telemetry;
+      if (!tel || typeof tel !== "object") continue;
+      const t = tel as Record<string, unknown>;
+      const usage = (t.usage && typeof t.usage === "object" ? t.usage : {}) as Record<string, unknown>;
+      const entry: NonNullable<EditorNodeData["telemetry"]> = {};
+      if (typeof t.providerId === "string") entry.providerId = t.providerId;
+      if (typeof t.model === "string") entry.model = t.model;
+      if (typeof t.latencyMs === "number") entry.latencyMs = t.latencyMs;
+      if (typeof t.llmCallCount === "number") entry.llmCallCount = t.llmCallCount;
+      if (typeof usage.inputTokens === "number") entry.inputTokens = usage.inputTokens as number;
+      if (typeof usage.outputTokens === "number") entry.outputTokens = usage.outputTokens as number;
+      if (typeof usage.totalTokens === "number") entry.totalTokens = usage.totalTokens as number;
+      if (typeof usage.cachedInputTokens === "number") entry.cachedInputTokens = usage.cachedInputTokens as number;
+      if (Object.keys(entry).length > 0) map.set(nodeResult.nodeId, entry);
+    }
+    return map;
+  }, [executionResult]);
   const pinnedNodeIds = useMemo(
     () => new Set(Object.keys(asRecord(currentWorkflow.pinnedData) ?? {})),
     [currentWorkflow.pinnedData]
@@ -1503,10 +1531,12 @@ function StudioApp() {
       const nextNodes = currentNodes.map((node) => {
         const executionStatus = executionStatuses.get(node.id) as EditorNodeData["executionStatus"];
         const executionPreview = executionPreviewByNodeId.get(node.id);
+        const telemetry = telemetryByNodeId.get(node.id);
         const pinned = pinnedNodeIds.has(node.id);
         if (
           node.data.executionStatus === executionStatus &&
           node.data.executionPreview === executionPreview &&
+          node.data.telemetry === telemetry &&
           node.data.pinned === pinned
         ) {
           return node;
@@ -1518,13 +1548,14 @@ function StudioApp() {
             ...node.data,
             executionStatus,
             executionPreview,
+            telemetry,
             pinned
           }
         };
       });
       return changed ? nextNodes : currentNodes;
     });
-  }, [executionPreviewByNodeId, executionStatuses, pinnedNodeIds, setNodes]);
+  }, [executionPreviewByNodeId, executionStatuses, pinnedNodeIds, setNodes, telemetryByNodeId]);
 
   useEffect(() => {
     setEdges((currentEdges) => currentEdges.map((edge) => decorateEdge(edge, nodes as EditorNode[])));

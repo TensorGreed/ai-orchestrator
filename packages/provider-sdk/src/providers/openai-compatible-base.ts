@@ -1,4 +1,4 @@
-import type { ChatMessage, LLMCallResponse, LLMProviderConfig, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
+import type { ChatMessage, LLMCallResponse, LLMProviderConfig, LLMUsage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
 import { resilientFetch } from "../resilient-fetch";
 import { parseToolArguments } from "../tool-arg-parser";
@@ -17,6 +17,23 @@ interface OpenAICompatibleResponse {
       }>;
     };
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
+}
+
+function extractOpenAIUsage(json: OpenAICompatibleResponse): LLMUsage | undefined {
+  const u = json.usage;
+  if (!u) return undefined;
+  const usage: LLMUsage = {};
+  if (typeof u.prompt_tokens === "number") usage.inputTokens = u.prompt_tokens;
+  if (typeof u.completion_tokens === "number") usage.outputTokens = u.completion_tokens;
+  if (typeof u.total_tokens === "number") usage.totalTokens = u.total_tokens;
+  if (typeof u.prompt_tokens_details?.cached_tokens === "number") usage.cachedInputTokens = u.prompt_tokens_details.cached_tokens;
+  return Object.keys(usage).length ? usage : undefined;
 }
 
 interface OpenAICompatibleStreamResponse {
@@ -235,6 +252,7 @@ export async function callOpenAICompatible(
   const connection = await resolveProviderConnection(request, context, options);
   const timeoutMs = typeof request.provider.extra?.timeoutMs === "number" ? request.provider.extra.timeoutMs : 60_000;
   const maxRetries = typeof request.provider.extra?.maxRetries === "number" ? request.provider.extra.maxRetries : 3;
+  const startedAt = Date.now();
   const response = await resilientFetch(
     `${connection.baseUrl}/chat/completions`,
     {
@@ -256,7 +274,9 @@ export async function callOpenAICompatible(
   return {
     content,
     toolCalls: options.supportsTools ? parseToolCalls(json) : [],
-    raw: json
+    raw: json,
+    usage: extractOpenAIUsage(json),
+    latencyMs: Date.now() - startedAt
   };
 }
 

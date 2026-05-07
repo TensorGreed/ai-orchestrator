@@ -1929,7 +1929,16 @@ async function runLlmNode(input: {
     answer: response.content,
     toolCalls: response.toolCalls,
     raw: response.raw,
-    _provider: input.provider
+    _provider: input.provider,
+    // Phase 7.1 — surface telemetry on the node output so execution_history
+    // captures token counts + provider-call latency. The Studio canvas reads
+    // these via getExecutionHistory's nodeResults.
+    _telemetry: {
+      providerId: input.provider.providerId,
+      model: input.provider.model,
+      usage: response.usage,
+      latencyMs: response.latencyMs
+    }
   };
 }
 
@@ -3852,7 +3861,15 @@ async function executeNode(
         stopReason: agentState.stopReason,
         steps: agentState.steps,
         messages: agentState.messages,
-        _provider: provider
+        _provider: provider,
+        // Phase 7.1 — surface cumulative agent telemetry on the node output.
+        _telemetry: {
+          providerId: provider.providerId,
+          model: provider.model,
+          usage: agentState.usage,
+          latencyMs: agentState.llmLatencyMs,
+          llmCallCount: agentState.llmCallCount
+        }
       };
     }
 
