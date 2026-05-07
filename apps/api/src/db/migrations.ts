@@ -2,6 +2,21 @@ export interface Migration {
   version: number;
   description: string;
   up: string;
+  /**
+   * SQL that reverses `up`. DESTRUCTIVE — running rollbackMigrations drops
+   * the tables/columns created by this migration AND any data they hold.
+   *
+   * Provided for every migration so `pnpm --filter @ai-orchestrator/api
+   * db:rollback --to <version> --yes` can walk a Postgres deployment back
+   * to an older schema during a botched-deploy recovery.
+   *
+   * IMPORTANT: the SQLite store (apps/api/src/db/database.ts) does NOT use
+   * this migration array — it has its own embedded `migrate()` method that
+   * `CREATE TABLE IF NOT EXISTS`-es the entire schema in one shot. SQLite
+   * users running the rollback CLI will get a clear error; the SQLite
+   * "rollback" recipe is `rm apps/api/data/orchestrator.db && restart`.
+   */
+  down: string;
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -146,6 +161,18 @@ export const MIGRATIONS: Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_workflow_executions_status
       ON workflow_executions(status);
+    `,
+    down: `
+      DROP TABLE IF EXISTS workflow_executions;
+      DROP TABLE IF EXISTS execution_history;
+      DROP TABLE IF EXISTS webhook_idempotency;
+      DROP TABLE IF EXISTS webhook_replay_keys;
+      DROP TABLE IF EXISTS sessions;
+      DROP TABLE IF EXISTS users;
+      DROP TABLE IF EXISTS session_tool_cache;
+      DROP TABLE IF EXISTS session_memory;
+      DROP TABLE IF EXISTS secrets;
+      DROP TABLE IF EXISTS workflows;
     `
   },
   {
@@ -183,6 +210,10 @@ export const MIGRATIONS: Migration[] = [
         failed_at TIMESTAMPTZ NOT NULL,
         created_at TIMESTAMPTZ NOT NULL
       );
+    `,
+    down: `
+      DROP TABLE IF EXISTS execution_queue_dlq;
+      DROP TABLE IF EXISTS execution_queue;
     `
   },
   {
@@ -197,6 +228,9 @@ export const MIGRATIONS: Migration[] = [
         updated_at TIMESTAMPTZ NOT NULL,
         PRIMARY KEY (workflow_id, node_id)
       );
+    `,
+    down: `
+      DROP TABLE IF EXISTS trigger_state;
     `
   },
   {
@@ -233,6 +267,19 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
       CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id);
       CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_secrets_project_id;
+      DROP INDEX IF EXISTS idx_workflows_folder_id;
+      DROP INDEX IF EXISTS idx_workflows_project_id;
+      ALTER TABLE secrets DROP COLUMN IF EXISTS project_id;
+      ALTER TABLE workflows DROP COLUMN IF EXISTS folder_id;
+      ALTER TABLE workflows DROP COLUMN IF EXISTS project_id;
+      ALTER TABLE workflows DROP COLUMN IF EXISTS tags_json;
+      DROP INDEX IF EXISTS idx_folders_parent_id;
+      DROP INDEX IF EXISTS idx_folders_project_id;
+      DROP TABLE IF EXISTS folders;
+      DROP TABLE IF EXISTS projects;
     `
   },
   {
@@ -246,6 +293,11 @@ export const MIGRATIONS: Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_execution_history_workflow_id
       ON execution_history(workflow_id);
+    `,
+    down: `
+      -- v1 already created these indexes; v5 is a no-op re-create. Don't drop
+      -- them on rollback or v1's invariants break. We only undo the column add.
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS custom_data_json;
     `
   },
   {
@@ -357,6 +409,16 @@ export const MIGRATIONS: Migration[] = [
       );
 
       CREATE INDEX IF NOT EXISTS idx_sso_group_mappings_provider_group ON sso_group_mappings(provider, group_name);
+    `,
+    down: `
+      DROP TABLE IF EXISTS sso_group_mappings;
+      DROP TABLE IF EXISTS secret_shares;
+      DROP TABLE IF EXISTS workflow_shares;
+      DROP TABLE IF EXISTS custom_roles;
+      DROP TABLE IF EXISTS user_project_roles;
+      DROP TABLE IF EXISTS sso_identities;
+      DROP TABLE IF EXISTS mfa_secrets;
+      DROP TABLE IF EXISTS api_keys;
     `
   },
   {
@@ -419,6 +481,15 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_user_id ON audit_logs(actor_user_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_resource_type ON audit_logs(resource_type);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome ON audit_logs(outcome);
+    `,
+    down: `
+      DROP TABLE IF EXISTS audit_logs;
+      DROP INDEX IF EXISTS idx_secrets_external_provider_id;
+      ALTER TABLE secrets DROP COLUMN IF EXISTS external_key;
+      ALTER TABLE secrets DROP COLUMN IF EXISTS external_provider_id;
+      ALTER TABLE secrets DROP COLUMN IF EXISTS source;
+      DROP TABLE IF EXISTS external_secret_cache;
+      DROP TABLE IF EXISTS external_secret_providers;
     `
   },
   {
@@ -465,6 +536,10 @@ export const MIGRATIONS: Migration[] = [
         ON log_stream_events(destination_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_log_stream_events_status ON log_stream_events(status);
       CREATE INDEX IF NOT EXISTS idx_log_stream_events_created_at ON log_stream_events(created_at);
+    `,
+    down: `
+      DROP TABLE IF EXISTS log_stream_events;
+      DROP TABLE IF EXISTS log_stream_destinations;
     `
   },
   {
@@ -513,6 +588,11 @@ export const MIGRATIONS: Migration[] = [
         last_error TEXT,
         updated_at TIMESTAMPTZ NOT NULL
       );
+    `,
+    down: `
+      DROP TABLE IF EXISTS git_configs;
+      DROP TABLE IF EXISTS workflow_versions;
+      DROP TABLE IF EXISTS variables;
     `
   },
   {
@@ -528,6 +608,9 @@ export const MIGRATIONS: Migration[] = [
       );
 
       CREATE INDEX IF NOT EXISTS idx_leader_leases_expires_at ON leader_leases(expires_at);
+    `,
+    down: `
+      DROP TABLE IF EXISTS leader_leases;
     `
   },
   {
@@ -548,6 +631,9 @@ export const MIGRATIONS: Migration[] = [
       );
 
       CREATE INDEX IF NOT EXISTS idx_workflow_templates_category ON workflow_templates(category);
+    `,
+    down: `
+      DROP TABLE IF EXISTS workflow_templates;
     `
   },
   {
@@ -563,6 +649,9 @@ export const MIGRATIONS: Migration[] = [
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+    `,
+    down: `
+      DROP TABLE IF EXISTS notification_configs;
     `
   },
   {
@@ -581,6 +670,9 @@ export const MIGRATIONS: Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_session_artifacts_namespace_session_updated_at
       ON session_artifacts(namespace, session_id, updated_at DESC);
+    `,
+    down: `
+      DROP TABLE IF EXISTS session_artifacts;
     `
   }
 ];
@@ -596,4 +688,59 @@ export async function runMigrations(
     await runSql(migration.up);
     await setVersion(migration.version);
   }
+}
+
+/**
+ * Walk a Postgres deployment back from the current schema version to
+ * `targetVersion` by running each migration's `down` SQL in reverse order.
+ *
+ * DESTRUCTIVE — drops tables/columns and the data they hold. Intended for
+ * recovering from a botched deploy: rollback to the last-known-good schema,
+ * restore data from backup, then re-apply migrations.
+ *
+ * Safety:
+ *   - No-op when the current version is already <= targetVersion.
+ *   - Throws if any migration in the rollback path is missing its `down`
+ *     (every migration in MIGRATIONS provides one, but a future contributor
+ *     could omit it — this guard catches that before partial damage).
+ *   - Caller is responsible for confirming the destructive intent (the CLI
+ *     enforces a `--yes` flag).
+ *
+ * Does NOT support SQLite — see the `Migration.down` JSDoc for why.
+ */
+export async function rollbackMigrations(
+  runSql: (sql: string) => Promise<void>,
+  getCurrentVersion: () => Promise<number>,
+  setVersion: (version: number) => Promise<void>,
+  targetVersion: number
+): Promise<{ rolledBack: number[]; from: number; to: number }> {
+  if (targetVersion < 0) {
+    throw new Error(`rollbackMigrations: targetVersion must be >= 0, got ${targetVersion}`);
+  }
+  const currentVersion = await getCurrentVersion();
+  if (currentVersion <= targetVersion) {
+    return { rolledBack: [], from: currentVersion, to: currentVersion };
+  }
+
+  const toRollBack = MIGRATIONS
+    .filter((m) => m.version > targetVersion && m.version <= currentVersion)
+    .sort((a, b) => b.version - a.version);
+
+  const missingDown = toRollBack.find((m) => !m.down || !m.down.trim());
+  if (missingDown) {
+    throw new Error(
+      `rollbackMigrations: migration v${missingDown.version} (${missingDown.description}) has no \`down\` SQL — refusing to roll back partially.`
+    );
+  }
+
+  const rolledBack: number[] = [];
+  for (const migration of toRollBack) {
+    await runSql(migration.down);
+    const newVersion = migration.version - 1;
+    await setVersion(newVersion);
+    rolledBack.push(migration.version);
+    if (newVersion <= targetVersion) break;
+  }
+
+  return { rolledBack, from: currentVersion, to: targetVersion };
 }
