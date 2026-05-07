@@ -22,6 +22,11 @@ The initial GA release covers production hardening, OSS-growth foundations, and 
 - **Hot-extend semantics**: install registers new adapters into the live registries (no restart needed); uninstall removes files but adapters stay loaded until next restart. Documented.
 - **Template scaffold repo** — [`l2m-nodes-template`](https://github.com/TensorGreed/l2m-nodes-template) ships a working starter package (sample connector, manifest, build/test setup, README walkthrough). Authors clone → rename → customize → `npm publish`.
 - **Threat model + authoring guide** at [`/docs/extensions/community-nodes`](apps/docs/docs/extensions/community-nodes.md).
+
+#### Phase 7 — Differentiation deepening
+- **Inline cost & latency telemetry** (Phase 7.1) — `LLMCallResponse` carries `usage` (input/output/total/cached tokens) + `latencyMs` from every provider. The agent runtime accumulates across iterations. Studio canvas shows pills (`1.2k tok` · `840ms` · `×3`) on llm_call and agent_orchestrator nodes after a run, with a tooltip carrying the full breakdown.
+- **Time-travel debugging** (Phase 7.2) — execution history detail rows expand to show per-node input/output JSON; each row gets a "▶ Replay from here" button that re-runs the workflow starting at that node, seeding upstream outputs from the source execution.
+- **Agent eval framework** (Phase 7.3) — new Settings → Evals tab. Group fixtures (input + expected) into datasets; run any workflow against a dataset; bundled scorers (exact_match / contains / regex) grade each result. Per-run summary shows pass/fail/error counts, total tokens, and avg latency. SQLite-only at the moment; Postgres parity is a follow-up.
 - **Zero-key sample workflows**:
   - `mcp-agent-quickstart-flow.json` — manual trigger → agent → output, attached to bundled echo provider + in-process mock-mcp tools.
   - `supervisor-worker-swarm-flow.json` — Supervisor coordinating a researcher worker and a computer worker.

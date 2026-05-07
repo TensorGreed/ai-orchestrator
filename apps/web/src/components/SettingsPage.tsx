@@ -76,7 +76,21 @@ import {
   uninstallCommunityNode,
   reloadCommunityNodes,
   type CommunityNodesStatus,
-  type CommunityNodePackageState
+  type CommunityNodePackageState,
+  fetchEvalDatasets,
+  createEvalDataset,
+  deleteEvalDataset,
+  fetchEvalFixtures,
+  createEvalFixture,
+  deleteEvalFixture,
+  startEvalRun,
+  fetchEvalRuns,
+  fetchEvalRun,
+  fetchWorkflows,
+  type EvalDataset,
+  type EvalFixture,
+  type EvalRun,
+  type EvalResult
 } from "../lib/api";
 
 type SettingsTab =
@@ -93,7 +107,8 @@ type SettingsTab =
   | "observability"
   | "notifications"
   | "mcp-servers"
-  | "community-nodes";
+  | "community-nodes"
+  | "evals";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -138,7 +153,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "observability", label: "Observability", restricted: !isAdmin },
     { id: "notifications", label: "Notifications", restricted: !isAdmin },
     { id: "mcp-servers", label: "MCP Servers" },
-    { id: "community-nodes", label: "Community Nodes", restricted: !isAdmin }
+    { id: "community-nodes", label: "Community Nodes", restricted: !isAdmin },
+    { id: "evals", label: "Evals" }
   ];
 
   return (
@@ -195,6 +211,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         {tab === "notifications" && isAdmin && <NotificationsTab />}
         {tab === "mcp-servers" && <McpServersTab />}
         {tab === "community-nodes" && isAdmin && <CommunityNodesTab />}
+        {tab === "evals" && <EvalsTab />}
       </div>
     </section>
   );
@@ -3372,5 +3389,399 @@ function CommunityPackageRow({
         </button>
       </div>
     </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7.3 — Eval framework
+//
+// Three views in one tab:
+//   - Datasets list + create
+//   - Drill into a dataset to manage fixtures + start a run
+//   - Drill into a run to see per-fixture pass/fail + scores
+// ---------------------------------------------------------------------------
+
+function EvalsTab() {
+  const [view, setView] = useState<"datasets" | "dataset" | "run">("datasets");
+  const [activeDatasetId, setActiveDatasetId] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+
+  if (view === "run" && activeRunId) {
+    return (
+      <EvalRunDetail
+        runId={activeRunId}
+        onBack={() => {
+          setActiveRunId(null);
+          setView(activeDatasetId ? "dataset" : "datasets");
+        }}
+      />
+    );
+  }
+  if (view === "dataset" && activeDatasetId) {
+    return (
+      <EvalDatasetDetail
+        datasetId={activeDatasetId}
+        onBack={() => {
+          setActiveDatasetId(null);
+          setView("datasets");
+        }}
+        onOpenRun={(runId) => {
+          setActiveRunId(runId);
+          setView("run");
+        }}
+      />
+    );
+  }
+  return (
+    <EvalDatasetsList
+      onOpenDataset={(id) => {
+        setActiveDatasetId(id);
+        setView("dataset");
+      }}
+    />
+  );
+}
+
+function EvalDatasetsList({ onOpenDataset }: { onOpenDataset: (id: string) => void }) {
+  const [datasets, setDatasets] = useState<EvalDataset[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetchEvalDatasets();
+      setDatasets(res.datasets);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load datasets");
+    }
+  }, []);
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const handleCreate = useCallback(async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!name.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await createEvalDataset({ name: name.trim(), description: description.trim() || undefined });
+      setName("");
+      setDescription("");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create dataset");
+    } finally {
+      setBusy(false);
+    }
+  }, [name, description, refresh]);
+
+  const handleDelete = useCallback(async (id: string) => {
+    if (!window.confirm("Delete dataset and all its fixtures + runs?")) return;
+    try {
+      await deleteEvalDataset(id);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+    }
+  }, [refresh]);
+
+  return (
+    <div className="settings-section">
+      <h3>Eval datasets</h3>
+      <p className="settings-help">
+        Group fixtures (test inputs + expected outputs) into datasets. Run a dataset against any
+        workflow to grade its outputs with the bundled exact-match / contains / regex scorers.
+        Eval runs use the same execution path as live runs, so token counts and latency match.
+      </p>
+      <div className="settings-card">
+        <h4>New dataset</h4>
+        <form onSubmit={handleCreate} style={{ display: "grid", gap: 8 }}>
+          <label>
+            <span>Name</span>
+            <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Customer triage v2" disabled={busy} />
+          </label>
+          <label>
+            <span>Description (optional)</span>
+            <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="100 representative tickets from Q1" disabled={busy} />
+          </label>
+          <div>
+            <button type="submit" className="header-btn" disabled={busy || !name.trim()}>Create</button>
+          </div>
+        </form>
+        {error && <div className="error-banner">{error}</div>}
+      </div>
+
+      <div className="settings-card">
+        <h4>Existing datasets ({datasets?.length ?? 0})</h4>
+        {!datasets ? (
+          <div className="muted">Loading…</div>
+        ) : datasets.length === 0 ? (
+          <p className="settings-help">No datasets yet. Create one above to get started.</p>
+        ) : (
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 10 }}>
+            {datasets.map((d) => (
+              <li
+                key={d.id}
+                style={{
+                  border: "1px solid var(--panel-border)",
+                  borderRadius: 10,
+                  padding: 12,
+                  background: "var(--panel)",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "flex-start",
+                  gap: 10
+                }}
+              >
+                <div style={{ flex: 1, cursor: "pointer" }} onClick={() => onOpenDataset(d.id)}>
+                  <div style={{ fontWeight: 600 }}>{d.name}</div>
+                  {d.description && <div style={{ fontSize: "0.86rem", color: "var(--muted)", marginTop: 2 }}>{d.description}</div>}
+                  <div style={{ fontSize: "0.76rem", color: "var(--muted)", marginTop: 6 }}>
+                    {d.fixtureCount} fixture{d.fixtureCount === 1 ? "" : "s"} · created {new Date(d.createdAt).toLocaleDateString()}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button type="button" className="header-btn" onClick={() => onOpenDataset(d.id)}>Open</button>
+                  <button type="button" className="header-btn danger" onClick={() => handleDelete(d.id)}>Delete</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EvalDatasetDetail({
+  datasetId,
+  onBack,
+  onOpenRun
+}: {
+  datasetId: string;
+  onBack: () => void;
+  onOpenRun: (runId: string) => void;
+}) {
+  const [fixtures, setFixtures] = useState<EvalFixture[] | null>(null);
+  const [runs, setRuns] = useState<EvalRun[] | null>(null);
+  const [workflows, setWorkflows] = useState<Array<{ id: string; name: string }>>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [fixName, setFixName] = useState("");
+  const [fixInput, setFixInput] = useState("{\n  \"user_prompt\": \"\"\n}");
+  const [fixExpected, setFixExpected] = useState("");
+  const [selectedWorkflow, setSelectedWorkflow] = useState<string>("");
+
+  const refresh = useCallback(async () => {
+    try {
+      const [fixRes, runsRes, wfRes] = await Promise.all([
+        fetchEvalFixtures(datasetId),
+        fetchEvalRuns({ datasetId, limit: 20 }),
+        fetchWorkflows()
+      ]);
+      setFixtures(fixRes.fixtures);
+      setRuns(runsRes.runs);
+      setWorkflows(wfRes.map((w) => ({ id: w.id, name: w.name })));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load");
+    }
+  }, [datasetId]);
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const handleAddFixture = useCallback(async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!fixName.trim()) return;
+    let inputParsed: unknown;
+    try {
+      inputParsed = JSON.parse(fixInput);
+    } catch (err) {
+      setError(`Input must be valid JSON: ${(err as Error).message}`);
+      return;
+    }
+    let expectedParsed: unknown | undefined;
+    if (fixExpected.trim()) {
+      try {
+        expectedParsed = JSON.parse(fixExpected);
+      } catch {
+        expectedParsed = fixExpected.trim();
+      }
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await createEvalFixture(datasetId, { name: fixName.trim(), input: inputParsed, expected: expectedParsed });
+      setFixName("");
+      setFixExpected("");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add fixture");
+    } finally {
+      setBusy(false);
+    }
+  }, [datasetId, fixName, fixInput, fixExpected, refresh]);
+
+  const handleStartRun = useCallback(async () => {
+    if (!selectedWorkflow) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await startEvalRun({ datasetId, workflowId: selectedWorkflow });
+      await refresh();
+      onOpenRun(result.runId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Run failed");
+    } finally {
+      setBusy(false);
+    }
+  }, [datasetId, selectedWorkflow, refresh, onOpenRun]);
+
+  return (
+    <div className="settings-section">
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button type="button" className="header-btn" onClick={onBack}>← Back</button>
+        <h3 style={{ margin: 0 }}>Dataset</h3>
+      </div>
+
+      <div className="settings-card">
+        <h4>Fixtures ({fixtures?.length ?? 0})</h4>
+        <form onSubmit={handleAddFixture} style={{ display: "grid", gap: 8 }}>
+          <label>
+            <span>Name</span>
+            <input type="text" value={fixName} onChange={(e) => setFixName(e.target.value)} placeholder="Refund request — billing" disabled={busy} />
+          </label>
+          <label>
+            <span>Input (JSON)</span>
+            <textarea rows={4} value={fixInput} onChange={(e) => setFixInput(e.target.value)} disabled={busy} style={{ fontFamily: "JetBrains Mono, Fira Code, monospace", fontSize: "0.84rem" }} />
+          </label>
+          <label>
+            <span>Expected (JSON or string, optional)</span>
+            <textarea rows={3} value={fixExpected} onChange={(e) => setFixExpected(e.target.value)} disabled={busy} placeholder='"refund processed" or {"category":"billing"}' style={{ fontFamily: "JetBrains Mono, Fira Code, monospace", fontSize: "0.84rem" }} />
+          </label>
+          <div>
+            <button type="submit" className="header-btn" disabled={busy || !fixName.trim()}>Add fixture</button>
+          </div>
+        </form>
+        {fixtures && fixtures.length > 0 && (
+          <ul style={{ listStyle: "none", margin: "12px 0 0", padding: 0, display: "grid", gap: 6 }}>
+            {fixtures.map((f) => (
+              <li key={f.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: "var(--app-bg)", border: "1px solid var(--panel-border)", borderRadius: 6, fontSize: "0.86rem" }}>
+                <span>{f.name}</span>
+                <button type="button" className="mini-btn danger" onClick={async () => { await deleteEvalFixture(f.id); await refresh(); }}>Delete</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="settings-card">
+        <h4>Run against a workflow</h4>
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <label style={{ flex: "1 1 280px" }}>
+            <span>Workflow</span>
+            <select value={selectedWorkflow} onChange={(e) => setSelectedWorkflow(e.target.value)} disabled={busy}>
+              <option value="">— pick a workflow —</option>
+              {workflows.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={busy || !selectedWorkflow || !fixtures || fixtures.length === 0}
+            onClick={handleStartRun}
+          >
+            {busy ? "Running…" : `Run ${fixtures?.length ?? 0} fixtures`}
+          </button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+      </div>
+
+      <div className="settings-card">
+        <h4>Recent runs</h4>
+        {!runs || runs.length === 0 ? (
+          <p className="settings-help">No runs yet.</p>
+        ) : (
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+            {runs.map((r) => (
+              <li key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", background: "var(--panel)", border: "1px solid var(--panel-border)", borderRadius: 8, cursor: "pointer" }} onClick={() => onOpenRun(r.id)}>
+                <div>
+                  <div style={{ fontSize: "0.88rem" }}>{new Date(r.startedAt).toLocaleString()}</div>
+                  {r.summary && <div style={{ fontSize: "0.76rem", color: "var(--muted)", marginTop: 2, fontFamily: "JetBrains Mono, Fira Code, monospace" }}>
+                    {r.summary.pass} pass · {r.summary.fail} fail · {r.summary.error} error · {Math.round(r.summary.passRate * 100)}% pass rate
+                  </div>}
+                </div>
+                <span style={{ fontSize: "0.76rem", color: r.status === "completed" ? "var(--run-success)" : "var(--accent)" }}>{r.status}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EvalRunDetail({ runId, onBack }: { runId: string; onBack: () => void }) {
+  const [run, setRun] = useState<(EvalRun & { results: EvalResult[] }) | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void fetchEvalRun(runId).then(setRun).catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+  }, [runId]);
+
+  if (error) return <div className="error-banner">{error}</div>;
+  if (!run) return <div className="settings-loading">Loading run…</div>;
+
+  return (
+    <div className="settings-section">
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button type="button" className="header-btn" onClick={onBack}>← Back</button>
+        <h3 style={{ margin: 0 }}>Eval run</h3>
+      </div>
+
+      {run.summary && (
+        <div className="settings-card">
+          <h4>Summary</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 10, fontFamily: "JetBrains Mono, Fira Code, monospace", fontSize: "0.86rem" }}>
+            <div><strong>{run.summary.total}</strong><br /><span style={{ color: "var(--muted)" }}>total</span></div>
+            <div><strong style={{ color: "var(--run-success)" }}>{run.summary.pass}</strong><br /><span style={{ color: "var(--muted)" }}>pass</span></div>
+            <div><strong style={{ color: "var(--accent)" }}>{run.summary.fail}</strong><br /><span style={{ color: "var(--muted)" }}>fail</span></div>
+            <div><strong>{run.summary.error}</strong><br /><span style={{ color: "var(--muted)" }}>error</span></div>
+            <div><strong>{Math.round(run.summary.passRate * 100)}%</strong><br /><span style={{ color: "var(--muted)" }}>pass rate</span></div>
+            <div><strong>{run.summary.totalTokenTotal}</strong><br /><span style={{ color: "var(--muted)" }}>total tokens</span></div>
+            <div><strong>{Math.round(run.summary.avgDurationMs)}ms</strong><br /><span style={{ color: "var(--muted)" }}>avg latency</span></div>
+          </div>
+        </div>
+      )}
+
+      <div className="settings-card">
+        <h4>Per-fixture results ({run.results.length})</h4>
+        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 8 }}>
+          {run.results.map((r) => (
+            <li key={r.id} style={{ padding: "10px 12px", background: r.status === "pass" ? "rgba(5, 150, 105, 0.08)" : r.status === "fail" ? "rgba(37, 99, 235, 0.08)" : "rgba(239, 68, 68, 0.08)", border: `1px solid ${r.status === "pass" ? "rgba(5, 150, 105, 0.3)" : "var(--panel-border)"}`, borderRadius: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "0.88rem", fontWeight: 600 }}>{r.fixtureName ?? r.fixtureId}</div>
+                  {r.score && (
+                    <div style={{ fontSize: "0.76rem", color: "var(--muted)", marginTop: 4 }}>
+                      {r.score.details.map((d, i) => (
+                        <div key={i}>
+                          <strong>{d.type}</strong>{d.path ? ` (${d.path})` : ""}: {d.pass ? "✓" : "✗"} {d.reason}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {r.error && <div style={{ fontSize: "0.78rem", color: "var(--accent)", marginTop: 4 }}>{r.error}</div>}
+                </div>
+                <div style={{ fontSize: "0.74rem", color: "var(--muted)", fontFamily: "JetBrains Mono, Fira Code, monospace", textAlign: "right", whiteSpace: "nowrap" }}>
+                  <div style={{ color: r.status === "pass" ? "var(--run-success)" : r.status === "fail" ? "var(--accent)" : "#ef4444", fontWeight: 600 }}>{r.status}</div>
+                  {r.durationMs !== null && <div>{r.durationMs}ms</div>}
+                  {r.tokenTotal !== null && <div>{r.tokenTotal} tok</div>}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
   );
 }

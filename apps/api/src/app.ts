@@ -43,6 +43,7 @@ import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
+import { EvalService, type ScorerSpec } from "./services/eval-service";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
@@ -1858,6 +1859,70 @@ export function createApp(
     commandTimeoutMs: config.GIT_COMMAND_TIMEOUT_MS,
     enabled: config.GIT_SYNC_ENABLED
   });
+
+  // Phase 7.3 — Eval framework. Wires the existing runWorkflowExecution path
+  // as the per-fixture executor so eval runs share routing, telemetry, and
+  // history with regular runs. SQLite-only — see /docs/extensions/eval-framework
+  // for the Postgres-parity follow-up note.
+  const evalService = new EvalService(store, async (input) => {
+    const workflow = store.getWorkflow(input.workflowId);
+    if (!workflow) {
+      return { output: null, error: `Workflow not found: ${input.workflowId}` };
+    }
+    const executionId = crypto.randomUUID();
+    const fixtureRecord =
+      input.fixtureInput && typeof input.fixtureInput === "object" && !Array.isArray(input.fixtureInput)
+        ? (input.fixtureInput as Record<string, unknown>)
+        : { input: input.fixtureInput };
+    const startedAt = Date.now();
+    try {
+      const result = await runWorkflowExecution({
+        workflow,
+        executionId,
+        directInput: { trigger_type: "eval", eval_run_id: input.runId, eval_fixture_name: input.fixtureName, ...fixtureRecord },
+        triggerType: "eval",
+        triggeredBy: input.triggeredBy
+      });
+      persistExecutionHistory({
+        executionId,
+        workflow,
+        result,
+        triggerType: "eval",
+        triggeredBy: input.triggeredBy,
+        requestInput: fixtureRecord
+      });
+      // Aggregate token usage from each node's _telemetry blob (Phase 7.1).
+      let tokenInput = 0;
+      let tokenOutput = 0;
+      let tokenTotal = 0;
+      let sawTokens = false;
+      for (const nr of result.nodeResults) {
+        const out = nr.output;
+        if (!out || typeof out !== "object" || Array.isArray(out)) continue;
+        const tel = (out as Record<string, unknown>)._telemetry;
+        if (!tel || typeof tel !== "object") continue;
+        const usage = (((tel as Record<string, unknown>).usage ?? {}) as Record<string, unknown>);
+        if (typeof usage.inputTokens === "number") { tokenInput += usage.inputTokens; sawTokens = true; }
+        if (typeof usage.outputTokens === "number") { tokenOutput += usage.outputTokens; sawTokens = true; }
+        if (typeof usage.totalTokens === "number") { tokenTotal += usage.totalTokens; sawTokens = true; }
+      }
+      return {
+        executionId,
+        output: result.output,
+        error: result.status !== "success" ? (result.error ?? `execution status: ${result.status}`) : undefined,
+        durationMs: Date.now() - startedAt,
+        tokens: sawTokens ? { input: tokenInput, output: tokenOutput, total: tokenTotal } : undefined
+      };
+    } catch (err) {
+      return {
+        executionId,
+        output: null,
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - startedAt
+      };
+    }
+  });
+
   const workerMode = config.WORKER_MODE;
   const runsBackgroundWorkers = workerMode === "all" || workerMode === "worker";
   const leaderElection = new LeaderElectionService(
@@ -2531,6 +2596,129 @@ export function createApp(
       reply.code(400);
       return { error: err instanceof Error ? err.message : String(err) };
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 7.3 — Agent eval framework routes (admin/builder).
+  // ---------------------------------------------------------------------------
+
+  app.get("/api/eval/datasets", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const projectId = (request.query as { projectId?: string } | undefined)?.projectId;
+    return { datasets: evalService.listDatasets({ projectId }) };
+  });
+
+  app.post<{ Body: { name?: string; description?: string; projectId?: string } }>("/api/eval/datasets", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const name = String(request.body?.name ?? "").trim();
+    if (!name) {
+      reply.code(400);
+      return { error: "name is required" };
+    }
+    return { dataset: evalService.createDataset({ name, description: request.body?.description, projectId: request.body?.projectId, createdBy: user.email }) };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/eval/datasets/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const ok = evalService.deleteDataset(request.params.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: "Dataset not found" };
+    }
+    return { ok: true };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/eval/datasets/:id/fixtures", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    return { fixtures: evalService.listFixtures(request.params.id) };
+  });
+
+  app.post<{
+    Params: { id: string };
+    Body: { name?: string; input?: unknown; expected?: unknown; scorers?: ScorerSpec[] };
+  }>("/api/eval/datasets/:id/fixtures", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const name = String(request.body?.name ?? "").trim();
+    if (!name) {
+      reply.code(400);
+      return { error: "name is required" };
+    }
+    if (request.body?.input === undefined) {
+      reply.code(400);
+      return { error: "input is required" };
+    }
+    return {
+      fixture: evalService.addFixture({
+        datasetId: request.params.id,
+        name,
+        input: request.body.input,
+        expected: request.body.expected,
+        scorers: request.body.scorers
+      })
+    };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/eval/fixtures/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const ok = evalService.deleteFixture(request.params.id);
+    if (!ok) {
+      reply.code(404);
+      return { error: "Fixture not found" };
+    }
+    return { ok: true };
+  });
+
+  app.post<{ Body: { datasetId?: string; workflowId?: string; scorers?: ScorerSpec[] } }>("/api/eval/runs", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const datasetId = String(request.body?.datasetId ?? "").trim();
+    const workflowId = String(request.body?.workflowId ?? "").trim();
+    if (!datasetId || !workflowId) {
+      reply.code(400);
+      return { error: "datasetId and workflowId are required" };
+    }
+    try {
+      const result = await evalService.startRun({
+        datasetId,
+        workflowId,
+        scorers: request.body?.scorers,
+        triggeredBy: user.email
+      });
+      return { ok: true, ...result };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get("/api/eval/runs", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const query = request.query as { datasetId?: string; workflowId?: string; limit?: string } | undefined;
+    return {
+      runs: evalService.listRuns({
+        datasetId: query?.datasetId,
+        workflowId: query?.workflowId,
+        limit: query?.limit ? Math.max(1, Math.min(500, parseInt(query.limit, 10) || 100)) : undefined
+      })
+    };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/eval/runs/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const run = evalService.getRun(request.params.id);
+    if (!run) {
+      reply.code(404);
+      return { error: "Eval run not found" };
+    }
+    return run;
   });
 
   app.get("/widget.js", async (_request, reply) => {

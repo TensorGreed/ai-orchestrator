@@ -824,6 +824,67 @@ export class SqliteStore {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+
+      -- Phase 7.3 — Agent eval framework
+      CREATE TABLE IF NOT EXISTS eval_datasets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        project_id TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_eval_datasets_project ON eval_datasets(project_id);
+
+      CREATE TABLE IF NOT EXISTS eval_fixtures (
+        id TEXT PRIMARY KEY,
+        dataset_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        expected_json TEXT,
+        scorers_json TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_eval_fixtures_dataset ON eval_fixtures(dataset_id);
+
+      CREATE TABLE IF NOT EXISTS eval_runs (
+        id TEXT PRIMARY KEY,
+        dataset_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        triggered_by TEXT,
+        scorers_json TEXT,
+        summary_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_dataset ON eval_runs(dataset_id);
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_workflow ON eval_runs(workflow_id);
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_started_at ON eval_runs(started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS eval_results (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        fixture_name TEXT,
+        status TEXT NOT NULL,
+        execution_id TEXT,
+        score_json TEXT,
+        output_json TEXT,
+        error TEXT,
+        duration_ms INTEGER,
+        token_input INTEGER,
+        token_output INTEGER,
+        token_total INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
+      CREATE INDEX IF NOT EXISTS idx_eval_results_fixture ON eval_results(fixture_id);
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -4817,6 +4878,279 @@ export class SqliteStore {
     const changed = (changesRow ? toNumber(changesRow.count) : 0) > 0;
     if (changed) this.persist();
     return changed;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 7.3 — Agent eval framework
+  //
+  // SQLite-only at the moment. PostgresStore parity is a follow-up — see
+  // the eval-framework docs for the interim story for prod-Postgres users.
+  // ---------------------------------------------------------------------------
+
+  createEvalDataset(input: {
+    id: string;
+    name: string;
+    description?: string;
+    projectId?: string;
+    createdBy?: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO eval_datasets (id, name, description, project_id, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [input.id, input.name, input.description ?? null, input.projectId ?? null, input.createdBy ?? null, now, now]
+    );
+    this.persist();
+  }
+
+  listEvalDatasets(options: { projectId?: string } = {}): Array<{
+    id: string; name: string; description: string | null; projectId: string | null;
+    createdBy: string | null; createdAt: string; updatedAt: string;
+    fixtureCount: number;
+  }> {
+    const where = options.projectId ? `WHERE project_id = ?` : "";
+    const params = options.projectId ? [options.projectId] : [];
+    const rows = this.queryAll<{
+      id: string; name: string; description: string | null; project_id: string | null;
+      created_by: string | null; created_at: string; updated_at: string; fixture_count: number;
+    }>(
+      `SELECT d.id, d.name, d.description, d.project_id, d.created_by, d.created_at, d.updated_at,
+              (SELECT COUNT(*) FROM eval_fixtures WHERE dataset_id = d.id) AS fixture_count
+       FROM eval_datasets d
+       ${where}
+       ORDER BY d.created_at DESC`,
+      params
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      name: toString(r.name),
+      description: r.description ? toString(r.description) : null,
+      projectId: r.project_id ? toString(r.project_id) : null,
+      createdBy: r.created_by ? toString(r.created_by) : null,
+      createdAt: toString(r.created_at),
+      updatedAt: toString(r.updated_at),
+      fixtureCount: toNumber(r.fixture_count)
+    }));
+  }
+
+  getEvalDataset(id: string) {
+    const list = this.listEvalDatasets();
+    return list.find((d) => d.id === id) ?? null;
+  }
+
+  deleteEvalDataset(id: string): boolean {
+    this.exec(`DELETE FROM eval_results WHERE run_id IN (SELECT id FROM eval_runs WHERE dataset_id = ?)`, [id]);
+    this.exec(`DELETE FROM eval_runs WHERE dataset_id = ?`, [id]);
+    this.exec(`DELETE FROM eval_fixtures WHERE dataset_id = ?`, [id]);
+    this.exec(`DELETE FROM eval_datasets WHERE id = ?`, [id]);
+    const row = this.queryOne<{ count: number }>("SELECT changes() as count");
+    const changed = (row ? toNumber(row.count) : 0) > 0;
+    if (changed) this.persist();
+    return changed;
+  }
+
+  createEvalFixture(input: {
+    id: string; datasetId: string; name: string;
+    input: unknown; expected?: unknown;
+    scorers?: Array<Record<string, unknown>>;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO eval_fixtures (id, dataset_id, name, input_json, expected_json, scorers_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id, input.datasetId, input.name,
+        JSON.stringify(input.input ?? null),
+        input.expected !== undefined ? JSON.stringify(input.expected) : null,
+        input.scorers && input.scorers.length > 0 ? JSON.stringify(input.scorers) : null,
+        now, now
+      ]
+    );
+    this.persist();
+  }
+
+  listEvalFixtures(datasetId: string): Array<{
+    id: string; datasetId: string; name: string;
+    input: unknown; expected: unknown | null;
+    scorers: Array<Record<string, unknown>> | null;
+    createdAt: string; updatedAt: string;
+  }> {
+    const rows = this.queryAll<{
+      id: string; dataset_id: string; name: string;
+      input_json: string; expected_json: string | null; scorers_json: string | null;
+      created_at: string; updated_at: string;
+    }>(
+      `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, created_at, updated_at
+       FROM eval_fixtures WHERE dataset_id = ? ORDER BY created_at`,
+      [datasetId]
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      datasetId: toString(r.dataset_id),
+      name: toString(r.name),
+      input: JSON.parse(toString(r.input_json) || "null"),
+      expected: r.expected_json ? JSON.parse(toString(r.expected_json)) : null,
+      scorers: r.scorers_json ? (JSON.parse(toString(r.scorers_json)) as Array<Record<string, unknown>>) : null,
+      createdAt: toString(r.created_at),
+      updatedAt: toString(r.updated_at)
+    }));
+  }
+
+  deleteEvalFixture(id: string): boolean {
+    this.exec(`DELETE FROM eval_fixtures WHERE id = ?`, [id]);
+    const row = this.queryOne<{ count: number }>("SELECT changes() as count");
+    const changed = (row ? toNumber(row.count) : 0) > 0;
+    if (changed) this.persist();
+    return changed;
+  }
+
+  createEvalRun(input: {
+    id: string; datasetId: string; workflowId: string; workflowName?: string;
+    triggeredBy?: string; scorers?: Array<Record<string, unknown>>;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO eval_runs (id, dataset_id, workflow_id, workflow_name, status, started_at,
+                               triggered_by, scorers_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id, input.datasetId, input.workflowId, input.workflowName ?? null,
+        "running", now, input.triggeredBy ?? null,
+        input.scorers && input.scorers.length > 0 ? JSON.stringify(input.scorers) : null,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  finalizeEvalRun(input: {
+    id: string;
+    status: "completed" | "errored";
+    summary?: Record<string, unknown>;
+    error?: string;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `UPDATE eval_runs SET status = ?, completed_at = ?, summary_json = ?, error = ? WHERE id = ?`,
+      [
+        input.status,
+        now,
+        input.summary ? JSON.stringify(input.summary) : null,
+        input.error ?? null,
+        input.id
+      ]
+    );
+    this.persist();
+  }
+
+  listEvalRuns(options: { datasetId?: string; workflowId?: string; limit?: number } = {}): Array<{
+    id: string; datasetId: string; workflowId: string; workflowName: string | null;
+    status: string; startedAt: string; completedAt: string | null;
+    triggeredBy: string | null; summary: Record<string, unknown> | null; error: string | null;
+  }> {
+    const clauses: string[] = [];
+    const params: BindParams = [];
+    if (options.datasetId) { clauses.push("dataset_id = ?"); params.push(options.datasetId); }
+    if (options.workflowId) { clauses.push("workflow_id = ?"); params.push(options.workflowId); }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limit = Math.max(1, Math.min(500, options.limit ?? 100));
+    const rows = this.queryAll<{
+      id: string; dataset_id: string; workflow_id: string; workflow_name: string | null;
+      status: string; started_at: string; completed_at: string | null;
+      triggered_by: string | null; summary_json: string | null; error: string | null;
+    }>(
+      `SELECT id, dataset_id, workflow_id, workflow_name, status, started_at, completed_at,
+              triggered_by, summary_json, error
+       FROM eval_runs ${where} ORDER BY started_at DESC LIMIT ?`,
+      [...params, limit]
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      datasetId: toString(r.dataset_id),
+      workflowId: toString(r.workflow_id),
+      workflowName: r.workflow_name ? toString(r.workflow_name) : null,
+      status: toString(r.status),
+      startedAt: toString(r.started_at),
+      completedAt: r.completed_at ? toString(r.completed_at) : null,
+      triggeredBy: r.triggered_by ? toString(r.triggered_by) : null,
+      summary: r.summary_json ? (JSON.parse(toString(r.summary_json)) as Record<string, unknown>) : null,
+      error: r.error ? toString(r.error) : null
+    }));
+  }
+
+  getEvalRun(id: string) {
+    const list = this.listEvalRuns({ limit: 500 });
+    return list.find((r) => r.id === id) ?? null;
+  }
+
+  recordEvalResult(input: {
+    id: string; runId: string; fixtureId: string; fixtureName?: string;
+    status: "pass" | "fail" | "error";
+    executionId?: string;
+    score?: Record<string, unknown>;
+    output?: unknown;
+    error?: string;
+    durationMs?: number;
+    tokenInput?: number;
+    tokenOutput?: number;
+    tokenTotal?: number;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO eval_results (id, run_id, fixture_id, fixture_name, status, execution_id,
+                                  score_json, output_json, error, duration_ms,
+                                  token_input, token_output, token_total, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id, input.runId, input.fixtureId, input.fixtureName ?? null,
+        input.status, input.executionId ?? null,
+        input.score ? JSON.stringify(input.score) : null,
+        input.output !== undefined ? JSON.stringify(input.output) : null,
+        input.error ?? null,
+        typeof input.durationMs === "number" ? Math.floor(input.durationMs) : null,
+        typeof input.tokenInput === "number" ? Math.floor(input.tokenInput) : null,
+        typeof input.tokenOutput === "number" ? Math.floor(input.tokenOutput) : null,
+        typeof input.tokenTotal === "number" ? Math.floor(input.tokenTotal) : null,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  listEvalResults(runId: string): Array<{
+    id: string; runId: string; fixtureId: string; fixtureName: string | null;
+    status: string; executionId: string | null;
+    score: Record<string, unknown> | null; output: unknown;
+    error: string | null; durationMs: number | null;
+    tokenInput: number | null; tokenOutput: number | null; tokenTotal: number | null;
+  }> {
+    const rows = this.queryAll<{
+      id: string; run_id: string; fixture_id: string; fixture_name: string | null;
+      status: string; execution_id: string | null;
+      score_json: string | null; output_json: string | null; error: string | null;
+      duration_ms: number | null;
+      token_input: number | null; token_output: number | null; token_total: number | null;
+    }>(
+      `SELECT id, run_id, fixture_id, fixture_name, status, execution_id,
+              score_json, output_json, error, duration_ms, token_input, token_output, token_total
+       FROM eval_results WHERE run_id = ? ORDER BY created_at`,
+      [runId]
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      runId: toString(r.run_id),
+      fixtureId: toString(r.fixture_id),
+      fixtureName: r.fixture_name ? toString(r.fixture_name) : null,
+      status: toString(r.status),
+      executionId: r.execution_id ? toString(r.execution_id) : null,
+      score: r.score_json ? (JSON.parse(toString(r.score_json)) as Record<string, unknown>) : null,
+      output: r.output_json ? JSON.parse(toString(r.output_json)) : null,
+      error: r.error ? toString(r.error) : null,
+      durationMs: r.duration_ms !== null && r.duration_ms !== undefined ? toNumber(r.duration_ms) : null,
+      tokenInput: r.token_input !== null && r.token_input !== undefined ? toNumber(r.token_input) : null,
+      tokenOutput: r.token_output !== null && r.token_output !== undefined ? toNumber(r.token_output) : null,
+      tokenTotal: r.token_total !== null && r.token_total !== undefined ? toNumber(r.token_total) : null
+    }));
   }
 
   /**

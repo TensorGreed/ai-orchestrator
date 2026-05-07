@@ -674,6 +674,81 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP TABLE IF EXISTS session_artifacts;
     `
+  },
+  {
+    version: 14,
+    description: "Agent eval framework — datasets, fixtures, runs, per-fixture results (Phase 7.3)",
+    up: `
+      CREATE TABLE IF NOT EXISTS eval_datasets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        project_id TEXT,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_eval_datasets_project ON eval_datasets(project_id);
+
+      CREATE TABLE IF NOT EXISTS eval_fixtures (
+        id TEXT PRIMARY KEY,
+        dataset_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        expected_json TEXT,
+        scorers_json TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_eval_fixtures_dataset ON eval_fixtures(dataset_id);
+
+      CREATE TABLE IF NOT EXISTS eval_runs (
+        id TEXT PRIMARY KEY,
+        dataset_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        status TEXT NOT NULL,
+        started_at TIMESTAMPTZ NOT NULL,
+        completed_at TIMESTAMPTZ,
+        triggered_by TEXT,
+        scorers_json TEXT,
+        summary_json TEXT,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_dataset ON eval_runs(dataset_id);
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_workflow ON eval_runs(workflow_id);
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_started_at ON eval_runs(started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS eval_results (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        fixture_id TEXT NOT NULL,
+        fixture_name TEXT,
+        status TEXT NOT NULL,
+        execution_id TEXT,
+        score_json TEXT,
+        output_json TEXT,
+        error TEXT,
+        duration_ms INTEGER,
+        token_input INTEGER,
+        token_output INTEGER,
+        token_total INTEGER,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
+      CREATE INDEX IF NOT EXISTS idx_eval_results_fixture ON eval_results(fixture_id);
+    `,
+    down: `
+      DROP TABLE IF EXISTS eval_results;
+      DROP TABLE IF EXISTS eval_runs;
+      DROP TABLE IF EXISTS eval_fixtures;
+      DROP TABLE IF EXISTS eval_datasets;
+    `
   }
 ];
 

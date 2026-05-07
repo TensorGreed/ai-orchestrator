@@ -1742,3 +1742,127 @@ export async function reloadCommunityNodes() {
     method: "POST"
   });
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7.3 — Agent eval framework
+// ---------------------------------------------------------------------------
+
+export type EvalScorerSpec =
+  | { type: "exact_match"; path?: string; ignoreCase?: boolean }
+  | { type: "contains"; path?: string; needle?: string; ignoreCase?: boolean }
+  | { type: "regex"; path?: string; pattern?: string; flags?: string };
+
+export interface EvalDataset {
+  id: string;
+  name: string;
+  description: string | null;
+  projectId: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  fixtureCount: number;
+}
+
+export interface EvalFixture {
+  id: string;
+  datasetId: string;
+  name: string;
+  input: unknown;
+  expected: unknown | null;
+  scorers: EvalScorerSpec[] | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvalRunSummary {
+  total: number;
+  pass: number;
+  fail: number;
+  error: number;
+  passRate: number;
+  totalTokenInput: number;
+  totalTokenOutput: number;
+  totalTokenTotal: number;
+  totalDurationMs: number;
+  avgDurationMs: number;
+}
+
+export interface EvalRun {
+  id: string;
+  datasetId: string;
+  workflowId: string;
+  workflowName: string | null;
+  status: string;
+  startedAt: string;
+  completedAt: string | null;
+  triggeredBy: string | null;
+  summary: EvalRunSummary | null;
+  error: string | null;
+}
+
+export interface EvalResult {
+  id: string;
+  runId: string;
+  fixtureId: string;
+  fixtureName: string | null;
+  status: string;
+  executionId: string | null;
+  score: { pass: boolean; details: Array<{ type: string; path?: string; pass: boolean; reason: string }> } | null;
+  output: unknown;
+  error: string | null;
+  durationMs: number | null;
+  tokenInput: number | null;
+  tokenOutput: number | null;
+  tokenTotal: number | null;
+}
+
+export async function fetchEvalDatasets(projectId?: string) {
+  const q = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ datasets: EvalDataset[] }>(`/api/eval/datasets${q}`);
+}
+
+export async function createEvalDataset(payload: { name: string; description?: string; projectId?: string }) {
+  return apiRequest<{ dataset: EvalDataset }>("/api/eval/datasets", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteEvalDataset(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/eval/datasets/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchEvalFixtures(datasetId: string) {
+  return apiRequest<{ fixtures: EvalFixture[] }>(`/api/eval/datasets/${encodeURIComponent(datasetId)}/fixtures`);
+}
+
+export async function createEvalFixture(datasetId: string, payload: { name: string; input: unknown; expected?: unknown; scorers?: EvalScorerSpec[] }) {
+  return apiRequest<{ fixture: EvalFixture }>(`/api/eval/datasets/${encodeURIComponent(datasetId)}/fixtures`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteEvalFixture(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/eval/fixtures/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function startEvalRun(payload: { datasetId: string; workflowId: string; scorers?: EvalScorerSpec[] }) {
+  return apiRequest<{ ok: boolean; runId: string; summary: EvalRunSummary }>("/api/eval/runs", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchEvalRuns(filter: { datasetId?: string; workflowId?: string; limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (filter.datasetId) params.set("datasetId", filter.datasetId);
+  if (filter.workflowId) params.set("workflowId", filter.workflowId);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{ runs: EvalRun[] }>(`/api/eval/runs${q}`);
+}
+
+export async function fetchEvalRun(id: string) {
+  return apiRequest<EvalRun & { results: EvalResult[] }>(`/api/eval/runs/${encodeURIComponent(id)}`);
+}
