@@ -2639,3 +2639,44 @@ describe("Phase 4.1 rate limiting", () => {
     }
   });
 });
+
+describe("Phase 4.4 request ID propagation", () => {
+  it("echoes a freshly-generated request id as x-request-id when no incoming header", async () => {
+    const context = await createTestContext();
+    const response = await context.app.inject({ method: "GET", url: "/health" });
+    expect(response.statusCode).toBe(200);
+    const requestId = response.headers["x-request-id"];
+    expect(typeof requestId).toBe("string");
+    expect((requestId as string).length).toBeGreaterThan(8);
+  });
+
+  it("honors an incoming X-Request-ID header and echoes the same value back", async () => {
+    const context = await createTestContext();
+    const upstreamId = "test-trace-1234567890abcdef";
+    const response = await context.app.inject({
+      method: "GET",
+      url: "/health",
+      headers: { "x-request-id": upstreamId }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["x-request-id"]).toBe(upstreamId);
+  });
+
+  it("emits unique request ids for sequential requests when no header is supplied", async () => {
+    const context = await createTestContext();
+    const r1 = await context.app.inject({ method: "GET", url: "/health" });
+    const r2 = await context.app.inject({ method: "GET", url: "/health" });
+    expect(r1.headers["x-request-id"]).not.toBe(r2.headers["x-request-id"]);
+  });
+
+  it("attaches x-request-id to error responses too (e.g. 401 unauthorized)", async () => {
+    const context = await createTestContext();
+    const response = await context.app.inject({
+      method: "GET",
+      url: "/api/workflows" // requires auth, returns 401
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.headers["x-request-id"]).toBeDefined();
+  });
+});
+

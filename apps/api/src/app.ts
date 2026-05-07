@@ -8,6 +8,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import fastifyRawBody from "fastify-raw-body";
 import Fastify, { type FastifyReply } from "fastify";
+import { nanoid } from "nanoid";
 import { z } from "zod";
 import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
@@ -940,9 +941,23 @@ export function createApp(
   queueService?: QueueService,
   triggerService?: TriggerService
 ) {
+  // Phase 4.4 — Request-ID propagation.
+  // - `requestIdHeader: "x-request-id"` makes Fastify honor an incoming
+  //   X-Request-ID header from upstream proxies (nginx, ALB, Cloudflare) so
+  //   a single trace ID can span multiple hops.
+  // - `genReqId` falls back to nanoid for fresh requests; nanoid is already
+  //   a transitive dep here and produces shorter URL-safe IDs than crypto
+  //   randomUUID without collision risk in the lifetime of an instance.
+  // - `requestIdLogLabel: "reqId"` keys the ID under `reqId` in every log
+  //   line that Pino emits via request.log, so `grep reqId=<id>` works.
+  // The X-Request-ID response header is set in the onSend hook below so
+  // clients (and curl --include) see the same ID their request carried.
   const app = Fastify({
     logger: { level: config.LOG_LEVEL },
-    bodyLimit: config.API_BODY_LIMIT_BYTES
+    bodyLimit: config.API_BODY_LIMIT_BYTES,
+    requestIdHeader: "x-request-id",
+    requestIdLogLabel: "reqId",
+    genReqId: () => nanoid()
   });
   const providerRegistry = createDefaultProviderRegistry();
   const connectorRegistry = createDefaultConnectorRegistry();
@@ -2340,6 +2355,17 @@ export function createApp(
     global: false,
     encoding: "utf8",
     runFirst: true
+  });
+
+  // Phase 4.4 — Echo the request ID back as x-request-id so clients can
+  // correlate their requests with server logs. Honors an incoming
+  // X-Request-ID header (handled by Fastify's requestIdHeader option above);
+  // otherwise sets the freshly-generated nanoid. onSend fires before the
+  // body is flushed so the header lands on every response, including 4xx/5xx.
+  app.addHook("onSend", async (request, reply) => {
+    if (!reply.getHeader("x-request-id")) {
+      reply.header("x-request-id", request.id);
+    }
   });
 
   // Phase 5.7 — HTTP metrics hook
