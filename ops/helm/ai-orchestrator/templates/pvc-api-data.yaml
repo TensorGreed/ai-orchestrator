@@ -1,0 +1,39 @@
+{{- /*
+PersistentVolumeClaim for the api's /app/apps/api/data path.
+
+Used when:
+  - DB_TYPE=sqlite (the default), so the SQLite file persists across pod
+    restarts and rolling updates.
+  - Or any deployment that wants the GitSyncService working tree
+    (apps/api/data/git/...) and binary data store to survive a restart.
+
+Skipped when:
+  - api.persistence.enabled=false → the deployment falls back to an
+    emptyDir mount (only useful for ephemeral dev clusters).
+  - api.persistence.existingClaim is set → BYO PVC, this template is a
+    no-op.
+
+Note on multi-replica: ReadWriteOnce PVCs cannot be shared across nodes.
+With api.replicaCount > 1 AND DB_TYPE=sqlite, ALL replicas must land on
+the same node (rare in real clusters) OR you must switch to Postgres.
+The chart's HA story (haEnabled=true with replicaCount=2) assumes
+Postgres; SQLite + replicaCount > 1 is a misconfiguration.
+*/}}
+{{- if and .Values.api.persistence.enabled (not .Values.api.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ai-orchestrator.fullname" . }}-api-data
+  labels:
+    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  accessModes:
+    - {{ .Values.api.persistence.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.api.persistence.size | default "5Gi" | quote }}
+  {{- with .Values.api.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

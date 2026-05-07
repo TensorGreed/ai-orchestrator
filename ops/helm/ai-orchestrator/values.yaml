@@ -60,6 +60,33 @@ api:
   env:
     BOOTSTRAP_ADMIN_EMAIL: ""
     BOOTSTRAP_ADMIN_PASSWORD: ""
+  # -------------------------------------------------------------------------
+  # Phase 4.5 — Persistence for /app/apps/api/data.
+  #
+  # Stores the SQLite database file (when DB_TYPE=sqlite, the chart default),
+  # the GitSyncService working tree, and the FileSystemBinaryStore. Without
+  # this set to true the data path is an emptyDir and every pod restart
+  # wipes state — fine for ephemeral dev clusters, never for production.
+  #
+  # SQLite vs Postgres tradeoff for HA:
+  #   - SQLite + ReadWriteOnce PVC + replicaCount > 1 only works if every
+  #     replica lands on the SAME node (rare). Cross-node scheduling will
+  #     deadlock on the single-writer file lock. Use this only with
+  #     replicaCount: 1, or for staging/dev.
+  #   - For real HA (replicaCount >= 2 across nodes), set DB_TYPE=postgres
+  #     in `config:` below and point secrets.databaseUrl at a managed PG.
+  #     The PVC then only carries git-sync working tree + binary blobs,
+  #     which can ride a ReadWriteMany volume (NFS, EFS, Longhorn) if you
+  #     want shared state, or stay ReadWriteOnce per-replica if you don't.
+  # -------------------------------------------------------------------------
+  persistence:
+    enabled: true
+    size: 5Gi
+    accessMode: ReadWriteOnce
+    # Empty string uses the cluster's default StorageClass.
+    storageClassName: ""
+    # Set to a pre-created PVC name to skip auto-creation (BYO storage).
+    existingClaim: ""
 
 # ---------------------------------------------------------------------------
 # Dedicated webhook replicas — horizontally scalable, auth-free ingress path.

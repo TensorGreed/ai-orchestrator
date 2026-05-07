@@ -72,7 +72,12 @@ spec:
               mountPath: /app/apps/api/data
       volumes:
         - name: data
+          {{- if .Values.api.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-api-data" (include "ai-orchestrator.fullname" .)) .Values.api.persistence.existingClaim }}
+          {{- else }}
           emptyDir: {}
+          {{- end }}
 ---
 apiVersion: v1
 kind: Service

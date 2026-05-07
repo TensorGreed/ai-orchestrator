@@ -42,6 +42,39 @@ Deployments carry `prometheus.io/scrape: "true"` on port 4000, path `/metrics`. 
 - **Postgres (recommended for HA)**: set `secrets.databaseUrl` to point at an external Postgres instance. The included `postgresql:` block is a placeholder — plug in [bitnami/postgresql](https://artifacthub.io/packages/helm/bitnami/postgresql) or your own operator.
 - **SQLite (single-replica only)**: leave `secrets.databaseUrl` blank. SQLite is single-writer — do not set `api.replicaCount > 1` with SQLite.
 
+## Persistence (`/app/apps/api/data`)
+
+The API container's `/app/apps/api/data` path holds, depending on configuration:
+
+- the SQLite database file (when `DB_TYPE=sqlite`, the chart default);
+- the [GitSyncService](../../../apps/api/src/services/git-sync-service.ts) working tree (`apps/api/data/git/...`) when source-control sync is enabled;
+- the [FileSystemBinaryStore](../../../packages/workflow-engine/src/executor.ts) blobs.
+
+Default behaviour (`api.persistence.enabled: true`): the chart auto-creates a `PersistentVolumeClaim` named `<release>-api-data` (5Gi, ReadWriteOnce, default StorageClass) and mounts it. SQLite, git working tree, and binary blobs all survive pod restarts and rolling updates.
+
+Knobs (under `api.persistence:`):
+
+| Key | Default | Notes |
+|---|---|---|
+| `enabled` | `true` | Set `false` to fall back to `emptyDir` (ephemeral; only useful for dev clusters or fully-Postgres deployments where the data path is unused). |
+| `size` | `5Gi` | Bump for large workflow-version histories or chunky binary outputs. |
+| `accessMode` | `ReadWriteOnce` | Switch to `ReadWriteMany` if you need shared state across replicas (NFS, EFS, Longhorn, etc.). |
+| `storageClassName` | `""` | Empty uses the cluster's default StorageClass. |
+| `existingClaim` | `""` | Set to a pre-created PVC name to BYO storage; the chart's auto-created PVC is then skipped. |
+
+### SQLite vs Postgres tradeoff under HA
+
+| Scenario | Database | Replicas | Persistence | Works? |
+|---|---|---|---|---|
+| Local / dev | SQLite | 1 | `emptyDir` | yes; resets on restart |
+| Single-node prod | SQLite | 1 | PVC (RWO) | yes; survives restarts |
+| Multi-node HA | SQLite | ≥ 2 | PVC (RWO) | **no** — replicas on different nodes deadlock on the SQLite single-writer file lock; PVC RWO can't be cross-node mounted |
+| Multi-node HA | SQLite | ≥ 2 | PVC (RWX) | technically works, but SQLite's locking is unsafe over network filesystems — **avoid** |
+| Multi-node HA | Postgres | ≥ 2 | PVC (RWO) | yes — Postgres handles concurrency, the PVC just carries git working tree + binary blobs per replica |
+| Multi-node HA | Postgres | ≥ 2 | PVC (RWX) | yes — and shared git working tree across replicas |
+
+The chart defaults (`api.replicaCount: 2`, `api.haEnabled: true`) assume Postgres. Switch to `api.replicaCount: 1` if you're sticking with SQLite.
+
 ## Webhook autoscaling
 
 Enable dedicated webhook replicas:
