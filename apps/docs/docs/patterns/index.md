@@ -4,6 +4,10 @@ Battle-tested topologies you can crib from when designing a workflow. Each patte
 
 Every sample lives under [`samples/workflows/`](https://github.com/TensorGreed/ai-orchestrator/tree/main/samples/workflows) and is auto-seeded into a fresh install when `SEED_SAMPLE_WORKFLOWS=true` is in your `.env`. Open the **Templates** panel in Studio, search by name, click **Use template**, and run it.
 
+::: info Looking for full reference implementations?
+The patterns below are minimal building blocks. For real-world end-to-end projects (helpdesk agent, support triage, VS Code repo reviewer), see the dedicated [**l2m-samples**](https://github.com/TensorGreed/l2m-samples) repo — each sample there carries a full README with topology, swap-to-production steps, and deployment notes.
+:::
+
 ::: tip Zero-key first
 Patterns marked **zero-key** boot end-to-end on a fresh install with no LLM credentials, no Ollama, and no external services. They use the bundled `echo` provider and the in-process `mock-mcp` adapter so you can verify the topology before swapping in real models and real MCP servers.
 :::

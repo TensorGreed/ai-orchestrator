@@ -772,6 +772,8 @@ Includes node types/config, edge graph, and node positions for canvas restoratio
 
 Set `SEED_SAMPLE_WORKFLOWS=true` to load these into the database when the workflow table is empty. See the [pattern library](apps/docs/docs/patterns/index.md) for when to use which.
 
+For full real-world reference projects (helpdesk agent, support triage, VS Code repo reviewer) with end-to-end READMEs and production-deployment notes, see the dedicated [**l2m-samples**](https://github.com/TensorGreed/l2m-samples) repo.
+
 ## Contributing
 
 L2M is **pure OSS (MIT)** and the project's growth depends on community contributions — adapters, MCP integrations, docs, bug reports, real-world patterns. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Bug? File a [bug report](https://github.com/TensorGreed/ai-orchestrator/issues/new?template=bug_report.yml). Question or design discussion? Use [GitHub Discussions](https://github.com/TensorGreed/ai-orchestrator/discussions). Security issue? Use a [private advisory](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new) — see [SECURITY.md](SECURITY.md). Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).

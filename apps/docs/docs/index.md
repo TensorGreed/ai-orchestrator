@@ -29,6 +29,7 @@ features:
 
 - [Build your first MCP agent in 5 min](/getting-started/build-your-first-mcp-agent) — fastest end-to-end path
 - [Pattern library](/patterns/) — 10 battle-tested topologies with runnable samples
+- [Sample projects (l2m-samples)](https://github.com/TensorGreed/l2m-samples) — full reference implementations: helpdesk agent, support triage, VS Code repo reviewer
 - [Why L2M?](/why) — the differentiators in detail
 - [Quickstart](/getting-started/quickstart)
 - [Workflow editor](/product/workflow-editor)

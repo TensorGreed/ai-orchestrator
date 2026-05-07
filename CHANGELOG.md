@@ -13,6 +13,7 @@ The initial GA release covers production hardening, OSS-growth foundations, and 
 #### MCP, agents, and the niche
 - **5-minute MCP agent tutorial** — the conversion path for new visitors. Walks from clone → running agent without any LLM credentials. See [`apps/docs/docs/getting-started/build-your-first-mcp-agent.md`](apps/docs/docs/getting-started/build-your-first-mcp-agent.md).
 - **Pattern library** — 10 documented topologies (zero-key MCP, webhook → agent → MCP, supervisor + worker swarm, workflow-as-MCP-tool, RAG, conditional, multi-turn artifacts, structured output, VS Code, Azure OpenAI), each with a runnable sample. See [`apps/docs/docs/patterns/index.md`](apps/docs/docs/patterns/index.md).
+- **Sample projects companion repo** — [`l2m-samples`](https://github.com/TensorGreed/l2m-samples) ships three full reference implementations (internal helpdesk agent, MCP-powered support triage, VS Code repo-aware reviewer) with end-to-end READMEs and production deployment notes. Independent from the main repo's `samples/workflows/` (which is the seed catalog) so heavy use-case content doesn't bloat the primary install.
 - **Zero-key sample workflows**:
   - `mcp-agent-quickstart-flow.json` — manual trigger → agent → output, attached to bundled echo provider + in-process mock-mcp tools.
   - `supervisor-worker-swarm-flow.json` — Supervisor coordinating a researcher worker and a computer worker.
