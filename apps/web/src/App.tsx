@@ -2162,6 +2162,48 @@ function StudioApp() {
     [currentWorkflow.id, handleApiError, hydrateWorkflow, refreshExecutionHistory]
   );
 
+  // Phase 7.2 — replay an existing execution starting from a chosen node.
+  // Loads the source execution's workflow, switches the editor into debug
+  // mode, and triggers /execute with startNodeId + sourceExecutionId so the
+  // server seeds upstream node outputs from the prior run.
+  const handleReplayFromNode = useCallback(
+    async (sourceExecutionId: string, nodeId: string) => {
+      let targetWorkflowId = currentWorkflow.id;
+      try {
+        setBusy(true);
+        setError(null);
+        const detail = await fetchExecutionById(sourceExecutionId);
+        targetWorkflowId = detail.workflowId;
+        const workflow = await fetchWorkflow(detail.workflowId);
+        hydrateWorkflow(workflow);
+        setIsDebugMode(true);
+        setLogsTab("logs");
+        setActiveMode("editor");
+        const result = await executeWorkflowStream(
+          detail.workflowId,
+          {
+            sessionId,
+            startNodeId: nodeId,
+            sourceExecutionId,
+            usePinnedData: true
+          },
+          {}
+        );
+        setExecutionResult(result);
+        if (result.executionId) {
+          latestDebugExecutionIdRef.current = result.executionId;
+        }
+        void refreshExecutionHistory();
+      } catch (replayError) {
+        const message = handleApiError(replayError, "Failed to replay from node");
+        setExecutionResult(buildExecutionErrorResult(targetWorkflowId, message));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [currentWorkflow.id, handleApiError, hydrateWorkflow, refreshExecutionHistory, sessionId]
+  );
+
   const handleCancelExecution = useCallback(
     async (executionId: string) => {
       try {
@@ -4832,6 +4874,7 @@ function StudioApp() {
               onToggleRow={(executionId) => toggleExecutionRow(executionId)}
               onDebugExecution={(executionId) => handleDebugExecution(executionId)}
               onRerunExecution={(executionId) => handleRerunExecution(executionId)}
+              onReplayFromNode={(executionId, nodeId) => handleReplayFromNode(executionId, nodeId)}
               onCancelExecution={(executionId) => handleCancelExecution(executionId)}
             />
           )}

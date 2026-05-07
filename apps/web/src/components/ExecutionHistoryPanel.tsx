@@ -1,3 +1,4 @@
+import { useState, useCallback } from "react";
 import type { ExecutionHistoryDetail, ExecutionHistorySummary } from "../lib/api";
 import type { WorkflowListItem } from "@ai-orchestrator/shared";
 
@@ -24,6 +25,13 @@ interface ExecutionHistoryPanelProps {
   onDebugExecution: (executionId: string) => Promise<void> | void;
   onRerunExecution: (executionId: string) => Promise<void> | void;
   onCancelExecution: (executionId: string) => Promise<void> | void;
+  /**
+   * Phase 7.2 — replay the workflow starting at `nodeId`, seeding upstream
+   * node outputs from the source execution. The server's
+   * /api/workflows/:id/execute already accepts startNodeId + sourceExecutionId
+   * for this; we just trigger it from here.
+   */
+  onReplayFromNode?: (executionId: string, nodeId: string) => Promise<void> | void;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -70,8 +78,13 @@ export function ExecutionHistoryPanel({
   onToggleRow,
   onDebugExecution,
   onRerunExecution,
-  onCancelExecution
+  onCancelExecution,
+  onReplayFromNode
 }: ExecutionHistoryPanelProps) {
+  const [expandedTraceKey, setExpandedTraceKey] = useState<string | null>(null);
+  const toggleTraceRow = useCallback((key: string) => {
+    setExpandedTraceKey((current) => (current === key ? null : key));
+  }, []);
   const clearFilters = () => {
     onFiltersChange({
       status: "",
@@ -264,21 +277,90 @@ export function ExecutionHistoryPanel({
                                 const errorMessage = typeof trace?.error === "string" ? trace.error : "";
                                 const errorRemediation =
                                   typeof trace?.errorRemediation === "string" ? trace.errorRemediation : "";
+                                const traceKey = `${item.id}-${nodeId}-${index}`;
+                                const isOpen = expandedTraceKey === traceKey;
+                                const nodeInput = trace?.input;
+                                const nodeOutput = trace?.output;
+                                const hasState = nodeInput !== undefined || nodeOutput !== undefined;
 
                                 return (
-                                  <div key={`${item.id}-${nodeId}-${index}`} className="execution-trace-item">
-                                    <span>{nodeId}</span>
-                                    <strong style={{ color: statusColors[status] ?? "#657087" }}>{status}</strong>
-                                    <span>{formatDuration(durationMs)}</span>
-                                    {errorMessage && (
-                                      <span className="trace-error">
-                                        {errorMessage}
-                                        {errorRemediation && (
-                                          <span className="trace-remediation">
-                                            <strong>How to fix:</strong> {errorRemediation}
+                                  <div key={traceKey}>
+                                    <div
+                                      className={`execution-trace-item ${isOpen ? "expanded" : ""}`}
+                                      onClick={() => hasState && toggleTraceRow(traceKey)}
+                                      style={{ cursor: hasState ? "pointer" : "default" }}
+                                    >
+                                      <span>
+                                        {hasState && (
+                                          <span style={{ marginRight: 6, color: "var(--muted)" }}>{isOpen ? "▾" : "▸"}</span>
+                                        )}
+                                        {nodeId}
+                                      </span>
+                                      <strong style={{ color: statusColors[status] ?? "var(--muted)" }}>{status}</strong>
+                                      <span>{formatDuration(durationMs)}</span>
+                                      <span style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                                        {errorMessage && (
+                                          <span className="trace-error">
+                                            {errorMessage}
+                                            {errorRemediation && (
+                                              <span className="trace-remediation">
+                                                <strong>How to fix:</strong> {errorRemediation}
+                                              </span>
+                                            )}
                                           </span>
                                         )}
+                                        {onReplayFromNode && (
+                                          <button
+                                            type="button"
+                                            className="mini-btn"
+                                            onClick={(event) => {
+                                              event.stopPropagation();
+                                              void onReplayFromNode(item.id, nodeId);
+                                            }}
+                                            title={`Replay the workflow from ${nodeId}, seeding upstream outputs from this run`}
+                                          >
+                                            ▶ Replay from here
+                                          </button>
+                                        )}
                                       </span>
+                                    </div>
+                                    {isOpen && hasState && (
+                                      <div
+                                        style={{
+                                          background: "var(--app-bg)",
+                                          border: "1px solid var(--panel-border)",
+                                          borderTop: "none",
+                                          borderRadius: "0 0 8px 8px",
+                                          padding: "10px 12px",
+                                          marginTop: "-4px",
+                                          marginBottom: 8,
+                                          display: "grid",
+                                          gridTemplateColumns: nodeInput !== undefined && nodeOutput !== undefined ? "1fr 1fr" : "1fr",
+                                          gap: 12,
+                                          fontSize: "0.78rem"
+                                        }}
+                                      >
+                                        {nodeInput !== undefined && (
+                                          <div>
+                                            <strong style={{ color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontSize: "0.7rem" }}>
+                                              Input
+                                            </strong>
+                                            <pre className="result-block" style={{ marginTop: 4, maxHeight: 200, overflow: "auto" }}>
+                                              {stringifyPretty(nodeInput)}
+                                            </pre>
+                                          </div>
+                                        )}
+                                        {nodeOutput !== undefined && (
+                                          <div>
+                                            <strong style={{ color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontSize: "0.7rem" }}>
+                                              Output
+                                            </strong>
+                                            <pre className="result-block" style={{ marginTop: 4, maxHeight: 200, overflow: "auto" }}>
+                                              {stringifyPretty(nodeOutput)}
+                                            </pre>
+                                          </div>
+                                        )}
+                                      </div>
                                     )}
                                   </div>
                                 );
