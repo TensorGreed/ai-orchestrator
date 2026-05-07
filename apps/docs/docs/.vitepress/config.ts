@@ -91,7 +91,8 @@ export default defineConfig({
         items: [
           { text: "Providers", link: "/extensions/providers" },
           { text: "Connectors", link: "/extensions/connectors" },
-          { text: "MCP", link: "/extensions/mcp" }
+          { text: "MCP", link: "/extensions/mcp" },
+          { text: "Community Nodes", link: "/extensions/community-nodes" }
         ]
       },
       {

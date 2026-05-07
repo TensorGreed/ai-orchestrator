@@ -1693,3 +1693,52 @@ export async function testNotificationConfig(payload: {
     body: JSON.stringify(payload)
   });
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Community node SDK
+// ---------------------------------------------------------------------------
+
+export interface CommunityNodePackageState {
+  packageName: string;
+  version: string;
+  state: "loaded" | "errored" | "unsupported";
+  apiVersion?: number;
+  displayName?: string;
+  description?: string;
+  author?: string;
+  homepage?: string;
+  license?: string;
+  contributions: { providers: number; mcpAdapters: number; connectors: number };
+  error?: string;
+}
+
+export interface CommunityNodesStatus {
+  enabled: boolean;
+  pluginsDir?: string;
+  allowlist?: string[];
+  packages?: CommunityNodePackageState[];
+  error?: string;
+}
+
+export async function fetchCommunityNodes() {
+  return apiRequest<CommunityNodesStatus>("/api/community-nodes");
+}
+
+export async function installCommunityNode(packageSpec: string) {
+  return apiRequest<{ ok: boolean; package: CommunityNodePackageState }>("/api/community-nodes/install", {
+    method: "POST",
+    body: JSON.stringify({ packageSpec })
+  });
+}
+
+export async function uninstallCommunityNode(packageName: string) {
+  return apiRequest<{ ok: boolean }>(`/api/community-nodes/${encodeURIComponent(packageName)}`, {
+    method: "DELETE"
+  });
+}
+
+export async function reloadCommunityNodes() {
+  return apiRequest<{ ok: boolean; packages: CommunityNodePackageState[] }>("/api/community-nodes/reload", {
+    method: "POST"
+  });
+}

@@ -70,7 +70,13 @@ import {
   fetchNotificationConfigs,
   testNotificationConfig,
   upsertNotificationConfig,
-  type NotificationConfig
+  type NotificationConfig,
+  fetchCommunityNodes,
+  installCommunityNode,
+  uninstallCommunityNode,
+  reloadCommunityNodes,
+  type CommunityNodesStatus,
+  type CommunityNodePackageState
 } from "../lib/api";
 
 type SettingsTab =
@@ -86,7 +92,8 @@ type SettingsTab =
   | "variables"
   | "observability"
   | "notifications"
-  | "mcp-servers";
+  | "mcp-servers"
+  | "community-nodes";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -130,7 +137,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "variables", label: "Variables" },
     { id: "observability", label: "Observability", restricted: !isAdmin },
     { id: "notifications", label: "Notifications", restricted: !isAdmin },
-    { id: "mcp-servers", label: "MCP Servers" }
+    { id: "mcp-servers", label: "MCP Servers" },
+    { id: "community-nodes", label: "Community Nodes", restricted: !isAdmin }
   ];
 
   return (
@@ -186,6 +194,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         {tab === "observability" && isAdmin && <ObservabilityTab />}
         {tab === "notifications" && isAdmin && <NotificationsTab />}
         {tab === "mcp-servers" && <McpServersTab />}
+        {tab === "community-nodes" && isAdmin && <CommunityNodesTab />}
       </div>
     </section>
   );
@@ -3118,5 +3127,250 @@ function McpServersTab() {
         ))
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Community Nodes
+//
+// Admin-only tab. When COMMUNITY_NODES_ENABLED=false on the server, the
+// initial fetch returns enabled=false and we render the disabled state with
+// an explainer. When enabled, admins can install/list/uninstall packages
+// by npm name. Allowlist is informational here — server enforces it on POST.
+// ---------------------------------------------------------------------------
+
+function CommunityNodesTab() {
+  const [status, setStatus] = useState<CommunityNodesStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [installSpec, setInstallSpec] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setStatus(await fetchCommunityNodes());
+    } catch (err) {
+      const apiErr = err as { status?: number; message?: string; payload?: { error?: string } };
+      if (apiErr.status === 503) {
+        setStatus({ enabled: false });
+      } else {
+        setError(apiErr.payload?.error ?? apiErr.message ?? "Failed to load community-node status");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handleInstall = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      const spec = installSpec.trim();
+      if (!spec) return;
+      setBusy(true);
+      setActionError(null);
+      try {
+        await installCommunityNode(spec);
+        setInstallSpec("");
+        await refresh();
+      } catch (err) {
+        const apiErr = err as { payload?: { error?: string }; message?: string };
+        setActionError(apiErr.payload?.error ?? apiErr.message ?? "Install failed");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [installSpec, refresh]
+  );
+
+  const handleUninstall = useCallback(
+    async (packageName: string) => {
+      if (!window.confirm(`Uninstall ${packageName}? Adapters it registered stay loaded until the server restarts.`)) {
+        return;
+      }
+      setBusy(true);
+      setActionError(null);
+      try {
+        await uninstallCommunityNode(packageName);
+        await refresh();
+      } catch (err) {
+        const apiErr = err as { payload?: { error?: string }; message?: string };
+        setActionError(apiErr.payload?.error ?? apiErr.message ?? "Uninstall failed");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh]
+  );
+
+  const handleReload = useCallback(async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await reloadCommunityNodes();
+      await refresh();
+    } catch (err) {
+      const apiErr = err as { payload?: { error?: string }; message?: string };
+      setActionError(apiErr.payload?.error ?? apiErr.message ?? "Reload failed");
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
+
+  if (loading) return <div className="settings-loading">Loading community-node status…</div>;
+  if (error) return <div className="error-banner">{error}</div>;
+  if (!status) return null;
+
+  if (!status.enabled) {
+    return (
+      <div className="settings-section">
+        <h3>Community Nodes</h3>
+        <p className="settings-help">
+          The community-node SDK lets you install third-party <code>l2m-nodes-*</code> npm packages
+          to add new LLM providers, MCP transports, and connectors without modifying L2M source.
+        </p>
+        <div className="info-banner">
+          <strong>Disabled.</strong> Set <code>COMMUNITY_NODES_ENABLED=true</code> in the server&apos;s
+          environment to enable. Install/uninstall is admin-only and runs <code>npm install --ignore-scripts</code>.
+          See the{" "}
+          <a href="/docs/extensions/community-nodes" target="_blank" rel="noreferrer">
+            community-nodes documentation
+          </a>{" "}
+          for the threat model.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="settings-section">
+      <h3>Community Nodes</h3>
+      <p className="settings-help">
+        Install third-party <code>l2m-nodes-*</code> packages by npm name. The server runs
+        <code> npm install --ignore-scripts</code> and validates each package&apos;s manifest
+        before importing it. Uninstall removes the package files but adapters stay loaded
+        until the next server restart.
+      </p>
+
+      <div className="settings-card">
+        <h4>Install a package</h4>
+        <form onSubmit={handleInstall} style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <label style={{ flex: "1 1 280px" }}>
+            <span>Package spec</span>
+            <input
+              type="text"
+              placeholder="l2m-nodes-cohere or l2m-nodes-cohere@1.2.3"
+              value={installSpec}
+              onChange={(event) => setInstallSpec(event.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <button type="submit" className="header-btn" disabled={busy || !installSpec.trim()}>
+            Install
+          </button>
+          <button type="button" className="header-btn" onClick={handleReload} disabled={busy}>
+            Re-scan
+          </button>
+        </form>
+        {status.allowlist && status.allowlist.length > 0 && (
+          <p className="settings-help" style={{ fontSize: "0.78rem", marginTop: 6 }}>
+            Allowlist: {status.allowlist.map((p) => <code key={p} style={{ marginRight: 6 }}>{p}</code>)}
+          </p>
+        )}
+        {status.pluginsDir && (
+          <p className="settings-help" style={{ fontSize: "0.78rem" }}>
+            Plugins directory: <code>{status.pluginsDir}</code>
+          </p>
+        )}
+        {actionError && <div className="error-banner">{actionError}</div>}
+      </div>
+
+      <div className="settings-card">
+        <h4>Loaded packages ({status.packages?.length ?? 0})</h4>
+        {!status.packages || status.packages.length === 0 ? (
+          <p className="settings-help">
+            No community packages installed. Try <code>l2m-nodes-template</code> to bootstrap your own.
+          </p>
+        ) : (
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 12 }}>
+            {status.packages.map((pkg) => (
+              <CommunityPackageRow key={pkg.packageName} pkg={pkg} onUninstall={handleUninstall} busy={busy} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CommunityPackageRow({
+  pkg,
+  onUninstall,
+  busy
+}: {
+  pkg: CommunityNodePackageState;
+  onUninstall: (name: string) => void;
+  busy: boolean;
+}) {
+  const stateLabel = pkg.state === "loaded" ? "loaded" : pkg.state === "errored" ? "errored" : "unsupported";
+  const totalContribs =
+    pkg.contributions.providers + pkg.contributions.mcpAdapters + pkg.contributions.connectors;
+  return (
+    <li
+      style={{
+        border: "1px solid var(--panel-border)",
+        borderRadius: 10,
+        padding: 14,
+        background: "var(--panel)"
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <div style={{ fontSize: "0.96rem", fontWeight: 600, color: "var(--text)" }}>
+            {pkg.displayName ?? pkg.packageName}{" "}
+            <code style={{ fontSize: "0.78rem", color: "var(--muted)", fontWeight: 400 }}>
+              {pkg.packageName}@{pkg.version}
+            </code>
+          </div>
+          {pkg.description && (
+            <div style={{ fontSize: "0.86rem", color: "var(--muted)", marginTop: 4 }}>{pkg.description}</div>
+          )}
+          <div style={{ fontSize: "0.76rem", color: "var(--muted)", marginTop: 6, display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <span>State: <strong style={{ color: pkg.state === "loaded" ? "var(--run-success)" : "var(--accent)" }}>{stateLabel}</strong></span>
+            {totalContribs > 0 && (
+              <span>
+                Contributes: {pkg.contributions.providers} providers · {pkg.contributions.mcpAdapters} MCP · {pkg.contributions.connectors} connectors
+              </span>
+            )}
+            {pkg.author && <span>by {pkg.author}</span>}
+            {pkg.license && <span>{pkg.license}</span>}
+            {pkg.homepage && (
+              <a href={pkg.homepage} target="_blank" rel="noreferrer">
+                Homepage
+              </a>
+            )}
+          </div>
+          {pkg.error && (
+            <div style={{ marginTop: 8, fontSize: "0.84rem", color: "var(--accent)" }}>
+              {pkg.error}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          className="header-btn danger"
+          onClick={() => onUninstall(pkg.packageName)}
+          disabled={busy}
+        >
+          Uninstall
+        </button>
+      </div>
+    </li>
   );
 }

@@ -249,6 +249,9 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     HELMET_ENABLED: true,
     HELMET_HSTS_ENABLED: false,
     HELMET_CSP_ENABLED: false,
+    COMMUNITY_NODES_ENABLED: false,
+    COMMUNITY_NODES_DIR: "./data/plugins",
+    COMMUNITY_NODES_ALLOWLIST: "",
     ...overrides
   };
 

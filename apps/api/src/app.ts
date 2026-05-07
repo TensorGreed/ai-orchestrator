@@ -42,6 +42,7 @@ import { MCP_PRESETS } from "./services/mcp-presets";
 import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
+import { CommunityPackageLoader } from "./services/community-package-loader";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
@@ -963,6 +964,26 @@ export function createApp(
   const connectorRegistry = createDefaultConnectorRegistry();
   const mcpRegistry = createDefaultMCPRegistry();
   const agentRuntime = createDefaultAgentRuntime();
+
+  // Phase 6 — community-package loader. Constructed eagerly so admin routes
+  // below can drive install/uninstall, but loadAll() only runs when
+  // COMMUNITY_NODES_ENABLED. When the feature is disabled the loader is a
+  // no-op shell that surfaces an explicit "disabled" error from any route
+  // that tries to use it.
+  const communityLoader = config.COMMUNITY_NODES_ENABLED
+    ? new CommunityPackageLoader(
+        {
+          pluginsDir: path.resolve(config.COMMUNITY_NODES_DIR),
+          allowlist: config.COMMUNITY_NODES_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean),
+          logger: {
+            info: (msg, fields) => app.log.info(fields ?? {}, msg),
+            warn: (msg, fields) => app.log.warn(fields ?? {}, msg),
+            error: (msg, fields) => app.log.error(fields ?? {}, msg)
+          }
+        },
+        { providerRegistry, mcpRegistry, connectorRegistry }
+      )
+    : null;
   const activeExecutions = new Map<
     string,
     {
@@ -2428,9 +2449,88 @@ export function createApp(
 
   app.addHook("onReady", async () => {
     await leaderElection.start();
+    if (communityLoader) {
+      try {
+        await communityLoader.loadAll();
+      } catch (err) {
+        app.log.error({ err: err instanceof Error ? err.message : String(err) }, "Initial community-package load failed");
+      }
+    }
   });
   app.addHook("onClose", async () => {
     await leaderElection.stop();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 6 — Community node SDK admin routes (admin-only).
+  //
+  // 503 when COMMUNITY_NODES_ENABLED is false. Install/uninstall shells out
+  // to npm with --ignore-scripts; the loader validates each package's
+  // manifest before importing it. See /docs/extensions/community-nodes for
+  // the threat model.
+  // ---------------------------------------------------------------------------
+  const requireCommunityLoader = (reply: FastifyReply): CommunityPackageLoader | null => {
+    if (!communityLoader) {
+      reply.code(503);
+      reply.send({ error: "Community node SDK is disabled. Set COMMUNITY_NODES_ENABLED=true to enable." });
+      return null;
+    }
+    return communityLoader;
+  };
+
+  app.get("/api/community-nodes", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const loader = requireCommunityLoader(reply);
+    if (!loader) return;
+    return {
+      enabled: true,
+      pluginsDir: path.resolve(config.COMMUNITY_NODES_DIR),
+      allowlist: config.COMMUNITY_NODES_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean),
+      packages: loader.list()
+    };
+  });
+
+  app.post<{ Body: { packageSpec?: string } }>("/api/community-nodes/install", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const loader = requireCommunityLoader(reply);
+    if (!loader) return;
+    const spec = String(request.body?.packageSpec ?? "").trim();
+    if (!spec) {
+      reply.code(400);
+      return { error: "packageSpec is required (e.g. 'l2m-nodes-cohere' or 'l2m-nodes-cohere@1.2.3')" };
+    }
+    try {
+      const result = await loader.install(spec);
+      return { ok: true, package: result };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.post("/api/community-nodes/reload", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const loader = requireCommunityLoader(reply);
+    if (!loader) return;
+    const packages = await loader.loadAll();
+    return { ok: true, packages };
+  });
+
+  app.delete<{ Params: { packageName: string } }>("/api/community-nodes/:packageName", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const loader = requireCommunityLoader(reply);
+    if (!loader) return;
+    try {
+      await loader.uninstall(request.params.packageName);
+      return { ok: true };
+    } catch (err) {
+      reply.code(400);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   app.get("/widget.js", async (_request, reply) => {

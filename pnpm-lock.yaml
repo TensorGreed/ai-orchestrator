@@ -29,6 +29,9 @@ importers:
       '@ai-orchestrator/agent-runtime':
         specifier: workspace:*
         version: link:../../packages/agent-runtime
+      '@ai-orchestrator/community-sdk':
+        specifier: workspace:*
+        version: link:../../packages/community-sdk
       '@ai-orchestrator/connector-sdk':
         specifier: workspace:*
         version: link:../../packages/connector-sdk
@@ -170,6 +173,21 @@ importers:
 
   packages/agent-runtime:
     dependencies:
+      '@ai-orchestrator/mcp-sdk':
+        specifier: workspace:*
+        version: link:../mcp-sdk
+      '@ai-orchestrator/provider-sdk':
+        specifier: workspace:*
+        version: link:../provider-sdk
+      '@ai-orchestrator/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/community-sdk:
+    dependencies:
+      '@ai-orchestrator/connector-sdk':
+        specifier: workspace:*
+        version: link:../connector-sdk
       '@ai-orchestrator/mcp-sdk':
         specifier: workspace:*
         version: link:../mcp-sdk

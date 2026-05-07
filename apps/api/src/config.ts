@@ -118,7 +118,21 @@ const envSchema = z.object({
   RATE_LIMIT_WEBHOOK_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   HELMET_ENABLED: booleanFromEnv.default(true),
   HELMET_HSTS_ENABLED: booleanFromEnv.default(false),
-  HELMET_CSP_ENABLED: booleanFromEnv.default(false)
+  HELMET_CSP_ENABLED: booleanFromEnv.default(false),
+
+  // Phase 6 — Community node SDK / marketplace.
+  // Off by default. Even with this enabled, install/uninstall is admin-only
+  // and (optionally) gated by COMMUNITY_NODES_ALLOWLIST. See
+  // /docs/extensions/community-nodes for the threat model.
+  COMMUNITY_NODES_ENABLED: booleanFromEnv.default(false),
+  /** Where `npm install` writes the community packages. node_modules/ lives below. */
+  COMMUNITY_NODES_DIR: z.string().default("./data/plugins"),
+  /**
+   * Comma-separated allowlist of installable package names. Each entry is
+   * either an exact name (`l2m-nodes-cohere`) or a glob suffix (`l2m-nodes-*`).
+   * Empty = allow any `l2m-nodes-*` package.
+   */
+  COMMUNITY_NODES_ALLOWLIST: z.string().default("")
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
