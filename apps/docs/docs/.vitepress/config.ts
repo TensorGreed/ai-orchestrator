@@ -49,7 +49,22 @@ export default defineConfig({
         items: [
           { text: "Core Nodes", link: "/nodes/core-nodes" },
           { text: "Azure Nodes", link: "/nodes/azure-nodes" },
-          { text: "Vector Stores", link: "/nodes/vector-stores" }
+          { text: "Vector Stores", link: "/nodes/vector-stores" },
+          {
+            text: "Reference (auto-generated)",
+            collapsed: true,
+            items: [
+              { text: "Overview", link: "/nodes/reference/" },
+              { text: "Input", link: "/nodes/reference/input" },
+              { text: "LLM", link: "/nodes/reference/llm" },
+              { text: "Agent", link: "/nodes/reference/agent" },
+              { text: "MCP", link: "/nodes/reference/mcp" },
+              { text: "RAG", link: "/nodes/reference/rag" },
+              { text: "Connector", link: "/nodes/reference/connector" },
+              { text: "Utility", link: "/nodes/reference/utility" },
+              { text: "Output", link: "/nodes/reference/output" }
+            ]
+          }
         ]
       },
       {
