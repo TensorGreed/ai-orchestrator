@@ -28,6 +28,9 @@ async function ensureAuthenticated(page: Page): Promise<void> {
 
 async function openStudio(page: Page): Promise<void> {
   await ensureAuthenticated(page);
+  // Suppress the first-login welcome modal — it intercepts clicks on the
+  // workflow editor and isn't part of any journey under test here.
+  await page.addInitScript(() => window.localStorage.setItem("l2m:welcome-dismissed", "1"));
   await page.goto("/");
   await expect(page.getByLabel("Studio modes")).toBeVisible({ timeout: 60_000 });
 }
