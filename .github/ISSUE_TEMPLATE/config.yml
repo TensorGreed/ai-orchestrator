@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or design discussion
+    url: https://github.com/TensorGreed/ai-orchestrator/discussions
+    about: Use Discussions for "how do I…", "is this a good idea…", and longer-form proposals.
+  - name: Security vulnerability
+    url: https://github.com/TensorGreed/ai-orchestrator/security/advisories/new
+    about: Report security issues privately. Do not open a public issue.
+  - name: Documentation site
+    url: https://github.com/TensorGreed/ai-orchestrator/tree/main/apps/docs
+    about: Read the docs first — the 5-minute tutorial and pattern library cover most "how do I" questions.

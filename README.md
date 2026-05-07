@@ -756,16 +756,25 @@ Includes node types/config, edge graph, and node positions for canvas restoratio
 
 ## Sample workflows
 
-- `samples/workflows/basic-flow.json`
-- `samples/workflows/conditional-flow.json`
-- `samples/workflows/rag-flow.json`
-- `samples/workflows/rag-pinecone-flow.json`
-- `samples/workflows/agentic-mcp-flow.json`
-- `samples/workflows/structured-output-flow.json`
-- `samples/workflows/azure-openai-flow.json`
-- `samples/workflows/azure-connectors-demo-flow.json`
+- `samples/workflows/basic-flow.json` — text-in / LLM / text-out, runs zero-key with the bundled echo provider.
+- `samples/workflows/mcp-agent-quickstart-flow.json` — zero-key MCP agent (target of the [5-minute tutorial](apps/docs/docs/getting-started/build-your-first-mcp-agent.md)).
+- `samples/workflows/supervisor-worker-swarm-flow.json` — multi-agent: a Supervisor delegating to a researcher and a computer worker.
+- `samples/workflows/workflow-as-mcp-tool-flow.json` — `mcp_server_trigger` exposing a workflow as a callable MCP tool.
+- `samples/workflows/agentic-mcp-flow.json` — webhook → agent → MCP tools + memory.
+- `samples/workflows/two-turn-report-code-helper-flow.json` — multi-turn helper with deterministic session artifacts.
+- `samples/workflows/vscode-l2m-coding-agent-flow.json` — canonical wiring for the VS Code extension.
+- `samples/workflows/conditional-flow.json` — branching from a webhook trigger.
+- `samples/workflows/rag-flow.json` — RAG with Google Drive + in-memory vector store.
+- `samples/workflows/rag-pinecone-flow.json` — RAG backed by Pinecone.
+- `samples/workflows/structured-output-flow.json` — schema-validated structured output extraction.
+- `samples/workflows/azure-openai-flow.json` — basic LLM flow using Azure OpenAI.
+- `samples/workflows/azure-connectors-demo-flow.json` — Azure Storage / Cosmos DB / Monitor / AI Search.
 
-Set `SEED_SAMPLE_WORKFLOWS=true` to load these into the database when the workflow table is empty.
+Set `SEED_SAMPLE_WORKFLOWS=true` to load these into the database when the workflow table is empty. See the [pattern library](apps/docs/docs/patterns/index.md) for when to use which.
+
+## Contributing
+
+L2M is **pure OSS (MIT)** and the project's growth depends on community contributions — adapters, MCP integrations, docs, bug reports, real-world patterns. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Bug? File a [bug report](https://github.com/TensorGreed/ai-orchestrator/issues/new?template=bug_report.yml). Question or design discussion? Use [GitHub Discussions](https://github.com/TensorGreed/ai-orchestrator/discussions). Security issue? Use a [private advisory](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new) — see [SECURITY.md](SECURITY.md). Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Status and roadmap
 

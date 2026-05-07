@@ -1,0 +1,117 @@
+name: Bug report
+description: Report something that doesn't work the way the docs say it should.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report. Please give us enough detail to reproduce — silent "doesn't work" reports rarely move forward.
+
+        **Not a bug?**
+        - Question or design discussion → [GitHub Discussions](https://github.com/TensorGreed/ai-orchestrator/discussions)
+        - Security vulnerability → [private advisory](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new) (do not open a public issue)
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A concise description of the bug.
+      placeholder: When I run X, the API returns 500 instead of the expected payload.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps. Include the exact prompts, payloads, and node configs that trigger the bug.
+      placeholder: |
+        1. `pnpm install`
+        2. Set `SECRET_MASTER_KEY_BASE64=...` in `.env`
+        3. Open Studio, click Templates → "MCP Agent Quickstart"
+        4. Click Run with `user_prompt: "what time is it?"`
+        5. See error in execution history
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you think would happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stack traces
+      description: Paste relevant API logs, browser console output, or stack traces. Strip secrets first.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: L2M version / commit
+      description: "`git rev-parse --short HEAD` if you're on `main`, or the release tag (e.g. `v0.1.0`)."
+      placeholder: v0.1.0 or 4bc0a9c
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      description: Where is this running?
+      options:
+        - Local dev (`pnpm dev`)
+        - Docker / docker-compose
+        - Helm / Kubernetes
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: db
+    attributes:
+      label: Database
+      options:
+        - SQLite (default)
+        - Postgres
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      description: "Output of `node --version`."
+      placeholder: v20.18.0
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: macOS 14.5 / Ubuntu 22.04 / Windows 11
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround (if any)
+      description: Anything you found that mitigates the issue while you wait for a fix.
+
+  - type: checkboxes
+    id: prereqs
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I searched [existing issues](https://github.com/TensorGreed/ai-orchestrator/issues?q=is%3Aissue) and didn't find a duplicate.
+          required: true
+        - label: I'm running a recent commit (within the last 30 days) or a tagged release.
+          required: true
+        - label: This isn't a security vulnerability (those go through [private advisories](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new)).
+          required: true
