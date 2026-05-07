@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
+import helmet from "@fastify/helmet";
+import rateLimit from "@fastify/rate-limit";
 import fastifyRawBody from "fastify-raw-body";
 import Fastify, { type FastifyReply } from "fastify";
 import { z } from "zod";
@@ -2235,6 +2237,102 @@ export function createApp(
     },
     credentials: true
   });
+
+  // Phase 4.2 — Security headers via @fastify/helmet
+  // HSTS and CSP default OFF because both routinely break local dev (HSTS
+  // requires HTTPS; CSP requires inline-script audits). Enable per-deployment
+  // via HELMET_HSTS_ENABLED and HELMET_CSP_ENABLED. Always-on protections:
+  // X-Frame-Options DENY (clickjacking), X-Content-Type-Options nosniff,
+  // Referrer-Policy no-referrer, Cross-Origin-Resource-Policy same-origin.
+  if (config.HELMET_ENABLED) {
+    app.register(helmet, {
+      contentSecurityPolicy: config.HELMET_CSP_ENABLED ? undefined : false,
+      strictTransportSecurity: config.HELMET_HSTS_ENABLED
+        ? { maxAge: 15_552_000, includeSubDomains: true, preload: false }
+        : false,
+      frameguard: { action: "deny" },
+      noSniff: true,
+      referrerPolicy: { policy: "no-referrer" },
+      crossOriginResourcePolicy: { policy: "same-origin" },
+      // Disable HTTPS-only headers Helmet adds by default that would break
+      // the local-dev HTTP setup. Self-hosters running behind a proxy can
+      // turn these on individually via the env flags above.
+      crossOriginOpenerPolicy: false,
+      crossOriginEmbedderPolicy: false,
+      originAgentCluster: false
+    });
+  }
+
+  // Phase 4.1 — Rate limiting via @fastify/rate-limit
+  // Global default: RATE_LIMIT_GLOBAL_MAX requests per RATE_LIMIT_GLOBAL_WINDOW_MS
+  // per IP. Stricter per-route limits for auth (brute-force protection) and
+  // public webhook routes (flood protection) are applied via the onRoute hook
+  // below — that way we don't have to touch ~15 route definitions individually.
+  // Disable entirely with RATE_LIMIT_ENABLED=false (default true; tests opt out).
+  if (config.RATE_LIMIT_ENABLED) {
+    // IMPORTANT: this onRoute hook MUST be added before app.register(rateLimit)
+    // below. Fastify hooks fire in registration order, and @fastify/rate-limit
+    // installs its own onRoute hook that snapshots routeOptions.config.rateLimit
+    // at registration time. If our hook ran second, the plugin would already
+    // have read the default and our per-route limits would never apply.
+    const AUTH_BURST_PREFIXES = [
+      "/api/auth/login",
+      "/api/auth/register",
+      "/api/auth/saml/callback",
+      "/api/auth/ldap/login"
+    ];
+    const WEBHOOK_PREFIXES = ["/webhook/", "/webhook-test/", "/api/webhooks/"];
+    const PROBE_URLS = new Set(["/health", "/metrics"]);
+    app.addHook("onRoute", (routeOptions) => {
+      const url = String(routeOptions.url ?? "");
+      const isProbe = PROBE_URLS.has(url);
+      const matchesAuth = AUTH_BURST_PREFIXES.some((prefix) => url.startsWith(prefix));
+      const matchesWebhook = WEBHOOK_PREFIXES.some((prefix) => url.startsWith(prefix));
+      if (!isProbe && !matchesAuth && !matchesWebhook) {
+        return;
+      }
+      const existingConfig = (routeOptions.config ?? {}) as Record<string, unknown>;
+      // Don't overwrite a per-route limit that's already been set explicitly.
+      if (existingConfig.rateLimit !== undefined) {
+        return;
+      }
+      let perRouteLimit: false | { max: number; timeWindow: number };
+      if (isProbe) {
+        perRouteLimit = false;
+      } else if (matchesAuth) {
+        perRouteLimit = {
+          max: config.RATE_LIMIT_AUTH_MAX,
+          timeWindow: config.RATE_LIMIT_AUTH_WINDOW_MS
+        };
+      } else {
+        perRouteLimit = {
+          max: config.RATE_LIMIT_WEBHOOK_MAX,
+          timeWindow: config.RATE_LIMIT_WEBHOOK_WINDOW_MS
+        };
+      }
+      routeOptions.config = {
+        ...existingConfig,
+        rateLimit: perRouteLimit
+      };
+    });
+
+    app.register(rateLimit, {
+      global: true,
+      max: config.RATE_LIMIT_GLOBAL_MAX,
+      timeWindow: config.RATE_LIMIT_GLOBAL_WINDOW_MS,
+      addHeadersOnExceeding: {
+        "x-ratelimit-limit": true,
+        "x-ratelimit-remaining": true,
+        "x-ratelimit-reset": true
+      },
+      addHeaders: {
+        "x-ratelimit-limit": true,
+        "x-ratelimit-remaining": true,
+        "x-ratelimit-reset": true,
+        "retry-after": true
+      }
+    });
+  }
 
   app.register(cookie);
   app.register(fastifyRawBody, {

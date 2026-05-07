@@ -235,6 +235,20 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     NOTIFICATIONS_ENABLED: false,
     NOTIFICATION_SMTP_PORT: 587,
     NOTIFICATION_SMTP_SECURE: false,
+    // Phase 4.1/4.2 — rate limiting + helmet defaults for tests.
+    // Rate limiting OFF by default so existing tests don't trip the limiter
+    // during burst patterns. Individual tests opt in via overrides when they
+    // specifically test rate-limit behavior.
+    RATE_LIMIT_ENABLED: false,
+    RATE_LIMIT_GLOBAL_MAX: 600,
+    RATE_LIMIT_GLOBAL_WINDOW_MS: 60000,
+    RATE_LIMIT_AUTH_MAX: 10,
+    RATE_LIMIT_AUTH_WINDOW_MS: 60000,
+    RATE_LIMIT_WEBHOOK_MAX: 120,
+    RATE_LIMIT_WEBHOOK_WINDOW_MS: 60000,
+    HELMET_ENABLED: true,
+    HELMET_HSTS_ENABLED: false,
+    HELMET_CSP_ENABLED: false,
     ...overrides
   };
 
@@ -2550,5 +2564,78 @@ describe("Phase 1 MCP probe & inspector", () => {
     });
 
     expect(response.statusCode).toBe(401);
+  });
+});
+
+describe("Phase 4.2 security headers (helmet)", () => {
+  it("sets X-Frame-Options DENY on every response when HELMET_ENABLED", async () => {
+    const context = await createTestContext({ HELMET_ENABLED: true });
+    const response = await context.app.inject({ method: "GET", url: "/health" });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["x-frame-options"]).toBe("DENY");
+  });
+
+  it("sets X-Content-Type-Options nosniff and Referrer-Policy no-referrer", async () => {
+    const context = await createTestContext({ HELMET_ENABLED: true });
+    const response = await context.app.inject({ method: "GET", url: "/health" });
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.headers["referrer-policy"]).toBe("no-referrer");
+  });
+
+  it("does NOT send strict-transport-security by default (HSTS opt-in)", async () => {
+    const context = await createTestContext({ HELMET_ENABLED: true, HELMET_HSTS_ENABLED: false });
+    const response = await context.app.inject({ method: "GET", url: "/health" });
+    expect(response.headers["strict-transport-security"]).toBeUndefined();
+  });
+
+  it("sends strict-transport-security when HELMET_HSTS_ENABLED is true", async () => {
+    const context = await createTestContext({ HELMET_ENABLED: true, HELMET_HSTS_ENABLED: true });
+    const response = await context.app.inject({ method: "GET", url: "/health" });
+    expect(response.headers["strict-transport-security"]).toMatch(/max-age=\d+/);
+  });
+
+  it("does NOT send any helmet headers when HELMET_ENABLED is false", async () => {
+    const context = await createTestContext({ HELMET_ENABLED: false });
+    const response = await context.app.inject({ method: "GET", url: "/health" });
+    expect(response.headers["x-frame-options"]).toBeUndefined();
+    expect(response.headers["referrer-policy"]).toBeUndefined();
+  });
+});
+
+describe("Phase 4.1 rate limiting", () => {
+  it("never rate-limits the /health probe endpoint", async () => {
+    const context = await createTestContext({
+      RATE_LIMIT_ENABLED: true,
+      RATE_LIMIT_GLOBAL_MAX: 2,
+      RATE_LIMIT_GLOBAL_WINDOW_MS: 60000
+    });
+
+    // Burst past the global limit on /health — none should ever get 429.
+    for (let i = 0; i < 6; i += 1) {
+      const r = await context.app.inject({ method: "GET", url: "/health" });
+      expect(r.statusCode).not.toBe(429);
+    }
+  });
+
+  it("never rate-limits the /metrics endpoint (Prometheus scraper)", async () => {
+    const context = await createTestContext({
+      RATE_LIMIT_ENABLED: true,
+      RATE_LIMIT_GLOBAL_MAX: 2,
+      RATE_LIMIT_GLOBAL_WINDOW_MS: 60000
+    });
+
+    for (let i = 0; i < 6; i += 1) {
+      const r = await context.app.inject({ method: "GET", url: "/metrics" });
+      expect(r.statusCode).not.toBe(429);
+    }
+  });
+
+  it("disables all rate limiting when RATE_LIMIT_ENABLED is false (default for tests)", async () => {
+    const context = await createTestContext({ RATE_LIMIT_ENABLED: false });
+    // Burst far past any sane limit on a route that would normally be limited.
+    for (let i = 0; i < 50; i += 1) {
+      const r = await context.app.inject({ method: "GET", url: "/api/definitions" });
+      expect(r.statusCode).not.toBe(429);
+    }
   });
 });

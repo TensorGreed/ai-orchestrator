@@ -91,6 +91,16 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     HA_INSTANCE_ID: undefined,
     HA_LEASE_TTL_MS: 30000,
     HA_RENEW_INTERVAL_MS: 10000,
+    RATE_LIMIT_ENABLED: false,
+    RATE_LIMIT_GLOBAL_MAX: 600,
+    RATE_LIMIT_GLOBAL_WINDOW_MS: 60000,
+    RATE_LIMIT_AUTH_MAX: 10,
+    RATE_LIMIT_AUTH_WINDOW_MS: 60000,
+    RATE_LIMIT_WEBHOOK_MAX: 120,
+    RATE_LIMIT_WEBHOOK_WINDOW_MS: 60000,
+    HELMET_ENABLED: true,
+    HELMET_HSTS_ENABLED: false,
+    HELMET_CSP_ENABLED: false,
     ...overrides
   };
 }

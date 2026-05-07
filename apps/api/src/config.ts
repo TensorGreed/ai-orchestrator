@@ -106,7 +106,19 @@ const envSchema = z.object({
   NOTIFICATION_EMAIL_FROM: z.string().optional(),
   NOTIFICATION_EMAIL_TO: z.string().optional(),
   NOTIFICATION_SLACK_WEBHOOK_URL: z.string().optional(),
-  NOTIFICATION_TEAMS_WEBHOOK_URL: z.string().optional()
+  NOTIFICATION_TEAMS_WEBHOOK_URL: z.string().optional(),
+
+  // Phase 4.1/4.2 — Production hardening: rate limiting + security headers
+  RATE_LIMIT_ENABLED: booleanFromEnv.default(true),
+  RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().positive().default(600),
+  RATE_LIMIT_GLOBAL_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_AUTH_MAX: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_AUTH_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_WEBHOOK_MAX: z.coerce.number().int().positive().default(120),
+  RATE_LIMIT_WEBHOOK_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  HELMET_ENABLED: booleanFromEnv.default(true),
+  HELMET_HSTS_ENABLED: booleanFromEnv.default(false),
+  HELMET_CSP_ENABLED: booleanFromEnv.default(false)
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
