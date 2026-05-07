@@ -23,6 +23,7 @@ export default defineConfig({
       {
         text: "Getting Started",
         items: [
+          { text: "Build your first MCP agent in 5 min", link: "/getting-started/build-your-first-mcp-agent" },
           { text: "Quickstart", link: "/getting-started/quickstart" },
           { text: "Environment", link: "/getting-started/environment" },
           { text: "VS Code Extension", link: "/getting-started/vscode-extension" }

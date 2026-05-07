@@ -5,6 +5,7 @@ import { SqliteStore } from "../db/database";
 
 const TEMPLATE_CATEGORY_MAP: Record<string, string> = {
   "basic-flow.json": "Getting Started",
+  "mcp-agent-quickstart-flow.json": "Getting Started",
   "conditional-flow.json": "Logic & Control",
   "rag-flow.json": "RAG & AI",
   "rag-pinecone-flow.json": "RAG & AI",
@@ -18,6 +19,7 @@ const TEMPLATE_CATEGORY_MAP: Record<string, string> = {
 
 const TEMPLATE_DESCRIPTION_MAP: Record<string, string> = {
   "basic-flow.json": "Text-in, LLM-call, text-out pipeline. Runs out-of-the-box with the built-in echo provider — no Ollama, no API keys, no setup required. Swap to a real provider when you're ready.",
+  "mcp-agent-quickstart-flow.json": "Manual Trigger -> Agent -> Output with the bundled echo provider and the in-process mock-mcp adapter exposing get_current_time + calculator. Zero-key target for the 5-minute MCP agent tutorial.",
   "conditional-flow.json": "Demonstrates conditional branching with webhook triggers.",
   "rag-flow.json": "Retrieval-Augmented Generation with Google Drive and vector search.",
   "rag-pinecone-flow.json": "RAG pipeline using Pinecone as the vector store.",

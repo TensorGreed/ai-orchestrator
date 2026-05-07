@@ -6,11 +6,11 @@ hero:
   tagline: Visual workflow builder, multi-agent Swarm, and a VS Code surface — for developers composing AI agents that do real work in real systems via the Model Context Protocol.
   actions:
     - theme: brand
+      text: Build your first MCP agent (5 min)
+      link: /getting-started/build-your-first-mcp-agent
+    - theme: alt
       text: Why L2M?
       link: /why
-    - theme: alt
-      text: 5-minute Quickstart
-      link: /getting-started/quickstart
     - theme: alt
       text: GitHub
       link: https://github.com/TensorGreed/ai-orchestrator
@@ -27,6 +27,7 @@ features:
 
 ## Documentation map
 
+- [Build your first MCP agent in 5 min](/getting-started/build-your-first-mcp-agent) — fastest end-to-end path
 - [Why L2M?](/why) — the differentiators in detail
 - [Quickstart](/getting-started/quickstart)
 - [Workflow editor](/product/workflow-editor)

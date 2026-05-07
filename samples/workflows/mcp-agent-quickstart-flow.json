@@ -1,0 +1,119 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-mcp-agent-quickstart",
+    "name": "MCP Agent Quickstart",
+    "description": "5-minute MCP agent tutorial target. Manual Trigger -> Agent Orchestrator -> Output, with the bundled echo provider as the chat model and the in-process mock-mcp adapter exposing get_current_time + calculator + lookup_kb tools. Runs zero-key on a fresh install. Once it's running, swap the echo provider for OpenAI/Anthropic/Ollama and the mock-mcp adapter for an stdio MCP server (filesystem, git, postgres, etc.) — see /getting-started/build-your-first-mcp-agent.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "trigger_1",
+        "type": "manual_trigger",
+        "name": "Manual Trigger",
+        "position": { "x": 80, "y": 200 },
+        "config": {
+          "label": "Run agent"
+        }
+      },
+      {
+        "id": "agent_1",
+        "type": "agent_orchestrator",
+        "name": "Agent",
+        "position": { "x": 380, "y": 200 },
+        "config": {
+          "systemPromptTemplate": "You are a helpful assistant. When the user asks for the time or arithmetic, call the appropriate MCP tool rather than guessing.",
+          "userPromptTemplate": "{{user_prompt}}",
+          "sessionIdTemplate": "quickstart",
+          "maxIterations": 4,
+          "toolCallingEnabled": true
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "Chat Model (echo)",
+        "position": { "x": 440, "y": 380 },
+        "config": {
+          "provider": {
+            "providerId": "echo",
+            "model": "demo",
+            "prefix": "Echo: "
+          },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "tool_time_1",
+        "type": "mcp_tool",
+        "name": "MCP: get_current_time",
+        "position": { "x": 660, "y": 360 },
+        "config": {
+          "serverId": "mock-mcp",
+          "toolName": "get_current_time",
+          "argsTemplate": "{\"tz\":\"UTC\"}",
+          "connection": {
+            "transport": "mock"
+          }
+        }
+      },
+      {
+        "id": "tool_calc_1",
+        "type": "mcp_tool",
+        "name": "MCP: calculator",
+        "position": { "x": 660, "y": 480 },
+        "config": {
+          "serverId": "mock-mcp",
+          "toolName": "calculator",
+          "argsTemplate": "{\"expression\":\"2+2\"}",
+          "connection": {
+            "transport": "mock"
+          }
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 720, "y": 200 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_main_1",
+        "source": "trigger_1",
+        "target": "agent_1"
+      },
+      {
+        "id": "edge_main_2",
+        "source": "agent_1",
+        "target": "output_1"
+      },
+      {
+        "id": "edge_aux_chat_model",
+        "source": "agent_1",
+        "sourceHandle": "chat_model",
+        "target": "llm_1"
+      },
+      {
+        "id": "edge_aux_tool_time",
+        "source": "agent_1",
+        "sourceHandle": "tool",
+        "target": "tool_time_1"
+      },
+      {
+        "id": "edge_aux_tool_calc",
+        "source": "agent_1",
+        "sourceHandle": "tool",
+        "target": "tool_calc_1"
+      }
+    ]
+  },
+  "exportedAt": "2026-05-07T00:00:00.000Z"
+}
