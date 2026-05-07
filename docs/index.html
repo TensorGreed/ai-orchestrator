@@ -3,25 +3,26 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="L2M is a visual AI orchestration studio for building reliable workflows with guardrails, approvals, and automation."
-    />
-    <meta property="og:title" content="L2M | Visual AI Orchestration" />
-    <meta
-      property="og:description"
-      content="Design and automate production AI workflows with branching, execution history, HITL, SSE streaming, and cron triggers."
-    />
+    <meta name="description" content="L2M is the MCP-native agent runtime: a visual workflow builder, multi-agent Swarm, and a first-party VS Code surface for building AI agents that do real work via the Model Context Protocol." />
+    <meta name="theme-color" content="#2563eb" />
+    <meta property="og:title" content="L2M | The MCP-native agent runtime" />
+    <meta property="og:description" content="Visual workflow builder, multi-agent Swarm, and a VS Code surface for AI agents that do real work via MCP." />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://lsquarem.com/" />
     <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./styles.css" />
-    <title>L&sup2;M | Visual AI Orchestration</title>
+    <title>L²M — The MCP-native agent runtime</title>
+    <script>
+      (function () {
+        var stored = localStorage.getItem("l2m-theme");
+        var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        var theme = stored || (prefersDark ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
   </head>
   <body>
     <div class="surface-glow" aria-hidden="true"></div>
@@ -30,179 +31,312 @@
       <div class="container topbar-inner">
         <a class="brand" href="#home" aria-label="L2M home">
           <img src="./assets/lsquarem-logo.svg" alt="L2M logo" />
-          <div>
+          <div class="brand-text">
             <strong>L<sup>2</sup>M</strong>
-            <span>Orchestration Studio</span>
+            <span>MCP-native agent runtime</span>
           </div>
         </a>
 
-        <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu" aria-expanded="false">Menu</button>
-
         <nav class="nav" id="siteNav">
-          <a href="#features">Features</a>
-          <a href="#automation">Automation</a>
-          <a href="#architecture">Architecture</a>
-          <a href="./integrations.html">Integrations</a>
-          <a href="#oss">Open Source</a>
+          <a href="#differentiators">Why L2M</a>
+          <a href="#quickstart">Quickstart</a>
+          <a href="#patterns">Patterns</a>
+          <a href="./docs/" class="text-link">Docs</a>
+          <a href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">Samples</a>
         </nav>
 
-        <a class="btn btn-subtle" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">
-          GitHub
-        </a>
+        <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu" aria-expanded="false">Menu</button>
+
+        <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></svg>
+        </button>
+
+        <a class="btn btn-subtle" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">GitHub</a>
       </div>
     </header>
 
     <main id="home">
+      <!-- ============================================================
+           Hero
+           ============================================================ -->
       <section class="hero reveal">
         <div class="container hero-grid">
           <div class="hero-copy">
-            <p class="eyebrow">Visual AI Automation</p>
-            <h1>Stop stitching tools together. Build one reliable AI flow.</h1>
-            <p>
-              L<sup>2</sup>M helps teams design, execute, monitor, and automate production-ready AI workflows with deterministic
-              branching, guardrails, human approvals, and full execution traceability.
+            <span class="eyebrow">Open source · MIT</span>
+            <h1>The <span class="accent">MCP-native</span> agent runtime.</h1>
+            <p class="lead">
+              Visual workflow builder, multi-agent Swarm, and a first-party VS Code surface — for developers composing AI agents that do real work in real systems via the <a class="text-link" href="https://modelcontextprotocol.io" target="_blank" rel="noreferrer">Model Context Protocol</a>.
             </p>
             <div class="hero-actions">
-              <a class="btn btn-primary" href="#oss">Get Started</a>
-              <a class="btn btn-subtle" href="#features">Explore Features</a>
+              <a class="btn btn-primary" href="./docs/getting-started/build-your-first-mcp-agent">
+                Build your first agent in 5 min
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7" /></svg>
+              </a>
+              <a class="btn btn-subtle" href="./docs/">Read the docs</a>
             </div>
           </div>
 
-          <aside class="hero-canvas" aria-label="Studio preview">
+          <aside class="hero-canvas" aria-label="Studio canvas preview">
             <div class="canvas-header">
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <span class="dot"></span>
-              <code>studio / customer-ops</code>
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <code>studio / mcp-agent</code>
             </div>
-            <div class="canvas-grid">
-              <div class="flow-pill">schedule_trigger</div>
-              <div class="flow-pill">input_validator</div>
-              <div class="flow-pill">llm_call</div>
-              <div class="flow-pill">output_guardrail</div>
-              <div class="flow-pill">human_approval</div>
-              <div class="flow-pill">output</div>
+            <div class="canvas-body">
+              <div class="flow-row">
+                <span class="flow-pill">webhook_input</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-pill accent">agent_orchestrator</span>
+                <span class="flow-arrow">→</span>
+                <span class="flow-pill">output</span>
+              </div>
+              <div class="flow-attach">
+                <div class="flow-attach-row"><span class="flow-attach-label">chat_model</span><span class="flow-pill">openai gpt-4o-mini</span></div>
+                <div class="flow-attach-row"><span class="flow-attach-label">memory</span><span class="flow-pill">session_memory</span></div>
+                <div class="flow-attach-row"><span class="flow-attach-label">tool</span><span class="flow-pill accent">mcp filesystem</span></div>
+                <div class="flow-attach-row"><span class="flow-attach-label">tool</span><span class="flow-pill accent">mcp git</span></div>
+                <div class="flow-attach-row"><span class="flow-attach-label">tool</span><span class="flow-pill accent">mcp postgres</span></div>
+              </div>
+              <div class="flow-row" style="margin-top: 28px;">
+                <span class="flow-pill success">execution success · 3 tool calls</span>
+              </div>
             </div>
             <div class="canvas-footer">
               <div><span class="status ok"></span>execution_history persisted</div>
-              <div><span class="status wait"></span>awaiting approval</div>
+              <div><span class="status wait"></span>x-request-id propagated</div>
             </div>
           </aside>
         </div>
       </section>
 
-      <section id="studio-preview" class="reveal">
+      <!-- ============================================================
+           Differentiators (3-up)
+           ============================================================ -->
+      <section id="differentiators" class="reveal">
         <div class="container">
           <header class="section-header">
-            <p class="eyebrow">Studio Preview</p>
-            <h2>Actual L<sup>2</sup>M editor experience on canvas</h2>
+            <span class="eyebrow">Why L2M</span>
+            <h2>Three things other workflow tools don't do.</h2>
+            <p>n8n has a basic MCP client node. Langflow and Flowise have none. Most "agent platforms" treat tool calls as glorified HTTP. L2M treats MCP, multi-agent topology, and IDE composition as first-class primitives.</p>
+          </header>
+
+          <div class="differentiators">
+            <article class="diff-card">
+              <span class="diff-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>
+              </span>
+              <h3>MCP-native, end to end</h3>
+              <p>stdio, http_streamable, and mock transports ship in-box. The MCP Tool node probes any server, lists its tools, and dry-runs them inline. Expose your own workflows back out as MCP tools that <em>other</em> agents — IDE, CLI, anything MCP-compatible — call by URL.</p>
+              <a class="text-link" href="./docs/extensions/mcp">MCP integration docs →</a>
+            </article>
+
+            <article class="diff-card">
+              <span class="diff-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3" /><circle cx="6" cy="19" r="3" /><circle cx="18" cy="19" r="3" /><path d="M12 8v6M9 17l3-3 3 3" /></svg>
+              </span>
+              <h3>Multi-agent Swarm</h3>
+              <p>Compose Supervisor → Worker hierarchies via dedicated attachment ports — not chained prompts. Workers become synthetic tools to the parent, recursively. Each worker gets its own model, its own tool set, its own memory.</p>
+              <a class="text-link" href="./docs/runtime/agent-loop">Agent loop docs →</a>
+            </article>
+
+            <article class="diff-card">
+              <span class="diff-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6" /></svg>
+              </span>
+              <h3>VS Code surface</h3>
+              <p>First-party extension turns any L2M workflow into a coding agent inside the editor — streaming responses, patch previews with workspace-path safety, and command approval. Bring your own backend agent topology.</p>
+              <a class="text-link" href="./docs/getting-started/vscode-extension">VS Code extension →</a>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           Code preview — the workflow JSON contract
+           ============================================================ -->
+      <section class="reveal">
+        <div class="container split">
+          <div>
+            <span class="eyebrow">Workflow JSON</span>
+            <h2>A stable, importable contract.</h2>
+            <p class="lead">Every workflow you build in Studio serializes to a versioned JSON document. Check it into git. Diff it. Code-review it. Import it anywhere. The agent runtime, MCP attachments, branching, retries, memory — all of it round-trips through this format.</p>
+            <ul class="clean-list">
+              <li><code>schemaVersion: "1.0.0"</code> — breaking-change boundary, never silently shifts.</li>
+              <li>Attachment ports (chat_model, memory, tool, worker) live alongside DAG edges.</li>
+              <li>Every adapter (LLM, MCP, connector) registers through a single SDK seam.</li>
+            </ul>
+          </div>
+
+          <div class="code-preview">
+            <div class="code-preview-header">samples/mcp-agent.json</div>
+            <pre><code><span class="tok-key">"nodes"</span>: [
+  {
+    <span class="tok-key">"id"</span>: <span class="tok-str">"trigger"</span>,
+    <span class="tok-key">"type"</span>: <span class="tok-str">"webhook_input"</span>,
+    <span class="tok-key">"config"</span>: { <span class="tok-key">"path"</span>: <span class="tok-str">"agent"</span>, <span class="tok-key">"authMode"</span>: <span class="tok-str">"hmac_sha256"</span> }
+  },
+  {
+    <span class="tok-key">"id"</span>: <span class="tok-str">"agent"</span>,
+    <span class="tok-key">"type"</span>: <span class="tok-str">"agent_orchestrator"</span>,
+    <span class="tok-key">"config"</span>: {
+      <span class="tok-key">"systemPromptTemplate"</span>: <span class="tok-str">"{{system_prompt}}"</span>,
+      <span class="tok-key">"toolCallingEnabled"</span>: <span class="tok-num">true</span>,
+      <span class="tok-key">"maxIterations"</span>: <span class="tok-num">6</span>
+    }
+  },
+  <span class="tok-comment">// + chat_model, memory, mcp_tool nodes...</span>
+],
+<span class="tok-key">"edges"</span>: [
+  { <span class="tok-key">"source"</span>: <span class="tok-str">"agent"</span>, <span class="tok-key">"sourceHandle"</span>: <span class="tok-str">"chat_model"</span>, <span class="tok-key">"target"</span>: <span class="tok-str">"llm"</span> },
+  { <span class="tok-key">"source"</span>: <span class="tok-str">"agent"</span>, <span class="tok-key">"sourceHandle"</span>: <span class="tok-str">"tool"</span>, <span class="tok-key">"target"</span>: <span class="tok-str">"mcp_fs"</span> }
+]</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           Studio screenshot
+           ============================================================ -->
+      <section class="reveal">
+        <div class="container">
+          <header class="section-header">
+            <span class="eyebrow">Studio</span>
+            <h2>The actual editor, not a marketing render.</h2>
           </header>
           <figure class="studio-shot">
-            <img
-              src="./assets/l2M_editor.PNG"
-              alt="L2M Studio editor showing SDLC workflow with DeveloperAgent, QAAgent, and Output on canvas."
-              loading="lazy"
-            />
+            <img src="./assets/l2M_editor.PNG" alt="L2M Studio editor showing a multi-node SDLC workflow with DeveloperAgent, QAAgent, and Output nodes on canvas." loading="lazy" />
           </figure>
         </div>
       </section>
 
-      <section id="features" class="reveal">
+      <!-- ============================================================
+           Quickstart strip
+           ============================================================ -->
+      <section id="quickstart" class="reveal">
+        <div class="container">
+          <div class="quickstart">
+            <div>
+              <span class="eyebrow">Get running</span>
+              <h2>Five minutes from clone to a working MCP agent.</h2>
+              <p>No API keys, no Ollama, no setup beyond a 32-byte master key. The bundled echo provider and in-process mock-mcp adapter let you verify the agent runtime end-to-end before swapping in real models and real MCP servers.</p>
+              <a class="btn btn-primary" href="./docs/getting-started/build-your-first-mcp-agent">Read the 5-minute tutorial →</a>
+            </div>
+            <ol class="quickstart-steps">
+              <li><span class="step-num">1</span><div><code>git clone</code> · <code>pnpm install</code></div></li>
+              <li><span class="step-num">2</span><div>Generate a master key, set <code>SECRET_MASTER_KEY_BASE64</code></div></li>
+              <li><span class="step-num">3</span><div><code>pnpm dev</code> · open <code>localhost:5173</code></div></li>
+              <li><span class="step-num">4</span><div>Templates → <strong>MCP Agent Quickstart</strong> → Run</div></li>
+              <li><span class="step-num">5</span><div>See the agent call MCP tools in execution history</div></li>
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+           Capabilities — refreshed cards
+           ============================================================ -->
+      <section class="reveal">
         <div class="container">
           <header class="section-header">
-            <p class="eyebrow">Capabilities</p>
-            <h2>Everything your orchestration layer should have</h2>
+            <span class="eyebrow">Capabilities</span>
+            <h2>Production-ready foundations.</h2>
+            <p>The boring stuff that decides whether you can actually ship.</p>
           </header>
 
           <div class="cards">
             <article>
-              <h3>Branching DAG Engine</h3>
-              <p>Topological execution with `if`, `switch`, and `try/catch` for controlled, readable AI logic.</p>
+              <h3>Branching DAG executor</h3>
+              <p>Topological execution with <code>if</code>, <code>switch</code>, <code>try/catch</code>. Template interpolation across nodes via <code>{{key}}</code> from the merged scope.</p>
             </article>
             <article>
-              <h3>Execution History</h3>
-              <p>Persistent audit logs with node-by-node trace for debugging, compliance, and quality review.</p>
+              <h3>Auth, RBAC, MFA, SSO</h3>
+              <p>Session cookies, API keys, TOTP, SAML, LDAP. Project-scoped roles plus custom roles with fine-grained permissions.</p>
             </article>
             <article>
-              <h3>Human-in-the-Loop</h3>
-              <p>Pause on approval nodes, serialize state, and resume safely after approve or reject decisions.</p>
+              <h3>Encrypted secrets at rest</h3>
+              <p>AES-256-GCM with master-key rotation via <code>db:export</code> / <code>db:import</code>. External providers: Vault, AWS, GCP, Azure.</p>
             </article>
             <article>
-              <h3>Guardrails</h3>
-              <p>Validate input and sanitize model output with deterministic checks and configurable failure behavior.</p>
+              <h3>Webhooks, signed and idempotent</h3>
+              <p>HMAC-SHA256, bearer, Stripe, Discord Ed25519, Telegram. Replay window + idempotency keyed on any header.</p>
             </article>
             <article>
-              <h3>Streaming Chat + Widget</h3>
-              <p>SSE-powered chat interface in-studio and an embeddable widget for external websites.</p>
+              <h3>Observability</h3>
+              <p>Prometheus metrics, OTEL tracing, request-ID propagation through logs, dedicated webhook replicas.</p>
             </article>
             <article>
-              <h3>Code Node Sandbox</h3>
-              <p>Run custom JavaScript transforms in a VM-isolated execution step with timeout controls.</p>
+              <h3>Multi-main HA</h3>
+              <p>Postgres-backed leader election: scheduler + triggers run on the leader, replicas autoscale webhook ingestion, lease handoff tested.</p>
             </article>
           </div>
         </div>
       </section>
 
-      <section id="automation" class="reveal">
+      <!-- ============================================================
+           Patterns / samples callout
+           ============================================================ -->
+      <section id="patterns" class="reveal">
         <div class="container split">
           <div>
-            <p class="eyebrow">Batch 5</p>
-            <h2>Native cron scheduling for autonomous workflows</h2>
-            <p class="lead">
-              Add a `schedule_trigger` node to run workflows every day, every 15 minutes, or any cron interval with timezone
-              support.
-            </p>
+            <span class="eyebrow">Patterns + Samples</span>
+            <h2>Battle-tested topologies, runnable on day one.</h2>
+            <p class="lead">Ten documented topologies — zero-key MCP agent, supervisor swarm, workflow-as-MCP-tool, RAG with citation, structured-output triage, multi-turn artifacts — each with a runnable sample workflow.</p>
             <ul class="clean-list">
-              <li>Scheduler initializes active workflows on API startup</li>
-              <li>Each cron run executes with `triggerType: "cron"` and is saved in execution history</li>
-              <li>Schedules reload dynamically when workflows are saved, imported, or deleted</li>
+              <li>Pattern library lives in the docs site.</li>
+              <li>Three full reference projects in <a class="text-link" href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">l2m-samples</a>: helpdesk agent, support triage, VS Code repo reviewer.</li>
+              <li>Every sample runs zero-key first; the swap-to-real-models path is documented.</li>
             </ul>
+            <div class="hero-actions" style="margin-top: 24px;">
+              <a class="btn btn-primary" href="./docs/patterns/">Open the pattern library</a>
+              <a class="btn btn-subtle" href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">l2m-samples →</a>
+            </div>
           </div>
 
           <div class="schedule-panel">
-            <h3>Common Schedules</h3>
-            <div class="schedule-row">
-              <code>0 9 * * *</code>
-              <span>Daily standup summary</span>
-            </div>
-            <div class="schedule-row">
-              <code>*/15 * * * *</code>
-              <span>Quarter-hour monitoring loop</span>
-            </div>
-            <div class="schedule-row">
-              <code>0 0 * * 1</code>
-              <span>Weekly Monday report</span>
-            </div>
+            <h3>Pattern at a glance</h3>
+            <div class="schedule-row"><code>helpdesk-agent</code><span>Slack/Teams + MCP KB + memory</span></div>
+            <div class="schedule-row"><code>support-triage</code><span>Agent → JSON → switch routing</span></div>
+            <div class="schedule-row"><code>swarm</code><span>Supervisor + multiple workers</span></div>
+            <div class="schedule-row"><code>workflow-as-mcp</code><span>Expose flow as MCP tool</span></div>
+            <div class="schedule-row"><code>vscode-reviewer</code><span>Diff + filesystem MCP</span></div>
+            <div class="schedule-row"><code>rag-with-citation</code><span>Retriever + cited answer</span></div>
           </div>
         </div>
       </section>
 
-      <section id="architecture" class="reveal">
+      <!-- ============================================================
+           Architecture stack
+           ============================================================ -->
+      <section class="reveal">
         <div class="container">
           <header class="section-header">
-            <p class="eyebrow">Stack</p>
-            <h2>Practical architecture for fast iteration</h2>
+            <span class="eyebrow">Stack</span>
+            <h2>Practical architecture for fast iteration.</h2>
           </header>
           <div class="stack">
-            <div><strong>Frontend</strong><span>Vite + React Studio</span></div>
-            <div><strong>Backend</strong><span>Fastify + SQLite</span></div>
-            <div><strong>Engine</strong><span>Workflow DAG Executor</span></div>
-            <div><strong>Integrations</strong><span>RAG, MCP, LLM Providers</span></div>
+            <div><strong>Frontend</strong><span>Vite + React 19 + React Flow</span></div>
+            <div><strong>API</strong><span>Fastify v5 + zod-validated config</span></div>
+            <div><strong>Runtime</strong><span>Pure-TS DAG executor + agent loop</span></div>
+            <div><strong>Storage</strong><span>SQLite (better-sqlite3) or Postgres</span></div>
+            <div><strong>SDKs</strong><span>provider · mcp · connector · agent</span></div>
+            <div><strong>Deploy</strong><span>Docker · Helm · GHCR multi-arch</span></div>
           </div>
         </div>
       </section>
 
-      <section id="oss" class="reveal cta">
-        <div class="container cta-inner">
-          <h2>From local prototype to production automation</h2>
-          <p>
-            L<sup>2</sup>M is open-source and built for teams that want transparent AI workflow logic instead of opaque chains.
-          </p>
-          <div class="hero-actions">
-            <a class="btn btn-primary" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">
-              View Repository
-            </a>
-            <a class="btn btn-subtle" href="#home">Back to Top</a>
+      <!-- ============================================================
+           CTA
+           ============================================================ -->
+      <section class="reveal">
+        <div class="container">
+          <div class="cta-inner">
+            <span class="eyebrow" style="background: rgba(255,255,255,0.16); color: #ffffff; border-color: rgba(255,255,255,0.3);">Open source · MIT</span>
+            <h2>From local prototype to production agents.</h2>
+            <p>L2M is a pure OSS project — no closed-source enterprise SKU, no SaaS lock-in. Self-host it, fork it, build community nodes, run it as the MCP-native runtime your stack actually needs.</p>
+            <div class="hero-actions" style="justify-content: center;">
+              <a class="btn btn-primary" href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">View on GitHub</a>
+              <a class="btn btn-subtle" href="./docs/">Read the docs</a>
+            </div>
           </div>
         </div>
       </section>
@@ -210,11 +344,17 @@
 
     <footer class="footer">
       <div class="container footer-inner">
-        <p><strong>L<sup>2</sup>M</strong> <span id="year"></span></p>
-        <p>
-          Powered by
-          <a href="https://tensorgreed.com" target="_blank" rel="noreferrer">tensorgreed.com</a>
-        </p>
+        <div>
+          <strong>L<sup>2</sup>M</strong> · MCP-native agent runtime · <span id="year"></span>
+        </div>
+        <div class="footer-links">
+          <a href="./docs/">Docs</a>
+          <a href="./docs/patterns/">Patterns</a>
+          <a href="https://github.com/TensorGreed/ai-orchestrator" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/TensorGreed/l2m-samples" target="_blank" rel="noreferrer">Samples</a>
+          <a href="https://github.com/TensorGreed/ai-orchestrator/discussions" target="_blank" rel="noreferrer">Discussions</a>
+          <a href="https://tensorgreed.com" target="_blank" rel="noreferrer">TensorGreed</a>
+        </div>
       </div>
     </footer>
 

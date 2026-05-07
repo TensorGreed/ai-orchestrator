@@ -3,10 +3,16 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
   title: "L2M",
   description: "The MCP-native agent runtime — visual workflow builder, multi-agent Swarm, and a VS Code surface.",
+  // Served as a subpath under lsquarem.com — the marketing landing lives at
+  // the root, the VitePress build is mounted at /docs/. The Pages deployment
+  // workflow at .github/workflows/pages.yml merges both into a single
+  // artifact before publishing.
+  base: "/docs/",
   cleanUrls: true,
+  sitemap: { hostname: "https://lsquarem.com/docs/" },
   themeConfig: {
     nav: [
-      { text: "Home", link: "/" },
+      { text: "← lsquarem.com", link: "https://lsquarem.com/" },
       { text: "Why", link: "/why" },
       { text: "Quickstart", link: "/getting-started/build-your-first-mcp-agent" },
       { text: "Patterns", link: "/patterns/" },

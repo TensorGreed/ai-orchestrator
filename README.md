@@ -2,6 +2,8 @@
 
 **The MCP-native agent runtime.** Visual workflow builder, multi-agent Swarm, and a first-party VS Code surface — for developers composing AI agents that do real work in real systems via the [Model Context Protocol](https://modelcontextprotocol.io).
 
+🌐 **[lsquarem.com](https://lsquarem.com/)** · 📚 [Docs](https://lsquarem.com/docs/) · 🚀 [5-minute tutorial](https://lsquarem.com/docs/getting-started/build-your-first-mcp-agent) · 🧩 [Patterns](https://lsquarem.com/docs/patterns/) · 🔬 [Sample projects](https://github.com/TensorGreed/l2m-samples)
+
 ## What makes it different
 
 - **MCP-first.** Wire any MCP server into an agent as a tool. The runtime compacts schemas, shortlists tools by prompt relevance, and caches full tool outputs across multi-turn sessions so models stay grounded without re-calling expensive endpoints. You can also expose your own workflows back out as MCP tools that other agents invoke (`mcp_server_trigger`).
@@ -757,7 +759,7 @@ Includes node types/config, edge graph, and node positions for canvas restoratio
 ## Sample workflows
 
 - `samples/workflows/basic-flow.json` — text-in / LLM / text-out, runs zero-key with the bundled echo provider.
-- `samples/workflows/mcp-agent-quickstart-flow.json` — zero-key MCP agent (target of the [5-minute tutorial](apps/docs/docs/getting-started/build-your-first-mcp-agent.md)).
+- `samples/workflows/mcp-agent-quickstart-flow.json` — zero-key MCP agent (target of the [5-minute tutorial](https://lsquarem.com/docs/getting-started/build-your-first-mcp-agent)).
 - `samples/workflows/supervisor-worker-swarm-flow.json` — multi-agent: a Supervisor delegating to a researcher and a computer worker.
 - `samples/workflows/workflow-as-mcp-tool-flow.json` — `mcp_server_trigger` exposing a workflow as a callable MCP tool.
 - `samples/workflows/agentic-mcp-flow.json` — webhook → agent → MCP tools + memory.
@@ -770,7 +772,7 @@ Includes node types/config, edge graph, and node positions for canvas restoratio
 - `samples/workflows/azure-openai-flow.json` — basic LLM flow using Azure OpenAI.
 - `samples/workflows/azure-connectors-demo-flow.json` — Azure Storage / Cosmos DB / Monitor / AI Search.
 
-Set `SEED_SAMPLE_WORKFLOWS=true` to load these into the database when the workflow table is empty. See the [pattern library](apps/docs/docs/patterns/index.md) for when to use which.
+Set `SEED_SAMPLE_WORKFLOWS=true` to load these into the database when the workflow table is empty. See the [pattern library](https://lsquarem.com/docs/patterns/) for when to use which.
 
 For full real-world reference projects (helpdesk agent, support triage, VS Code repo reviewer) with end-to-end READMEs and production-deployment notes, see the dedicated [**l2m-samples**](https://github.com/TensorGreed/l2m-samples) repo.
 

@@ -1,0 +1,89 @@
+name: Deploy lsquarem.com (Pages)
+
+# Builds the unified site that lives at lsquarem.com:
+#   - /        marketing landing — the static HTML/CSS/JS in `docs/`
+#   - /docs/   product documentation — the VitePress build under `apps/docs/`
+#
+# The two halves are merged into a single artifact and deployed via
+# actions/deploy-pages. To enable, in GitHub Settings → Pages flip the
+# source from "Deploy from a branch" to "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "apps/docs/**"
+      - "packages/shared/src/definitions.ts"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build VitePress (with base=/docs/)
+        run: pnpm --filter @ai-orchestrator/docs build
+
+      - name: Assemble unified site
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          # 1. Marketing landing: copy the static `docs/` folder to root
+          cp -r docs/. _site/
+          # 2. Product docs: VitePress build mounted at /docs/
+          mkdir -p _site/docs
+          cp -r apps/docs/docs/.vitepress/dist/. _site/docs/
+          # 3. Sanity: the marketing CNAME from `docs/` is preserved at the
+          #    root of the artifact (Pages requires CNAME at site root).
+          test -f _site/CNAME && grep -q "lsquarem.com" _site/CNAME
+          echo "Built _site:"
+          ls -la _site
+          echo "Built _site/docs:"
+          ls -la _site/docs | head -10
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

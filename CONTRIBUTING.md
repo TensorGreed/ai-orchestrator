@@ -27,7 +27,7 @@ cp .env.example .env  # edit SECRET_MASTER_KEY_BASE64 — see docs site
 pnpm dev               # API + Web + Docs concurrently
 ```
 
-The [5-minute MCP agent tutorial](https://your-docs-domain/getting-started/build-your-first-mcp-agent) is the canonical onboarding path — verify it works on your machine before changing anything.
+The [5-minute MCP agent tutorial](https://lsquarem.com/docs/getting-started/build-your-first-mcp-agent) is the canonical onboarding path — verify it works on your machine before changing anything.
 
 ## Layering and where things go
 
