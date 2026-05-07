@@ -2,6 +2,15 @@
 
 Kubernetes deployment for the Fastify API, Studio web UI, and (optionally) dedicated webhook-only replicas.
 
+## Container images
+
+The chart's default `image.repository` values point at GHCR images published by [.github/workflows/release-images.yml](../../../.github/workflows/release-images.yml) on every `v*` git tag (e.g. `v0.1.0`):
+
+- `ghcr.io/tensorgreed/ai-orchestrator:<tag>` — the API (Fastify)
+- `ghcr.io/tensorgreed/ai-orchestrator-web:<tag>` — the Studio UI (Nginx)
+
+Both images are multi-arch (`linux/amd64` + `linux/arm64`), so M-series Macs and AWS Graviton nodes get the right architecture without emulation. Pin a specific tag in production via `--set image.tag=v0.1.0 --set web.image.tag=v0.1.0` instead of `latest`.
+
 ## Quick start
 
 ```bash
