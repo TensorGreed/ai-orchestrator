@@ -1,0 +1,147 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-supervisor-worker-swarm",
+    "name": "Supervisor + Worker Swarm",
+    "description": "Multi-agent swarm pattern. A Supervisor coordinates two specialist Worker agents (a 'researcher' with MCP knowledge-base access and a 'computer' with calculator + time tools). Workers are exposed to the Supervisor as synthetic tools — the Supervisor decides which one to delegate each step to. Runs zero-key with the bundled echo provider and in-process mock-mcp adapter.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "trigger_1",
+        "type": "manual_trigger",
+        "name": "Manual Trigger",
+        "position": { "x": 80, "y": 240 },
+        "config": { "label": "Run swarm" }
+      },
+      {
+        "id": "supervisor_1",
+        "type": "supervisor_node",
+        "name": "Supervisor",
+        "position": { "x": 360, "y": 240 },
+        "config": {
+          "systemPromptTemplate": "You are a supervisor. Decompose the user request, delegate each subtask to the most appropriate specialist worker, and assemble a final answer. Workers: 'researcher' for knowledge-base lookups, 'computer' for math and time queries.",
+          "userPromptTemplate": "{{user_prompt}}",
+          "sessionIdTemplate": "swarm-demo",
+          "maxIterations": 8
+        }
+      },
+      {
+        "id": "supervisor_chat",
+        "type": "llm_call",
+        "name": "Supervisor Chat Model (echo)",
+        "position": { "x": 360, "y": 80 },
+        "config": {
+          "provider": { "providerId": "echo", "model": "demo", "prefix": "Supervisor: " },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "worker_research",
+        "type": "agent_orchestrator",
+        "name": "Worker: Researcher",
+        "position": { "x": 660, "y": 380 },
+        "config": {
+          "systemPromptTemplate": "You answer factual questions by looking them up in the knowledge base via the lookup_kb MCP tool.",
+          "userPromptTemplate": "{{user_prompt}}",
+          "sessionIdTemplate": "swarm-demo:researcher",
+          "maxIterations": 4,
+          "toolCallingEnabled": true
+        }
+      },
+      {
+        "id": "worker_research_chat",
+        "type": "llm_call",
+        "name": "Researcher Chat (echo)",
+        "position": { "x": 660, "y": 540 },
+        "config": {
+          "provider": { "providerId": "echo", "model": "demo", "prefix": "Researcher: " },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "worker_research_tool",
+        "type": "mcp_tool",
+        "name": "MCP: lookup_kb",
+        "position": { "x": 860, "y": 540 },
+        "config": {
+          "serverId": "mock-mcp",
+          "toolName": "lookup_kb",
+          "argsTemplate": "{\"key\":\"mcp\"}",
+          "connection": { "transport": "mock" }
+        }
+      },
+      {
+        "id": "worker_compute",
+        "type": "agent_orchestrator",
+        "name": "Worker: Computer",
+        "position": { "x": 660, "y": 100 },
+        "config": {
+          "systemPromptTemplate": "You answer math and time questions by calling the calculator and get_current_time MCP tools.",
+          "userPromptTemplate": "{{user_prompt}}",
+          "sessionIdTemplate": "swarm-demo:computer",
+          "maxIterations": 4,
+          "toolCallingEnabled": true
+        }
+      },
+      {
+        "id": "worker_compute_chat",
+        "type": "llm_call",
+        "name": "Computer Chat (echo)",
+        "position": { "x": 860, "y": 100 },
+        "config": {
+          "provider": { "providerId": "echo", "model": "demo", "prefix": "Computer: " },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "worker_compute_calc",
+        "type": "mcp_tool",
+        "name": "MCP: calculator",
+        "position": { "x": 1060, "y": 60 },
+        "config": {
+          "serverId": "mock-mcp",
+          "toolName": "calculator",
+          "argsTemplate": "{\"expression\":\"2+2\"}",
+          "connection": { "transport": "mock" }
+        }
+      },
+      {
+        "id": "worker_compute_time",
+        "type": "mcp_tool",
+        "name": "MCP: get_current_time",
+        "position": { "x": 1060, "y": 160 },
+        "config": {
+          "serverId": "mock-mcp",
+          "toolName": "get_current_time",
+          "argsTemplate": "{\"tz\":\"UTC\"}",
+          "connection": { "transport": "mock" }
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 720, "y": 240 },
+        "config": { "responseTemplate": "{{answer}}", "outputKey": "result" }
+      }
+    ],
+    "edges": [
+      { "id": "edge_main_1", "source": "trigger_1", "target": "supervisor_1" },
+      { "id": "edge_main_2", "source": "supervisor_1", "target": "output_1" },
+      { "id": "edge_sup_chat", "source": "supervisor_1", "sourceHandle": "chat_model", "target": "supervisor_chat" },
+      { "id": "edge_sup_w_research", "source": "supervisor_1", "sourceHandle": "worker", "target": "worker_research" },
+      { "id": "edge_sup_w_compute", "source": "supervisor_1", "sourceHandle": "worker", "target": "worker_compute" },
+      { "id": "edge_research_chat", "source": "worker_research", "sourceHandle": "chat_model", "target": "worker_research_chat" },
+      { "id": "edge_research_tool", "source": "worker_research", "sourceHandle": "tool", "target": "worker_research_tool" },
+      { "id": "edge_compute_chat", "source": "worker_compute", "sourceHandle": "chat_model", "target": "worker_compute_chat" },
+      { "id": "edge_compute_calc", "source": "worker_compute", "sourceHandle": "tool", "target": "worker_compute_calc" },
+      { "id": "edge_compute_time", "source": "worker_compute", "sourceHandle": "tool", "target": "worker_compute_time" }
+    ]
+  },
+  "exportedAt": "2026-05-07T00:00:00.000Z"
+}

@@ -8,7 +8,8 @@ export default defineConfig({
     nav: [
       { text: "Home", link: "/" },
       { text: "Why", link: "/why" },
-      { text: "Quickstart", link: "/getting-started/quickstart" },
+      { text: "Quickstart", link: "/getting-started/build-your-first-mcp-agent" },
+      { text: "Patterns", link: "/patterns/" },
       { text: "Architecture", link: "/architecture/overview" },
       { text: "Nodes", link: "/nodes/core-nodes" },
       { text: "API", link: "/api/endpoints" }
@@ -28,6 +29,10 @@ export default defineConfig({
           { text: "Environment", link: "/getting-started/environment" },
           { text: "VS Code Extension", link: "/getting-started/vscode-extension" }
         ]
+      },
+      {
+        text: "Patterns",
+        items: [{ text: "Pattern library", link: "/patterns/" }]
       },
       {
         text: "Product",

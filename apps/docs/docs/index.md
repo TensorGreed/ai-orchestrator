@@ -28,6 +28,7 @@ features:
 ## Documentation map
 
 - [Build your first MCP agent in 5 min](/getting-started/build-your-first-mcp-agent) — fastest end-to-end path
+- [Pattern library](/patterns/) — 10 battle-tested topologies with runnable samples
 - [Why L2M?](/why) — the differentiators in detail
 - [Quickstart](/getting-started/quickstart)
 - [Workflow editor](/product/workflow-editor)

@@ -1,0 +1,85 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-workflow-as-mcp-tool",
+    "name": "Workflow as MCP Tool",
+    "description": "Compose-by-MCP pattern. The mcp_server_trigger node turns this whole workflow into an MCP tool exposed at GET /api/mcp-server/kb-helper/manifest and POST /api/mcp-server/kb-helper/invoke. Other agents (in L2M, in your IDE, in other MCP-compatible runtimes) can wire 'kb-helper' in as a callable tool. Inside, the workflow runs an Agent that consults the bundled mock-mcp lookup_kb tool to answer the question. Demonstrates: agent -> workflow -> agent composition without any HTTP plumbing.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "mcp_trigger_1",
+        "type": "mcp_server_trigger",
+        "name": "Expose as MCP Tool",
+        "position": { "x": 80, "y": 200 },
+        "config": {
+          "path": "kb-helper",
+          "toolName": "answer_from_kb",
+          "toolDescription": "Answer a question by looking it up in the L2M demo knowledge base.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "question": {
+                "type": "string",
+                "description": "Natural-language question to answer."
+              }
+            },
+            "required": ["question"]
+          },
+          "authMode": "public"
+        }
+      },
+      {
+        "id": "agent_1",
+        "type": "agent_orchestrator",
+        "name": "Agent",
+        "position": { "x": 380, "y": 200 },
+        "config": {
+          "systemPromptTemplate": "Answer the user's question by calling the lookup_kb MCP tool. Reply with a concise factual sentence.",
+          "userPromptTemplate": "{{question}}",
+          "sessionIdTemplate": "kb-helper",
+          "maxIterations": 4,
+          "toolCallingEnabled": true
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "Chat Model (echo)",
+        "position": { "x": 440, "y": 380 },
+        "config": {
+          "provider": { "providerId": "echo", "model": "demo", "prefix": "Echo: " },
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt"
+        }
+      },
+      {
+        "id": "tool_kb_1",
+        "type": "mcp_tool",
+        "name": "MCP: lookup_kb",
+        "position": { "x": 660, "y": 380 },
+        "config": {
+          "serverId": "mock-mcp",
+          "toolName": "lookup_kb",
+          "argsTemplate": "{\"key\":\"mcp\"}",
+          "connection": { "transport": "mock" }
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 720, "y": 200 },
+        "config": { "responseTemplate": "{{answer}}", "outputKey": "result" }
+      }
+    ],
+    "edges": [
+      { "id": "edge_main_1", "source": "mcp_trigger_1", "target": "agent_1" },
+      { "id": "edge_main_2", "source": "agent_1", "target": "output_1" },
+      { "id": "edge_aux_chat", "source": "agent_1", "sourceHandle": "chat_model", "target": "llm_1" },
+      { "id": "edge_aux_tool", "source": "agent_1", "sourceHandle": "tool", "target": "tool_kb_1" }
+    ]
+  },
+  "exportedAt": "2026-05-07T00:00:00.000Z"
+}
