@@ -139,4 +139,4 @@ Once your package is on npm, anyone running an L2M instance with `COMMUNITY_NODE
 - **API surface**: [`@ai-orchestrator/community-sdk`](https://github.com/TensorGreed/ai-orchestrator/tree/main/packages/community-sdk) — `CommunityNodePackage`, `RegistrationApi`, version constants.
 - **Loader implementation**: [`apps/api/src/services/community-package-loader.ts`](https://github.com/TensorGreed/ai-orchestrator/blob/main/apps/api/src/services/community-package-loader.ts).
 - **Admin routes**: `GET/POST/DELETE /api/community-nodes` — see app.ts for the full surface.
-- **Template repo**: [`l2m-nodes-template`](https://github.com/TensorGreed/l2m-nodes-template).
+- **Template repo**: [`l2m-nodes-template`](https://github.com/TensorGreed/l2m-nodes-template) — clone, rename, customize, publish.
