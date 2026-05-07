@@ -15,14 +15,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
+      # invokes `pnpm` to compute the cache key, so pnpm has to already be
+      # on PATH at that point. The previous order failed with "Unable to
+      # locate executable file: pnpm".
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "pnpm"
-
-      - name: Enable Corepack
-        run: corepack enable
 
       - name: Show pnpm version
         run: pnpm --version
@@ -51,14 +55,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
+      # invokes `pnpm` to compute the cache key, so pnpm has to already be
+      # on PATH at that point. The previous order failed with "Unable to
+      # locate executable file: pnpm".
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "pnpm"
-
-      - name: Enable Corepack
-        run: corepack enable
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -86,14 +94,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
+      # invokes `pnpm` to compute the cache key, so pnpm has to already be
+      # on PATH at that point. The previous order failed with "Unable to
+      # locate executable file: pnpm".
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "pnpm"
-
-      - name: Enable Corepack
-        run: corepack enable
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
