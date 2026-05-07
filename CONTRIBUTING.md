@@ -80,6 +80,7 @@ For the API, integration tests cover RBAC, executor flows, webhook signatures, l
 - **Commit messages**: title under 72 chars, body explains the *why* not the *what*. Reference issues with `Fixes #NN` when applicable.
 - **PR title**: same shape as a commit title. PR description: what changed, why, how it was tested. Link to the Discussion if there was one.
 - **Squash on merge** is the default. If your PR is a series of meaningful intermediate commits (e.g. a refactor that lands cleanly in steps), say so — we'll rebase-merge instead.
+- **Update [CHANGELOG.md](./CHANGELOG.md)** for any user-visible change. Add a one-line entry under `## [Unreleased]` in the appropriate category (`Added` / `Changed` / `Fixed` / etc.). Skip this only for pure-internal refactors, doc-only edits, and CI tweaks.
 
 ## Adding a sample workflow
 

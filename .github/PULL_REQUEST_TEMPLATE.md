@@ -31,6 +31,7 @@ Examples:
 - [ ] Code follows the conventions in [CONTRIBUTING.md](../CONTRIBUTING.md)
 - [ ] New / changed logic has tests (`*.test.ts` next to source)
 - [ ] `pnpm lint`, `pnpm build`, and `pnpm test` all pass locally
+- [ ] User-visible change → entry added under `## [Unreleased]` in [CHANGELOG.md](../CHANGELOG.md) (skip for internal refactors / doc-only / CI tweaks)
 - [ ] If a node type was added or changed: schema in `packages/shared/src/definitions.ts` + `pnpm --filter @ai-orchestrator/docs gen:nodes`
 - [ ] If a DB column / table was added or changed: paired `up`/`down` in `apps/api/src/db/migrations.ts` AND the embedded SQLite schema in `apps/api/src/db/database.ts`
 - [ ] If a config knob was added: it's in `.env.example` and zod-validated in `apps/api/src/config.ts`
