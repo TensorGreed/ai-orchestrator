@@ -875,6 +875,45 @@ export const MIGRATIONS: Migration[] = [
       -- pre-3.35; rolling back the chain columns is intentionally a no-op so
       -- we don't lose tamper-evidence data on a downgrade.
     `
+  },
+  {
+    version: 18,
+    description: "Phase 9.1 — built-in persistent vector store (knowledge_bases + knowledge_base_chunks)",
+    up: `
+      CREATE TABLE IF NOT EXISTS knowledge_bases (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        project_id TEXT,
+        embedder_id TEXT NOT NULL,
+        embedder_config_json TEXT,
+        dimensions INTEGER NOT NULL DEFAULT 0,
+        chunk_count INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_knowledge_bases_project ON knowledge_bases(project_id);
+
+      CREATE TABLE IF NOT EXISTS knowledge_base_chunks (
+        id TEXT PRIMARY KEY,
+        knowledge_base_id TEXT NOT NULL,
+        source_id TEXT,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        metadata_json TEXT,
+        vector_json TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_id ON knowledge_base_chunks(knowledge_base_id);
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_source ON knowledge_base_chunks(knowledge_base_id, source_id);
+    `,
+    down: `
+      DROP TABLE IF EXISTS knowledge_base_chunks;
+      DROP TABLE IF EXISTS knowledge_bases;
+    `
   }
 ];
 

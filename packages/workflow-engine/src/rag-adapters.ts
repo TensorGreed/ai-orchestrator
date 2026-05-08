@@ -767,3 +767,110 @@ export class VectorStoreRegistry {
     return this.adapters.get(id);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 9.1 — Built-in persistent vector store ("knowledge base")
+// ---------------------------------------------------------------------------
+//
+// The KB adapter slots into the same `VectorStoreAdapter` shape as Pinecone /
+// Qdrant / pgvector etc., but reads from / writes to a SQLite-backed table
+// owned by apps/api. To keep workflow-engine free of any apps/api dependency
+// we declare a minimal interface here that the consumer (apps/api) implements
+// on its SqliteStore.
+//
+// Semantics that differ from in-memory:
+//   - upsert is APPEND, not replace. Calling upsert([]) is a safe no-op (lets
+//     `rag_retrieve` issue a query without re-ingesting).
+//   - similaritySearch reads vectors out of the persistent store every call.
+//     Hand-rolled cosine in JS — fine up to ~10k chunks per KB. sqlite-vec /
+//     pgvector are the obvious follow-ups for larger corpora.
+
+export interface KnowledgeBaseStore {
+  /**
+   * Append chunks for a knowledge_base_id. Implementations should validate
+   * vector dimensions match what's already stored.
+   */
+  addKnowledgeBaseChunks(input: {
+    knowledgeBaseId: string;
+    chunks: Array<{
+      sourceId?: string | null;
+      chunkIndex: number;
+      content: string;
+      metadata?: Record<string, unknown> | null;
+      vector: number[];
+    }>;
+  }): { inserted: number; dimensions: number };
+
+  /** Read every chunk + vector for a KB; caller scores in JS. */
+  listKnowledgeBaseChunks(knowledgeBaseId: string): Array<{
+    id: string;
+    sourceId: string | null;
+    chunkIndex: number;
+    content: string;
+    metadata: Record<string, unknown> | null;
+    vector: number[];
+  }>;
+
+  getKnowledgeBase(id: string): { id: string; embedderId: string; dimensions: number } | null;
+}
+
+export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
+  readonly id = "knowledge-base";
+
+  constructor(
+    private readonly store: KnowledgeBaseStore,
+    private readonly knowledgeBaseId: string
+  ) {}
+
+  async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
+    if (documents.length === 0) return; // append-only; nothing to do
+    const kb = this.store.getKnowledgeBase(this.knowledgeBaseId);
+    if (!kb) throw new Error(`Knowledge base not found: ${this.knowledgeBaseId}`);
+
+    const chunks = await Promise.all(
+      documents.map(async (doc, index) => {
+        const vector = await embedder.embed(doc.text);
+        const meta = (doc.metadata && typeof doc.metadata === "object")
+          ? (doc.metadata as Record<string, unknown>)
+          : null;
+        const sourceId =
+          meta && typeof meta.sourceId === "string"
+            ? (meta.sourceId as string)
+            : doc.id ?? null;
+        return {
+          sourceId,
+          chunkIndex: index,
+          content: doc.text,
+          metadata: meta,
+          vector
+        };
+      })
+    );
+    this.store.addKnowledgeBaseChunks({ knowledgeBaseId: this.knowledgeBaseId, chunks });
+  }
+
+  async similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]> {
+    const queryVector = await embedder.embed(query);
+    const chunks = this.store.listKnowledgeBaseChunks(this.knowledgeBaseId);
+    if (chunks.length === 0) return [];
+    return chunks
+      .map((chunk) => ({
+        chunk,
+        score: cosineSimilarity(queryVector, chunk.vector)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map(({ chunk, score }) => ({
+        id: chunk.id,
+        text: chunk.content,
+        metadata: {
+          ...(chunk.metadata ?? {}),
+          knowledgeBaseId: this.knowledgeBaseId,
+          chunkId: chunk.id,
+          chunkIndex: chunk.chunkIndex,
+          sourceId: chunk.sourceId,
+          similarityScore: Math.round(score * 1000) / 1000
+        }
+      }));
+  }
+}

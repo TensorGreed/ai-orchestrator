@@ -78,7 +78,8 @@ Retrieves context chunks from provided documents or vector store.
 | `topK` | `number` | no | — |
 | `documents` | `array<string>` | no | — |
 | `embedderId` | `string` | no | — |
-| `vectorStoreId` | `string` | no | — |
+| `vectorStoreId` | `string` | no | `in-memory-vector-store` \| `knowledge-base` \| `pinecone-vector-store` \| `pgvector-store` \| `azure-ai-search-vector-store` \| `qdrant-vector-store` \| `chroma-vector-store` \| `weaviate-vector-store` \| `redis-vector-store` |
+| `knowledgeBaseId` | `string` | no | — |
 | `vectorStoreConfig` | `object` | no | — |
 | `embeddingSecretRef` | `object` | no | — |
 

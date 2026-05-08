@@ -2874,3 +2874,245 @@ describe("Phase 4.9 — SECRET_MASTER_KEY_BASE64 rotation end-to-end", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 9.1 — knowledge bases (REST + rag_retrieve integration)
+// ---------------------------------------------------------------------------
+
+describe("Phase 9.1 knowledge bases", () => {
+  it("admin can create + ingest + search a KB through the REST API", async () => {
+    const context = await createTestContext();
+    const adminCookie = await createRoleSession(context, {
+      email: "kb-admin@example.com",
+      password: "kb-pass-9999",
+      role: "admin"
+    });
+
+    const create = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie: adminCookie },
+      payload: {
+        name: "Helpdesk corpus",
+        embedderId: "token-embedder",
+        embedderConfig: {}
+      }
+    });
+    expect(create.statusCode).toBe(200);
+    const created = create.json() as { knowledgeBase: { id: string; embedderId: string; chunkCount: number } };
+    expect(created.knowledgeBase.embedderId).toBe("token-embedder");
+    expect(created.knowledgeBase.chunkCount).toBe(0);
+    const kbId = created.knowledgeBase.id;
+
+    const ingest = await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/ingest`,
+      headers: { cookie: adminCookie },
+      payload: {
+        sourceId: "support-faq-v1",
+        documents: [
+          { content: "To reset your password, click Settings then Account.", metadata: { topic: "auth" } },
+          { content: "We accept Visa, Mastercard, and ACH transfers.", metadata: { topic: "billing" } },
+          { content: "Password reset emails arrive within five minutes.", metadata: { topic: "auth" } }
+        ]
+      }
+    });
+    expect(ingest.statusCode).toBe(200);
+    const ingestBody = ingest.json() as { inserted: number; sourceId: string };
+    expect(ingestBody.inserted).toBe(3);
+    expect(ingestBody.sourceId).toBe("support-faq-v1");
+
+    const fetched = await context.app.inject({
+      method: "GET",
+      url: `/api/knowledge-bases/${kbId}`,
+      headers: { cookie: adminCookie }
+    });
+    const fetchedBody = fetched.json() as {
+      knowledgeBase: { chunkCount: number; dimensions: number };
+      sources: Array<{ sourceId: string; chunkCount: number }>;
+    };
+    expect(fetchedBody.knowledgeBase.chunkCount).toBe(3);
+    expect(fetchedBody.knowledgeBase.dimensions).toBeGreaterThan(0);
+    expect(fetchedBody.sources).toContainEqual({ sourceId: "support-faq-v1", chunkCount: 3 });
+
+    const search = await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/search`,
+      headers: { cookie: adminCookie },
+      payload: { query: "how do I change my password", topK: 2 }
+    });
+    expect(search.statusCode).toBe(200);
+    const searchBody = search.json() as { results: Array<{ text: string; metadata: { sourceId: string } }> };
+    expect(searchBody.results).toHaveLength(2);
+    // Both top-2 results should be auth-related (the password ones)
+    expect(searchBody.results.every((r) => /password/i.test(r.text))).toBe(true);
+
+    // Delete the source — chunk_count drops to 0
+    const delSrc = await context.app.inject({
+      method: "DELETE",
+      url: `/api/knowledge-bases/${kbId}/sources/support-faq-v1`,
+      headers: { cookie: adminCookie }
+    });
+    expect(delSrc.statusCode).toBe(200);
+    expect((delSrc.json() as { removed: number }).removed).toBe(3);
+
+    const after = await context.app.inject({
+      method: "GET",
+      url: `/api/knowledge-bases/${kbId}`,
+      headers: { cookie: adminCookie }
+    });
+    expect((after.json() as { knowledgeBase: { chunkCount: number } }).knowledgeBase.chunkCount).toBe(0);
+  });
+
+  it("rag_retrieve node reads from a KB end-to-end via vectorStoreId=knowledge-base", async () => {
+    const context = await createTestContext();
+    const adminCookie = await createRoleSession(context, {
+      email: "kb-rag@example.com",
+      password: "kb-pass-1234",
+      role: "admin"
+    });
+
+    // Create + populate the KB.
+    const create = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie: adminCookie },
+      payload: { name: "rag-flow KB", embedderId: "token-embedder" }
+    });
+    const kbId = (create.json() as { knowledgeBase: { id: string } }).knowledgeBase.id;
+    await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/ingest`,
+      headers: { cookie: adminCookie },
+      payload: {
+        sourceId: "kb-doc",
+        documents: [
+          { content: "the recovery process for a forgotten password is on the login page" },
+          { content: "the office is open from nine to five on weekdays" }
+        ]
+      }
+    });
+
+    // Build a workflow: text_input -> rag_retrieve(kb) -> output
+    const workflow: Workflow = {
+      id: "wf-rag-kb",
+      name: "RAG KB",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "text",
+          type: "text_input",
+          name: "Q",
+          position: { x: 0, y: 0 },
+          config: { text: "how do I recover my password" }
+        },
+        {
+          id: "retrieve",
+          type: "rag_retrieve",
+          name: "Retrieve",
+          position: { x: 200, y: 0 },
+          config: {
+            queryTemplate: "{{text}}",
+            topK: 1,
+            embedderId: "token-embedder",
+            vectorStoreId: "knowledge-base",
+            knowledgeBaseId: kbId
+          }
+        },
+        {
+          id: "out",
+          type: "output",
+          name: "Out",
+          position: { x: 400, y: 0 },
+          config: { outputKey: "context" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "text", target: "retrieve" },
+        { id: "e2", source: "retrieve", target: "out" }
+      ]
+    };
+
+    const upsert = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows`,
+      headers: { cookie: adminCookie },
+      payload: workflow
+    });
+    expect(upsert.statusCode).toBe(200);
+
+    const exec = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflow.id}/execute`,
+      headers: { cookie: adminCookie },
+      payload: {}
+    });
+    expect(exec.statusCode).toBe(200);
+    const execBody = exec.json() as {
+      status: string;
+      output?: { context: string } | string;
+      nodeResults: Array<{ nodeId: string; output?: { context?: string; documents?: Array<{ text: string }> } }>;
+    };
+    expect(execBody.status).toBe("success");
+
+    const retrieveNode = execBody.nodeResults.find((n) => n.nodeId === "retrieve");
+    expect(retrieveNode).toBeDefined();
+    const docs = retrieveNode!.output!.documents!;
+    expect(docs).toHaveLength(1);
+    expect(docs[0]!.text).toMatch(/password/i);
+  });
+
+  it("rejects ingest with a vector dimension mismatch", async () => {
+    const context = await createTestContext();
+    const adminCookie = await createRoleSession(context, {
+      email: "kb-dim@example.com",
+      password: "kb-pass-1111",
+      role: "admin"
+    });
+    const create = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie: adminCookie },
+      payload: { name: "dim test", embedderId: "token-embedder" }
+    });
+    const kbId = (create.json() as { knowledgeBase: { id: string } }).knowledgeBase.id;
+
+    // First ingest locks dimensions = 4
+    await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/ingest`,
+      headers: { cookie: adminCookie },
+      payload: {
+        chunks: [{ chunkIndex: 0, content: "x", vector: [1, 2, 3, 4] }]
+      }
+    });
+
+    const bad = await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/ingest`,
+      headers: { cookie: adminCookie },
+      payload: {
+        chunks: [{ chunkIndex: 1, content: "y", vector: [1, 2] }]
+      }
+    });
+    expect(bad.statusCode).toBe(400);
+    expect((bad.json() as { error: string }).error).toMatch(/dimension mismatch/i);
+  });
+
+  it("non-admin cannot create or delete KBs", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "kb-builder@example.com",
+      password: "kb-pass-7777",
+      role: "builder"
+    });
+    const create = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie: builderCookie },
+      payload: { name: "should fail", embedderId: "token-embedder" }
+    });
+    expect(create.statusCode).toBe(403);
+  });
+});
+

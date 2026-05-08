@@ -33,7 +33,16 @@ import {
   exportWorkflowToJson,
   importWorkflowFromJson,
   renderExpressionTemplate,
-  validateWorkflowGraph
+  validateWorkflowGraph,
+  KnowledgeBaseVectorStoreAdapter,
+  TokenEmbeddingAdapter,
+  OpenAIEmbeddingAdapter,
+  AzureOpenAIEmbeddingAdapter,
+  CohereEmbeddingAdapter,
+  MistralEmbeddingAdapter,
+  GoogleVertexEmbeddingAdapter,
+  HuggingFaceEmbeddingAdapter,
+  type EmbeddingAdapter
 } from "@ai-orchestrator/workflow-engine";
 import { SqliteStore } from "./db/database";
 import type { AppConfig } from "./config";
@@ -517,6 +526,63 @@ function toDurationMs(startedAt: string, completedAt: string): number | undefine
     return undefined;
   }
   return Math.max(0, Math.floor(completed - started));
+}
+
+// Phase 9.1 — instantiate a workflow-engine EmbeddingAdapter from a KB's
+// stored embedderId + embedderConfig. Mirrors the dispatch on the
+// `rag_retrieve` node so REST callers get the same embedder semantics.
+// Returns null if the embedderId is unknown or required config is missing.
+async function buildEmbedderFromKbConfig(
+  kb: { embedderId: string; embedderConfig: Record<string, unknown> },
+  secretService: SecretService
+): Promise<EmbeddingAdapter | null> {
+  const cfg = kb.embedderConfig ?? {};
+  const secretRef = (cfg.secretRef ?? cfg.embeddingSecretRef) as SecretReference | undefined;
+  const apiKey = secretRef ? await secretService.resolveSecret(secretRef) : undefined;
+  switch (kb.embedderId) {
+    case "token-embedder":
+      return new TokenEmbeddingAdapter();
+    case "openai-embedder":
+      return new OpenAIEmbeddingAdapter({
+        apiKey: apiKey ?? process.env.OPENAI_API_KEY ?? "",
+        baseUrl: typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined,
+        model: typeof cfg.model === "string" ? cfg.model : undefined
+      });
+    case "azure-openai-embedder":
+      return new AzureOpenAIEmbeddingAdapter({
+        endpoint: typeof cfg.endpoint === "string" ? cfg.endpoint : process.env.AZURE_OPENAI_ENDPOINT ?? "",
+        deployment:
+          typeof cfg.deployment === "string" && cfg.deployment.trim()
+            ? cfg.deployment
+            : typeof cfg.model === "string"
+              ? cfg.model
+              : "text-embedding-3-small",
+        apiVersion: typeof cfg.apiVersion === "string" ? cfg.apiVersion : process.env.AZURE_OPENAI_API_VERSION,
+        apiKey: apiKey ?? process.env.AZURE_OPENAI_API_KEY ?? ""
+      });
+    case "cohere-embedder":
+      return new CohereEmbeddingAdapter({
+        apiKey: apiKey ?? process.env.COHERE_API_KEY ?? "",
+        model: typeof cfg.model === "string" ? cfg.model : undefined
+      });
+    case "mistral-embedder":
+      return new MistralEmbeddingAdapter({
+        apiKey: apiKey ?? process.env.MISTRAL_API_KEY ?? "",
+        model: typeof cfg.model === "string" ? cfg.model : undefined
+      });
+    case "google-vertex-embedder":
+      return new GoogleVertexEmbeddingAdapter({
+        apiKey: apiKey ?? process.env.GEMINI_API_KEY ?? "",
+        model: typeof cfg.model === "string" ? cfg.model : undefined
+      });
+    case "huggingface-embedder":
+      return new HuggingFaceEmbeddingAdapter({
+        apiKey: apiKey ?? process.env.HUGGINGFACE_API_KEY ?? "",
+        model: typeof cfg.model === "string" ? cfg.model : undefined
+      });
+    default:
+      return null;
+  }
 }
 
 // Phase 8.3 — surface a Retry-After hint when a budget block rejects.
@@ -1286,6 +1352,21 @@ export function createApp(
               })
           },
           loadWorkflow: (workflowId) => store.getWorkflow(workflowId) ?? undefined,
+          // Phase 9.1 — built-in persistent vector store. The SqliteStore
+          // implements the minimal KnowledgeBaseStore interface declared in
+          // workflow-engine/rag-adapters.ts.
+          knowledgeBaseStore: {
+            addKnowledgeBaseChunks: (input) =>
+              store.addKnowledgeBaseChunks({
+                knowledgeBaseId: input.knowledgeBaseId,
+                chunks: input.chunks
+              }),
+            listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
+            getKnowledgeBase: (id) => {
+              const kb = store.getKnowledgeBase(id);
+              return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
+            }
+          },
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
           persistPausedExecution: async (paused) => {
             store.saveWorkflowExecutionState({
@@ -1350,6 +1431,14 @@ export function createApp(
                     loadArtifact: async (artifact) => store.loadSessionArtifact(artifact)
                   },
                   loadWorkflow: (wid) => store.getWorkflow(wid) ?? undefined,
+                  knowledgeBaseStore: {
+                    addKnowledgeBaseChunks: (i) => store.addKnowledgeBaseChunks(i),
+                    listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
+                    getKnowledgeBase: (kbId) => {
+                      const kb = store.getKnowledgeBase(kbId);
+                      return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
+                    }
+                  },
                   resolveSecret: (ref) => secretService.resolveSecret(ref)
                 }
               );
@@ -3074,6 +3163,289 @@ export function createApp(
       return { error: err instanceof Error ? err.message : String(err) };
     }
   });
+
+  // Phase 9.1 — Knowledge bases (built-in persistent vector store).
+  // builder role for read; admin for create/update/delete to keep the data
+  // tier governed (these are persistent corpora; non-admins shouldn't
+  // wipe them).
+  app.get("/api/knowledge-bases", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const query = request.query as { projectId?: string } | undefined;
+    return { knowledgeBases: store.listKnowledgeBases({ projectId: query?.projectId }) };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/knowledge-bases/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const kb = store.getKnowledgeBase(request.params.id);
+    if (!kb) {
+      reply.code(404);
+      return { error: "Knowledge base not found" };
+    }
+    const sources = store.listKnowledgeBaseSources(request.params.id);
+    return { knowledgeBase: kb, sources };
+  });
+
+  app.post<{ Body: unknown }>("/api/knowledge-bases", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const body = request.body as Partial<{
+      name: string;
+      description: string | null;
+      projectId: string | null;
+      embedderId: string;
+      embedderConfig: Record<string, unknown>;
+    }> | undefined;
+    if (!body || typeof body.name !== "string" || !body.name.trim()) {
+      reply.code(400);
+      return { error: "name is required" };
+    }
+    if (!body.embedderId || typeof body.embedderId !== "string") {
+      reply.code(400);
+      return { error: "embedderId is required (e.g. token-embedder, openai-embedder, azure-openai-embedder)" };
+    }
+    const id = `kb_${crypto.randomUUID()}`;
+    store.createKnowledgeBase({
+      id,
+      name: body.name.trim(),
+      description: body.description ?? null,
+      projectId: body.projectId ?? null,
+      embedderId: body.embedderId,
+      embedderConfig: body.embedderConfig ?? {},
+      createdBy: user.email
+    });
+    auditService.record({
+      category: "system",
+      eventType: "knowledge_base.created",
+      action: "create",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "knowledge_base",
+      resourceId: id,
+      projectId: body.projectId ?? null,
+      metadata: { embedderId: body.embedderId }
+    });
+    return { knowledgeBase: store.getKnowledgeBase(id) };
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/knowledge-bases/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getKnowledgeBase(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Knowledge base not found" };
+    }
+    const patch = request.body as Partial<{
+      name: string;
+      description: string | null;
+      embedderConfig: Record<string, unknown>;
+    }> | undefined;
+    if (!patch || typeof patch !== "object") {
+      reply.code(400);
+      return { error: "Empty update payload" };
+    }
+    store.updateKnowledgeBase(request.params.id, patch);
+    auditService.record({
+      category: "system",
+      eventType: "knowledge_base.updated",
+      action: "update",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "knowledge_base",
+      resourceId: request.params.id,
+      metadata: { ...patch }
+    });
+    return { knowledgeBase: store.getKnowledgeBase(request.params.id) };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/knowledge-bases/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getKnowledgeBase(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Knowledge base not found" };
+    }
+    store.deleteKnowledgeBase(request.params.id);
+    auditService.record({
+      category: "system",
+      eventType: "knowledge_base.deleted",
+      action: "delete",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "knowledge_base",
+      resourceId: request.params.id
+    });
+    return { ok: true };
+  });
+
+  /**
+   * Ingest pre-chunked text into a KB. Either:
+   *   - body.chunks: pre-embedded chunks (vector + content). For programmatic
+   *     ingestion when the caller already has embeddings.
+   *   - body.documents: plain text documents. The server runs the KB's
+   *     configured embedder on each chunk's content. Phase 9.2 layers
+   *     chunking on top.
+   */
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/knowledge-bases/:id/ingest", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const kb = store.getKnowledgeBase(request.params.id);
+    if (!kb) {
+      reply.code(404);
+      return { error: "Knowledge base not found" };
+    }
+    const body = request.body as Partial<{
+      sourceId: string;
+      documents: Array<{ content: string; metadata?: Record<string, unknown> }>;
+      chunks: Array<{
+        sourceId?: string | null;
+        chunkIndex: number;
+        content: string;
+        metadata?: Record<string, unknown>;
+        vector: number[];
+      }>;
+    }> | undefined;
+    if (!body) {
+      reply.code(400);
+      return { error: "Empty payload" };
+    }
+
+    // Path 1: pre-embedded chunks
+    if (Array.isArray(body.chunks) && body.chunks.length > 0) {
+      try {
+        const result = store.addKnowledgeBaseChunks({
+          knowledgeBaseId: request.params.id,
+          chunks: body.chunks
+        });
+        return { inserted: result.inserted, dimensions: result.dimensions };
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
+    // Path 2: server-side embedding of plain documents
+    if (Array.isArray(body.documents) && body.documents.length > 0) {
+      const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+      if (!embedder) {
+        reply.code(400);
+        return { error: `Cannot instantiate embedder ${kb.embedderId} — check embedderConfig` };
+      }
+      const sourceId = body.sourceId ?? `src_${crypto.randomUUID().slice(0, 8)}`;
+      const chunks = await Promise.all(
+        body.documents.map(async (doc, idx) => ({
+          sourceId,
+          chunkIndex: idx,
+          content: doc.content,
+          metadata: doc.metadata ?? null,
+          vector: await embedder.embed(doc.content)
+        }))
+      );
+      try {
+        const result = store.addKnowledgeBaseChunks({
+          knowledgeBaseId: request.params.id,
+          chunks
+        });
+        return { inserted: result.inserted, dimensions: result.dimensions, sourceId };
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
+    reply.code(400);
+    return { error: "Provide either body.chunks or body.documents" };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/knowledge-bases/:id/chunks", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const kb = store.getKnowledgeBase(request.params.id);
+    if (!kb) {
+      reply.code(404);
+      return { error: "Knowledge base not found" };
+    }
+    const query = request.query as { limit?: string; sourceId?: string } | undefined;
+    return {
+      chunks: store.listKnowledgeBaseChunkPreviews({
+        knowledgeBaseId: request.params.id,
+        limit: query?.limit ? Number(query.limit) : 50,
+        sourceId: query?.sourceId
+      })
+    };
+  });
+
+  app.delete<{ Params: { id: string; sourceId: string } }>(
+    "/api/knowledge-bases/:id/sources/:sourceId",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["admin"]);
+      if (!user) return;
+      const kb = store.getKnowledgeBase(request.params.id);
+      if (!kb) {
+        reply.code(404);
+        return { error: "Knowledge base not found" };
+      }
+      const removed = store.deleteKnowledgeBaseChunksBySource({
+        knowledgeBaseId: request.params.id,
+        sourceId: request.params.sourceId
+      });
+      auditService.record({
+        category: "system",
+        eventType: "knowledge_base.source.deleted",
+        action: "delete",
+        outcome: "success",
+        actor: { email: user.email, type: "user" },
+        resourceType: "knowledge_base",
+        resourceId: request.params.id,
+        metadata: { sourceId: request.params.sourceId, chunksRemoved: removed }
+      });
+      return { removed };
+    }
+  );
+
+  /**
+   * Standalone similarity search — useful for testing a KB without wrapping
+   * it in a workflow, and for the Studio "search" preview.
+   */
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/api/knowledge-bases/:id/search",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const kb = store.getKnowledgeBase(request.params.id);
+      if (!kb) {
+        reply.code(404);
+        return { error: "Knowledge base not found" };
+      }
+      const body = request.body as Partial<{ query: string; topK: number }> | undefined;
+      if (!body?.query || typeof body.query !== "string") {
+        reply.code(400);
+        return { error: "query is required" };
+      }
+      const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+      if (!embedder) {
+        reply.code(400);
+        return { error: `Cannot instantiate embedder ${kb.embedderId} — check embedderConfig` };
+      }
+      const adapter = new KnowledgeBaseVectorStoreAdapter(
+        {
+          addKnowledgeBaseChunks: (i) => store.addKnowledgeBaseChunks(i),
+          listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
+          getKnowledgeBase: (kbId) => {
+            const k = store.getKnowledgeBase(kbId);
+            return k ? { id: k.id, embedderId: k.embedderId, dimensions: k.dimensions } : null;
+          }
+        },
+        request.params.id
+      );
+      const topK = body.topK && body.topK > 0 ? Math.floor(body.topK) : 5;
+      const results = await adapter.similaritySearch(body.query, topK, embedder);
+      return { query: body.query, results };
+    }
+  );
 
   app.get<{ Params: { id: string } }>("/api/audit-export/destinations/:id/runs", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);

@@ -757,7 +757,22 @@ export const nodeDefinitions: NodeDefinition[] = [
         topK: { type: "number" },
         documents: { type: "array", items: { type: "string" } },
         embedderId: { type: "string" },
-        vectorStoreId: { type: "string" },
+        vectorStoreId: {
+          type: "string",
+          enum: [
+            "in-memory-vector-store",
+            "knowledge-base",
+            "pinecone-vector-store",
+            "pgvector-store",
+            "azure-ai-search-vector-store",
+            "qdrant-vector-store",
+            "chroma-vector-store",
+            "weaviate-vector-store",
+            "redis-vector-store"
+          ]
+        },
+        /** When vectorStoreId === "knowledge-base", names the persistent KB to query/append to. */
+        knowledgeBaseId: { type: "string" },
         vectorStoreConfig: { type: "object" },
         embeddingSecretRef: { type: "object" }
       }

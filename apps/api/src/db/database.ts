@@ -269,6 +269,90 @@ interface BudgetRow {
   updated_at: string;
 }
 
+// Phase 9.1 — knowledge bases
+export interface KnowledgeBaseRecord {
+  id: string;
+  name: string;
+  description: string | null;
+  projectId: string | null;
+  embedderId: string;
+  embedderConfig: Record<string, unknown>;
+  dimensions: number;
+  chunkCount: number;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KnowledgeBaseChunkRecord {
+  id: string;
+  knowledgeBaseId: string;
+  sourceId: string | null;
+  chunkIndex: number;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  vector: number[];
+  createdAt: string;
+}
+
+interface KnowledgeBaseRow {
+  id: string;
+  name: string;
+  description: string | null;
+  project_id: string | null;
+  embedder_id: string;
+  embedder_config_json: string | null;
+  dimensions: number;
+  chunk_count: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface KnowledgeBaseChunkRow {
+  id: string;
+  knowledge_base_id: string;
+  source_id: string | null;
+  chunk_index: number;
+  content: string;
+  metadata_json: string | null;
+  vector_json: string;
+  created_at: string;
+}
+
+function mapKnowledgeBase(row: KnowledgeBaseRow): KnowledgeBaseRecord {
+  return {
+    id: toString(row.id),
+    name: toString(row.name),
+    description: row.description ? toString(row.description) : null,
+    projectId: row.project_id ? toString(row.project_id) : null,
+    embedderId: toString(row.embedder_id),
+    embedderConfig: row.embedder_config_json
+      ? (safeJsonParse(toString(row.embedder_config_json)) as Record<string, unknown>) ?? {}
+      : {},
+    dimensions: toNumber(row.dimensions),
+    chunkCount: toNumber(row.chunk_count),
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
+function mapKnowledgeBaseChunk(row: KnowledgeBaseChunkRow): KnowledgeBaseChunkRecord {
+  return {
+    id: toString(row.id),
+    knowledgeBaseId: toString(row.knowledge_base_id),
+    sourceId: row.source_id ? toString(row.source_id) : null,
+    chunkIndex: toNumber(row.chunk_index),
+    content: toString(row.content),
+    metadata: row.metadata_json
+      ? (safeJsonParse(toString(row.metadata_json)) as Record<string, unknown>)
+      : null,
+    vector: safeJsonParse(toString(row.vector_json)) as number[],
+    createdAt: toString(row.created_at)
+  };
+}
+
 function mapBudget(row: BudgetRow): BudgetRecord {
   return {
     id: toString(row.id),
@@ -1091,6 +1175,37 @@ export class SqliteStore {
     // Phase 8.4 — audit chain columns (idempotent ADD COLUMN)
     this.ensureColumn("audit_logs", "prev_hash", "TEXT");
     this.ensureColumn("audit_logs", "entry_hash", "TEXT");
+
+    // Phase 9.1 — built-in persistent vector store
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS knowledge_bases (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        project_id TEXT,
+        embedder_id TEXT NOT NULL,
+        embedder_config_json TEXT,
+        dimensions INTEGER NOT NULL DEFAULT 0,
+        chunk_count INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_knowledge_bases_project ON knowledge_bases(project_id);
+
+      CREATE TABLE IF NOT EXISTS knowledge_base_chunks (
+        id TEXT PRIMARY KEY,
+        knowledge_base_id TEXT NOT NULL,
+        source_id TEXT,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        metadata_json TEXT,
+        vector_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_id ON knowledge_base_chunks(knowledge_base_id);
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_source ON knowledge_base_chunks(knowledge_base_id, source_id);
+    `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
     this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
@@ -6304,6 +6419,230 @@ export class SqliteStore {
       firstId: r.first_id ? toString(r.first_id) : null,
       lastId: r.last_id ? toString(r.last_id) : null,
       error: r.error ? toString(r.error) : null
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 9.1 — knowledge_bases (built-in persistent vector store)
+  // ---------------------------------------------------------------------------
+
+  createKnowledgeBase(input: {
+    id: string;
+    name: string;
+    description?: string | null;
+    projectId?: string | null;
+    embedderId: string;
+    embedderConfig?: Record<string, unknown>;
+    dimensions?: number;
+    createdBy?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO knowledge_bases (
+         id, name, description, project_id, embedder_id, embedder_config_json,
+         dimensions, chunk_count, created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      [
+        input.id,
+        input.name,
+        input.description ?? null,
+        input.projectId ?? null,
+        input.embedderId,
+        input.embedderConfig ? JSON.stringify(input.embedderConfig) : null,
+        input.dimensions ?? 0,
+        input.createdBy ?? null,
+        now,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  updateKnowledgeBase(id: string, patch: {
+    name?: string;
+    description?: string | null;
+    embedderConfig?: Record<string, unknown>;
+    dimensions?: number;
+  }): boolean {
+    const fields: string[] = [];
+    const params: Array<string | number | null> = [];
+    if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
+    if (patch.description !== undefined) { fields.push("description = ?"); params.push(patch.description); }
+    if (patch.embedderConfig !== undefined) {
+      fields.push("embedder_config_json = ?");
+      params.push(JSON.stringify(patch.embedderConfig));
+    }
+    if (patch.dimensions !== undefined) { fields.push("dimensions = ?"); params.push(patch.dimensions); }
+    if (fields.length === 0) return false;
+    fields.push("updated_at = ?");
+    params.push(new Date().toISOString());
+    params.push(id);
+    this.exec(`UPDATE knowledge_bases SET ${fields.join(", ")} WHERE id = ?`, params);
+    this.persist();
+    return true;
+  }
+
+  deleteKnowledgeBase(id: string): boolean {
+    this.exec(`DELETE FROM knowledge_base_chunks WHERE knowledge_base_id = ?`, [id]);
+    this.exec(`DELETE FROM knowledge_bases WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  getKnowledgeBase(id: string): KnowledgeBaseRecord | null {
+    const row = this.queryOne<KnowledgeBaseRow>(`SELECT * FROM knowledge_bases WHERE id = ?`, [id]);
+    return row ? mapKnowledgeBase(row) : null;
+  }
+
+  listKnowledgeBases(filter: { projectId?: string } = {}): KnowledgeBaseRecord[] {
+    const filters: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.projectId) { filters.push("project_id = ?"); params.push(filter.projectId); }
+    const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const rows = this.queryAll<KnowledgeBaseRow>(
+      `SELECT * FROM knowledge_bases ${where} ORDER BY name`,
+      params
+    );
+    return rows.map(mapKnowledgeBase);
+  }
+
+  /**
+   * Bulk insert chunks. Caller pre-embeds; we store the vector as JSON.
+   * dimensions is locked on the first insert if it's still 0 — subsequent
+   * inserts must match.
+   */
+  addKnowledgeBaseChunks(input: {
+    knowledgeBaseId: string;
+    chunks: Array<{
+      id?: string;
+      sourceId?: string | null;
+      chunkIndex: number;
+      content: string;
+      metadata?: Record<string, unknown> | null;
+      vector: number[];
+    }>;
+  }): { inserted: number; dimensions: number } {
+    const kb = this.getKnowledgeBase(input.knowledgeBaseId);
+    if (!kb) throw new Error(`Knowledge base not found: ${input.knowledgeBaseId}`);
+    if (input.chunks.length === 0) return { inserted: 0, dimensions: kb.dimensions };
+
+    const expectedDims = kb.dimensions > 0 ? kb.dimensions : input.chunks[0]!.vector.length;
+    for (const c of input.chunks) {
+      if (c.vector.length !== expectedDims) {
+        throw new Error(
+          `Vector dimension mismatch: expected ${expectedDims}, got ${c.vector.length} (chunk ${c.chunkIndex})`
+        );
+      }
+    }
+
+    const now = new Date().toISOString();
+    for (const c of input.chunks) {
+      this.exec(
+        `INSERT INTO knowledge_base_chunks (
+           id, knowledge_base_id, source_id, chunk_index, content, metadata_json, vector_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          c.id ?? `kbc_${randomUUID()}`,
+          input.knowledgeBaseId,
+          c.sourceId ?? null,
+          c.chunkIndex,
+          c.content,
+          c.metadata ? JSON.stringify(c.metadata) : null,
+          JSON.stringify(c.vector),
+          now
+        ]
+      );
+    }
+
+    if (kb.dimensions === 0) {
+      this.exec(
+        `UPDATE knowledge_bases SET dimensions = ?, updated_at = ? WHERE id = ?`,
+        [expectedDims, now, input.knowledgeBaseId]
+      );
+    }
+    this.exec(
+      `UPDATE knowledge_bases SET chunk_count = (SELECT COUNT(*) FROM knowledge_base_chunks WHERE knowledge_base_id = ?), updated_at = ? WHERE id = ?`,
+      [input.knowledgeBaseId, now, input.knowledgeBaseId]
+    );
+    this.persist();
+    return { inserted: input.chunks.length, dimensions: expectedDims };
+  }
+
+  /**
+   * Pull every chunk for a KB. For Phase 9.1's hand-rolled cosine search
+   * we score in JS — fine up to ~10k chunks per KB. Larger fleets should
+   * push to pgvector or sqlite-vec (follow-up).
+   */
+  listKnowledgeBaseChunks(knowledgeBaseId: string): KnowledgeBaseChunkRecord[] {
+    const rows = this.queryAll<KnowledgeBaseChunkRow>(
+      `SELECT * FROM knowledge_base_chunks WHERE knowledge_base_id = ? ORDER BY rowid`,
+      [knowledgeBaseId]
+    );
+    return rows.map(mapKnowledgeBaseChunk);
+  }
+
+  /** Preview chunks for the UI — content + metadata, no vectors. */
+  listKnowledgeBaseChunkPreviews(input: { knowledgeBaseId: string; limit?: number; sourceId?: string }): Array<{
+    id: string; sourceId: string | null; chunkIndex: number; content: string;
+    metadata: Record<string, unknown> | null; createdAt: string;
+  }> {
+    const limit = Math.min(input.limit ?? 50, 500);
+    const filters = ["knowledge_base_id = ?"];
+    const params: Array<string | number> = [input.knowledgeBaseId];
+    if (input.sourceId) { filters.push("source_id = ?"); params.push(input.sourceId); }
+    const rows = this.queryAll<{
+      id: string; source_id: string | null; chunk_index: number; content: string;
+      metadata_json: string | null; created_at: string;
+    }>(
+      `SELECT id, source_id, chunk_index, content, metadata_json, created_at
+       FROM knowledge_base_chunks WHERE ${filters.join(" AND ")} ORDER BY chunk_index LIMIT ?`,
+      [...params, limit]
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      sourceId: r.source_id ? toString(r.source_id) : null,
+      chunkIndex: toNumber(r.chunk_index),
+      content: toString(r.content),
+      metadata: r.metadata_json
+        ? (safeJsonParse(toString(r.metadata_json)) as Record<string, unknown>)
+        : null,
+      createdAt: toString(r.created_at)
+    }));
+  }
+
+  deleteKnowledgeBaseChunksBySource(input: { knowledgeBaseId: string; sourceId: string }): number {
+    const before = this.queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM knowledge_base_chunks WHERE knowledge_base_id = ? AND source_id = ?`,
+      [input.knowledgeBaseId, input.sourceId]
+    );
+    const beforeCount = before ? toNumber(before.count) : 0;
+    this.exec(
+      `DELETE FROM knowledge_base_chunks WHERE knowledge_base_id = ? AND source_id = ?`,
+      [input.knowledgeBaseId, input.sourceId]
+    );
+    const now = new Date().toISOString();
+    this.exec(
+      `UPDATE knowledge_bases SET chunk_count = (SELECT COUNT(*) FROM knowledge_base_chunks WHERE knowledge_base_id = ?), updated_at = ? WHERE id = ?`,
+      [input.knowledgeBaseId, now, input.knowledgeBaseId]
+    );
+    this.persist();
+    return beforeCount;
+  }
+
+  /**
+   * Distinct source IDs in a KB with chunk counts. Powers the "Sources"
+   * panel in the ingestion UI (Phase 9.2).
+   */
+  listKnowledgeBaseSources(knowledgeBaseId: string): Array<{ sourceId: string; chunkCount: number }> {
+    const rows = this.queryAll<{ source_id: string | null; cnt: number }>(
+      `SELECT source_id, COUNT(*) AS cnt FROM knowledge_base_chunks
+       WHERE knowledge_base_id = ? AND source_id IS NOT NULL
+       GROUP BY source_id ORDER BY source_id`,
+      [knowledgeBaseId]
+    );
+    return rows.map((r) => ({
+      sourceId: r.source_id ? toString(r.source_id) : "(unsourced)",
+      chunkCount: toNumber(r.cnt)
     }));
   }
 

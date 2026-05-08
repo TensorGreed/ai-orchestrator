@@ -35,8 +35,10 @@ import {
   ChromaVectorStoreAdapter,
   WeaviateVectorStoreAdapter,
   RedisVectorStoreAdapter,
+  KnowledgeBaseVectorStoreAdapter,
   type EmbeddingRegistry,
-  type VectorStoreRegistry
+  type VectorStoreRegistry,
+  type KnowledgeBaseStore
 } from "./rag-adapters";
 import { renderTemplate, tryParseJson } from "./template";
 import { executePhase2Node } from "./phase2-dispatch";
@@ -55,6 +57,12 @@ export interface WorkflowExecutionDependencies {
   connectorRegistry: ConnectorRegistry;
   embeddingRegistry?: EmbeddingRegistry;
   vectorStoreRegistry?: VectorStoreRegistry;
+  /**
+   * Phase 9.1 — built-in persistent vector store. When supplied,
+   * `rag_retrieve` accepts `vectorStoreId: "knowledge-base"` and reads /
+   * writes through this store.
+   */
+  knowledgeBaseStore?: KnowledgeBaseStore;
   agentRuntime: AgentRuntimeAdapter;
   memoryStore?: AgentSessionMemoryStore;
   toolDataStore?: AgentSessionToolDataStore;
@@ -3293,6 +3301,25 @@ async function executeNode(
              indexName: typeof vectorStoreConfig.indexName === "string" ? vectorStoreConfig.indexName : "",
              apiKey: apiKey || undefined
            });
+         } else if (vectorStoreId === "knowledge-base") {
+           // Phase 9.1 — built-in persistent KB. The KB ID identifies which
+           // collection the chunks live in; the embedder set on the KB at
+           // creation time is used implicitly here too (same embedderId is
+           // expected on the rag_retrieve node).
+           const kbId = typeof vectorStoreConfig.knowledgeBaseId === "string"
+             ? vectorStoreConfig.knowledgeBaseId
+             : typeof config.knowledgeBaseId === "string"
+               ? config.knowledgeBaseId
+               : "";
+           if (!kbId) {
+             throw new Error("knowledge-base vector store requires vectorStoreConfig.knowledgeBaseId");
+           }
+           if (!dependencies.knowledgeBaseStore) {
+             throw new Error(
+               "knowledge-base vector store unavailable — dependencies.knowledgeBaseStore not wired"
+             );
+           }
+           store = new KnowledgeBaseVectorStoreAdapter(dependencies.knowledgeBaseStore, kbId);
          }
          else throw new Error(`Unknown vector store ID: ${vectorStoreId}`);
       }
