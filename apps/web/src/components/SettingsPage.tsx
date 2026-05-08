@@ -165,23 +165,59 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
   const [tab, setTab] = useState<SettingsTab>("security");
   const isAdmin = authUser.role === "admin";
 
-  const tabs: Array<{ id: SettingsTab; label: string; restricted?: boolean }> = [
-    { id: "security", label: "Security (MFA)" },
-    { id: "api-keys", label: "API Keys" },
-    { id: "members", label: "Project Members" },
-    { id: "roles", label: "Custom Roles", restricted: !isAdmin },
-    { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
-    { id: "external-secrets", label: "External Secrets", restricted: !isAdmin },
-    { id: "audit-log", label: "Audit Log", restricted: !isAdmin },
-    { id: "log-streams", label: "Log Streams", restricted: !isAdmin },
-    { id: "source-control", label: "Source Control", restricted: !isAdmin },
-    { id: "variables", label: "Variables" },
-    { id: "observability", label: "Observability", restricted: !isAdmin },
-    { id: "notifications", label: "Notifications", restricted: !isAdmin },
-    { id: "mcp-servers", label: "MCP Servers" },
-    { id: "community-nodes", label: "Community Nodes", restricted: !isAdmin },
-    { id: "evals", label: "Evals" },
-    { id: "finops", label: "FinOps", restricted: !isAdmin }
+  // Grouped sidebar — much easier to scan than 16 wrapping horizontal tabs.
+  // Groups are ordered by typical user journey: account self-service first,
+  // then workspace admin, then access control, then runtime concerns.
+  const groups: Array<{
+    label: string;
+    tabs: Array<{ id: SettingsTab; label: string; restricted?: boolean }>;
+  }> = [
+    {
+      label: "Account",
+      tabs: [
+        { id: "security", label: "Security (MFA)" },
+        { id: "api-keys", label: "API Keys" }
+      ]
+    },
+    {
+      label: "Workspace",
+      tabs: [
+        { id: "members", label: "Project Members" },
+        { id: "variables", label: "Variables" },
+        { id: "source-control", label: "Source Control", restricted: !isAdmin }
+      ]
+    },
+    {
+      label: "Access control",
+      tabs: [
+        { id: "roles", label: "Custom Roles", restricted: !isAdmin },
+        { id: "sso", label: "SSO Mappings", restricted: !isAdmin },
+        { id: "external-secrets", label: "External Secrets", restricted: !isAdmin }
+      ]
+    },
+    {
+      label: "Integrations",
+      tabs: [
+        { id: "mcp-servers", label: "MCP Servers" },
+        { id: "community-nodes", label: "Community Nodes", restricted: !isAdmin },
+        { id: "notifications", label: "Notifications", restricted: !isAdmin }
+      ]
+    },
+    {
+      label: "Observability",
+      tabs: [
+        { id: "observability", label: "Metrics & Traces", restricted: !isAdmin },
+        { id: "audit-log", label: "Audit Log", restricted: !isAdmin },
+        { id: "log-streams", label: "Log Streams", restricted: !isAdmin }
+      ]
+    },
+    {
+      label: "Cost & quality",
+      tabs: [
+        { id: "finops", label: "FinOps", restricted: !isAdmin },
+        { id: "evals", label: "Evals" }
+      ]
+    }
   ];
 
   return (
@@ -196,24 +232,32 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         </div>
       </header>
 
-      <nav className="settings-tabs" role="tablist">
-        {tabs
-          .filter((item) => !item.restricted)
-          .map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === item.id}
-              className={tab === item.id ? "settings-tab active" : "settings-tab"}
-              onClick={() => setTab(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-      </nav>
+      <div className="settings-layout">
+        <nav className="settings-sidebar" role="tablist" aria-label="Settings sections">
+          {groups.map((group) => {
+            const visible = group.tabs.filter((t) => !t.restricted);
+            if (visible.length === 0) return null;
+            return (
+              <div key={group.label} className="settings-group">
+                <div className="settings-group-label">{group.label}</div>
+                {visible.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === item.id}
+                    className={tab === item.id ? "settings-tab active" : "settings-tab"}
+                    onClick={() => setTab(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            );
+          })}
+        </nav>
 
-      <div className="settings-body">
+        <div className="settings-body">
         {tab === "security" && <SecurityTab />}
         {tab === "api-keys" && <ApiKeysTab isAdmin={isAdmin} />}
         {tab === "members" && (
@@ -240,6 +284,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         {tab === "community-nodes" && isAdmin && <CommunityNodesTab />}
         {tab === "evals" && <EvalsTab />}
         {tab === "finops" && isAdmin && <FinOpsTab />}
+        </div>
       </div>
     </section>
   );
