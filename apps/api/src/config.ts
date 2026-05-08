@@ -64,6 +64,17 @@ const envSchema = z.object({
   AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(365),
   AUDIT_LOG_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),
 
+  // Phase 8.4 — Audit export to long-term sinks (SIEM, archive, etc.)
+  AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
+  AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
+  AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),
+  /**
+   * File-kind audit export sinks must write under this root. Defaults to
+   * the API data dir so writes are container-local. Path traversal outside
+   * this root is rejected at delivery time.
+   */
+  AUDIT_EXPORT_FILE_ROOT: z.string().default("apps/api/data"),
+
   // Phase 5.5 — Log streaming
   LOG_STREAM_ENABLED: booleanFromEnv.default(true),
   LOG_STREAM_FLUSH_INTERVAL_MS: z.coerce.number().int().positive().default(2000),

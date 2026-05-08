@@ -1747,6 +1747,66 @@ export async function fetchBudgetAlerts(filter: { budgetId?: string; limit?: num
 }
 
 // ---------------------------------------------------------------------------
+// Phase 8.4 — Audit chain + export
+// ---------------------------------------------------------------------------
+
+export interface AuditChainStatus {
+  ok: boolean;
+  rowsChecked: number;
+  firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
+}
+
+export interface AuditExportDestination {
+  id: string;
+  name: string;
+  kind: "http" | "file";
+  config: Record<string, unknown>;
+  intervalSeconds: number;
+  enabled: boolean;
+  lastExportId: string | null;
+  lastExportAt: string | null;
+  lastStatus: string | null;
+  lastError: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function verifyAuditChain() {
+  return apiRequest<AuditChainStatus>("/api/audit-log/verify-chain");
+}
+
+export async function fetchAuditExportDestinations() {
+  return apiRequest<{ destinations: AuditExportDestination[] }>("/api/audit-export/destinations");
+}
+
+export async function createAuditExportDestination(payload: {
+  name: string;
+  kind: "http" | "file";
+  config: Record<string, unknown>;
+  intervalSeconds?: number;
+  enabled?: boolean;
+}) {
+  return apiRequest<{ destination: AuditExportDestination }>("/api/audit-export/destinations", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteAuditExportDestination(id: string) {
+  return apiRequest<{ ok: true }>(`/api/audit-export/destinations/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+export async function runAuditExportDestination(id: string) {
+  return apiRequest<{ outcome: { status: string; rowsExported: number; firstId: string | null; lastId: string | null; error: string | null } }>(
+    `/api/audit-export/destinations/${encodeURIComponent(id)}/run`,
+    { method: "POST" }
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Phase 7.4 — Workflow templates & sharing
 // ---------------------------------------------------------------------------
 

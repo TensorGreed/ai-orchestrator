@@ -67,6 +67,7 @@ import { TracingService, parseKeyValueList, parseTraceparent } from "./services/
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
+import { AuditExportService } from "./services/audit-export-service";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -2110,6 +2111,21 @@ export function createApp(
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
   });
+  const auditExportService = new AuditExportService(store, {
+    checkIntervalMs: config.AUDIT_EXPORT_CHECK_INTERVAL_MS,
+    batchSize: config.AUDIT_EXPORT_BATCH_SIZE,
+    safeFsRoot: config.AUDIT_EXPORT_FILE_ROOT
+  });
+  auditExportService.setLogger({
+    info: (msg, fields) => app.log.info(fields ?? {}, msg),
+    warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+  });
+  if (config.AUDIT_EXPORT_ENABLED) {
+    auditExportService.start();
+    app.addHook("onClose", async () => {
+      await auditExportService.stop();
+    });
+  }
   const logStreamingService = new LogStreamingService(store, config.SECRET_MASTER_KEY_BASE64, {
     enabled: config.LOG_STREAM_ENABLED,
     flushIntervalMs: config.LOG_STREAM_FLUSH_INTERVAL_MS,
@@ -2919,6 +2935,157 @@ export function createApp(
         budgetId: query?.budgetId,
         limit: query?.limit ? Number(query.limit) : 100
       })
+    };
+  });
+
+  // Phase 8.4 — audit chain integrity + export destinations.
+
+  app.get("/api/audit-log/verify-chain", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return store.verifyAuditChain();
+  });
+
+  app.get("/api/audit-export/destinations", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return { destinations: store.listAuditExportDestinations() };
+  });
+
+  app.post<{ Body: unknown }>("/api/audit-export/destinations", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const body = request.body as Partial<{
+      name: string;
+      kind: "http" | "file";
+      config: Record<string, unknown>;
+      intervalSeconds: number;
+      enabled: boolean;
+    }> | undefined;
+    if (!body || typeof body.name !== "string" || !body.name.trim()) {
+      reply.code(400);
+      return { error: "name is required" };
+    }
+    if (!body.kind || !["http", "file"].includes(body.kind)) {
+      reply.code(400);
+      return { error: "kind must be one of http|file" };
+    }
+    if (!body.config || typeof body.config !== "object") {
+      reply.code(400);
+      return { error: "config object is required" };
+    }
+    if (body.kind === "http" && typeof (body.config as { url?: unknown }).url !== "string") {
+      reply.code(400);
+      return { error: "http destination requires config.url" };
+    }
+    if (body.kind === "file" && typeof (body.config as { path?: unknown }).path !== "string") {
+      reply.code(400);
+      return { error: "file destination requires config.path" };
+    }
+    const id = `axdest_${crypto.randomUUID()}`;
+    store.createAuditExportDestination({
+      id,
+      name: body.name.trim(),
+      kind: body.kind,
+      config: body.config,
+      intervalSeconds: body.intervalSeconds ?? 3600,
+      enabled: body.enabled !== false,
+      createdBy: user.email
+    });
+    auditService.record({
+      category: "system",
+      eventType: "audit_export.destination.created",
+      action: "create",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "audit_export_destination",
+      resourceId: id,
+      metadata: { kind: body.kind, intervalSeconds: body.intervalSeconds ?? 3600 }
+    });
+    return { destination: store.getAuditExportDestination(id) };
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/audit-export/destinations/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getAuditExportDestination(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Destination not found" };
+    }
+    const patch = request.body as Partial<{
+      name: string;
+      config: Record<string, unknown>;
+      intervalSeconds: number;
+      enabled: boolean;
+    }> | undefined;
+    if (!patch || typeof patch !== "object") {
+      reply.code(400);
+      return { error: "Empty update payload" };
+    }
+    store.updateAuditExportDestination(request.params.id, patch);
+    auditService.record({
+      category: "system",
+      eventType: "audit_export.destination.updated",
+      action: "update",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "audit_export_destination",
+      resourceId: request.params.id,
+      metadata: { ...patch }
+    });
+    return { destination: store.getAuditExportDestination(request.params.id) };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/audit-export/destinations/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getAuditExportDestination(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Destination not found" };
+    }
+    store.deleteAuditExportDestination(request.params.id);
+    auditService.record({
+      category: "system",
+      eventType: "audit_export.destination.deleted",
+      action: "delete",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "audit_export_destination",
+      resourceId: request.params.id
+    });
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/audit-export/destinations/:id/run", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getAuditExportDestination(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Destination not found" };
+    }
+    try {
+      const outcome = await auditExportService.runDestination(request.params.id);
+      return { outcome };
+    } catch (err) {
+      reply.code(500);
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/audit-export/destinations/:id/runs", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getAuditExportDestination(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Destination not found" };
+    }
+    const query = request.query as { limit?: string } | undefined;
+    return {
+      runs: store.listAuditExportRuns(request.params.id, query?.limit ? Number(query.limit) : 25)
     };
   });
 

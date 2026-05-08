@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
 import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
@@ -316,6 +316,61 @@ function toString(value: unknown): string {
 
 function toNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value ?? 0);
+}
+
+// Phase 8.4 — audit-log hash chain helpers.
+// canonicalAuditPayload: stable, key-ordered JSON serialization. Same input
+// must yield byte-identical output across processes and Node versions.
+function canonicalAuditPayload(input: {
+  id: string;
+  createdAt: string;
+  eventType: string;
+  category: string;
+  action: string;
+  outcome: string;
+  actorUserId: string | null;
+  actorEmail: string | null;
+  actorType: string;
+  resourceType: string | null;
+  resourceId: string | null;
+  projectId: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  metadataJson: string | null;
+  message: string | null;
+}): string {
+  // Explicit field ordering — do NOT sort, so adding fields in future
+  // versions doesn't silently break the chain. New fields go at the end.
+  return JSON.stringify([
+    input.id,
+    input.createdAt,
+    input.eventType,
+    input.category,
+    input.action,
+    input.outcome,
+    input.actorUserId,
+    input.actorEmail,
+    input.actorType,
+    input.resourceType,
+    input.resourceId,
+    input.projectId,
+    input.ipAddress,
+    input.userAgent,
+    input.metadataJson,
+    input.message
+  ]);
+}
+
+function sha256Hex(input: string): string {
+  return createHash("sha256").update(input, "utf8").digest("hex");
+}
+
+function safeJsonParse(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 function parseJsonArray(raw: unknown): string[] {
@@ -1000,7 +1055,42 @@ export class SqliteStore {
       );
       CREATE INDEX IF NOT EXISTS idx_budget_alerts_budget ON budget_alerts(budget_id);
       CREATE INDEX IF NOT EXISTS idx_budget_alerts_fired_at ON budget_alerts(fired_at DESC);
+
+      -- Phase 8.4 — audit export destinations
+      CREATE TABLE IF NOT EXISTS audit_export_destinations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        interval_seconds INTEGER NOT NULL DEFAULT 3600,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_export_id TEXT,
+        last_export_at TEXT,
+        last_status TEXT,
+        last_error TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_export_destinations_enabled ON audit_export_destinations(enabled);
+
+      CREATE TABLE IF NOT EXISTS audit_export_runs (
+        id TEXT PRIMARY KEY,
+        destination_id TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        status TEXT NOT NULL,
+        rows_exported INTEGER NOT NULL DEFAULT 0,
+        first_id TEXT,
+        last_id TEXT,
+        error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_export_runs_dest ON audit_export_runs(destination_id, started_at DESC);
     `);
+
+    // Phase 8.4 — audit chain columns (idempotent ADD COLUMN)
+    this.ensureColumn("audit_logs", "prev_hash", "TEXT");
+    this.ensureColumn("audit_logs", "entry_hash", "TEXT");
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
     this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
@@ -3955,11 +4045,36 @@ export class SqliteStore {
     createdAt?: string;
   }): void {
     const createdAt = entry.createdAt ?? new Date().toISOString();
+    // Phase 8.4 — hash chain. prev_hash = the last row's entry_hash; for the
+    // very first row it's 64 zeros. entry_hash = SHA-256(prev_hash || canonical
+    // JSON of this row). Tampering with any historical row breaks every link
+    // after it, which `verifyAuditChain()` surfaces.
+    const prevHash = this.getLastAuditEntryHash() ?? "0".repeat(64);
+    const canonical = canonicalAuditPayload({
+      id: entry.id,
+      createdAt,
+      eventType: entry.eventType,
+      category: entry.category,
+      action: entry.action,
+      outcome: entry.outcome,
+      actorUserId: entry.actorUserId ?? null,
+      actorEmail: entry.actorEmail ?? null,
+      actorType: entry.actorType ?? "user",
+      resourceType: entry.resourceType ?? null,
+      resourceId: entry.resourceId ?? null,
+      projectId: entry.projectId ?? null,
+      ipAddress: entry.ipAddress ?? null,
+      userAgent: entry.userAgent ?? null,
+      metadataJson: entry.metadata === undefined ? null : JSON.stringify(entry.metadata),
+      message: entry.message ?? null
+    });
+    const entryHash = sha256Hex(prevHash + canonical);
     this.exec(
       `INSERT INTO audit_logs
          (id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
-          resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message, created_at,
+          prev_hash, entry_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.id,
         entry.eventType,
@@ -3976,10 +4091,107 @@ export class SqliteStore {
         entry.userAgent ?? null,
         entry.metadata === undefined ? null : JSON.stringify(entry.metadata),
         entry.message ?? null,
-        createdAt
+        createdAt,
+        prevHash,
+        entryHash
       ]
     );
     this.persist();
+  }
+
+  private getLastAuditEntryHash(): string | null {
+    const row = this.queryOne<{ entry_hash: string | null }>(
+      `SELECT entry_hash FROM audit_logs WHERE entry_hash IS NOT NULL ORDER BY rowid DESC LIMIT 1`
+    );
+    return row?.entry_hash ? toString(row.entry_hash) : null;
+  }
+
+  /**
+   * Walk the chain in insertion order and verify every recomputed entry_hash
+   * matches what's stored. Returns details of the first broken link, or
+   * `{ ok: true }` when the chain is intact.
+   *
+   * Rows persisted before Phase 8.4 (where entry_hash IS NULL) are skipped —
+   * we can only attest the chain from the first hash onwards.
+   */
+  verifyAuditChain(): {
+    ok: boolean;
+    rowsChecked: number;
+    firstBrokenAt?: { id: string; createdAt: string; expected: string; stored: string };
+  } {
+    const rows = this.queryAll<{
+      id: string;
+      event_type: string;
+      category: string;
+      action: string;
+      outcome: string;
+      actor_user_id: string | null;
+      actor_email: string | null;
+      actor_type: string;
+      resource_type: string | null;
+      resource_id: string | null;
+      project_id: string | null;
+      ip_address: string | null;
+      user_agent: string | null;
+      metadata_json: string | null;
+      message: string | null;
+      created_at: string;
+      prev_hash: string | null;
+      entry_hash: string | null;
+    }>(
+      `SELECT id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
+              resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message,
+              created_at, prev_hash, entry_hash
+       FROM audit_logs WHERE entry_hash IS NOT NULL
+       ORDER BY rowid ASC`
+    );
+    let prev = "0".repeat(64);
+    let checked = 0;
+    for (const row of rows) {
+      const stored = toString(row.entry_hash ?? "");
+      const storedPrev = toString(row.prev_hash ?? "");
+      if (storedPrev !== prev) {
+        return {
+          ok: false,
+          rowsChecked: checked,
+          firstBrokenAt: {
+            id: toString(row.id),
+            createdAt: toString(row.created_at),
+            expected: prev,
+            stored: storedPrev
+          }
+        };
+      }
+      const canonical = canonicalAuditPayload({
+        id: toString(row.id),
+        createdAt: toString(row.created_at),
+        eventType: toString(row.event_type),
+        category: toString(row.category),
+        action: toString(row.action),
+        outcome: toString(row.outcome),
+        actorUserId: row.actor_user_id ? toString(row.actor_user_id) : null,
+        actorEmail: row.actor_email ? toString(row.actor_email) : null,
+        actorType: toString(row.actor_type),
+        resourceType: row.resource_type ? toString(row.resource_type) : null,
+        resourceId: row.resource_id ? toString(row.resource_id) : null,
+        projectId: row.project_id ? toString(row.project_id) : null,
+        ipAddress: row.ip_address ? toString(row.ip_address) : null,
+        userAgent: row.user_agent ? toString(row.user_agent) : null,
+        metadataJson: row.metadata_json ? toString(row.metadata_json) : null,
+        message: row.message ? toString(row.message) : null
+      });
+      const expected = sha256Hex(prev + canonical);
+      if (expected !== stored) {
+        return {
+          ok: false,
+          rowsChecked: checked,
+          firstBrokenAt: { id: toString(row.id), createdAt: toString(row.created_at), expected, stored }
+        };
+      }
+      prev = expected;
+      checked += 1;
+    }
+    return { ok: true, rowsChecked: checked };
   }
 
   listAuditLogs(filter: {
@@ -5858,6 +6070,240 @@ export class SqliteStore {
       executionId: r.execution_id ? toString(r.execution_id) : null,
       message: r.message ? toString(r.message) : null,
       firedAt: toString(r.fired_at)
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 8.4 — audit export destinations
+  // ---------------------------------------------------------------------------
+
+  createAuditExportDestination(input: {
+    id: string;
+    name: string;
+    kind: "http" | "file";
+    config: Record<string, unknown>;
+    intervalSeconds?: number;
+    enabled?: boolean;
+    createdBy?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO audit_export_destinations
+         (id, name, kind, config_json, interval_seconds, enabled, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.name,
+        input.kind,
+        JSON.stringify(input.config),
+        input.intervalSeconds ?? 3600,
+        input.enabled === false ? 0 : 1,
+        input.createdBy ?? null,
+        now,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  updateAuditExportDestination(id: string, patch: {
+    name?: string;
+    config?: Record<string, unknown>;
+    intervalSeconds?: number;
+    enabled?: boolean;
+  }): boolean {
+    const fields: string[] = [];
+    const params: Array<string | number | null> = [];
+    if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
+    if (patch.config !== undefined) { fields.push("config_json = ?"); params.push(JSON.stringify(patch.config)); }
+    if (patch.intervalSeconds !== undefined) { fields.push("interval_seconds = ?"); params.push(patch.intervalSeconds); }
+    if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
+    if (fields.length === 0) return false;
+    fields.push("updated_at = ?");
+    params.push(new Date().toISOString());
+    params.push(id);
+    this.exec(`UPDATE audit_export_destinations SET ${fields.join(", ")} WHERE id = ?`, params);
+    this.persist();
+    return true;
+  }
+
+  deleteAuditExportDestination(id: string): boolean {
+    this.exec(`DELETE FROM audit_export_runs WHERE destination_id = ?`, [id]);
+    this.exec(`DELETE FROM audit_export_destinations WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  listAuditExportDestinations(): Array<{
+    id: string; name: string; kind: string; config: Record<string, unknown>;
+    intervalSeconds: number; enabled: boolean;
+    lastExportId: string | null; lastExportAt: string | null;
+    lastStatus: string | null; lastError: string | null;
+    createdBy: string | null; createdAt: string; updatedAt: string;
+  }> {
+    const rows = this.queryAll<{
+      id: string; name: string; kind: string; config_json: string;
+      interval_seconds: number; enabled: number;
+      last_export_id: string | null; last_export_at: string | null;
+      last_status: string | null; last_error: string | null;
+      created_by: string | null; created_at: string; updated_at: string;
+    }>(
+      `SELECT * FROM audit_export_destinations ORDER BY name`
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      name: toString(r.name),
+      kind: toString(r.kind),
+      config: r.config_json ? (JSON.parse(toString(r.config_json)) as Record<string, unknown>) : {},
+      intervalSeconds: toNumber(r.interval_seconds),
+      enabled: toNumber(r.enabled) === 1,
+      lastExportId: r.last_export_id ? toString(r.last_export_id) : null,
+      lastExportAt: r.last_export_at ? toString(r.last_export_at) : null,
+      lastStatus: r.last_status ? toString(r.last_status) : null,
+      lastError: r.last_error ? toString(r.last_error) : null,
+      createdBy: r.created_by ? toString(r.created_by) : null,
+      createdAt: toString(r.created_at),
+      updatedAt: toString(r.updated_at)
+    }));
+  }
+
+  getAuditExportDestination(id: string) {
+    return this.listAuditExportDestinations().find((d) => d.id === id) ?? null;
+  }
+
+  /**
+   * Pull audit_logs strictly newer than `cursor.id` (or all rows when cursor
+   * is null). Used by AuditExportService to ship batches incrementally.
+   * Ordered by (created_at, id) ASC so cursor-based pagination is stable
+   * across concurrent inserts.
+   */
+  listAuditLogsAfter(input: { afterId: string | null; limit: number }): Array<{
+    id: string; eventType: string; category: string; action: string; outcome: string;
+    actorUserId: string | null; actorEmail: string | null; actorType: string;
+    resourceType: string | null; resourceId: string | null; projectId: string | null;
+    ipAddress: string | null; userAgent: string | null; metadata: unknown;
+    message: string | null; createdAt: string; entryHash: string | null;
+  }> {
+    const limit = Math.min(Math.max(input.limit, 1), 5000);
+    // SQLite's rowid is the canonical insertion-order key. We CANNOT use the
+    // text id for ordering because it's a nanoid (random — not lexicographic
+    // monotonic) and we CANNOT use created_at alone because rapid inserts
+    // share the same millisecond. rowid resolves both.
+    let where = "";
+    const params: Array<string | number> = [];
+    if (input.afterId) {
+      const cursorRow = this.queryOne<{ rid: number }>(
+        `SELECT rowid AS rid FROM audit_logs WHERE id = ?`,
+        [input.afterId]
+      );
+      if (cursorRow) {
+        where = `WHERE rowid > ?`;
+        params.push(toNumber(cursorRow.rid));
+      }
+    }
+    const rows = this.queryAll<{
+      id: string; event_type: string; category: string; action: string; outcome: string;
+      actor_user_id: string | null; actor_email: string | null; actor_type: string;
+      resource_type: string | null; resource_id: string | null; project_id: string | null;
+      ip_address: string | null; user_agent: string | null; metadata_json: string | null;
+      message: string | null; created_at: string; entry_hash: string | null;
+    }>(
+      `SELECT id, event_type, category, action, outcome, actor_user_id, actor_email, actor_type,
+              resource_type, resource_id, project_id, ip_address, user_agent, metadata_json, message,
+              created_at, entry_hash
+       FROM audit_logs ${where}
+       ORDER BY rowid ASC LIMIT ?`,
+      [...params, limit]
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      eventType: toString(r.event_type),
+      category: toString(r.category),
+      action: toString(r.action),
+      outcome: toString(r.outcome),
+      actorUserId: r.actor_user_id ? toString(r.actor_user_id) : null,
+      actorEmail: r.actor_email ? toString(r.actor_email) : null,
+      actorType: toString(r.actor_type),
+      resourceType: r.resource_type ? toString(r.resource_type) : null,
+      resourceId: r.resource_id ? toString(r.resource_id) : null,
+      projectId: r.project_id ? toString(r.project_id) : null,
+      ipAddress: r.ip_address ? toString(r.ip_address) : null,
+      userAgent: r.user_agent ? toString(r.user_agent) : null,
+      metadata: r.metadata_json ? safeJsonParse(toString(r.metadata_json)) : null,
+      message: r.message ? toString(r.message) : null,
+      createdAt: toString(r.created_at),
+      entryHash: r.entry_hash ? toString(r.entry_hash) : null
+    }));
+  }
+
+  recordAuditExportRun(input: {
+    id: string;
+    destinationId: string;
+    startedAt: string;
+    completedAt: string;
+    status: "success" | "failure" | "partial";
+    rowsExported: number;
+    firstId?: string | null;
+    lastId?: string | null;
+    error?: string | null;
+  }): void {
+    this.exec(
+      `INSERT INTO audit_export_runs
+         (id, destination_id, started_at, completed_at, status, rows_exported, first_id, last_id, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.destinationId,
+        input.startedAt,
+        input.completedAt,
+        input.status,
+        input.rowsExported,
+        input.firstId ?? null,
+        input.lastId ?? null,
+        input.error ?? null
+      ]
+    );
+    if (input.status === "success" && input.lastId) {
+      this.exec(
+        `UPDATE audit_export_destinations
+         SET last_export_id = ?, last_export_at = ?, last_status = ?, last_error = NULL, updated_at = ?
+         WHERE id = ?`,
+        [input.lastId, input.completedAt, input.status, new Date().toISOString(), input.destinationId]
+      );
+    } else if (input.status === "failure") {
+      this.exec(
+        `UPDATE audit_export_destinations
+         SET last_status = ?, last_error = ?, updated_at = ?
+         WHERE id = ?`,
+        [input.status, input.error ?? "unknown", new Date().toISOString(), input.destinationId]
+      );
+    }
+    this.persist();
+  }
+
+  listAuditExportRuns(destinationId: string, limit = 25): Array<{
+    id: string; destinationId: string; startedAt: string; completedAt: string | null;
+    status: string; rowsExported: number; firstId: string | null; lastId: string | null;
+    error: string | null;
+  }> {
+    const rows = this.queryAll<{
+      id: string; destination_id: string; started_at: string; completed_at: string | null;
+      status: string; rows_exported: number; first_id: string | null; last_id: string | null;
+      error: string | null;
+    }>(
+      `SELECT * FROM audit_export_runs WHERE destination_id = ? ORDER BY started_at DESC LIMIT ?`,
+      [destinationId, Math.min(Math.max(limit, 1), 200)]
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      destinationId: toString(r.destination_id),
+      startedAt: toString(r.started_at),
+      completedAt: r.completed_at ? toString(r.completed_at) : null,
+      status: toString(r.status),
+      rowsExported: toNumber(r.rows_exported),
+      firstId: r.first_id ? toString(r.first_id) : null,
+      lastId: r.last_id ? toString(r.last_id) : null,
+      error: r.error ? toString(r.error) : null
     }));
   }
 

@@ -828,6 +828,53 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS budget_alerts;
       DROP TABLE IF EXISTS budgets;
     `
+  },
+  {
+    version: 17,
+    description: "Phase 8.4 — audit log hash chain (tamper-evidence) + export destinations",
+    up: `
+      ALTER TABLE audit_logs ADD COLUMN prev_hash TEXT;
+      ALTER TABLE audit_logs ADD COLUMN entry_hash TEXT;
+
+      CREATE TABLE IF NOT EXISTS audit_export_destinations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        interval_seconds INTEGER NOT NULL DEFAULT 3600,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        last_export_id TEXT,
+        last_export_at TIMESTAMPTZ,
+        last_status TEXT,
+        last_error TEXT,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_export_destinations_enabled ON audit_export_destinations(enabled);
+
+      CREATE TABLE IF NOT EXISTS audit_export_runs (
+        id TEXT PRIMARY KEY,
+        destination_id TEXT NOT NULL,
+        started_at TIMESTAMPTZ NOT NULL,
+        completed_at TIMESTAMPTZ,
+        status TEXT NOT NULL,
+        rows_exported INTEGER NOT NULL DEFAULT 0,
+        first_id TEXT,
+        last_id TEXT,
+        error TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_export_runs_dest ON audit_export_runs(destination_id, started_at DESC);
+    `,
+    down: `
+      DROP TABLE IF EXISTS audit_export_runs;
+      DROP TABLE IF EXISTS audit_export_destinations;
+      -- ALTER TABLE DROP COLUMN is unsupported on Postgres pre-9.x and SQLite
+      -- pre-3.35; rolling back the chain columns is intentionally a no-op so
+      -- we don't lose tamper-evidence data on a downgrade.
+    `
   }
 ];
 

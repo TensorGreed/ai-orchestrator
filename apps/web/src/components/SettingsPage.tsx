@@ -108,7 +108,14 @@ import {
   type BudgetScopeType,
   type BudgetPeriod,
   type BudgetLimitType,
-  type BudgetAction
+  type BudgetAction,
+  verifyAuditChain,
+  fetchAuditExportDestinations,
+  createAuditExportDestination,
+  deleteAuditExportDestination,
+  runAuditExportDestination,
+  type AuditChainStatus,
+  type AuditExportDestination
 } from "../lib/api";
 
 type SettingsTab =
@@ -1651,7 +1658,238 @@ function AuditLogTab() {
           </button>
         </div>
       </div>
+
+      <AuditChainPanel />
+      <AuditExportPanel />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8.4 — audit chain + export destinations
+// ---------------------------------------------------------------------------
+
+function AuditChainPanel() {
+  const [status, setStatus] = useState<AuditChainStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleVerify = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await verifyAuditChain());
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  return (
+    <div className="settings-card" style={{ marginTop: "1rem" }}>
+      <h4>Tamper-evidence (hash chain)</h4>
+      <p className="settings-help">
+        Every audit row stores <code>SHA-256(prev_hash + canonical_payload)</code>. Verification recomputes the chain and reports the first broken link.
+      </p>
+      <div className="settings-actions">
+        <button type="button" className="header-btn primary" onClick={() => void handleVerify()} disabled={busy}>
+          {busy ? "Verifying…" : "Verify chain integrity"}
+        </button>
+      </div>
+      {error && <div className="settings-error">{error}</div>}
+      {status && (
+        <div className="settings-help" style={{ marginTop: "0.5rem" }}>
+          {status.ok ? (
+            <span style={{ color: "#16a34a" }}>✓ Chain intact — verified {status.rowsChecked} rows.</span>
+          ) : (
+            <span style={{ color: "#dc2626" }}>
+              ✗ Chain broken at row {status.firstBrokenAt?.id} ({status.firstBrokenAt?.createdAt}). Rows verified before break: {status.rowsChecked}.
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AuditExportPanel() {
+  const [destinations, setDestinations] = useState<AuditExportDestination[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await fetchAuditExportDestinations();
+      setDestinations(r.destinations);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const handleRunNow = useCallback(async (id: string) => {
+    setBusy(true);
+    try {
+      const result = await runAuditExportDestination(id);
+      window.alert(`Export ${result.outcome.status}: ${result.outcome.rowsExported} rows`);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
+
+  const handleDelete = useCallback(async (dest: AuditExportDestination) => {
+    if (!window.confirm(`Delete export destination "${dest.name}"?`)) return;
+    setBusy(true);
+    try {
+      await deleteAuditExportDestination(dest.id);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
+
+  return (
+    <div className="settings-card" style={{ marginTop: "1rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h4 style={{ margin: 0 }}>Export destinations</h4>
+        <button type="button" className="header-btn primary" onClick={() => setShowCreate((v) => !v)} disabled={busy}>
+          {showCreate ? "Cancel" : "+ New destination"}
+        </button>
+      </div>
+      <p className="settings-help">
+        Cursor-based bulk export of audit rows to long-term sinks. Each NDJSON record carries <code>entryHash</code> so consumers can re-verify the chain. Set <code>AUDIT_EXPORT_ENABLED=true</code> for scheduled runs; "Run now" works regardless.
+      </p>
+      {error && <div className="settings-error">{error}</div>}
+      {showCreate && <CreateAuditExportForm onCreated={async () => { setShowCreate(false); await refresh(); }} onError={setError} />}
+
+      {loading ? (
+        <p className="settings-help">Loading…</p>
+      ) : destinations.length === 0 ? (
+        <p className="settings-help">No export destinations configured.</p>
+      ) : (
+        <table className="finops-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Kind</th>
+              <th>Interval</th>
+              <th>Last export</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {destinations.map((d) => (
+              <tr key={d.id}>
+                <td>{d.name}</td>
+                <td>{d.kind}</td>
+                <td>{d.intervalSeconds}s</td>
+                <td>{d.lastExportAt ? formatDate(d.lastExportAt) : "—"}</td>
+                <td>{d.lastStatus ?? "—"}{d.lastError && <div className="settings-error" style={{ fontSize: "0.7rem" }}>{d.lastError}</div>}</td>
+                <td style={{ display: "flex", gap: "0.4rem" }}>
+                  <button type="button" className="header-btn ghost" onClick={() => void handleRunNow(d.id)} disabled={busy}>Run now</button>
+                  <button type="button" className="finops-delete" onClick={() => void handleDelete(d)} disabled={busy}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function CreateAuditExportForm({ onCreated, onError }: { onCreated: () => Promise<void>; onError: (msg: string) => void }) {
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState<"http" | "file">("http");
+  const [intervalSeconds, setIntervalSeconds] = useState("3600");
+  const [url, setUrl] = useState("");
+  const [headers, setHeaders] = useState("");
+  const [filePath, setFilePath] = useState("apps/api/data/audit-export.ndjson");
+  const [busy, setBusy] = useState(false);
+
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      let config: Record<string, unknown>;
+      if (kind === "http") {
+        config = { url: url.trim() };
+        if (headers.trim()) {
+          const parsed: Record<string, string> = {};
+          for (const line of headers.split("\n")) {
+            const idx = line.indexOf(":");
+            if (idx > 0) parsed[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+          }
+          config.headers = parsed;
+        }
+      } else {
+        config = { path: filePath.trim() };
+      }
+      await createAuditExportDestination({
+        name: name.trim(),
+        kind,
+        config,
+        intervalSeconds: Number(intervalSeconds)
+      });
+      await onCreated();
+    } catch (err) {
+      onError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [name, kind, url, headers, filePath, intervalSeconds, onCreated, onError]);
+
+  return (
+    <form onSubmit={handleSubmit} className="finops-create-form">
+      <div className="finops-form-row finops-form-row-2">
+        <label>Name<input type="text" value={name} onChange={(e) => setName(e.target.value)} required placeholder="Datadog Logs" /></label>
+        <label>Interval (seconds)<input type="number" min="60" value={intervalSeconds} onChange={(e) => setIntervalSeconds(e.target.value)} /></label>
+      </div>
+      <div className="finops-form-row">
+        <label>Kind
+          <select value={kind} onChange={(e) => setKind(e.target.value as "http" | "file")}>
+            <option value="http">HTTP (POST NDJSON)</option>
+            <option value="file">File (append NDJSON)</option>
+          </select>
+        </label>
+      </div>
+      {kind === "http" ? (
+        <>
+          <div className="finops-form-row">
+            <label>URL<input type="url" value={url} onChange={(e) => setUrl(e.target.value)} required placeholder="https://http-intake.logs.datadoghq.com/api/v2/logs" /></label>
+          </div>
+          <div className="finops-form-row">
+            <label>Headers (one per line, "Name: value")
+              <textarea value={headers} onChange={(e) => setHeaders(e.target.value)} rows={3} placeholder="DD-API-KEY: abc123" />
+            </label>
+          </div>
+        </>
+      ) : (
+        <div className="finops-form-row">
+          <label>Path (must live under <code>AUDIT_EXPORT_FILE_ROOT</code>)
+            <input type="text" value={filePath} onChange={(e) => setFilePath(e.target.value)} required />
+          </label>
+        </div>
+      )}
+      <div className="finops-form-row">
+        <button type="submit" disabled={busy} className="header-btn primary">{busy ? "Saving…" : "Create destination"}</button>
+      </div>
+    </form>
   );
 }
 

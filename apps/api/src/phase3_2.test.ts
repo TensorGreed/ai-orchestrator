@@ -116,6 +116,10 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     OTEL_HTTP_SERVER_SPANS: false,
     LLM_PRICING_OVERRIDES_JSON: "",
     USAGE_EVENTS_RETENTION_DAYS: 365,
+    AUDIT_EXPORT_ENABLED: false,
+    AUDIT_EXPORT_CHECK_INTERVAL_MS: 60000,
+    AUDIT_EXPORT_BATCH_SIZE: 500,
+    AUDIT_EXPORT_FILE_ROOT: "apps/api/data",
     ...overrides
   };
 }
