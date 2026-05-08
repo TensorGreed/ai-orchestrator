@@ -1659,6 +1659,94 @@ export async function fetchUsagePricing() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 8.3 — Budgets
+// ---------------------------------------------------------------------------
+
+export type BudgetScopeType = "global" | "project" | "workflow" | "user";
+export type BudgetPeriod = "day" | "week" | "month";
+export type BudgetLimitType = "usd" | "tokens";
+export type BudgetAction = "warn" | "block";
+
+export interface Budget {
+  id: string;
+  name: string;
+  scopeType: BudgetScopeType;
+  scopeId: string | null;
+  period: BudgetPeriod;
+  limitType: BudgetLimitType;
+  limitValue: number;
+  warnThresholdPct: number;
+  action: BudgetAction;
+  notifyChannel: string | null;
+  enabled: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BudgetAlert {
+  id: string;
+  budgetId: string;
+  periodStart: string;
+  severity: "warn" | "block";
+  usageValue: number;
+  limitValue: number;
+  workflowId: string | null;
+  executionId: string | null;
+  message: string | null;
+  firedAt: string;
+}
+
+export async function fetchBudgets() {
+  return apiRequest<{ budgets: Budget[] }>("/api/budgets");
+}
+
+export async function createBudget(payload: {
+  name: string;
+  scopeType: BudgetScopeType;
+  scopeId?: string | null;
+  period: BudgetPeriod;
+  limitType: BudgetLimitType;
+  limitValue: number;
+  warnThresholdPct?: number;
+  action: BudgetAction;
+  notifyChannel?: string | null;
+}) {
+  return apiRequest<{ budget: Budget }>("/api/budgets", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateBudget(id: string, patch: Partial<{
+  name: string;
+  limitValue: number;
+  warnThresholdPct: number;
+  action: BudgetAction;
+  notifyChannel: string | null;
+  enabled: boolean;
+}>) {
+  return apiRequest<{ budget: Budget }>(`/api/budgets/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch)
+  });
+}
+
+export async function deleteBudgetApi(id: string) {
+  return apiRequest<{ ok: true }>(`/api/budgets/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+export async function fetchBudgetAlerts(filter: { budgetId?: string; limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (filter.budgetId) params.set("budgetId", filter.budgetId);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  const qs = params.toString();
+  return apiRequest<{ alerts: BudgetAlert[] }>(`/api/budget-alerts${qs ? `?${qs}` : ""}`);
+}
+
+// ---------------------------------------------------------------------------
 // Phase 7.4 — Workflow templates & sharing
 // ---------------------------------------------------------------------------
 

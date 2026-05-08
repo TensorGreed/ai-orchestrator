@@ -4552,3 +4552,19 @@ select {
 .finops-status-error { color: #dc2626; }
 .finops-status-canceled { color: #d97706; }
 
+.finops-action-badge { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 0.3rem; font-size: 0.72rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+.finops-action-warn { background: rgba(245, 158, 11, 0.15); color: #b45309; }
+.finops-action-block { background: rgba(239, 68, 68, 0.15); color: #b91c1c; }
+.finops-toggle { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.85rem; }
+.finops-toggle input { cursor: pointer; }
+.finops-delete { padding: 0.25rem 0.55rem; font-size: 0.78rem; background: transparent; border: 1px solid rgba(239, 68, 68, 0.4); color: #dc2626; border-radius: 0.3rem; cursor: pointer; }
+.finops-delete:hover:not(:disabled) { background: rgba(239, 68, 68, 0.08); }
+.finops-delete:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.finops-create-form { background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.55rem; padding: 0.85rem 1rem; margin-bottom: 0.85rem; display: flex; flex-direction: column; gap: 0.6rem; }
+.finops-form-row { display: grid; gap: 0.6rem; }
+.finops-form-row-2 { grid-template-columns: 1fr 1fr; }
+.finops-form-row-3 { grid-template-columns: repeat(3, 1fr); }
+.finops-create-form label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.8rem; color: var(--text-muted); }
+.finops-create-form input, .finops-create-form select { padding: 0.35rem 0.5rem; font-size: 0.85rem; border: 1px solid var(--border); border-radius: 0.35rem; background: var(--surface); color: var(--text); }
+

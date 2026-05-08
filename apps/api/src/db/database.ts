@@ -234,6 +234,60 @@ interface LogStreamDestinationRow {
   updated_at: string;
 }
 
+// Phase 8.3 — budgets
+export interface BudgetRecord {
+  id: string;
+  name: string;
+  scopeType: "global" | "project" | "workflow" | "user";
+  scopeId: string | null;
+  period: "day" | "week" | "month";
+  limitType: "usd" | "tokens";
+  limitValue: number;
+  warnThresholdPct: number;
+  action: "warn" | "block";
+  notifyChannel: string | null;
+  enabled: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface BudgetRow {
+  id: string;
+  name: string;
+  scope_type: string;
+  scope_id: string | null;
+  period: string;
+  limit_type: string;
+  limit_value: number;
+  warn_threshold_pct: number;
+  action: string;
+  notify_channel: string | null;
+  enabled: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapBudget(row: BudgetRow): BudgetRecord {
+  return {
+    id: toString(row.id),
+    name: toString(row.name),
+    scopeType: toString(row.scope_type) as BudgetRecord["scopeType"],
+    scopeId: row.scope_id ? toString(row.scope_id) : null,
+    period: toString(row.period) as BudgetRecord["period"],
+    limitType: toString(row.limit_type) as BudgetRecord["limitType"],
+    limitValue: Number(row.limit_value),
+    warnThresholdPct: Number(row.warn_threshold_pct),
+    action: toString(row.action) as BudgetRecord["action"],
+    notifyChannel: row.notify_channel ? toString(row.notify_channel) : null,
+    enabled: toNumber(row.enabled) === 1,
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
 function mapLogStreamDestinationRow(row: LogStreamDestinationRow): LogStreamDestinationRecord {
   return {
     id: toString(row.id),
@@ -911,6 +965,41 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_usage_events_workflow_created ON usage_events(workflow_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_usage_events_user_created ON usage_events(user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_usage_events_project_created ON usage_events(project_id, created_at DESC);
+
+      -- Phase 8.3 — budgets + budget_alerts
+      CREATE TABLE IF NOT EXISTS budgets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT,
+        period TEXT NOT NULL,
+        limit_type TEXT NOT NULL,
+        limit_value REAL NOT NULL,
+        warn_threshold_pct REAL NOT NULL DEFAULT 0.8,
+        action TEXT NOT NULL,
+        notify_channel TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_budgets_scope ON budgets(scope_type, scope_id);
+      CREATE INDEX IF NOT EXISTS idx_budgets_enabled ON budgets(enabled);
+
+      CREATE TABLE IF NOT EXISTS budget_alerts (
+        id TEXT PRIMARY KEY,
+        budget_id TEXT NOT NULL,
+        period_start TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        usage_value REAL NOT NULL,
+        limit_value REAL NOT NULL,
+        workflow_id TEXT,
+        execution_id TEXT,
+        message TEXT,
+        fired_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_budget_alerts_budget ON budget_alerts(budget_id);
+      CREATE INDEX IF NOT EXISTS idx_budget_alerts_fired_at ON budget_alerts(fired_at DESC);
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -5480,12 +5569,15 @@ export class SqliteStore {
 
   /**
    * Single-row totals for the dashboard KPI cards.
+   * `userKey` matches either `user_id` OR `user_email` so user-scope budgets
+   * can be expressed by either identifier (Phase 8.3).
    */
   queryUsageTotals(input: {
     from: string;
     to: string;
     workflowId?: string;
     userId?: string;
+    userKey?: string;
     projectId?: string;
   }): {
     executions: number;
@@ -5501,6 +5593,10 @@ export class SqliteStore {
     const params: Array<string | number> = [input.from, input.to];
     if (input.workflowId) { filters.push("workflow_id = ?"); params.push(input.workflowId); }
     if (input.userId) { filters.push("user_id = ?"); params.push(input.userId); }
+    if (input.userKey) {
+      filters.push("(user_id = ? OR user_email = ?)");
+      params.push(input.userKey, input.userKey);
+    }
     if (input.projectId) { filters.push("project_id = ?"); params.push(input.projectId); }
     const row = this.queryOne<{
       execs: number; ti: number; to: number; ci: number; tt: number;
@@ -5578,6 +5674,190 @@ export class SqliteStore {
         ? (JSON.parse(toString(r.providers_json)) as Array<{ providerId: string; model: string; calls: number }>)
         : [],
       createdAt: toString(r.created_at)
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 8.3 — budgets + budget_alerts
+  // ---------------------------------------------------------------------------
+
+  createBudget(input: {
+    id: string;
+    name: string;
+    scopeType: "global" | "project" | "workflow" | "user";
+    scopeId?: string | null;
+    period: "day" | "week" | "month";
+    limitType: "usd" | "tokens";
+    limitValue: number;
+    warnThresholdPct?: number;
+    action: "warn" | "block";
+    notifyChannel?: string | null;
+    enabled?: boolean;
+    createdBy?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO budgets (
+         id, name, scope_type, scope_id, period, limit_type, limit_value,
+         warn_threshold_pct, action, notify_channel, enabled, created_by,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.name,
+        input.scopeType,
+        input.scopeId ?? null,
+        input.period,
+        input.limitType,
+        input.limitValue,
+        input.warnThresholdPct ?? 0.8,
+        input.action,
+        input.notifyChannel ?? null,
+        input.enabled === false ? 0 : 1,
+        input.createdBy ?? null,
+        now,
+        now
+      ]
+    );
+    this.persist();
+  }
+
+  updateBudget(id: string, patch: {
+    name?: string;
+    limitValue?: number;
+    warnThresholdPct?: number;
+    action?: "warn" | "block";
+    notifyChannel?: string | null;
+    enabled?: boolean;
+  }): boolean {
+    const fields: string[] = [];
+    const params: Array<string | number | null> = [];
+    if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
+    if (patch.limitValue !== undefined) { fields.push("limit_value = ?"); params.push(patch.limitValue); }
+    if (patch.warnThresholdPct !== undefined) { fields.push("warn_threshold_pct = ?"); params.push(patch.warnThresholdPct); }
+    if (patch.action !== undefined) { fields.push("action = ?"); params.push(patch.action); }
+    if (patch.notifyChannel !== undefined) { fields.push("notify_channel = ?"); params.push(patch.notifyChannel); }
+    if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
+    if (fields.length === 0) return false;
+    fields.push("updated_at = ?");
+    params.push(new Date().toISOString());
+    params.push(id);
+    this.exec(`UPDATE budgets SET ${fields.join(", ")} WHERE id = ?`, params);
+    this.persist();
+    return true;
+  }
+
+  deleteBudget(id: string): boolean {
+    this.exec(`DELETE FROM budget_alerts WHERE budget_id = ?`, [id]);
+    this.exec(`DELETE FROM budgets WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  getBudget(id: string): BudgetRecord | null {
+    const row = this.queryOne<BudgetRow>(`SELECT * FROM budgets WHERE id = ?`, [id]);
+    return row ? mapBudget(row) : null;
+  }
+
+  listBudgets(filter: { enabledOnly?: boolean; scopeType?: string; scopeId?: string } = {}): BudgetRecord[] {
+    const filters: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.enabledOnly) { filters.push("enabled = 1"); }
+    if (filter.scopeType) { filters.push("scope_type = ?"); params.push(filter.scopeType); }
+    if (filter.scopeId !== undefined) {
+      if (filter.scopeId === "") {
+        filters.push("(scope_id IS NULL OR scope_id = '')");
+      } else {
+        filters.push("scope_id = ?");
+        params.push(filter.scopeId);
+      }
+    }
+    const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const rows = this.queryAll<BudgetRow>(
+      `SELECT * FROM budgets ${where} ORDER BY scope_type, name`,
+      params
+    );
+    return rows.map(mapBudget);
+  }
+
+  recordBudgetAlert(input: {
+    id: string;
+    budgetId: string;
+    periodStart: string;
+    severity: "warn" | "block";
+    usageValue: number;
+    limitValue: number;
+    workflowId?: string | null;
+    executionId?: string | null;
+    message?: string;
+  }): void {
+    this.exec(
+      `INSERT INTO budget_alerts (
+         id, budget_id, period_start, severity, usage_value, limit_value,
+         workflow_id, execution_id, message, fired_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.budgetId,
+        input.periodStart,
+        input.severity,
+        input.usageValue,
+        input.limitValue,
+        input.workflowId ?? null,
+        input.executionId ?? null,
+        input.message ?? null,
+        new Date().toISOString()
+      ]
+    );
+    this.persist();
+  }
+
+  /**
+   * Most recent alert for a (budget, period) pair. Used to debounce — we
+   * only fire one warn / one block per period+budget combination so users
+   * don't get spammed across every execution after a threshold is crossed.
+   */
+  getLatestBudgetAlert(budgetId: string, periodStart: string, severity: "warn" | "block"): { id: string; firedAt: string } | null {
+    const row = this.queryOne<{ id: string; fired_at: string }>(
+      `SELECT id, fired_at FROM budget_alerts
+       WHERE budget_id = ? AND period_start = ? AND severity = ?
+       ORDER BY fired_at DESC LIMIT 1`,
+      [budgetId, periodStart, severity]
+    );
+    return row ? { id: toString(row.id), firedAt: toString(row.fired_at) } : null;
+  }
+
+  listBudgetAlerts(filter: { budgetId?: string; limit?: number } = {}): Array<{
+    id: string; budgetId: string; periodStart: string;
+    severity: string; usageValue: number; limitValue: number;
+    workflowId: string | null; executionId: string | null;
+    message: string | null; firedAt: string;
+  }> {
+    const filters: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.budgetId) { filters.push("budget_id = ?"); params.push(filter.budgetId); }
+    const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const limit = Math.min(filter.limit ?? 100, 500);
+    const rows = this.queryAll<{
+      id: string; budget_id: string; period_start: string;
+      severity: string; usage_value: number; limit_value: number;
+      workflow_id: string | null; execution_id: string | null;
+      message: string | null; fired_at: string;
+    }>(
+      `SELECT * FROM budget_alerts ${where} ORDER BY fired_at DESC LIMIT ${limit}`,
+      params
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      budgetId: toString(r.budget_id),
+      periodStart: toString(r.period_start),
+      severity: toString(r.severity),
+      usageValue: Number(r.usage_value),
+      limitValue: Number(r.limit_value),
+      workflowId: r.workflow_id ? toString(r.workflow_id) : null,
+      executionId: r.execution_id ? toString(r.execution_id) : null,
+      message: r.message ? toString(r.message) : null,
+      firedAt: toString(r.fired_at)
     }));
   }
 

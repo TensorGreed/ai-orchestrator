@@ -66,6 +66,7 @@ import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
+import { BudgetService } from "./services/budget-service";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -515,6 +516,23 @@ function toDurationMs(startedAt: string, completedAt: string): number | undefine
     return undefined;
   }
   return Math.max(0, Math.floor(completed - started));
+}
+
+// Phase 8.3 — surface a Retry-After hint when a budget block rejects.
+// Returns seconds until the start of the next budget period.
+function retryAfterSeconds(period: "day" | "week" | "month"): number {
+  const now = new Date();
+  let next: Date;
+  if (period === "day") {
+    next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  } else if (period === "week") {
+    const day = now.getUTCDay();
+    const daysFromMonday = (day + 6) % 7;
+    next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysFromMonday + 7));
+  } else {
+    next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  }
+  return Math.max(60, Math.floor((next.getTime() - now.getTime()) / 1000));
 }
 
 function summarizeNodeStatuses(nodeResults: Array<{ status?: unknown }> | undefined): Record<string, number> {
@@ -1489,7 +1507,7 @@ export function createApp(
           nodeOutputs[r.nodeId] = r.output;
         }
       }
-      usageService.recordExecution({
+      const usageResult = usageService.recordExecution({
         executionId: input.executionId,
         workflowId: input.workflow.id,
         workflowName: input.workflow.name,
@@ -1507,6 +1525,31 @@ export function createApp(
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt) ?? 0,
         nodeResults: nodeOutputs
       });
+
+      // Phase 8.3 — fire budget alerts on threshold crossings. Debounced per
+      // (budget, period, severity) so users don't get spammed.
+      try {
+        budgetService.recordExecution({
+          executionId: input.executionId,
+          workflowId: input.workflow.id,
+          projectId: input.workflow.projectId ?? null,
+          userEmail:
+            typeof input.triggeredBy === "string" && input.triggeredBy.includes("@")
+              ? input.triggeredBy
+              : null,
+          userId:
+            typeof input.triggeredBy === "string" && !input.triggeredBy.includes("@")
+              ? input.triggeredBy
+              : null,
+          spentUsd: usageResult.costUsd,
+          spentTokens: usageResult.totalTokens
+        });
+      } catch (err) {
+        app.log.warn(
+          { error: err instanceof Error ? err.message : String(err), executionId: input.executionId },
+          "Budget alert evaluation failed"
+        );
+      }
     } catch (err) {
       app.log.warn(
         { error: err instanceof Error ? err.message : String(err), executionId: input.executionId },
@@ -2059,6 +2102,11 @@ export function createApp(
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
   const usageService = new UsageService(store, { pricingOverridesJson: config.LLM_PRICING_OVERRIDES_JSON });
   usageService.setLogger({
+    info: (msg, fields) => app.log.info(fields ?? {}, msg),
+    warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+  });
+  const budgetService = new BudgetService(store);
+  budgetService.setLogger({
     info: (msg, fields) => app.log.info(fields ?? {}, msg),
     warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
   });
@@ -2721,6 +2769,157 @@ export function createApp(
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
     return { pricing: usageService.getPricing() };
+  });
+
+  // Phase 8.3 — budgets CRUD (admin-only).
+  app.get("/api/budgets", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const query = request.query as { scopeType?: string; enabledOnly?: string } | undefined;
+    return {
+      budgets: store.listBudgets({
+        scopeType: query?.scopeType,
+        enabledOnly: query?.enabledOnly === "true"
+      })
+    };
+  });
+
+  app.post<{ Body: unknown }>("/api/budgets", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const body = request.body as Partial<{
+      name: string;
+      scopeType: "global" | "project" | "workflow" | "user";
+      scopeId: string | null;
+      period: "day" | "week" | "month";
+      limitType: "usd" | "tokens";
+      limitValue: number;
+      warnThresholdPct: number;
+      action: "warn" | "block";
+      notifyChannel: string | null;
+      enabled: boolean;
+    }> | undefined;
+    if (!body || typeof body.name !== "string" || !body.name.trim()) {
+      reply.code(400);
+      return { error: "name is required" };
+    }
+    if (!body.scopeType || !["global", "project", "workflow", "user"].includes(body.scopeType)) {
+      reply.code(400);
+      return { error: "scopeType must be one of global|project|workflow|user" };
+    }
+    if (!body.period || !["day", "week", "month"].includes(body.period)) {
+      reply.code(400);
+      return { error: "period must be one of day|week|month" };
+    }
+    if (!body.limitType || !["usd", "tokens"].includes(body.limitType)) {
+      reply.code(400);
+      return { error: "limitType must be one of usd|tokens" };
+    }
+    if (typeof body.limitValue !== "number" || body.limitValue <= 0) {
+      reply.code(400);
+      return { error: "limitValue must be a positive number" };
+    }
+    if (!body.action || !["warn", "block"].includes(body.action)) {
+      reply.code(400);
+      return { error: "action must be one of warn|block" };
+    }
+    if (body.scopeType !== "global" && !body.scopeId) {
+      reply.code(400);
+      return { error: "scopeId required for non-global budgets" };
+    }
+    const id = `bgt_${crypto.randomUUID()}`;
+    store.createBudget({
+      id,
+      name: body.name.trim(),
+      scopeType: body.scopeType,
+      scopeId: body.scopeId ?? null,
+      period: body.period,
+      limitType: body.limitType,
+      limitValue: body.limitValue,
+      warnThresholdPct: body.warnThresholdPct ?? 0.8,
+      action: body.action,
+      notifyChannel: body.notifyChannel ?? null,
+      enabled: body.enabled !== false,
+      createdBy: user.email
+    });
+    auditService.record({
+      category: "system",
+      eventType: "budget.created",
+      action: "create",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "budget",
+      resourceId: id,
+      metadata: { scopeType: body.scopeType, limitType: body.limitType, limitValue: body.limitValue, action: body.action }
+    });
+    return { budget: store.getBudget(id) };
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/budgets/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getBudget(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Budget not found" };
+    }
+    const patch = request.body as Partial<{
+      name: string;
+      limitValue: number;
+      warnThresholdPct: number;
+      action: "warn" | "block";
+      notifyChannel: string | null;
+      enabled: boolean;
+    }> | undefined;
+    if (!patch || typeof patch !== "object") {
+      reply.code(400);
+      return { error: "Empty update payload" };
+    }
+    store.updateBudget(request.params.id, patch);
+    auditService.record({
+      category: "system",
+      eventType: "budget.updated",
+      action: "update",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "budget",
+      resourceId: request.params.id,
+      metadata: { ...patch }
+    });
+    return { budget: store.getBudget(request.params.id) };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/budgets/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getBudget(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "Budget not found" };
+    }
+    store.deleteBudget(request.params.id);
+    auditService.record({
+      category: "system",
+      eventType: "budget.deleted",
+      action: "delete",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "budget",
+      resourceId: request.params.id
+    });
+    return { ok: true };
+  });
+
+  app.get("/api/budget-alerts", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const query = request.query as { budgetId?: string; limit?: string } | undefined;
+    return {
+      alerts: store.listBudgetAlerts({
+        budgetId: query?.budgetId,
+        limit: query?.limit ? Number(query.limit) : 100
+      })
+    };
   });
 
   // Phase 7.1 — HA status
@@ -5278,6 +5477,35 @@ export function createApp(
     if (!workflow) {
       reply.code(404);
       return { error: "Workflow not found" };
+    }
+
+    // Phase 8.3 — pre-execution budget check. Block-action budgets reject
+    // here (HTTP 402); warn-action budgets only fire post-execution.
+    const budgetCheck = budgetService.checkExecution({
+      workflowId: workflow.id,
+      projectId: workflow.projectId ?? null,
+      userEmail: user.email,
+      userId: user.id
+    });
+    if (!budgetCheck.allowed && budgetCheck.blocked) {
+      reply.code(402);
+      reply.header("retry-after", retryAfterSeconds(budgetCheck.blocked.budget.period));
+      return {
+        error: "budget_exceeded",
+        message: `Budget "${budgetCheck.blocked.budget.name}" exceeded for the current ${budgetCheck.blocked.budget.period}.`,
+        budgetId: budgetCheck.blocked.budget.id,
+        currentUsage: budgetCheck.blocked.current,
+        limit: budgetCheck.blocked.limit,
+        periodStart: budgetCheck.blocked.periodStart
+      };
+    }
+    if (budgetCheck.approachingLimit.length > 0) {
+      reply.header(
+        "x-budget-warning",
+        budgetCheck.approachingLimit
+          .map((a) => `${a.budget.name}=${Math.round(a.pct * 100)}%`)
+          .join(",")
+      );
     }
 
     const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});

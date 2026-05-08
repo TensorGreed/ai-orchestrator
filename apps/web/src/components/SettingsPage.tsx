@@ -97,7 +97,18 @@ import {
   type UsageGroupBy,
   type UsageRollupRow,
   type UsageTotals,
-  type UsageEvent
+  type UsageEvent,
+  fetchBudgets,
+  createBudget,
+  updateBudget,
+  deleteBudgetApi,
+  fetchBudgetAlerts,
+  type Budget,
+  type BudgetAlert,
+  type BudgetScopeType,
+  type BudgetPeriod,
+  type BudgetLimitType,
+  type BudgetAction
 } from "../lib/api";
 
 type SettingsTab =
@@ -4000,7 +4011,251 @@ function FinOpsTab() {
           </table>
         )}
       </section>
+
+      <BudgetsPanel />
     </div>
+  );
+}
+
+function BudgetsPanel() {
+  const [budgets, setBudgets] = useState<Budget[]>([]);
+  const [alerts, setAlerts] = useState<BudgetAlert[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [b, a] = await Promise.all([fetchBudgets(), fetchBudgetAlerts({ limit: 25 })]);
+      setBudgets(b.budgets);
+      setAlerts(a.alerts);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handleToggle = useCallback(async (budget: Budget) => {
+    setBusy(true);
+    try {
+      await updateBudget(budget.id, { enabled: !budget.enabled });
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
+
+  const handleDelete = useCallback(async (budget: Budget) => {
+    if (!window.confirm(`Delete budget "${budget.name}"?`)) return;
+    setBusy(true);
+    try {
+      await deleteBudgetApi(budget.id);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
+
+  return (
+    <section className="finops-section">
+      <div className="finops-section-header">
+        <h4>Budgets &amp; alerts</h4>
+        <button
+          type="button"
+          className="finops-refresh"
+          onClick={() => setShowCreate((v) => !v)}
+          disabled={busy}
+        >
+          {showCreate ? "Cancel" : "+ New budget"}
+        </button>
+      </div>
+      <p className="finops-subtle">
+        Spend caps with <strong>warn</strong> (alert when crossed) or <strong>block</strong> (reject pre-execution with HTTP 402) actions. Block enforcement is on the manual <code>/api/workflows/:id/execute</code> endpoint; webhook + scheduled triggers still get post-execution alerts.
+      </p>
+
+      {error && <div className="finops-error">{error}</div>}
+
+      {showCreate && <CreateBudgetForm onCreated={async () => { setShowCreate(false); await refresh(); }} onError={setError} />}
+
+      {loading ? (
+        <p className="finops-subtle">Loading…</p>
+      ) : budgets.length === 0 ? (
+        <p className="finops-subtle">No budgets configured.</p>
+      ) : (
+        <table className="finops-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Scope</th>
+              <th>Period</th>
+              <th>Limit</th>
+              <th>Action</th>
+              <th>Enabled</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {budgets.map((b) => (
+              <tr key={b.id}>
+                <td>{b.name}</td>
+                <td>{b.scopeType}{b.scopeId ? `:${b.scopeId}` : ""}</td>
+                <td>{b.period}</td>
+                <td>{b.limitType === "usd" ? `$${b.limitValue}` : `${b.limitValue.toLocaleString()} tok`}</td>
+                <td><span className={`finops-action-badge finops-action-${b.action}`}>{b.action}</span></td>
+                <td>
+                  <label className="finops-toggle">
+                    <input type="checkbox" checked={b.enabled} disabled={busy} onChange={() => void handleToggle(b)} />
+                    <span>{b.enabled ? "On" : "Off"}</span>
+                  </label>
+                </td>
+                <td>
+                  <button type="button" className="finops-delete" onClick={() => void handleDelete(b)} disabled={busy}>
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {alerts.length > 0 && (
+        <div style={{ marginTop: "1rem" }}>
+          <h5 style={{ margin: "0 0 0.4rem 0", fontSize: "0.85rem" }}>Recent alerts</h5>
+          <table className="finops-table">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Severity</th>
+                <th>Budget</th>
+                <th>Period</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {alerts.map((a) => (
+                <tr key={a.id}>
+                  <td>{formatDate(a.firedAt)}</td>
+                  <td><span className={`finops-action-badge finops-action-${a.severity}`}>{a.severity}</span></td>
+                  <td>{a.budgetId.slice(0, 12)}…</td>
+                  <td>{a.periodStart.slice(0, 10)}</td>
+                  <td>{a.message ?? `${a.usageValue} of ${a.limitValue}`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CreateBudgetForm({ onCreated, onError }: { onCreated: () => Promise<void>; onError: (msg: string) => void }) {
+  const [name, setName] = useState("");
+  const [scopeType, setScopeType] = useState<BudgetScopeType>("global");
+  const [scopeId, setScopeId] = useState("");
+  const [period, setPeriod] = useState<BudgetPeriod>("month");
+  const [limitType, setLimitType] = useState<BudgetLimitType>("usd");
+  const [limitValue, setLimitValue] = useState("100");
+  const [warnThresholdPct, setWarnThresholdPct] = useState("0.8");
+  const [action, setAction] = useState<BudgetAction>("warn");
+  const [notifyChannel, setNotifyChannel] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      await createBudget({
+        name: name.trim(),
+        scopeType,
+        scopeId: scopeType === "global" ? null : scopeId.trim(),
+        period,
+        limitType,
+        limitValue: Number(limitValue),
+        warnThresholdPct: Number(warnThresholdPct),
+        action,
+        notifyChannel: notifyChannel.trim() || null
+      });
+      await onCreated();
+    } catch (err) {
+      onError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [name, scopeType, scopeId, period, limitType, limitValue, warnThresholdPct, action, notifyChannel, onCreated, onError]);
+
+  return (
+    <form onSubmit={handleSubmit} className="finops-create-form">
+      <div className="finops-form-row">
+        <label>Name<input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Q2 marketing spend" required /></label>
+      </div>
+      <div className="finops-form-row finops-form-row-3">
+        <label>Scope
+          <select value={scopeType} onChange={(e) => setScopeType(e.target.value as BudgetScopeType)}>
+            <option value="global">global</option>
+            <option value="project">project</option>
+            <option value="workflow">workflow</option>
+            <option value="user">user</option>
+          </select>
+        </label>
+        {scopeType !== "global" && (
+          <label>Scope ID
+            <input type="text" value={scopeId} onChange={(e) => setScopeId(e.target.value)} placeholder={scopeType === "user" ? "email or user_id" : `${scopeType}_id`} required />
+          </label>
+        )}
+        <label>Period
+          <select value={period} onChange={(e) => setPeriod(e.target.value as BudgetPeriod)}>
+            <option value="day">day</option>
+            <option value="week">week</option>
+            <option value="month">month</option>
+          </select>
+        </label>
+      </div>
+      <div className="finops-form-row finops-form-row-3">
+        <label>Limit type
+          <select value={limitType} onChange={(e) => setLimitType(e.target.value as BudgetLimitType)}>
+            <option value="usd">USD</option>
+            <option value="tokens">tokens</option>
+          </select>
+        </label>
+        <label>Limit value
+          <input type="number" min="0" step="0.01" value={limitValue} onChange={(e) => setLimitValue(e.target.value)} required />
+        </label>
+        <label>Warn at (%)
+          <input type="number" min="0" max="1" step="0.05" value={warnThresholdPct} onChange={(e) => setWarnThresholdPct(e.target.value)} />
+        </label>
+      </div>
+      <div className="finops-form-row finops-form-row-2">
+        <label>Action
+          <select value={action} onChange={(e) => setAction(e.target.value as BudgetAction)}>
+            <option value="warn">warn</option>
+            <option value="block">block (HTTP 402)</option>
+          </select>
+        </label>
+        <label>Notify webhook (optional)
+          <input type="url" value={notifyChannel} onChange={(e) => setNotifyChannel(e.target.value)} placeholder="https://hooks.slack.com/..." />
+        </label>
+      </div>
+      <div className="finops-form-row">
+        <button type="submit" disabled={busy} className="finops-refresh">
+          {busy ? "Saving…" : "Create budget"}
+        </button>
+      </div>
+    </form>
   );
 }
 

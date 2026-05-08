@@ -783,6 +783,51 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP TABLE IF EXISTS usage_events;
     `
+  },
+  {
+    version: 16,
+    description: "Phase 8.3 — budgets + budget_alerts (spend caps with warn/block actions)",
+    up: `
+      CREATE TABLE IF NOT EXISTS budgets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        scope_type TEXT NOT NULL,
+        scope_id TEXT,
+        period TEXT NOT NULL,
+        limit_type TEXT NOT NULL,
+        limit_value REAL NOT NULL,
+        warn_threshold_pct REAL NOT NULL DEFAULT 0.8,
+        action TEXT NOT NULL,
+        notify_channel TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_budgets_scope ON budgets(scope_type, scope_id);
+      CREATE INDEX IF NOT EXISTS idx_budgets_enabled ON budgets(enabled);
+
+      CREATE TABLE IF NOT EXISTS budget_alerts (
+        id TEXT PRIMARY KEY,
+        budget_id TEXT NOT NULL,
+        period_start TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        usage_value REAL NOT NULL,
+        limit_value REAL NOT NULL,
+        workflow_id TEXT,
+        execution_id TEXT,
+        message TEXT,
+        fired_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_budget_alerts_budget ON budget_alerts(budget_id);
+      CREATE INDEX IF NOT EXISTS idx_budget_alerts_fired_at ON budget_alerts(fired_at DESC);
+    `,
+    down: `
+      DROP TABLE IF EXISTS budget_alerts;
+      DROP TABLE IF EXISTS budgets;
+    `
   }
 ];
 
