@@ -3114,5 +3114,148 @@ describe("Phase 9.1 knowledge bases", () => {
     });
     expect(create.statusCode).toBe(403);
   });
+
+  // -------------------------------------------------------------------------
+  // Phase 9.2 — upload pipeline (load -> chunk -> embed -> ingest)
+  // -------------------------------------------------------------------------
+
+  it("upload endpoint chunks markdown and ingests it under a single sourceId", async () => {
+    const context = await createTestContext();
+    const adminCookie = await createRoleSession(context, {
+      email: "kb-up@example.com",
+      password: "kb-up-pass-1",
+      role: "admin"
+    });
+    const create = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie: adminCookie },
+      payload: { name: "uploads", embedderId: "token-embedder" }
+    });
+    const kbId = (create.json() as { knowledgeBase: { id: string } }).knowledgeBase.id;
+
+    // 6 paragraphs of ~80 chars each, joined by \n\n. With chunkSize=200,
+    // separator strategy should produce ~3 chunks.
+    const paragraph = (label: string) => `${label}: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor`;
+    const md = [paragraph("p1"), paragraph("p2"), paragraph("p3"), paragraph("p4"), paragraph("p5"), paragraph("p6")].join("\n\n");
+
+    const upload = await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/upload`,
+      headers: { cookie: adminCookie },
+      payload: {
+        filename: "notes.md",
+        content: md,
+        sourceId: "notes-v1",
+        chunking: { strategy: "separator", chunkSize: 200, chunkOverlap: 0 }
+      }
+    });
+    expect(upload.statusCode).toBe(200);
+    const body = upload.json() as {
+      sourceId: string;
+      documentsLoaded: number;
+      chunksInserted: number;
+    };
+    expect(body.sourceId).toBe("notes-v1");
+    expect(body.documentsLoaded).toBe(1);
+    expect(body.chunksInserted).toBeGreaterThanOrEqual(2);
+
+    // Confirm chunk_count rolled up
+    const fetched = await context.app.inject({
+      method: "GET",
+      url: `/api/knowledge-bases/${kbId}`,
+      headers: { cookie: adminCookie }
+    });
+    const fetchedBody = fetched.json() as { knowledgeBase: { chunkCount: number }; sources: Array<{ sourceId: string }> };
+    expect(fetchedBody.knowledgeBase.chunkCount).toBe(body.chunksInserted);
+    expect(fetchedBody.sources).toContainEqual({ sourceId: "notes-v1", chunkCount: body.chunksInserted });
+  });
+
+  it("upload endpoint extracts text from HTML before chunking", async () => {
+    const context = await createTestContext();
+    const adminCookie = await createRoleSession(context, {
+      email: "kb-html@example.com",
+      password: "kb-html-pass-1",
+      role: "admin"
+    });
+    const create = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie: adminCookie },
+      payload: { name: "html", embedderId: "token-embedder" }
+    });
+    const kbId = (create.json() as { knowledgeBase: { id: string } }).knowledgeBase.id;
+
+    const html = `<!doctype html>
+      <html><head><title>Docs</title><script>alert(1)</script></head>
+      <body><h1>Welcome</h1><p>The first paragraph has some content.</p>
+      <p>The second paragraph mentions password resets clearly.</p></body></html>`;
+    const upload = await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/upload`,
+      headers: { cookie: adminCookie },
+      payload: {
+        filename: "docs.html",
+        content: html,
+        chunking: { strategy: "separator", chunkSize: 1000, chunkOverlap: 0 }
+      }
+    });
+    expect(upload.statusCode).toBe(200);
+
+    // Verify the script content was stripped
+    const chunks = await context.app.inject({
+      method: "GET",
+      url: `/api/knowledge-bases/${kbId}/chunks`,
+      headers: { cookie: adminCookie }
+    });
+    const chunkBody = chunks.json() as { chunks: Array<{ content: string }> };
+    expect(chunkBody.chunks.length).toBeGreaterThan(0);
+    for (const c of chunkBody.chunks) {
+      expect(c.content).not.toContain("alert(1)");
+      expect(c.content).not.toContain("<script");
+    }
+    // And the visible content survived
+    const allText = chunkBody.chunks.map((c) => c.content).join(" ");
+    expect(allText).toMatch(/password resets/i);
+  });
+
+  it("upload endpoint loads CSV rows as separate documents", async () => {
+    const context = await createTestContext();
+    const adminCookie = await createRoleSession(context, {
+      email: "kb-csv@example.com",
+      password: "kb-csv-pass-1",
+      role: "admin"
+    });
+    const create = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie: adminCookie },
+      payload: { name: "csv kb", embedderId: "token-embedder" }
+    });
+    const kbId = (create.json() as { knowledgeBase: { id: string } }).knowledgeBase.id;
+
+    const csv = [
+      "id,topic,body",
+      "1,billing,How do I update my credit card",
+      "2,auth,How do I reset my password",
+      "3,billing,Why was I charged twice"
+    ].join("\n");
+    const upload = await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/upload`,
+      headers: { cookie: adminCookie },
+      payload: {
+        filename: "tickets.csv",
+        content: csv,
+        csv: { textColumn: "body" },
+        chunking: { strategy: "separator", chunkSize: 500, chunkOverlap: 0 }
+      }
+    });
+    expect(upload.statusCode).toBe(200);
+    const body = upload.json() as { documentsLoaded: number; chunksInserted: number };
+    expect(body.documentsLoaded).toBe(3);
+    // Each row is short — separator chunker emits one chunk per row
+    expect(body.chunksInserted).toBe(3);
+  });
 });
 

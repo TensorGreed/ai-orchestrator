@@ -1807,6 +1807,146 @@ export async function runAuditExportDestination(id: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 9.1 / 9.2 — Knowledge bases
+// ---------------------------------------------------------------------------
+
+export interface KnowledgeBase {
+  id: string;
+  name: string;
+  description: string | null;
+  projectId: string | null;
+  embedderId: string;
+  embedderConfig: Record<string, unknown>;
+  dimensions: number;
+  chunkCount: number;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KnowledgeBaseSource {
+  sourceId: string;
+  chunkCount: number;
+}
+
+export interface KnowledgeBaseChunkPreview {
+  id: string;
+  sourceId: string | null;
+  chunkIndex: number;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export type ChunkStrategy = "separator" | "character" | "recursive" | "token";
+export type DocumentKind = "text" | "markdown" | "html" | "csv" | "json";
+
+export interface ChunkOptions {
+  strategy?: ChunkStrategy;
+  chunkSize?: number;
+  chunkOverlap?: number;
+  separator?: string;
+}
+
+export async function fetchKnowledgeBases(projectId?: string) {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ knowledgeBases: KnowledgeBase[] }>(`/api/knowledge-bases${qs}`);
+}
+
+export async function fetchKnowledgeBase(id: string) {
+  return apiRequest<{ knowledgeBase: KnowledgeBase; sources: KnowledgeBaseSource[] }>(
+    `/api/knowledge-bases/${encodeURIComponent(id)}`
+  );
+}
+
+export async function createKnowledgeBase(payload: {
+  name: string;
+  description?: string | null;
+  projectId?: string | null;
+  embedderId: string;
+  embedderConfig?: Record<string, unknown>;
+}) {
+  return apiRequest<{ knowledgeBase: KnowledgeBase }>("/api/knowledge-bases", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateKnowledgeBase(id: string, patch: Partial<{
+  name: string;
+  description: string | null;
+  embedderConfig: Record<string, unknown>;
+}>) {
+  return apiRequest<{ knowledgeBase: KnowledgeBase }>(`/api/knowledge-bases/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch)
+  });
+}
+
+export async function deleteKnowledgeBaseApi(id: string) {
+  return apiRequest<{ ok: true }>(`/api/knowledge-bases/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}
+
+export async function uploadKnowledgeBaseDocument(id: string, payload: {
+  filename?: string;
+  kind?: DocumentKind;
+  content: string;
+  sourceId?: string;
+  chunking?: ChunkOptions;
+  csv?: { textColumn?: string; metadataColumns?: string[] };
+  metadata?: Record<string, unknown>;
+}) {
+  return apiRequest<{
+    sourceId: string;
+    documentsLoaded: number;
+    chunksInserted: number;
+    dimensions: number;
+  }>(`/api/knowledge-bases/${encodeURIComponent(id)}/upload`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchKnowledgeBaseChunks(id: string, options: { limit?: number; sourceId?: string } = {}) {
+  const params = new URLSearchParams();
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.sourceId) params.set("sourceId", options.sourceId);
+  const qs = params.toString();
+  return apiRequest<{ chunks: KnowledgeBaseChunkPreview[] }>(
+    `/api/knowledge-bases/${encodeURIComponent(id)}/chunks${qs ? `?${qs}` : ""}`
+  );
+}
+
+export async function deleteKnowledgeBaseSource(id: string, sourceId: string) {
+  return apiRequest<{ removed: number }>(
+    `/api/knowledge-bases/${encodeURIComponent(id)}/sources/${encodeURIComponent(sourceId)}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function searchKnowledgeBase(id: string, query: string, topK = 5) {
+  return apiRequest<{
+    query: string;
+    results: Array<{
+      id: string;
+      text: string;
+      metadata: Record<string, unknown> & {
+        knowledgeBaseId?: string;
+        chunkId?: string;
+        chunkIndex?: number;
+        sourceId?: string | null;
+        similarityScore?: number;
+      };
+    }>;
+  }>(`/api/knowledge-bases/${encodeURIComponent(id)}/search`, {
+    method: "POST",
+    body: JSON.stringify({ query, topK })
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Phase 7.4 — Workflow templates & sharing
 // ---------------------------------------------------------------------------
 

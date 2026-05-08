@@ -65,6 +65,14 @@ export function LeftMenuBar({ activeMode, canManageSecrets, onModeChange }: Left
       >
         Eval
       </button>
+      <button
+        className="rail-btn"
+        onClick={() => onModeChange("knowledge")}
+        title="Knowledge Bases"
+        aria-pressed={activeMode === "knowledge"}
+      >
+        KB
+      </button>
       {canManageSecrets && (
         <button
           className="rail-btn"

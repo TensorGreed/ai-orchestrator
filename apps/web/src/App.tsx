@@ -95,6 +95,7 @@ import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
 import { SettingsPage } from "./components/SettingsPage";
+import { KnowledgeBasePage } from "./components/KnowledgeBasePage";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
@@ -5090,6 +5091,13 @@ function StudioApp() {
               <h2>Evaluations</h2>
               <p>Evaluation dashboards are out of scope for V1. Use Editor and Executions for runtime validation.</p>
             </section>
+          )}
+
+          {activeMode === "knowledge" && (
+            <KnowledgeBasePage
+              isAdmin={authUser?.role === "admin"}
+              activeProjectId={activeProjectId}
+            />
           )}
 
           {activeMode === "templates" && (

@@ -13,11 +13,14 @@ GET    /api/knowledge-bases/:id                   Read a KB + its sources (build
 PUT    /api/knowledge-bases/:id                   Update name / config (admin)
 DELETE /api/knowledge-bases/:id                   Delete a KB and all its chunks (admin)
 
+POST   /api/knowledge-bases/:id/upload            Load -> chunk -> embed -> ingest in one call (builder, Phase 9.2)
 POST   /api/knowledge-bases/:id/ingest            Ingest documents or pre-embedded chunks (builder)
 GET    /api/knowledge-bases/:id/chunks            Preview chunks (builder)
 POST   /api/knowledge-bases/:id/search            Standalone similarity search (builder)
 DELETE /api/knowledge-bases/:id/sources/:sourceId Drop all chunks from one source (admin)
 ```
+
+The Studio UI under **KB** in the left sidebar drives all of the above through forms — no curl needed.
 
 ## Creating a KB
 
@@ -41,6 +44,37 @@ curl -X POST http://localhost:4000/api/knowledge-bases \
 `embedderConfig` is the same shape that `rag_retrieve.vectorStoreConfig` uses (`baseUrl`, `model`, `endpoint`, `deployment`, `apiVersion`, `secretRef`). Whatever you set here is what the API uses on `/ingest` and `/search`; on a workflow run you must pass the matching `embedderId` on the `rag_retrieve` node so the query vector lives in the same space as the indexed chunks.
 
 The KB's `dimensions` are locked the first time you ingest a chunk. Subsequent ingests must produce vectors of the same length or the request is rejected with HTTP 400.
+
+## Uploading a document (Phase 9.2)
+
+`POST /api/knowledge-bases/:id/upload` is a one-shot pipeline that loads → chunks → embeds → ingests. Ideal for "I have a markdown file, get it into the KB":
+
+```bash
+curl -X POST http://localhost:4000/api/knowledge-bases/<id>/upload \
+  -H "content-type: application/json" \
+  --cookie "ao_session=..." \
+  -d '{
+    "filename": "support-faq.md",
+    "content": "# FAQ\n\n## Reset password\n...",
+    "sourceId": "support-faq-v1",
+    "chunking": { "strategy": "recursive", "chunkSize": 800, "chunkOverlap": 80 }
+  }'
+```
+
+Response:
+
+```json
+{ "sourceId": "support-faq-v1", "documentsLoaded": 1, "chunksInserted": 4, "dimensions": 64 }
+```
+
+Loaders ship for:
+
+- **Plain text** / **Markdown** — passed through as-is
+- **HTML** — `<script>` / `<style>` / `<head>` blocks dropped, tags stripped, entities decoded. The `<title>` becomes `metadata.title`.
+- **CSV** — RFC-4180-ish parser; either pick a `csv.textColumn` (other columns become metadata) or omit it to flatten every column into `key: value` lines per row
+- **JSON** / **NDJSON** — array elements become docs; objects with `{ text, metadata }` are honored verbatim
+
+`kind` is auto-inferred from the filename extension; pass an explicit `kind` to override. PDF and DOCX are intentionally deferred (each needs a binary parser); use `POST /ingest` with externally pre-extracted text in the meantime.
 
 ## Ingesting documents
 

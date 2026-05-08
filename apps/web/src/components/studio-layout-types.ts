@@ -6,5 +6,6 @@ export type StudioMode =
   | "executions"
   | "chat"
   | "evaluations"
+  | "knowledge"
   | "secrets"
   | "settings";

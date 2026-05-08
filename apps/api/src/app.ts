@@ -42,8 +42,11 @@ import {
   MistralEmbeddingAdapter,
   GoogleVertexEmbeddingAdapter,
   HuggingFaceEmbeddingAdapter,
+  chunkDocuments,
+  type ChunkOptions,
   type EmbeddingAdapter
 } from "@ai-orchestrator/workflow-engine";
+import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
 import { SqliteStore } from "./db/database";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
@@ -3359,6 +3362,128 @@ export function createApp(
     reply.code(400);
     return { error: "Provide either body.chunks or body.documents" };
   });
+
+  /**
+   * Phase 9.2 — full upload pipeline (load -> chunk -> embed -> ingest).
+   * Body shape:
+   *   {
+   *     filename: "support-faq.md",       // optional; drives kind inference
+   *     kind: "markdown",                 // optional explicit override
+   *     content: "...",                   // raw text
+   *     sourceId: "support-faq-v1",       // groups chunks; defaults to filename
+   *     chunking: { strategy: "recursive", chunkSize: 800, chunkOverlap: 80 }
+   *     csv: { textColumn: "body", metadataColumns: ["topic"] }   // optional
+   *   }
+   * Returns:
+   *   { sourceId, documentsLoaded, chunksInserted, dimensions }
+   */
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/api/knowledge-bases/:id/upload",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const kb = store.getKnowledgeBase(request.params.id);
+      if (!kb) {
+        reply.code(404);
+        return { error: "Knowledge base not found" };
+      }
+      const body = request.body as Partial<{
+        filename: string;
+        kind: DocumentKind;
+        content: string;
+        sourceId: string;
+        chunking: ChunkOptions;
+        csv: { textColumn?: string; metadataColumns?: string[] };
+        metadata: Record<string, unknown>;
+      }> | undefined;
+      if (!body || typeof body.content !== "string" || !body.content.length) {
+        reply.code(400);
+        return { error: "content (string) is required" };
+      }
+      const kind: DocumentKind = body.kind ?? (body.filename ? inferDocumentKind(body.filename) : "text");
+      const sourceId = body.sourceId ?? body.filename ?? `src_${crypto.randomUUID().slice(0, 8)}`;
+
+      // 1. Load
+      let loaded;
+      try {
+        loaded = loadDocuments(kind, body.content, {
+          sourceId,
+          metadata: body.metadata ?? {},
+          csv: body.csv
+        });
+      } catch (err) {
+        reply.code(400);
+        return { error: `Loader failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      if (loaded.length === 0) {
+        reply.code(400);
+        return { error: "Loader produced zero documents — content may be empty after parsing" };
+      }
+
+      // 2. Chunk. Use chunker defaults if no chunking options provided.
+      const chunked = chunkDocuments(
+        loaded.map((d, idx) => ({
+          id: `${sourceId}-${idx}`,
+          text: d.text,
+          metadata: d.metadata
+        })),
+        body.chunking ?? {}
+      );
+
+      if (chunked.length === 0) {
+        reply.code(400);
+        return { error: "Chunker produced zero chunks — try a smaller chunkSize or different strategy" };
+      }
+
+      // 3. Embed using the KB's configured embedder
+      const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+      if (!embedder) {
+        reply.code(400);
+        return { error: `Cannot instantiate embedder ${kb.embedderId} — check embedderConfig` };
+      }
+      const chunksToInsert = await Promise.all(
+        chunked.map(async (c, idx) => ({
+          sourceId,
+          chunkIndex: idx,
+          content: c.text,
+          metadata: c.metadata as Record<string, unknown>,
+          vector: await embedder.embed(c.text)
+        }))
+      );
+
+      // 4. Persist
+      try {
+        const result = store.addKnowledgeBaseChunks({
+          knowledgeBaseId: request.params.id,
+          chunks: chunksToInsert
+        });
+        auditService.record({
+          category: "system",
+          eventType: "knowledge_base.upload",
+          action: "ingest",
+          outcome: "success",
+          actor: { email: user.email, type: "user" },
+          resourceType: "knowledge_base",
+          resourceId: request.params.id,
+          metadata: {
+            sourceId,
+            kind,
+            documentsLoaded: loaded.length,
+            chunksInserted: result.inserted
+          }
+        });
+        return {
+          sourceId,
+          documentsLoaded: loaded.length,
+          chunksInserted: result.inserted,
+          dimensions: result.dimensions
+        };
+      } catch (err) {
+        reply.code(400);
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
 
   app.get<{ Params: { id: string } }>("/api/knowledge-bases/:id/chunks", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
