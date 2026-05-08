@@ -156,9 +156,89 @@ curl -X POST http://localhost:4000/api/knowledge-bases/:id/search \
 
 Returns the top-K chunks with the same provenance metadata as the workflow path.
 
+## Hybrid search (Phase 9.3)
+
+Built-in KBs index every chunk in a SQLite FTS5 table at insert time, so BM25 lexical search and dense vector search both target the same content. The `rag_retrieve` node accepts `searchMode`:
+
+- `vector` (default) — cosine over dense embeddings only. Catches paraphrases and semantic similarity.
+- `bm25` — full-text search only. Catches exact-keyword matches, rare terms, identifiers, error codes.
+- `hybrid` — fuses both via Reciprocal Rank Fusion (RRF). Industry-standard combiner — each ranker contributes `1 / (k + rank)` per doc; the sum across rankers is the final score. Great for catching both kinds of matches in one query.
+
+```json
+{
+  "type": "rag_retrieve",
+  "config": {
+    "queryTemplate": "{{user_prompt}}",
+    "topK": 5,
+    "embedderId": "openai-embedder",
+    "vectorStoreId": "knowledge-base",
+    "vectorStoreConfig": { "knowledgeBaseId": "kb_..." },
+    "searchMode": "hybrid",
+    "candidatesPerRanker": 50,
+    "bm25Weight": 1.0,
+    "vectorWeight": 1.0,
+    "rrfK": 60
+  }
+}
+```
+
+Tunables:
+
+- `candidatesPerRanker` — how many docs each ranker emits before fusion. Defaults to `max(20, 4 * topK)`.
+- `bm25Weight` / `vectorWeight` — per-ranker weighting in the fusion. Defaults to 1.0 each.
+- `rrfK` — RRF constant. Default 60 (Cormack et al. 2009). Higher k flattens the curve; lower k makes top-1 of each ranker dominate.
+
+Result metadata identifies the retrieval mode and ranker provenance:
+
+```json
+{
+  "id": "kbc_...",
+  "text": "...",
+  "metadata": {
+    "knowledgeBaseId": "kb_...",
+    "chunkId": "kbc_...",
+    "sourceId": "support-faq-v1",
+    "retrieval": {
+      "mode": "hybrid",
+      "rrfScore": 0.0319,
+      "rankers": ["vector", "bm25"]
+    }
+  }
+}
+```
+
+Hybrid + BM25 are KB-only today. External adapters (Pinecone, Qdrant, etc.) silently fall back to vector-only when `searchMode != "vector"` since they don't expose a unified BM25 interface; per-store hybrid wiring is a follow-up.
+
+## Reranker node (Phase 9.3)
+
+The `rerank` node sits after a retrieval step and reorders candidates via a hosted cross-encoder. Cross-encoders score each (query, doc) pair end-to-end — much higher precision than independent embeddings, but slower and per-call billed.
+
+Three providers wired today:
+
+- `cohere` — Cohere Rerank v3 (`rerank-english-v3.0` default)
+- `jina` — Jina Reranker v2 (`jina-reranker-v2-base-multilingual` default)
+- `voyage` — Voyage rerank-2 (`rerank-2` default)
+
+```json
+{
+  "type": "rerank",
+  "config": {
+    "queryTemplate": "{{user_prompt}}",
+    "topN": 3,
+    "providerId": "cohere",
+    "secretRef": { "secretId": "sec_..." }
+  }
+}
+```
+
+Wire `rag_retrieve` (with `topK: 20-50`) → `rerank` (with `topN: 3-5`) for the canonical "high recall, then high precision" pattern. Sample at [samples/workflows/rag-hybrid-rerank-flow.json](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-hybrid-rerank-flow.json).
+
+API keys can come from a `secretRef.secretId` (preferred — encrypted at rest) or the matching env var (`COHERE_API_KEY`, `JINA_API_KEY`, `VOYAGE_API_KEY`).
+
 ## Tradeoffs
 
 - **Algorithm**: cosine similarity, computed in JavaScript. Fine up to ~10k chunks per KB. Larger fleets should use pgvector / Qdrant / Azure AI Search — `rag_retrieve` accepts those vector-store IDs unchanged.
 - **Storage**: vectors are stored as JSON arrays in SQLite. ~6 bytes/dimension on disk. For a 1536-d OpenAI model, that's ~10 KB per chunk.
 - **Concurrency**: writes serialize through the SqliteStore. Read-heavy workloads are unaffected.
 - **No HNSW**: every query reads every vector for the KB. `sqlite-vec` is the obvious follow-up if linear scan becomes a bottleneck.
+- **BM25 (FTS5)**: indexed automatically on insert via SQL triggers. Re-indexing on bulk imports is free. Tokenizer is `porter unicode61` — handles English stemming and unicode word breaks; adjust the migration if you need a language-specific tokenizer.

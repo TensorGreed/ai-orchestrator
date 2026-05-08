@@ -812,6 +812,70 @@ export interface KnowledgeBaseStore {
   }>;
 
   getKnowledgeBase(id: string): { id: string; embedderId: string; dimensions: number } | null;
+
+  /**
+   * Phase 9.3 — BM25 search over a KB's content. Returns top-K rows with
+   * normalized scores in [0, 1] (higher = better). Implementations that
+   * lack a full-text index should return an empty array rather than throw;
+   * `KnowledgeBaseVectorStoreAdapter.hybridSearch` falls back to dense-only
+   * when BM25 is unavailable.
+   */
+  bm25SearchKnowledgeBase?(input: {
+    knowledgeBaseId: string;
+    query: string;
+    topK: number;
+  }): Array<{
+    id: string;
+    sourceId: string | null;
+    chunkIndex: number;
+    content: string;
+    metadata: Record<string, unknown> | null;
+    score: number;
+  }>;
+}
+
+/**
+ * Phase 9.3 — Reciprocal Rank Fusion. Industry-standard for combining
+ * heterogeneous rankers (BM25 + dense vector) without normalization
+ * gymnastics. Each ranker contributes 1 / (k + rank) per document; the
+ * sum across rankers is the final score. k=60 is the canonical default
+ * (Cormack et al. 2009); higher k flattens the curve, lower k makes the
+ * top-1 of each list dominate.
+ */
+export function reciprocalRankFusion<T>(
+  lists: Array<{ items: T[]; weight?: number }>,
+  getId: (item: T) => string,
+  k = 60
+): Array<{ id: string; score: number; sources: T[] }> {
+  const scores = new Map<string, { score: number; sources: T[] }>();
+  for (const { items, weight = 1 } of lists) {
+    items.forEach((item, rank) => {
+      const id = getId(item);
+      const contrib = weight / (k + rank + 1);
+      const existing = scores.get(id);
+      if (existing) {
+        existing.score += contrib;
+        existing.sources.push(item);
+      } else {
+        scores.set(id, { score: contrib, sources: [item] });
+      }
+    });
+  }
+  return Array.from(scores.entries())
+    .map(([id, { score, sources }]) => ({ id, score, sources }))
+    .sort((a, b) => b.score - a.score);
+}
+
+export interface HybridSearchOptions {
+  /**
+   * How many candidates each ranker emits before fusion. The fusion result
+   * is then truncated to `topK` (passed to similaritySearch / hybridSearch).
+   */
+  candidatesPerRanker?: number;
+  bm25Weight?: number;
+  vectorWeight?: number;
+  /** RRF k constant. Default 60. */
+  rrfK?: number;
 }
 
 export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
@@ -869,8 +933,285 @@ export class KnowledgeBaseVectorStoreAdapter implements VectorStoreAdapter {
           chunkId: chunk.id,
           chunkIndex: chunk.chunkIndex,
           sourceId: chunk.sourceId,
-          similarityScore: Math.round(score * 1000) / 1000
+          similarityScore: Math.round(score * 1000) / 1000,
+          retrieval: { mode: "vector" }
         }
       }));
+  }
+
+  /**
+   * Phase 9.3 — BM25 search via FTS5 (delegated to the store). Returns the
+   * same `ConnectorDocument[]` shape as `similaritySearch` so call sites
+   * can swap the two transparently. Returns [] when the store doesn't
+   * implement bm25 (graceful degradation for non-KB stores).
+   */
+  async bm25Search(query: string, topK: number): Promise<ConnectorDocument[]> {
+    if (!this.store.bm25SearchKnowledgeBase) return [];
+    const rows = this.store.bm25SearchKnowledgeBase({
+      knowledgeBaseId: this.knowledgeBaseId,
+      query,
+      topK
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      text: r.content,
+      metadata: {
+        ...(r.metadata ?? {}),
+        knowledgeBaseId: this.knowledgeBaseId,
+        chunkId: r.id,
+        chunkIndex: r.chunkIndex,
+        sourceId: r.sourceId,
+        bm25Score: Math.round(r.score * 1000) / 1000,
+        retrieval: { mode: "bm25" }
+      }
+    }));
+  }
+
+  /**
+   * Hybrid search = BM25 + dense vector, fused via Reciprocal Rank Fusion.
+   * Industry-standard approach (used by Vespa, Elastic ESQL, etc.) for
+   * combining a lexical ranker (catches exact matches and rare terms) with
+   * a semantic ranker (catches paraphrases). Each ranker emits
+   * `candidatesPerRanker` results (default 4 * topK) before fusion; the
+   * top-K of the fused list is returned.
+   *
+   * Falls back to vector-only when the store lacks BM25 (other adapters,
+   * or future stores that haven't wired FTS yet).
+   */
+  async hybridSearch(
+    query: string,
+    topK: number,
+    embedder: EmbeddingAdapter,
+    options: HybridSearchOptions = {}
+  ): Promise<ConnectorDocument[]> {
+    const candidates = options.candidatesPerRanker ?? Math.max(20, topK * 4);
+    const [vectorResults, bm25Results] = await Promise.all([
+      this.similaritySearch(query, candidates, embedder),
+      this.bm25Search(query, candidates)
+    ]);
+    if (bm25Results.length === 0) {
+      return vectorResults.slice(0, topK);
+    }
+
+    const fused = reciprocalRankFusion<ConnectorDocument>(
+      [
+        { items: vectorResults, weight: options.vectorWeight ?? 1 },
+        { items: bm25Results, weight: options.bm25Weight ?? 1 }
+      ],
+      (doc) => doc.id,
+      options.rrfK ?? 60
+    ).slice(0, topK);
+
+    // Stitch the source docs back together — the BM25 result has bm25Score
+    // metadata, the vector result has similarityScore. We want both.
+    return fused.map(({ id, score, sources }) => {
+      const merged: Record<string, unknown> = {};
+      let text = "";
+      let chunkIndex: number | null = null;
+      let sourceId: string | null = null;
+      for (const src of sources) {
+        text = src.text;
+        Object.assign(merged, src.metadata ?? {});
+        if (src.metadata && typeof src.metadata === "object") {
+          const m = src.metadata as Record<string, unknown>;
+          if (typeof m.chunkIndex === "number") chunkIndex = m.chunkIndex;
+          if (typeof m.sourceId === "string" || m.sourceId === null) sourceId = m.sourceId as string | null;
+        }
+      }
+      // Override the per-ranker mode; record what fed the fusion.
+      merged.retrieval = {
+        mode: "hybrid",
+        rrfScore: Math.round(score * 10000) / 10000,
+        rankers: sources.map((s) =>
+          (s.metadata as { retrieval?: { mode?: string } })?.retrieval?.mode ?? "unknown"
+        )
+      };
+      merged.knowledgeBaseId = this.knowledgeBaseId;
+      merged.chunkId = id;
+      if (chunkIndex !== null) merged.chunkIndex = chunkIndex;
+      if (sourceId !== null) merged.sourceId = sourceId;
+      return { id, text, metadata: merged };
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9.3 — Reranker adapters
+// ---------------------------------------------------------------------------
+//
+// Rerankers consume (query, candidate documents) and return them re-ordered
+// by relevance. They're typically used as a second stage after a high-recall
+// retriever (BM25, dense, or hybrid) — slower but much higher precision per
+// API call. Cross-encoder models score each (query, doc) pair end-to-end
+// rather than relying on independent embeddings.
+//
+// Three providers are wired today:
+//   - cohere    — Cohere Rerank v3
+//   - jina      — Jina AI Reranker v2
+//   - voyage    — Voyage AI rerank-2
+//
+// All three are pure REST + JSON, so a single adapter shape covers them.
+// Add new providers by registering another `RerankAdapter` with the same
+// shape — no engine changes needed.
+
+export interface RerankAdapter {
+  id: string;
+  /**
+   * Score (query, documents) and return them in the new ranking order.
+   * Implementations should preserve every input field on the doc and only
+   * mutate metadata to add a `rerankerScore`.
+   *
+   * `topN` is a hint — the adapter may return fewer rows if the upstream
+   * provider truncates. Callers should still assume topN is an upper bound.
+   */
+  rerank(input: {
+    query: string;
+    documents: ConnectorDocument[];
+    topN: number;
+  }): Promise<ConnectorDocument[]>;
+}
+
+export class RerankRegistry {
+  private adapters = new Map<string, RerankAdapter>();
+
+  register(adapter: RerankAdapter): void {
+    this.adapters.set(adapter.id, adapter);
+  }
+
+  get(id: string): RerankAdapter | undefined {
+    return this.adapters.get(id);
+  }
+}
+
+interface RerankProviderConfig {
+  apiKey: string;
+  model?: string;
+}
+
+/**
+ * Cohere Rerank v3 — POST https://api.cohere.com/v2/rerank
+ *
+ * Request: { model, query, documents: [string], top_n }
+ * Response: { results: [{ index, relevance_score }] }
+ */
+export class CohereRerankAdapter implements RerankAdapter {
+  readonly id = "cohere";
+
+  constructor(private readonly config: RerankProviderConfig) {}
+
+  async rerank(input: { query: string; documents: ConnectorDocument[]; topN: number }): Promise<ConnectorDocument[]> {
+    if (input.documents.length === 0) return [];
+    const model = this.config.model || "rerank-english-v3.0";
+    const res = await fetch("https://api.cohere.com/v2/rerank", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.config.apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        query: input.query,
+        documents: input.documents.map((d) => d.text),
+        top_n: input.topN
+      })
+    });
+    if (!res.ok) {
+      throw new Error(`Cohere rerank ${res.status}: ${await safeText(res)}`);
+    }
+    const data = (await res.json()) as { results: Array<{ index: number; relevance_score: number }> };
+    return data.results.map((r) => annotateRerank(input.documents[r.index]!, r.relevance_score, "cohere", model));
+  }
+}
+
+/**
+ * Jina AI Reranker v2 — POST https://api.jina.ai/v1/rerank
+ *
+ * Same payload shape as Cohere except response is { results: [{ index, relevance_score }] }
+ * (also under `relevance_score`, conveniently).
+ */
+export class JinaRerankAdapter implements RerankAdapter {
+  readonly id = "jina";
+
+  constructor(private readonly config: RerankProviderConfig) {}
+
+  async rerank(input: { query: string; documents: ConnectorDocument[]; topN: number }): Promise<ConnectorDocument[]> {
+    if (input.documents.length === 0) return [];
+    const model = this.config.model || "jina-reranker-v2-base-multilingual";
+    const res = await fetch("https://api.jina.ai/v1/rerank", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.config.apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        query: input.query,
+        documents: input.documents.map((d) => d.text),
+        top_n: input.topN
+      })
+    });
+    if (!res.ok) {
+      throw new Error(`Jina rerank ${res.status}: ${await safeText(res)}`);
+    }
+    const data = (await res.json()) as { results: Array<{ index: number; relevance_score: number }> };
+    return data.results.map((r) => annotateRerank(input.documents[r.index]!, r.relevance_score, "jina", model));
+  }
+}
+
+/**
+ * Voyage AI rerank-2 — POST https://api.voyageai.com/v1/rerank
+ *
+ * Response: { data: [{ index, relevance_score }] }
+ */
+export class VoyageRerankAdapter implements RerankAdapter {
+  readonly id = "voyage";
+
+  constructor(private readonly config: RerankProviderConfig) {}
+
+  async rerank(input: { query: string; documents: ConnectorDocument[]; topN: number }): Promise<ConnectorDocument[]> {
+    if (input.documents.length === 0) return [];
+    const model = this.config.model || "rerank-2";
+    const res = await fetch("https://api.voyageai.com/v1/rerank", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.config.apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        query: input.query,
+        documents: input.documents.map((d) => d.text),
+        top_k: input.topN
+      })
+    });
+    if (!res.ok) {
+      throw new Error(`Voyage rerank ${res.status}: ${await safeText(res)}`);
+    }
+    const data = (await res.json()) as { data: Array<{ index: number; relevance_score: number }> };
+    return data.data.map((r) => annotateRerank(input.documents[r.index]!, r.relevance_score, "voyage", model));
+  }
+}
+
+function annotateRerank(
+  doc: ConnectorDocument,
+  score: number,
+  providerId: string,
+  model: string
+): ConnectorDocument {
+  return {
+    ...doc,
+    metadata: {
+      ...(doc.metadata && typeof doc.metadata === "object" ? doc.metadata : {}),
+      rerankerScore: Math.round(score * 10000) / 10000,
+      reranker: { providerId, model }
+    }
+  };
+}
+
+async function safeText(res: Response): Promise<string> {
+  try {
+    return (await res.text()).slice(0, 200);
+  } catch {
+    return "";
   }
 }

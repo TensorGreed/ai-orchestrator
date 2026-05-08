@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-rag-hybrid-rerank-flow",
+    "name": "RAG with Hybrid Search + Reranker",
+    "description": "Text Input -> RAG Retrieve (hybrid: BM25 + dense, fused via RRF) -> Rerank (Cohere) -> Prompt Template -> LLM -> Output. Demonstrates Phase 9.3 — hybrid retrieval catches both keyword-exact matches and semantic paraphrases, then a cross-encoder reranker boosts precision on the top candidates. Replace `<your-kb-id>` with the id from POST /api/knowledge-bases. The reranker requires a Cohere API key (or set providerId to jina/voyage and the matching key).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "text_1",
+        "type": "text_input",
+        "name": "Question",
+        "position": { "x": 70, "y": 220 },
+        "config": {
+          "text": "How do I reset my password?"
+        }
+      },
+      {
+        "id": "rag_1",
+        "type": "rag_retrieve",
+        "name": "Retrieve (hybrid)",
+        "position": { "x": 360, "y": 220 },
+        "config": {
+          "queryTemplate": "{{user_prompt}}",
+          "topK": 20,
+          "embedderId": "openai-embedder",
+          "vectorStoreId": "knowledge-base",
+          "vectorStoreConfig": {
+            "knowledgeBaseId": "<your-kb-id>"
+          },
+          "searchMode": "hybrid",
+          "candidatesPerRanker": 50,
+          "rrfK": 60
+        }
+      },
+      {
+        "id": "rerank_1",
+        "type": "rerank",
+        "name": "Rerank (Cohere)",
+        "position": { "x": 670, "y": 220 },
+        "config": {
+          "queryTemplate": "{{user_prompt}}",
+          "topN": 3,
+          "providerId": "cohere",
+          "model": "rerank-english-v3.0",
+          "secretRef": { "secretId": "<cohere-key-secret-id>" }
+        }
+      },
+      {
+        "id": "template_1",
+        "type": "prompt_template",
+        "name": "Grounded Prompt",
+        "position": { "x": 980, "y": 220 },
+        "config": {
+          "template": "Answer the question using the context. Cite chunkIds inline.\n\nContext:\n{{context}}\n\nQuestion:\n{{user_prompt}}",
+          "outputKey": "prompt"
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "LLM",
+        "position": { "x": 1290, "y": 220 },
+        "config": {
+          "provider": {
+            "providerId": "openai",
+            "model": "gpt-4o-mini",
+            "temperature": 0.1
+          },
+          "promptKey": "prompt"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 1600, "y": 220 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "edge_1", "source": "text_1", "target": "rag_1" },
+      { "id": "edge_2", "source": "rag_1", "target": "rerank_1" },
+      { "id": "edge_3", "source": "text_1", "target": "rerank_1" },
+      { "id": "edge_4", "source": "rerank_1", "target": "template_1" },
+      { "id": "edge_5", "source": "text_1", "target": "template_1" },
+      { "id": "edge_6", "source": "template_1", "target": "llm_1" },
+      { "id": "edge_7", "source": "llm_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-05-08T00:00:00.000Z"
+}

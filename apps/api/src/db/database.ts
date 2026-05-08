@@ -457,6 +457,25 @@ function safeJsonParse(raw: string): unknown {
   }
 }
 
+/**
+ * Phase 9.3 — Build a defensive FTS5 MATCH expression from a user query.
+ *
+ * FTS5 has its own query syntax (AND/OR/NOT, NEAR, prefix `*`, phrase `"..."`)
+ * which trips up on user input containing colons, parens, or quotes. We
+ * tokenize on non-alphanumerics, drop noise tokens (length <2), and wrap
+ * each surviving token as a quoted phrase so FTS5 treats user content as
+ * literal text — never operators. Tokens are OR'd so any one match returns
+ * the row (BM25 then ranks within that set).
+ */
+function buildFts5Query(userQuery: string): string {
+  const tokens = userQuery
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 2);
+  if (tokens.length === 0) return "";
+  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR ");
+}
+
 function parseJsonArray(raw: unknown): string[] {
   if (!raw) return [];
   try {
@@ -1205,6 +1224,32 @@ export class SqliteStore {
       );
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_kb_id ON knowledge_base_chunks(knowledge_base_id);
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_source ON knowledge_base_chunks(knowledge_base_id, source_id);
+
+      -- Phase 9.3 — FTS5 BM25 index over knowledge_base_chunks for hybrid search
+      CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_base_chunks_fts USING fts5(
+        content,
+        kb_id UNINDEXED,
+        content='knowledge_base_chunks',
+        content_rowid='rowid',
+        tokenize='porter unicode61'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_ai AFTER INSERT ON knowledge_base_chunks BEGIN
+        INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
+        VALUES (new.rowid, new.content, new.knowledge_base_id);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_ad AFTER DELETE ON knowledge_base_chunks BEGIN
+        INSERT INTO knowledge_base_chunks_fts(knowledge_base_chunks_fts, rowid, content, kb_id)
+        VALUES('delete', old.rowid, old.content, old.knowledge_base_id);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_au AFTER UPDATE ON knowledge_base_chunks BEGIN
+        INSERT INTO knowledge_base_chunks_fts(knowledge_base_chunks_fts, rowid, content, kb_id)
+        VALUES('delete', old.rowid, old.content, old.knowledge_base_id);
+        INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
+        VALUES (new.rowid, new.content, new.knowledge_base_id);
+      END;
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -6579,6 +6624,83 @@ export class SqliteStore {
       [knowledgeBaseId]
     );
     return rows.map(mapKnowledgeBaseChunk);
+  }
+
+  /**
+   * Phase 9.3 — BM25 search via the FTS5 virtual table. Returns chunks with
+   * a normalized score (higher = better, 0..1 after normalization). FTS5's
+   * native bm25() returns negative values where 0 is best — we flip the sign
+   * and rank-normalize so the result composes with cosine similarity in RRF.
+   *
+   * The user query is tokenized + each token wrapped as a phrase to escape
+   * FTS5 special characters. Words shorter than 2 chars are dropped (FTS5's
+   * default tokenizer indexes single characters but they hurt recall).
+   */
+  bm25SearchKnowledgeBase(input: {
+    knowledgeBaseId: string;
+    query: string;
+    topK: number;
+  }): Array<{
+    id: string;
+    sourceId: string | null;
+    chunkIndex: number;
+    content: string;
+    metadata: Record<string, unknown> | null;
+    score: number;
+  }> {
+    const ftsQuery = buildFts5Query(input.query);
+    if (!ftsQuery) return [];
+    const limit = Math.min(Math.max(input.topK, 1), 200);
+
+    type Row = {
+      id: string;
+      source_id: string | null;
+      chunk_index: number;
+      content: string;
+      metadata_json: string | null;
+      raw_score: number;
+    };
+    let rows: Row[];
+    try {
+      rows = this.queryAll<Row>(
+        `SELECT
+           c.id AS id,
+           c.source_id AS source_id,
+           c.chunk_index AS chunk_index,
+           c.content AS content,
+           c.metadata_json AS metadata_json,
+           bm25(knowledge_base_chunks_fts) AS raw_score
+         FROM knowledge_base_chunks_fts
+         JOIN knowledge_base_chunks c ON c.rowid = knowledge_base_chunks_fts.rowid
+         WHERE knowledge_base_chunks_fts MATCH ?
+           AND c.knowledge_base_id = ?
+         ORDER BY raw_score
+         LIMIT ?`,
+        [ftsQuery, input.knowledgeBaseId, limit]
+      );
+    } catch {
+      // Malformed query (rare with our escaping) — return empty rather than throw
+      return [];
+    }
+    if (rows.length === 0) return [];
+
+    // FTS5 bm25() yields negative scores in [-inf, 0] where lower is better.
+    // Negate and min-max-normalize to [0, 1] for clean composition with
+    // cosine similarity in RRF.
+    const negated = rows.map((r) => -toNumber(r.raw_score));
+    const min = Math.min(...negated);
+    const max = Math.max(...negated);
+    const range = max - min || 1;
+    return rows.map((r, idx) => ({
+      id: toString(r.id),
+      sourceId: r.source_id ? toString(r.source_id) : null,
+      chunkIndex: toNumber(r.chunk_index),
+      content: toString(r.content),
+      metadata: r.metadata_json
+        ? (safeJsonParse(toString(r.metadata_json)) as Record<string, unknown>)
+        : null,
+      score: (negated[idx]! - min) / range
+    }));
   }
 
   /** Preview chunks for the UI — content + metadata, no vectors. */

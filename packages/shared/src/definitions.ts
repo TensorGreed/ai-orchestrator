@@ -773,11 +773,39 @@ export const nodeDefinitions: NodeDefinition[] = [
         },
         /** When vectorStoreId === "knowledge-base", names the persistent KB to query/append to. */
         knowledgeBaseId: { type: "string" },
+        /**
+         * Phase 9.3 — search strategy. "vector" (default, all stores) does
+         * cosine on dense embeddings. "bm25" and "hybrid" require a store
+         * with full-text indexing (knowledge-base today; others fall back
+         * to vector-only).
+         */
+        searchMode: { type: "string", enum: ["vector", "bm25", "hybrid"] },
+        bm25Weight: { type: "number" },
+        vectorWeight: { type: "number" },
+        rrfK: { type: "number" },
+        candidatesPerRanker: { type: "number" },
         vectorStoreConfig: { type: "object" },
         embeddingSecretRef: { type: "object" }
       }
     },
     sampleConfig: { queryTemplate: "{{user_prompt}}", topK: 3, embedderId: "token-embedder", vectorStoreId: "in-memory-vector-store" }
+  },
+  {
+    type: "rerank",
+    label: "Rerank",
+    category: "RAG",
+    description: "Reorders candidate documents by relevance via a cross-encoder reranker (Cohere / Jina / Voyage). Plug after rag_retrieve for the precision boost.",
+    configSchema: {
+      type: "object",
+      properties: {
+        queryTemplate: { type: "string" },
+        topN: { type: "number" },
+        providerId: { type: "string", enum: ["cohere", "jina", "voyage"] },
+        model: { type: "string" },
+        secretRef: { type: "object" }
+      }
+    },
+    sampleConfig: { queryTemplate: "{{user_prompt}}", topN: 3, providerId: "cohere", model: "rerank-english-v3.0" }
   },
   {
     type: "document_chunker",

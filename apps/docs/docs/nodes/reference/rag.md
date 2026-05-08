@@ -8,7 +8,7 @@
 
 Retrieval-Augmented Generation: embedders, vector stores, document loaders, retrievers.
 
-3 nodes.
+4 nodes.
 
 ---
 ### `document_chunker` — Document Chunker
@@ -80,6 +80,11 @@ Retrieves context chunks from provided documents or vector store.
 | `embedderId` | `string` | no | — |
 | `vectorStoreId` | `string` | no | `in-memory-vector-store` \| `knowledge-base` \| `pinecone-vector-store` \| `pgvector-store` \| `azure-ai-search-vector-store` \| `qdrant-vector-store` \| `chroma-vector-store` \| `weaviate-vector-store` \| `redis-vector-store` |
 | `knowledgeBaseId` | `string` | no | — |
+| `searchMode` | `string` | no | `vector` \| `bm25` \| `hybrid` |
+| `bm25Weight` | `number` | no | — |
+| `vectorWeight` | `number` | no | — |
+| `rrfK` | `number` | no | — |
+| `candidatesPerRanker` | `number` | no | — |
 | `vectorStoreConfig` | `object` | no | — |
 | `embeddingSecretRef` | `object` | no | — |
 
@@ -91,5 +96,32 @@ Retrieves context chunks from provided documents or vector store.
   "topK": 3,
   "embedderId": "token-embedder",
   "vectorStoreId": "in-memory-vector-store"
+}
+```
+
+---
+
+### `rerank` — Rerank
+
+Reorders candidate documents by relevance via a cross-encoder reranker (Cohere / Jina / Voyage). Plug after rag_retrieve for the precision boost.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `queryTemplate` | `string` | no | — |
+| `topN` | `number` | no | — |
+| `providerId` | `string` | no | `cohere` \| `jina` \| `voyage` |
+| `model` | `string` | no | — |
+| `secretRef` | `object` | no | — |
+
+**Example config**
+
+```json
+{
+  "queryTemplate": "{{user_prompt}}",
+  "topN": 3,
+  "providerId": "cohere",
+  "model": "rerank-english-v3.0"
 }
 ```

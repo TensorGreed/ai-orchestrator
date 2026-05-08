@@ -3219,6 +3219,107 @@ describe("Phase 9.1 knowledge bases", () => {
     expect(allText).toMatch(/password resets/i);
   });
 
+  it("rag_retrieve with searchMode=hybrid uses BM25 + vector fusion", async () => {
+    const context = await createTestContext();
+    const adminCookie = await createRoleSession(context, {
+      email: "kb-hybrid@example.com",
+      password: "kb-hybrid-pass-1",
+      role: "admin"
+    });
+    const create = await context.app.inject({
+      method: "POST",
+      url: "/api/knowledge-bases",
+      headers: { cookie: adminCookie },
+      payload: { name: "hybrid kb", embedderId: "token-embedder" }
+    });
+    const kbId = (create.json() as { knowledgeBase: { id: string } }).knowledgeBase.id;
+
+    // Mix in a chunk with an unusual identifier that the bag-of-tokens
+    // embedder will hash poorly but BM25 will catch verbatim.
+    await context.app.inject({
+      method: "POST",
+      url: `/api/knowledge-bases/${kbId}/ingest`,
+      headers: { cookie: adminCookie },
+      payload: {
+        sourceId: "mixed",
+        documents: [
+          { content: "Generic introduction to our product line and customer success stories" },
+          { content: "DocRefXYZ77 is our internal reference number for the wholesale plan" },
+          { content: "We support credit cards and bank transfers for enterprise customers" }
+        ]
+      }
+    });
+
+    const workflow: Workflow = {
+      id: "wf-hybrid",
+      name: "Hybrid",
+      schemaVersion: WORKFLOW_SCHEMA_VERSION,
+      workflowVersion: 1,
+      nodes: [
+        {
+          id: "text",
+          type: "text_input",
+          name: "Q",
+          position: { x: 0, y: 0 },
+          config: { text: "what is DocRefXYZ77" }
+        },
+        {
+          id: "retrieve",
+          type: "rag_retrieve",
+          name: "Retrieve (hybrid)",
+          position: { x: 200, y: 0 },
+          config: {
+            queryTemplate: "{{text}}",
+            topK: 1,
+            embedderId: "token-embedder",
+            vectorStoreId: "knowledge-base",
+            knowledgeBaseId: kbId,
+            searchMode: "hybrid"
+          }
+        },
+        {
+          id: "out",
+          type: "output",
+          name: "Out",
+          position: { x: 400, y: 0 },
+          config: { outputKey: "context" }
+        }
+      ],
+      edges: [
+        { id: "e1", source: "text", target: "retrieve" },
+        { id: "e2", source: "retrieve", target: "out" }
+      ]
+    };
+
+    const upsert = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie: adminCookie },
+      payload: workflow
+    });
+    expect(upsert.statusCode).toBe(200);
+
+    const exec = await context.app.inject({
+      method: "POST",
+      url: `/api/workflows/${workflow.id}/execute`,
+      headers: { cookie: adminCookie },
+      payload: {}
+    });
+    expect(exec.statusCode).toBe(200);
+    const execBody = exec.json() as {
+      status: string;
+      nodeResults: Array<{ nodeId: string; output?: { documents?: Array<{ text: string; metadata?: { retrieval?: { mode?: string } } }> } }>;
+    };
+    expect(execBody.status).toBe("success");
+    const retrieveNode = execBody.nodeResults.find((n) => n.nodeId === "retrieve");
+    const docs = retrieveNode!.output!.documents!;
+    expect(docs).toHaveLength(1);
+    // BM25 picks up the rare token that the bag-of-tokens embedder misses.
+    expect(docs[0]!.text).toContain("DocRefXYZ77");
+    // Result metadata identifies hybrid retrieval mode.
+    expect(docs[0]!.metadata?.retrieval?.mode).toBe("hybrid");
+  });
+
   it("upload endpoint loads CSV rows as separate documents", async () => {
     const context = await createTestContext();
     const adminCookie = await createRoleSession(context, {

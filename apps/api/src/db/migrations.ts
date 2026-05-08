@@ -914,6 +914,45 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS knowledge_base_chunks;
       DROP TABLE IF EXISTS knowledge_bases;
     `
+  },
+  {
+    version: 19,
+    description: "Phase 9.3 — FTS5 BM25 index over knowledge_base_chunks for hybrid search",
+    up: `
+      CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_base_chunks_fts USING fts5(
+        content,
+        kb_id UNINDEXED,
+        content='knowledge_base_chunks',
+        content_rowid='rowid',
+        tokenize='porter unicode61'
+      );
+
+      INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
+        SELECT rowid, content, knowledge_base_id FROM knowledge_base_chunks;
+
+      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_ai AFTER INSERT ON knowledge_base_chunks BEGIN
+        INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
+        VALUES (new.rowid, new.content, new.knowledge_base_id);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_ad AFTER DELETE ON knowledge_base_chunks BEGIN
+        INSERT INTO knowledge_base_chunks_fts(knowledge_base_chunks_fts, rowid, content, kb_id)
+        VALUES('delete', old.rowid, old.content, old.knowledge_base_id);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS kb_chunks_fts_au AFTER UPDATE ON knowledge_base_chunks BEGIN
+        INSERT INTO knowledge_base_chunks_fts(knowledge_base_chunks_fts, rowid, content, kb_id)
+        VALUES('delete', old.rowid, old.content, old.knowledge_base_id);
+        INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
+        VALUES (new.rowid, new.content, new.knowledge_base_id);
+      END;
+    `,
+    down: `
+      DROP TRIGGER IF EXISTS kb_chunks_fts_au;
+      DROP TRIGGER IF EXISTS kb_chunks_fts_ad;
+      DROP TRIGGER IF EXISTS kb_chunks_fts_ai;
+      DROP TABLE IF EXISTS knowledge_base_chunks_fts;
+    `
   }
 ];
 

@@ -40,6 +40,7 @@ export type WorkflowNodeType =
   | "helper_chat_response"
   | "mcp_tool"
   | "rag_retrieve"
+  | "rerank"
   | "connector_source"
   | "google_drive_source"
   | "azure_storage"

@@ -1365,6 +1365,8 @@ export function createApp(
                 chunks: input.chunks
               }),
             listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
+            // Phase 9.3 — BM25 / hybrid support.
+            bm25SearchKnowledgeBase: (input) => store.bm25SearchKnowledgeBase(input),
             getKnowledgeBase: (id) => {
               const kb = store.getKnowledgeBase(id);
               return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
@@ -1437,6 +1439,7 @@ export function createApp(
                   knowledgeBaseStore: {
                     addKnowledgeBaseChunks: (i) => store.addKnowledgeBaseChunks(i),
                     listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
+                    bm25SearchKnowledgeBase: (i) => store.bm25SearchKnowledgeBase(i),
                     getKnowledgeBase: (kbId) => {
                       const kb = store.getKnowledgeBase(kbId);
                       return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
@@ -3559,6 +3562,7 @@ export function createApp(
         {
           addKnowledgeBaseChunks: (i) => store.addKnowledgeBaseChunks(i),
           listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
+          bm25SearchKnowledgeBase: (i) => store.bm25SearchKnowledgeBase(i),
           getKnowledgeBase: (kbId) => {
             const k = store.getKnowledgeBase(kbId);
             return k ? { id: k.id, embedderId: k.embedderId, dimensions: k.dimensions } : null;

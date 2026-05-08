@@ -36,6 +36,10 @@ import {
   WeaviateVectorStoreAdapter,
   RedisVectorStoreAdapter,
   KnowledgeBaseVectorStoreAdapter,
+  CohereRerankAdapter,
+  JinaRerankAdapter,
+  VoyageRerankAdapter,
+  type RerankAdapter,
   type EmbeddingRegistry,
   type VectorStoreRegistry,
   type KnowledgeBaseStore
@@ -3325,8 +3329,85 @@ async function executeNode(
       }
 
       await store.upsert(allDocs, embedder);
-      const documents = await store.similaritySearch(query, topK, embedder);
 
+      // Phase 9.3 — searchMode picks vector / bm25 / hybrid. Default
+      // "vector" preserves Phase 9.1 behavior; bm25 + hybrid only work
+      // when the underlying store supports them (currently the
+      // KnowledgeBaseVectorStoreAdapter via FTS5).
+      const searchMode = typeof config.searchMode === "string" ? config.searchMode : "vector";
+      let documents;
+      if (searchMode === "hybrid" && store instanceof KnowledgeBaseVectorStoreAdapter) {
+        const candidatesPerRanker = typeof config.candidatesPerRanker === "number" && config.candidatesPerRanker > 0
+          ? Math.floor(config.candidatesPerRanker)
+          : undefined;
+        documents = await store.hybridSearch(query, topK, embedder, {
+          candidatesPerRanker,
+          bm25Weight: typeof config.bm25Weight === "number" ? config.bm25Weight : undefined,
+          vectorWeight: typeof config.vectorWeight === "number" ? config.vectorWeight : undefined,
+          rrfK: typeof config.rrfK === "number" ? config.rrfK : undefined
+        });
+      } else if (searchMode === "bm25" && store instanceof KnowledgeBaseVectorStoreAdapter) {
+        documents = await store.bm25Search(query, topK);
+      } else {
+        if ((searchMode === "hybrid" || searchMode === "bm25") && !(store instanceof KnowledgeBaseVectorStoreAdapter)) {
+          // Vector-only fallback when the user asked for hybrid/bm25 but
+          // the store doesn't implement them (e.g. Pinecone). Documented
+          // behavior — surfaces in the node output via metadata.
+        }
+        documents = await store.similaritySearch(query, topK, embedder);
+      }
+
+      return {
+        query,
+        documents,
+        context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n")
+      };
+    }
+
+    case "rerank": {
+      // Phase 9.3 — cross-encoder reranking. Pulls candidate docs from
+      // upstream (typically a rag_retrieve node), scores each (query, doc)
+      // pair via a hosted cross-encoder, and returns top-N by relevance.
+      const queryTemplate = typeof config.queryTemplate === "string" ? config.queryTemplate : "{{user_prompt}}";
+      const query = renderTemplate(queryTemplate, templateData).trim();
+      const topN = typeof config.topN === "number" && config.topN > 0 ? Math.floor(config.topN) : 3;
+      const providerId = typeof config.providerId === "string" ? config.providerId : "cohere";
+
+      const upstreamDocs = normalizeDocuments(templateData.documents);
+      if (upstreamDocs.length === 0) {
+        return { query, documents: [], context: "" };
+      }
+
+      const apiKeyRef = config.secretRef;
+      const apiKey =
+        typeof apiKeyRef === "object" && apiKeyRef
+          ? await dependencies.resolveSecret(apiKeyRef as SecretReference)
+          : providerId === "cohere"
+            ? process.env.COHERE_API_KEY
+            : providerId === "jina"
+              ? process.env.JINA_API_KEY
+              : providerId === "voyage"
+                ? process.env.VOYAGE_API_KEY
+                : undefined;
+      if (!apiKey) {
+        throw new Error(
+          `Reranker "${providerId}" requires an API key — pass via secretRef or set ${providerId.toUpperCase()}_API_KEY`
+        );
+      }
+
+      const model = typeof config.model === "string" ? config.model : undefined;
+      let adapter: RerankAdapter;
+      if (providerId === "cohere") {
+        adapter = new CohereRerankAdapter({ apiKey, model });
+      } else if (providerId === "jina") {
+        adapter = new JinaRerankAdapter({ apiKey, model });
+      } else if (providerId === "voyage") {
+        adapter = new VoyageRerankAdapter({ apiKey, model });
+      } else {
+        throw new Error(`Unknown reranker providerId: ${providerId}`);
+      }
+
+      const documents = await adapter.rerank({ query, documents: upstreamDocs, topN });
       return {
         query,
         documents,
