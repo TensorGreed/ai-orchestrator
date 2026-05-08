@@ -89,6 +89,26 @@ const envSchema = z.object({
   TRACING_ENDPOINT: z.string().optional(),
   TRACING_SERVICE_NAME: z.string().default("ai-orchestrator"),
 
+  // Phase 8.1 — OpenTelemetry-grade observability.
+  // Standard OTEL_* env vars. When OTEL_EXPORTER_OTLP_ENDPOINT is set we
+  // export traces (and optionally metrics) over OTLP/HTTP-JSON. Trace export
+  // also activates if the legacy TRACING_ENDPOINT is set — both paths share
+  // the same TracingService.
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.string().optional(),
+  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: z.string().optional(),
+  /** Comma-separated `key=value` pairs added to every OTLP request (auth headers, tenant IDs). */
+  OTEL_EXPORTER_OTLP_HEADERS: z.string().default(""),
+  OTEL_SERVICE_NAME: z.string().optional(),
+  OTEL_SERVICE_VERSION: z.string().optional(),
+  OTEL_DEPLOYMENT_ENVIRONMENT: z.string().optional(),
+  /** Comma-separated `key=value` pairs merged into every span/metric resource. */
+  OTEL_RESOURCE_ATTRIBUTES: z.string().default(""),
+  OTEL_METRICS_ENABLED: booleanFromEnv.default(false),
+  OTEL_METRICS_PUSH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  /** Emit a SERVER span per HTTP request (in addition to per-execution/per-node spans). */
+  OTEL_HTTP_SERVER_SPANS: booleanFromEnv.default(true),
+
   // Phase 7.1 — Deployment & HA
   WORKER_MODE: z.enum(["all", "api", "webhook", "worker"]).default("all"),
   HA_ENABLED: booleanFromEnv.default(false),

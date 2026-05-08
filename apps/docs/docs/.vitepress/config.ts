@@ -104,6 +104,7 @@ export default defineConfig({
         items: [
           { text: "CI Pipeline", link: "/operations/ci" },
           { text: "Testing + Quality Gates", link: "/operations/testing-and-quality" },
+          { text: "Observability (OTel, metrics, traces)", link: "/operations/observability" },
           { text: "Troubleshooting", link: "/troubleshooting/common-issues" }
         ]
       }

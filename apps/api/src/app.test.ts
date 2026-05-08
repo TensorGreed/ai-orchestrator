@@ -252,6 +252,17 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     COMMUNITY_NODES_ENABLED: false,
     COMMUNITY_NODES_DIR: "./data/plugins",
     COMMUNITY_NODES_ALLOWLIST: "",
+    OTEL_EXPORTER_OTLP_ENDPOINT: undefined,
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: undefined,
+    OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: undefined,
+    OTEL_EXPORTER_OTLP_HEADERS: "",
+    OTEL_SERVICE_NAME: undefined,
+    OTEL_SERVICE_VERSION: undefined,
+    OTEL_DEPLOYMENT_ENVIRONMENT: undefined,
+    OTEL_RESOURCE_ATTRIBUTES: "",
+    OTEL_METRICS_ENABLED: false,
+    OTEL_METRICS_PUSH_INTERVAL_MS: 60000,
+    OTEL_HTTP_SERVER_SPANS: false,
     ...overrides
   };
 

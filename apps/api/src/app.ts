@@ -63,7 +63,8 @@ import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GitSyncService } from "./services/git-sync-service";
 import { LeaderElectionService } from "./services/leader-election-service";
 import { MetricsService } from "./services/metrics-service";
-import { TracingService } from "./services/tracing-service";
+import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
+import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -1965,11 +1966,58 @@ export function createApp(
     sloSuccessTarget: config.METRICS_SLO_SUCCESS_TARGET,
     sloP95LatencyMs: config.METRICS_SLO_P95_LATENCY_MS
   });
+  // Phase 8.1 — OpenTelemetry-grade observability.
+  // Endpoint resolution, in priority order:
+  //   1. OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (per-signal override, OTel spec)
+  //   2. OTEL_EXPORTER_OTLP_ENDPOINT + "/v1/traces" (combined endpoint)
+  //   3. legacy TRACING_ENDPOINT (kept for back-compat with existing deploys)
+  // Tracing is enabled if any of those is set OR TRACING_ENABLED=true.
+  const otlpHeaders = parseKeyValueList(config.OTEL_EXPORTER_OTLP_HEADERS);
+  const otelTracesEndpoint =
+    config.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ||
+    (config.OTEL_EXPORTER_OTLP_ENDPOINT
+      ? config.OTEL_EXPORTER_OTLP_ENDPOINT.replace(/\/+$/, "") + "/v1/traces"
+      : undefined) ||
+    config.TRACING_ENDPOINT;
+  const otelMetricsEndpoint =
+    config.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT ||
+    (config.OTEL_EXPORTER_OTLP_ENDPOINT
+      ? config.OTEL_EXPORTER_OTLP_ENDPOINT.replace(/\/+$/, "") + "/v1/metrics"
+      : undefined);
+  const otelServiceName = config.OTEL_SERVICE_NAME || config.TRACING_SERVICE_NAME;
+  const baseResourceAttributes: Record<string, string> = {
+    "service.name": otelServiceName,
+    ...(config.OTEL_SERVICE_VERSION ? { "service.version": config.OTEL_SERVICE_VERSION } : {}),
+    ...(config.OTEL_DEPLOYMENT_ENVIRONMENT
+      ? { "deployment.environment": config.OTEL_DEPLOYMENT_ENVIRONMENT }
+      : {}),
+    ...parseKeyValueList(config.OTEL_RESOURCE_ATTRIBUTES)
+  };
   const tracingService = new TracingService({
-    enabled: config.TRACING_ENABLED,
-    endpoint: config.TRACING_ENDPOINT,
-    serviceName: config.TRACING_SERVICE_NAME
+    enabled: config.TRACING_ENABLED || Boolean(otelTracesEndpoint),
+    endpoint: otelTracesEndpoint,
+    serviceName: otelServiceName,
+    resourceAttributes: baseResourceAttributes,
+    otlpHeaders
   });
+
+  let otlpMetricsExporter: OtlpMetricsExporter | null = null;
+  if (config.OTEL_METRICS_ENABLED && otelMetricsEndpoint) {
+    otlpMetricsExporter = new OtlpMetricsExporter(metricsService, {
+      endpoint: otelMetricsEndpoint,
+      resourceAttributes: baseResourceAttributes,
+      headers: otlpHeaders,
+      intervalMs: config.OTEL_METRICS_PUSH_INTERVAL_MS,
+      serviceName: otelServiceName
+    });
+    otlpMetricsExporter.setLogger({
+      warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+    });
+    otlpMetricsExporter.start();
+    app.addHook("onClose", async () => {
+      await otlpMetricsExporter?.stop();
+    });
+  }
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
   const logStreamingService = new LogStreamingService(store, config.SECRET_MASTER_KEY_BASE64, {
@@ -2460,6 +2508,51 @@ export function createApp(
     metricsService.recordHttpRequest(request.method, reply.statusCode, elapsed);
   });
 
+  // Phase 8.1 — HTTP server spans + W3C trace-context propagation.
+  // We open an OTel SERVER span at onRequest time and end it onResponse so
+  // every request shows up in the trace UI alongside per-execution/per-node
+  // spans. If the client passes a `traceparent` header we adopt its trace ID
+  // to keep the trace continuous across our boundary; otherwise we mint a
+  // fresh one. Skipped for /health and /metrics so they don't drown out
+  // useful spans.
+  if (config.OTEL_HTTP_SERVER_SPANS) {
+    const spanByReqId = new Map<string, ReturnType<typeof tracingService.startSpan>>();
+    const skipPaths = new Set(["/health", "/metrics"]);
+    app.addHook("onRequest", async (request) => {
+      if (skipPaths.has(request.url.split("?")[0] ?? "")) return;
+      const headers = request.headers;
+      const incoming = parseTraceparent(
+        typeof headers["traceparent"] === "string" ? (headers["traceparent"] as string) : undefined
+      );
+      const span = tracingService.startSpan({
+        operationName: `${request.method} ${request.routeOptions?.url ?? request.url}`,
+        kind: "server",
+        traceId: incoming?.traceId,
+        parentSpanId: incoming?.parentSpanId,
+        attributes: {
+          "http.method": request.method,
+          "http.target": request.url,
+          "http.route": request.routeOptions?.url ?? request.url,
+          "http.scheme": request.protocol,
+          "net.peer.ip": request.ip ?? "",
+          "request.id": request.id ?? ""
+        }
+      });
+      spanByReqId.set(request.id, span);
+      // Make the span discoverable to downstream code (e.g. workflow execution)
+      // via request.requestContext-like accessor — Fastify has request.diagnosticsChannel
+      // but for simplicity we attach to request directly.
+      (request as unknown as { otelSpan?: typeof span }).otelSpan = span;
+    });
+    app.addHook("onResponse", async (request, reply) => {
+      const span = spanByReqId.get(request.id);
+      if (!span) return;
+      spanByReqId.delete(request.id);
+      tracingService.setAttribute(span, "http.status_code", reply.statusCode);
+      tracingService.endSpan(span, reply.statusCode >= 500 ? "error" : "ok");
+    });
+  }
+
   app.get("/health", async () => {
     const slo = metricsService.getSloStatus();
     return {
@@ -2480,7 +2573,16 @@ export function createApp(
     if (!user) return;
     return {
       metrics: metricsService.getSnapshot(),
-      tracing: { enabled: tracingService.isEnabled() }
+      tracing: {
+        enabled: tracingService.isEnabled(),
+        tracesEndpoint: otelTracesEndpoint ?? null,
+        resourceAttributes: tracingService.getResourceAttributes()
+      },
+      otlpMetrics: {
+        enabled: otlpMetricsExporter !== null,
+        endpoint: otelMetricsEndpoint ?? null,
+        intervalMs: otlpMetricsExporter ? config.OTEL_METRICS_PUSH_INTERVAL_MS : null
+      }
     };
   });
 

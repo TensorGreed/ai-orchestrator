@@ -23,6 +23,9 @@ The initial GA release covers production hardening, OSS-growth foundations, and 
 - **Template scaffold repo** — [`l2m-nodes-template`](https://github.com/TensorGreed/l2m-nodes-template) ships a working starter package (sample connector, manifest, build/test setup, README walkthrough). Authors clone → rename → customize → `npm publish`.
 - **Threat model + authoring guide** at [`/docs/extensions/community-nodes`](apps/docs/docs/extensions/community-nodes.md).
 
+#### Phase 8 — Observability & FinOps
+- **OpenTelemetry-grade observability** (Phase 8.1) — `OTEL_EXPORTER_OTLP_ENDPOINT` and friends ship traces (and optionally metrics) to any OTLP/HTTP collector. Resource attributes (`service.version`, `deployment.environment`, `host.name`, `service.instance.id`) flow into every span/metric. W3C `traceparent` is honored on incoming HTTP requests so traces stay continuous across nginx/ALB/Cloudflare → L2M → downstream LLM/MCP calls. Per-request OTel `SERVER` spans, span kinds (server/client/internal/producer/consumer), per-signal endpoint overrides, and `OTEL_EXPORTER_OTLP_HEADERS` for Honeycomb / Grafana Cloud auth. Legacy `TRACING_*` vars still work.
+
 #### Phase 7 — Differentiation deepening
 - **Inline cost & latency telemetry** (Phase 7.1) — `LLMCallResponse` carries `usage` (input/output/total/cached tokens) + `latencyMs` from every provider. The agent runtime accumulates across iterations. Studio canvas shows pills (`1.2k tok` · `840ms` · `×3`) on llm_call and agent_orchestrator nodes after a run, with a tooltip carrying the full breakdown.
 - **Time-travel debugging** (Phase 7.2) — execution history detail rows expand to show per-node input/output JSON; each row gets a "▶ Replay from here" button that re-runs the workflow starting at that node, seeding upstream outputs from the source execution.
