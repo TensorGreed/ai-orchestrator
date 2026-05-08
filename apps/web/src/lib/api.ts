@@ -1568,6 +1568,97 @@ export async function fetchRecentTraces(limit = 50) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 8.2 — FinOps cost rollups
+// ---------------------------------------------------------------------------
+
+export interface UsageTotals {
+  executions: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  llmCallCount: number;
+  avgDurationMs: number;
+}
+
+export interface UsageRollupRow extends UsageTotals {
+  bucket: string;
+  workflowId?: string | null;
+  workflowName?: string | null;
+  userId?: string | null;
+  userEmail?: string | null;
+  projectId?: string | null;
+  providerId?: string | null;
+  model?: string | null;
+}
+
+export type UsageGroupBy = "day" | "hour" | "workflow" | "user" | "project" | "provider";
+
+export interface UsageEvent {
+  id: string;
+  executionId: string;
+  workflowId: string;
+  workflowName: string | null;
+  userId: string | null;
+  userEmail: string | null;
+  projectId: string | null;
+  triggerType: string | null;
+  status: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  llmCallCount: number;
+  durationMs: number;
+  providers: Array<{ providerId: string; model: string; calls: number }>;
+  createdAt: string;
+}
+
+export interface UsageWindow {
+  from: string;
+  to: string;
+}
+
+function buildUsageQuery(filter: { from?: string; to?: string; workflowId?: string; userId?: string; projectId?: string; groupBy?: UsageGroupBy; limit?: number }): string {
+  const params = new URLSearchParams();
+  if (filter.from) params.set("from", filter.from);
+  if (filter.to) params.set("to", filter.to);
+  if (filter.workflowId) params.set("workflowId", filter.workflowId);
+  if (filter.userId) params.set("userId", filter.userId);
+  if (filter.projectId) params.set("projectId", filter.projectId);
+  if (filter.groupBy) params.set("groupBy", filter.groupBy);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  const s = params.toString();
+  return s ? `?${s}` : "";
+}
+
+export async function fetchUsageTotals(filter: { from?: string; to?: string; workflowId?: string; userId?: string; projectId?: string } = {}) {
+  return apiRequest<{ window: UsageWindow; totals: UsageTotals }>(
+    `/api/usage/totals${buildUsageQuery(filter)}`
+  );
+}
+
+export async function fetchUsageRollup(filter: { from?: string; to?: string; groupBy?: UsageGroupBy; workflowId?: string; userId?: string; projectId?: string; limit?: number } = {}) {
+  return apiRequest<{ window: UsageWindow; groupBy: UsageGroupBy; rows: UsageRollupRow[] }>(
+    `/api/usage/rollup${buildUsageQuery(filter)}`
+  );
+}
+
+export async function fetchRecentUsage(filter: { limit?: number; workflowId?: string; userId?: string; projectId?: string } = {}) {
+  return apiRequest<{ events: UsageEvent[] }>(
+    `/api/usage/recent${buildUsageQuery(filter)}`
+  );
+}
+
+export async function fetchUsagePricing() {
+  return apiRequest<{ pricing: Record<string, Record<string, { inputUsdPer1M: number; outputUsdPer1M: number; cachedInputUsdPer1M?: number }>> }>(
+    "/api/usage/pricing"
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Phase 7.4 — Workflow templates & sharing
 // ---------------------------------------------------------------------------
 

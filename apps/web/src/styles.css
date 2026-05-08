@@ -4506,3 +4506,49 @@ select {
 .chat-pending-image-thumb button { position: absolute; top: -2px; right: -2px; width: 18px; height: 18px; border-radius: 50%; border: none; background: #EF4444; color: white; font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; line-height: 1; }
 .chat-images { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
 .chat-image { max-width: 200px; max-height: 200px; border-radius: 0.5rem; border: 1px solid var(--border); }
+
+/* ----------------------------------------------------------------------- */
+/* Phase 8.2 — FinOps tab                                                  */
+/* ----------------------------------------------------------------------- */
+.finops-tab { display: flex; flex-direction: column; gap: 1.25rem; }
+.finops-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.finops-header h3 { margin: 0 0 0.25rem 0; }
+.finops-subtle { color: var(--text-muted); font-size: 0.875rem; margin: 0; }
+.finops-subtle code { background: var(--surface-2); padding: 0.05rem 0.3rem; border-radius: 0.25rem; }
+.finops-controls { display: flex; align-items: center; gap: 0.75rem; }
+.finops-range { display: inline-flex; gap: 0.125rem; padding: 0.125rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 0.5rem; }
+.finops-range-btn { padding: 0.3rem 0.65rem; font-size: 0.8rem; border: none; background: transparent; color: var(--text-muted); border-radius: 0.375rem; cursor: pointer; transition: all 120ms; }
+.finops-range-btn.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+.finops-refresh { padding: 0.4rem 0.8rem; font-size: 0.85rem; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 0.375rem; cursor: pointer; }
+.finops-refresh:hover:not(:disabled) { background: var(--surface-2); }
+.finops-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
+.finops-error { padding: 0.65rem 0.8rem; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #b91c1c; border-radius: 0.5rem; font-size: 0.875rem; }
+
+.finops-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; }
+.finops-kpi { padding: 0.85rem 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 0.65rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.finops-kpi-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.finops-kpi-value { font-size: 1.45rem; font-weight: 600; color: var(--text); font-feature-settings: "tnum"; }
+.finops-kpi-hint { font-size: 0.75rem; color: var(--text-muted); }
+
+.finops-section { background: var(--surface); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1rem 1.1rem; }
+.finops-section h4 { margin: 0 0 0.65rem 0; font-size: 0.95rem; }
+.finops-section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.65rem; }
+.finops-section-header h4 { margin: 0; }
+.finops-select { padding: 0.3rem 0.5rem; font-size: 0.85rem; border: 1px solid var(--border); border-radius: 0.4rem; background: var(--surface); color: var(--text); }
+
+.finops-bars { display: flex; align-items: flex-end; gap: 0.25rem; height: 130px; padding: 0.25rem 0; overflow-x: auto; }
+.finops-bar-col { flex: 1; min-width: 18px; display: flex; flex-direction: column; align-items: center; gap: 0.2rem; height: 100%; }
+.finops-bar { width: 100%; min-height: 2px; background: linear-gradient(180deg, #3b82f6, #2563eb); border-radius: 2px 2px 0 0; transition: opacity 120ms; }
+.finops-bar:hover { opacity: 0.85; }
+.finops-bar-label { font-size: 0.7rem; color: var(--text-muted); font-feature-settings: "tnum"; white-space: nowrap; }
+
+.finops-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+.finops-table th { text-align: left; padding: 0.5rem 0.6rem; font-weight: 500; color: var(--text-muted); border-bottom: 1px solid var(--border); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.finops-table th.num, .finops-table td.num { text-align: right; font-feature-settings: "tnum"; }
+.finops-table td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); color: var(--text); }
+.finops-table tr:last-child td { border-bottom: none; }
+.finops-status { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500; }
+.finops-status-success { color: #16a34a; }
+.finops-status-error { color: #dc2626; }
+.finops-status-canceled { color: #d97706; }
+

@@ -109,6 +109,14 @@ const envSchema = z.object({
   /** Emit a SERVER span per HTTP request (in addition to per-execution/per-node spans). */
   OTEL_HTTP_SERVER_SPANS: booleanFromEnv.default(true),
 
+  // Phase 8.2 — FinOps cost rollups.
+  // JSON object overlaying `services/usage-service.ts` DEFAULT_PRICING. Same
+  // shape: `{ providerId: { model: { inputUsdPer1M, outputUsdPer1M, cachedInputUsdPer1M? } } }`.
+  // Operators with negotiated rates / self-hosted GPU costs override here.
+  LLM_PRICING_OVERRIDES_JSON: z.string().default(""),
+  /** Retention for usage_events rows. 0 disables pruning. */
+  USAGE_EVENTS_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(365),
+
   // Phase 7.1 — Deployment & HA
   WORKER_MODE: z.enum(["all", "api", "webhook", "worker"]).default("all"),
   HA_ENABLED: booleanFromEnv.default(false),

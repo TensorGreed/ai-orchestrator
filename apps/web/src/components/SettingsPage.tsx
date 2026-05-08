@@ -90,7 +90,14 @@ import {
   type EvalDataset,
   type EvalFixture,
   type EvalRun,
-  type EvalResult
+  type EvalResult,
+  fetchUsageTotals,
+  fetchUsageRollup,
+  fetchRecentUsage,
+  type UsageGroupBy,
+  type UsageRollupRow,
+  type UsageTotals,
+  type UsageEvent
 } from "../lib/api";
 
 type SettingsTab =
@@ -108,7 +115,8 @@ type SettingsTab =
   | "notifications"
   | "mcp-servers"
   | "community-nodes"
-  | "evals";
+  | "evals"
+  | "finops";
 
 interface SettingsPageProps {
   authUser: AuthUser;
@@ -154,7 +162,8 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
     { id: "notifications", label: "Notifications", restricted: !isAdmin },
     { id: "mcp-servers", label: "MCP Servers" },
     { id: "community-nodes", label: "Community Nodes", restricted: !isAdmin },
-    { id: "evals", label: "Evals" }
+    { id: "evals", label: "Evals" },
+    { id: "finops", label: "FinOps", restricted: !isAdmin }
   ];
 
   return (
@@ -212,6 +221,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         {tab === "mcp-servers" && <McpServersTab />}
         {tab === "community-nodes" && isAdmin && <CommunityNodesTab />}
         {tab === "evals" && <EvalsTab />}
+        {tab === "finops" && isAdmin && <FinOpsTab />}
       </div>
     </section>
   );
@@ -3782,6 +3792,224 @@ function EvalRunDetail({ runId, onBack }: { runId: string; onBack: () => void })
           ))}
         </ul>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8.2 — FinOps tab (cost dashboards backed by usage_events)
+// ---------------------------------------------------------------------------
+
+function formatUsd(v: number): string {
+  if (v < 0.01) return `$${v.toFixed(4)}`;
+  if (v < 1) return `$${v.toFixed(3)}`;
+  if (v < 1000) return `$${v.toFixed(2)}`;
+  return `$${(v / 1000).toFixed(1)}k`;
+}
+
+function formatTokens(v: number): string {
+  if (v < 1000) return `${v}`;
+  if (v < 1_000_000) return `${(v / 1000).toFixed(1)}k`;
+  return `${(v / 1_000_000).toFixed(2)}M`;
+}
+
+const FINOPS_RANGES = [
+  { id: "24h", label: "Last 24h", days: 1 },
+  { id: "7d", label: "Last 7 days", days: 7 },
+  { id: "30d", label: "Last 30 days", days: 30 },
+  { id: "90d", label: "Last 90 days", days: 90 }
+] as const;
+
+type FinOpsRangeId = (typeof FINOPS_RANGES)[number]["id"];
+
+function FinOpsTab() {
+  const [rangeId, setRangeId] = useState<FinOpsRangeId>("30d");
+  const [groupBy, setGroupBy] = useState<UsageGroupBy>("workflow");
+  const [totals, setTotals] = useState<UsageTotals | null>(null);
+  const [series, setSeries] = useState<UsageRollupRow[]>([]);
+  const [breakdown, setBreakdown] = useState<UsageRollupRow[]>([]);
+  const [recent, setRecent] = useState<UsageEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const window = useMemo(() => {
+    const range = FINOPS_RANGES.find((r) => r.id === rangeId) ?? FINOPS_RANGES[2];
+    const to = new Date().toISOString();
+    const from = new Date(Date.now() - range.days * 24 * 60 * 60 * 1000).toISOString();
+    return { from, to };
+  }, [rangeId]);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [t, s, b, r] = await Promise.all([
+        fetchUsageTotals(window),
+        fetchUsageRollup({ ...window, groupBy: rangeId === "24h" ? "hour" : "day", limit: 200 }),
+        fetchUsageRollup({ ...window, groupBy, limit: 20 }),
+        fetchRecentUsage({ limit: 25 })
+      ]);
+      setTotals(t.totals);
+      setSeries(s.rows);
+      setBreakdown(b.rows);
+      setRecent(r.events);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [window, groupBy, rangeId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const seriesMaxCost = Math.max(...series.map((r) => r.costUsd), 0.0001);
+
+  return (
+    <div className="finops-tab">
+      <header className="finops-header">
+        <div>
+          <h3>FinOps — cost &amp; token usage</h3>
+          <p className="finops-subtle">
+            Aggregated from <code>_telemetry</code> recorded on every llm_call / agent_orchestrator / supervisor_node run. Cost uses list-price pricing — override per-tenant via <code>LLM_PRICING_OVERRIDES_JSON</code>.
+          </p>
+        </div>
+        <div className="finops-controls">
+          <div className="finops-range" role="tablist" aria-label="Time range">
+            {FINOPS_RANGES.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                role="tab"
+                aria-selected={rangeId === r.id}
+                className={rangeId === r.id ? "finops-range-btn active" : "finops-range-btn"}
+                onClick={() => setRangeId(r.id)}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="finops-refresh" onClick={() => void refresh()} disabled={loading}>
+            {loading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+      </header>
+
+      {error && <div className="finops-error">{error}</div>}
+
+      <div className="finops-kpis">
+        <FinOpsKpi label="Total spend" value={totals ? formatUsd(totals.costUsd) : "—"} hint={totals ? `${totals.executions} executions` : undefined} />
+        <FinOpsKpi label="Total tokens" value={totals ? formatTokens(totals.totalTokens) : "—"} hint={totals ? `${formatTokens(totals.inputTokens)} in / ${formatTokens(totals.outputTokens)} out` : undefined} />
+        <FinOpsKpi label="LLM calls" value={totals ? totals.llmCallCount.toLocaleString() : "—"} hint={totals && totals.executions ? `${(totals.llmCallCount / totals.executions).toFixed(1)} per exec` : undefined} />
+        <FinOpsKpi label="Avg latency" value={totals ? `${totals.avgDurationMs} ms` : "—"} hint="per execution" />
+        <FinOpsKpi label="Cached tokens" value={totals ? formatTokens(totals.cachedInputTokens) : "—"} hint={totals && totals.inputTokens ? `${((totals.cachedInputTokens / totals.inputTokens) * 100).toFixed(0)}% of input` : undefined} />
+      </div>
+
+      <section className="finops-section">
+        <h4>Spend over time</h4>
+        {series.length === 0 ? (
+          <p className="finops-subtle">No usage in this window yet.</p>
+        ) : (
+          <div className="finops-bars" role="img" aria-label="Spend per bucket">
+            {series.map((row) => {
+              const pct = Math.max(2, (row.costUsd / seriesMaxCost) * 100);
+              return (
+                <div key={row.bucket} className="finops-bar-col" title={`${row.bucket}\n${formatUsd(row.costUsd)} / ${formatTokens(row.totalTokens)} tok / ${row.executions} execs`}>
+                  <div className="finops-bar" style={{ height: `${pct}%` }} />
+                  <div className="finops-bar-label">{row.bucket.split("T")[0]?.slice(5) ?? row.bucket}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <section className="finops-section">
+        <div className="finops-section-header">
+          <h4>Breakdown</h4>
+          <select value={groupBy} onChange={(e) => setGroupBy(e.target.value as UsageGroupBy)} className="finops-select">
+            <option value="workflow">By workflow</option>
+            <option value="user">By user</option>
+            <option value="provider">By provider / model</option>
+            <option value="project">By project</option>
+          </select>
+        </div>
+        {breakdown.length === 0 ? (
+          <p className="finops-subtle">No data.</p>
+        ) : (
+          <table className="finops-table">
+            <thead>
+              <tr>
+                <th>{groupBy === "provider" ? "Provider / Model" : groupBy === "user" ? "User" : groupBy === "project" ? "Project" : "Workflow"}</th>
+                <th className="num">Executions</th>
+                <th className="num">Tokens</th>
+                <th className="num">LLM calls</th>
+                <th className="num">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {breakdown.map((row) => (
+                <tr key={row.bucket}>
+                  <td>
+                    {groupBy === "workflow" ? (row.workflowName ?? row.workflowId ?? row.bucket) :
+                     groupBy === "user" ? (row.userEmail ?? row.userId ?? "(anonymous)") :
+                     row.bucket}
+                  </td>
+                  <td className="num">{row.executions}</td>
+                  <td className="num">{formatTokens(row.totalTokens)}</td>
+                  <td className="num">{row.llmCallCount}</td>
+                  <td className="num">{formatUsd(row.costUsd)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="finops-section">
+        <h4>Recent executions</h4>
+        {recent.length === 0 ? (
+          <p className="finops-subtle">No recent executions.</p>
+        ) : (
+          <table className="finops-table">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Workflow</th>
+                <th>Trigger</th>
+                <th>Status</th>
+                <th className="num">Tokens</th>
+                <th className="num">Cost</th>
+                <th className="num">Latency</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recent.map((ev) => (
+                <tr key={ev.id}>
+                  <td title={ev.createdAt}>{formatDate(ev.createdAt)}</td>
+                  <td>{ev.workflowName ?? ev.workflowId}</td>
+                  <td>{ev.triggerType ?? "—"}</td>
+                  <td className={`finops-status finops-status-${ev.status}`}>{ev.status}</td>
+                  <td className="num">{formatTokens(ev.totalTokens)}</td>
+                  <td className="num">{formatUsd(ev.costUsd)}</td>
+                  <td className="num">{ev.durationMs} ms</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function FinOpsKpi({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="finops-kpi">
+      <div className="finops-kpi-label">{label}</div>
+      <div className="finops-kpi-value">{value}</div>
+      {hint && <div className="finops-kpi-hint">{hint}</div>}
     </div>
   );
 }

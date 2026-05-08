@@ -115,6 +115,8 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     OTEL_METRICS_ENABLED: false,
     OTEL_METRICS_PUSH_INTERVAL_MS: 60000,
     OTEL_HTTP_SERVER_SPANS: false,
+    LLM_PRICING_OVERRIDES_JSON: "",
+    USAGE_EVENTS_RETENTION_DAYS: 365,
     ...overrides
   };
 }

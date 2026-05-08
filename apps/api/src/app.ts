@@ -65,6 +65,7 @@ import { LeaderElectionService } from "./services/leader-election-service";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
+import { UsageService } from "./services/usage-service";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -1477,6 +1478,42 @@ export function createApp(
       }
     });
 
+    // Phase 8.2 — record FinOps usage event. nodeResults from runWorkflowExecution
+    // is an Array<NodeExecutionResult>; flatten to Record<nodeId, output> so
+    // UsageService can scan per-node `_telemetry` blobs without re-implementing
+    // the array shape.
+    try {
+      const nodeOutputs: Record<string, unknown> = {};
+      for (const r of input.result.nodeResults as Array<{ nodeId?: string; output?: unknown }>) {
+        if (r && typeof r === "object" && typeof r.nodeId === "string") {
+          nodeOutputs[r.nodeId] = r.output;
+        }
+      }
+      usageService.recordExecution({
+        executionId: input.executionId,
+        workflowId: input.workflow.id,
+        workflowName: input.workflow.name,
+        userEmail:
+          typeof input.triggeredBy === "string" && input.triggeredBy.includes("@")
+            ? input.triggeredBy
+            : null,
+        userId:
+          typeof input.triggeredBy === "string" && !input.triggeredBy.includes("@")
+            ? input.triggeredBy
+            : null,
+        projectId: input.workflow.projectId ?? null,
+        triggerType: input.triggerType ?? null,
+        status: input.result.status,
+        durationMs: toDurationMs(input.result.startedAt, input.result.completedAt) ?? 0,
+        nodeResults: nodeOutputs
+      });
+    } catch (err) {
+      app.log.warn(
+        { error: err instanceof Error ? err.message : String(err), executionId: input.executionId },
+        "Failed to record usage event"
+      );
+    }
+
     app.log.info(
       {
         executionId: input.executionId,
@@ -2020,6 +2057,11 @@ export function createApp(
   }
   secretService.attachExternalSecrets(externalSecretsService);
   const auditService = new AuditService(store, { enabled: config.AUDIT_LOG_ENABLED });
+  const usageService = new UsageService(store, { pricingOverridesJson: config.LLM_PRICING_OVERRIDES_JSON });
+  usageService.setLogger({
+    info: (msg, fields) => app.log.info(fields ?? {}, msg),
+    warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+  });
   const logStreamingService = new LogStreamingService(store, config.SECRET_MASTER_KEY_BASE64, {
     enabled: config.LOG_STREAM_ENABLED,
     flushIntervalMs: config.LOG_STREAM_FLUSH_INTERVAL_MS,
@@ -2601,6 +2643,84 @@ export function createApp(
     }
     const limit = Math.min(200, Math.max(1, Number(query?.limit ?? 50)));
     return { spans: tracingService.recentSpans(limit) };
+  });
+
+  // Phase 8.2 — FinOps endpoints. Admin-only; the dashboard reads through
+  // these for KPI cards, time-series charts, and dimensional rollups.
+  // Default window is the last 30 days. The query layer caps result rows
+  // at 500 to keep responses bounded.
+  const parseUsageWindow = (query: { from?: string; to?: string } | undefined): { from: string; to: string } => {
+    const now = new Date();
+    const defaultTo = now.toISOString();
+    const defaultFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const from = query?.from && !isNaN(Date.parse(query.from)) ? new Date(query.from).toISOString() : defaultFrom;
+    const to = query?.to && !isNaN(Date.parse(query.to)) ? new Date(query.to).toISOString() : defaultTo;
+    return { from, to };
+  };
+
+  app.get("/api/usage/totals", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const query = request.query as { from?: string; to?: string; workflowId?: string; userId?: string; projectId?: string } | undefined;
+    const window = parseUsageWindow(query);
+    return {
+      window,
+      totals: store.queryUsageTotals({
+        ...window,
+        workflowId: query?.workflowId,
+        userId: query?.userId,
+        projectId: query?.projectId
+      })
+    };
+  });
+
+  app.get("/api/usage/rollup", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const query = request.query as {
+      from?: string; to?: string;
+      groupBy?: "day" | "hour" | "workflow" | "user" | "project" | "provider";
+      workflowId?: string; userId?: string; projectId?: string;
+      limit?: string;
+    } | undefined;
+    const window = parseUsageWindow(query);
+    const groupBy = query?.groupBy ?? "day";
+    if (!["day", "hour", "workflow", "user", "project", "provider"].includes(groupBy)) {
+      reply.code(400);
+      return { error: `invalid groupBy: ${groupBy}` };
+    }
+    return {
+      window,
+      groupBy,
+      rows: store.queryUsageRollup({
+        ...window,
+        groupBy,
+        workflowId: query?.workflowId,
+        userId: query?.userId,
+        projectId: query?.projectId,
+        limit: query?.limit ? Number(query.limit) : undefined
+      })
+    };
+  });
+
+  app.get("/api/usage/recent", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const query = request.query as { limit?: string; workflowId?: string; userId?: string; projectId?: string } | undefined;
+    return {
+      events: store.listUsageEvents({
+        limit: query?.limit ? Number(query.limit) : 50,
+        workflowId: query?.workflowId,
+        userId: query?.userId,
+        projectId: query?.projectId
+      })
+    };
+  });
+
+  app.get("/api/usage/pricing", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    return { pricing: usageService.getPricing() };
   });
 
   // Phase 7.1 — HA status

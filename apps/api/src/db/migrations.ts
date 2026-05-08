@@ -749,6 +749,40 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS eval_fixtures;
       DROP TABLE IF EXISTS eval_datasets;
     `
+  },
+  {
+    version: 15,
+    description: "Phase 8.2 — usage_events for FinOps cost rollups (one row per execution)",
+    up: `
+      CREATE TABLE IF NOT EXISTS usage_events (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        user_id TEXT,
+        user_email TEXT,
+        project_id TEXT,
+        trigger_type TEXT,
+        status TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        llm_call_count INTEGER NOT NULL DEFAULT 0,
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        providers_json TEXT,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_usage_events_created_at ON usage_events(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_usage_events_workflow_created ON usage_events(workflow_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_usage_events_user_created ON usage_events(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_usage_events_project_created ON usage_events(project_id, created_at DESC);
+    `,
+    down: `
+      DROP TABLE IF EXISTS usage_events;
+    `
   }
 ];
 

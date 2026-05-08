@@ -885,6 +885,32 @@ export class SqliteStore {
       );
       CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id);
       CREATE INDEX IF NOT EXISTS idx_eval_results_fixture ON eval_results(fixture_id);
+
+      -- Phase 8.2 — usage_events (FinOps cost rollups)
+      CREATE TABLE IF NOT EXISTS usage_events (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        user_id TEXT,
+        user_email TEXT,
+        project_id TEXT,
+        trigger_type TEXT,
+        status TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        llm_call_count INTEGER NOT NULL DEFAULT 0,
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        providers_json TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_usage_events_created_at ON usage_events(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_usage_events_workflow_created ON usage_events(workflow_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_usage_events_user_created ON usage_events(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_usage_events_project_created ON usage_events(project_id, created_at DESC);
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -5150,6 +5176,408 @@ export class SqliteStore {
       tokenInput: r.token_input !== null && r.token_input !== undefined ? toNumber(r.token_input) : null,
       tokenOutput: r.token_output !== null && r.token_output !== undefined ? toNumber(r.token_output) : null,
       tokenTotal: r.token_total !== null && r.token_total !== undefined ? toNumber(r.token_total) : null
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 8.2 — usage_events (FinOps cost rollups)
+  // ---------------------------------------------------------------------------
+
+  writeUsageEvent(input: {
+    id: string;
+    executionId: string;
+    workflowId: string;
+    workflowName?: string | null;
+    userId?: string | null;
+    userEmail?: string | null;
+    projectId?: string | null;
+    triggerType?: string | null;
+    status: string;
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    totalTokens: number;
+    costUsd: number;
+    llmCallCount: number;
+    durationMs: number;
+    providers: Array<{ providerId: string; model: string; calls: number }>;
+    createdAt?: string;
+  }): void {
+    this.exec(
+      `INSERT INTO usage_events (
+         id, execution_id, workflow_id, workflow_name, user_id, user_email,
+         project_id, trigger_type, status, input_tokens, output_tokens,
+         cached_input_tokens, total_tokens, cost_usd, llm_call_count,
+         duration_ms, providers_json, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.executionId,
+        input.workflowId,
+        input.workflowName ?? null,
+        input.userId ?? null,
+        input.userEmail ?? null,
+        input.projectId ?? null,
+        input.triggerType ?? null,
+        input.status,
+        input.inputTokens,
+        input.outputTokens,
+        input.cachedInputTokens,
+        input.totalTokens,
+        input.costUsd,
+        input.llmCallCount,
+        input.durationMs,
+        JSON.stringify(input.providers),
+        input.createdAt ?? new Date().toISOString()
+      ]
+    );
+    this.persist();
+  }
+
+  /**
+   * Aggregate usage over a time window. `groupBy` switches between time-series
+   * buckets (`day` / `hour`) and dimensional rollups (`workflow` / `user` /
+   * `project` / `provider`). Returns rows with summed tokens + cost.
+   */
+  queryUsageRollup(input: {
+    from: string;
+    to: string;
+    groupBy: "day" | "hour" | "workflow" | "user" | "project" | "provider";
+    workflowId?: string;
+    userId?: string;
+    projectId?: string;
+    limit?: number;
+  }): Array<{
+    bucket: string;
+    workflowId?: string | null;
+    workflowName?: string | null;
+    userId?: string | null;
+    userEmail?: string | null;
+    projectId?: string | null;
+    providerId?: string | null;
+    model?: string | null;
+    executions: number;
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    totalTokens: number;
+    costUsd: number;
+    llmCallCount: number;
+    avgDurationMs: number;
+  }> {
+    const filters: string[] = ["created_at >= ?", "created_at < ?"];
+    const params: Array<string | number> = [input.from, input.to];
+    if (input.workflowId) {
+      filters.push("workflow_id = ?");
+      params.push(input.workflowId);
+    }
+    if (input.userId) {
+      filters.push("user_id = ?");
+      params.push(input.userId);
+    }
+    if (input.projectId) {
+      filters.push("project_id = ?");
+      params.push(input.projectId);
+    }
+    const where = `WHERE ${filters.join(" AND ")}`;
+    const limit = Math.min(input.limit ?? 100, 500);
+
+    if (input.groupBy === "day" || input.groupBy === "hour") {
+      const fmt = input.groupBy === "day" ? "%Y-%m-%d" : "%Y-%m-%dT%H:00:00";
+      const rows = this.queryAll<{
+        bucket: string;
+        execs: number;
+        ti: number; to: number; ci: number; tt: number;
+        cost: number; calls: number; avgd: number;
+      }>(
+        `SELECT strftime('${fmt}', created_at) AS bucket,
+                COUNT(*) AS execs,
+                SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
+                SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
+                SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
+                AVG(duration_ms) AS avgd
+         FROM usage_events ${where}
+         GROUP BY bucket
+         ORDER BY bucket ASC
+         LIMIT ${limit}`,
+        params
+      );
+      return rows.map((r) => ({
+        bucket: toString(r.bucket),
+        executions: toNumber(r.execs),
+        inputTokens: toNumber(r.ti ?? 0),
+        outputTokens: toNumber(r.to ?? 0),
+        cachedInputTokens: toNumber(r.ci ?? 0),
+        totalTokens: toNumber(r.tt ?? 0),
+        costUsd: Number(r.cost ?? 0),
+        llmCallCount: toNumber(r.calls ?? 0),
+        avgDurationMs: Math.round(Number(r.avgd ?? 0))
+      }));
+    }
+
+    if (input.groupBy === "workflow") {
+      const rows = this.queryAll<{
+        workflow_id: string; workflow_name: string | null;
+        execs: number; ti: number; to: number; ci: number; tt: number;
+        cost: number; calls: number; avgd: number;
+      }>(
+        `SELECT workflow_id, MAX(workflow_name) AS workflow_name,
+                COUNT(*) AS execs,
+                SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
+                SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
+                SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
+                AVG(duration_ms) AS avgd
+         FROM usage_events ${where}
+         GROUP BY workflow_id
+         ORDER BY cost DESC, tt DESC
+         LIMIT ${limit}`,
+        params
+      );
+      return rows.map((r) => ({
+        bucket: toString(r.workflow_id),
+        workflowId: toString(r.workflow_id),
+        workflowName: r.workflow_name ? toString(r.workflow_name) : null,
+        executions: toNumber(r.execs),
+        inputTokens: toNumber(r.ti ?? 0),
+        outputTokens: toNumber(r.to ?? 0),
+        cachedInputTokens: toNumber(r.ci ?? 0),
+        totalTokens: toNumber(r.tt ?? 0),
+        costUsd: Number(r.cost ?? 0),
+        llmCallCount: toNumber(r.calls ?? 0),
+        avgDurationMs: Math.round(Number(r.avgd ?? 0))
+      }));
+    }
+
+    if (input.groupBy === "user") {
+      const rows = this.queryAll<{
+        user_id: string | null; user_email: string | null;
+        execs: number; ti: number; to: number; ci: number; tt: number;
+        cost: number; calls: number; avgd: number;
+      }>(
+        `SELECT user_id, MAX(user_email) AS user_email,
+                COUNT(*) AS execs,
+                SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
+                SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
+                SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
+                AVG(duration_ms) AS avgd
+         FROM usage_events ${where}
+         GROUP BY user_id
+         ORDER BY cost DESC, tt DESC
+         LIMIT ${limit}`,
+        params
+      );
+      return rows.map((r) => ({
+        bucket: r.user_id ? toString(r.user_id) : "(anonymous)",
+        userId: r.user_id ? toString(r.user_id) : null,
+        userEmail: r.user_email ? toString(r.user_email) : null,
+        executions: toNumber(r.execs),
+        inputTokens: toNumber(r.ti ?? 0),
+        outputTokens: toNumber(r.to ?? 0),
+        cachedInputTokens: toNumber(r.ci ?? 0),
+        totalTokens: toNumber(r.tt ?? 0),
+        costUsd: Number(r.cost ?? 0),
+        llmCallCount: toNumber(r.calls ?? 0),
+        avgDurationMs: Math.round(Number(r.avgd ?? 0))
+      }));
+    }
+
+    if (input.groupBy === "project") {
+      const rows = this.queryAll<{
+        project_id: string | null;
+        execs: number; ti: number; to: number; ci: number; tt: number;
+        cost: number; calls: number; avgd: number;
+      }>(
+        `SELECT project_id,
+                COUNT(*) AS execs,
+                SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
+                SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
+                SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
+                AVG(duration_ms) AS avgd
+         FROM usage_events ${where}
+         GROUP BY project_id
+         ORDER BY cost DESC, tt DESC
+         LIMIT ${limit}`,
+        params
+      );
+      return rows.map((r) => ({
+        bucket: r.project_id ? toString(r.project_id) : "(none)",
+        projectId: r.project_id ? toString(r.project_id) : null,
+        executions: toNumber(r.execs),
+        inputTokens: toNumber(r.ti ?? 0),
+        outputTokens: toNumber(r.to ?? 0),
+        cachedInputTokens: toNumber(r.ci ?? 0),
+        totalTokens: toNumber(r.tt ?? 0),
+        costUsd: Number(r.cost ?? 0),
+        llmCallCount: toNumber(r.calls ?? 0),
+        avgDurationMs: Math.round(Number(r.avgd ?? 0))
+      }));
+    }
+
+    // groupBy === "provider": providers_json is per-execution, so we need to
+    // unfold it client-side. For typical fleet sizes (<10k events / window)
+    // this is fine; for large fleets a denormalized usage_event_providers
+    // table is the obvious follow-up.
+    const rows = this.queryAll<{
+      providers_json: string | null;
+      ti: number; to: number; ci: number; tt: number;
+      cost: number; calls: number; duration: number;
+    }>(
+      `SELECT providers_json, input_tokens AS ti, output_tokens AS "to",
+              cached_input_tokens AS ci, total_tokens AS tt,
+              cost_usd AS cost, llm_call_count AS calls, duration_ms AS duration
+       FROM usage_events ${where}`,
+      params
+    );
+    type Agg = {
+      providerId: string; model: string;
+      executions: number; inputTokens: number; outputTokens: number;
+      cachedInputTokens: number; totalTokens: number; costUsd: number;
+      llmCallCount: number; totalDurationMs: number;
+    };
+    const agg = new Map<string, Agg>();
+    for (const r of rows) {
+      const providers = r.providers_json
+        ? (JSON.parse(toString(r.providers_json)) as Array<{ providerId: string; model: string; calls: number }>)
+        : [];
+      if (providers.length === 0) continue;
+      const totalCalls = providers.reduce((s, p) => s + (p.calls || 0), 0) || 1;
+      for (const p of providers) {
+        const key = `${p.providerId}::${p.model}`;
+        const share = (p.calls || 0) / totalCalls;
+        const cur = agg.get(key) ?? {
+          providerId: p.providerId, model: p.model,
+          executions: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0,
+          totalTokens: 0, costUsd: 0, llmCallCount: 0, totalDurationMs: 0
+        };
+        cur.executions += 1;
+        cur.inputTokens += Math.round(toNumber(r.ti ?? 0) * share);
+        cur.outputTokens += Math.round(toNumber(r.to ?? 0) * share);
+        cur.cachedInputTokens += Math.round(toNumber(r.ci ?? 0) * share);
+        cur.totalTokens += Math.round(toNumber(r.tt ?? 0) * share);
+        cur.costUsd += Number(r.cost ?? 0) * share;
+        cur.llmCallCount += p.calls || 0;
+        cur.totalDurationMs += Math.round(toNumber(r.duration ?? 0) * share);
+        agg.set(key, cur);
+      }
+    }
+    return Array.from(agg.values())
+      .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens)
+      .slice(0, limit)
+      .map((a) => ({
+        bucket: `${a.providerId} / ${a.model}`,
+        providerId: a.providerId,
+        model: a.model,
+        executions: a.executions,
+        inputTokens: a.inputTokens,
+        outputTokens: a.outputTokens,
+        cachedInputTokens: a.cachedInputTokens,
+        totalTokens: a.totalTokens,
+        costUsd: a.costUsd,
+        llmCallCount: a.llmCallCount,
+        avgDurationMs: a.executions > 0 ? Math.round(a.totalDurationMs / a.executions) : 0
+      }));
+  }
+
+  /**
+   * Single-row totals for the dashboard KPI cards.
+   */
+  queryUsageTotals(input: {
+    from: string;
+    to: string;
+    workflowId?: string;
+    userId?: string;
+    projectId?: string;
+  }): {
+    executions: number;
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+    totalTokens: number;
+    costUsd: number;
+    llmCallCount: number;
+    avgDurationMs: number;
+  } {
+    const filters: string[] = ["created_at >= ?", "created_at < ?"];
+    const params: Array<string | number> = [input.from, input.to];
+    if (input.workflowId) { filters.push("workflow_id = ?"); params.push(input.workflowId); }
+    if (input.userId) { filters.push("user_id = ?"); params.push(input.userId); }
+    if (input.projectId) { filters.push("project_id = ?"); params.push(input.projectId); }
+    const row = this.queryOne<{
+      execs: number; ti: number; to: number; ci: number; tt: number;
+      cost: number; calls: number; avgd: number;
+    }>(
+      `SELECT COUNT(*) AS execs,
+              SUM(input_tokens) AS ti, SUM(output_tokens) AS "to",
+              SUM(cached_input_tokens) AS ci, SUM(total_tokens) AS tt,
+              SUM(cost_usd) AS cost, SUM(llm_call_count) AS calls,
+              AVG(duration_ms) AS avgd
+       FROM usage_events WHERE ${filters.join(" AND ")}`,
+      params
+    );
+    return {
+      executions: toNumber(row?.execs ?? 0),
+      inputTokens: toNumber(row?.ti ?? 0),
+      outputTokens: toNumber(row?.to ?? 0),
+      cachedInputTokens: toNumber(row?.ci ?? 0),
+      totalTokens: toNumber(row?.tt ?? 0),
+      costUsd: Number(row?.cost ?? 0),
+      llmCallCount: toNumber(row?.calls ?? 0),
+      avgDurationMs: Math.round(Number(row?.avgd ?? 0))
+    };
+  }
+
+  /**
+   * Recent usage events (with cost), most-recent first. Powers the FinOps
+   * "recent runs" panel.
+   */
+  listUsageEvents(input: { limit?: number; workflowId?: string; userId?: string; projectId?: string } = {}): Array<{
+    id: string; executionId: string; workflowId: string; workflowName: string | null;
+    userId: string | null; userEmail: string | null; projectId: string | null;
+    triggerType: string | null; status: string;
+    inputTokens: number; outputTokens: number; cachedInputTokens: number;
+    totalTokens: number; costUsd: number; llmCallCount: number; durationMs: number;
+    providers: Array<{ providerId: string; model: string; calls: number }>;
+    createdAt: string;
+  }> {
+    const filters: string[] = [];
+    const params: Array<string | number> = [];
+    if (input.workflowId) { filters.push("workflow_id = ?"); params.push(input.workflowId); }
+    if (input.userId) { filters.push("user_id = ?"); params.push(input.userId); }
+    if (input.projectId) { filters.push("project_id = ?"); params.push(input.projectId); }
+    const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const limit = Math.min(input.limit ?? 50, 500);
+    const rows = this.queryAll<{
+      id: string; execution_id: string; workflow_id: string; workflow_name: string | null;
+      user_id: string | null; user_email: string | null; project_id: string | null;
+      trigger_type: string | null; status: string;
+      input_tokens: number; output_tokens: number; cached_input_tokens: number;
+      total_tokens: number; cost_usd: number; llm_call_count: number; duration_ms: number;
+      providers_json: string | null; created_at: string;
+    }>(
+      `SELECT * FROM usage_events ${where} ORDER BY created_at DESC LIMIT ${limit}`,
+      params
+    );
+    return rows.map((r) => ({
+      id: toString(r.id),
+      executionId: toString(r.execution_id),
+      workflowId: toString(r.workflow_id),
+      workflowName: r.workflow_name ? toString(r.workflow_name) : null,
+      userId: r.user_id ? toString(r.user_id) : null,
+      userEmail: r.user_email ? toString(r.user_email) : null,
+      projectId: r.project_id ? toString(r.project_id) : null,
+      triggerType: r.trigger_type ? toString(r.trigger_type) : null,
+      status: toString(r.status),
+      inputTokens: toNumber(r.input_tokens),
+      outputTokens: toNumber(r.output_tokens),
+      cachedInputTokens: toNumber(r.cached_input_tokens),
+      totalTokens: toNumber(r.total_tokens),
+      costUsd: Number(r.cost_usd),
+      llmCallCount: toNumber(r.llm_call_count),
+      durationMs: toNumber(r.duration_ms),
+      providers: r.providers_json
+        ? (JSON.parse(toString(r.providers_json)) as Array<{ providerId: string; model: string; calls: number }>)
+        : [],
+      createdAt: toString(r.created_at)
     }));
   }
 
