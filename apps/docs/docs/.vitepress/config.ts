@@ -60,6 +60,7 @@ export default defineConfig({
         items: [
           { text: "Core Nodes", link: "/nodes/core-nodes" },
           { text: "Azure Nodes", link: "/nodes/azure-nodes" },
+          { text: "Chart (Vega-Lite)", link: "/nodes/chart" },
           { text: "Knowledge Bases (built-in)", link: "/nodes/knowledge-bases" },
           { text: "Vector Stores", link: "/nodes/vector-stores" },
           {

@@ -42,6 +42,7 @@ export type WorkflowNodeType =
   | "rag_retrieve"
   | "rerank"
   | "extract_citations"
+  | "chart"
   | "connector_source"
   | "google_drive_source"
   | "azure_storage"

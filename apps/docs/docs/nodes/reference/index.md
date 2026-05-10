@@ -10,7 +10,7 @@ Auto-generated from the canonical `nodeDefinitions` registry in
 config field, every default value — kept in lock-step with the running
 code by the docs build.
 
-134 node types across 8 categories.
+135 node types across 8 categories.
 
 ## Categories
 
@@ -21,4 +21,4 @@ code by the docs build.
 - [RAG](/nodes/reference/rag) — Retrieval-Augmented Generation: embedders, vector stores, document loaders, retrievers. (5 nodes)
 - [Connector](/nodes/reference/connector) — External system integrations — HTTP, SQL, NoSQL, cloud SDKs, SaaS APIs. (40 nodes)
 - [Utility](/nodes/reference/utility) — DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait. (40 nodes)
-- [Output](/nodes/reference/output) — Terminal nodes that shape the workflow's response payload. (4 nodes)
+- [Output](/nodes/reference/output) — Terminal nodes that shape the workflow's response payload. (5 nodes)

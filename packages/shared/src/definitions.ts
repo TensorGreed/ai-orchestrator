@@ -791,6 +791,38 @@ export const nodeDefinitions: NodeDefinition[] = [
     sampleConfig: { queryTemplate: "{{user_prompt}}", topK: 3, embedderId: "token-embedder", vectorStoreId: "in-memory-vector-store" }
   },
   {
+    type: "chart",
+    label: "Chart",
+    category: "Output",
+    description: "Renders a Vega-Lite chart spec to SVG (server-side, no browser). Pair with pdf_output for branded reports. The same spec format Altair / Streamlit / Observable / Vega Editor use, so an LLM can produce specs directly.",
+    configSchema: {
+      type: "object",
+      properties: {
+        spec: { type: "object" },
+        specTemplate: { type: "string" },
+        dataPath: { type: "string" },
+        width: { type: "number" },
+        height: { type: "number" },
+        theme: { type: "string" },
+        outputKey: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      spec: {
+        $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+        mark: "bar",
+        encoding: {
+          x: { field: "category", type: "nominal" },
+          y: { field: "count", type: "quantitative" }
+        }
+      },
+      dataPath: "results",
+      width: 480,
+      height: 300,
+      outputKey: "chart"
+    }
+  },
+  {
     type: "extract_citations",
     label: "Extract Citations",
     category: "RAG",

@@ -1,0 +1,125 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-report-with-charts-flow",
+    "name": "Report with Charts (PDF)",
+    "description": "Set Node (sample data) -> 3x Chart nodes (Vega-Lite) -> Prompt Template (HTML report) -> PDF Output. Demonstrates the chart node — Vega-Lite specs render to SVG server-side, embed cleanly into HTML, and chain into pdf_output for a branded report. Drop-in pattern for the CipherTrust / keys-aging scenario: replace the inline data with an upstream MCP tool result.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "data_1",
+        "type": "set_node",
+        "name": "Sample Data",
+        "position": { "x": 70, "y": 220 },
+        "config": {
+          "assignments": [
+            {
+              "key": "byCloud",
+              "valueTemplate": "[{\"category\":\"AWS\",\"count\":42},{\"category\":\"Azure\",\"count\":31},{\"category\":\"GCP\",\"count\":18},{\"category\":\"On-prem\",\"count\":9}]"
+            },
+            {
+              "key": "byAlgorithm",
+              "valueTemplate": "[{\"algorithm\":\"AES-256\",\"count\":58},{\"algorithm\":\"RSA-2048\",\"count\":24},{\"algorithm\":\"ECDSA\",\"count\":12},{\"algorithm\":\"AES-128\",\"count\":6}]"
+            },
+            {
+              "key": "ageing",
+              "valueTemplate": "[{\"bucket\":\"<30d\",\"count\":12},{\"bucket\":\"30-90d\",\"count\":24},{\"bucket\":\"90-180d\",\"count\":31},{\"bucket\":\"180-365d\",\"count\":22},{\"bucket\":\">365d\",\"count\":11}]"
+            }
+          ]
+        }
+      },
+      {
+        "id": "chart_cloud",
+        "type": "chart",
+        "name": "Keys by Cloud",
+        "position": { "x": 360, "y": 100 },
+        "config": {
+          "spec": {
+            "mark": { "type": "bar", "color": "#0066CC" },
+            "encoding": {
+              "x": { "field": "category", "type": "nominal", "title": "Cloud" },
+              "y": { "field": "count", "type": "quantitative", "title": "Keys" }
+            }
+          },
+          "dataPath": "byCloud",
+          "width": 360,
+          "height": 220,
+          "outputKey": "cloudChart"
+        }
+      },
+      {
+        "id": "chart_algo",
+        "type": "chart",
+        "name": "Keys by Algorithm",
+        "position": { "x": 360, "y": 340 },
+        "config": {
+          "spec": {
+            "mark": { "type": "arc", "innerRadius": 50 },
+            "encoding": {
+              "theta": { "field": "count", "type": "quantitative" },
+              "color": { "field": "algorithm", "type": "nominal", "scale": { "scheme": "blues" } }
+            }
+          },
+          "dataPath": "byAlgorithm",
+          "width": 360,
+          "height": 220,
+          "outputKey": "algoChart"
+        }
+      },
+      {
+        "id": "chart_age",
+        "type": "chart",
+        "name": "Keys by Age",
+        "position": { "x": 360, "y": 580 },
+        "config": {
+          "spec": {
+            "mark": { "type": "bar", "color": "#003F7D" },
+            "encoding": {
+              "x": { "field": "bucket", "type": "nominal", "sort": null, "title": "Age" },
+              "y": { "field": "count", "type": "quantitative", "title": "Keys" }
+            }
+          },
+          "dataPath": "ageing",
+          "width": 360,
+          "height": 220,
+          "outputKey": "ageChart"
+        }
+      },
+      {
+        "id": "report",
+        "type": "prompt_template",
+        "name": "HTML Report",
+        "position": { "x": 720, "y": 340 },
+        "config": {
+          "template": "<!doctype html><html><head><meta charset=\"utf-8\"><title>Key Inventory Report</title><style>body{font-family:Inter,system-ui,sans-serif;margin:32px;color:#0f172a}h1{color:#003F7D;border-bottom:3px solid #0066CC;padding-bottom:8px}h2{color:#003F7D;margin-top:32px}.chart{margin:16px 0;padding:16px;background:#f8fafc;border-radius:8px}</style></head><body><h1>Key Inventory Report</h1><h2>Keys by Cloud Provider</h2><div class=\"chart\">{{cloudChart.svg}}</div><h2>Keys by Algorithm</h2><div class=\"chart\">{{algoChart.svg}}</div><h2>Key Ageing</h2><div class=\"chart\">{{ageChart.svg}}</div></body></html>",
+          "outputKey": "html"
+        }
+      },
+      {
+        "id": "pdf",
+        "type": "pdf_output",
+        "name": "PDF",
+        "position": { "x": 1020, "y": 340 },
+        "config": {
+          "renderMode": "html",
+          "inputKey": "html",
+          "pageFormat": "A4",
+          "filenameTemplate": "key-report-{{session_id}}.pdf",
+          "outputKey": "pdf"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "e1", "source": "data_1", "target": "chart_cloud" },
+      { "id": "e2", "source": "data_1", "target": "chart_algo" },
+      { "id": "e3", "source": "data_1", "target": "chart_age" },
+      { "id": "e4", "source": "chart_cloud", "target": "report" },
+      { "id": "e5", "source": "chart_algo", "target": "report" },
+      { "id": "e6", "source": "chart_age", "target": "report" },
+      { "id": "e7", "source": "report", "target": "pdf" }
+    ]
+  },
+  "exportedAt": "2026-05-10T00:00:00.000Z"
+}

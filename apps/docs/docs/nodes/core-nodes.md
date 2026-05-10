@@ -34,6 +34,7 @@
 - `http_request`
 - `code_execution`
 - `pdf_output`
+- `chart`
 - `execute_workflow`
 
 ## Output

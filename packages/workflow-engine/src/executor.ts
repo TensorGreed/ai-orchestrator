@@ -48,6 +48,7 @@ import {
   extractCitationsFromText,
   DEFAULT_CITATION_INSTRUCTIONS
 } from "./citations";
+import { renderChart } from "./chart";
 import { renderTemplate, tryParseJson } from "./template";
 import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
@@ -3441,6 +3442,70 @@ async function executeNode(
         documents,
         context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n"),
         citationInstructions: DEFAULT_CITATION_INSTRUCTIONS
+      };
+    }
+
+    case "chart": {
+      // Render a Vega-Lite spec to SVG. The spec can be supplied either:
+      //   - inline as a config.spec object (LLM-generated specs land here),
+      //   - or as a config.specTemplate string with {{...}} placeholders that
+      //     resolve from upstream data, then JSON.parse'd.
+      // Data is either embedded in the spec (data.values) or pointed at via
+      // config.dataPath which resolves against templateData.
+      let specObject: Record<string, unknown> | null = null;
+      if (config.spec && typeof config.spec === "object" && !Array.isArray(config.spec)) {
+        specObject = config.spec as Record<string, unknown>;
+      } else if (typeof config.specTemplate === "string" && config.specTemplate.trim()) {
+        const rendered = renderTemplate(config.specTemplate, templateData);
+        try {
+          const parsed = JSON.parse(rendered);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            specObject = parsed as Record<string, unknown>;
+          }
+        } catch (err) {
+          throw new Error(
+            `chart specTemplate did not produce valid JSON after interpolation: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        }
+      }
+      if (!specObject) {
+        throw new Error("chart node requires either config.spec (object) or config.specTemplate (string)");
+      }
+
+      const dataPath = typeof config.dataPath === "string" && config.dataPath.trim()
+        ? config.dataPath.trim()
+        : undefined;
+      const dataValue = dataPath ? resolveDottedPath(templateData, dataPath) : undefined;
+      const data = Array.isArray(dataValue) ? dataValue : undefined;
+
+      const width = typeof config.width === "number" && config.width > 0 ? Math.floor(config.width) : undefined;
+      const height = typeof config.height === "number" && config.height > 0 ? Math.floor(config.height) : undefined;
+      const themeConfig =
+        config.theme && typeof config.theme === "object" && !Array.isArray(config.theme)
+          ? (config.theme as Record<string, unknown>)
+          : undefined;
+
+      const outputKey = typeof config.outputKey === "string" && config.outputKey.trim() ? config.outputKey.trim() : "chart";
+
+      const result = await renderChart({
+        spec: specObject,
+        data,
+        width,
+        height,
+        config: themeConfig
+      });
+
+      return {
+        [outputKey]: {
+          svg: result.svg,
+          dataUrl: result.dataUrl
+        },
+        svg: result.svg,
+        dataUrl: result.dataUrl,
+        // Useful for chaining: an <img> tag the caller can drop into pdf_output's htmlTemplate.
+        imgTag: `<img src="${result.dataUrl}" alt="chart" />`
       };
     }
 

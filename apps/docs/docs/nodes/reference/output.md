@@ -8,9 +8,52 @@
 
 Terminal nodes that shape the workflow's response payload.
 
-4 nodes.
+5 nodes.
 
 ---
+### `chart` — Chart
+
+Renders a Vega-Lite chart spec to SVG (server-side, no browser). Pair with pdf_output for branded reports. The same spec format Altair / Streamlit / Observable / Vega Editor use, so an LLM can produce specs directly.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `spec` | `object` | no | — |
+| `specTemplate` | `string` | no | — |
+| `dataPath` | `string` | no | — |
+| `width` | `number` | no | — |
+| `height` | `number` | no | — |
+| `theme` | `string` | no | — |
+| `outputKey` | `string` | no | — |
+
+**Example config**
+
+```json
+{
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+    "mark": "bar",
+    "encoding": {
+      "x": {
+        "field": "category",
+        "type": "nominal"
+      },
+      "y": {
+        "field": "count",
+        "type": "quantitative"
+      }
+    }
+  },
+  "dataPath": "results",
+  "width": 480,
+  "height": 300,
+  "outputKey": "chart"
+}
+```
+
+---
+
 ### `helper_chat_response` — Helper Chat Response
 
 Packages report HTML, code blocks, and file attachments into the response shape helper-chat understands.
