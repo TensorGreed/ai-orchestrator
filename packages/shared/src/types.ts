@@ -41,6 +41,7 @@ export type WorkflowNodeType =
   | "mcp_tool"
   | "rag_retrieve"
   | "rerank"
+  | "extract_citations"
   | "connector_source"
   | "google_drive_source"
   | "azure_storage"

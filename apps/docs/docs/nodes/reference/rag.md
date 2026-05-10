@@ -8,7 +8,7 @@
 
 Retrieval-Augmented Generation: embedders, vector stores, document loaders, retrievers.
 
-4 nodes.
+5 nodes.
 
 ---
 ### `document_chunker` — Document Chunker
@@ -61,6 +61,28 @@ Generates embedding vectors using Azure OpenAI embedding deployments.
   "apiVersion": "2024-10-21",
   "inputKey": "user_prompt",
   "outputKey": "embedding"
+}
+```
+
+---
+
+### `extract_citations` — Extract Citations
+
+Phase 9.4 — scans an LLM answer for [N] markers, resolves each to the upstream retrieved document, and emits structured citations the chat UI renders as clickable footnotes. Wire after llm_call when the upstream chain produced documents.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `answerPath` | `string` | no | — |
+| `documentsPath` | `string` | no | — |
+
+**Example config**
+
+```json
+{
+  "answerPath": "answer",
+  "documentsPath": "documents"
 }
 ```
 

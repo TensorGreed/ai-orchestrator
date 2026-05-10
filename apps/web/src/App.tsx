@@ -134,6 +134,27 @@ interface ChatMessageEntry {
   text: string;
   status?: "streaming" | "done" | "error";
   images?: Array<{ data: string; mimeType: string }>;
+  /**
+   * Phase 9.4 — citations resolved by `extract_citations` from the
+   * workflow output. Each citation maps a `[N]` marker in the answer
+   * text to a retrieved document chunk; `ChatBubbleText` renders them
+   * as clickable footnotes with hover previews.
+   */
+  citations?: ChatCitation[];
+}
+
+export interface ChatCitation {
+  marker: string;
+  index: number;
+  chunkId?: string;
+  sourceId?: string | null;
+  knowledgeBaseId?: string;
+  text: string;
+  similarityScore?: number;
+  rerankerScore?: number;
+  retrievalMode?: string;
+  startIndex: number;
+  endIndex: number;
 }
 
 interface WorkflowVariableRow {
@@ -611,6 +632,118 @@ function extractAssistantText(value: unknown): string {
 
 function isPdfDataUrl(value: string): boolean {
   return /^data:application\/pdf;base64,/i.test(value.trim());
+}
+
+/**
+ * Phase 9.4 — chat bubble that turns `[N]` markers in the answer text into
+ * clickable superscript links. Each link scrolls to / highlights the
+ * corresponding entry in the citation footer below the bubble.
+ *
+ * The strategy is segment-based: walk the citations sorted by startIndex,
+ * slice the answer into (text-before-marker, link, text-after-marker)
+ * segments, and render each as either a plain string or a <sup> link.
+ * Citations that share the same marker offset (rare but possible if the
+ * regex overlapped) are deduped by `marker + startIndex`.
+ */
+function ChatBubbleWithCitations({ text, citations }: { text: string; citations: ChatCitation[] }) {
+  const sorted = [...citations].sort((a, b) => a.startIndex - b.startIndex);
+  const segments: Array<{ kind: "text"; value: string } | { kind: "cite"; citation: ChatCitation }> = [];
+  let cursor = 0;
+  for (const c of sorted) {
+    if (c.startIndex < cursor) continue; // skip overlap
+    if (c.startIndex > cursor) {
+      segments.push({ kind: "text", value: text.slice(cursor, c.startIndex) });
+    }
+    segments.push({ kind: "cite", citation: c });
+    cursor = c.endIndex;
+  }
+  if (cursor < text.length) {
+    segments.push({ kind: "text", value: text.slice(cursor) });
+  }
+
+  return (
+    <span className="chat-citation-text">
+      {segments.map((seg, idx) =>
+        seg.kind === "text" ? (
+          <span key={idx}>{seg.value}</span>
+        ) : (
+          <a
+            key={idx}
+            href={`#citation-${seg.citation.index}`}
+            className="chat-citation-marker"
+            title={seg.citation.text.slice(0, 200)}
+            onClick={(e) => {
+              // Soft scroll within the chat pane rather than full anchor jump
+              e.preventDefault();
+              const el = document.getElementById(`citation-${seg.citation.index}`);
+              el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+              el?.classList.add("chat-citation-flash");
+              window.setTimeout(() => el?.classList.remove("chat-citation-flash"), 1200);
+            }}
+          >
+            <sup>[{seg.citation.index}]</sup>
+          </a>
+        )
+      )}
+    </span>
+  );
+}
+
+/**
+ * Phase 9.4 — sources panel below an assistant bubble. Lists each unique
+ * cited chunk with a preview, the score (similarity / reranker if present),
+ * and the source ID. Multiple `[N]` markers that resolve to the same chunk
+ * collapse to one footer entry.
+ */
+function CitationFooter({ citations }: { citations: ChatCitation[] }) {
+  // Dedupe by chunkId (or index when chunkId missing) — preserve first-seen order
+  const seen = new Set<string>();
+  const unique: ChatCitation[] = [];
+  for (const c of citations) {
+    const key = c.chunkId ?? `idx:${c.index}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(c);
+  }
+  return (
+    <ol className="chat-citation-footer">
+      {unique.map((c) => {
+        const score = c.rerankerScore ?? c.similarityScore;
+        return (
+          <li key={c.chunkId ?? `cite-${c.index}`} id={`citation-${c.index}`} className="chat-citation-source">
+            <div className="chat-citation-source-head">
+              <span className="chat-citation-source-num">[{c.index}]</span>
+              {c.sourceId && <code className="chat-citation-source-id">{c.sourceId}</code>}
+              {c.retrievalMode && <span className="chat-citation-tag">{c.retrievalMode}</span>}
+              {typeof score === "number" && <span className="chat-citation-score">score {score.toFixed(3)}</span>}
+            </div>
+            <div className="chat-citation-source-text">{c.text}</div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * Phase 9.4 — find an `extract_citations` node output in a workflow's
+ * nodeResults, if any. Returns the structured citations array so the
+ * chat bubble can render `[N]` markers as clickable footnotes. Multiple
+ * extract_citations nodes return the LAST one's citations (later in the
+ * graph wins, matching workflow execution semantics).
+ */
+function findCitationsInExecution(result: WorkflowExecutionResult | null): ChatCitation[] | undefined {
+  if (!result || !Array.isArray(result.nodeResults)) return undefined;
+  let found: ChatCitation[] | undefined;
+  for (const nr of result.nodeResults) {
+    const out = (nr as { output?: unknown }).output;
+    if (!out || typeof out !== "object") continue;
+    const cits = (out as { citations?: unknown }).citations;
+    if (Array.isArray(cits) && cits.length > 0 && cits.every((c) => c && typeof c === "object" && "marker" in (c as object))) {
+      found = cits as ChatCitation[];
+    }
+  }
+  return found;
 }
 
 function getNodeStatusMap(result: WorkflowExecutionResult | null) {
@@ -2364,6 +2497,20 @@ function StudioApp() {
     });
   }, []);
 
+  // Phase 9.4 — attach extracted citations to the assistant message so the
+  // chat bubble can render [N] markers as clickable footnotes.
+  const setChatMessageCitations = useCallback((workflowId: string, messageId: string, citations: ChatCitation[]) => {
+    setChatMessagesByWorkflow((current) => {
+      const nextMessages = (current[workflowId] ?? []).map((entry) =>
+        entry.id === messageId ? { ...entry, citations } : entry
+      );
+      return {
+        ...current,
+        [workflowId]: nextMessages
+      };
+    });
+  }, []);
+
   const stopChatDeltaFlusher = useCallback(() => {
     if (chatDeltaIntervalRef.current !== null) {
       window.clearInterval(chatDeltaIntervalRef.current);
@@ -3082,6 +3229,11 @@ function StudioApp() {
           activeAssistantMessageIdRef.current,
           result.status === "error" ? "error" : "done"
         );
+        // Phase 9.4 — surface citations from the extract_citations node.
+        const citations = findCitationsInExecution(result);
+        if (citations && citations.length > 0) {
+          setChatMessageCitations(workflowId, activeAssistantMessageIdRef.current, citations);
+        }
       }
 
       if (result.status === "error") {
@@ -3135,6 +3287,7 @@ function StudioApp() {
     promptNodeSources.systemPromptFromNodes,
     refreshExecutionHistory,
     setChatMessageStatus,
+    setChatMessageCitations,
     startChatDeltaFlusher,
     stopChatDeltaFlusher,
     setChatMessageText,
@@ -5015,10 +5168,15 @@ function StudioApp() {
                           <a href={entry.text} download="workflow-output.pdf" target="_blank" rel="noreferrer">
                             Download PDF
                           </a>
+                        ) : entry.role === "assistant" && entry.citations && entry.citations.length > 0 ? (
+                          <ChatBubbleWithCitations text={entry.text} citations={entry.citations} />
                         ) : (
                           entry.text || (entry.status === "streaming" ? "..." : "")
                         )}
                       </div>
+                      {entry.role === "assistant" && entry.citations && entry.citations.length > 0 && (
+                        <CitationFooter citations={entry.citations} />
+                      )}
                     </div>
                   ))}
                 </div>

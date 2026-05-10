@@ -44,6 +44,10 @@ import {
   type VectorStoreRegistry,
   type KnowledgeBaseStore
 } from "./rag-adapters";
+import {
+  extractCitationsFromText,
+  DEFAULT_CITATION_INSTRUCTIONS
+} from "./citations";
 import { renderTemplate, tryParseJson } from "./template";
 import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
@@ -527,6 +531,26 @@ function isErrorLikeOutput(output: unknown): boolean {
   }
   const asRecord = output as Record<string, unknown>;
   return typeof asRecord.error === "string" && asRecord.error.trim().length > 0;
+}
+
+/**
+ * Phase 9.4 — dot-path resolver for `extract_citations` config. "answer"
+ * returns templateData.answer; "result.documents" returns
+ * templateData.result.documents. Returns undefined when any segment is
+ * missing rather than throwing — the citation node handles it gracefully.
+ */
+function resolveDottedPath(value: unknown, path: string): unknown {
+  if (!path) return value;
+  let current: unknown = value;
+  for (const part of path.split(".")) {
+    if (!part) continue;
+    if (current && typeof current === "object" && part in (current as Record<string, unknown>)) {
+      current = (current as Record<string, unknown>)[part];
+    } else {
+      return undefined;
+    }
+  }
+  return current;
 }
 
 function normalizeDocuments(raw: unknown): ConnectorDocument[] {
@@ -3360,7 +3384,11 @@ async function executeNode(
       return {
         query,
         documents,
-        context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n")
+        context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n"),
+        // Phase 9.4 — drop into a prompt template (e.g. {{citationInstructions}})
+        // to teach the model to emit [N] markers that extract_citations
+        // can resolve back to chunks.
+        citationInstructions: DEFAULT_CITATION_INSTRUCTIONS
       };
     }
 
@@ -3411,7 +3439,38 @@ async function executeNode(
       return {
         query,
         documents,
-        context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n")
+        context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n"),
+        citationInstructions: DEFAULT_CITATION_INSTRUCTIONS
+      };
+    }
+
+    case "extract_citations": {
+      // Phase 9.4 — resolves [N] / [chunkId] markers in an LLM answer back
+      // to the upstream documents. Pure post-processing — the answer text
+      // is preserved verbatim so downstream nodes / the UI can render
+      // markers as React links using the returned offsets.
+      const answerPath = typeof config.answerPath === "string" && config.answerPath.trim()
+        ? config.answerPath.trim()
+        : "answer";
+      const documentsPath = typeof config.documentsPath === "string" && config.documentsPath.trim()
+        ? config.documentsPath.trim()
+        : "documents";
+
+      const answerRaw = resolveDottedPath(templateData, answerPath);
+      const answer = typeof answerRaw === "string"
+        ? answerRaw
+        : answerRaw === undefined || answerRaw === null
+          ? ""
+          : String(answerRaw);
+      const documents = normalizeDocuments(resolveDottedPath(templateData, documentsPath));
+
+      const result = extractCitationsFromText(answer, documents);
+      return {
+        answer: result.answer,
+        citations: result.citations,
+        uniqueCitedDocuments: result.uniqueCitedDocuments,
+        hasCitations: result.hasCitations,
+        documents // pass through so downstream nodes still see them
       };
     }
 

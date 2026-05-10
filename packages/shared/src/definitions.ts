@@ -791,6 +791,20 @@ export const nodeDefinitions: NodeDefinition[] = [
     sampleConfig: { queryTemplate: "{{user_prompt}}", topK: 3, embedderId: "token-embedder", vectorStoreId: "in-memory-vector-store" }
   },
   {
+    type: "extract_citations",
+    label: "Extract Citations",
+    category: "RAG",
+    description: "Phase 9.4 — scans an LLM answer for [N] markers, resolves each to the upstream retrieved document, and emits structured citations the chat UI renders as clickable footnotes. Wire after llm_call when the upstream chain produced documents.",
+    configSchema: {
+      type: "object",
+      properties: {
+        answerPath: { type: "string" },
+        documentsPath: { type: "string" }
+      }
+    },
+    sampleConfig: { answerPath: "answer", documentsPath: "documents" }
+  },
+  {
     type: "rerank",
     label: "Rerank",
     category: "RAG",

@@ -48,6 +48,8 @@ export const workflowNodeSchema = z.object({
     "helper_chat_response",
     "mcp_tool",
     "rag_retrieve",
+    "rerank",
+    "extract_citations",
     "connector_source",
     "google_drive_source",
     "azure_storage",

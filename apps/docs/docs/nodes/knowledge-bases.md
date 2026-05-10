@@ -235,6 +235,82 @@ Wire `rag_retrieve` (with `topK: 20-50`) → `rerank` (with `topN: 3-5`) for the
 
 API keys can come from a `secretRef.secretId` (preferred — encrypted at rest) or the matching env var (`COHERE_API_KEY`, `JINA_API_KEY`, `VOYAGE_API_KEY`).
 
+## Citations (Phase 9.4)
+
+Every chunk that comes out of `rag_retrieve` / `hybrid_search` / `rerank` carries stable provenance — `chunkId`, `sourceId`, `knowledgeBaseId`, `similarityScore`, `retrieval.mode`. Phase 9.4 turns that into clickable footnotes in the chat UI via two pieces:
+
+### `citationInstructions` on `rag_retrieve` output
+
+`rag_retrieve` (and `rerank`) now emit a `citationInstructions` string alongside `context`. Drop it into your prompt template to teach the model to mark its claims with `[N]` brackets that match the bracketed context numbers `rag_retrieve` already emits:
+
+```
+Answer using only the context below.
+
+{{citationInstructions}}
+
+Context:
+{{context}}
+
+Question:
+{{user_prompt}}
+```
+
+The default instruction is intentionally short to preserve prompt budget; the same wiring is exposed via `DEFAULT_CITATION_INSTRUCTIONS` from `@ai-orchestrator/workflow-engine` if you want to override.
+
+### `extract_citations` node
+
+Wire after `llm_call` to resolve `[N]` (or `[chunkId]`) markers back to the upstream documents:
+
+```json
+{
+  "type": "extract_citations",
+  "config": {
+    "answerPath": "answer",
+    "documentsPath": "documents"
+  }
+}
+```
+
+Output:
+
+```json
+{
+  "answer": "...",
+  "citations": [
+    {
+      "marker": "[1]",
+      "index": 1,
+      "chunkId": "kbc_...",
+      "sourceId": "support-faq-v1",
+      "text": "Reset your password using the recovery email link.",
+      "similarityScore": 0.81,
+      "retrievalMode": "hybrid",
+      "startIndex": 38,
+      "endIndex": 41
+    }
+  ],
+  "uniqueCitedDocuments": 1,
+  "hasCitations": true
+}
+```
+
+`startIndex` / `endIndex` are character offsets into the answer string — the chat UI uses them to splice in `<sup>[1]</sup>` links without disturbing the original text. The answer is preserved verbatim.
+
+### Chat UI rendering
+
+When a workflow run produces `extract_citations` output, the chat bubble renders each `[N]` as a clickable superscript that scrolls to a footnote panel below the bubble (with source ID, retrieval mode, score, and the chunk preview). Click on `[1]` to jump to the corresponding source.
+
+The full sample is at [samples/workflows/rag-with-citations-flow.json](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-with-citations-flow.json).
+
+### Wiring the graph
+
+`extract_citations` needs both the LLM answer **and** the documents. Wire two incoming edges:
+
+- `llm_call` → `extract_citations` (carries `answer`)
+- `rag_retrieve` → `extract_citations` (carries `documents`)
+
+The Phase 9.5 `faithfulness` and `context_*` scorers compose naturally with this — same `documents` + `answer` shape, same `extract_citations` node makes citations visible in chat, then evals score against the same retrieval.
+
 ## RAG-specific eval scorers (Phase 9.5)
 
 The eval framework (Settings → Evals) supports four scorer types that are RAG-aware. Programmatic ones cost nothing per fixture; LLM-judge ones cost one provider call per fixture.

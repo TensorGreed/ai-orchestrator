@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-rag-with-citations-flow",
+    "name": "RAG with Citations",
+    "description": "Text Input -> RAG Retrieve (KB) -> Prompt Template (with citation instructions) -> LLM -> Extract Citations -> Output. Demonstrates Phase 9.4 — every chunk retrieved by `rag_retrieve` carries stable provenance, the LLM is instructed to cite with [N] markers, and `extract_citations` resolves each marker back to the source chunk so the chat UI renders clickable footnotes. Replace `<your-kb-id>` with a real id from POST /api/knowledge-bases.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "text_1",
+        "type": "text_input",
+        "name": "Question",
+        "position": { "x": 70, "y": 220 },
+        "config": {
+          "text": "How do I reset my password?"
+        }
+      },
+      {
+        "id": "rag_1",
+        "type": "rag_retrieve",
+        "name": "Retrieve",
+        "position": { "x": 360, "y": 220 },
+        "config": {
+          "queryTemplate": "{{user_prompt}}",
+          "topK": 4,
+          "embedderId": "openai-embedder",
+          "vectorStoreId": "knowledge-base",
+          "vectorStoreConfig": {
+            "knowledgeBaseId": "<your-kb-id>"
+          },
+          "searchMode": "hybrid"
+        }
+      },
+      {
+        "id": "template_1",
+        "type": "prompt_template",
+        "name": "Grounded Prompt",
+        "position": { "x": 670, "y": 220 },
+        "config": {
+          "template": "Answer the question using only the context below.\n\n{{citationInstructions}}\n\nContext:\n{{context}}\n\nQuestion:\n{{user_prompt}}",
+          "outputKey": "prompt"
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "LLM",
+        "position": { "x": 980, "y": 220 },
+        "config": {
+          "provider": {
+            "providerId": "openai",
+            "model": "gpt-4o-mini",
+            "temperature": 0.1
+          },
+          "promptKey": "prompt",
+          "outputKey": "answer"
+        }
+      },
+      {
+        "id": "cite_1",
+        "type": "extract_citations",
+        "name": "Extract Citations",
+        "position": { "x": 1290, "y": 220 },
+        "config": {
+          "answerPath": "answer",
+          "documentsPath": "documents"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 1600, "y": 220 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "edge_1", "source": "text_1", "target": "rag_1" },
+      { "id": "edge_2", "source": "rag_1", "target": "template_1" },
+      { "id": "edge_3", "source": "text_1", "target": "template_1" },
+      { "id": "edge_4", "source": "template_1", "target": "llm_1" },
+      { "id": "edge_5", "source": "llm_1", "target": "cite_1" },
+      { "id": "edge_6", "source": "rag_1", "target": "cite_1" },
+      { "id": "edge_7", "source": "cite_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-05-10T00:00:00.000Z"
+}

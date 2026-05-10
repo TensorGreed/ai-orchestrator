@@ -4835,3 +4835,71 @@ select {
   background: rgba(239, 68, 68, 0.2);
 }
 
+/* ----------------------------------------------------------------------- */
+/* Phase 9.4 — citation markers + footnote panel                           */
+/* ----------------------------------------------------------------------- */
+
+.chat-citation-text { white-space: pre-wrap; word-break: break-word; }
+
+.chat-citation-marker {
+  display: inline-block;
+  margin: 0 1px;
+  text-decoration: none;
+  color: var(--accent);
+  font-weight: 600;
+  font-feature-settings: "tnum";
+  cursor: pointer;
+  border-radius: 0.2rem;
+  padding: 0 1px;
+  transition: background 120ms;
+}
+.chat-citation-marker:hover { background: var(--accent-soft); }
+.chat-citation-marker sup { font-size: 0.7em; }
+
+.chat-citation-footer {
+  list-style: none;
+  margin: 0.65rem 0 0 0;
+  padding: 0.55rem 0.7rem;
+  background: var(--accent-soft);
+  border: 1px solid var(--panel-border);
+  border-radius: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+}
+.chat-citation-source { display: flex; flex-direction: column; gap: 0.2rem; padding: 0.3rem 0.4rem; border-radius: 0.35rem; transition: background 200ms; }
+.chat-citation-source-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.chat-citation-source-num { font-weight: 600; color: var(--accent); font-feature-settings: "tnum"; }
+.chat-citation-source-id { background: var(--panel); padding: 0.05rem 0.3rem; border-radius: 0.2rem; font-size: 0.7rem; }
+.chat-citation-tag {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.65rem;
+  background: var(--panel);
+  padding: 0.05rem 0.3rem;
+  border-radius: 0.2rem;
+  color: var(--text);
+}
+.chat-citation-score { font-feature-settings: "tnum"; color: var(--muted); }
+.chat-citation-source-text {
+  font-size: 0.78rem;
+  color: var(--text);
+  line-height: 1.4;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  word-break: break-word;
+}
+
+.chat-citation-flash { background: var(--accent-line); animation: chat-citation-flash-anim 1.2s ease-out; }
+@keyframes chat-citation-flash-anim {
+  0% { background: var(--accent); color: var(--panel); }
+  100% { background: transparent; }
+}
+
