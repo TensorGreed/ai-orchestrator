@@ -235,6 +235,50 @@ Wire `rag_retrieve` (with `topK: 20-50`) → `rerank` (with `topN: 3-5`) for the
 
 API keys can come from a `secretRef.secretId` (preferred — encrypted at rest) or the matching env var (`COHERE_API_KEY`, `JINA_API_KEY`, `VOYAGE_API_KEY`).
 
+## RAG-specific eval scorers (Phase 9.5)
+
+The eval framework (Settings → Evals) supports four scorer types that are RAG-aware. Programmatic ones cost nothing per fixture; LLM-judge ones cost one provider call per fixture.
+
+| Scorer | Kind | What it measures |
+|---|---|---|
+| `context_precision` | programmatic | Of retrieved chunks, what fraction overlap meaningfully with the expected answer. High when the retriever returns mostly-relevant chunks. |
+| `context_recall` | programmatic | Of expected-answer tokens, what fraction appear somewhere in the retrieved context. High when retrieval *covers* the answer. |
+| `faithfulness` | LLM judge | Of factual claims in the generated answer, what fraction are supported by the retrieved context. Catches hallucinations. |
+| `answer_relevance` | LLM judge | Does the answer actually address the question? Catches off-topic or evasive responses. |
+
+All four return a numeric `score` in `[0, 1]` plus `pass = score >= threshold`. Defaults: `0.5` for context scorers, `0.7` for faithfulness, `0.6` for answer_relevance. Per-scorer overrides via `threshold`, `contextPath`, `answerPath`, `questionPath`, `providerId`, `model`.
+
+### Wiring
+
+Programmatic scorers work out of the box. LLM-judge scorers require:
+
+```bash
+EVAL_JUDGE_ENABLED=true
+EVAL_JUDGE_PROVIDER_ID=openai            # any registered provider
+EVAL_JUDGE_MODEL=gpt-4o-mini             # cheap default
+EVAL_JUDGE_TEMPERATURE=0
+EVAL_JUDGE_MAX_TOKENS=512
+```
+
+The judge uses the standard provider-config + secret-resolution path — same OPENAI_API_KEY (or secretRef) that drives normal LLM calls.
+
+### Workflow output shape
+
+The scorers expect a workflow output like:
+
+```json
+{
+  "documents": [{ "text": "...", "metadata": { "sourceId": "..." } }],
+  "answer": "the LLM-generated answer string"
+}
+```
+
+The default `contextPath` is `documents` (the shape `rag_retrieve` and `rerank` emit) and the default `answerPath` is `answer` (set this on your output node's `outputKey`). When the workflow returns a different shape, point the scorer at it via the per-scorer paths.
+
+### Defaults vs production tuning
+
+The shipped programmatic scorers use bag-of-tokens overlap with stopword filtering — fast, deterministic, free. Quality is good enough for regression smoke tests but trails embedding-similarity scorers from frameworks like Ragas. For research-grade RAG eval, run faithfulness + answer_relevance against `gpt-4o` (not `mini`) and treat the programmatic scorers as guardrails on retrieval changes.
+
 ## Tradeoffs
 
 - **Algorithm**: cosine similarity, computed in JavaScript. Fine up to ~10k chunks per KB. Larger fleets should use pgvector / Qdrant / Azure AI Search — `rag_retrieve` accepts those vector-store IDs unchanged.

@@ -2129,7 +2129,12 @@ export async function reloadCommunityNodes() {
 export type EvalScorerSpec =
   | { type: "exact_match"; path?: string; ignoreCase?: boolean }
   | { type: "contains"; path?: string; needle?: string; ignoreCase?: boolean }
-  | { type: "regex"; path?: string; pattern?: string; flags?: string };
+  | { type: "regex"; path?: string; pattern?: string; flags?: string }
+  // Phase 9.5 — RAG-specific scorers
+  | { type: "context_precision"; contextPath?: string; threshold?: number; relevanceThreshold?: number }
+  | { type: "context_recall"; contextPath?: string; threshold?: number }
+  | { type: "faithfulness"; contextPath?: string; answerPath?: string; providerId?: string; model?: string; threshold?: number }
+  | { type: "answer_relevance"; questionPath?: string; answerPath?: string; providerId?: string; model?: string; threshold?: number };
 
 export interface EvalDataset {
   id: string;

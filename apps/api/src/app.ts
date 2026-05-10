@@ -2041,6 +2041,33 @@ export function createApp(
   // as the per-fixture executor so eval runs share routing, telemetry, and
   // history with regular runs. SQLite-only — see /docs/extensions/eval-framework
   // for the Postgres-parity follow-up note.
+  // Phase 9.5 — LLM-judge for RAG-specific scorers (faithfulness, answer_relevance).
+  // Wired only when EVAL_JUDGE_ENABLED to avoid surprise costs; scorers
+  // surface a clear "no judge wired" error when they're requested without
+  // this. Per-scorer overrides take precedence over the default config.
+  const evalLlmJudge = config.EVAL_JUDGE_ENABLED
+    ? async (judgeInput: { prompt: string; providerId?: string; model?: string }): Promise<string> => {
+        const providerId = judgeInput.providerId ?? config.EVAL_JUDGE_PROVIDER_ID;
+        const adapter = providerRegistry.tryGet(providerId);
+        if (!adapter) {
+          throw new Error(`eval judge provider "${providerId}" is not registered`);
+        }
+        const response = await adapter.generate(
+          {
+            provider: {
+              providerId,
+              model: judgeInput.model ?? config.EVAL_JUDGE_MODEL,
+              temperature: config.EVAL_JUDGE_TEMPERATURE,
+              maxTokens: config.EVAL_JUDGE_MAX_TOKENS
+            },
+            messages: [{ role: "user", content: judgeInput.prompt }]
+          },
+          { resolveSecret: (ref) => secretService.resolveSecret(ref) }
+        );
+        return response.content ?? "";
+      }
+    : undefined;
+
   const evalService = new EvalService(store, async (input) => {
     const workflow = store.getWorkflow(input.workflowId);
     if (!workflow) {
@@ -2098,7 +2125,7 @@ export function createApp(
         durationMs: Date.now() - startedAt
       };
     }
-  });
+  }, evalLlmJudge);
 
   const workerMode = config.WORKER_MODE;
   const runsBackgroundWorkers = workerMode === "all" || workerMode === "worker";

@@ -91,6 +91,7 @@ import {
   type EvalFixture,
   type EvalRun,
   type EvalResult,
+  type EvalScorerSpec,
   fetchUsageTotals,
   fetchUsageRollup,
   fetchRecentUsage,
@@ -3876,6 +3877,13 @@ function EvalDatasetDetail({
   const [fixInput, setFixInput] = useState("{\n  \"user_prompt\": \"\"\n}");
   const [fixExpected, setFixExpected] = useState("");
   const [selectedWorkflow, setSelectedWorkflow] = useState<string>("");
+  // Phase 9.5 — RAG scorer selection. When all are unchecked the API
+  // defaults to a single exact_match (preserves Phase 7.3 behavior).
+  const [scorerExact, setScorerExact] = useState(true);
+  const [scorerContextPrecision, setScorerContextPrecision] = useState(false);
+  const [scorerContextRecall, setScorerContextRecall] = useState(false);
+  const [scorerFaithfulness, setScorerFaithfulness] = useState(false);
+  const [scorerAnswerRelevance, setScorerAnswerRelevance] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -3930,7 +3938,17 @@ function EvalDatasetDetail({
     setBusy(true);
     setError(null);
     try {
-      const result = await startEvalRun({ datasetId, workflowId: selectedWorkflow });
+      const scorers: EvalScorerSpec[] = [];
+      if (scorerExact) scorers.push({ type: "exact_match" });
+      if (scorerContextPrecision) scorers.push({ type: "context_precision", threshold: 0.5 });
+      if (scorerContextRecall) scorers.push({ type: "context_recall", threshold: 0.5 });
+      if (scorerFaithfulness) scorers.push({ type: "faithfulness", threshold: 0.7 });
+      if (scorerAnswerRelevance) scorers.push({ type: "answer_relevance", threshold: 0.6 });
+      const result = await startEvalRun({
+        datasetId,
+        workflowId: selectedWorkflow,
+        scorers: scorers.length > 0 ? scorers : undefined
+      });
       await refresh();
       onOpenRun(result.runId);
     } catch (err) {
@@ -3938,7 +3956,7 @@ function EvalDatasetDetail({
     } finally {
       setBusy(false);
     }
-  }, [datasetId, selectedWorkflow, refresh, onOpenRun]);
+  }, [datasetId, selectedWorkflow, refresh, onOpenRun, scorerExact, scorerContextPrecision, scorerContextRecall, scorerFaithfulness, scorerAnswerRelevance]);
 
   return (
     <div className="settings-section">
@@ -3997,6 +4015,27 @@ function EvalDatasetDetail({
             {busy ? "Running…" : `Run ${fixtures?.length ?? 0} fixtures`}
           </button>
         </div>
+        <fieldset style={{ marginTop: 12, padding: "8px 12px", border: "1px solid var(--panel-border)", borderRadius: 6 }}>
+          <legend style={{ padding: "0 6px", fontSize: "0.78rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.04em" }}>Scorers</legend>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: "0.84rem" }}>
+            <label><input type="checkbox" checked={scorerExact} onChange={(e) => setScorerExact(e.target.checked)} /> exact_match</label>
+            <label title="Of retrieved chunks, what fraction overlap the expected answer? Programmatic, no LLM cost.">
+              <input type="checkbox" checked={scorerContextPrecision} onChange={(e) => setScorerContextPrecision(e.target.checked)} /> context_precision
+            </label>
+            <label title="Of expected-answer tokens, what fraction appear in the retrieved context? Programmatic.">
+              <input type="checkbox" checked={scorerContextRecall} onChange={(e) => setScorerContextRecall(e.target.checked)} /> context_recall
+            </label>
+            <label title="Are the claims in the answer supported by the context? Requires EVAL_JUDGE_ENABLED=true.">
+              <input type="checkbox" checked={scorerFaithfulness} onChange={(e) => setScorerFaithfulness(e.target.checked)} /> faithfulness <small style={{ color: "var(--muted)" }}>(judge)</small>
+            </label>
+            <label title="Does the answer address the question? Requires EVAL_JUDGE_ENABLED=true.">
+              <input type="checkbox" checked={scorerAnswerRelevance} onChange={(e) => setScorerAnswerRelevance(e.target.checked)} /> answer_relevance <small style={{ color: "var(--muted)" }}>(judge)</small>
+            </label>
+          </div>
+          <small style={{ display: "block", marginTop: 8, color: "var(--muted)" }}>
+            Pick context_precision + context_recall for RAG runs. faithfulness + answer_relevance call your configured judge LLM (one call per fixture each) — set <code>EVAL_JUDGE_ENABLED=true</code> in apps/api before enabling.
+          </small>
+        </fieldset>
         {error && <div className="error-banner">{error}</div>}
       </div>
 

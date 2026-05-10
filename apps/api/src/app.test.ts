@@ -269,6 +269,11 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     AUDIT_EXPORT_CHECK_INTERVAL_MS: 60000,
     AUDIT_EXPORT_BATCH_SIZE: 500,
     AUDIT_EXPORT_FILE_ROOT: "apps/api/data",
+    EVAL_JUDGE_ENABLED: false,
+    EVAL_JUDGE_PROVIDER_ID: "openai",
+    EVAL_JUDGE_MODEL: "gpt-4o-mini",
+    EVAL_JUDGE_TEMPERATURE: 0,
+    EVAL_JUDGE_MAX_TOKENS: 512,
     ...overrides
   };
 

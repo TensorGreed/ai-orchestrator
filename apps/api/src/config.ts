@@ -64,6 +64,17 @@ const envSchema = z.object({
   AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(365),
   AUDIT_LOG_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),
 
+  // Phase 9.5 — RAG eval judge.
+  // When EVAL_JUDGE_ENABLED=true, the eval framework can run faithfulness +
+  // answer_relevance scorers using the named provider. Provider credentials
+  // come from the standard provider-config + secret resolution path; per-
+  // scorer overrides take precedence.
+  EVAL_JUDGE_ENABLED: booleanFromEnv.default(false),
+  EVAL_JUDGE_PROVIDER_ID: z.string().default("openai"),
+  EVAL_JUDGE_MODEL: z.string().default("gpt-4o-mini"),
+  EVAL_JUDGE_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
+  EVAL_JUDGE_MAX_TOKENS: z.coerce.number().int().positive().default(512),
+
   // Phase 8.4 — Audit export to long-term sinks (SIEM, archive, etc.)
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
