@@ -8,7 +8,7 @@
 
 External system integrations — HTTP, SQL, NoSQL, cloud SDKs, SaaS APIs.
 
-40 nodes.
+41 nodes.
 
 ---
 ### `airtable_create_record` — Airtable: Create Record
@@ -1190,5 +1190,44 @@ Send an SMS via Twilio. Secret stores the auth token paired with the Account SID
   "from": "+15551234567",
   "to": "+15557654321",
   "body": "Alert: {{user_prompt}}"
+}
+```
+
+---
+
+### `web_browse` — Web Browse
+
+Drives a headless Chromium to fetch a URL, wait for JS, and extract structured page data: rendered HTML, page text, screenshot, title, meta tags, links, and images. Use when http_request can't see the page (SPAs, JS-rendered content) or when an LLM needs to reason about a page's actual look.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `url` | `string` | no | — |
+| `urlTemplate` | `string` | no | — |
+| `waitUntil` | `string` | no | `load` \| `domcontentloaded` \| `networkidle` \| `commit` |
+| `timeoutMs` | `number` | no | — |
+| `userAgent` | `string` | no | — |
+| `viewportWidth` | `number` | no | — |
+| `viewportHeight` | `number` | no | — |
+| `extraHeadersJson` | `string` | no | — |
+| `screenshot` | `any` | no | — |
+| `extractText` | `boolean` | no | — |
+| `extractLinks` | `boolean` | no | — |
+| `extractImages` | `boolean` | no | — |
+| `waitForSelector` | `string` | no | — |
+| `outputKey` | `string` | no | — |
+
+**Example config**
+
+```json
+{
+  "url": "https://example.com",
+  "waitUntil": "domcontentloaded",
+  "timeoutMs": 30000,
+  "screenshot": true,
+  "extractText": true,
+  "extractLinks": true,
+  "extractImages": true
 }
 ```

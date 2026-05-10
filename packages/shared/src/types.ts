@@ -43,6 +43,7 @@ export type WorkflowNodeType =
   | "rerank"
   | "extract_citations"
   | "chart"
+  | "web_browse"
   | "connector_source"
   | "google_drive_source"
   | "azure_storage"

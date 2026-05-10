@@ -5,6 +5,7 @@ export * from "./rag-adapters";
 export * from "./chunker";
 export * from "./citations";
 export * from "./chart";
+export * from "./web-browse";
 export * from "./template";
 export * from "./expression";
 export * from "./graph";

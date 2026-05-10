@@ -49,6 +49,7 @@ import {
   DEFAULT_CITATION_INSTRUCTIONS
 } from "./citations";
 import { renderChart } from "./chart";
+import { browseUrl, type WebBrowseOptions } from "./web-browse";
 import { renderTemplate, tryParseJson } from "./template";
 import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
@@ -3442,6 +3443,93 @@ async function executeNode(
         documents,
         context: documents.map((doc, index) => `[${index + 1}] ${doc.text}`).join("\n"),
         citationInstructions: DEFAULT_CITATION_INSTRUCTIONS
+      };
+    }
+
+    case "web_browse": {
+      // Drive headless Chromium to fetch a URL and extract structured page
+      // data. URL can be supplied verbatim (config.url) or templated
+      // (config.urlTemplate); the templated form lets upstream nodes feed
+      // dynamic URLs in.
+      let url: string | undefined;
+      if (typeof config.url === "string" && config.url.trim()) {
+        url = config.url.trim();
+      } else if (typeof config.urlTemplate === "string" && config.urlTemplate.trim()) {
+        url = renderTemplate(config.urlTemplate, templateData).trim();
+      }
+      if (!url) {
+        throw new Error("web_browse node requires either config.url or config.urlTemplate");
+      }
+
+      let extraHeaders: Record<string, string> | undefined;
+      if (typeof config.extraHeadersJson === "string" && config.extraHeadersJson.trim()) {
+        try {
+          const parsed = JSON.parse(config.extraHeadersJson);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            extraHeaders = Object.fromEntries(
+              Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v)])
+            );
+          }
+        } catch {
+          throw new Error("web_browse: extraHeadersJson must be a JSON object");
+        }
+      }
+
+      const viewportWidth = typeof config.viewportWidth === "number" && config.viewportWidth > 0
+        ? Math.floor(config.viewportWidth)
+        : undefined;
+      const viewportHeight = typeof config.viewportHeight === "number" && config.viewportHeight > 0
+        ? Math.floor(config.viewportHeight)
+        : undefined;
+      const viewport = viewportWidth && viewportHeight
+        ? { width: viewportWidth, height: viewportHeight }
+        : undefined;
+
+      const screenshotOption: WebBrowseOptions["screenshot"] = config.screenshot === false
+        ? false
+        : config.screenshot === "fullPage"
+          ? "fullPage"
+          : true;
+
+      const browseOptions: WebBrowseOptions = {
+        url,
+        ...(typeof config.waitUntil === "string"
+          ? { waitUntil: config.waitUntil as WebBrowseOptions["waitUntil"] }
+          : {}),
+        ...(typeof config.timeoutMs === "number" && config.timeoutMs > 0
+          ? { timeoutMs: Math.floor(config.timeoutMs) }
+          : {}),
+        ...(typeof config.userAgent === "string" && config.userAgent.trim()
+          ? { userAgent: config.userAgent.trim() }
+          : {}),
+        ...(extraHeaders ? { extraHeaders } : {}),
+        ...(viewport ? { viewport } : {}),
+        screenshot: screenshotOption,
+        ...(config.extractText === false ? { extractText: false } : {}),
+        ...(config.extractLinks === false ? { extractLinks: false } : {}),
+        ...(config.extractImages === false ? { extractImages: false } : {}),
+        ...(typeof config.waitForSelector === "string" && config.waitForSelector.trim()
+          ? { waitForSelector: config.waitForSelector.trim() }
+          : {})
+      };
+
+      const outputKey = typeof config.outputKey === "string" && config.outputKey.trim()
+        ? config.outputKey.trim()
+        : "page";
+
+      const result = await browseUrl(browseOptions);
+      return {
+        [outputKey]: result,
+        // Mirror the most-used fields at the top level so downstream
+        // template nodes can reference them without nesting.
+        url: result.finalUrl,
+        title: result.title,
+        text: result.text,
+        html: result.html,
+        screenshot: result.screenshot,
+        meta: result.meta,
+        links: result.links,
+        images: result.images
       };
     }
 

@@ -1,0 +1,94 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-branding-extract-flow",
+    "name": "Brand Extraction (Web Browse)",
+    "description": "Text Input -> Web Browse -> Prompt Template -> LLM (extract brand colors / logo URL / fonts as JSON) -> Output Parser -> Output. Fetches a website with a real headless browser so JS-rendered pages work, then asks the LLM to extract structured branding data. Drop-in pattern for the CipherTrust scenario step where the user said 'use the branding from thalesgroup.com' — the LLM sees the real page (HTML + screenshot + meta tags) and pulls colors / logo / typography. Replace the inline url with a parameter for full automation.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "input_1",
+        "type": "text_input",
+        "name": "Brand URL",
+        "position": { "x": 70, "y": 220 },
+        "config": {
+          "text": "https://example.com"
+        }
+      },
+      {
+        "id": "browse_1",
+        "type": "web_browse",
+        "name": "Fetch Brand Site",
+        "position": { "x": 360, "y": 220 },
+        "config": {
+          "urlTemplate": "{{user_prompt}}",
+          "waitUntil": "networkidle",
+          "timeoutMs": 45000,
+          "screenshot": true,
+          "extractText": true,
+          "extractLinks": false,
+          "extractImages": true,
+          "viewportWidth": 1440,
+          "viewportHeight": 900,
+          "outputKey": "brandSite"
+        }
+      },
+      {
+        "id": "prompt_1",
+        "type": "prompt_template",
+        "name": "Extract Branding",
+        "position": { "x": 670, "y": 220 },
+        "config": {
+          "template": "You are a brand-asset extractor. Examine the page below and produce a JSON object with the brand's primary identifiers.\n\nPAGE TITLE: {{title}}\n\nMETA OG IMAGE: {{meta.og:image}}\n\nKEY IMAGES (first 10):\n{{images}}\n\nPAGE TEXT (first 4000 chars):\n{{text}}\n\nReturn ONLY a JSON object on one line, no markdown:\n{\"brand\":\"<official brand name>\",\"primaryLogoUrl\":\"<URL of the main logo image>\",\"primaryColor\":\"<hex color you can infer from the page>\",\"accentColor\":\"<hex>\",\"fontFamily\":\"<best guess of the brand's typeface>\",\"tagline\":\"<short slogan if present>\"}",
+          "outputKey": "prompt"
+        }
+      },
+      {
+        "id": "llm_1",
+        "type": "llm_call",
+        "name": "LLM",
+        "position": { "x": 980, "y": 220 },
+        "config": {
+          "provider": {
+            "providerId": "openai",
+            "model": "gpt-4o-mini",
+            "temperature": 0
+          },
+          "promptKey": "prompt",
+          "outputKey": "branding"
+        }
+      },
+      {
+        "id": "parse_1",
+        "type": "output_parser",
+        "name": "Parse JSON",
+        "position": { "x": 1290, "y": 220 },
+        "config": {
+          "mode": "json_schema",
+          "inputKey": "branding",
+          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"brand\":{\"type\":\"string\"},\"primaryLogoUrl\":{\"type\":\"string\"},\"primaryColor\":{\"type\":\"string\"},\"accentColor\":{\"type\":\"string\"},\"fontFamily\":{\"type\":\"string\"},\"tagline\":{\"type\":\"string\"}}}",
+          "parsingMode": "lenient"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 1600, "y": 220 },
+        "config": {
+          "outputKey": "parsed"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "edge_1", "source": "input_1", "target": "browse_1" },
+      { "id": "edge_2", "source": "browse_1", "target": "prompt_1" },
+      { "id": "edge_3", "source": "prompt_1", "target": "llm_1" },
+      { "id": "edge_4", "source": "llm_1", "target": "parse_1" },
+      { "id": "edge_5", "source": "parse_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-05-10T00:00:00.000Z"
+}

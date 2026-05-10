@@ -51,6 +51,7 @@ export const workflowNodeSchema = z.object({
     "rerank",
     "extract_citations",
     "chart",
+    "web_browse",
     "connector_source",
     "google_drive_source",
     "azure_storage",

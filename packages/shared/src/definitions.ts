@@ -791,6 +791,40 @@ export const nodeDefinitions: NodeDefinition[] = [
     sampleConfig: { queryTemplate: "{{user_prompt}}", topK: 3, embedderId: "token-embedder", vectorStoreId: "in-memory-vector-store" }
   },
   {
+    type: "web_browse",
+    label: "Web Browse",
+    category: "Connector",
+    description: "Drives a headless Chromium to fetch a URL, wait for JS, and extract structured page data: rendered HTML, page text, screenshot, title, meta tags, links, and images. Use when http_request can't see the page (SPAs, JS-rendered content) or when an LLM needs to reason about a page's actual look.",
+    configSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        urlTemplate: { type: "string" },
+        waitUntil: { type: "string", enum: ["load", "domcontentloaded", "networkidle", "commit"] },
+        timeoutMs: { type: "number" },
+        userAgent: { type: "string" },
+        viewportWidth: { type: "number" },
+        viewportHeight: { type: "number" },
+        extraHeadersJson: { type: "string" },
+        screenshot: { oneOf: [{ type: "boolean" }, { type: "string", enum: ["fullPage"] }] },
+        extractText: { type: "boolean" },
+        extractLinks: { type: "boolean" },
+        extractImages: { type: "boolean" },
+        waitForSelector: { type: "string" },
+        outputKey: { type: "string" }
+      }
+    },
+    sampleConfig: {
+      url: "https://example.com",
+      waitUntil: "domcontentloaded",
+      timeoutMs: 30000,
+      screenshot: true,
+      extractText: true,
+      extractLinks: true,
+      extractImages: true
+    }
+  },
+  {
     type: "chart",
     label: "Chart",
     category: "Output",
