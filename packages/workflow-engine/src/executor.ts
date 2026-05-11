@@ -4189,7 +4189,13 @@ async function executeNode(
           usage: agentState.usage,
           latencyMs: agentState.llmLatencyMs,
           llmCallCount: agentState.llmCallCount
-        }
+        },
+        // Phase: agent_clarify — when the agent paused to ask the user a
+        // question, surface the clarification details on the node output
+        // so workflow consumers (chat UI, /executions response, downstream
+        // nodes) can detect the awaiting state. `clarification` is
+        // undefined when the agent finished normally.
+        ...(agentState.clarification ? { clarification: agentState.clarification } : {})
       };
     }
 
@@ -6299,6 +6305,13 @@ export async function executeWorkflow(
     finalOutput = nodeOutputs.get(nodeOrder[nodeOrder.length - 1]);
   }
 
+  // Phase: agent_clarify — surface the clarification at the top of the
+  // result so chat UIs and webhook callers don't have to dig into
+  // nodeResults to find it. Status stays "success" — the agent did
+  // successfully complete a turn by asking a question — but the
+  // clarification field tells consumers the answer isn't final.
+  const clarificationFromAgent = findClarificationInNodeResults(nodeResults);
+
   return {
     workflowId: workflow.id,
     status: hadContinuedErrors ? "partial" : "success",
@@ -6307,8 +6320,36 @@ export async function executeWorkflow(
     executionId: request.executionId,
     customData,
     nodeResults,
-    output: finalOutput
+    output: finalOutput,
+    ...(clarificationFromAgent ? { clarification: clarificationFromAgent } : {})
   };
+}
+
+/**
+ * Phase: agent_clarify. Walk node results from the end and find the last
+ * `agent_orchestrator` output carrying a `clarification` field. Last-wins
+ * is intentional — if two agent nodes both paused (rare but possible),
+ * the most recent question is the one the user needs to answer.
+ */
+function findClarificationInNodeResults(
+  nodeResults: NodeExecutionResult[]
+): { question: string; reason?: string; toolCallId: string; nodeId: string } | undefined {
+  for (let i = nodeResults.length - 1; i >= 0; i--) {
+    const r = nodeResults[i]!;
+    const out = r.output;
+    if (!out || typeof out !== "object") continue;
+    const c = (out as { clarification?: unknown }).clarification;
+    if (!c || typeof c !== "object") continue;
+    const obj = c as { question?: unknown; reason?: unknown; toolCallId?: unknown };
+    if (typeof obj.question !== "string" || typeof obj.toolCallId !== "string") continue;
+    return {
+      question: obj.question,
+      ...(typeof obj.reason === "string" ? { reason: obj.reason } : {}),
+      toolCallId: obj.toolCallId,
+      nodeId: r.nodeId
+    };
+  }
+  return undefined;
 }
 
 export async function resumeWorkflowExecution(

@@ -4897,6 +4897,41 @@ select {
   word-break: break-word;
 }
 
+/* ----------------------------------------------------------------------- */
+/* agent_clarify — distinct "agent is asking" bubble                       */
+/* ----------------------------------------------------------------------- */
+
+.chat-bubble-clarify {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+}
+
+.chat-clarify-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 0.35rem;
+  background: var(--accent);
+  color: var(--panel);
+  border-radius: 50%;
+  font-size: 0.65rem;
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.chat-clarify-reason {
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
 .chat-citation-flash { background: var(--accent-line); animation: chat-citation-flash-anim 1.2s ease-out; }
 @keyframes chat-citation-flash-anim {
   0% { background: var(--accent); color: var(--panel); }

@@ -889,11 +889,10 @@ describe("DefaultAgentRuntime", () => {
 
     const requestTools = provider.calls[0]?.tools ?? [];
     // ToolCaptureProvider records what was passed. It should bypass the max of 6 and max limits.
-    // However dedupeToolsByName and internal session cache tools may be added.
-    // With 20 tools bypass true it should have all 20 external tools.
-    // Depending on if sessionCache tools are added, the length might be slightly more,
-    // but without sessionId, sessioncache tools are not created.
-    expect(requestTools.length).toBe(20);
+    // 20 external tools + 1 built-in (agent_clarify, always present). Session
+    // cache tools are NOT added because no sessionId is supplied here.
+    expect(requestTools.length).toBe(21);
+    expect(requestTools.some((t: { name: string }) => t.name === "agent_clarify")).toBe(true);
   });
 
   it("defaults to tools agent type when agentType is not specified", async () => {
@@ -1068,5 +1067,247 @@ describe("DefaultAgentRuntime", () => {
     expect(output.finalAnswer).toContain("4");
     expect(output.steps.length).toBe(2);
     expect(output.steps[0].requestedTools.length).toBe(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // agent_clarify — built-in pause primitive
+  // ---------------------------------------------------------------------------
+
+  describe("agent_clarify built-in tool", () => {
+    class ClarifyOnceProvider implements LLMProviderAdapter {
+      readonly definition = {
+        id: "clarify-once",
+        label: "Clarify Once",
+        supportsTools: true,
+        configSchema: {}
+      };
+      callCount = 0;
+      readonly calls: ProviderCallRequest[] = [];
+
+      async generate(request: ProviderCallRequest) {
+        this.callCount += 1;
+        // Snapshot messages NOW — the runtime keeps mutating its messages
+        // array after we return (pushing the assistant response, tool
+        // results, etc.). Without the copy, later assertions would see
+        // the post-mutation state and fail in confusing ways.
+        this.calls.push({ ...request, messages: [...request.messages] });
+        if (this.callCount === 1) {
+          // First turn: agent calls agent_clarify with a question
+          return {
+            content: "Need more info before I can answer.",
+            toolCalls: [
+              {
+                id: "clarify-1",
+                name: "agent_clarify",
+                arguments: { question: "What color do you prefer, blue or red?", reason: "Color isn't specified." }
+              }
+            ]
+          };
+        }
+        // Second turn (resume): agent answers using the user's reply
+        return { content: "Got it — picking blue. Done.", toolCalls: [] };
+      }
+    }
+
+    function makeMemoryStore() {
+      const map = new Map<string, string>();
+      return {
+        map,
+        store: {
+          loadMessages: async (bucket: string, key: string) => {
+            const stored = map.get(`${bucket}:${key}`);
+            return stored ? JSON.parse(stored) : [];
+          },
+          saveMessages: async (bucket: string, key: string, messages: unknown) => {
+            map.set(`${bucket}:${key}`, JSON.stringify(messages));
+          }
+        }
+      };
+    }
+
+    it("pauses with stopReason=clarification_requested when the agent calls agent_clarify", async () => {
+      const providerRegistry = new ProviderRegistry();
+      const provider = new ClarifyOnceProvider();
+      providerRegistry.register(provider);
+      const runtime = new DefaultAgentRuntime();
+      const memory = makeMemoryStore();
+
+      const result = await runtime.run(
+        {
+          provider: { providerId: "clarify-once", model: "fake-model" },
+          systemPrompt: "You are helpful",
+          userPrompt: "Pick a color for me",
+          tools: [],
+          maxIterations: 4,
+          toolCallingEnabled: true,
+          sessionId: "session-clarify-1",
+          memory: { namespace: "default", maxMessages: 12, persistToolMessages: false }
+        },
+        { tools: [], invokeTool: async () => null },
+        { providerRegistry, resolveSecret: async () => undefined, memoryStore: memory.store }
+      );
+
+      expect(result.stopReason).toBe("clarification_requested");
+      expect(result.clarification).toBeDefined();
+      expect(result.clarification!.question).toBe("What color do you prefer, blue or red?");
+      expect(result.clarification!.reason).toBe("Color isn't specified.");
+      expect(result.clarification!.toolCallId).toBe("clarify-1");
+      // finalAnswer mirrors the question so chat UIs that don't know about
+      // clarification still surface it as text
+      expect(result.finalAnswer).toBe("What color do you prefer, blue or red?");
+      // Only one provider call so far — the agent paused before iterating again
+      expect(provider.callCount).toBe(1);
+    });
+
+    it("resumes seamlessly on the next run with the same sessionId", async () => {
+      const providerRegistry = new ProviderRegistry();
+      const provider = new ClarifyOnceProvider();
+      providerRegistry.register(provider);
+      const runtime = new DefaultAgentRuntime();
+      const memory = makeMemoryStore();
+
+      // Turn 1: agent asks for clarification
+      const first = await runtime.run(
+        {
+          provider: { providerId: "clarify-once", model: "fake-model" },
+          systemPrompt: "You are helpful",
+          userPrompt: "Pick a color for me",
+          tools: [],
+          maxIterations: 4,
+          toolCallingEnabled: true,
+          sessionId: "session-clarify-2",
+          memory: { namespace: "default", maxMessages: 12, persistToolMessages: false }
+        },
+        { tools: [], invokeTool: async () => null },
+        { providerRegistry, resolveSecret: async () => undefined, memoryStore: memory.store }
+      );
+      expect(first.stopReason).toBe("clarification_requested");
+
+      // Turn 2: user replies "blue". The runtime should detect the
+      // orphaned clarify call in memory and inject the reply as the tool
+      // result, NOT as a fresh user message.
+      const second = await runtime.run(
+        {
+          provider: { providerId: "clarify-once", model: "fake-model" },
+          systemPrompt: "You are helpful",
+          userPrompt: "blue",
+          tools: [],
+          maxIterations: 4,
+          toolCallingEnabled: true,
+          sessionId: "session-clarify-2",
+          memory: { namespace: "default", maxMessages: 12, persistToolMessages: false }
+        },
+        { tools: [], invokeTool: async () => null },
+        { providerRegistry, resolveSecret: async () => undefined, memoryStore: memory.store }
+      );
+
+      expect(second.stopReason).toBe("final_answer");
+      expect(second.finalAnswer).toContain("blue");
+
+      // Inspect the messages sent to the provider on the resume call. The
+      // last message should be a TOOL message for the clarify tool call,
+      // not a user message.
+      const resumeRequest = provider.calls[1]!;
+      const lastMsg = resumeRequest.messages.at(-1)!;
+      expect(lastMsg.role).toBe("tool");
+      expect((lastMsg as { toolCallId?: string }).toolCallId).toBe("clarify-1");
+      expect(lastMsg.content).toContain("blue");
+
+      // And no orphaned user message saying "blue" — that's the whole
+      // point of resume-detection.
+      const userBlue = resumeRequest.messages.some(
+        (m) => m.role === "user" && typeof m.content === "string" && m.content === "blue"
+      );
+      expect(userBlue).toBe(false);
+    });
+
+    it("agent_clarify tool result is persisted to session memory (so subsequent runs don't double-resume)", async () => {
+      const providerRegistry = new ProviderRegistry();
+      const provider = new ClarifyOnceProvider();
+      providerRegistry.register(provider);
+      const runtime = new DefaultAgentRuntime();
+      const memory = makeMemoryStore();
+
+      // Pause
+      await runtime.run(
+        {
+          provider: { providerId: "clarify-once", model: "fake-model" },
+          systemPrompt: "You are helpful",
+          userPrompt: "Pick a color for me",
+          tools: [],
+          maxIterations: 4,
+          toolCallingEnabled: true,
+          sessionId: "session-clarify-3",
+          memory: { namespace: "default", maxMessages: 12, persistToolMessages: false }
+        },
+        { tools: [], invokeTool: async () => null },
+        { providerRegistry, resolveSecret: async () => undefined, memoryStore: memory.store }
+      );
+
+      // Resume
+      await runtime.run(
+        {
+          provider: { providerId: "clarify-once", model: "fake-model" },
+          systemPrompt: "You are helpful",
+          userPrompt: "blue",
+          tools: [],
+          maxIterations: 4,
+          toolCallingEnabled: true,
+          sessionId: "session-clarify-3",
+          memory: { namespace: "default", maxMessages: 12, persistToolMessages: false }
+        },
+        { tools: [], invokeTool: async () => null },
+        { providerRegistry, resolveSecret: async () => undefined, memoryStore: memory.store }
+      );
+
+      // Memory should contain a tool message for the clarify call so a
+      // future run() with a fresh userPrompt doesn't think the clarify
+      // is still unanswered.
+      const persisted = JSON.parse(memory.map.get("default:session-clarify-3") ?? "[]") as Array<{
+        role: string;
+        toolCallId?: string;
+        name?: string;
+      }>;
+      const clarifyToolMsg = persisted.find(
+        (m) => m.role === "tool" && m.toolCallId === "clarify-1" && m.name === "agent_clarify"
+      );
+      expect(clarifyToolMsg).toBeDefined();
+
+      // A third invocation with a fresh prompt should NOT treat it as a
+      // resume — the clarify is already answered.
+      provider.callCount = 0;
+      provider.calls.length = 0;
+      // Replace the provider's behavior: any new turn should be a normal
+      // (non-clarify) final answer. We just need to assert the runtime
+      // doesn't inject the new prompt as a tool result.
+      class NoClarifyProvider implements LLMProviderAdapter {
+        readonly definition = { id: "no-clarify", label: "x", supportsTools: true, configSchema: {} };
+        readonly calls: ProviderCallRequest[] = [];
+        async generate(request: ProviderCallRequest) {
+          this.calls.push({ ...request, messages: [...request.messages] });
+          return { content: "fresh answer", toolCalls: [] };
+        }
+      }
+      const freshProvider = new NoClarifyProvider();
+      providerRegistry.register(freshProvider);
+      await runtime.run(
+        {
+          provider: { providerId: "no-clarify", model: "fake-model" },
+          systemPrompt: "You are helpful",
+          userPrompt: "another question",
+          tools: [],
+          maxIterations: 2,
+          toolCallingEnabled: false,
+          sessionId: "session-clarify-3",
+          memory: { namespace: "default", maxMessages: 12, persistToolMessages: false }
+        },
+        { tools: [], invokeTool: async () => null },
+        { providerRegistry, resolveSecret: async () => undefined, memoryStore: memory.store }
+      );
+      const thirdRequest = freshProvider.calls[0]!;
+      const lastThird = thirdRequest.messages.at(-1)!;
+      expect(lastThird.role).toBe("user");
+      expect(lastThird.content).toBe("another question");
+    });
   });
 });

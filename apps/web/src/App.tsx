@@ -141,6 +141,17 @@ interface ChatMessageEntry {
    * as clickable footnotes with hover previews.
    */
   citations?: ChatCitation[];
+  /**
+   * Phase: agent_clarify — populated when the agent paused and called
+   * the built-in `agent_clarify` tool to ask the user a question. Lets
+   * the bubble render with a "?" badge + reason hint, so users can tell
+   * "the agent is waiting on you" apart from a finished answer. The
+   * next user message resumes naturally via session memory continuity.
+   */
+  clarification?: {
+    question: string;
+    reason?: string;
+  };
 }
 
 export interface ChatCitation {
@@ -2497,6 +2508,21 @@ function StudioApp() {
     });
   }, []);
 
+  // Phase: agent_clarify — attach the agent's clarifying question to the
+  // assistant message so the bubble can render a "?" badge instead of a
+  // plain answer.
+  const setChatMessageClarification = useCallback(
+    (workflowId: string, messageId: string, clarification: { question: string; reason?: string }) => {
+      setChatMessagesByWorkflow((current) => {
+        const nextMessages = (current[workflowId] ?? []).map((entry) =>
+          entry.id === messageId ? { ...entry, clarification } : entry
+        );
+        return { ...current, [workflowId]: nextMessages };
+      });
+    },
+    []
+  );
+
   // Phase 9.4 — attach extracted citations to the assistant message so the
   // chat bubble can render [N] markers as clickable footnotes.
   const setChatMessageCitations = useCallback((workflowId: string, messageId: string, citations: ChatCitation[]) => {
@@ -3234,6 +3260,24 @@ function StudioApp() {
         if (citations && citations.length > 0) {
           setChatMessageCitations(workflowId, activeAssistantMessageIdRef.current, citations);
         }
+        // Phase: agent_clarify — when the agent paused to ask a question,
+        // the workflow result carries a `clarification` field at the top
+        // level. Render it as a "?" bubble so users see "the agent is
+        // waiting on you" instead of treating the question as a final
+        // answer. The user's NEXT chat message resumes naturally via
+        // session memory — no special "resume" endpoint needed.
+        const clarification = (result as { clarification?: { question: string; reason?: string } }).clarification;
+        if (clarification && typeof clarification.question === "string") {
+          setChatMessageClarification(workflowId, activeAssistantMessageIdRef.current, {
+            question: clarification.question,
+            ...(clarification.reason ? { reason: clarification.reason } : {})
+          });
+          // Also force the bubble text to be the question (in case the
+          // workflow output wasn't already routed to the answer field).
+          if (clarification.question.trim()) {
+            setChatMessageText(workflowId, activeAssistantMessageIdRef.current, clarification.question);
+          }
+        }
       }
 
       if (result.status === "error") {
@@ -3288,6 +3332,7 @@ function StudioApp() {
     refreshExecutionHistory,
     setChatMessageStatus,
     setChatMessageCitations,
+    setChatMessageClarification,
     startChatDeltaFlusher,
     stopChatDeltaFlusher,
     setChatMessageText,
@@ -5150,35 +5195,51 @@ function StudioApp() {
                     <div className="logs-placeholder">Start a conversation. Responses stream token-by-token from the workflow LLM nodes.</div>
                   )}
 
-                  {currentChatMessages.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className={entry.role === "user" ? "chat-bubble chat-bubble-user" : "chat-bubble chat-bubble-assistant"}
-                    >
-                      <div className="chat-bubble-label">{entry.role === "user" ? "You" : "Assistant"}</div>
-                      <div className="chat-bubble-text">
-                        {entry.images && entry.images.length > 0 && (
-                          <div className="chat-images">
-                            {entry.images.map((img, idx) => (
-                              <img key={idx} src={`data:${img.mimeType};base64,${img.data}`} alt="" className="chat-image" />
-                            ))}
-                          </div>
+                  {currentChatMessages.map((entry) => {
+                    const isClarify = entry.role === "assistant" && Boolean(entry.clarification);
+                    return (
+                      <div
+                        key={entry.id}
+                        className={
+                          entry.role === "user"
+                            ? "chat-bubble chat-bubble-user"
+                            : isClarify
+                              ? "chat-bubble chat-bubble-assistant chat-bubble-clarify"
+                              : "chat-bubble chat-bubble-assistant"
+                        }
+                      >
+                        <div className="chat-bubble-label">
+                          {entry.role === "user" ? "You" : isClarify ? (
+                            <span><span className="chat-clarify-badge" aria-label="agent is asking">?</span> Assistant is asking</span>
+                          ) : "Assistant"}
+                        </div>
+                        <div className="chat-bubble-text">
+                          {entry.images && entry.images.length > 0 && (
+                            <div className="chat-images">
+                              {entry.images.map((img, idx) => (
+                                <img key={idx} src={`data:${img.mimeType};base64,${img.data}`} alt="" className="chat-image" />
+                              ))}
+                            </div>
+                          )}
+                          {entry.role === "assistant" && entry.text && isPdfDataUrl(entry.text) ? (
+                            <a href={entry.text} download="workflow-output.pdf" target="_blank" rel="noreferrer">
+                              Download PDF
+                            </a>
+                          ) : entry.role === "assistant" && entry.citations && entry.citations.length > 0 ? (
+                            <ChatBubbleWithCitations text={entry.text} citations={entry.citations} />
+                          ) : (
+                            entry.text || (entry.status === "streaming" ? "..." : "")
+                          )}
+                        </div>
+                        {isClarify && entry.clarification?.reason && (
+                          <div className="chat-clarify-reason">{entry.clarification.reason}</div>
                         )}
-                        {entry.role === "assistant" && entry.text && isPdfDataUrl(entry.text) ? (
-                          <a href={entry.text} download="workflow-output.pdf" target="_blank" rel="noreferrer">
-                            Download PDF
-                          </a>
-                        ) : entry.role === "assistant" && entry.citations && entry.citations.length > 0 ? (
-                          <ChatBubbleWithCitations text={entry.text} citations={entry.citations} />
-                        ) : (
-                          entry.text || (entry.status === "streaming" ? "..." : "")
+                        {entry.role === "assistant" && entry.citations && entry.citations.length > 0 && (
+                          <CitationFooter citations={entry.citations} />
                         )}
                       </div>
-                      {entry.role === "assistant" && entry.citations && entry.citations.length > 0 && (
-                        <CitationFooter citations={entry.citations} />
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 <div className="chat-side-trace">

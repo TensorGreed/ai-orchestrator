@@ -24,6 +24,22 @@ const DEFAULT_TOOL_PAYLOAD_MAX_DEPTH = 8;
 const DEFAULT_TOOL_PAYLOAD_MAX_OBJECT_KEYS = 64;
 const DEFAULT_TOOL_PAYLOAD_MAX_ARRAY_ITEMS = 64;
 const DEFAULT_TOOL_PAYLOAD_MAX_STRING_CHARS = 1024;
+/**
+ * Built-in tool the agent calls to pause and ask the user a clarifying
+ * question. When the LLM invokes this, the runtime breaks out of the
+ * iteration loop, returns with `stopReason: "clarification_requested"`,
+ * and persists the orphaned tool-call message to session memory. On the
+ * NEXT run() invocation with the same sessionId, the runtime detects the
+ * unanswered tool call and injects the new userPrompt as its tool result
+ * — so the LLM sees a clean tool-call → tool-result exchange instead of
+ * an orphan + a fresh user message.
+ *
+ * Works at any trigger surface (chat / webhook / schedule). For chat, the
+ * next user message naturally resumes; for non-chat, the workflow caller
+ * re-invokes the workflow with the reply as the user prompt.
+ */
+const CLARIFY_TOOL_NAME = "agent_clarify";
+
 const SESSION_CACHE_LIST_TOOL_NAME = "session_cache_list";
 const SESSION_CACHE_GET_TOOL_NAME = "session_cache_get";
 const SESSION_CACHE_DEFAULT_LIST_LIMIT = 10;
@@ -293,6 +309,47 @@ function createSessionCacheTools(input: {
   };
 
   return [listTool, getTool];
+}
+
+/**
+ * Built-in tool that lets the agent pause and ask the user a clarifying
+ * question. The tool's `invoke` is a no-op — the actual pause logic lives
+ * in the iteration loop, which special-cases this tool name and returns
+ * early. Defining it as a synthetic tool here means the LLM sees a
+ * normal-shaped tool it can call, with a description guiding when to use
+ * it. The runtime treats the call specially after dispatch.
+ *
+ * Available on every run (no sessionId gating) — useful even for one-shot
+ * non-chat triggers where an operator inspects the workflow output and
+ * supplies the reply manually.
+ */
+function createClarifyTool(): RuntimeInternalTool {
+  return {
+    definition: {
+      name: CLARIFY_TOOL_NAME,
+      description:
+        "Call this when you cannot complete the user's request without more information from them. The user will see your question and reply, then your run resumes. Don't ask about things you can reasonably infer; don't use this for confirmation when the request is already clear.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          question: {
+            type: "string",
+            description: "The specific, focused question to ask the user. Keep it concise."
+          },
+          reason: {
+            type: "string",
+            description: "Optional one-sentence rationale — what's blocking you, why you can't proceed without this."
+          }
+        },
+        required: ["question"]
+      }
+    },
+    // Returning anything from invoke would be a tool_result message. The
+    // loop catches this tool by NAME and bails before any result gets
+    // appended, so this body is unreachable in practice. We return a
+    // sentinel anyway so a mis-routed call still yields something readable.
+    invoke: async () => ({ __agent_clarify: true })
+  };
 }
 
 function compactToolPayload(value: unknown, limits: NormalizedToolOutputLimits, depth = 0): unknown {
@@ -600,6 +657,33 @@ function serializeToolMessage(ok: boolean, payload: unknown, limits: NormalizedT
   });
 }
 
+/**
+ * Walk session memory from the end and find the id of an `agent_clarify`
+ * tool call that hasn't been answered by a subsequent tool message. Used
+ * by `run()` to detect resume-from-clarification and route the new
+ * userPrompt as the tool result. Returns null when no orphaned clarify
+ * call is found.
+ */
+function findUnansweredClarifyToolCallId(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "assistant") continue;
+    const calls = (m as { toolCalls?: Array<{ id?: string; name?: string }> }).toolCalls;
+    if (!calls || calls.length === 0) continue;
+    const clarifyCall = calls.find((c) => c?.name === CLARIFY_TOOL_NAME && typeof c.id === "string");
+    if (!clarifyCall || typeof clarifyCall.id !== "string") continue;
+    // Is there a downstream tool message that answers this call?
+    const answered = messages.slice(i + 1).some(
+      (msg) =>
+        msg.role === "tool" &&
+        typeof (msg as { toolCallId?: string }).toolCallId === "string" &&
+        (msg as { toolCallId?: string }).toolCallId === clarifyCall.id
+    );
+    return answered ? null : clarifyCall.id;
+  }
+  return null;
+}
+
 function normalizeStoredMessages(
   messages: ChatMessage[],
   maxMessages: number,
@@ -638,10 +722,37 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
         ? `\n\nSession cache tools are available for this session:\n- ${SESSION_CACHE_LIST_TOOL_NAME}: list cached prior MCP outputs\n- ${SESSION_CACHE_GET_TOOL_NAME}: fetch one cached output by record_id\nUse these tools first for follow-up questions to avoid repeating expensive MCP calls.`
         : "";
 
+    // Phase: agent_clarify. The clarify tool is always available so the
+    // agent can pause and ask the user when context is genuinely missing.
+    const clarifyTool = createClarifyTool();
+    const clarifyHint = `\n\nIf you cannot complete the task without information only the user can provide, call the \`${CLARIFY_TOOL_NAME}\` tool with a focused question. Your run pauses and resumes when they reply. Don't use this for confirmation when the request is already clear.`;
+
     let memoryMessages: ChatMessage[] = [];
     if (memoryEnabled && request.sessionId) {
       const loaded = await context.memoryStore!.loadMessages(memoryNamespace, request.sessionId);
       memoryMessages = normalizeStoredMessages(loaded, memoryMaxMessages, toolOutputLimits.messageMaxChars);
+    }
+
+    // Phase: agent_clarify resume detection. If the last assistant message
+    // in memory has an unanswered `agent_clarify` tool call AND the caller
+    // supplied a new userPrompt, treat the prompt as the tool result so
+    // the LLM sees a normal tool-call → tool-result protocol exchange
+    // instead of an orphaned tool call + fresh user message (which most
+    // LLM APIs reject). The `clarifyResumeToolCallId` is what we inject;
+    // the original userPrompt is then NOT appended as a separate user
+    // message below.
+    const clarifyResumeToolCallId = findUnansweredClarifyToolCallId(memoryMessages);
+    const resumingFromClarification = clarifyResumeToolCallId !== null && request.userPrompt.trim().length > 0;
+    if (resumingFromClarification) {
+      memoryMessages = [
+        ...memoryMessages,
+        {
+          role: "tool",
+          toolCallId: clarifyResumeToolCallId,
+          name: CLARIFY_TOOL_NAME,
+          content: serializeToolMessage(true, { user_reply: request.userPrompt }, toolOutputLimits)
+        }
+      ];
     }
 
     let effectiveSystemPrompt = request.systemPrompt;
@@ -716,17 +827,26 @@ ${effectiveSystemPrompt}`;
     const messages: ChatMessage[] = [
       {
         role: "system",
-        content: normalizeMessageContent(`${effectiveSystemPrompt}${sessionCacheHint}`, MAX_SYSTEM_MESSAGE_CHARS)
+        content: normalizeMessageContent(`${effectiveSystemPrompt}${sessionCacheHint}${clarifyHint}`, MAX_SYSTEM_MESSAGE_CHARS)
       },
       ...memoryMessages,
-      { role: "user", content: normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS), images: request.images }
+      // When resuming from clarification, the tool result we just injected
+      // IS the continuation — don't double up with a fresh user message.
+      ...(resumingFromClarification
+        ? []
+        : [{
+            role: "user" as const,
+            content: normalizeMessageContent(request.userPrompt, MAX_MESSAGE_CHARS),
+            images: request.images
+          }])
     ];
     const externalToolDefinitions = tools.tools;
-    const internalToolDefinitions = sessionCacheTools.map((tool) => tool.definition);
+    const internalTools: RuntimeInternalTool[] = [...sessionCacheTools, clarifyTool];
+    const internalToolDefinitions = internalTools.map((tool) => tool.definition);
     const allToolDefinitions = [...externalToolDefinitions, ...internalToolDefinitions];
     const toolDefinitionByName = new Map<string, ToolDefinition>(allToolDefinitions.map((tool) => [tool.name, tool]));
     const internalToolsByName = new Map<string, RuntimeInternalTool>(
-      sessionCacheTools.map((tool) => [tool.definition.name, tool])
+      internalTools.map((tool) => [tool.definition.name, tool])
     );
 
     const normalizedExternalTools = normalizeToolsForModel(
@@ -746,9 +866,20 @@ ${effectiveSystemPrompt}`;
         return;
       }
 
+      // Tool messages are filtered out by default to keep memory lean —
+      // EXCEPT agent_clarify tool results, which we always persist so the
+      // resume-detection on the next run() sees the question as answered.
+      // Without this, after a clarify→reply cycle finishes, the next user
+      // message would still see the orphaned tool call and treat the
+      // prompt as a re-resume.
       const persistable = messages
         .filter((message, index) => !(index === 0 && message.role === "system"))
-        .filter((message) => (persistToolMessages ? true : message.role !== "tool"))
+        .filter((message) => {
+          if (message.role !== "tool") return true;
+          if (persistToolMessages) return true;
+          const toolName = (message as { name?: string }).name;
+          return toolName === CLARIFY_TOOL_NAME;
+        })
         .slice(-memoryMaxMessages);
 
       await context.memoryStore.saveMessages(memoryNamespace, request.sessionId, persistable);
@@ -977,6 +1108,45 @@ ${effectiveSystemPrompt}`;
                 }
                 failedToolCount += 1;
                 continue;
+              }
+
+              // Phase: agent_clarify. The assistant's tool-call message
+              // is already in `messages` (pushed above). For the clarify
+              // tool we don't run a real invoke — we capture the args,
+              // persist the conversation with the orphaned tool call, and
+              // bail out of the iteration loop. The next run() call with
+              // the same sessionId will detect the unanswered tool call
+              // and inject the new userPrompt as its tool result.
+              if (call.name === CLARIFY_TOOL_NAME) {
+                const question = typeof call.arguments?.question === "string"
+                  ? call.arguments.question.trim()
+                  : "";
+                const reason = typeof call.arguments?.reason === "string"
+                  ? call.arguments.reason.trim()
+                  : undefined;
+                steps.push({
+                  iteration,
+                  modelOutput: modelResponse.content,
+                  requestedTools,
+                  toolResults: []
+                });
+                const clarifyResult: AgentRunState = {
+                  finalAnswer: question || "Awaiting clarification.",
+                  stopReason: "clarification_requested",
+                  iterations: iteration,
+                  messages,
+                  steps,
+                  usage: finalizeUsage(),
+                  llmLatencyMs: llmLatencyAccumulator || undefined,
+                  llmCallCount: llmCallCount || undefined,
+                  clarification: {
+                    question: question || "Awaiting clarification.",
+                    ...(reason ? { reason } : {}),
+                    toolCallId: call.id
+                  }
+                };
+                await persistConversation();
+                return clarifyResult;
               }
 
               const output = internalTool

@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-agent-clarify-flow",
+    "name": "Agent with Clarification",
+    "description": "Chat Trigger -> Agent Orchestrator (with built-in agent_clarify tool) -> Output. Demonstrates the agent_clarify pause primitive: when the agent calls the built-in `agent_clarify` tool, the workflow result carries a top-level `clarification` field with the question. The chat UI renders that as a '?' bubble. The user's NEXT chat message in the same session resumes the agent naturally via session memory — the runtime injects the reply as the tool result for the pending clarify call, so the LLM sees a clean tool-call → tool-result exchange instead of an orphaned tool call.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "trigger_1",
+        "type": "chat_trigger",
+        "name": "Chat",
+        "position": { "x": 70, "y": 220 },
+        "config": {}
+      },
+      {
+        "id": "model_1",
+        "type": "openai_chat_model",
+        "name": "GPT-4o-mini",
+        "position": { "x": 70, "y": 380 },
+        "config": {
+          "provider": {
+            "providerId": "openai",
+            "model": "gpt-4o-mini",
+            "temperature": 0.1
+          }
+        }
+      },
+      {
+        "id": "memory_1",
+        "type": "local_memory",
+        "name": "Session Memory",
+        "position": { "x": 70, "y": 540 },
+        "config": {
+          "namespace": "agent-clarify-demo"
+        }
+      },
+      {
+        "id": "agent_1",
+        "type": "agent_orchestrator",
+        "name": "Helpful Agent",
+        "position": { "x": 360, "y": 220 },
+        "config": {
+          "systemPromptTemplate": "You are a concise assistant. When the user's request is ambiguous in a way that materially changes the answer, call the `agent_clarify` tool with a focused question. Otherwise answer directly. Don't ask for confirmation on things that are already clear.",
+          "userPromptTemplate": "{{user_prompt}}",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxIterations": 5,
+          "toolCallingEnabled": true,
+          "agentType": "tools"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "Output",
+        "position": { "x": 670, "y": 220 },
+        "config": {
+          "responseTemplate": "{{answer}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "edge_1", "source": "trigger_1", "target": "agent_1" },
+      { "id": "edge_2", "source": "model_1", "target": "agent_1", "sourceHandle": "chat_model", "targetHandle": "chat_model" },
+      { "id": "edge_3", "source": "memory_1", "target": "agent_1", "sourceHandle": "memory", "targetHandle": "memory" },
+      { "id": "edge_4", "source": "agent_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-05-11T00:00:00.000Z"
+}

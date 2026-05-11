@@ -303,6 +303,24 @@ export interface WorkflowExecutionResult {
   errorRemediation?: string;
   warnings?: string[];
   retriedNodes?: Array<{ nodeId: string; attempts: number; nodeType: string }>;
+  /**
+   * Populated when an `agent_orchestrator` node paused mid-iteration by
+   * calling the built-in `agent_clarify` tool. Lets the chat UI render
+   * the question with distinct styling and lets non-chat callers (webhook
+   * / schedule / API consumers) decide how to surface the question to a
+   * human and re-invoke the workflow with the reply. The workflow's
+   * top-level `status` stays "success" — the agent did successfully
+   * complete its turn by asking — but `clarification` tells consumers
+   * the answer is not the final one.
+   */
+  clarification?: {
+    question: string;
+    reason?: string;
+    /** The agent's tool-call id; used by the runtime on resume. */
+    toolCallId: string;
+    /** Which node raised the clarification. */
+    nodeId: string;
+  };
 }
 
 export interface WorkflowExecutionState {
@@ -582,10 +600,24 @@ export interface AgentRunStep {
 
 export interface AgentRunState {
   finalAnswer: string;
-  stopReason: "final_answer" | "max_iterations" | "error";
+  stopReason: "final_answer" | "max_iterations" | "error" | "clarification_requested";
   iterations: number;
   messages: ChatMessage[];
   steps: AgentRunStep[];
+  /**
+   * Populated when `stopReason === "clarification_requested"` — the agent
+   * called the built-in `agent_clarify` tool to pause and ask the user a
+   * question. The orphaned tool-call message stays in `messages`; on the
+   * next `run()` call with the same `sessionId`, the runtime injects the
+   * new `userPrompt` as the tool result for `toolCallId` rather than
+   * appending it as a fresh user message — so the LLM sees a normal
+   * tool-call → tool-result protocol exchange.
+   */
+  clarification?: {
+    question: string;
+    reason?: string;
+    toolCallId: string;
+  };
   /**
    * Cumulative LLM usage across every model call the agent made (one per
    * iteration plus retries). Aggregated from each `LLMCallResponse.usage`.
