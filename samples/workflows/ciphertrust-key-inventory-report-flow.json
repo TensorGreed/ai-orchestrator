@@ -1,0 +1,235 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "wf-ciphertrust-key-inventory-report-flow",
+    "name": "CipherTrust — Key Inventory Report (PDF, branded)",
+    "description": "End-to-end report pipeline that demonstrates the full Phase 9-11 stack composed together. Layout (left to right): manual_trigger fans out two parallel branches. (A) Branding: text_input → web_browse (headless Chromium fetches a brand site) → prompt_template + llm_call + output_parser distill the page into a JSON brand kit (primary color, accent color, logo URL, font, tagline). (B) Keys: mcp_tool calls CipherTrust Manager `list_keys` → code_node (Python, stdlib-only) buckets the response by cloud / algorithm / age (<30d / 30-90d / 90-180d / 180-365d / >365d). The two branches merge into three chart nodes (Vega-Lite, server-side SVG) for keys-by-cloud (bar), keys-by-algorithm (donut), and key-aging (bar). A final prompt_template stitches the branding tokens + chart SVGs into one HTML body; pdf_output renders it via Chromium. Two things to wire before this works for real: (1) replace the `mcp_tool` connection block with your CipherTrust MCP server endpoint + secretRef, (2) set the `text_input` to your brand URL (defaults to https://thalesgroup.com). The token-efficient companion workflow (\"generate the same report as a Python script, no L2M\") can re-use the same `session_id` — the agent's session_tool_cache holds the CipherTrust `list_keys` response from this run so a follow-up prompt reads from cache instead of re-fetching.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "trigger_1",
+        "type": "manual_trigger",
+        "name": "Run report",
+        "position": { "x": 70, "y": 320 },
+        "config": {}
+      },
+
+      {
+        "id": "brand_url",
+        "type": "text_input",
+        "name": "Brand URL",
+        "position": { "x": 360, "y": 120 },
+        "config": {
+          "text": "https://thalesgroup.com"
+        }
+      },
+      {
+        "id": "web_browse_1",
+        "type": "web_browse",
+        "name": "Fetch Brand Site",
+        "position": { "x": 670, "y": 120 },
+        "config": {
+          "urlTemplate": "{{user_prompt}}",
+          "waitUntil": "networkidle",
+          "timeoutMs": 45000,
+          "viewportWidth": 1440,
+          "viewportHeight": 900,
+          "screenshot": true,
+          "extractText": true,
+          "extractLinks": false,
+          "extractImages": true,
+          "outputKey": "brandSite"
+        }
+      },
+      {
+        "id": "brand_prompt",
+        "type": "prompt_template",
+        "name": "Extract Branding Prompt",
+        "position": { "x": 980, "y": 120 },
+        "config": {
+          "template": "You are a brand-asset extractor. Examine the page below and produce a JSON object with the brand's primary identifiers.\n\nPAGE TITLE: {{title}}\n\nMETA OG IMAGE: {{meta.og:image}}\n\nKEY IMAGES (first 10):\n{{images}}\n\nPAGE TEXT (first 4000 chars):\n{{text}}\n\nReturn ONLY a JSON object on one line, no markdown:\n{\"brand\":\"<official brand name>\",\"primaryLogoUrl\":\"<URL of the main logo image>\",\"primaryColor\":\"<hex color you can infer from the page>\",\"accentColor\":\"<hex>\",\"fontFamily\":\"<best guess of the brand's typeface>\",\"tagline\":\"<short slogan if present>\"}",
+          "outputKey": "brand_extraction_prompt"
+        }
+      },
+      {
+        "id": "brand_llm",
+        "type": "llm_call",
+        "name": "Distill Branding",
+        "position": { "x": 1290, "y": 120 },
+        "config": {
+          "provider": {
+            "providerId": "openai",
+            "model": "gpt-4o-mini",
+            "temperature": 0
+          },
+          "promptKey": "brand_extraction_prompt",
+          "outputKey": "branding_raw"
+        }
+      },
+      {
+        "id": "brand_parse",
+        "type": "output_parser",
+        "name": "Parse Brand JSON",
+        "position": { "x": 1600, "y": 120 },
+        "config": {
+          "mode": "json_schema",
+          "inputKey": "branding_raw",
+          "parsingMode": "lenient",
+          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"brand\":{\"type\":\"string\"},\"primaryLogoUrl\":{\"type\":\"string\"},\"primaryColor\":{\"type\":\"string\"},\"accentColor\":{\"type\":\"string\"},\"fontFamily\":{\"type\":\"string\"},\"tagline\":{\"type\":\"string\"}}}"
+        }
+      },
+
+      {
+        "id": "mcp_list_keys",
+        "type": "mcp_tool",
+        "name": "CipherTrust list_keys",
+        "position": { "x": 360, "y": 520 },
+        "config": {
+          "serverId": "ciphertrust",
+          "toolName": "list_keys",
+          "argsTemplate": "{\"limit\":1000}",
+          "connection": {
+            "transport": "http_streamable",
+            "endpoint": "http://ciphertrust-mcp.internal/mcp"
+          }
+        }
+      },
+      {
+        "id": "aggregate_keys",
+        "type": "code_node",
+        "name": "Aggregate Keys",
+        "position": { "x": 670, "y": 520 },
+        "config": {
+          "language": "python",
+          "timeout": 5000,
+          "code": "from datetime import datetime, timezone\n\n# items is the upstream payload. Find the keys array wherever the MCP\n# server put it. Defaults handle a few common response shapes.\nsrc = items[0] if items else {}\nif isinstance(src, dict):\n    keys = src.get('keys') or src.get('resources') or src.get('result', {}).get('keys') or []\nelse:\n    keys = []\n\nby_cloud = {}\nby_algorithm = {}\nbuckets = ['<30d', '30-90d', '90-180d', '180-365d', '>365d']\nageing = {b: 0 for b in buckets}\nnow = datetime.now(timezone.utc)\n\nfor k in keys:\n    if not isinstance(k, dict):\n        continue\n    labels = k.get('labels') or k.get('metadata') or {}\n    cloud = (labels.get('cloud') if isinstance(labels, dict) else None) or k.get('cloud') or 'unknown'\n    algo = k.get('algorithm') or k.get('algo') or 'unknown'\n    by_cloud[cloud] = by_cloud.get(cloud, 0) + 1\n    by_algorithm[algo] = by_algorithm.get(algo, 0) + 1\n\n    created_raw = k.get('createdAt') or k.get('created_at') or k.get('creationDate') or ''\n    age_days = 0\n    try:\n        if isinstance(created_raw, str) and created_raw:\n            dt = datetime.fromisoformat(created_raw.replace('Z', '+00:00'))\n            age_days = (now - dt).days\n    except Exception:\n        age_days = 0\n    if age_days < 30:\n        ageing['<30d'] += 1\n    elif age_days < 90:\n        ageing['30-90d'] += 1\n    elif age_days < 180:\n        ageing['90-180d'] += 1\n    elif age_days < 365:\n        ageing['180-365d'] += 1\n    else:\n        ageing['>365d'] += 1\n\nlog({\n    'byCloud': [{'category': c, 'count': n} for c, n in sorted(by_cloud.items(), key=lambda x: -x[1])],\n    'byAlgorithm': [{'algorithm': a, 'count': n} for a, n in sorted(by_algorithm.items(), key=lambda x: -x[1])],\n    'ageing': [{'bucket': b, 'count': ageing[b]} for b in buckets],\n    'totalKeys': len(keys),\n    'generatedAt': now.isoformat()\n})\n"
+        }
+      },
+
+      {
+        "id": "chart_cloud",
+        "type": "chart",
+        "name": "Keys by Cloud",
+        "position": { "x": 980, "y": 440 },
+        "config": {
+          "spec": {
+            "mark": { "type": "bar", "cornerRadiusTopLeft": 3, "cornerRadiusTopRight": 3 },
+            "encoding": {
+              "x": { "field": "category", "type": "nominal", "title": "Cloud", "sort": "-y" },
+              "y": { "field": "count", "type": "quantitative", "title": "Keys" },
+              "color": { "value": "{{parsed.primaryColor}}" }
+            }
+          },
+          "dataPath": "byCloud",
+          "width": 380,
+          "height": 220,
+          "outputKey": "cloudChart"
+        }
+      },
+      {
+        "id": "chart_algo",
+        "type": "chart",
+        "name": "Keys by Algorithm",
+        "position": { "x": 980, "y": 700 },
+        "config": {
+          "spec": {
+            "mark": { "type": "arc", "innerRadius": 50 },
+            "encoding": {
+              "theta": { "field": "count", "type": "quantitative" },
+              "color": { "field": "algorithm", "type": "nominal", "scale": { "scheme": "blues" } }
+            }
+          },
+          "dataPath": "byAlgorithm",
+          "width": 380,
+          "height": 220,
+          "outputKey": "algoChart"
+        }
+      },
+      {
+        "id": "chart_age",
+        "type": "chart",
+        "name": "Key Aging",
+        "position": { "x": 980, "y": 960 },
+        "config": {
+          "spec": {
+            "mark": { "type": "bar" },
+            "encoding": {
+              "x": { "field": "bucket", "type": "nominal", "sort": null, "title": "Age" },
+              "y": { "field": "count", "type": "quantitative", "title": "Keys" },
+              "color": { "value": "{{parsed.accentColor}}" }
+            }
+          },
+          "dataPath": "ageing",
+          "width": 380,
+          "height": 220,
+          "outputKey": "ageChart"
+        }
+      },
+
+      {
+        "id": "report_html",
+        "type": "prompt_template",
+        "name": "Compose Branded HTML",
+        "position": { "x": 1290, "y": 700 },
+        "config": {
+          "template": "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n<title>{{parsed.brand}} — Key Inventory Report</title>\n<style>\n  body { font-family: {{parsed.fontFamily}}, system-ui, sans-serif; margin: 32px; color: #0f172a; }\n  header { display: flex; align-items: center; gap: 16px; border-bottom: 3px solid {{parsed.primaryColor}}; padding-bottom: 12px; }\n  header img { height: 48px; }\n  h1 { color: {{parsed.primaryColor}}; margin: 0; font-size: 28px; }\n  h1 small { color: #64748b; font-weight: 400; font-size: 14px; display: block; margin-top: 4px; }\n  .tagline { color: #64748b; font-style: italic; margin: 4px 0 0; }\n  .summary { background: #f8fafc; border-left: 4px solid {{parsed.primaryColor}}; padding: 16px; margin: 24px 0; }\n  .summary .num { font-size: 32px; font-weight: 700; color: {{parsed.primaryColor}}; }\n  h2 { color: {{parsed.primaryColor}}; margin-top: 32px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }\n  .chart { padding: 12px 0; }\n  footer { margin-top: 48px; padding-top: 12px; border-top: 1px solid #e2e8f0; color: #94a3b8; font-size: 11px; }\n</style></head>\n<body>\n<header>\n  <img src=\"{{parsed.primaryLogoUrl}}\" alt=\"{{parsed.brand}}\">\n  <div>\n    <h1>Key Inventory Report<small>{{parsed.brand}} · CipherTrust Manager</small></h1>\n    <p class=\"tagline\">{{parsed.tagline}}</p>\n  </div>\n</header>\n\n<div class=\"summary\">\n  <div class=\"num\">{{totalKeys}}</div>\n  <div>keys under management as of {{generatedAt}}</div>\n</div>\n\n<h2>Keys by Cloud Provider</h2>\n<div class=\"chart\">{{cloudChart.svg}}</div>\n\n<h2>Keys by Algorithm</h2>\n<div class=\"chart\">{{algoChart.svg}}</div>\n\n<h2>Key Aging Distribution</h2>\n<div class=\"chart\">{{ageChart.svg}}</div>\n\n<footer>Generated by L2M from live CipherTrust Manager data. Source: CipherTrust list_keys MCP call. Branding extracted from {{user_prompt}}.</footer>\n</body></html>",
+          "outputKey": "html"
+        }
+      },
+      {
+        "id": "pdf_1",
+        "type": "pdf_output",
+        "name": "Render PDF",
+        "position": { "x": 1600, "y": 700 },
+        "config": {
+          "renderMode": "html",
+          "inputKey": "html",
+          "pageFormat": "A4",
+          "printBackground": true,
+          "filenameTemplate": "{{parsed.brand}}-key-inventory-{{session_id}}.pdf",
+          "outputKey": "pdf"
+        }
+      },
+      {
+        "id": "output_1",
+        "type": "output",
+        "name": "PDF Report",
+        "position": { "x": 1910, "y": 700 },
+        "config": {
+          "outputKey": "pdf"
+        }
+      }
+    ],
+    "edges": [
+      { "id": "e_trigger_brand", "source": "trigger_1", "target": "brand_url" },
+      { "id": "e_brand_url", "source": "brand_url", "target": "web_browse_1" },
+      { "id": "e_browse_prompt", "source": "web_browse_1", "target": "brand_prompt" },
+      { "id": "e_brand_prompt_llm", "source": "brand_prompt", "target": "brand_llm" },
+      { "id": "e_brand_llm_parse", "source": "brand_llm", "target": "brand_parse" },
+
+      { "id": "e_trigger_mcp", "source": "trigger_1", "target": "mcp_list_keys" },
+      { "id": "e_mcp_agg", "source": "mcp_list_keys", "target": "aggregate_keys" },
+
+      { "id": "e_agg_cloud", "source": "aggregate_keys", "target": "chart_cloud" },
+      { "id": "e_agg_algo", "source": "aggregate_keys", "target": "chart_algo" },
+      { "id": "e_agg_age", "source": "aggregate_keys", "target": "chart_age" },
+
+      { "id": "e_parse_report", "source": "brand_parse", "target": "chart_cloud" },
+      { "id": "e_parse_algo", "source": "brand_parse", "target": "chart_algo" },
+      { "id": "e_parse_age", "source": "brand_parse", "target": "chart_age" },
+
+      { "id": "e_cloud_report", "source": "chart_cloud", "target": "report_html" },
+      { "id": "e_algo_report", "source": "chart_algo", "target": "report_html" },
+      { "id": "e_age_report", "source": "chart_age", "target": "report_html" },
+      { "id": "e_parse_html", "source": "brand_parse", "target": "report_html" },
+      { "id": "e_agg_html", "source": "aggregate_keys", "target": "report_html" },
+      { "id": "e_url_html", "source": "brand_url", "target": "report_html" },
+
+      { "id": "e_report_pdf", "source": "report_html", "target": "pdf_1" },
+      { "id": "e_pdf_out", "source": "pdf_1", "target": "output_1" }
+    ]
+  },
+  "exportedAt": "2026-05-11T00:00:00.000Z"
+}
