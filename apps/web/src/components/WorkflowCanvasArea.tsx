@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type DragEvent,
+  type MouseEvent as ReactMouseEvent,
+  type RefObject
+} from "react";
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -15,22 +24,27 @@ import ReactFlow, {
 } from "reactflow";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNodeData } from "../lib/workflow";
+import { AGENT_ATTACHMENT_HANDLES, AGENT_ATTACHMENT_STYLES, type AgentAttachmentHandle } from "../lib/agent-attachments";
 import {
-  AGENT_ATTACHMENT_HANDLES,
-  AGENT_ATTACHMENT_STYLES,
-  type AgentAttachmentHandle
-} from "../lib/agent-attachments";
-import { NodeTypeIcon, PaletteIcon, type PaletteCategoryIconKey } from "./node-icons";
+  ORBIT,
+  attachedNodeIds,
+  computeAttachmentSlots,
+  computeStages,
+  findHubOf,
+  isHubType,
+  orbitPositions,
+  tidyLayout,
+  type Point
+} from "../lib/stages";
+import { NodePalette, type PaletteDefinition, type PaletteSection } from "./NodePalette";
+import { RunTape } from "./RunTape";
+import { StageStrip, type StageStripNode } from "./StageStrip";
+import type { PaletteCategoryIconKey } from "./node-icons";
 
-interface DefinitionNode {
-  type: string;
-  label: string;
-  category: string;
-  description: string;
-  sampleConfig: Record<string, unknown>;
-}
+type DefinitionNode = PaletteDefinition;
 
 type LogsTab = "logs" | "inputs";
+type PanelTab = "tape" | "logs";
 
 interface NodeDrawerContext {
   title: string;
@@ -50,6 +64,26 @@ interface PaletteCategoryMeta {
 
 const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
   {
+    key: "trigger",
+    title: "Triggers",
+    description: "Start workflow runs from schedules, webhooks, forms, chat, files, or expose this workflow as an MCP tool that other agents call.",
+    icon: "trigger",
+    match: (node) =>
+      [
+        "schedule_trigger",
+        "webhook_input",
+        "text_input",
+        "mcp_server_trigger",
+        "form_trigger",
+        "chat_trigger",
+        "file_trigger",
+        "rss_trigger",
+        "sse_trigger",
+        "manual_trigger",
+        "error_trigger"
+      ].includes(node.type)
+  },
+  {
     key: "ai",
     title: "AI",
     description: "Build agents, prompt pipelines, RAG retrieval and guardrails.",
@@ -66,6 +100,7 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "google_gemini_chat_model",
         "embeddings_azure_openai",
         "agent_orchestrator",
+        "supervisor_node",
         "prompt_template",
         "rag_retrieve",
         "local_memory",
@@ -96,6 +131,7 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "qdrant_vector_store",
         "mcp_tool",
         "http_request",
+        "web_browse",
         "execute_workflow"
       ].includes(node.type)
   },
@@ -104,37 +140,14 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     title: "Data Transformation",
     description: "Parse, validate, chunk, merge, and shape structured outputs.",
     icon: "transform",
-    match: (node) =>
-      ["code_node", "document_chunker", "input_validator", "output_parser", "set_node", "merge_node"].includes(
-        node.type
-      )
+    match: (node) => ["code_node", "python_code", "document_chunker", "input_validator", "set_node", "merge_node", "chart_node"].includes(node.type)
   },
   {
     key: "flow",
     title: "Flow",
     description: "Branch, merge, loop, wait, and handle fallback paths.",
     icon: "flow",
-    match: (node) =>
-      ["if_node", "switch_node", "chat_intent_router", "try_catch", "loop_node", "merge_node", "wait_node", "execute_workflow"].includes(node.type)
-  },
-  {
-    key: "core",
-    title: "Core",
-    description: "Input/output primitives and base workflow utilities.",
-    icon: "core",
-    match: (node) =>
-      [
-        "webhook_input",
-        "text_input",
-        "system_prompt",
-        "user_prompt",
-        "output",
-        "helper_chat_response",
-        "webhook_response",
-        "wait_node",
-        "code_node",
-        "schedule_trigger"
-      ].includes(node.type)
+    match: (node) => ["if_node", "switch_node", "chat_intent_router", "try_catch", "loop_node", "wait_node"].includes(node.type)
   },
   {
     key: "human",
@@ -144,27 +157,13 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     match: (node) => node.type === "human_approval"
   },
   {
-    key: "trigger",
-    title: "Triggers",
-    description: "Start workflow runs from schedules, webhooks, forms, chat, files, or expose this workflow as an MCP tool that other agents call.",
-    icon: "trigger",
-    match: (node) =>
-      [
-        "schedule_trigger",
-        "webhook_input",
-        "text_input",
-        "mcp_server_trigger",
-        "form_trigger",
-        "chat_trigger",
-        "file_trigger",
-        "rss_trigger",
-        "sse_trigger",
-        "manual_trigger",
-        "error_trigger"
-      ].includes(node.type)
+    key: "core",
+    title: "Core",
+    description: "Input/output primitives and base workflow utilities.",
+    icon: "core",
+    match: () => true
   }
 ];
-
 
 interface WorkflowCanvasAreaProps {
   isLogsPanelCollapsed: boolean;
@@ -193,6 +192,7 @@ interface WorkflowCanvasAreaProps {
   onClearCanvas: () => void;
   debugMode: boolean;
   onDebugModeChange: (next: boolean) => void;
+  /** Kept for API compatibility; the primary Run action lives in the HUD. */
   onExecuteWorkflow: () => void;
   onExecuteWebhook: () => void;
   onCancelRun?: () => void;
@@ -212,6 +212,8 @@ interface WorkflowCanvasAreaProps {
   onUserPromptChange: (value: string) => void;
   sessionId: string;
   onSessionIdChange: (value: string) => void;
+  /** Called right before Tidy rewrites node positions (e.g. to push an undo snapshot). */
+  onBeforeTidy?: () => void;
 }
 
 function stringifyPretty(value: unknown) {
@@ -226,6 +228,11 @@ function stringifyPretty(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+function samePoint(a: Point | undefined, b: Point | undefined): boolean {
+  if (!a || !b) return false;
+  return Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5;
 }
 
 export function WorkflowCanvasArea({
@@ -255,7 +262,6 @@ export function WorkflowCanvasArea({
   onClearCanvas,
   debugMode,
   onDebugModeChange,
-  onExecuteWorkflow,
   onExecuteWebhook,
   onCancelRun,
   canCancelRun = false,
@@ -268,17 +274,13 @@ export function WorkflowCanvasArea({
   onToggleLogsPanel,
   executionResult,
   statusColors,
-  systemPrompt,
-  onSystemPromptChange,
-  userPrompt,
-  onUserPromptChange,
-  sessionId,
-  onSessionIdChange
+  onBeforeTidy
 }: WorkflowCanvasAreaProps) {
-  const [paletteSearch, setPaletteSearch] = useState("");
-  const [activePaletteCategory, setActivePaletteCategory] = useState<string | null>(null);
   const [expandedNodeLogIds, setExpandedNodeLogIds] = useState<string[]>([]);
+  const [panelTab, setPanelTab] = useState<PanelTab>(logsTab === "logs" ? "tape" : "logs");
+  const [showKey, setShowKey] = useState(false);
 
+  // ---------------------------------------------------------------- palette
   const allDefinitions = useMemo(() => {
     const byType = new Map<string, DefinitionNode>();
     for (const items of groupedDefinitions.values()) {
@@ -289,42 +291,48 @@ export function WorkflowCanvasArea({
     return [...byType.values()].sort((a, b) => a.label.localeCompare(b.label));
   }, [groupedDefinitions]);
 
-  const visibleDefinitions = useMemo(() => {
-    if (!nodeDrawerContext) {
-      return allDefinitions;
-    }
+  const paletteSections = useMemo<PaletteSection[]>(() => {
+    const seen = new Set<string>();
+    return PALETTE_CATEGORIES.map((section) => {
+      const items = allDefinitions.filter((node) => !seen.has(node.type) && section.match(node));
+      for (const item of items) seen.add(item.type);
+      return { key: section.key, title: section.title, description: section.description, icon: section.icon, items };
+    }).filter((section) => section.items.length > 0);
+  }, [allDefinitions]);
 
-    const allowedTypes = new Set(nodeDrawerContext.allowedTypes);
-    return allDefinitions.filter((definition) => allowedTypes.has(definition.type));
+  const filteredDefinitions = useMemo(() => {
+    if (!nodeDrawerContext) return null;
+    const allowed = new Set(nodeDrawerContext.allowedTypes);
+    return allDefinitions.filter((definition) => allowed.has(definition.type));
   }, [allDefinitions, nodeDrawerContext]);
 
-  const paletteSections = useMemo(
-    () =>
-      PALETTE_CATEGORIES.map((section) => ({
-        ...section,
-        items: visibleDefinitions.filter((node) => section.match(node))
-      })).filter((section) => section.items.length > 0),
-    [visibleDefinitions]
+  const handleAddNode = useCallback(
+    (definition: DefinitionNode) => {
+      onCreateNodeFromDefinition(definition);
+      onCloseNodeDrawer();
+    },
+    [onCloseNodeDrawer, onCreateNodeFromDefinition]
   );
 
-  const activeSection = useMemo(
-    () => paletteSections.find((section) => section.key === activePaletteCategory) ?? null,
-    [activePaletteCategory, paletteSections]
-  );
+  useEffect(() => {
+    if (!showNodeDrawer) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCloseNodeDrawer();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showNodeDrawer, onCloseNodeDrawer]);
 
-  const searchResults = useMemo(() => {
-    const query = paletteSearch.trim().toLowerCase();
-    if (!query) {
-      return [];
-    }
-    return visibleDefinitions.filter((node) => {
-      return (
-        node.label.toLowerCase().includes(query) ||
-        node.type.toLowerCase().includes(query) ||
-        node.description.toLowerCase().includes(query)
-      );
-    });
-  }, [paletteSearch, visibleDefinitions]);
+  // ------------------------------------------------------- stages + orbits
+  const slots = useMemo(() => computeAttachmentSlots(nodes, edges), [nodes, edges]);
+  const attached = useMemo(() => attachedNodeIds(slots), [slots]);
+  const stageInfo = useMemo(() => computeStages(nodes, edges), [nodes, edges]);
+  const hubCount = useMemo(() => Object.keys(slots).length, [slots]);
+  const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
 
   const renderEdges = useMemo(
     () =>
@@ -338,61 +346,146 @@ export function WorkflowCanvasArea({
     [edges, onDeleteEdge]
   );
 
-  const presentAttachmentHandles = useMemo(() => {
-    const present = new Set<AgentAttachmentHandle>();
-    for (const edge of edges) {
-      const handle = edge.sourceHandle ?? edge.targetHandle;
-      if (handle && (AGENT_ATTACHMENT_HANDLES as string[]).includes(handle)) {
-        present.add(handle as AgentAttachmentHandle);
-      }
-    }
-    return present;
-  }, [edges]);
-
   const renderNodes = useMemo(
     () =>
       nodes.map((node) => {
-        if (
-          !onOpenAgentAttachmentDrawer ||
-          (node.data.nodeType !== "agent_orchestrator" && node.data.nodeType !== "supervisor_node")
-        ) {
+        const nodeType = node.data.nodeType;
+        const hub = isHubType(nodeType);
+        const attachment = attached.has(node.id) ? findHubOf(node.id, slots) : null;
+        if (!hub && !attachment) {
           return node;
         }
-
+        const data: EditorNodeData = { ...node.data };
+        if (hub) {
+          data.slots = slots[node.id];
+          if (onOpenAgentAttachmentDrawer) {
+            data.onOpenAgentAttachmentDrawer = (sourceHandle: AgentAttachmentHandle) => onOpenAgentAttachmentDrawer(node.id, sourceHandle);
+          }
+        }
+        if (attachment) {
+          data.attachedTo = attachment.hubId;
+          data.attachedAs = attachment.port;
+          const hubNode = nodeById.get(attachment.hubId);
+          if (hubNode) {
+            const dx = node.position.x + ORBIT.satelliteSize / 2 - (hubNode.position.x + ORBIT.hubSize / 2);
+            const dy = node.position.y + ORBIT.satelliteSize / 2 - (hubNode.position.y + ORBIT.hubSize / 2);
+            data.labelSide = Math.abs(dy) >= Math.abs(dx) * 1.2 ? (dy < 0 ? "top" : "bottom") : dx < 0 ? "left" : "right";
+          }
+        }
         return {
           ...node,
-          data: {
-            ...node.data,
-            onOpenAgentAttachmentDrawer: (sourceHandle: AgentAttachmentHandle) =>
-              onOpenAgentAttachmentDrawer(node.id, sourceHandle)
-          }
+          data,
+          draggable: attachment ? false : node.draggable
         };
       }),
-    [nodes, onOpenAgentAttachmentDrawer]
+    [attached, nodeById, nodes, onOpenAgentAttachmentDrawer, slots]
   );
 
+  /** Position changes for every node attached (recursively) to `hubId`. */
+  const orbitChangesFor = useCallback(
+    (hubId: string, hubPosition: Point, dragging?: boolean): NodeChange[] => {
+      const positions = orbitPositions(hubId, slots, hubPosition);
+      return Object.entries(positions).map(([id, position]) => ({ type: "position", id, position, dragging }));
+    },
+    [slots]
+  );
+
+  const handleNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      const extra: NodeChange[] = [];
+      for (const change of changes) {
+        if (change.type === "position" && change.position && slots[change.id] && !findHubOf(change.id, slots)) {
+          extra.push(...orbitChangesFor(change.id, change.position, change.dragging));
+        }
+      }
+      onNodesChange(extra.length ? [...changes, ...extra] : changes);
+    },
+    [onNodesChange, orbitChangesFor, slots]
+  );
+
+  // Snap attached nodes onto their orbit whenever the attachment set or a hub
+  // position changes outside of a drag (new edge, import, undo, ...).
+  useEffect(() => {
+    const changes: NodeChange[] = [];
+    for (const hubId of Object.keys(slots)) {
+      if (findHubOf(hubId, slots)) continue; // worker hubs are positioned by their parent
+      const hub = nodeById.get(hubId);
+      if (!hub) continue;
+      const positions = orbitPositions(hubId, slots, hub.position);
+      for (const [id, position] of Object.entries(positions)) {
+        const node = nodeById.get(id);
+        if (node && !node.dragging && !samePoint(node.position, position)) {
+          changes.push({ type: "position", id, position });
+        }
+      }
+    }
+    if (changes.length) onNodesChange(changes);
+  }, [nodeById, onNodesChange, slots]);
+
+  const applyTidy = useCallback(() => {
+    if (nodes.length === 0) return;
+    onBeforeTidy?.();
+    const layout = tidyLayout(nodes, edges);
+    const changes: NodeChange[] = Object.entries(layout)
+      .filter(([id, position]) => !samePoint(nodeById.get(id)?.position, position))
+      .map(([id, position]) => ({ type: "position", id, position }));
+    if (changes.length) onNodesChange(changes);
+    if (reactFlowInstance) {
+      window.setTimeout(() => reactFlowInstance.fitView({ padding: 0.18, duration: 320 }), 30);
+    }
+  }, [edges, nodeById, nodes, onBeforeTidy, onNodesChange, reactFlowInstance]);
+
+  // ------------------------------------------------------------ stage strip
+  const stripStages = useMemo<StageStripNode[][]>(
+    () =>
+      stageInfo.stages.map((ids) =>
+        ids
+          .map((id) => nodeById.get(id))
+          .filter((node): node is Node<EditorNodeData> => Boolean(node))
+          .map((node) => ({ id: node.id, label: node.data.label, type: node.data.nodeType, status: node.data.executionStatus }))
+      ),
+    [nodeById, stageInfo.stages]
+  );
+
+  const activeStage = useMemo(() => {
+    const selected = nodes.find((node) => node.selected);
+    if (!selected) return null;
+    const anchor = attached.has(selected.id) ? findHubOf(selected.id, slots)?.hubId ?? selected.id : selected.id;
+    const depth = stageInfo.depth[anchor];
+    return typeof depth === "number" ? depth : null;
+  }, [attached, nodes, slots, stageInfo.depth]);
+
+  const focusStage = useCallback(
+    (_index: number, nodeIds: string[]) => {
+      if (!reactFlowInstance) return;
+      const ids = new Set(nodeIds);
+      for (const id of nodeIds) {
+        if (slots[id]) {
+          const hub = nodeById.get(id);
+          if (hub) for (const attachedId of Object.keys(orbitPositions(id, slots, hub.position))) ids.add(attachedId);
+        }
+      }
+      reactFlowInstance.fitView({ nodes: [...ids].map((id) => ({ id })), padding: 0.35, duration: 320 });
+    },
+    [nodeById, reactFlowInstance, slots]
+  );
+
+  // ---------------------------------------------------------------- logs
   const nodeMetaById = useMemo(() => {
     const byId = new Map<string, { label: string; type: string }>();
     for (const node of nodes) {
-      byId.set(node.id, {
-        label: node.data.label,
-        type: node.data.nodeType
-      });
+      byId.set(node.id, { label: node.data.label, type: node.data.nodeType });
     }
     return byId;
   }, [nodes]);
 
   useEffect(() => {
-    const initialOpenIds = (executionResult?.nodeResults ?? [])
-      .filter((result) => result.status === "error")
-      .map((result) => result.nodeId);
+    const initialOpenIds = (executionResult?.nodeResults ?? []).filter((result) => result.status === "error").map((result) => result.nodeId);
     setExpandedNodeLogIds(initialOpenIds);
   }, [executionResult?.executionId, executionResult?.completedAt, executionResult?.status]);
 
   const toggleNodeLogExpanded = (nodeId: string) => {
-    setExpandedNodeLogIds((current) =>
-      current.includes(nodeId) ? current.filter((value) => value !== nodeId) : [...current, nodeId]
-    );
+    setExpandedNodeLogIds((current) => (current.includes(nodeId) ? current.filter((value) => value !== nodeId) : [...current, nodeId]));
   };
 
   const expandAllNodeLogs = () => {
@@ -403,362 +496,151 @@ export function WorkflowCanvasArea({
     setExpandedNodeLogIds([]);
   };
 
-  const handleAddNode = (definition: DefinitionNode) => {
-    onCreateNodeFromDefinition(definition);
-    onCloseNodeDrawer();
-    setPaletteSearch("");
-    setActivePaletteCategory(null);
+  const selectPanelTab = (tab: PanelTab) => {
+    setPanelTab(tab);
+    if (tab === "logs") onLogsTabChange("logs");
   };
 
-  useEffect(() => {
-    if (!showNodeDrawer) {
-      setPaletteSearch("");
-      setActivePaletteCategory(null);
-      return;
+  const selectNodeFromTape = useCallback(
+    (nodeId: string) => {
+      onNodesChange(nodes.map((node) => ({ type: "select", id: node.id, selected: node.id === nodeId })));
+      reactFlowInstance?.fitView({ nodes: [{ id: nodeId }], padding: 1.2, duration: 280 });
+    },
+    [nodes, onNodesChange, reactFlowInstance]
+  );
+
+  const paletteTitle = nodeDrawerContext?.title ?? "Add a node";
+  const paletteSubtitle = nodeDrawerContext?.description ?? "Search or browse by category. Drag onto the canvas or press Enter.";
+
+  const onStageDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.classList.contains("react-flow__pane")) {
+      event.preventDefault();
+      onOpenNodeDrawer();
     }
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onCloseNodeDrawer();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [showNodeDrawer, onCloseNodeDrawer]);
-
-  useEffect(() => {
-    if (!showNodeDrawer) {
-      return;
-    }
-    setPaletteSearch("");
-    setActivePaletteCategory(null);
-  }, [nodeDrawerContext?.sourceHandle, nodeDrawerContext?.sourceNodeId, nodeDrawerContext?.title, showNodeDrawer]);
-
-  const isFilteredDrawer = Boolean(nodeDrawerContext);
-  const effectiveActiveSection = isFilteredDrawer ? null : activeSection;
-  const paletteTitle = effectiveActiveSection ? effectiveActiveSection.title : nodeDrawerContext?.title ?? "What happens next?";
-  const paletteSubtitle = effectiveActiveSection
-    ? `Select a ${effectiveActiveSection.title} node to add`
-    : nodeDrawerContext?.description ?? "Pick a category or search directly";
+  };
 
   return (
     <div className="editor-layout">
       <section className={isLogsPanelCollapsed ? "canvas-and-logs logs-collapsed" : "canvas-and-logs"} style={canvasAndLogsStyle}>
-        <div className="canvas-pane" ref={flowWrapperRef} onDrop={onDrop} onDragOver={onDragOver}>
-          {showNodeDrawer && (
-            <div className="node-palette-overlay" onClick={onCloseNodeDrawer}>
-              <aside
-                className="node-palette"
-                onClick={(event) => {
-                  event.stopPropagation();
-                }}
-              >
-                <div className="node-palette-header">
-                  <div className="node-palette-heading-row">
-                    {effectiveActiveSection ? (
-                      <button
-                        className="node-palette-back-btn"
-                        onClick={() => setActivePaletteCategory(null)}
-                        title="Back to categories"
-                        aria-label="Back to categories"
-                      >
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                          <path
-                            d="m14 6-6 6 6 6"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        </svg>
-                      </button>
-                    ) : null}
-                    <div>
-                      <h3>{paletteTitle}</h3>
-                      <p>{paletteSubtitle}</p>
-                    </div>
-                    <button
-                      className="node-palette-close-btn"
-                      onClick={onCloseNodeDrawer}
-                      title="Close node library"
-                      aria-label="Close node library"
-                    >
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path
-                          d="m7 7 10 10M17 7 7 17"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.8"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </button>
-                  </div>
-
-                  <label className="node-palette-search">
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <circle cx="11" cy="11" r="6.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
-                      <path d="m16 16 4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                    </svg>
-                    <input
-                      placeholder="Search nodes..."
-                      value={paletteSearch}
-                      onChange={(event) => setPaletteSearch(event.target.value)}
-                      autoFocus
-                    />
-                  </label>
-                </div>
-
-                <div className="node-palette-body">
-                  {paletteSearch.trim() ? (
-                    <div className="node-palette-list">
-                      {searchResults.length === 0 && (
-                        <div className="node-palette-empty">No nodes match "{paletteSearch.trim()}".</div>
-                      )}
-                      {searchResults.map((item) => {
-                        const parentSection = paletteSections.find((section) => section.match(item));
-                        return (
-                          <button
-                            key={item.type}
-                            className="node-palette-node-row"
-                            draggable
-                            onDragStart={(event) => {
-                              event.dataTransfer.setData("application/reactflow", item.type);
-                              event.dataTransfer.effectAllowed = "move";
-                            }}
-                            onClick={() => handleAddNode(item)}
-                            title={item.description}
-                          >
-                            <span className="node-palette-icon-wrap">
-                              <NodeTypeIcon nodeType={item.type} fallbackIcon={parentSection?.icon ?? "core"} />
-                            </span>
-                            <span className="node-palette-row-copy">
-                              <strong>{item.label}</strong>
-                              <small>{item.description || item.type}</small>
-                            </span>
-                            <span className="node-palette-row-arrow" aria-hidden="true">
-                              +
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : isFilteredDrawer ? (
-                    <div className="node-palette-list">
-                      {visibleDefinitions.length === 0 && (
-                        <div className="node-palette-empty">No compatible nodes are available for this port.</div>
-                      )}
-                      {visibleDefinitions.map((item) => {
-                        const parentSection = paletteSections.find((section) => section.match(item));
-                        return (
-                          <button
-                            key={item.type}
-                            className="node-palette-node-row"
-                            draggable
-                            onDragStart={(event) => {
-                              event.dataTransfer.setData("application/reactflow", item.type);
-                              event.dataTransfer.effectAllowed = "move";
-                            }}
-                            onClick={() => handleAddNode(item)}
-                            title={item.description}
-                          >
-                            <span className="node-palette-icon-wrap">
-                              <NodeTypeIcon nodeType={item.type} fallbackIcon={parentSection?.icon ?? "ai"} />
-                            </span>
-                            <span className="node-palette-row-copy">
-                              <strong>{item.label}</strong>
-                              <small>{item.description || item.type}</small>
-                            </span>
-                            <span className="node-palette-row-arrow" aria-hidden="true">
-                              +
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : activeSection ? (
-                    <div className="node-palette-list">
-                      {activeSection.items.map((item) => (
-                        <button
-                          key={item.type}
-                          className="node-palette-node-row"
-                          draggable
-                          onDragStart={(event) => {
-                            event.dataTransfer.setData("application/reactflow", item.type);
-                            event.dataTransfer.effectAllowed = "move";
-                          }}
-                          onClick={() => handleAddNode(item)}
-                          title={item.description}
-                        >
-                          <span className="node-palette-icon-wrap">
-                            <NodeTypeIcon nodeType={item.type} fallbackIcon={activeSection.icon} />
-                          </span>
-                          <span className="node-palette-row-copy">
-                            <strong>{item.label}</strong>
-                            <small>{item.description || item.type}</small>
-                          </span>
-                          <span className="node-palette-row-arrow" aria-hidden="true">
-                            +
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="node-palette-list">
-                      {paletteSections.map((section) => (
-                        <button
-                          key={section.key}
-                          className="node-palette-category-row"
-                          onClick={() => setActivePaletteCategory(section.key)}
-                        >
-                          <span className="node-palette-icon-wrap">
-                            <PaletteIcon icon={section.icon} />
-                          </span>
-                          <span className="node-palette-row-copy">
-                            <strong>{section.title}</strong>
-                            <small>{section.description}</small>
-                          </span>
-                          <span className="node-palette-row-arrow" aria-hidden="true">
-                            &rarr;
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </aside>
-            </div>
-          )}
-
-          <ReactFlow
-            nodes={renderNodes}
-            edges={renderEdges}
-            nodeTypes={nodeTypes}
-            edgeTypes={edgeTypes}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            onEdgeDoubleClick={(event, edge) => {
-              event.preventDefault();
-              onDeleteEdge(edge.id);
-            }}
-            onEdgeContextMenu={(event, edge) => {
-              event.preventDefault();
-              onDeleteEdge(edge.id);
-            }}
-            onInit={onInit}
-            onNodeDoubleClick={(_event, node) => onOpenNodeConfig(node.id)}
-            fitView
-            multiSelectionKeyCode={["Shift", "Meta", "Control"]}
-            selectionKeyCode={["Shift"]}
-            deleteKeyCode={null}
-          >
-            <Background id="workflow-grid-minor" variant={BackgroundVariant.Lines} color="#e4ebf5" gap={24} lineWidth={0.65} />
-            <Background id="workflow-grid-major" variant={BackgroundVariant.Lines} color="#c8d7ea" gap={120} lineWidth={1.15} />
-            <MiniMap
-              pannable
-              zoomable
-              nodeStrokeWidth={2}
-              maskColor="rgba(15, 23, 42, 0.08)"
-              nodeColor={(n) => {
-                const color = (n.data as EditorNodeData | undefined)?.color;
-                if (color === "red") return "#fecaca";
-                if (color === "orange") return "#fed7aa";
-                if (color === "yellow") return "#fde68a";
-                if (color === "green") return "#bbf7d0";
-                if (color === "blue") return "#bfdbfe";
-                if (color === "purple") return "#ddd6fe";
-                if (color === "pink") return "#fbcfe8";
-                if (color === "gray") return "#e2e8f0";
-                return "#c7d2fe";
-              }}
-            />
-            <Controls showInteractive={false} />
-          </ReactFlow>
-
-          <div className="canvas-controls-left">
-            <button onClick={() => reactFlowInstance?.fitView()}>Fit</button>
-            <button onClick={() => reactFlowInstance?.zoomIn()}>+</button>
-            <button onClick={() => reactFlowInstance?.zoomOut()}>-</button>
-            <button onClick={onClearCanvas}>Clear</button>
-          </div>
-
-          {presentAttachmentHandles.size > 0 && (
-            <div
-              className="canvas-attachment-legend"
-              role="group"
-              aria-label="Agent attachment edges legend"
-            >
-              <div className="canvas-attachment-legend-title">Attachment edges</div>
-              {AGENT_ATTACHMENT_HANDLES.filter((handle) => presentAttachmentHandles.has(handle)).map(
-                (handle) => {
-                  const style = AGENT_ATTACHMENT_STYLES[handle];
-                  return (
-                    <div
-                      key={handle}
-                      className="canvas-attachment-legend-row"
-                      title={style.description}
-                    >
-                      <span
-                        className="canvas-attachment-legend-swatch"
-                        style={{
-                          background: style.bg,
-                          borderColor: style.border,
-                          color: style.stroke
-                        }}
-                      >
-                        <span
-                          className="canvas-attachment-legend-dash"
-                          style={{ background: style.stroke }}
-                        />
-                      </span>
-                      <span style={{ color: style.stroke, fontWeight: 600 }}>{style.label}</span>
-                    </div>
-                  );
-                }
-              )}
-            </div>
-          )}
-
-          {!showNodeDrawer && (
-            <button
-              className="node-drawer-open-btn"
-              onClick={onOpenNodeDrawer}
-              title="Open node library"
-              aria-label="Open node library"
-            >
-              +
-            </button>
-          )}
-
-          <div className="execute-strip">
-            <button className="execute-btn" onClick={onExecuteWorkflow} disabled={busy}>
-              Execute workflow
-            </button>
-            <button className="execute-btn secondary" onClick={onExecuteWebhook} disabled={busy}>
-              Webhook run
-            </button>
-            {canCancelRun && (
-              <button
-                className="execute-btn secondary"
-                onClick={onCancelRun}
-                title={activeRunExecutionId ? `Stop run ${activeRunExecutionId}` : "Stop running workflow"}
-              >
-                Stop run
-              </button>
+        <div className="canvas-pane">
+          <div className="canvas-stage" ref={flowWrapperRef} onDrop={onDrop} onDragOver={onDragOver} onDoubleClick={onStageDoubleClick}>
+            {showNodeDrawer && (
+              <div className="node-palette-overlay" onClick={onCloseNodeDrawer}>
+                <NodePalette
+                  title={paletteTitle}
+                  subtitle={paletteSubtitle}
+                  sections={paletteSections}
+                  flatItems={filteredDefinitions}
+                  emptyMessage={nodeDrawerContext ? "No compatible nodes are available for this port." : undefined}
+                  onPick={handleAddNode}
+                  onClose={onCloseNodeDrawer}
+                  onTidy={nodeDrawerContext ? undefined : applyTidy}
+                />
+              </div>
             )}
-            <button
-              className={debugMode ? "execute-btn" : "execute-btn secondary"}
-              onClick={() => onDebugModeChange(!debugMode)}
-              disabled={busy}
+
+            <ReactFlow
+              nodes={renderNodes}
+              edges={renderEdges}
+              nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
+              onNodesChange={handleNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              onEdgeDoubleClick={(event, edge) => {
+                event.preventDefault();
+                onDeleteEdge(edge.id);
+              }}
+              onEdgeContextMenu={(event, edge) => {
+                event.preventDefault();
+                onDeleteEdge(edge.id);
+              }}
+              onInit={onInit}
+              onNodeDoubleClick={(_event, node) => onOpenNodeConfig(node.id)}
+              fitView
+              fitViewOptions={{ padding: 0.18 }}
+              zoomOnDoubleClick={false}
+              multiSelectionKeyCode={["Shift", "Meta", "Control"]}
+              selectionKeyCode={["Shift"]}
+              deleteKeyCode={null}
+              proOptions={{ hideAttribution: true }}
             >
-              {debugMode ? "Debug mode: ON" : "Debug mode: OFF"}
-            </button>
+              <Background id="workflow-dots" variant={BackgroundVariant.Dots} gap={24} size={1.4} className="canvas-dots" />
+              <MiniMap
+                pannable
+                zoomable
+                nodeStrokeWidth={0}
+                nodeBorderRadius={6}
+                nodeClassName={(n) => {
+                  const data = n.data as EditorNodeData | undefined;
+                  if (!data) return "wf-mini";
+                  if (isHubType(data.nodeType)) return "wf-mini wf-mini-hub";
+                  if (attached.has(n.id)) return "wf-mini wf-mini-satellite";
+                  return `wf-mini${data.color ? ` wf-mini-${data.color}` : ""}`;
+                }}
+              />
+              <Controls showInteractive={false} position="bottom-left" />
+            </ReactFlow>
+
+            <div className="canvas-toolbar" role="toolbar" aria-label="Canvas tools">
+              {!showNodeDrawer && (
+                <button type="button" className="canvas-tool canvas-tool-primary node-drawer-open-btn" onClick={onOpenNodeDrawer} title="Add node (double-click the canvas)">
+                  <span aria-hidden="true">+</span> Add node
+                </button>
+              )}
+              <button type="button" className="canvas-tool" onClick={applyTidy} disabled={nodes.length === 0} title="Lay out stages left to right">
+                Tidy
+              </button>
+              <button type="button" className="canvas-tool" onClick={() => reactFlowInstance?.fitView({ padding: 0.18, duration: 240 })} title="Fit to view">
+                Fit
+              </button>
+              <button type="button" className="canvas-tool canvas-tool-danger" onClick={onClearCanvas} disabled={nodes.length === 0} title="Remove every node and edge">
+                Clear
+              </button>
+              <span className="canvas-toolbar-sep" aria-hidden="true" />
+              <button type="button" className="canvas-tool canvas-tool-ghost" onClick={onExecuteWebhook} disabled={busy} title="Run through the webhook entry point">
+                Webhook run
+              </button>
+              {canCancelRun && (
+                <button type="button" className="canvas-tool canvas-tool-stop" onClick={onCancelRun} title={activeRunExecutionId ? `Stop run ${activeRunExecutionId}` : "Stop running workflow"}>
+                  Stop run
+                </button>
+              )}
+              <button
+                type="button"
+                className={`canvas-tool canvas-tool-toggle${debugMode ? " on" : ""}`}
+                onClick={() => onDebugModeChange(!debugMode)}
+                disabled={busy}
+                aria-pressed={debugMode}
+                aria-label={debugMode ? "Debug mode: ON" : "Debug mode: OFF"}
+                title="Toggle debug mode (shows the run tape and logs panel)"
+              >
+                <span className="canvas-tool-toggle-dot" aria-hidden="true" />
+                Debug
+              </button>
+            </div>
+
+            {hubCount > 0 && (
+              <div className={`canvas-key${showKey ? " open" : ""}`}>
+                <button type="button" className="canvas-key-toggle" onClick={() => setShowKey((value) => !value)} aria-expanded={showKey} title="Attachment port colours">
+                  {showKey ? "Hide key" : "Key"}
+                </button>
+                {showKey && (
+                  <ul className="canvas-key-list" aria-label="Agent attachment ports">
+                    {AGENT_ATTACHMENT_HANDLES.map((handle) => (
+                      <li key={handle} className={`canvas-key-row canvas-key-${handle}`} title={AGENT_ATTACHMENT_STYLES[handle].description}>
+                        <i aria-hidden="true" />
+                        {AGENT_ATTACHMENT_STYLES[handle].label}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
           </div>
+
+          <StageStrip stages={stripStages} activeStage={activeStage} onFocusStage={focusStage} />
         </div>
 
         {debugMode && (
@@ -773,8 +655,11 @@ export function WorkflowCanvasArea({
 
             <div className="logs-pane">
               <div className="logs-header">
-                <div className="logs-tabs">
-                  <button className="logs-tab active" onClick={() => onLogsTabChange("logs")}>
+                <div className="logs-tabs" role="tablist" aria-label="Run panel">
+                  <button role="tab" aria-selected={panelTab === "tape"} className={panelTab === "tape" ? "logs-tab active" : "logs-tab"} onClick={() => selectPanelTab("tape")}>
+                    Run tape
+                  </button>
+                  <button role="tab" aria-selected={panelTab === "logs"} className={panelTab === "logs" ? "logs-tab active" : "logs-tab"} onClick={() => selectPanelTab("logs")}>
                     Logs
                   </button>
                 </div>
@@ -800,25 +685,11 @@ export function WorkflowCanvasArea({
                   >
                     {isLogsPanelCollapsed ? (
                       <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path
-                          d="M8 10l4-4 4 4M8 14l4 4 4-4"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.8"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
+                        <path d="M8 10l4-4 4 4M8 14l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                     ) : (
                       <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path
-                          d="M8 8l4 4 4-4M8 16l4-4 4 4"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.8"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
+                        <path d="M8 8l4 4 4-4M8 16l4-4 4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                     )}
                   </button>
@@ -827,11 +698,13 @@ export function WorkflowCanvasArea({
 
               {!isLogsPanelCollapsed && (
                 <div className="logs-body">
-                  {!executionResult && (
+                  {panelTab === "tape" && <RunTape executionResult={executionResult} nodeMetaById={nodeMetaById} onSelectNode={selectNodeFromTape} />}
+
+                  {panelTab === "logs" && !executionResult && (
                     <div className="logs-placeholder">No debug trace yet. Send a chat message or call a webhook endpoint.</div>
                   )}
 
-                  {executionResult && (
+                  {panelTab === "logs" && executionResult && (
                     <>
                       <div className="log-summary">
                         <span>
@@ -854,21 +727,14 @@ export function WorkflowCanvasArea({
                           const isExpanded = expandedNodeLogIds.includes(result.nodeId);
                           const nodeLabel = meta?.label ?? result.nodeId;
                           const nodeResultRecord = result as unknown as { nodeType?: unknown };
-                          const nodeType =
-                            typeof nodeResultRecord.nodeType === "string"
-                              ? String(nodeResultRecord.nodeType)
-                              : meta?.type;
+                          const nodeType = typeof nodeResultRecord.nodeType === "string" ? String(nodeResultRecord.nodeType) : meta?.type;
                           const started = result.startedAt ? new Date(result.startedAt).toLocaleTimeString() : "—";
                           const completed = result.completedAt ? new Date(result.completedAt).toLocaleTimeString() : "—";
                           const hasDetails = result.input !== undefined || result.output !== undefined || Boolean(result.error);
 
                           return (
                             <div key={result.nodeId} className={isExpanded ? "node-status-item expanded" : "node-status-item"}>
-                              <button
-                                className="node-status-head"
-                                onClick={() => toggleNodeLogExpanded(result.nodeId)}
-                                aria-expanded={isExpanded}
-                              >
+                              <button className="node-status-head" onClick={() => toggleNodeLogExpanded(result.nodeId)} aria-expanded={isExpanded}>
                                 <div className="node-status-title-wrap">
                                   <strong className="node-status-title">{nodeLabel}</strong>
                                   <span className="node-status-subtitle">
@@ -878,7 +744,9 @@ export function WorkflowCanvasArea({
                                 </div>
                                 <div className="node-status-meta">
                                   {result.durationMs !== undefined ? <span>{result.durationMs}ms</span> : null}
-                                  <strong style={{ color: statusColors[result.status] ?? "#657087" }}>{result.status}</strong>
+                                  <strong className={`node-status-value node-status-${result.status}`} style={{ color: statusColors[result.status] }}>
+                                    {result.status}
+                                  </strong>
                                   <span className="node-status-chevron" aria-hidden="true">
                                     {isExpanded ? "▾" : "▸"}
                                   </span>
@@ -917,9 +785,7 @@ export function WorkflowCanvasArea({
                                     </div>
                                   )}
 
-                                  {!hasDetails && (
-                                    <div className="node-log-empty">No input/output payload captured for this node.</div>
-                                  )}
+                                  {!hasDetails && <div className="node-log-empty">No input/output payload captured for this node.</div>}
                                 </div>
                               )}
                             </div>

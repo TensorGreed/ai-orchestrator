@@ -90,21 +90,21 @@ export function WorkflowShareModal({
   };
 
   return (
-    <div className="node-modal-backdrop" role="dialog" aria-modal="true" onClick={onClose}>
-      <div className="node-modal-shell settings-share-modal" onClick={(event) => event.stopPropagation()}>
-        <header className="node-modal-header">
+    <div className="pg-modal-backdrop" role="presentation" onClick={onClose}>
+      <div className="pg-modal settings-share-modal" role="dialog" aria-modal="true" aria-labelledby="share-modal-title" onClick={(event) => event.stopPropagation()}>
+        <header className="pg-modal-header">
           <div>
-            <h3>Share "{workflowName}"</h3>
+            <h3 id="share-modal-title" className="pg-modal-title">Share "{workflowName}"</h3>
             <p className="settings-help">
               Grant read or execute access to other projects. Shared workflows remain owned by{" "}
               <code>{owningProjectId}</code>.
             </p>
           </div>
-          <button className="header-btn ghost" onClick={onClose}>
+          <button type="button" className="pg-btn ghost small" onClick={onClose} aria-label="Close share dialog">
             Close
           </button>
         </header>
-        <div className="node-modal-body">
+        <div className="pg-modal-body">
           {error && <div className="settings-error">{error}</div>}
 
           <div className="settings-card">
@@ -136,7 +136,7 @@ export function WorkflowShareModal({
                 </select>
                 <div className="settings-actions">
                   <button
-                    className="header-btn"
+                    className="pg-btn primary"
                     onClick={handleShare}
                     disabled={busy || !targetProjectId}
                   >
@@ -173,7 +173,7 @@ export function WorkflowShareModal({
                       <td>{share.sharedBy ?? "—"}</td>
                       <td>
                         <button
-                          className="mini-btn"
+                          className="pg-btn small ghost danger"
                           onClick={() => handleUnshare(share.projectId)}
                           disabled={busy}
                         >

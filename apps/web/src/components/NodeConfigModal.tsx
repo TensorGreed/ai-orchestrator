@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { LLMProviderConfig, MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
-import type { EditorNode, EditorNodeData } from "../lib/workflow";
+import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
+import { NodeTypeIcon } from "./node-icons";
 import {
   createSecret,
   discoverMcpTools,
@@ -22,8 +23,33 @@ export interface NodeInputOption {
   label: string;
 }
 
-interface NodeConfigModalProps {
+export type InspectorAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
+
+/** Last-run summary for the Trace tab. All fields optional; "No run yet" when nothing is set. */
+export interface NodeTrace {
+  status?: string;
+  durationMs?: number;
+  telemetry?: NodeTelemetry;
+  error?: string;
+  errorRemediation?: string;
+}
+
+/** Labels of the nodes attached to each agent port, derived by the caller from the edges. */
+export interface NodeSlots {
+  chat_model: string[];
+  memory: string[];
+  tool: string[];
+  worker: string[];
+}
+
+export interface NodeInspectorProps {
   node: EditorNode;
+  /** Last-run trace for this node (status, duration, telemetry, error). */
+  trace?: NodeTrace;
+  /** Attached agent ports (agent_orchestrator / supervisor_node only). */
+  slots?: NodeSlots;
+  /** Opens the attachment drawer for the given agent port. */
+  onAttach?: (handle: InspectorAttachmentHandle) => void;
   inputOptions: NodeInputOption[];
   executionResult: WorkflowExecutionResult | null;
   workflowContext?: {
@@ -46,6 +72,132 @@ interface NodeConfigModalProps {
   onExecuteStep: () => void;
   onPinNodeOutput?: (nodeId: string) => Promise<void> | void;
   onUnpinNodeOutput?: (nodeId: string) => Promise<void> | void;
+}
+
+type NodeConfigModalProps = NodeInspectorProps;
+
+type InspectorTab = "parameters" | "input" | "output" | "trace";
+
+const INSPECTOR_WIDTH_STORAGE_KEY = "l2m:inspector-w";
+const INSPECTOR_MIN_WIDTH = 320;
+const INSPECTOR_MAX_VIEWPORT_RATIO = 0.6;
+
+const SLOT_DEFINITIONS: Array<{ handle: InspectorAttachmentHandle; label: string; required?: boolean }> = [
+  { handle: "chat_model", label: "Model", required: true },
+  { handle: "memory", label: "Memory" },
+  { handle: "tool", label: "Tools" },
+  { handle: "worker", label: "Workers" }
+];
+
+function readStoredInspectorWidth(): number | null {
+  try {
+    const raw = window.localStorage.getItem(INSPECTOR_WIDTH_STORAGE_KEY);
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed >= INSPECTOR_MIN_WIDTH ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeInspectorWidth(width: number): void {
+  try {
+    window.localStorage.setItem(INSPECTOR_WIDTH_STORAGE_KEY, String(Math.round(width)));
+  } catch {
+    // Storage may be unavailable (private mode, blocked); the width still applies for this session.
+  }
+}
+
+function clampInspectorWidth(width: number): number {
+  const max = Math.max(INSPECTOR_MIN_WIDTH, Math.floor(window.innerWidth * INSPECTOR_MAX_VIEWPORT_RATIO));
+  return Math.min(max, Math.max(INSPECTOR_MIN_WIDTH, width));
+}
+
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, inner) => {
+    if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+      return Object.keys(inner as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, key) => {
+          acc[key] = (inner as Record<string, unknown>)[key];
+          return acc;
+        }, {});
+    }
+    return inner;
+  });
+}
+
+function stripAgentOnlyKeys(nodeType: string, value: Record<string, unknown>): Record<string, unknown> {
+  if (nodeType !== "agent_orchestrator") return value;
+  const next = { ...value };
+  delete next.provider;
+  delete next.sourceUserPrompt;
+  return next;
+}
+
+function formatMs(value: number | undefined): string | undefined {
+  if (value === undefined || !Number.isFinite(value)) return undefined;
+  if (value < 1000) return `${Math.round(value)} ms`;
+  return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)} s`;
+}
+
+function formatCount(value: number | undefined): string | undefined {
+  if (value === undefined || !Number.isFinite(value)) return undefined;
+  return value.toLocaleString();
+}
+
+function traceTone(status: string | undefined): "ok" | "err" | "running" | "warn" | "idle" {
+  switch (status) {
+    case "success":
+      return "ok";
+    case "error":
+      return "err";
+    case "running":
+    case "pending":
+      return "running";
+    case "skipped":
+    case "canceled":
+    case "waiting_approval":
+      return "warn";
+    default:
+      return "idle";
+  }
+}
+
+/** Derive the agent slot labels from the editor graph: attachment edges go agent → attached node with
+ *  sourceHandle = chat_model | memory | tool | worker. */
+export function buildNodeSlots(
+  nodeId: string,
+  nodes: ReadonlyArray<{ id: string; data: { label: string } }>,
+  edges: ReadonlyArray<{ source: string; target: string; sourceHandle?: string | null }>
+): NodeSlots {
+  const slots: NodeSlots = { chat_model: [], memory: [], tool: [], worker: [] };
+  const labelById = new Map(nodes.map((node) => [node.id, node.data.label]));
+  for (const edge of edges) {
+    if (edge.source !== nodeId) continue;
+    const handle = edge.sourceHandle;
+    if (handle !== "chat_model" && handle !== "memory" && handle !== "tool" && handle !== "worker") continue;
+    slots[handle].push(labelById.get(edge.target) ?? edge.target);
+  }
+  return slots;
+}
+
+/** Assemble the Trace tab payload from the maps App.tsx already keeps for the canvas. */
+export function buildNodeTrace(
+  nodeId: string,
+  executionResult: WorkflowExecutionResult | null,
+  statuses?: ReadonlyMap<string, string>,
+  telemetry?: ReadonlyMap<string, NodeTelemetry>
+): NodeTrace | undefined {
+  const result = executionResult?.nodeResults.find((entry) => entry.nodeId === nodeId);
+  const trace: NodeTrace = {};
+  const status = statuses?.get(nodeId) ?? result?.status;
+  if (status) trace.status = status;
+  if (result?.durationMs !== undefined) trace.durationMs = result.durationMs;
+  const nodeTelemetry = telemetry?.get(nodeId);
+  if (nodeTelemetry) trace.telemetry = nodeTelemetry;
+  if (result?.error) trace.error = result.error;
+  if (result?.errorRemediation) trace.errorRemediation = result.errorRemediation;
+  return Object.keys(trace).length > 0 ? trace : undefined;
 }
 
 const NODE_INPUT_OPTION_ID = "__node_input__";
@@ -825,8 +977,11 @@ function getSuggestedDirectApiBaseUrl(currentBaseUrl: string): string | null {
   return suggested;
 }
 
-export function NodeConfigModal({
+export function NodeInspector({
   node,
+  trace,
+  slots,
+  onAttach,
   inputOptions,
   executionResult,
   workflowContext,
@@ -845,7 +1000,65 @@ export function NodeConfigModal({
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
   const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
-  const [activeTab, setActiveTab] = useState<"parameters" | "settings">("parameters");
+  const [activeTab, setActiveTab] = useState<InspectorTab>("parameters");
+  const [inspectorWidth, setInspectorWidth] = useState<number | null>(() =>
+    typeof window === "undefined" ? null : readStoredInspectorWidth()
+  );
+  const [resizing, setResizing] = useState(false);
+  const resizeOrigin = useRef<{ startX: number; startWidth: number } | null>(null);
+  const isAgentNode = node.data.nodeType === "agent_orchestrator" || node.data.nodeType === "supervisor_node";
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  const handleResizeStart = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const currentWidth = inspectorWidth ?? (event.currentTarget.parentElement?.getBoundingClientRect().width || 0);
+      resizeOrigin.current = { startX: event.clientX, startWidth: currentWidth };
+      setResizing(true);
+    },
+    [inspectorWidth]
+  );
+
+  useEffect(() => {
+    if (!resizing) return;
+    const handleMove = (event: PointerEvent) => {
+      const origin = resizeOrigin.current;
+      if (!origin) return;
+      setInspectorWidth(clampInspectorWidth(origin.startWidth + (origin.startX - event.clientX)));
+    };
+    const handleUp = () => {
+      setResizing(false);
+      resizeOrigin.current = null;
+      setInspectorWidth((current) => {
+        if (current !== null) storeInspectorWidth(current);
+        return current;
+      });
+    };
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+    window.addEventListener("pointercancel", handleUp);
+    const previousCursor = document.body.style.cursor;
+    const previousSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+      window.removeEventListener("pointercancel", handleUp);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousSelect;
+    };
+  }, [resizing]);
   const [selectedInputId, setSelectedInputId] = useState(NODE_INPUT_OPTION_ID);
   const [discoveredTools, setDiscoveredTools] = useState<MCPToolDefinition[]>([]);
   const [discoverBusy, setDiscoverBusy] = useState(false);
@@ -1121,13 +1334,18 @@ export function NodeConfigModal({
     return base;
   }, [mcpServerDefinitions]);
   const nodeResultById = useMemo(() => {
-    const map = new Map<string, { input?: unknown; output?: unknown; error?: string; status?: string }>();
+    const map = new Map<
+      string,
+      { input?: unknown; output?: unknown; error?: string; errorRemediation?: string; status?: string; durationMs?: number }
+    >();
     for (const result of executionResult?.nodeResults ?? []) {
       map.set(result.nodeId, {
         input: result.input,
         output: result.output,
         error: result.error,
-        status: result.status
+        errorRemediation: result.errorRemediation,
+        status: result.status,
+        durationMs: result.durationMs
       });
     }
     return map;
@@ -1423,7 +1641,7 @@ export function NodeConfigModal({
               )}
               {inlineSecretError && <div className="error-banner">{inlineSecretError}</div>}
               <div className="cfg-inline-actions">
-                <button type="button" className="node-btn" onClick={() => void handleCreateInlineSecret()} disabled={inlineSecretBusy}>
+                <button type="button" className="insp-btn" onClick={() => void handleCreateInlineSecret()} disabled={inlineSecretBusy}>
                   {inlineSecretBusy ? "Creating..." : "Create Credential"}
                 </button>
                 <button type="button" className="header-btn" onClick={closeInlineSecretCreator} disabled={inlineSecretBusy}>
@@ -2041,7 +2259,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() => void handleProviderTestRun()}
             disabled={providerTestBusy}
           >
@@ -2656,7 +2874,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() =>
               void discoverToolsForMcpNode({
                 serverId: toStringValue(config.serverId),
@@ -2968,7 +3186,7 @@ export function NodeConfigModal({
               <div className="cfg-inline-actions">
                 <button
                   type="button"
-                  className="node-btn"
+                  className="insp-btn"
                   onClick={() => {
                     if (!probeToolName && probeChoice) {
                       setProbeToolName(probeChoice);
@@ -3259,7 +3477,7 @@ export function NodeConfigModal({
         </label>
 
         <div className="cfg-inline-actions">
-          <button type="button" className="node-btn" onClick={() => void handleCodeNodeTestRun()} disabled={codeTestBusy}>
+          <button type="button" className="insp-btn" onClick={() => void handleCodeNodeTestRun()} disabled={codeTestBusy}>
             {codeTestBusy ? "Testing..." : "Test Run"}
           </button>
           {codeTestResult && <span className="muted">Test completed. Inspect output panel for logs/result.</span>}
@@ -3603,7 +3821,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() =>
               void handleConnectorTestRun({
                 connectorId,
@@ -3697,7 +3915,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() =>
               void handleConnectorTestRun({
                 connectorId: "google-drive",
@@ -3799,7 +4017,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() => void handleProviderTestRun()}
             disabled={providerTestBusy}
           >
@@ -3897,7 +4115,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() => void handleProviderTestRun()}
             disabled={providerTestBusy}
           >
@@ -3973,7 +4191,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() => void handleProviderTestRun()}
             disabled={providerTestBusy}
           >
@@ -4048,7 +4266,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() => void handleProviderTestRun()}
             disabled={providerTestBusy}
           >
@@ -4201,7 +4419,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() =>
               void handleConnectorTestRun({
                 connectorId: "azure-storage",
@@ -4315,7 +4533,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() =>
               void handleConnectorTestRun({
                 connectorId: "azure-cosmos-db",
@@ -4441,7 +4659,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() =>
               void handleConnectorTestRun({
                 connectorId: "azure-monitor",
@@ -4564,7 +4782,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() =>
               void handleConnectorTestRun({
                 connectorId: "azure-ai-search",
@@ -4691,7 +4909,7 @@ export function NodeConfigModal({
         <div className="cfg-inline-actions">
           <button
             type="button"
-            className="node-btn"
+            className="insp-btn"
             onClick={() =>
               void handleConnectorTestRun({
                 connectorId: "qdrant",
@@ -7952,11 +8170,7 @@ export function NodeConfigModal({
 
     return (
       <>
-        <TextField label="Node Label" value={label} onChange={setLabel} />
-        <div className="cfg-tip">
-          Node ID: <code>{node.id}</code>
-        </div>
-        <div style={{ marginTop: 14 }}>
+        <div>
           <ToggleField
             label="Disabled (executor skips this node and passes parent outputs through)"
             checked={nodeDisabled}
@@ -8082,160 +8296,307 @@ export function NodeConfigModal({
     return nextConfig;
   };
 
-  return (
-    <div className="node-modal-backdrop" role="dialog" aria-modal="true">
-      <div className="node-modal-shell">
-        <div className="node-modal-header">
-          <div className="node-modal-title">
-            <span className="node-modal-icon">{node.data.nodeType === "agent_orchestrator" ? "AG" : "ND"}</span>
-            <strong>{label || node.data.label}</strong>
-          </div>
-          <button type="button" className="node-modal-close" onClick={onClose}>
-            x
-          </button>
+  const isDirty = useMemo(() => {
+    const savedConfig = asRecord(node.data.config);
+    if (label !== node.data.label) return true;
+    if (nodeDisabled !== Boolean(node.data.disabled)) return true;
+    if ((nodeColor ?? undefined) !== (node.data.color ?? undefined)) return true;
+    return stableStringify(getConfigForSave()) !== stableStringify(stripAgentOnlyKeys(node.data.nodeType, savedConfig));
+  }, [config, label, node.data, nodeColor, nodeDisabled]);
+
+  const handleSave = () =>
+    onSave({
+      label,
+      config: getConfigForSave(),
+      disabled: nodeDisabled || undefined,
+      color: nodeColor
+    });
+
+  const renderSlots = () => {
+    if (!isAgentNode) return null;
+    const visibleSlots = SLOT_DEFINITIONS.filter((slot) => slot.handle !== "worker" || node.data.nodeType === "supervisor_node");
+    return (
+      <section className="insp-section insp-slots" aria-label="Slots">
+        <div className="insp-section-head">
+          <h3>Slots</h3>
+          <span className="insp-section-hint">Attached via the agent ports</span>
         </div>
-
-        <div className={showRuntimeInspection ? "node-modal-grid" : "node-modal-grid node-modal-grid-single"}>
-          {showRuntimeInspection && (
-            <section className="node-modal-panel">
-              <h3>INPUT</h3>
-              <SelectField
-                label="Input Source"
-                value={selectedInputId}
-                onChange={setSelectedInputId}
-                options={[
-                  { value: NODE_INPUT_OPTION_ID, label: "This node input (last run)" },
-                  ...inputOptions.map((option) => ({ value: option.id, label: option.label }))
-                ]}
-              />
-              {resolvedInputPreview === undefined ? (
-                <div className="node-modal-placeholder">No input data yet. Execute the workflow to inspect payload.</div>
-              ) : (
-                <KeyValueTable
-                  label={selectedInputId === NODE_INPUT_OPTION_ID ? "Resolved Input" : "Selected Source Output"}
-                  value={resolvedInputPreview}
-                />
-              )}
-            </section>
-          )}
-
-          <section className={showRuntimeInspection ? "node-modal-panel center" : "node-modal-panel center node-modal-panel-full"}>
-            <div className="node-modal-tabs">
-              <div>
-                <button
-                  className={activeTab === "parameters" ? "node-tab active" : "node-tab"}
-                  type="button"
-                  onClick={() => setActiveTab("parameters")}
-                >
-                  Parameters
-                </button>
-                <button
-                  className={activeTab === "settings" ? "node-tab active" : "node-tab"}
-                  type="button"
-                  onClick={() => setActiveTab("settings")}
-                >
-                  Settings
-                </button>
-              </div>
-              <div className="node-modal-debug-actions">
-                {currentNodePinned ? (
-                  <button
-                    className="node-exec-btn secondary"
-                    type="button"
-                    onClick={() => void onUnpinNodeOutput?.(node.id)}
-                  >
-                    Unpin output
-                  </button>
+        {visibleSlots.map((slot) => {
+          const attached = slots?.[slot.handle] ?? [];
+          return (
+            <div key={slot.handle} className={`insp-slot ${slot.handle}`} data-testid={`insp-slot-${slot.handle}`}>
+              <i aria-hidden="true" />
+              <em>
+                {slot.label}
+                {slot.required ? <span className="insp-slot-required" title="Required">*</span> : null}
+              </em>
+              <span className="insp-slot-items">
+                {attached.length > 0 ? (
+                  attached.map((item, index) => (
+                    <code key={`${item}-${index}`} className="insp-slot-chip">
+                      {item}
+                    </code>
+                  ))
                 ) : (
-                  <button
-                    className="node-exec-btn secondary"
-                    type="button"
-                    onClick={() => void onPinNodeOutput?.(node.id)}
-                    disabled={!currentNodeResult || currentNodeResult.output === undefined}
-                  >
-                    Pin output
-                  </button>
+                  <span className="insp-slot-empty">{slot.required ? "required" : "none"}</span>
                 )}
-                <button className="node-exec-btn" type="button" onClick={onExecuteStep}>
-                  Execute node
+              </span>
+              {onAttach ? (
+                <button
+                  type="button"
+                  className="insp-slot-add"
+                  onClick={() => onAttach(slot.handle)}
+                  aria-label={`Attach ${slot.label.toLowerCase()}`}
+                >
+                  + attach
                 </button>
-              </div>
+              ) : null}
             </div>
+          );
+        })}
+      </section>
+    );
+  };
 
-            <div className="node-modal-content">{activeTab === "parameters" ? renderParameters() : renderSettings()}</div>
+  const renderInputTab = () => {
+    if (!showRuntimeInspection) {
+      return <div className="insp-empty">Switch to debug mode and run the workflow to inspect this node's input.</div>;
+    }
+    return (
+      <>
+        <SelectField
+          label="Input Source"
+          value={selectedInputId}
+          onChange={setSelectedInputId}
+          options={[
+            { value: NODE_INPUT_OPTION_ID, label: "This node input (last run)" },
+            ...inputOptions.map((option) => ({ value: option.id, label: option.label }))
+          ]}
+        />
+        {resolvedInputPreview === undefined ? (
+          <div className="insp-empty">No input data yet. Execute the workflow to inspect payload.</div>
+        ) : (
+          <KeyValueTable
+            label={selectedInputId === NODE_INPUT_OPTION_ID ? "Resolved Input" : "Selected Source Output"}
+            value={resolvedInputPreview}
+          />
+        )}
+      </>
+    );
+  };
 
-            {node.data.nodeType === "agent_orchestrator" && (
-              <div className="node-modal-port-preview">
-                <div>Chat Model*</div>
-                <div>Memory</div>
-                <div>Tool</div>
-              </div>
-            )}
-          </section>
-
-          {showRuntimeInspection && (
-            <section className="node-modal-panel">
-              <h3>OUTPUT</h3>
-              {resolvedOutputPreview !== undefined || currentPinnedOutput !== undefined ? (
-                <div className="cfg-group">
-                  <div className="cfg-tip">
-                    {currentPinnedOutput !== undefined && resolvedOutputPreview === undefined ? (
-                      <>
-                        Using pinned output. <code>Execute node</code> will reuse this data until unpinned.
-                      </>
-                    ) : (
-                      <>
-                        Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
-                        {currentNodePinned ? " (pinned)" : ""}
-                      </>
-                    )}
-                  </div>
-                  <KeyValueTable label="Output" value={resolvedOutputPreview ?? currentPinnedOutput} />
-                </div>
-              ) : node.data.nodeType === "code_node" && codeTestResult ? (
-                <div className="cfg-group">
-                  <TextAreaField
-                    label="Result"
-                    value={JSON.stringify(codeTestResult.result, null, 2)}
-                    onChange={() => undefined}
-                    rows={8}
-                    readOnly
-                  />
-                  <TextAreaField
-                    label="Console Logs"
-                    value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
-                    onChange={() => undefined}
-                    rows={6}
-                    readOnly
-                  />
-                </div>
-              ) : (
-                <div className="node-modal-placeholder">Output appears after executing this step.</div>
-              )}
-            </section>
-          )}
-        </div>
-
-        <div className="node-modal-actions">
-          <button type="button" className="node-btn subtle" onClick={onClose}>
-            Cancel
+  const renderOutputTab = () => {
+    const pinControls = (
+      <div className="insp-row-actions">
+        {currentNodePinned ? (
+          <button className="insp-btn" type="button" onClick={() => void onUnpinNodeOutput?.(node.id)}>
+            Unpin output
           </button>
+        ) : (
           <button
+            className="insp-btn"
             type="button"
-            className="node-btn primary"
-            onClick={() =>
-              onSave({
-                label,
-                config: getConfigForSave(),
-                disabled: nodeDisabled || undefined,
-                color: nodeColor
-              })
-            }
+            onClick={() => void onPinNodeOutput?.(node.id)}
+            disabled={!currentNodeResult || currentNodeResult.output === undefined}
           >
-            Save changes
+            Pin output
           </button>
-        </div>
+        )}
       </div>
-    </div>
+    );
+    if (!showRuntimeInspection) {
+      return (
+        <>
+          <div className="insp-empty">Switch to debug mode and run the workflow to inspect this node's output.</div>
+          {pinControls}
+        </>
+      );
+    }
+    return (
+      <>
+        {pinControls}
+        {resolvedOutputPreview !== undefined || currentPinnedOutput !== undefined ? (
+          <div className="cfg-group">
+            <div className="cfg-tip">
+              {currentPinnedOutput !== undefined && resolvedOutputPreview === undefined ? (
+                <>
+                  Using pinned output. <code>Run this node</code> will reuse this data until unpinned.
+                </>
+              ) : (
+                <>
+                  Last run status: <code>{currentNodeResult?.status ?? "unknown"}</code>
+                  {currentNodePinned ? " (pinned)" : ""}
+                </>
+              )}
+            </div>
+            <KeyValueTable label="Output" value={resolvedOutputPreview ?? currentPinnedOutput} />
+          </div>
+        ) : node.data.nodeType === "code_node" && codeTestResult ? (
+          <div className="cfg-group">
+            <TextAreaField
+              label="Result"
+              value={JSON.stringify(codeTestResult.result, null, 2)}
+              onChange={() => undefined}
+              rows={8}
+              readOnly
+            />
+            <TextAreaField
+              label="Console Logs"
+              value={codeTestResult.logs.length ? codeTestResult.logs.join("\n") : "No logs"}
+              onChange={() => undefined}
+              rows={6}
+              readOnly
+            />
+          </div>
+        ) : (
+          <div className="insp-empty">Output appears after running this node.</div>
+        )}
+      </>
+    );
+  };
+
+  const renderTraceTab = () => {
+    const status = trace?.status ?? currentNodeResult?.status;
+    const durationMs = trace?.durationMs ?? currentNodeResult?.durationMs;
+    const telemetry = trace?.telemetry;
+    const error = trace?.error ?? currentNodeResult?.error;
+    const errorRemediation = trace?.errorRemediation ?? currentNodeResult?.errorRemediation;
+    const hasRun = Boolean(status || durationMs !== undefined || telemetry || error);
+    if (!hasRun) {
+      return <div className="insp-empty">No run yet. Run the workflow or this node to see its trace.</div>;
+    }
+    const tone = traceTone(status);
+    const metrics: Array<{ key: string; label: string; value: string | undefined }> = [
+      { key: "duration", label: "Duration", value: formatMs(durationMs) },
+      { key: "tokens-in", label: "Tokens in", value: formatCount(telemetry?.inputTokens) },
+      { key: "tokens-out", label: "Tokens out", value: formatCount(telemetry?.outputTokens) },
+      { key: "tokens-cached", label: "Cached", value: formatCount(telemetry?.cachedInputTokens) },
+      { key: "tokens-total", label: "Total tokens", value: formatCount(telemetry?.totalTokens) },
+      { key: "latency", label: "LLM latency", value: formatMs(telemetry?.latencyMs) },
+      { key: "calls", label: "LLM calls", value: formatCount(telemetry?.llmCallCount) },
+      { key: "model", label: "Model", value: telemetry?.model },
+      { key: "provider", label: "Provider", value: telemetry?.providerId }
+    ];
+    return (
+      <div className="insp-trace">
+        <div className="insp-trace-status">
+          <span className={`insp-status-dot ${tone}`} aria-hidden="true" />
+          <span className="insp-trace-status-label" data-testid="insp-trace-status">{status ?? "unknown"}</span>
+        </div>
+        <dl className="insp-metrics">
+          {metrics
+            .filter((metric) => metric.value !== undefined)
+            .map((metric) => (
+              <div key={metric.key} className="insp-metric">
+                <dt>{metric.label}</dt>
+                <dd>{metric.value}</dd>
+              </div>
+            ))}
+        </dl>
+        {error ? (
+          <div className="insp-trace-error" role="alert">
+            <strong>Error</strong>
+            <pre>{error}</pre>
+            {errorRemediation ? <p className="insp-trace-remedy">{errorRemediation}</p> : null}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  const tabs: Array<{ key: InspectorTab; label: string }> = [
+    { key: "parameters", label: "Parameters" },
+    { key: "input", label: "Input" },
+    { key: "output", label: "Output" },
+    { key: "trace", label: "Trace" }
+  ];
+
+  return (
+    <aside
+      className={`insp${isAgentNode ? " insp-agent" : ""}`}
+      role="dialog"
+      aria-label={`Inspect ${label || node.data.label}`}
+      style={inspectorWidth !== null ? { width: inspectorWidth } : undefined}
+    >
+      <div
+        className={resizing ? "insp-resizer active" : "insp-resizer"}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize inspector"
+        onPointerDown={handleResizeStart}
+      />
+      <header className="insp-head">
+        <span className="insp-glyph" aria-hidden="true">
+          <NodeTypeIcon nodeType={node.data.nodeType} />
+        </span>
+        <div className="insp-title">
+          <input
+            className="insp-name"
+            aria-label="Node name"
+            value={label}
+            placeholder={node.data.label}
+            onChange={(event) => setLabel(event.target.value)}
+          />
+          <div className="insp-sub">
+            <span>{node.data.nodeType}</span>
+            <span className="insp-sub-sep" aria-hidden="true">
+              ·
+            </span>
+            <span>{node.id}</span>
+          </div>
+        </div>
+        <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep}>
+          Run this node
+        </button>
+        <button type="button" className="insp-close" aria-label="Close inspector" onClick={onClose}>
+          ×
+        </button>
+      </header>
+
+      <div className="insp-tabs" role="tablist" aria-label="Inspector sections">
+        {tabs.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.key}
+            className={activeTab === tab.key ? "insp-tab active" : "insp-tab"}
+            onClick={() => setActiveTab(tab.key)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="insp-body">
+        {activeTab === "parameters" && (
+          <>
+            {renderSlots()}
+            <section className="insp-section">{renderParameters()}</section>
+            <section className="insp-section insp-settings">
+              <div className="insp-section-head">
+                <h3>Settings</h3>
+              </div>
+              {renderSettings()}
+            </section>
+          </>
+        )}
+        {activeTab === "input" && <section className="insp-section">{renderInputTab()}</section>}
+        {activeTab === "output" && <section className="insp-section">{renderOutputTab()}</section>}
+        {activeTab === "trace" && <section className="insp-section">{renderTraceTab()}</section>}
+      </div>
+
+      <footer className="insp-foot">
+        <button type="button" className="insp-btn" onClick={onClose}>
+          Cancel
+        </button>
+        <button type="button" className="insp-btn primary" onClick={handleSave} data-dirty={isDirty ? "true" : undefined}>
+          Save changes
+          {isDirty ? <span className="insp-dirty" aria-hidden="true" /> : null}
+        </button>
+      </footer>
+    </aside>
   );
 }
+
+export const NodeConfigModal = NodeInspector;

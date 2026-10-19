@@ -2,12 +2,13 @@ import { expect, test, type Page } from "@playwright/test";
 
 const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL ?? "admin@example.com";
 const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD ?? "ChangeThisPassword123!";
+const API_URL = process.env.E2E_API_URL ?? "http://localhost:4000";
 
 async function ensureAuthenticated(page: Page): Promise<void> {
   await expect
     .poll(
       async () => {
-        const response = await page.request.get("http://localhost:4000/health");
+        const response = await page.request.get(`${API_URL}/health`);
         return response.ok();
       },
       { timeout: 60_000 }
@@ -26,13 +27,19 @@ async function ensureAuthenticated(page: Page): Promise<void> {
   }
 }
 
+/** The "Orbit" shell: a persistent `<aside class="app-sidebar">` with one button per workspace mode. */
+function sidebarItem(page: Page, label: string) {
+  return page.locator("aside.app-sidebar").getByRole("navigation", { name: "Workspace" }).getByRole("button", { name: label, exact: true });
+}
+
 async function openStudio(page: Page): Promise<void> {
   await ensureAuthenticated(page);
   // Suppress the first-login welcome modal — it intercepts clicks on the
   // workflow editor and isn't part of any journey under test here.
   await page.addInitScript(() => window.localStorage.setItem("l2m:welcome-dismissed", "1"));
   await page.goto("/");
-  await expect(page.getByLabel("Studio modes")).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator("aside.app-sidebar")).toBeVisible({ timeout: 60_000 });
+  await expect(sidebarItem(page, "Home")).toBeVisible();
 }
 
 test.describe("golden journeys", () => {
@@ -43,20 +50,30 @@ test.describe("golden journeys", () => {
   }) => {
     await openStudio(page);
 
-    await page.getByRole("button", { name: "New Workflow" }).click();
-    await expect(page.getByRole("button", { name: "Execute workflow" })).toBeVisible();
+    // Dashboard ("Home") → New workflow drops us into the editor with a starter graph.
+    await sidebarItem(page, "Home").click();
+    await expect(page.getByRole("heading", { name: "Workflows" })).toBeVisible();
+    await page.getByRole("button", { name: "New workflow" }).click();
+    await expect(sidebarItem(page, "Editor")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("button", { name: "Run workflow" })).toBeVisible();
+    await expect(page.getByRole("toolbar", { name: "Canvas tools" })).toBeVisible();
 
+    // Configure the starter User Prompt node in the docked inspector drawer.
     const userPromptNode = page.locator(".react-flow__node").filter({ hasText: "User Prompt" }).first();
     await userPromptNode.dblclick();
-    await expect(page.getByRole("button", { name: "Save changes" })).toBeVisible();
-    await page.getByLabel("Text").fill("E2E configured prompt");
-    await page.getByRole("button", { name: "Save changes" }).click();
+    const inspector = page.getByRole("dialog", { name: /^Inspect / });
+    await expect(inspector).toBeVisible();
+    await expect(inspector.getByRole("button", { name: "Save changes" })).toBeVisible();
+    await inspector.getByLabel("Text", { exact: true }).fill("E2E configured prompt");
+    await inspector.getByRole("button", { name: "Save changes" }).click();
 
-    await page.getByRole("button", { name: "Save" }).click();
-    await page.getByRole("button", { name: "Execute workflow" }).click();
+    // Save via the HUD pill, then run via the primary HUD button.
+    const hud = page.getByRole("banner");
+    await hud.getByRole("button", { name: "Save", exact: true }).click();
+    await hud.getByRole("button", { name: "Run workflow" }).click();
 
-    const leftMenu = page.getByRole("complementary");
-    await leftMenu.getByRole("button", { name: "Runs" }).click();
+    // Inspect history in the Runs workspace.
+    await sidebarItem(page, "Runs").click();
     await expect(page.getByRole("heading", { name: "Runs" })).toBeVisible();
     await expect(page.locator(".executions-table tbody tr").first()).toBeVisible();
     await expect.poll(async () => {
@@ -83,8 +100,9 @@ test.describe("golden journeys", () => {
       return secrets.some((secret) => secret.name === secretName);
     }).toBeTruthy();
 
-    const headerWorkflowSelect = page.locator("header .workflow-select");
-    const activeWorkflowId = await headerWorkflowSelect.inputValue();
+    // The HUD breadcrumb carries the active workflow switcher.
+    const hudWorkflowSelect = hud.getByRole("combobox", { name: "Workflow", exact: true });
+    const activeWorkflowId = await hudWorkflowSelect.inputValue();
     expect(activeWorkflowId).not.toBe("");
     const templateName = `E2E Template ${Date.now()}`;
     const createTemplateResponse = await page.request.post("/api/templates", {
@@ -97,17 +115,20 @@ test.describe("golden journeys", () => {
     expect(createTemplateResponse.ok()).toBeTruthy();
     const createdTemplate = (await createTemplateResponse.json()) as { id: string; name: string };
 
-    await page.getByRole("button", { name: "Tmpl" }).click();
-    await expect(page.getByRole("heading", { name: "Template Gallery" })).toBeVisible();
-    const templateCard = page.locator(".tpl-card").filter({ hasText: templateName });
+    await sidebarItem(page, "Templates").click();
+    await expect(page.getByRole("heading", { name: "Templates" })).toBeVisible();
+    const templateCard = page.getByTestId(`tpl-card-${createdTemplate.id}`);
     await expect(templateCard).toBeVisible();
+    await expect(templateCard).toContainText(templateName);
     const useTemplateButton = templateCard.getByRole("button", { name: "Use Template" });
     await expect(useTemplateButton).toBeVisible();
     const useTemplateResponse = await page.request.post(`/api/templates/${createdTemplate.id}/use`);
     expect(useTemplateResponse.ok()).toBeTruthy();
     const importedTemplateWorkflow = (await useTemplateResponse.json()) as { workflowId: string; name: string };
     await page.reload();
-    await expect(page.locator("header .workflow-select")).toContainText(importedTemplateWorkflow.name);
+    await expect(page.getByRole("banner").getByRole("combobox", { name: "Workflow", exact: true })).toContainText(
+      importedTemplateWorkflow.name
+    );
   });
 
   test("approves a waiting human-approval execution via API journey", async ({ page }) => {

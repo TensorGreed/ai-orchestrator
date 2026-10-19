@@ -37,8 +37,10 @@ const SHORTCUT_GROUPS: Array<{ title: string; rows: ShortcutRow[] }> = [
     ]
   },
   {
-    title: "Help",
+    title: "Studio",
     rows: [
+      { keys: ["Ctrl/⌘ + K"], description: "Open the command palette (switch workflow or mode, run, save, export…)" },
+      { keys: ["Ctrl/⌘ + S"], description: "Save the current workflow" },
       { keys: ["?", "Ctrl/⌘ + /"], description: "Open this reference" }
     ]
   }

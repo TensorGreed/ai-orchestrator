@@ -1,5 +1,14 @@
 import { WORKFLOW_SCHEMA_VERSION, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeType } from "@ai-orchestrator/shared";
 import type { Edge, Node } from "reactflow";
+import {
+  computeAttachmentSlots,
+  findHubOf,
+  hasOrbitOverlap,
+  hasUsablePositions,
+  orbitPositions,
+  tidyLayout,
+  type AttachmentSlots
+} from "./stages";
 
 export type NodeColorKey = "gray" | "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "pink";
 
@@ -40,6 +49,15 @@ export interface EditorNodeData {
   disabled?: boolean;
   color?: NodeColorKey;
   onOpenAgentAttachmentDrawer?: (sourceHandle: "chat_model" | "memory" | "tool" | "worker") => void;
+  /**
+   * Render-time only (set by WorkflowCanvasArea, never persisted): attachment
+   * slots of an agent hub, and for attached nodes the hub + port they orbit.
+   */
+  slots?: AttachmentSlots;
+  attachedTo?: string;
+  attachedAs?: "chat_model" | "memory" | "tool" | "worker";
+  /** Which side of a satellite its label sits on (away from the hub). */
+  labelSide?: "top" | "bottom" | "left" | "right";
 }
 
 export type EditorNode = Node<EditorNodeData>;
@@ -57,11 +75,30 @@ export function createBlankWorkflow(): Workflow {
   };
 }
 
-export function workflowToEditor(workflow: Workflow): { nodes: EditorNode[]; edges: Edge[] } {
+/**
+ * Converts a workflow into React Flow nodes/edges. When the workflow has no
+ * usable positions (all nodes at one point, e.g. a generated or hand-written
+ * import) or a saved layout would put a hub's rings over other nodes, the
+ * stage layout is applied. Nodes attached to an agent hub are
+ * always snapped onto their orbit so the canvas and the saved JSON agree.
+ */
+export function workflowToEditor(workflow: Workflow): { nodes: EditorNode[]; edges: Edge[]; autoTidied: boolean } {
+  const autoTidied = !hasUsablePositions(workflow.nodes) || hasOrbitOverlap(workflow.nodes, workflow.edges);
+  const laidOut = autoTidied ? tidyLayout(workflow.nodes, workflow.edges) : {};
+  const orbit: Record<string, { x: number; y: number }> = {};
+  if (!autoTidied) {
+    const slots = computeAttachmentSlots(workflow.nodes, workflow.edges);
+    for (const node of workflow.nodes) {
+      if (slots[node.id] && !findHubOf(node.id, slots)) {
+        Object.assign(orbit, orbitPositions(node.id, slots, node.position));
+      }
+    }
+  }
+
   const nodes: EditorNode[] = workflow.nodes.map((node) => ({
     id: node.id,
     type: node.type === "sticky_note" ? "stickyNote" : "workflowNode",
-    position: node.position,
+    position: laidOut[node.id] ?? orbit[node.id] ?? node.position,
     data: {
       label: node.name,
       nodeType: node.type,
@@ -81,7 +118,7 @@ export function workflowToEditor(workflow: Workflow): { nodes: EditorNode[]; edg
     label: edge.label
   }));
 
-  return { nodes, edges };
+  return { nodes, edges, autoTidied };
 }
 
 export function editorToWorkflow(base: Workflow, nodes: EditorNode[], edges: Edge[]): Workflow {

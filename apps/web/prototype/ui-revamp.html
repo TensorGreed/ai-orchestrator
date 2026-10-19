@@ -1,0 +1,450 @@
+<title>L2M Studio Directions</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@500;700;800&family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* PROTOTYPE — throwaway. Three UI directions for L2M Studio, switchable from the bottom bar.
+   Layout: one full-height stage; each variant owns its own shell, palette and type. */
+:root {
+  --bg:#f3f4f6; --fg:#111827; --muted:#6b7280; --line:#d1d5db; --accent:#1f6f8b;
+  --bar-bg:#111827; --bar-fg:#f9fafb;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0f1115; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f3a; --accent:#6fb7cc; --bar-bg:#f9fafb; --bar-fg:#111827; color-scheme: dark } }
+:root[data-theme="dark"] { --bg:#0f1115; --fg:#e5e7eb; --muted:#9ca3af; --line:#2a2f3a; --accent:#6fb7cc; --bar-bg:#f9fafb; --bar-fg:#111827; color-scheme: dark }
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 "IBM Plex Sans",system-ui,sans-serif;overflow:hidden}
+*{box-sizing:border-box}
+button{font:inherit;cursor:pointer}
+.stage{position:absolute;inset:0;overflow:hidden}
+.variant{position:absolute;inset:0;min-width:0}
+.variant:not(.active){display:none!important}
+
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+
+/* switcher */
+.switch{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:50;display:flex;gap:4px;padding:6px;border-radius:999px;background:var(--bar-bg);color:var(--bar-fg);box-shadow:0 10px 30px rgba(0,0,0,.35);font-family:"IBM Plex Sans",sans-serif;max-width:calc(100% - 32px);flex-wrap:wrap;justify-content:center}
+.switch button{border:0;background:transparent;color:inherit;padding:8px 14px;border-radius:999px;font-weight:600;font-size:13px;opacity:.7}
+.switch button[aria-pressed="true"]{opacity:1;background:rgba(127,127,127,.25)}
+.switch .sep{width:1px;background:rgba(127,127,127,.4);margin:4px 2px}
+.switch button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ========================= A. SCORE — the workflow as a readable score ========================= */
+.score{--pbg:#fbfaf7;--pfg:#1c1917;--pmute:#6f6a62;--prule:#e2ddd3;--pink:#8b2f3a;--pink-soft:#f7e9ea;--pcode:#eeeae2;--pagent:#2f5d50;--pagent-soft:#e5efea;
+  background:var(--pbg);color:var(--pfg);font-family:"IBM Plex Sans",sans-serif;display:grid;grid-template-rows:52px 1fr;height:100%}
+.score .top{display:flex;align-items:center;gap:18px;padding:0 max(16px,env(safe-area-inset-left,0px)) 0 max(16px,env(safe-area-inset-right,0px));border-bottom:1px solid var(--prule)}
+.score .brand{font-family:"Fraunces",serif;font-weight:700;font-size:20px;letter-spacing:-.01em}
+.score .brand sup{font-size:.55em;vertical-align:top;margin-left:1px}
+.score .crumbs{color:var(--pmute);font-size:13px;display:flex;gap:8px;align-items:center;min-width:0}
+.score .crumbs b{color:var(--pfg);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.score .cmd{margin-left:auto;flex:0 1 420px;min-width:0;height:32px;border:1px solid var(--prule);border-radius:6px;background:#fff;display:flex;align-items:center;padding:0 10px;color:var(--pmute);gap:10px;font-size:13px}
+.score .cmd kbd{margin-left:auto;font:11px "IBM Plex Mono",monospace;border:1px solid var(--prule);border-radius:4px;padding:1px 5px;background:var(--pcode)}
+.score .run{height:32px;padding:0 14px;border-radius:6px;border:0;background:var(--pfg);color:#fff;font-weight:600}
+.score .body{display:grid;grid-template-columns:1fr 260px;min-height:0}
+.score .doc{overflow:auto;padding:28px max(24px,env(safe-area-inset-left,0px)) 120px}
+.score h1{font-family:"Fraunces",serif;font-weight:500;font-size:30px;margin:0 0 4px;letter-spacing:-.015em;text-wrap:balance}
+.score .desc{color:var(--pmute);max-width:62ch;margin:0 0 26px}
+.score .movement{display:grid;grid-template-columns:72px 1fr;gap:0 18px;border-top:1px solid var(--prule);padding:14px 0}
+.score .mv-no{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--pmute);padding-top:9px}
+.score .mv-no b{display:block;font-family:"Fraunces",serif;font-size:22px;color:var(--pfg);font-weight:500;line-height:1}
+.score .lanes{display:grid;gap:10px;grid-template-columns:repeat(var(--n,1),minmax(0,1fr))}
+.score .row{display:grid;grid-template-columns:28px 1fr auto;gap:12px;align-items:center;padding:9px 10px;border-radius:8px;border:1px solid transparent;min-width:0}
+.score .row:hover{background:#fff;border-color:var(--prule)}
+.score .row.open{background:#fff;border-color:var(--prule);grid-template-rows:auto auto}
+.score .glyph{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;font:500 13px "IBM Plex Mono",monospace;background:var(--pcode);color:var(--pfg)}
+.score .glyph.llm{background:var(--pink-soft);color:var(--pink)}
+.score .glyph.agent{background:var(--pagent-soft);color:var(--pagent)}
+.score .name{font-weight:600;min-width:0}
+.score .name small{display:block;font-weight:400;color:var(--pmute);font-family:"IBM Plex Mono",monospace;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.score .state{width:8px;height:8px;border-radius:50%;background:#c9c3b8}
+.score .state.ok{background:#3a7d5c}
+.score .form{grid-column:1 / -1;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px 16px;padding:10px 0 4px;border-top:1px dashed var(--prule);margin-top:6px}
+.score .f label{display:block;font-size:11px;color:var(--pmute);letter-spacing:.04em;text-transform:uppercase;margin-bottom:3px}
+.score .f .v{font-family:"IBM Plex Mono",monospace;font-size:12.5px;border-bottom:1px solid var(--prule);padding:3px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.score .f.wide{grid-column:1 / -1}
+.score .crew{grid-column:1/-1;display:grid;grid-template-columns:90px 1fr;gap:6px 12px;padding:8px 0 2px;border-top:1px dashed var(--prule);margin-top:6px;font-size:13px}
+.score .crew .k{color:var(--pagent);font-weight:600;font-size:11px;letter-spacing:.05em;text-transform:uppercase;padding-top:4px}
+.score .crew .vals{display:flex;flex-wrap:wrap;gap:6px}
+.score .tag{border:1px solid var(--prule);background:#fff;border-radius:5px;padding:2px 8px;font-family:"IBM Plex Mono",monospace;font-size:12px}
+.score .tag.worker{border-color:var(--pagent);color:var(--pagent)}
+.score .outline{border-left:1px solid var(--prule);padding:22px 16px;overflow:auto;font-size:12.5px}
+.score .outline h4{margin:0 0 10px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--pmute)}
+.score .ol{display:grid;grid-template-columns:22px 1fr auto;gap:6px 8px;align-items:baseline;padding:4px 0;color:var(--pmute);font-family:"IBM Plex Mono",monospace;font-size:11.5px}
+.score .ol b{color:var(--pfg);font-family:"IBM Plex Sans",sans-serif;font-weight:500;font-size:12.5px}
+.score .tape{margin-top:22px;padding-top:14px;border-top:1px solid var(--prule)}
+.score .bar{height:6px;border-radius:3px;background:var(--pcode);overflow:hidden;margin:8px 0 4px}
+.score .bar i{display:block;height:100%;background:var(--pagent);width:38%}
+.score .tape p{margin:4px 0;font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--pmute)}
+@media (max-width:860px){.score .body{grid-template-columns:1fr}.score .outline{display:none}.score .movement{grid-template-columns:44px 1fr}.score .cmd{display:none}}
+
+/* ========================= B. ORBIT — the agent is the center of gravity ========================= */
+.orbit{--obg:#07090f;--ofg:#e9ecf3;--omute:#7b8496;--oline:#1c2230;--opanel:#0d111a;--oglow:#8ae2ff;--ohot:#ffb454;--oagent:#c6a2ff;
+  background:radial-gradient(1200px 700px at 60% 40%,#0e1422 0%,var(--obg) 60%);color:var(--ofg);font-family:"DM Sans",sans-serif;height:100%;position:relative;overflow:hidden}
+.orbit .hud{position:absolute;top:14px;left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));display:flex;align-items:center;gap:10px;z-index:3;flex-wrap:wrap}
+.orbit .pill{background:rgba(13,17,26,.85);border:1px solid var(--oline);backdrop-filter:blur(8px);border-radius:999px;padding:7px 12px;font-size:12.5px;display:inline-flex;gap:8px;align-items:center;color:var(--ofg)}
+.orbit .pill b{font-family:"Syne",sans-serif;font-weight:800;letter-spacing:.02em}
+.orbit .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--oglow);box-shadow:0 0 10px var(--oglow)}
+.orbit .hud .right{margin-left:auto;display:flex;gap:8px}
+.orbit .go{border:0;background:var(--oglow);color:#06202a;font-weight:700;border-radius:999px;padding:8px 16px}
+.orbit .field{position:absolute;inset:0;display:grid;grid-template-columns:1fr 340px;grid-template-rows:1fr 112px}
+.orbit svg.space{grid-column:1;grid-row:1;width:100%;height:100%;display:block}
+.orbit .drawer{grid-column:2;grid-row:1 / span 2;border-left:1px solid var(--oline);background:rgba(13,17,26,.92);backdrop-filter:blur(10px);padding:72px 18px 24px;overflow:auto;min-width:0}
+.orbit .drawer h3{font-family:"Syne",sans-serif;font-weight:700;margin:0;font-size:18px}
+.orbit .drawer .sub{color:var(--omute);font-family:"DM Mono",monospace;font-size:11.5px;margin:2px 0 16px}
+.orbit .tabs{display:flex;gap:2px;border-bottom:1px solid var(--oline);margin-bottom:14px}
+.orbit .tabs span{padding:6px 10px;font-size:12px;color:var(--omute)}
+.orbit .tabs span.on{color:var(--ofg);border-bottom:2px solid var(--oglow)}
+.orbit .kv{display:grid;grid-template-columns:1fr;gap:10px}
+.orbit .kv label{display:block;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--omute);margin-bottom:4px}
+.orbit .kv .v{font-family:"DM Mono",monospace;font-size:12.5px;background:#0a0e16;border:1px solid var(--oline);border-radius:6px;padding:7px 9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.orbit .kv .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.orbit .slot{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--oline);font-size:12.5px}
+.orbit .slot i{width:8px;height:8px;border-radius:50%;background:var(--oagent)}
+.orbit .slot.tool i{background:var(--ohot)}
+.orbit .slot.model i{background:var(--oglow)}
+.orbit .slot .m{color:var(--omute);margin-left:auto;font-family:"DM Mono",monospace;font-size:11px}
+.orbit .strip{grid-column:1;grid-row:2;border-top:1px solid var(--oline);background:rgba(13,17,26,.85);backdrop-filter:blur(8px);display:flex;align-items:center;gap:0;padding:0 max(16px,env(safe-area-inset-left,0px)) 56px;overflow-x:auto;min-width:0}
+.orbit .st{flex:0 0 auto;display:flex;flex-direction:column;gap:4px;padding:8px 12px;border-radius:8px;min-width:120px;cursor:pointer}
+.orbit .st.on{background:rgba(138,226,255,.08);outline:1px solid rgba(138,226,255,.35)}
+.orbit .st small{font-family:"DM Mono",monospace;font-size:10px;color:var(--omute);letter-spacing:.06em}
+.orbit .st b{font-size:12.5px;font-weight:600;white-space:nowrap}
+.orbit .st em{font-style:normal;font-size:11px;color:var(--omute)}
+.orbit .st + .st::before{content:"";position:absolute}
+.orbit .link{flex:0 0 26px;height:1px;background:linear-gradient(90deg,var(--oline),var(--omute))}
+.orbit text{font-family:"DM Sans",sans-serif;fill:var(--ofg)}
+.orbit text.mono{font-family:"DM Mono",monospace;fill:var(--omute);font-size:10px;letter-spacing:.06em}
+@media (max-width:900px){.orbit .field{grid-template-columns:1fr;grid-template-rows:1fr 112px}.orbit .drawer{display:none}}
+
+/* ========================= C. LOOM — columns by stage, threads between, persistent inspector ========================= */
+.loom{--lbg:#eef0ee;--lpaper:#f8f9f7;--lfg:#15201d;--lmute:#5f6d68;--lline:#d3d9d5;--laccent:#0f6e63;--laccent-soft:#dcefeb;--lcopper:#a9612b;--lcopper-soft:#f3e4d8;--lthread:#9fb3ac;
+  background:var(--lbg);color:var(--lfg);font-family:"Instrument Sans",sans-serif;height:100%;display:grid;grid-template-columns:232px 1fr 320px;grid-template-rows:44px 1fr 150px}
+.loom .side{grid-row:1 / span 3;background:var(--lpaper);border-right:1px solid var(--lline);padding:14px 0 90px;overflow:auto;min-width:0}
+.loom .side .logo{font-weight:700;padding:0 16px 14px;display:flex;align-items:center;gap:8px}
+.loom .side .logo i{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--laccent),var(--lcopper))}
+.loom .side h5{margin:12px 16px 4px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--lmute);font-weight:600}
+.loom .side .it{padding:5px 16px 5px 28px;font-size:13px;color:var(--lfg);display:flex;gap:8px;align-items:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.loom .side .it.on{background:var(--laccent-soft);color:var(--laccent);font-weight:600;border-right:2px solid var(--laccent)}
+.loom .side .it .n{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--lmute)}
+.loom .tabs{grid-column:2 / span 2;display:flex;align-items:stretch;border-bottom:1px solid var(--lline);background:var(--lpaper);min-width:0;overflow:hidden}
+.loom .tab{padding:0 16px;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--lmute);border-right:1px solid var(--lline);white-space:nowrap}
+.loom .tab.on{color:var(--lfg);font-weight:600;background:var(--lbg);box-shadow:inset 0 -2px 0 var(--laccent)}
+.loom .tabs .spacer{flex:1}
+.loom .tabs .act{display:flex;gap:6px;align-items:center;padding:0 12px}
+.loom .tabs .act button{border:1px solid var(--lline);background:var(--lpaper);border-radius:6px;padding:5px 10px;font-size:12.5px;font-weight:600}
+.loom .tabs .act button.pri{background:var(--laccent);border-color:var(--laccent);color:#fff}
+.loom .board{grid-column:2;grid-row:2;position:relative;overflow:auto;padding:22px 20px 20px;min-width:0}
+.loom .cols{display:flex;gap:28px;align-items:flex-start;position:relative;z-index:1;width:max-content;min-width:100%}
+.loom .col{flex:0 0 196px;display:flex;flex-direction:column;gap:12px}
+.loom .col h6{margin:0 0 2px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--lmute);font-weight:600;font-family:"JetBrains Mono",monospace}
+.loom .card{background:var(--lpaper);border:1px solid var(--lline);border-radius:10px;padding:10px 12px;position:relative;box-shadow:0 1px 0 rgba(21,32,29,.04)}
+.loom .card.sel{border-color:var(--laccent);box-shadow:0 0 0 3px rgba(15,110,99,.15)}
+.loom .card .h{display:flex;gap:8px;align-items:center}
+.loom .card .g{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font:500 11px "JetBrains Mono",monospace;background:var(--lline)}
+.loom .card .g.llm{background:var(--laccent-soft);color:var(--laccent)}
+.loom .card .g.agent{background:var(--lcopper-soft);color:var(--lcopper)}
+.loom .card .t{font-weight:600;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.loom .card .s{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--lmute);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.loom .card .slots{margin-top:8px;border-top:1px dashed var(--lline);padding-top:6px;display:grid;gap:4px}
+.loom .card .sl{display:flex;gap:6px;align-items:center;font-size:11.5px}
+.loom .card .sl em{font-style:normal;color:var(--lcopper);font-weight:600;font-size:10px;letter-spacing:.06em;text-transform:uppercase;width:52px;flex:0 0 auto}
+.loom .card .sl span{background:var(--lcopper-soft);border-radius:4px;padding:1px 6px;font-family:"JetBrains Mono",monospace;font-size:10.5px;white-space:nowrap}
+.loom .card .sl.model span{background:var(--laccent-soft)}
+.loom .card .ports{position:absolute;right:-5px;top:50%;width:8px;height:8px;border-radius:50%;background:var(--lthread);transform:translateY(-50%)}
+.loom .card .ports.in{left:-5px;right:auto}
+.loom svg.threads{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;overflow:visible}
+.loom .insp{grid-column:3;grid-row:2 / span 2;border-left:1px solid var(--lline);background:var(--lpaper);overflow:auto;padding:16px 16px 90px;min-width:0}
+.loom .insp h3{margin:0;font-size:15px;font-weight:700}
+.loom .insp .sub{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--lmute);margin:2px 0 12px}
+.loom .insp .seg{display:flex;border:1px solid var(--lline);border-radius:7px;overflow:hidden;margin-bottom:14px}
+.loom .insp .seg span{flex:1;text-align:center;padding:6px;font-size:12px;color:var(--lmute)}
+.loom .insp .seg span.on{background:var(--laccent-soft);color:var(--laccent);font-weight:600}
+.loom .fld{margin-bottom:10px}
+.loom .fld label{display:block;font-size:11px;color:var(--lmute);margin-bottom:3px;font-weight:600}
+.loom .fld .v{border:1px solid var(--lline);border-radius:6px;background:#fff;padding:7px 9px;font-family:"JetBrains Mono",monospace;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.loom .fld .v.sec{color:var(--lmute)}
+.loom .fld2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.loom .tape{grid-column:2;grid-row:3;border-top:1px solid var(--lline);background:var(--lpaper);padding:10px 16px 60px;overflow:auto;min-width:0}
+.loom .tape h5{margin:0 0 8px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--lmute);display:flex;gap:10px;align-items:center}
+.loom .tape h5 span{font-family:"JetBrains Mono",monospace;text-transform:none;letter-spacing:0;color:var(--lfg)}
+.loom .lanes{display:grid;gap:4px;font-family:"JetBrains Mono",monospace;font-size:10.5px}
+.loom .ln{display:grid;grid-template-columns:150px 1fr 70px;gap:10px;align-items:center;color:var(--lmute)}
+.loom .ln b{color:var(--lfg);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.loom .ln .tr{height:8px;background:var(--lline);border-radius:3px;position:relative}
+.loom .ln .tr i{position:absolute;top:0;bottom:0;border-radius:3px;background:var(--laccent)}
+.loom .ln .tr i.hot{background:var(--lcopper)}
+@media (max-width:1000px){.loom{grid-template-columns:1fr;grid-template-rows:44px 1fr 150px}.loom .side,.loom .insp{display:none}.loom .tabs{grid-column:1}.loom .board,.loom .tape{grid-column:1}}
+</style>
+
+<div class="stage">
+  <section class="variant score" id="v-score" aria-label="Score direction"></section>
+  <section class="variant orbit" id="v-orbit" aria-label="Orbit direction"></section>
+  <section class="variant loom" id="v-loom" aria-label="Loom direction"></section>
+</div>
+
+<nav class="switch" aria-label="Prototype controls">
+  <button data-v="score" aria-pressed="true">A · Score</button>
+  <button data-v="orbit" aria-pressed="false">B · Orbit</button>
+  <button data-v="loom" aria-pressed="false">C · Loom</button>
+  <span class="sep"></span>
+  <button data-w="cipher" aria-pressed="true">CipherTrust report</button>
+  <button data-w="swarm" aria-pressed="false">Supervisor swarm</button>
+</nav>
+
+<script>
+// ---------- real data from samples/workflows (trimmed to what the UI shows) ----------
+const WORKFLOWS = {
+  cipher: {
+    name: "CipherTrust — Key Inventory Report",
+    desc: "Fans out two branches from one trigger: a branding branch that browses the brand site and distills a brand kit, and a key-inventory branch that lists keys over MCP and aggregates them. Both meet at three charts, a branded HTML template, and a rendered PDF.",
+    nodes: [
+      n("trigger_1","manual_trigger","Run report","manual",{}),
+      n("brand_url","text_input","Brand URL","text = https://thalesgroup.com",{Text:"https://thalesgroup.com"}),
+      n("web_browse_1","web_browse","Fetch Brand Site","networkidle · 45s · 1440×900 · screenshot",{"URL template":"{{user_prompt}}","Wait until":"networkidle","Timeout":"45000 ms","Viewport":"1440 × 900","Screenshot":"true"}),
+      n("brand_prompt","prompt_template","Extract Branding Prompt","“You are a brand-asset extractor…”",{Template:"You are a brand-asset extractor. Examine the page below and produce a JSON object…"}),
+      n("brand_llm","llm_call","Distill Branding","openai · gpt-4o-mini · t=0 → branding_raw",{Provider:"OpenAI",Model:"gpt-4o-mini","Base URL":"https://api.openai.com/v1","API key secret":"None / environment variable",Temperature:"0","Max tokens":"1024","Prompt key":"brand_extraction_prompt","System prompt key":"system_prompt","Output key":"branding_raw"}),
+      n("brand_parse","output_parser","Parse Brand JSON","json_schema · lenient ← branding_raw",{Mode:"json_schema","Input key":"branding_raw",Parsing:"lenient",Schema:"{ brand, primaryColor, accentColor, logoUrl, font, tagline }"}),
+      n("mcp_list_keys","mcp_tool","CipherTrust list_keys","ciphertrust / list_keys · http_streamable",{Server:"ciphertrust",Tool:"list_keys",Transport:"http_streamable",Args:"{\"limit\":1000}"}),
+      n("aggregate_keys","code_node","Aggregate Keys","python · 5s timeout",{Language:"python",Timeout:"5000 ms",Code:"from datetime import datetime, timezone …"}),
+      n("chart_cloud","chart","Keys by Cloud","vega-lite · bar",{Mark:"bar",X:"category (nominal)",Y:"count (quantitative)"}),
+      n("chart_algo","chart","Keys by Algorithm","vega-lite · donut",{Mark:"arc · innerRadius 50",Theta:"count",Color:"algorithm"}),
+      n("chart_age","chart","Key Aging","vega-lite · bar",{Mark:"bar",X:"bucket (nominal, unsorted)",Y:"count"}),
+      n("report_html","prompt_template","Compose Branded HTML","html template · {{parsed.brand}}",{Template:"<!doctype html><html><head><title>{{parsed.brand}} — Key Inventory Report</title>…"}),
+      n("pdf_1","pdf_output","Render PDF","html · A4 · print background",{"Render mode":"html","Input key":"html","Page format":"A4","Print background":"true",Filename:"{{parsed.brand}}-key-inventory-{{session_id}}.pdf"}),
+      n("output_1","output","PDF Report","outputKey = pdf",{"Output key":"pdf"})
+    ],
+    edges: [
+      ["trigger_1","brand_url"],["brand_url","web_browse_1"],["web_browse_1","brand_prompt"],["brand_prompt","brand_llm"],["brand_llm","brand_parse"],
+      ["trigger_1","mcp_list_keys"],["mcp_list_keys","aggregate_keys"],["aggregate_keys","chart_cloud"],["aggregate_keys","chart_algo"],["aggregate_keys","chart_age"],
+      ["brand_parse","chart_cloud"],["brand_parse","chart_algo"],["brand_parse","chart_age"],["chart_cloud","report_html"],["chart_algo","report_html"],["chart_age","report_html"],
+      ["brand_parse","report_html"],["aggregate_keys","report_html"],["brand_url","report_html"],["report_html","pdf_1"],["pdf_1","output_1"]
+    ],
+    selected: "brand_llm",
+    run: [["Run report",0,1],["Brand URL",1,2],["CipherTrust list_keys",1,9],["Fetch Brand Site",2,21],["Aggregate Keys",9,11],["Extract Branding Prompt",21,22],["Distill Branding",22,31,"hot"],["Parse Brand JSON",31,32],["Keys by Cloud",32,34],["Keys by Algorithm",32,34],["Key Aging",32,34],["Compose Branded HTML",34,35],["Render PDF",35,41],["PDF Report",41,42]]
+  },
+  swarm: {
+    name: "Supervisor + Worker Swarm",
+    desc: "A supervisor decomposes the request and delegates to two workers exposed to it as tools. The researcher looks things up in the knowledge base over MCP; the computer calls calculator and clock tools.",
+    nodes: [
+      n("trigger_1","manual_trigger","Run swarm","manual",{}),
+      n("supervisor_1","supervisor_node","Supervisor","delegates to 2 workers · max 6 iterations",{"System prompt":"You are a supervisor. Decompose the user request, delegate each subtask…","Max iterations":"6","Tool mode":"all tools, shortlisted by prompt"}),
+      n("supervisor_chat","llm_call","Supervisor Chat Model (echo)","echo · demo",{Provider:"echo",Model:"demo",Prefix:"Supervisor: "}),
+      n("worker_research","agent_orchestrator","Worker: Researcher","answers from the knowledge base",{"System prompt":"You answer factual questions by looking them up in the knowledge base via the lookup_kb MCP tool.","Max iterations":"4"}),
+      n("worker_research_chat","llm_call","Researcher Chat (echo)","echo · demo",{Provider:"echo",Model:"demo"}),
+      n("worker_research_tool","mcp_tool","MCP: lookup_kb","mock-mcp / lookup_kb",{Server:"mock-mcp",Tool:"lookup_kb",Transport:"mock"}),
+      n("worker_compute","agent_orchestrator","Worker: Computer","math and time questions",{"System prompt":"You answer math and time questions by calling the calculator and get_current_time MCP tools.","Max iterations":"4"}),
+      n("worker_compute_chat","llm_call","Computer Chat (echo)","echo · demo",{Provider:"echo",Model:"demo"}),
+      n("worker_compute_calc","mcp_tool","MCP: calculator","mock-mcp / calculator",{Server:"mock-mcp",Tool:"calculator",Transport:"mock"}),
+      n("worker_compute_time","mcp_tool","MCP: get_current_time","mock-mcp / get_current_time",{Server:"mock-mcp",Tool:"get_current_time",Transport:"mock"}),
+      n("output_1","output","Output","{{answer}} → result",{"Response template":"{{answer}}","Output key":"result"})
+    ],
+    edges: [["trigger_1","supervisor_1"],["supervisor_1","output_1"]],
+    attach: [["supervisor_1","chat_model","supervisor_chat"],["supervisor_1","worker","worker_research"],["supervisor_1","worker","worker_compute"],
+      ["worker_research","chat_model","worker_research_chat"],["worker_research","tool","worker_research_tool"],
+      ["worker_compute","chat_model","worker_compute_chat"],["worker_compute","tool","worker_compute_calc"],["worker_compute","tool","worker_compute_time"]],
+    selected: "supervisor_1",
+    run: [["Run swarm",0,1],["Supervisor",1,14,"hot"],["↳ Worker: Researcher",3,7],["↳ Worker: Computer",7,12],["Output",14,15]]
+  }
+};
+function n(id,type,name,summary,params){return {id,type,name,summary,params}}
+const GLYPH = {manual_trigger:"▶",text_input:"Aa",web_browse:"◎",prompt_template:"¶",llm_call:"✦",output_parser:"{}",mcp_tool:"⚒",code_node:"</>",chart:"▥",pdf_output:"⎙",output:"⏏",supervisor_node:"◉",agent_orchestrator:"◉",local_memory:"▤"};
+const isAgent = t => t==="supervisor_node"||t==="agent_orchestrator";
+const gcls = t => isAgent(t)?"agent":(t==="llm_call"?"llm":"");
+
+function analyze(w){
+  const byId = Object.fromEntries(w.nodes.map(x=>[x.id,x]));
+  const attached = new Set(); const slots = {};
+  for (const [a,port,t] of (w.attach||[])) { attached.add(t); (slots[a] ||= {chat_model:[],memory:[],tool:[],worker:[]})[port].push(t); }
+  const dag = w.nodes.filter(x=>!attached.has(x.id));
+  const preds = {}, succ = {};
+  for (const x of dag) { preds[x.id]=[]; succ[x.id]=[]; }
+  for (const [s,t] of w.edges) { preds[t].push(s); succ[s].push(t); }
+  const depth = {}; const order = [];
+  const visit = id => { if (id in depth) return depth[id]; depth[id] = preds[id].length ? 1+Math.max(...preds[id].map(visit)) : 0; return depth[id]; };
+  dag.forEach(x=>visit(x.id));
+  const maxD = Math.max(...Object.values(depth));
+  const stages = Array.from({length:maxD+1},()=>[]);
+  dag.forEach(x=>stages[depth[x.id]].push(x));
+  return {byId,slots,dag,preds,succ,depth,stages};
+}
+const esc = s => String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fields = (p) => Object.entries(p);
+
+/* ---------------- A. SCORE ---------------- */
+function renderScore(w){
+  const A = analyze(w);
+  const movements = A.stages.map((nodes,i)=>{
+    const rows = nodes.map(x=>{
+      const open = x.id===w.selected;
+      let extra = "";
+      if (open && !isAgent(x.type)) extra = `<div class="form">${fields(x.params).map(([k,v])=>`<div class="f ${v.length>40?"wide":""}"><label>${esc(k)}</label><div class="v">${esc(v)}</div></div>`).join("")}</div>`;
+      if (A.slots[x.id]) {
+        const s = A.slots[x.id];
+        const tags = (ids,cls="") => ids.map(id=>`<span class="tag ${cls}">${esc(A.byId[id].name)}</span>`).join("") || `<span class="tag" style="opacity:.5">none</span>`;
+        extra += `<div class="crew"><span class="k">Model</span><div class="vals">${tags(s.chat_model)}</div><span class="k">Memory</span><div class="vals">${tags(s.memory)}</div><span class="k">Tools</span><div class="vals">${tags(s.tool)}</div>${s.worker.length?`<span class="k">Workers</span><div class="vals">${tags(s.worker,"worker")}</div>`:""}</div>`;
+        if (open) extra += `<div class="form">${fields(x.params).map(([k,v])=>`<div class="f wide"><label>${esc(k)}</label><div class="v">${esc(v)}</div></div>`).join("")}</div>`;
+        // worker crews nested
+        for (const wid of s.worker) { const ws = A.slots[wid]; if (!ws) continue;
+          extra += `<div class="crew" style="padding-left:14px"><span class="k">↳ ${esc(A.byId[wid].name.replace("Worker: ",""))}</span><div class="vals">${tags(ws.chat_model)}${tags(ws.tool)}</div></div>`; }
+      }
+      return `<div class="row ${open?"open":""}"><div class="glyph ${gcls(x.type)}">${GLYPH[x.type]||"•"}</div><div class="name">${esc(x.name)}<small>${esc(x.type)} · ${esc(x.summary)}</small></div><div class="state ${i<6?"ok":""}"></div>${extra}</div>`;
+    }).join("");
+    const label = i===0?"trigger":(nodes.length>1?`${nodes.length} in parallel`:"step");
+    return `<div class="movement"><div class="mv-no"><b>${String(i+1).padStart(2,"0")}</b>${label}</div><div class="lanes" style="--n:${Math.min(nodes.length,3)}">${rows}</div></div>`;
+  }).join("");
+  const outline = A.stages.map((ns,i)=>`<div class="ol"><span>${String(i+1).padStart(2,"0")}</span><b>${esc(ns.map(x=>x.name).join(" · "))}</b><span>${ns.length>1?"∥":""}</span></div>`).join("");
+  return `
+  <header class="top">
+    <div class="brand">L<sup>2</sup>M</div>
+    <div class="crumbs">Default Project <span>/</span> <b>${esc(w.name)}</b></div>
+    <div class="cmd"><span>⌕</span> Jump to a step, add a node, run a stage… <kbd>⌘K</kbd></div>
+    <button class="run">Run ▸</button>
+  </header>
+  <div class="body">
+    <article class="doc">
+      <h1>${esc(w.name)}</h1>
+      <p class="desc">${esc(w.desc)}</p>
+      ${movements}
+    </article>
+    <aside class="outline">
+      <h4>Movements</h4>${outline}
+      <div class="tape"><h4>Last run · 42 s</h4><div class="bar"><i></i></div><p>14 steps · 6 ok · 8 pending</p><p>Distill Branding · 2.9k tok · 9.1 s</p><p>Branch A and B joined at 34 s</p></div>
+    </aside>
+  </div>`;
+}
+
+/* ---------------- B. ORBIT ---------------- */
+function renderOrbit(w){
+  const A = analyze(w);
+  const sel = A.byId[w.selected];
+  const selStage = A.depth[sel.id] ?? 0;
+  const strip = A.stages.map((ns,i)=>`<div class="st ${i===selStage?"on":""}"><small>STAGE ${String(i+1).padStart(2,"0")}</small><b>${esc(ns.length>1?ns.length+" in parallel":ns[0].name)}</b><em>${esc(ns.length>1?ns.map(x=>x.name).join(", "):ns[0].type)}</em></div>${i<A.stages.length-1?'<div class="link"></div>':''}`).join("");
+  // space: if selected is an agent, draw hub + rings; else draw the stage column with threads to neighbours
+  let svg = "";
+  const W = 1000, H = 640;
+  if (A.slots[sel.id]) {
+    const s = A.slots[sel.id]; const cx = W*0.5, cy = H*0.5;
+    const ring = (r,cls) => `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#1c2230" stroke-dasharray="${cls}" />`;
+    const at = (r,ang) => [cx + r*Math.cos(ang), cy + r*Math.sin(ang)];
+    let out = `<defs><radialGradient id="hub"><stop offset="0" stop-color="#c6a2ff" stop-opacity=".55"/><stop offset="1" stop-color="#c6a2ff" stop-opacity="0"/></radialGradient></defs>`;
+    out += ring(120,"2 6") + ring(210,"2 6") + ring(262,"1 8");
+    out += `<circle cx="${cx}" cy="${cy}" r="150" fill="url(#hub)"/><circle cx="${cx}" cy="${cy}" r="62" fill="#131a2a" stroke="#c6a2ff" stroke-width="1.5"/>`;
+    out += `<text x="${cx}" y="${cy-4}" text-anchor="middle" font-size="15" font-weight="700" font-family="Syne">${esc(sel.name)}</text><text class="mono" x="${cx}" y="${cy+14}" text-anchor="middle">${esc(sel.type)}</text>`;
+    // inner ring: model + memory
+    const inner = [...s.chat_model.map(id=>["model",id]), ...s.memory.map(id=>["memory",id])];
+    inner.forEach(([k,id],i)=>{ const [x,y]=at(120, -Math.PI/2 + i*Math.PI*2/Math.max(inner.length,2)); out += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#8ae2ff" stroke-opacity=".5"/><circle cx="${x}" cy="${y}" r="22" fill="#0d111a" stroke="#8ae2ff"/><text x="${x}" y="${y+4}" text-anchor="middle" font-size="12">✦</text><text class="mono" x="${x}" y="${y+38}" text-anchor="middle">${k.toUpperCase()}</text><text x="${x}" y="${y+52}" text-anchor="middle" font-size="11">${esc(A.byId[id].name)}</text>`; });
+    if (!s.memory.length) { const [x,y]=at(120, Math.PI/2); out += `<circle cx="${x}" cy="${y}" r="22" fill="none" stroke="#2a3344" stroke-dasharray="3 4"/><text class="mono" x="${x}" y="${y+38}" text-anchor="middle">MEMORY · empty slot</text>`; }
+    // outer ring: tools
+    s.tool.forEach((id,i)=>{ const [x,y]=at(210, -Math.PI/2 + 0.9 + i*0.9); out += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#ffb454" stroke-opacity=".45"/><circle cx="${x}" cy="${y}" r="20" fill="#0d111a" stroke="#ffb454"/><text x="${x}" y="${y+4}" text-anchor="middle" font-size="12">⚒</text><text x="${x}" y="${y+36}" text-anchor="middle" font-size="11">${esc(A.byId[id].name)}</text>`; });
+    // workers: satellite hubs on the outermost ring, each with their own mini-orbit
+    s.worker.forEach((wid,i)=>{ const ang = Math.PI*0.15 + i*Math.PI*0.7; const [x,y]=at(262, ang); const ws = A.slots[wid]||{chat_model:[],tool:[],memory:[],worker:[]};
+      out += `<path d="M${cx} ${cy} Q ${cx+ (x-cx)*0.5} ${cy + (y-cy)*0.15} ${x} ${y}" fill="none" stroke="#c6a2ff" stroke-opacity=".6" stroke-dasharray="4 4"/>`;
+      out += `<circle cx="${x}" cy="${y}" r="40" fill="#131a2a" stroke="#c6a2ff"/><text x="${x}" y="${y-2}" text-anchor="middle" font-size="12" font-weight="700" font-family="Syne">${esc(A.byId[wid].name.replace("Worker: ",""))}</text><text class="mono" x="${x}" y="${y+12}" text-anchor="middle">WORKER</text>`;
+      const subs = [...ws.chat_model.map(id=>["#8ae2ff","✦",id]), ...ws.tool.map(id=>["#ffb454","⚒",id])];
+      subs.forEach(([c,g,id],j)=>{ const a = ang - 0.9 + j*0.75; const sx = x + 78*Math.cos(a), sy = y + 78*Math.sin(a);
+        out += `<line x1="${x}" y1="${y}" x2="${sx}" y2="${sy}" stroke="${c}" stroke-opacity=".5"/><circle cx="${sx}" cy="${sy}" r="14" fill="#0d111a" stroke="${c}"/><text x="${sx}" y="${sy+4}" text-anchor="middle" font-size="10">${g}</text><text x="${sx + (Math.cos(a)>0?18:-18)}" y="${sy+4}" text-anchor="${Math.cos(a)>0?"start":"end"}" font-size="10.5" fill="#9aa3b5">${esc(A.byId[id].name.replace("MCP: ",""))}</text>`; });
+    });
+    // upstream / downstream pins
+    const up = A.preds[sel.id]||[], down = A.succ[sel.id]||[];
+    up.forEach((id,i)=>{ const y = cy - 40 + i*40; out += `<line x1="40" y1="${y}" x2="${cx-62}" y2="${cy}" stroke="#2a3344"/><text x="40" y="${y-8}" font-size="11" fill="#9aa3b5">← ${esc(A.byId[id].name)}</text>`; });
+    down.forEach((id,i)=>{ const y = cy - 40 + i*40; out += `<line x1="${cx+62}" y1="${cy}" x2="${W-40}" y2="${y}" stroke="#2a3344"/><text x="${W-40}" y="${y-8}" text-anchor="end" font-size="11" fill="#9aa3b5">${esc(A.byId[id].name)} →</text>`; });
+    svg = out;
+  } else {
+    // non-agent: show this stage and its neighbours as three luminous columns
+    const cols = [selStage-1, selStage, selStage+1].filter(i=>i>=0 && i<A.stages.length);
+    const xs = {}; cols.forEach((ci,k)=>xs[ci] = W*(0.2 + 0.3*k));
+    const pos = {};
+    cols.forEach(ci=>{ const ns = A.stages[ci]; ns.forEach((x,j)=>{ pos[x.id] = [xs[ci], H*0.5 + (j-(ns.length-1)/2)*110]; }); });
+    let out = "";
+    for (const [s,t] of w.edges) if (pos[s] && pos[t]) { const [x1,y1]=pos[s],[x2,y2]=pos[t]; out += `<path d="M${x1+96} ${y1} C ${x1+180} ${y1}, ${x2-180} ${y2}, ${x2-96} ${y2}" fill="none" stroke="${s===sel.id||t===sel.id?"#8ae2ff":"#2a3344"}" stroke-width="${s===sel.id||t===sel.id?1.5:1}"/>`; }
+    cols.forEach(ci=>{ out += `<text class="mono" x="${xs[ci]}" y="40" text-anchor="middle">STAGE ${String(ci+1).padStart(2,"0")}${ci===selStage?" · FOCUS":""}</text>`; });
+    for (const [id,[x,y]] of Object.entries(pos)) { const node = A.byId[id]; const on = id===sel.id;
+      out += `<g><rect x="${x-96}" y="${y-30}" width="192" height="60" rx="10" fill="${on?"#131a2a":"#0d111a"}" stroke="${on?"#8ae2ff":"#1c2230"}" stroke-width="${on?1.5:1}"/>${on?`<rect x="${x-96}" y="${y-30}" width="192" height="60" rx="10" fill="none" stroke="#8ae2ff" stroke-opacity=".25" stroke-width="8"/>`:""}<text x="${x-82}" y="${y+5}" font-size="16" fill="${node.type==="llm_call"?"#8ae2ff":"#e9ecf3"}">${GLYPH[node.type]||"•"}</text><text x="${x-56}" y="${y-2}" font-size="12.5" font-weight="600">${esc(node.name)}</text><text class="mono" x="${x-56}" y="${y+14}">${esc(node.type)}</text></g>`; }
+    svg = out;
+  }
+  const slotsHtml = A.slots[sel.id] ? `<div style="margin-top:16px"><label style="font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--omute)">Orbit slots</label>
+    ${A.slots[sel.id].chat_model.map(id=>`<div class="slot model"><i></i>Model<span class="m">${esc(A.byId[id].name)}</span></div>`).join("")}
+    <div class="slot"><i style="background:#2a3344"></i>Memory<span class="m">empty · drop a Simple Memory here</span></div>
+    ${A.slots[sel.id].tool.map(id=>`<div class="slot tool"><i></i>Tool<span class="m">${esc(A.byId[id].name)}</span></div>`).join("")}
+    ${A.slots[sel.id].worker.map(id=>`<div class="slot"><i></i>Worker<span class="m">${esc(A.byId[id].name.replace("Worker: ",""))}</span></div>`).join("")}</div>` : "";
+  return `
+  <div class="hud">
+    <span class="pill"><b>L2M</b></span>
+    <span class="pill">Default Project / ${esc(w.name)}</span>
+    <span class="pill"><span class="dot"></span> last run ${w.run[w.run.length-1][2]} s · ${Math.min(6,A.dag.length)} of ${A.dag.length} ok</span>
+    <div class="right"><span class="pill">⌘K</span><button class="go">Run ▸</button></div>
+  </div>
+  <div class="field">
+    <svg class="space" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Stage view">${svg}</svg>
+    <aside class="drawer">
+      <h3>${esc(sel.name)}</h3><div class="sub">${esc(sel.type)} · stage ${String(selStage+1).padStart(2,"0")}</div>
+      <div class="tabs"><span class="on">Parameters</span><span>Input</span><span>Output</span><span>Trace</span></div>
+      <div class="kv">${fields(sel.params).map(([k,v])=>`<div><label>${esc(k)}</label><div class="v">${esc(v)}</div></div>`).join("")}</div>
+      ${slotsHtml}
+    </aside>
+    <div class="strip">${strip}</div>
+  </div>`;
+}
+
+/* ---------------- C. LOOM ---------------- */
+function renderLoom(w){
+  const A = analyze(w);
+  const sel = A.byId[w.selected];
+  const cols = A.stages.map((ns,i)=>`<div class="col"><h6>${i===0?"trigger":"stage "+String(i+1).padStart(2,"0")}${ns.length>1?" · ∥"+ns.length:""}</h6>${ns.map(x=>{
+    const s = A.slots[x.id]; let slots = "";
+    if (s) { const nm = id=>esc(A.byId[id].name.replace("Worker: ","").replace("MCP: ",""));
+      slots = `<div class="slots"><div class="sl model"><em>Model</em>${s.chat_model.map(id=>`<span>${nm(id)}</span>`).join("")}</div><div class="sl"><em>Memory</em><span style="opacity:.55">+ add</span></div><div class="sl"><em>Tools</em>${s.tool.map(id=>`<span>${nm(id)}</span>`).join("")||'<span style="opacity:.55">+ add</span>'}</div>${s.worker.length?`<div class="sl"><em>Workers</em>${s.worker.map(id=>`<span>${nm(id)}</span>`).join("")}</div>`:""}</div>`;
+      for (const wid of s.worker) { const ws = A.slots[wid]; if (!ws) continue; slots += `<div class="slots" style="margin-top:4px;padding-left:8px;border-left:2px solid var(--lcopper-soft)"><div class="sl model"><em>${nm(wid)}</em>${ws.chat_model.map(id=>`<span>${nm(id)}</span>`).join("")}${ws.tool.map(id=>`<span style="background:var(--lcopper-soft)">${nm(id)}</span>`).join("")}</div></div>`; }
+    }
+    return `<div class="card ${x.id===w.selected?"sel":""}" data-id="${x.id}"><div class="h"><div class="g ${gcls(x.type)}">${GLYPH[x.type]||"•"}</div><div class="t">${esc(x.name)}</div></div><div class="s">${esc(x.summary)}</div>${slots}${i>0?'<i class="ports in"></i>':""}${A.succ[x.id].length?'<i class="ports"></i>':""}</div>`;
+  }).join("")}</div>`).join("");
+  const files = Object.entries(WORKFLOWS).map(([k,x])=>`<div class="it ${x===w?"on":""}">▣ ${esc(x.name)}<span class="n">${x.nodes.length}</span></div>`).join("");
+  const maxT = Math.max(...w.run.map(r=>r[2]));
+  const tape = w.run.map(([nm,a,b,hot])=>`<div class="ln"><b>${esc(nm)}</b><div class="tr"><i class="${hot||""}" style="left:${a/maxT*100}%;width:${Math.max((b-a)/maxT*100,1)}%"></i></div><span>${b-a} s</span></div>`).join("");
+  return `
+  <aside class="side">
+    <div class="logo"><i></i>L2M Studio</div>
+    <h5>Default Project</h5>${files}
+    <h5>Workspace</h5><div class="it">◷ Runs <span class="n">0</span></div><div class="it">◫ Templates <span class="n">20</span></div><div class="it">▤ Knowledge bases</div><div class="it">⚿ Secrets</div><div class="it">⚙ Settings</div>
+  </aside>
+  <div class="tabs"><div class="tab on">${esc(w.name)}</div><div class="tab">+ New</div><div class="spacer"></div><div class="act"><button>Import</button><button>Export</button><button>Save</button><button class="pri">Run ▸</button></div></div>
+  <div class="board"><svg class="threads"></svg><div class="cols">${cols}</div></div>
+  <aside class="insp">
+    <h3>${esc(sel.name)}</h3><div class="sub">${esc(sel.type)} · ${esc(sel.id)}</div>
+    <div class="seg"><span class="on">Parameters</span><span>Input</span><span>Output</span></div>
+    ${fields(sel.params).map(([k,v])=>`<div class="fld"><label>${esc(k)}</label><div class="v ${/secret/i.test(k)?"sec":""}">${esc(v)}</div></div>`).join("")}
+  </aside>
+  <div class="tape"><h5>Run tape <span>last run · ${maxT} s</span> <span style="color:var(--lmute)">copper = LLM time</span></h5><div class="lanes">${tape}</div></div>`;
+}
+function drawThreads(root){
+  const svg = root.querySelector("svg.threads"); if (!svg) return;
+  const board = root.querySelector(".board"); const w = WORKFLOWS[state.w];
+  const br = board.getBoundingClientRect();
+  const rect = id => { const el = root.querySelector(`.card[data-id="${id}"]`); if (!el) return null; const r = el.getBoundingClientRect(); return {x1:r.left-br.left+board.scrollLeft, x2:r.right-br.left+board.scrollLeft, y:r.top-br.top+board.scrollTop+r.height/2}; };
+  const cols = root.querySelector(".cols").getBoundingClientRect();
+  svg.setAttribute("width", cols.width + 40); svg.setAttribute("height", cols.height + 40);
+  svg.style.width = (cols.width+40)+"px"; svg.style.height = (cols.height+40)+"px";
+  let d = "";
+  for (const [s,t] of w.edges) { const a = rect(s), b = rect(t); if (!a||!b) continue; const hot = s===w.selected||t===w.selected;
+    d += `<path d="M${a.x2} ${a.y} C ${a.x2+40} ${a.y}, ${b.x1-40} ${b.y}, ${b.x1} ${b.y}" fill="none" stroke="${hot?"#0f6e63":"#9fb3ac"}" stroke-width="${hot?2:1.3}" opacity="${hot?1:.8}"/>`; }
+  svg.innerHTML = d;
+}
+
+/* ---------------- controller ---------------- */
+const state = { v: "score", w: "cipher" };
+try { const h = location.hash.replace("#",""); if (["score","orbit","loom"].includes(h)) state.v = h; else { const s = localStorage.getItem("l2m-proto-v"); if (s) state.v = s; } } catch {}
+function render(){
+  const w = WORKFLOWS[state.w];
+  document.getElementById("v-score").innerHTML = renderScore(w);
+  document.getElementById("v-orbit").innerHTML = renderOrbit(w);
+  document.getElementById("v-loom").innerHTML = renderLoom(w);
+  document.querySelectorAll(".variant").forEach(el=>el.classList.toggle("active", el.id==="v-"+state.v));
+  document.querySelectorAll(".switch [data-v]").forEach(b=>b.setAttribute("aria-pressed", String(b.dataset.v===state.v)));
+  document.querySelectorAll(".switch [data-w]").forEach(b=>b.setAttribute("aria-pressed", String(b.dataset.w===state.w)));
+  requestAnimationFrame(()=>drawThreads(document.getElementById("v-loom")));
+  try { localStorage.setItem("l2m-proto-v", state.v); } catch {}
+}
+document.querySelector(".switch").addEventListener("click", e=>{ const b = e.target.closest("button"); if (!b) return; if (b.dataset.v) { state.v = b.dataset.v; try { history.replaceState(null,"","#"+state.v); } catch {} } if (b.dataset.w) state.w = b.dataset.w; render(); });
+document.getElementById("v-loom").addEventListener("click", e=>{ const c = e.target.closest(".card"); if (!c) return; WORKFLOWS[state.w].selected = c.dataset.id; render(); });
+document.getElementById("v-score").addEventListener("click", e=>{ const r = e.target.closest(".row"); if (!r) return; const i=[...r.parentElement.children].indexOf(r); });
+window.addEventListener("resize", ()=>drawThreads(document.getElementById("v-loom")));
+render();
+</script>

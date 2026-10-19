@@ -18,6 +18,11 @@ interface ExecutionHistoryPanelProps {
   filters: ExecutionHistoryFilters;
   expandedExecutionIds: string[];
   executionDetailById: Record<string, ExecutionHistoryDetail | undefined>;
+  /**
+   * Legacy status → colour map. Status pills are now coloured by the
+   * `data-status` attribute through design tokens; the map is only used as a
+   * fallback for statuses the token set does not know.
+   */
   statusColors: Record<string, string>;
   onFiltersChange: (filters: ExecutionHistoryFilters) => void;
   onRefresh: () => void;
@@ -34,6 +39,18 @@ interface ExecutionHistoryPanelProps {
   onReplayFromNode?: (executionId: string, nodeId: string) => Promise<void> | void;
 }
 
+const TOKENISED_STATUSES = new Set([
+  "success",
+  "error",
+  "partial",
+  "running",
+  "pending",
+  "waiting_approval",
+  "canceled",
+  "skipped",
+  "unknown"
+]);
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -42,7 +59,7 @@ function stringifyPretty(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
-function formatDuration(value: number | null | undefined): string {
+export function formatDuration(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     return "-";
   }
@@ -61,6 +78,19 @@ function formatWhen(value: string | null | undefined): string {
 
 function hasCustomData(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length > 0);
+}
+
+function StatusPill({ status, statusColors }: { status: string; statusColors: Record<string, string> }) {
+  const known = TOKENISED_STATUSES.has(status);
+  return (
+    <span
+      className="status-pill"
+      data-status={known ? status : "unknown"}
+      style={!known && statusColors[status] ? { color: statusColors[status] } : undefined}
+    >
+      {status.replace(/_/g, " ")}
+    </span>
+  );
 }
 
 export function ExecutionHistoryPanel({
@@ -95,16 +125,20 @@ export function ExecutionHistoryPanel({
   };
 
   return (
-    <section className="executions-pane">
-      <div className="executions-header-row">
-        <div>
-          <h2>Runs</h2>
-          <p className="muted">Execution history and node-level traces ({executionHistoryTotal} total)</p>
+    <section className="executions-pane page-pane">
+      <header className="page-head">
+        <div className="page-head-copy">
+          <h2 className="page-title">Runs</h2>
+          <p className="page-sub">
+            Execution history and node-level traces · <span className="mono-cell">{executionHistoryTotal}</span> total
+          </p>
         </div>
-        <button className="header-btn" onClick={onRefresh} disabled={executionsLoading}>
-          {executionsLoading ? "Refreshing..." : "Refresh"}
-        </button>
-      </div>
+        <div className="page-actions">
+          <button className="pg-btn" onClick={onRefresh} disabled={executionsLoading}>
+            {executionsLoading ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+      </header>
 
       <form
         className="execution-filters"
@@ -158,26 +192,28 @@ export function ExecutionHistoryPanel({
             onChange={(event) => onFiltersChange({ ...filters, startedTo: event.target.value })}
           />
         </label>
-        <button className="mini-btn" type="submit" disabled={executionsLoading}>
-          Apply
-        </button>
-        <button
-          className="mini-btn"
-          type="button"
-          onClick={() => {
-            clearFilters();
-            window.setTimeout(onRefresh, 0);
-          }}
-          disabled={executionsLoading}
-        >
-          Clear
-        </button>
+        <div className="execution-filters-actions">
+          <button className="pg-btn small primary" type="submit" disabled={executionsLoading}>
+            Apply
+          </button>
+          <button
+            className="pg-btn small ghost"
+            type="button"
+            onClick={() => {
+              clearFilters();
+              window.setTimeout(onRefresh, 0);
+            }}
+            disabled={executionsLoading}
+          >
+            Clear
+          </button>
+        </div>
       </form>
 
       {executionsError && <div className="error-banner">{executionsError}</div>}
 
       {!executionsLoading && executionHistoryItems.length === 0 && (
-        <div className="logs-placeholder">No executions yet. Run a workflow from the editor to populate history.</div>
+        <div className="page-empty">No executions yet. Run a workflow from the editor to populate history.</div>
       )}
 
       {executionHistoryItems.length > 0 && (
@@ -190,7 +226,7 @@ export function ExecutionHistoryPanel({
                 <th>Status</th>
                 <th>Trigger</th>
                 <th>Started</th>
-                <th>Duration</th>
+                <th className="num">Duration</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -210,21 +246,35 @@ export function ExecutionHistoryPanel({
                   <tr
                     key={`${item.id}-summary`}
                     className={expanded ? "execution-row expanded" : "execution-row"}
+                    aria-expanded={expanded}
                     onClick={() => {
                       void onToggleRow(item.id);
                     }}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        void onToggleRow(item.id);
+                      }
+                    }}
+                    tabIndex={0}
                   >
-                    <td className="mono-cell">{item.id.slice(0, 8)}</td>
-                    <td>{item.workflowName ?? item.workflowId}</td>
-                    <td>
-                      <strong style={{ color: statusColors[item.status] ?? "#657087" }}>{item.status}</strong>
+                    <td className="mono-cell">
+                      <span className="execution-row-caret" aria-hidden="true">
+                        {expanded ? "▾" : "▸"}
+                      </span>
+                      {item.id.slice(0, 8)}
                     </td>
-                    <td>{item.triggerType ?? "unknown"}</td>
-                    <td>{formatWhen(item.startedAt)}</td>
-                    <td>{formatDuration(item.durationMs)}</td>
+                    <td className="execution-row-workflow">{item.workflowName ?? item.workflowId}</td>
+                    <td>
+                      <StatusPill status={item.status} statusColors={statusColors} />
+                    </td>
+                    <td className="mono-cell muted-cell">{item.triggerType ?? "unknown"}</td>
+                    <td className="muted-cell">{formatWhen(item.startedAt)}</td>
+                    <td className="mono-cell num">{formatDuration(item.durationMs)}</td>
                     <td className="execution-actions-cell">
                       <button
-                        className="mini-btn"
+                        className="pg-btn small"
                         onClick={(event) => {
                           event.stopPropagation();
                           void onDebugExecution(item.id);
@@ -233,7 +283,7 @@ export function ExecutionHistoryPanel({
                         Debug
                       </button>
                       <button
-                        className="mini-btn"
+                        className="pg-btn small"
                         disabled={!canRetry}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -244,7 +294,7 @@ export function ExecutionHistoryPanel({
                       </button>
                       {canCancel && (
                         <button
-                          className="mini-btn danger"
+                          className="pg-btn small ghost danger"
                           onClick={(event) => {
                             event.stopPropagation();
                             void onCancelExecution(item.id);
@@ -258,17 +308,17 @@ export function ExecutionHistoryPanel({
                   expanded ? (
                     <tr key={`${item.id}-detail`} className="execution-detail-row">
                       <td colSpan={7}>
-                        {!detail && <div className="muted">Loading full trace...</div>}
+                        {!detail && <div className="page-hint">Loading full trace…</div>}
                         {detail && (
                           <div className="execution-trace">
                             {hasCustomData(customData) && (
                               <div className="execution-custom-data">
-                                <strong>Custom data</strong>
+                                <span className="pg-eyebrow">Custom data</span>
                                 <pre className="result-block">{stringifyPretty(customData)}</pre>
                               </div>
                             )}
                             <div className="execution-trace-grid">
-                              {nodeResults.length === 0 && <div className="muted">No node-by-node trace available.</div>}
+                              {nodeResults.length === 0 && <div className="page-hint">No node-by-node trace available.</div>}
                               {nodeResults.map((entry, index) => {
                                 const trace = asRecord(entry);
                                 const nodeId = typeof trace?.nodeId === "string" ? trace.nodeId : `node-${index + 1}`;
@@ -284,35 +334,32 @@ export function ExecutionHistoryPanel({
                                 const hasState = nodeInput !== undefined || nodeOutput !== undefined;
 
                                 return (
-                                  <div key={traceKey}>
-                                    <div
-                                      className={`execution-trace-item ${isOpen ? "expanded" : ""}`}
-                                      onClick={() => hasState && toggleTraceRow(traceKey)}
-                                      style={{ cursor: hasState ? "pointer" : "default" }}
-                                    >
-                                      <span>
-                                        {hasState && (
-                                          <span style={{ marginRight: 6, color: "var(--muted)" }}>{isOpen ? "▾" : "▸"}</span>
-                                        )}
-                                        {nodeId}
-                                      </span>
-                                      <strong style={{ color: statusColors[status] ?? "var(--muted)" }}>{status}</strong>
-                                      <span>{formatDuration(durationMs)}</span>
-                                      <span style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                                        {errorMessage && (
-                                          <span className="trace-error">
-                                            {errorMessage}
-                                            {errorRemediation && (
-                                              <span className="trace-remediation">
-                                                <strong>How to fix:</strong> {errorRemediation}
-                                              </span>
-                                            )}
+                                  <div key={traceKey} className={isOpen ? "execution-trace-node open" : "execution-trace-node"}>
+                                    <div className={`execution-trace-item${hasState ? " expandable" : ""}${isOpen ? " expanded" : ""}`}>
+                                      {hasState ? (
+                                        <button
+                                          type="button"
+                                          className="execution-trace-toggle"
+                                          aria-expanded={isOpen}
+                                          onClick={() => toggleTraceRow(traceKey)}
+                                        >
+                                          <span className="execution-row-caret" aria-hidden="true">
+                                            {isOpen ? "▾" : "▸"}
                                           </span>
-                                        )}
+                                          <span className="mono-cell">{nodeId}</span>
+                                        </button>
+                                      ) : (
+                                        <span className="execution-trace-toggle static">
+                                          <span className="mono-cell">{nodeId}</span>
+                                        </span>
+                                      )}
+                                      <StatusPill status={status} statusColors={statusColors} />
+                                      <span className="mono-cell num">{formatDuration(durationMs)}</span>
+                                      <span className="execution-trace-extra">
                                         {onReplayFromNode && (
                                           <button
                                             type="button"
-                                            className="mini-btn"
+                                            className="pg-btn small ghost"
                                             onClick={(event) => {
                                               event.stopPropagation();
                                               void onReplayFromNode(item.id, nodeId);
@@ -324,40 +371,30 @@ export function ExecutionHistoryPanel({
                                         )}
                                       </span>
                                     </div>
+                                    {errorMessage && (
+                                      <div className="trace-error">
+                                        {errorMessage}
+                                        {errorRemediation && (
+                                          <span className="trace-remediation">
+                                            <strong>How to fix:</strong> {errorRemediation}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
                                     {isOpen && hasState && (
                                       <div
-                                        style={{
-                                          background: "var(--app-bg)",
-                                          border: "1px solid var(--panel-border)",
-                                          borderTop: "none",
-                                          borderRadius: "0 0 8px 8px",
-                                          padding: "10px 12px",
-                                          marginTop: "-4px",
-                                          marginBottom: 8,
-                                          display: "grid",
-                                          gridTemplateColumns: nodeInput !== undefined && nodeOutput !== undefined ? "1fr 1fr" : "1fr",
-                                          gap: 12,
-                                          fontSize: "0.78rem"
-                                        }}
+                                        className={`execution-trace-state${nodeInput !== undefined && nodeOutput !== undefined ? " two" : ""}`}
                                       >
                                         {nodeInput !== undefined && (
                                           <div>
-                                            <strong style={{ color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontSize: "0.7rem" }}>
-                                              Input
-                                            </strong>
-                                            <pre className="result-block" style={{ marginTop: 4, maxHeight: 200, overflow: "auto" }}>
-                                              {stringifyPretty(nodeInput)}
-                                            </pre>
+                                            <span className="pg-eyebrow">Input</span>
+                                            <pre className="result-block">{stringifyPretty(nodeInput)}</pre>
                                           </div>
                                         )}
                                         {nodeOutput !== undefined && (
                                           <div>
-                                            <strong style={{ color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontSize: "0.7rem" }}>
-                                              Output
-                                            </strong>
-                                            <pre className="result-block" style={{ marginTop: 4, maxHeight: 200, overflow: "auto" }}>
-                                              {stringifyPretty(nodeOutput)}
-                                            </pre>
+                                            <span className="pg-eyebrow">Output</span>
+                                            <pre className="result-block">{stringifyPretty(nodeOutput)}</pre>
                                           </div>
                                         )}
                                       </div>
@@ -366,6 +403,7 @@ export function ExecutionHistoryPanel({
                                 );
                               })}
                             </div>
+                            <span className="pg-eyebrow">Result</span>
                             <pre className="result-block">{stringifyPretty(detail.output ?? detail.error ?? detail)}</pre>
                           </div>
                         )}

@@ -97,4 +97,64 @@ describe("ExecutionHistoryPanel", () => {
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onCancelExecution).toHaveBeenCalledWith("ex-1");
   });
+
+  it("renders token-driven status pills and a compact per-node trace when expanded", async () => {
+    const user = userEvent.setup();
+    const onReplayFromNode = vi.fn();
+    const detail: ExecutionHistoryDetail = {
+      ...makeSummary({ status: "error", durationMs: 1530 }),
+      input: {},
+      output: null,
+      nodeResults: [
+        { nodeId: "trigger", status: "success", durationMs: 12, input: { a: 1 }, output: { b: 2 } },
+        { nodeId: "llm", status: "error", durationMs: 1500, error: "boom", errorRemediation: "Check the key" }
+      ]
+    };
+
+    render(
+      <ExecutionHistoryPanel
+        {...makeProps({
+          executionHistoryTotal: 1,
+          executionHistoryItems: [makeSummary({ status: "error", durationMs: 1530 })],
+          expandedExecutionIds: ["ex-1"],
+          executionDetailById: { "ex-1": detail },
+          onReplayFromNode
+        })}
+      />
+    );
+
+    const pills = document.querySelectorAll(".status-pill");
+    expect(pills.length).toBe(3);
+    expect(pills[0]).toHaveAttribute("data-status", "error");
+    expect(pills[0]).not.toHaveAttribute("style");
+    expect(screen.getByText("1.53s")).toHaveClass("mono-cell");
+    expect(screen.getByText("12ms")).toBeInTheDocument();
+    expect(screen.getByText("boom")).toBeInTheDocument();
+    expect(screen.getByText("Check the key")).toBeInTheDocument();
+
+    const toggle = screen.getByRole("button", { name: /trigger/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Input")).toBeInTheDocument();
+    expect(screen.getByText("Output")).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("button", { name: /Replay from here/ })[1]);
+    expect(onReplayFromNode).toHaveBeenCalledWith("ex-1", "llm");
+  });
+
+  it("uses the legacy colour map only for statuses outside the token set", () => {
+    render(
+      <ExecutionHistoryPanel
+        {...makeProps({
+          executionHistoryTotal: 1,
+          executionHistoryItems: [makeSummary({ status: "mystery" })],
+          statusColors: { mystery: "#123456" }
+        })}
+      />
+    );
+    const pill = document.querySelector(".status-pill") as HTMLElement;
+    expect(pill).toHaveAttribute("data-status", "unknown");
+    expect(pill.style.color).toBe("rgb(18, 52, 86)");
+  });
 });
