@@ -1,0 +1,204 @@
+/* ---------------------------------------------------------------------------
+   L2M Studio design tokens — "Orbit" identity.
+   Dark-first. Every color on every surface comes from these tokens; component
+   CSS never uses literal colors. Light theme redefines the same names.
+   Legacy aliases at the bottom keep older rules in styles.css on-palette while
+   they are migrated into src/styles/*.css.
+   --------------------------------------------------------------------------- */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg: #07090f;
+  --bg-glow: radial-gradient(1200px 700px at 60% 30%, #0e1422 0%, #07090f 60%);
+  --bg-elev: #0d111a;
+  --bg-elev-2: #131a2a;
+  --bg-elev-3: #1a2336;
+  --bg-input: #0a0e16;
+  --line: #1c2230;
+  --line-strong: #2a3344;
+  --scrim: rgba(3, 5, 10, 0.72);
+
+  /* text */
+  --fg: #e9ecf3;
+  --fg-muted: #8b94a7;
+  --fg-faint: #4f5870;
+  --fg-on-accent: #06202a;
+
+  /* accent (the glow) */
+  --accent: #8ae2ff;
+  --accent-strong: #5ccdf3;
+  --accent-soft: rgba(138, 226, 255, 0.12);
+  --accent-line: rgba(138, 226, 255, 0.45);
+
+  /* agent port colours — chat_model / memory / tool / worker */
+  --port-model: #8ae2ff;
+  --port-memory: #7ee2b8;
+  --port-tool: #ffb454;
+  --port-worker: #c6a2ff;
+  --port-model-soft: rgba(138, 226, 255, 0.14);
+  --port-memory-soft: rgba(126, 226, 184, 0.14);
+  --port-tool-soft: rgba(255, 180, 84, 0.14);
+  --port-worker-soft: rgba(198, 162, 255, 0.14);
+
+  /* agent hub */
+  --agent: #c6a2ff;
+  --agent-soft: rgba(198, 162, 255, 0.12);
+  --agent-glow: radial-gradient(circle, rgba(198, 162, 255, 0.45) 0%, rgba(198, 162, 255, 0) 70%);
+
+  /* semantic status (separate from accent) */
+  --ok: #5fd39a;
+  --ok-soft: rgba(95, 211, 154, 0.16);
+  --warn: #ffb454;
+  --warn-soft: rgba(255, 180, 84, 0.16);
+  --err: #ff6b7a;
+  --err-soft: rgba(255, 107, 122, 0.16);
+  --running: var(--accent);
+  --running-soft: var(--accent-soft);
+  --skipped: var(--fg-faint);
+
+  /* canvas */
+  --canvas-bg: var(--bg);
+  --canvas-dot: #1a2131;
+  --edge: #2f3a4e;
+  --edge-active: var(--accent);
+  --card-bg: var(--bg-elev);
+  --card-border: var(--line);
+  --card-border-selected: var(--accent);
+
+  /* type */
+  --font-display: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --ls-display: -0.02em;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12.5px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 28px;
+
+  /* shape + depth */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.55);
+  --glow-accent: 0 0 0 1px var(--accent), 0 0 0 6px var(--accent-soft);
+  --glow-agent: 0 0 0 1px var(--agent), 0 0 40px var(--agent-soft);
+  --blur: blur(10px);
+
+  /* motion */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur: 160ms;
+
+  /* layout */
+  --sidebar-w: 232px;
+  --sidebar-w-collapsed: 56px;
+  --hud-h: 56px;
+  --inspector-w: 380px;
+  --strip-h: 112px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f3f5f9;
+  --bg-glow: radial-gradient(1200px 700px at 60% 30%, #ffffff 0%, #f3f5f9 60%);
+  --bg-elev: #ffffff;
+  --bg-elev-2: #eef1f7;
+  --bg-elev-3: #e3e8f1;
+  --bg-input: #ffffff;
+  --line: #dde2ec;
+  --line-strong: #c3cad8;
+  --scrim: rgba(17, 22, 37, 0.45);
+
+  --fg: #111625;
+  --fg-muted: #5c6577;
+  --fg-faint: #98a0b1;
+  --fg-on-accent: #ffffff;
+
+  --accent: #0b84a5;
+  --accent-strong: #086c88;
+  --accent-soft: rgba(11, 132, 165, 0.10);
+  --accent-line: rgba(11, 132, 165, 0.45);
+
+  --port-model: #0b84a5;
+  --port-memory: #0e8f5e;
+  --port-tool: #b86e00;
+  --port-worker: #6f42c1;
+  --port-model-soft: rgba(11, 132, 165, 0.12);
+  --port-memory-soft: rgba(14, 143, 94, 0.12);
+  --port-tool-soft: rgba(184, 110, 0, 0.12);
+  --port-worker-soft: rgba(111, 66, 193, 0.12);
+
+  --agent: #6f42c1;
+  --agent-soft: rgba(111, 66, 193, 0.10);
+  --agent-glow: radial-gradient(circle, rgba(111, 66, 193, 0.25) 0%, rgba(111, 66, 193, 0) 70%);
+
+  --ok: #15843f;
+  --ok-soft: rgba(21, 132, 63, 0.12);
+  --warn: #b86e00;
+  --warn-soft: rgba(184, 110, 0, 0.12);
+  --err: #c62839;
+  --err-soft: rgba(198, 40, 57, 0.12);
+
+  --canvas-bg: var(--bg);
+  --canvas-dot: #d5dbe6;
+  --edge: #b9c2d2;
+  --card-bg: var(--bg-elev);
+  --card-border: var(--line);
+
+  --shadow-sm: 0 1px 2px rgba(17, 22, 37, 0.08);
+  --shadow-md: 0 8px 24px rgba(17, 22, 37, 0.10);
+  --shadow-lg: 0 24px 60px rgba(17, 22, 37, 0.14);
+  --glow-accent: 0 0 0 1px var(--accent), 0 0 0 6px var(--accent-soft);
+  --glow-agent: 0 0 0 1px var(--agent), 0 0 32px var(--agent-soft);
+}
+
+/* ---- Legacy aliases (kept until styles.css is fully migrated) ---- */
+:root,
+:root[data-theme="dark"],
+:root[data-theme="light"] {
+  --app-bg: var(--bg);
+  --panel: var(--bg-elev);
+  --panel-border: var(--line);
+  --text: var(--fg);
+  --muted: var(--fg-muted);
+  --accent-dark: var(--accent-strong);
+  --node-bg: var(--card-bg);
+  --node-border: var(--card-border);
+  --shadow: var(--shadow-md);
+  --run-success: var(--ok);
+  --run-success-ring: var(--ok-soft);
+  --run-active: var(--running);
+  --run-active-ring-soft: var(--running-soft);
+  --run-active-ring-strong: var(--accent-line);
+  --run-active-glow-soft: var(--running-soft);
+  --run-active-glow-strong: var(--accent-line);
+  --canvas-grid-minor: var(--canvas-dot);
+  --canvas-grid-major: var(--line-strong);
+  --border-strong: var(--line-strong);
+  --traffic-red: var(--err);
+  --traffic-amber: var(--warn);
+  --traffic-green: var(--ok);
+  --pill-bg: var(--bg-elev);
+  --pill-border: var(--line);
+  --pill-bg-accent: var(--accent-soft);
+  --pill-border-accent: var(--accent-line);
+  --pill-text-accent: var(--accent);
+  --pill-bg-success: var(--ok-soft);
+  --pill-border-success: var(--ok);
+  --pill-text-success: var(--ok);
+  --card-shadow-lg: var(--shadow-md);
+  --card-shadow-xl: var(--shadow-lg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur: 0ms; }
+}

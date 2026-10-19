@@ -73,6 +73,7 @@ import {
   type EditorNodeData
 } from "./lib/workflow";
 import { AGENT_ATTACHMENT_STYLES } from "./lib/agent-attachments";
+import { computeAttachmentSlots, orbitPositions } from "./lib/stages";
 import {
   deleteTabWipWorkflow,
   readLegacyLocalWipWorkflow,
@@ -89,16 +90,18 @@ import { WorkflowCanvasNode } from "./components/WorkflowCanvasNode";
 import { StickyNoteNode } from "./components/StickyNoteNode";
 import { KeyboardShortcutsPanel } from "./components/KeyboardShortcutsPanel";
 import { RadialActionRing, type RadialAction } from "./components/RadialActionRing";
-import { WorkflowCanvasEdge } from "./components/WorkflowCanvasEdge";
-import { NodeConfigModal, type NodeInputOption } from "./components/NodeConfigModal";
+import { AttachmentSpokeEdge, WorkflowCanvasEdge } from "./components/WorkflowCanvasEdge";
+import { NodeInspector, buildNodeSlots, buildNodeTrace, type NodeInputOption } from "./components/NodeConfigModal";
 import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
+import { deriveRunStatus } from "./components/studio-layout-types";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
 import { SettingsPage } from "./components/SettingsPage";
 import { KnowledgeBasePage } from "./components/KnowledgeBasePage";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
+import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea } from "./components/WorkflowCanvasArea";
 import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
 
@@ -855,7 +858,8 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
       target?.data.nodeType === "google_drive_source");
 
   const isAuxiliary = Boolean(attachmentStyle) || Boolean(isGenericAuxiliary);
-  const stroke = attachmentStyle?.stroke ?? (isAuxiliary ? "#a7bccc" : "#4f6881");
+  // Colours are tokens so both themes resolve them (see src/styles/tokens.css).
+  const stroke = attachmentStyle?.stroke ?? (isAuxiliary ? "var(--line-strong)" : "var(--edge)");
 
   // Workers represent recursive Supervisor delegation — give them a slightly
   // thicker line so the hierarchy reads even in dense graphs.
@@ -864,17 +868,12 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
   // Create an explicit label. Attachment edges carry their port name so users
   // can distinguish chat_model / memory / tool / worker without hovering.
   let label: string | undefined = undefined;
-  let labelBgStyle = { fill: "#f3faf9", color: "#2f5a67", border: "1px solid #cde3e2" };
-  let labelStyle = { fill: "#2f5a67", fontWeight: 600, fontSize: 10 };
+  const labelBgStyle = { fill: "var(--bg-elev)", color: "var(--fg-muted)", border: "1px solid var(--line)" };
+  const labelStyle = { fill: "var(--fg-muted)", fontWeight: 600, fontSize: 10 };
 
   if (attachmentStyle) {
-    label = attachmentStyle.label;
-    labelBgStyle = {
-      fill: attachmentStyle.bg,
-      color: attachmentStyle.stroke,
-      border: `1px solid ${attachmentStyle.border}`
-    };
-    labelStyle = { fill: attachmentStyle.stroke, fontWeight: 600, fontSize: 10 };
+    // Spokes carry their port in the stroke colour and the hub slot — no label.
+    label = undefined;
   } else if (!isAuxiliary && edge.sourceHandle) {
     if (edge.sourceHandle === "true") label = "True";
     else if (edge.sourceHandle === "false") label = "False";
@@ -912,22 +911,23 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
 
   return {
     ...edge,
-    type: "workflowBezier",
-    animated: Boolean(isAuxiliary),
+    // Attachment edges (chat_model / memory / tool / worker) are straight
+    // spokes from the hub to the orbiting node; DAG edges stay bezier.
+    type: attachmentStyle ? "attachmentSpoke" : "workflowBezier",
+    animated: Boolean(isGenericAuxiliary),
     label,
     labelBgPadding: [8, 4],
     labelBgBorderRadius: 4,
     labelBgStyle,
     labelStyle,
-    markerEnd: {
-      type: MarkerType.ArrowClosed,
-      color: stroke
-    },
+    // Arrowhead colour comes from CSS (`.react-flow__arrowhead`), the marker
+    // id cannot carry a CSS variable.
+    markerEnd: attachmentStyle ? undefined : { type: MarkerType.ArrowClosed },
     style: {
       ...(edge.style ?? {}),
       stroke,
-      strokeWidth: isWorkerEdge ? 2.25 : isAuxiliary ? 1.5 : 2,
-      strokeDasharray: isAuxiliary ? "6 6" : undefined
+      strokeWidth: isWorkerEdge ? 2 : isAuxiliary ? 1.5 : 1.75,
+      strokeDasharray: isWorkerEdge ? "6 5" : isGenericAuxiliary ? "6 6" : undefined
     },
     data: {
       ...(edge.data ?? {}),
@@ -1165,7 +1165,7 @@ function StudioApp() {
     } catch {
       /* ignore */
     }
-    return "light";
+    return "dark";
   });
   const [isDebugMode, setIsDebugMode] = useState<boolean>(() => {
     try {
@@ -1213,7 +1213,8 @@ function StudioApp() {
   );
   const edgeTypes = useMemo<EdgeTypes>(
     () => ({
-      workflowBezier: WorkflowCanvasEdge
+      workflowBezier: WorkflowCanvasEdge,
+      attachmentSpoke: AttachmentSpokeEdge
     }),
     []
   );
@@ -3929,20 +3930,17 @@ function StudioApp() {
       const sourceNode = attachContext?.sourceNodeId
         ? nodes.find((node) => node.id === attachContext.sourceNodeId)
         : undefined;
-      const attachmentPosition = sourceNode
-        ? {
-            x: sourceNode.position.x + 310,
-            y:
-              sourceNode.position.y +
-              (attachContext?.sourceHandle === "chat_model"
-                ? 92
-                : attachContext?.sourceHandle === "memory"
-                  ? 172
-                  : attachContext?.sourceHandle === "worker"
-                    ? 252
-                    : 212)
-          }
-        : undefined;
+      // Attached nodes are born on their orbit slot around the hub so the
+      // canvas never shows them jumping into place.
+      const attachmentPosition = (() => {
+        if (!sourceNode || !attachContext?.sourceHandle) return undefined;
+        const stub = { id, type: definition.type, position: sourceNode.position };
+        const slots = computeAttachmentSlots(
+          [...(nodes as EditorNode[]), stub],
+          [...edges, { source: sourceNode.id, target: id, sourceHandle: attachContext.sourceHandle }]
+        );
+        return orbitPositions(sourceNode.id, slots, sourceNode.position)[id];
+      })();
 
       const newNode: Node<EditorNodeData> = {
         id,
@@ -3984,7 +3982,7 @@ function StudioApp() {
       }
       setError(null);
     },
-    [nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]
+    [edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]
   );
 
   const onConnect = useCallback(
@@ -4295,12 +4293,12 @@ function StudioApp() {
               required
               autoComplete="one-time-code"
             />
-            <button className="execute-btn" type="submit" disabled={authBusy || !mfaCode.trim()}>
+            <button className="auth-submit" type="submit" disabled={authBusy || !mfaCode.trim()}>
               {authBusy ? "Verifying..." : "Verify"}
             </button>
             <button
               type="button"
-              className="header-btn ghost"
+              className="auth-link-btn"
               onClick={() => {
                 setMfaChallengeId(null);
                 setMfaCode("");
@@ -4342,7 +4340,7 @@ function StudioApp() {
             autoComplete="current-password"
             required
           />
-          <button className="execute-btn" type="submit" disabled={authBusy}>
+          <button className="auth-submit" type="submit" disabled={authBusy}>
             {authBusy ? "Signing in..." : "Sign in"}
           </button>
         </form>
@@ -4367,6 +4365,12 @@ function StudioApp() {
         activeMode={activeMode}
         canManageSecrets={canManageSecrets}
         onModeChange={setActiveMode}
+        projects={projects}
+        activeProjectId={activeProjectId}
+        onChangeActiveProject={(id) => setActiveProjectId(id)}
+        onCreateProject={() => {
+          void handleCreateProject();
+        }}
       />
 
       <div className="studio-main">
@@ -4410,6 +4414,21 @@ function StudioApp() {
           onCreateProject={() => {
             void handleCreateProject();
           }}
+          runStatus={deriveRunStatus(busy, executionResult)}
+          onRun={() => {
+            void handleExecute();
+          }}
+          onShare={
+            currentWorkflowExists
+              ? () =>
+                  setShareWorkflowTarget({
+                    id: currentWorkflow.id,
+                    name: currentWorkflow.name,
+                    projectId: currentWorkflow.projectId ?? activeProjectId
+                  })
+              : undefined
+          }
+          docsUrl={docsUrl}
         />
 
         <main className="main-content">
@@ -4417,67 +4436,82 @@ function StudioApp() {
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}
 
           {activeMode === "dashboard" && (
-            <section className="dashboard-pane has-sidebar">
-              <aside className="dashboard-sidebar">
-                <div className="dashboard-sidebar-section">
-                  <div className="dashboard-sidebar-heading">
-                    <h4>Project</h4>
-                  </div>
-                  <div className="dashboard-sidebar-project">
-                    <strong>{activeProject?.name ?? "Default Project"}</strong>
-                    {activeProject?.description && <p className="muted">{activeProject.description}</p>}
-                  </div>
+            <section className="dashboard-pane page-pane">
+              <header className="page-head">
+                <div className="page-head-copy">
+                  <h2 className="page-title">Workflows</h2>
+                  <p className="page-sub">
+                    <span className="page-project">{activeProject?.name ?? "Default Project"}</span>
+                    {activeProject?.description && <span className="page-sub-sep">· {activeProject.description}</span>}
+                    <span className="page-sub-sep">
+                      · {workflowList.length} workflow{workflowList.length === 1 ? "" : "s"}
+                    </span>
+                  </p>
+                </div>
+                <div className="page-actions">
                   {canManageWorkflows && activeProjectId !== DEFAULT_PROJECT_ID && (
                     <button
-                      className="header-btn danger text-only"
+                      className="pg-btn ghost danger"
                       onClick={() => void handleDeleteProject(activeProjectId)}
                       disabled={busy}
                     >
                       Delete project
                     </button>
                   )}
+                  <button className="pg-btn" onClick={() => void loadData()} disabled={busy}>
+                    Refresh
+                  </button>
+                  <button
+                    className="pg-btn primary"
+                    onClick={() => void handleCreateWorkflow()}
+                    disabled={busy || !canManageWorkflows}
+                  >
+                    {busy ? "Creating…" : "New workflow"}
+                  </button>
                 </div>
+              </header>
 
-                <div className="dashboard-sidebar-section">
-                  <div className="dashboard-sidebar-heading">
-                    <h4>Folders</h4>
-                    {canManageWorkflows && (
-                      <button
-                        className="mini-btn"
-                        onClick={() => void handleCreateFolder()}
-                        disabled={busy}
-                        title="New folder in this project"
-                      >
-                        +
-                      </button>
-                    )}
-                  </div>
+              <div className="dashboard-toolbar">
+                <label className="page-search">
+                  <span className="page-search-icon" aria-hidden="true">
+                    ⌕
+                  </span>
+                  <input
+                    className="dashboard-search"
+                    value={dashboardFilter}
+                    onChange={(event) => setDashboardFilter(event.target.value)}
+                    placeholder="Search by name, id or tag…"
+                    aria-label="Search workflows"
+                  />
+                </label>
+                <div className="folder-strip" role="group" aria-label="Folders">
                   <button
                     type="button"
                     className={`folder-row${activeFolderFilter === undefined ? " active" : ""}`}
+                    aria-pressed={activeFolderFilter === undefined}
                     onClick={() => setActiveFolderFilter(undefined)}
                   >
-                    <span>All workflows</span>
+                    <span>All</span>
                     <span className="folder-row-count">{workflowList.length}</span>
                   </button>
                   <button
                     type="button"
                     className={`folder-row${activeFolderFilter === null ? " active" : ""}`}
+                    aria-pressed={activeFolderFilter === null}
                     onClick={() => setActiveFolderFilter(null)}
                   >
                     <span>Unfiled</span>
-                    <span className="folder-row-count">
-                      {workflowList.filter((w) => !w.folderId).length}
-                    </span>
+                    <span className="folder-row-count">{workflowList.filter((w) => !w.folderId).length}</span>
                   </button>
                   {folders.map((folder) => (
-                    <div key={folder.id} className="folder-row-wrap">
+                    <span key={folder.id} className="folder-row-wrap">
                       <button
                         type="button"
                         className={`folder-row${activeFolderFilter === folder.id ? " active" : ""}`}
+                        aria-pressed={activeFolderFilter === folder.id}
                         onClick={() => setActiveFolderFilter(folder.id)}
                       >
-                        <span>📁 {folder.name}</span>
+                        <span>{folder.name}</span>
                         <span className="folder-row-count">
                           {workflowList.filter((w) => w.folderId === folder.id).length}
                         </span>
@@ -4493,202 +4527,164 @@ function StudioApp() {
                           ×
                         </button>
                       )}
-                    </div>
+                    </span>
+                  ))}
+                  {canManageWorkflows && (
+                    <button
+                      type="button"
+                      className="folder-row folder-row-add"
+                      onClick={() => void handleCreateFolder()}
+                      disabled={busy}
+                      title="New folder in this project"
+                    >
+                      + Folder
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {availableTags.length > 0 && (
+                <div className="tag-filter-row" role="group" aria-label="Filter by tag">
+                  <button
+                    type="button"
+                    className={`tag-chip${activeTagFilter === null ? " active" : ""}`}
+                    aria-pressed={activeTagFilter === null}
+                    onClick={() => setActiveTagFilter(null)}
+                  >
+                    All tags
+                  </button>
+                  {availableTags.map((tag) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      className={`tag-chip${activeTagFilter === tag ? " active" : ""}`}
+                      aria-pressed={activeTagFilter === tag}
+                      onClick={() => setActiveTagFilter(tag === activeTagFilter ? null : tag)}
+                    >
+                      #{tag}
+                    </button>
                   ))}
                 </div>
+              )}
 
-                {availableTags.length > 0 && (
-                  <div className="dashboard-sidebar-section">
-                    <div className="dashboard-sidebar-heading">
-                      <h4>Tags</h4>
-                    </div>
-                    <div className="tag-filter-row">
-                      <button
-                        type="button"
-                        className={`tag-chip${activeTagFilter === null ? " active" : ""}`}
-                        onClick={() => setActiveTagFilter(null)}
-                      >
-                        All
-                      </button>
-                      {availableTags.map((tag) => (
-                        <button
-                          key={tag}
-                          type="button"
-                          className={`tag-chip${activeTagFilter === tag ? " active" : ""}`}
-                          onClick={() => setActiveTagFilter(tag === activeTagFilter ? null : tag)}
-                        >
-                          #{tag}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </aside>
-
-              <div className="dashboard-main">
-                <div className="dashboard-header-row">
-                  <div>
-                    <h2>Workflow Dashboard</h2>
-                    <p className="muted">Manage saved workflows, reopen them later, and execute any workflow on demand.</p>
-                  </div>
-                  <div className="dashboard-actions">
-                    <button className="header-btn" onClick={() => void loadData()} disabled={busy}>
-                      Refresh
-                    </button>
-                  </div>
+              {filteredWorkflowItems.length === 0 && (
+                <div className="page-empty">
+                  {workflowList.length === 0
+                    ? "No workflows in this project yet. Create one, or start from a template."
+                    : "No workflows match your filters."}
                 </div>
+              )}
 
-                <div className="dashboard-toolbar">
-                  <input
-                    className="dashboard-search"
-                    value={dashboardFilter}
-                    onChange={(event) => setDashboardFilter(event.target.value)}
-                    placeholder="Search by name, ID, or tag…"
-                  />
-                  <div className="dashboard-create-controls">
-                    <button className="header-btn" onClick={() => void handleCreateWorkflow()} disabled={busy || !canManageWorkflows}>
-                      {busy ? "Creating..." : "New Workflow"}
-                    </button>
-                  </div>
+              {filteredWorkflowItems.length > 0 && (
+                <div className="dashboard-grid">
+                  {filteredWorkflowItems.map((workflow) => {
+                    const folderName = workflow.folderId
+                      ? folders.find((f) => f.id === workflow.folderId)?.name
+                      : null;
+                    const openIn = (mode: "editor" | "chat") => {
+                      void loadWorkflowById(workflow.id);
+                      setActiveMode(mode);
+                    };
+                    const menuActions = [
+                      { id: "chat", label: "Chat", onSelect: () => openIn("chat") },
+                      {
+                        id: "execute",
+                        label: "Execute",
+                        disabled: busy,
+                        onSelect: () => {
+                          void handleExecuteSavedWorkflow(workflow.id);
+                        }
+                      },
+                      ...(canManageWorkflows
+                        ? [
+                            {
+                              id: "tags",
+                              label: "Tags",
+                              disabled: busy,
+                              onSelect: () => void handleWorkflowEditTags(workflow.id)
+                            },
+                            {
+                              id: "folder",
+                              label: "Folder",
+                              disabled: busy,
+                              onSelect: () => void handleWorkflowAssignFolder(workflow.id)
+                            }
+                          ]
+                        : []),
+                      ...(canManageWorkflows && projects.length > 1
+                        ? [
+                            {
+                              id: "project",
+                              label: "Move to project",
+                              disabled: busy,
+                              onSelect: () => void handleWorkflowAssignProject(workflow.id)
+                            },
+                            {
+                              id: "share",
+                              label: "Share",
+                              disabled: busy,
+                              onSelect: () =>
+                                setShareWorkflowTarget({
+                                  id: workflow.id,
+                                  name: workflow.name,
+                                  projectId: workflow.projectId ?? activeProjectId
+                                })
+                            }
+                          ]
+                        : []),
+                      ...(canManageWorkflows
+                        ? [
+                            {
+                              id: "duplicate",
+                              label: "Duplicate",
+                              disabled: busy,
+                              onSelect: () => {
+                                void handleDuplicateWorkflow(workflow.id);
+                              }
+                            },
+                            {
+                              id: "delete",
+                              label: "Delete",
+                              danger: true,
+                              disabled: busy,
+                              onSelect: () => {
+                                void handleDeleteWorkflow(workflow.id);
+                              }
+                            }
+                          ]
+                        : [])
+                    ];
+                    return (
+                      <article key={workflow.id} className="dashboard-card">
+                        <div className="dashboard-card-head">
+                          <h3 className="dashboard-card-name">{workflow.name}</h3>
+                          <WorkflowCardMenu label={`More actions for ${workflow.name}`} actions={menuActions} />
+                        </div>
+                        <div className="dashboard-card-id">
+                          <span className="mono-cell">{workflow.id.slice(0, 8)}</span>
+                          <span className="mono-cell">v{workflow.workflowVersion}</span>
+                          {folderName && <span className="dashboard-card-folder">{folderName}</span>}
+                        </div>
+                        {workflow.tags && workflow.tags.length > 0 && (
+                          <div className="dashboard-card-tags">
+                            {workflow.tags.map((tag) => (
+                              <span key={tag} className="tag-chip small">
+                                #{tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <div className="dashboard-card-foot">
+                          <span className="dashboard-card-meta">Updated {formatWhen(workflow.updatedAt)}</span>
+                          <button type="button" className="pg-btn primary small" onClick={() => openIn("editor")}>
+                            Open
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
-
-                {filteredWorkflowItems.length === 0 && (
-                  <div className="logs-placeholder">
-                    {workflowList.length === 0
-                      ? "No workflows in this project yet. Create one from this dashboard."
-                      : "No workflows match your filters."}
-                  </div>
-                )}
-
-                {filteredWorkflowItems.length > 0 && (
-                  <div className="dashboard-grid">
-                    {filteredWorkflowItems.map((workflow) => {
-                      const folderName = workflow.folderId
-                        ? folders.find((f) => f.id === workflow.folderId)?.name
-                        : null;
-                      return (
-                        <article key={workflow.id} className="dashboard-card">
-                          <div className="dashboard-card-head">
-                            <h3>{workflow.name}</h3>
-                            <span className="mono-cell">{workflow.id.slice(0, 8)}</span>
-                          </div>
-                          <div className="dashboard-card-meta">
-                            <span>Updated: {formatWhen(workflow.updatedAt)}</span>
-                            <span>Version: {workflow.workflowVersion}</span>
-                            {folderName && <span>📁 {folderName}</span>}
-                          </div>
-                          {workflow.tags && workflow.tags.length > 0 && (
-                            <div className="dashboard-card-tags">
-                              {workflow.tags.map((tag) => (
-                                <span key={tag} className="tag-chip small">
-                                  #{tag}
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                          <div className="dashboard-card-actions">
-                            <button
-                              className="header-btn"
-                              onClick={() => {
-                                void loadWorkflowById(workflow.id);
-                                setActiveMode("editor");
-                              }}
-                            >
-                              Open Editor
-                            </button>
-                            <button
-                              className="header-btn"
-                              onClick={() => {
-                                void loadWorkflowById(workflow.id);
-                                setActiveMode("chat");
-                              }}
-                            >
-                              Open Chat
-                            </button>
-                            <button
-                              className="header-btn"
-                              onClick={() => {
-                                void handleExecuteSavedWorkflow(workflow.id);
-                              }}
-                              disabled={busy}
-                            >
-                              Execute
-                            </button>
-                            {canManageWorkflows && (
-                              <button
-                                className="header-btn"
-                                onClick={() => void handleWorkflowEditTags(workflow.id)}
-                                disabled={busy}
-                                title="Edit tags"
-                              >
-                                Tags
-                              </button>
-                            )}
-                            {canManageWorkflows && (
-                              <button
-                                className="header-btn"
-                                onClick={() => void handleWorkflowAssignFolder(workflow.id)}
-                                disabled={busy}
-                                title="Move to folder"
-                              >
-                                Folder
-                              </button>
-                            )}
-                            {canManageWorkflows && projects.length > 1 && (
-                              <button
-                                className="header-btn"
-                                onClick={() => void handleWorkflowAssignProject(workflow.id)}
-                                disabled={busy}
-                                title="Move to another project"
-                              >
-                                Project
-                              </button>
-                            )}
-                            {canManageWorkflows && projects.length > 1 && (
-                              <button
-                                className="header-btn"
-                                onClick={() =>
-                                  setShareWorkflowTarget({
-                                    id: workflow.id,
-                                    name: workflow.name,
-                                    projectId: workflow.projectId ?? activeProjectId
-                                  })
-                                }
-                                disabled={busy}
-                                title="Share with other projects"
-                              >
-                                Share
-                              </button>
-                            )}
-                            {canManageWorkflows && (
-                              <button
-                                className="header-btn"
-                                onClick={() => {
-                                  void handleDuplicateWorkflow(workflow.id);
-                                }}
-                                disabled={busy}
-                              >
-                                Duplicate
-                              </button>
-                            )}
-                            {canManageWorkflows && (
-                              <button
-                                className="header-btn danger"
-                                onClick={() => {
-                                  void handleDeleteWorkflow(workflow.id);
-                                }}
-                                disabled={busy}
-                              >
-                                Delete
-                              </button>
-                            )}
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+              )}
             </section>
           )}
 
@@ -4759,55 +4755,68 @@ function StudioApp() {
               onUserPromptChange={setUserPrompt}
               sessionId={sessionId}
               onSessionIdChange={setSessionId}
+              onBeforeTidy={pushHistorySnapshot}
             />
           )}
 
           {activeMode === "variables" && (
-            <section className="variables-pane">
-              <div className="variables-pane-header">
-                <div>
-                  <h2>Workflow Variables</h2>
-                  <p className="muted">
-                    Define reusable key/value pairs available in templates as <code>{`{{vars.KEY}}`}</code>.
+            <section className="variables-pane page-pane">
+              <header className="page-head">
+                <div className="page-head-copy">
+                  <h2 className="page-title">Variables</h2>
+                  <p className="page-sub">
+                    Reusable key/value pairs for <strong>{currentWorkflow.name}</strong>, available in templates as{" "}
+                    <code className="mono-cell">{`{{vars.KEY}}`}</code>.
                   </p>
                 </div>
-                <div className="variables-pane-actions">
-                  <button className="header-btn" onClick={handleAddVariableRow} disabled={!canManageWorkflows}>
-                    Add Variable
+                <div className="page-actions">
+                  <button className="pg-btn" onClick={handleAddVariableRow} disabled={!canManageWorkflows}>
+                    + Add variable
                   </button>
                   <button
-                    className="header-btn"
+                    className="pg-btn primary"
                     onClick={() => void handleSaveVariables()}
                     disabled={!canManageWorkflows || variablesBusy || !currentWorkflowExists}
                   >
-                    {variablesBusy ? "Saving..." : "Save Variables"}
+                    {variablesBusy ? "Saving…" : "Save variables"}
                   </button>
                 </div>
-              </div>
+              </header>
 
               {!currentWorkflowExists && (
-                <div className="logs-placeholder">
-                  Save this workflow first from Editor, then return here to manage variables.
-                </div>
+                <div className="page-empty">Save this workflow first from the editor, then return here to manage variables.</div>
               )}
 
               {currentWorkflowExists && workflowVariableRows.length === 0 && (
-                <div className="logs-placeholder">No variables yet. Add your first variable to start templating.</div>
+                <div className="page-empty">No variables yet. Add your first variable to start templating.</div>
               )}
 
               {currentWorkflowExists && workflowVariableRows.length > 0 && (
                 <div className="variables-grid">
+                  <div className="variable-row variable-row-head" aria-hidden="true">
+                    <span>Key</span>
+                    <span>Value</span>
+                    <span />
+                  </div>
                   {workflowVariableRows.map((row) => (
                     <div key={row.id} className="variable-row">
-                      <label>Key</label>
+                      <label className="sr-only" htmlFor={`var-key-${row.id}`}>
+                        Key
+                      </label>
                       <input
+                        id={`var-key-${row.id}`}
+                        className="variable-key"
                         value={row.key}
                         onChange={(event) => handleUpdateVariableRow(row.id, "key", event.target.value)}
                         placeholder="API_BASE_URL"
                         disabled={!canManageWorkflows}
                       />
-                      <label>Value</label>
+                      <label className="sr-only" htmlFor={`var-value-${row.id}`}>
+                        Value
+                      </label>
                       <textarea
+                        id={`var-value-${row.id}`}
+                        className="variable-value"
                         value={row.value}
                         onChange={(event) => handleUpdateVariableRow(row.id, "value", event.target.value)}
                         rows={2}
@@ -4815,9 +4824,11 @@ function StudioApp() {
                         disabled={!canManageWorkflows}
                       />
                       <button
-                        className="header-btn danger"
+                        type="button"
+                        className="pg-btn ghost danger small"
                         onClick={() => handleRemoveVariableRow(row.id)}
                         disabled={!canManageWorkflows}
+                        aria-label={`Remove variable ${row.key || "row"}`}
                       >
                         Remove
                       </button>
@@ -4826,233 +4837,6 @@ function StudioApp() {
                 </div>
               )}
             </section>
-          )}
-
-          {false && activeMode === "editor" && (
-            <div className="editor-layout">
-              <section
-                className={isLogsPanelCollapsed ? "canvas-and-logs logs-collapsed" : "canvas-and-logs"}
-                style={canvasAndLogsStyle}
-              >
-                <div className="canvas-pane" ref={flowWrapperRef} onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
-                  {showNodeDrawer && (
-                    <div className="node-drawer">
-                      <div className="node-drawer-header-row">
-                        <div className="node-drawer-header">Node Library</div>
-                        <button
-                          className="node-drawer-close-btn"
-                          onClick={() => setShowNodeDrawer(false)}
-                          title="Close node library"
-                          aria-label="Close node library"
-                        >
-                          ×
-                        </button>
-                      </div>
-                      {[...groupedDefinitions.entries()].map(([category, items]) => (
-                        <div key={category} className="node-category">
-                          <div className="node-category-title">{category}</div>
-                          <div className="node-list">
-                            {items.map((item) => (
-                              <button
-                                key={item.type}
-                                className="node-chip"
-                                draggable
-                                onDragStart={(event) => {
-                                  event.dataTransfer.setData("application/reactflow", item.type);
-                                  event.dataTransfer.effectAllowed = "move";
-                                }}
-                                onClick={() => createNodeFromDefinition(item)}
-                                title={item.description}
-                              >
-                                <span>{item.label}</span>
-                                <small>{item.type}</small>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <ReactFlow
-                    nodes={nodes}
-                    edges={edges}
-                    nodeTypes={nodeTypes}
-                    edgeTypes={edgeTypes}
-                    onNodesChange={onNodesChange}
-                    onEdgesChange={(changes) => {
-                      onEdgesChange(changes);
-                      setEdges((current) => current.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
-                    }}
-                    onConnect={onConnect}
-                    onInit={setReactFlowInstance}
-                    onNodeDoubleClick={(_event, node) => openNodeConfig(node.id)}
-                    fitView
-                  >
-                    <Background variant={BackgroundVariant.Dots} color="#d5dae3" gap={20} size={1} />
-                  </ReactFlow>
-
-                  <div className="canvas-controls-left">
-                    <button onClick={() => reactFlowInstance?.fitView()}>Fit</button>
-                    <button onClick={() => reactFlowInstance?.zoomIn()}>+</button>
-                    <button onClick={() => reactFlowInstance?.zoomOut()}>-</button>
-                    <button
-                      onClick={() => {
-                        setNodes([]);
-                        setEdges([]);
-                        setExecutionResult(null);
-                        setEditingNodeId(null);
-                      }}
-                    >
-                      Clear
-                    </button>
-                  </div>
-
-                  {!showNodeDrawer && (
-                    <button
-                      className="node-drawer-open-btn"
-                      onClick={() => setShowNodeDrawer(true)}
-                      title="Open node library"
-                      aria-label="Open node library"
-                    >
-                      +
-                    </button>
-                  )}
-
-                  <div className="execute-strip">
-                    <button className="execute-btn" onClick={() => void handleExecute()} disabled={busy}>
-                      Execute workflow
-                    </button>
-                    <button className="execute-btn secondary" onClick={handleWebhookExecute} disabled={busy}>
-                      Webhook run
-                    </button>
-                  </div>
-                </div>
-
-                <div
-                  className={isLogsPanelCollapsed ? "logs-resize-handle disabled" : "logs-resize-handle"}
-                  role="separator"
-                  aria-orientation="horizontal"
-                  aria-label="Resize logs panel"
-                  onMouseDown={handleLogsResizeStart}
-                />
-
-                <div className="logs-pane">
-                  <div className="logs-header">
-                    <div className="logs-tabs">
-                      <button className={logsTab === "logs" ? "logs-tab active" : "logs-tab"} onClick={() => setLogsTab("logs")}>
-                        Logs
-                      </button>
-                      <button className={logsTab === "inputs" ? "logs-tab active" : "logs-tab"} onClick={() => setLogsTab("inputs")}>
-                        Run Inputs
-                      </button>
-                    </div>
-
-                    <div className="logs-header-actions">
-                      {logsTab === "logs" ? (
-                        <button
-                          className="icon-btn"
-                          onClick={() => setExecutionResult(null)}
-                          title="Clear logs"
-                          aria-label="Clear logs"
-                        >
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path
-                              d="M6 7h12M9 7V5h6v2m-7 3v8m4-8v8m4-8v8M7 7l1 13h8l1-13"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="1.8"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </svg>
-                        </button>
-                      ) : (
-                        <span className="muted">Used by Execute and Webhook run.</span>
-                      )}
-                      <button
-                        className="icon-btn"
-                        onClick={() => setIsLogsPanelCollapsed((value) => !value)}
-                        title={isLogsPanelCollapsed ? "Expand panel" : "Minimize panel"}
-                        aria-label={isLogsPanelCollapsed ? "Expand panel" : "Minimize panel"}
-                      >
-                        {isLogsPanelCollapsed ? (
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path
-                              d="M8 10l4-4 4 4M8 14l4 4 4-4"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="1.8"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </svg>
-                        ) : (
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path
-                              d="M8 8l4 4 4-4M8 16l4-4 4 4"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="1.8"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-
-                  {!isLogsPanelCollapsed && (
-                    <div className="logs-body">
-                      {logsTab === "inputs" && (
-                        <div className="run-inputs-panel">
-                          <label>System prompt</label>
-                          <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} rows={3} />
-                          <label>User prompt</label>
-                          <textarea value={userPrompt} onChange={(event) => setUserPrompt(event.target.value)} rows={3} />
-                          <label>Session id</label>
-                          <input value={sessionId} onChange={(event) => setSessionId(event.target.value)} />
-                          <div className="row-actions">
-                            <button onClick={() => void handleExecute()} disabled={busy}>
-                              Execute workflow
-                            </button>
-                            <button onClick={handleWebhookExecute} disabled={busy}>
-                              Webhook run
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {logsTab === "logs" && !executionResult && (
-                        <div className="logs-placeholder">Nothing to display yet. Execute the workflow to see logs.</div>
-                      )}
-
-                      {logsTab === "logs" && executionResult && (
-                        <>
-                          <div className="log-summary">
-                            <span>
-                              Status: <strong>{executionResult!.status}</strong>
-                            </span>
-                            <span>Started: {new Date(executionResult!.startedAt).toLocaleString()}</span>
-                            <span>Completed: {new Date(executionResult!.completedAt).toLocaleString()}</span>
-                          </div>
-                          <div className="node-status-list">
-                            {executionResult!.nodeResults.map((result) => (
-                              <div key={result.nodeId} className="node-status-item">
-                                <span>{result.nodeId}</span>
-                                <strong style={{ color: statusColors[result.status] ?? "#657087" }}>{result.status}</strong>
-                              </div>
-                            ))}
-                          </div>
-                          <pre className="result-block">{stringifyPretty(executionResult!.output ?? executionResult!.error ?? "")}</pre>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </section>
-            </div>
           )}
 
           {activeMode === "executions" && (
@@ -5078,121 +4862,25 @@ function StudioApp() {
             />
           )}
 
-          {false && activeMode === "executions" && (
-            <section className="executions-pane">
-              <div className="executions-header-row">
-                <div>
-                  <h2>Runs</h2>
-                  <p className="muted">Execution history and node-level traces ({executionHistoryTotal} total)</p>
-                </div>
-                <button className="header-btn" onClick={() => void refreshExecutionHistory()} disabled={executionsLoading}>
-                  {executionsLoading ? "Refreshing..." : "Refresh"}
-                </button>
-              </div>
-
-              {executionsError && <div className="error-banner">{executionsError}</div>}
-
-              {!executionsLoading && executionHistoryItems.length === 0 && (
-                <div className="logs-placeholder">No executions yet. Run a workflow from the editor to populate history.</div>
-              )}
-
-              {executionHistoryItems.length > 0 && (
-                <div className="executions-table-wrap">
-                  <table className="executions-table">
-                    <thead>
-                      <tr>
-                        <th>ID</th>
-                        <th>Workflow</th>
-                        <th>Status</th>
-                        <th>Trigger</th>
-                        <th>Duration</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {executionHistoryItems.map((item) => {
-                        const expanded = expandedExecutionIds.includes(item.id);
-                        const detail = executionDetailById[item.id];
-                        const nodeResults = Array.isArray(detail?.nodeResults) ? detail?.nodeResults : [];
-
-                        return [
-                          <tr
-                            key={`${item.id}-summary`}
-                            className={expanded ? "execution-row expanded" : "execution-row"}
-                            onClick={() => {
-                              void toggleExecutionRow(item.id);
-                            }}
-                          >
-                            <td className="mono-cell">{item.id.slice(0, 8)}</td>
-                            <td>{item.workflowName ?? item.workflowId}</td>
-                            <td>
-                              <strong style={{ color: statusColors[item.status] ?? "#657087" }}>{item.status}</strong>
-                            </td>
-                            <td>{item.triggerType ?? "unknown"}</td>
-                            <td>{formatDuration(item.durationMs)}</td>
-                          </tr>,
-                          expanded ? (
-                            <tr key={`${item.id}-detail`} className="execution-detail-row">
-                              <td colSpan={5}>
-                                {!detail && <div className="muted">Loading full trace...</div>}
-                                {detail && (
-                                  <div className="execution-trace">
-                                    <div className="execution-trace-grid">
-                                      {nodeResults.length === 0 && <div className="muted">No node-by-node trace available.</div>}
-                                      {nodeResults.map((entry, index) => {
-                                        const trace = asRecord(entry);
-                                        const nodeId =
-                                          typeof trace?.nodeId === "string" ? trace.nodeId : `node-${index + 1}`;
-                                        const status =
-                                          typeof trace?.status === "string" ? trace.status : "unknown";
-                                        const durationMs =
-                                          typeof trace?.durationMs === "number" ? trace.durationMs : null;
-                                        const errorMessage =
-                                          typeof trace?.error === "string" ? trace.error : "";
-
-                                        return (
-                                          <div key={`${item.id}-${nodeId}-${index}`} className="execution-trace-item">
-                                            <span>{nodeId}</span>
-                                            <strong style={{ color: statusColors[status] ?? "#657087" }}>{status}</strong>
-                                            <span>{formatDuration(durationMs)}</span>
-                                            {errorMessage && <span className="trace-error">{errorMessage}</span>}
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                    <pre className="result-block">{stringifyPretty(detail.output ?? detail.error ?? detail)}</pre>
-                                  </div>
-                                )}
-                              </td>
-                            </tr>
-                          ) : null
-                        ];
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
-          )}
-
           {activeMode === "chat" && (
-            <section className="chat-pane">
-              <div className="chat-pane-header">
-                <div>
-                  <h2>Chat</h2>
-                  <p className="muted">
+            <section className="chat-pane page-pane">
+              <header className="page-head chat-pane-header">
+                <div className="page-head-copy">
+                  <h2 className="page-title">Chat</h2>
+                  <p className="page-sub">
                     Streaming assistant bound to <strong>{currentWorkflow.name}</strong>
                   </p>
                 </div>
                 <div className="chat-session-chip">
                   <span>Session</span>
-                  <code>{currentChatSessionId || "initializing..."}</code>
+                  <code className="mono-cell">{currentChatSessionId || "initializing…"}</code>
                 </div>
-              </div>
+              </header>
 
               <div className="chat-stream-shell">
                 <div className="chat-history" ref={chatHistoryRef}>
                   {currentChatMessages.length === 0 && (
-                    <div className="logs-placeholder">Start a conversation. Responses stream token-by-token from the workflow LLM nodes.</div>
+                    <div className="page-empty">Start a conversation. Responses stream token-by-token from the workflow LLM nodes.</div>
                   )}
 
                   {currentChatMessages.map((entry) => {
@@ -5228,7 +4916,7 @@ function StudioApp() {
                           ) : entry.role === "assistant" && entry.citations && entry.citations.length > 0 ? (
                             <ChatBubbleWithCitations text={entry.text} citations={entry.citations} />
                           ) : (
-                            entry.text || (entry.status === "streaming" ? "..." : "")
+                            entry.text || (entry.status === "streaming" ? "…" : "")
                           )}
                         </div>
                         {isClarify && entry.clarification?.reason && (
@@ -5242,25 +4930,29 @@ function StudioApp() {
                   })}
                 </div>
 
-                <div className="chat-side-trace">
-                  <h4>Node Trace</h4>
-                  {!isDebugMode && <div className="muted">Enable Debug mode in Editor to see live node trace.</div>}
-                  {isDebugMode && chatNodeTrace.length === 0 && <div className="muted">Waiting for execution events.</div>}
+                <aside className="chat-side-trace" aria-label="Node trace">
+                  <h4>Node trace</h4>
+                  {!isDebugMode && <div className="page-hint">Enable Debug mode in the editor to see the live node trace.</div>}
+                  {isDebugMode && chatNodeTrace.length === 0 && <div className="page-hint">Waiting for execution events.</div>}
                   {isDebugMode &&
                     chatNodeTrace.map((trace, index) => (
                       <div key={`${trace.nodeId}-${trace.at}-${index}`} className="chat-trace-item">
-                        <span>{trace.nodeId}</span>
-                        <strong style={{ color: statusColors[trace.status] ?? "#657087" }}>{trace.status}</strong>
+                        <span className="mono-cell">{trace.nodeId}</span>
+                        <span className="status-pill" data-status={trace.status}>
+                          {trace.status}
+                        </span>
                       </div>
                     ))}
-                </div>
+                </aside>
               </div>
 
               <form className="chat-input-row" onSubmit={handleChatSubmit}>
                 <textarea
+                  className="chat-system-prompt"
                   value={chatSystemPrompt}
                   onChange={(event) => setChatSystemPrompt(event.target.value)}
                   rows={2}
+                  aria-label="Fallback system prompt"
                   placeholder="Fallback system prompt (used when no System Prompt node sets one)"
                 />
                 {chatPendingImages.length > 0 && (
@@ -5268,47 +4960,68 @@ function StudioApp() {
                     {chatPendingImages.map((img, idx) => (
                       <div key={idx} className="chat-pending-image-thumb">
                         <img src={`data:${img.mimeType};base64,${img.data}`} alt="" />
-                        <button type="button" onClick={() => setChatPendingImages((prev) => prev.filter((_, i) => i !== idx))}>×</button>
+                        <button
+                          type="button"
+                          aria-label="Remove attached image"
+                          onClick={() => setChatPendingImages((prev) => prev.filter((_, i) => i !== idx))}
+                        >
+                          ×
+                        </button>
                       </div>
                     ))}
                   </div>
                 )}
-                <input
-                  value={chatInput}
-                  onChange={(event) => setChatInput(event.target.value)}
-                  onPaste={(event) => {
-                    const items = event.clipboardData?.items;
-                    if (!items) return;
-                    for (let i = 0; i < items.length; i++) {
-                      const item = items[i];
-                      if (item.type.startsWith("image/")) {
-                        event.preventDefault();
-                        const file = item.getAsFile();
-                        if (!file) continue;
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          const result = reader.result as string;
-                          const base64 = result.split(",")[1] ?? "";
-                          setChatPendingImages((prev) => [...prev, { data: base64, mimeType: item.type }]);
-                        };
-                        reader.readAsDataURL(file);
+                <div className="chat-composer">
+                  <input
+                    className="chat-message-input"
+                    aria-label="Message"
+                    value={chatInput}
+                    onChange={(event) => setChatInput(event.target.value)}
+                    onPaste={(event) => {
+                      const items = event.clipboardData?.items;
+                      if (!items) return;
+                      for (let i = 0; i < items.length; i++) {
+                        const item = items[i];
+                        if (item.type.startsWith("image/")) {
+                          event.preventDefault();
+                          const file = item.getAsFile();
+                          if (!file) continue;
+                          const reader = new FileReader();
+                          reader.onload = () => {
+                            const result = reader.result as string;
+                            const base64 = result.split(",")[1] ?? "";
+                            setChatPendingImages((prev) => [...prev, { data: base64, mimeType: item.type }]);
+                          };
+                          reader.readAsDataURL(file);
+                        }
                       }
-                    }
-                  }}
-                  placeholder={chatPendingImages.length > 0 ? `${chatPendingImages.length} image(s) attached — type your message...` : "Ask something..."}
-                />
-                <button type="submit" disabled={chatBusy || (!chatInput.trim() && chatPendingImages.length === 0)}>
-                  {chatBusy ? "Streaming..." : "Send"}
-                </button>
+                    }}
+                    placeholder={chatPendingImages.length > 0 ? `${chatPendingImages.length} image(s) attached — type your message…` : "Ask something…"}
+                  />
+                  <button
+                    type="submit"
+                    className="pg-btn primary"
+                    disabled={chatBusy || (!chatInput.trim() && chatPendingImages.length === 0)}
+                  >
+                    {chatBusy ? "Streaming…" : "Send"}
+                  </button>
+                </div>
               </form>
               {chatError && <div className="error-banner">{chatError}</div>}
             </section>
           )}
 
           {activeMode === "evaluations" && (
-            <section className="placeholder-pane">
-              <h2>Evaluations</h2>
-              <p>Evaluation dashboards are out of scope for V1. Use Editor and Executions for runtime validation.</p>
+            <section className="placeholder-pane page-pane">
+              <header className="page-head">
+                <div className="page-head-copy">
+                  <h2 className="page-title">Evaluations</h2>
+                  <p className="page-sub">Score workflow outputs against datasets and rubrics.</p>
+                </div>
+              </header>
+              <div className="page-empty">
+                Evaluation dashboards are out of scope for V1. Use the Editor and Runs for runtime validation.
+              </div>
             </section>
           )}
 
@@ -5327,24 +5040,32 @@ function StudioApp() {
           )}
 
           {activeMode === "secrets" && (
-            <section className="secrets-page">
-              <div className="secrets-page-header">
-                <div>
-                  <h2>Secrets</h2>
-                  <p>Secrets are stored encrypted server-side and referenced by secret ID in node configs.</p>
+            <section className="secrets-page page-pane">
+              <header className="page-head">
+                <div className="page-head-copy">
+                  <h2 className="page-title">Secrets</h2>
+                  <p className="page-sub">
+                    Stored encrypted server-side and referenced by id in node configs. Values are never shown again.
+                  </p>
                 </div>
-                <button className="header-btn" onClick={() => setActiveMode("editor")}>
-                  Back to Editor
-                </button>
-              </div>
+                <div className="page-actions">
+                  <button className="pg-btn" onClick={() => void refreshSecrets()} disabled={secretBusy || busy}>
+                    Refresh
+                  </button>
+                  <button className="pg-btn ghost" onClick={() => setActiveMode("editor")}>
+                    Back to editor
+                  </button>
+                </div>
+              </header>
 
               <div className="secrets-grid">
-                <article className="secrets-card">
-                  <h3>Create Secret</h3>
-                  <label>Name</label>
-                  <input value={secretName} onChange={(event) => setSecretName(event.target.value)} />
-                  <label>Provider</label>
+                <article className="secrets-card pg-card">
+                  <h3 className="pg-card-title">Create secret</h3>
+                  <label htmlFor="secret-name">Name</label>
+                  <input id="secret-name" value={secretName} onChange={(event) => setSecretName(event.target.value)} />
+                  <label htmlFor="secret-provider">Provider</label>
                   <select
+                    id="secret-provider"
                     value={secretProvider}
                     onChange={(event) => setSecretProvider(event.target.value as SecretProviderPreset)}
                   >
@@ -5357,8 +5078,9 @@ function StudioApp() {
 
                   {secretProvider === "custom" && (
                     <>
-                      <label>Custom Provider Name</label>
+                      <label htmlFor="secret-custom-provider">Custom provider name</label>
                       <input
+                        id="secret-custom-provider"
                         value={secretCustomProvider}
                         onChange={(event) => setSecretCustomProvider(event.target.value)}
                         placeholder="my-provider"
@@ -5368,8 +5090,9 @@ function StudioApp() {
 
                   {secretProvider === "google_drive" ? (
                     <>
-                      <label>Google Auth Mode</label>
+                      <label htmlFor="secret-google-mode">Google auth mode</label>
                       <select
+                        id="secret-google-mode"
                         value={secretGoogleAuthMode}
                         onChange={(event) =>
                           setSecretGoogleAuthMode(event.target.value as "access_token" | "service_account_json")
@@ -5381,9 +5104,11 @@ function StudioApp() {
 
                       {secretGoogleAuthMode === "access_token" ? (
                         <>
-                          <label>Google Drive Access Token</label>
+                          <label htmlFor="secret-google-token">Google Drive access token</label>
                           <input
+                            id="secret-google-token"
                             type="password"
+                            autoComplete="off"
                             value={secretGoogleAccessToken}
                             onChange={(event) => setSecretGoogleAccessToken(event.target.value)}
                             placeholder="ya29..."
@@ -5391,8 +5116,9 @@ function StudioApp() {
                         </>
                       ) : (
                         <>
-                          <label>Google Service Account JSON</label>
+                          <label htmlFor="secret-google-sa">Google service account JSON</label>
                           <textarea
+                            id="secret-google-sa"
                             rows={7}
                             value={secretGoogleServiceAccountJson}
                             onChange={(event) => setSecretGoogleServiceAccountJson(event.target.value)}
@@ -5403,9 +5129,11 @@ function StudioApp() {
                     </>
                   ) : secretProvider === "postgres" ? (
                     <>
-                      <label>Connection String</label>
+                      <label htmlFor="secret-connection">Connection string</label>
                       <input
+                        id="secret-connection"
                         type="password"
+                        autoComplete="off"
                         value={secretConnectionString}
                         onChange={(event) => setSecretConnectionString(event.target.value)}
                         placeholder="postgresql://user:pass@host:5432/db"
@@ -5413,50 +5141,56 @@ function StudioApp() {
                     </>
                   ) : (
                     <>
-                      <label>
+                      <label htmlFor="secret-value">
                         {secretProvider === "webhook"
-                          ? "Shared Secret / Token"
+                          ? "Shared secret / token"
                           : secretProvider === "custom"
-                            ? "Secret Value"
-                            : "API Key / Token"}
+                            ? "Secret value"
+                            : "API key / token"}
                       </label>
                       <input
+                        id="secret-value"
                         type="password"
+                        autoComplete="off"
                         value={secretGenericValue}
                         onChange={(event) => setSecretGenericValue(event.target.value)}
                       />
                     </>
                   )}
-                  <div className="row-actions">
-                    <button onClick={handleCreateSecret} disabled={secretBusy || busy}>
-                      Create
-                    </button>
-                    <button onClick={() => void refreshSecrets()} disabled={secretBusy || busy}>
-                      Refresh
+                  <div className="page-actions">
+                    <button className="pg-btn primary" onClick={handleCreateSecret} disabled={secretBusy || busy}>
+                      {secretBusy ? "Creating…" : "Create secret"}
                     </button>
                   </div>
                 </article>
 
-                <article className="secrets-card">
+                <article className="secrets-card pg-card">
                   <div className="secrets-card-header">
-                    <h3>Saved Secrets</h3>
-                    <span>{secrets.length}</span>
+                    <h3 className="pg-card-title">Saved secrets</h3>
+                    <span className="pg-count">{secrets.length}</span>
                   </div>
+                  {secrets.length === 0 && <div className="page-empty compact">No secrets yet.</div>}
                   <div className="secret-list">
                     {secrets.map((secret) => (
                       <div key={secret.id} className="secret-item">
-                        <strong>{secret.name}</strong>
-                        <small>{secret.provider}</small>
-                        <code>{secret.id}</code>
-                        <div className="row-actions">
-                          <button onClick={() => void copySecretId(secret.id)}>Copy ID</button>
+                        <div className="secret-item-copy">
+                          <strong>{secret.name}</strong>
+                          <span className="pg-pill">{secret.provider}</span>
+                          <code className="mono-cell">{secret.id}</code>
+                        </div>
+                        <div className="secret-item-actions">
+                          <button type="button" className="pg-btn small" onClick={() => void copySecretId(secret.id)}>
+                            Copy id
+                          </button>
                           <button
+                            type="button"
+                            className="pg-btn small ghost"
                             onClick={() => {
                               setActiveMode("editor");
                               setSecretMessage("Open an LLM/Agent node and pick this secret in Provider settings.");
                             }}
                           >
-                            Use in Node
+                            Use in node
                           </button>
                         </div>
                       </div>
@@ -5465,9 +5199,9 @@ function StudioApp() {
                 </article>
               </div>
 
-              <p className="muted secrets-hint">
-                To attach a secret to an LLM or AI Agent node: go to Editor, double-click the node, then choose the secret in
-                the Provider section.
+              <p className="page-hint secrets-hint">
+                To attach a secret to an LLM or agent node: open the Editor, select the node and choose the secret in the
+                Provider section of the inspector.
               </p>
             </section>
           )}
@@ -5496,8 +5230,11 @@ function StudioApp() {
         <RadialActionRing node={soloSelectedNode} center={radialCenter} onAction={onRadialAction} />
       )}
       {editingNode && (
-        <NodeConfigModal
+        <NodeInspector
           node={editingNode}
+          trace={buildNodeTrace(editingNode.id, executionResult, executionStatuses, telemetryByNodeId)}
+          slots={buildNodeSlots(editingNode.id, nodes, edges)}
+          onAttach={(handle) => handleOpenAgentAttachmentDrawer(editingNode.id, handle)}
           inputOptions={editingNodeInputOptions}
           executionResult={isDebugMode ? executionResult : null}
           workflowContext={{

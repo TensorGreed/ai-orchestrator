@@ -1,292 +1,360 @@
 import { Handle, Position, type NodeProps } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
+import { AGENT_ATTACHMENT_STYLES, type AgentAttachmentHandle } from "../lib/agent-attachments";
+import { ORBIT, emptySlots, isHubType, ringGeometry, summarizeNode } from "../lib/stages";
 import { NodeTypeIcon } from "./node-icons";
 
-function toTitle(nodeType: string): string {
-  return nodeType
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
+const TERMINAL_TYPES = new Set([
+  "schedule_trigger",
+  "webhook_input",
+  "form_trigger",
+  "chat_trigger",
+  "file_trigger",
+  "rss_trigger",
+  "sse_trigger",
+  "manual_trigger",
+  "error_trigger",
+  "mcp_server_trigger",
+  "sub_workflow_trigger",
+  "output",
+  "helper_chat_response",
+  "webhook_response",
+  "pdf_output"
+]);
 
-function nodeVariant(nodeType: string): "terminal" | "resource" | "primary" | "agent" {
-  if (nodeType === "agent_orchestrator" || nodeType === "supervisor_node") {
-    return "agent";
-  }
-
-  if (
-    nodeType === "schedule_trigger" ||
-    nodeType === "webhook_input" ||
-    nodeType === "output" ||
-    nodeType === "helper_chat_response" ||
-    nodeType === "webhook_response"
-  ) {
-    return "terminal";
-  }
-
-  if (
-    nodeType === "mcp_tool" ||
-    nodeType === "connector_source" ||
-    nodeType === "google_drive_source" ||
-    nodeType === "azure_storage" ||
-    nodeType === "azure_cosmos_db" ||
-    nodeType === "azure_monitor_http" ||
-    nodeType === "azure_ai_search_vector_store" ||
-    nodeType === "qdrant_vector_store" ||
-    nodeType === "embeddings_azure_openai" ||
-    nodeType === "http_request" ||
-    nodeType === "llm_call" ||
-    nodeType === "openai_chat_model" ||
-    nodeType === "anthropic_chat_model" ||
-    nodeType === "ollama_chat_model" ||
-    nodeType === "openai_compatible_chat_model" ||
-    nodeType === "ai_gateway_chat_model" ||
-    nodeType === "azure_openai_chat_model" ||
-    nodeType === "google_gemini_chat_model" ||
-    nodeType === "local_memory"
-  ) {
-    return "resource";
-  }
-
-  return "primary";
-}
+const SLOT_LABEL: Record<AgentAttachmentHandle, string> = {
+  chat_model: "+ model",
+  memory: "+ memory",
+  tool: "+ tool",
+  worker: "+ worker"
+};
 
 function statusClass(status: EditorNodeData["executionStatus"]): string {
-  if (!status) {
-    return "status-idle";
-  }
+  return status ? `status-${status}` : "status-idle";
+}
 
-  return `status-${status}`;
+function statusTitle(status: EditorNodeData["executionStatus"]): string {
+  switch (status) {
+    case "running":
+      return "Running";
+    case "success":
+      return "Completed";
+    case "error":
+      return "Failed";
+    case "skipped":
+      return "Skipped";
+    case "canceled":
+      return "Canceled";
+    case "pending":
+      return "Pending";
+    default:
+      return "Idle";
+  }
 }
 
 export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>) {
-  const variant = nodeVariant(data.nodeType);
-  const subtitle = toTitle(data.nodeType);
-  const currentStatus = data.executionStatus;
-  const showSuccessBadge = currentStatus === "success";
-  const showRunningBadge = currentStatus === "running";
-  const preview = data.executionPreview;
-  const disabledClass = data.disabled ? " wf-node-disabled" : "";
-  const colorClass = data.color ? ` wf-node-color-${data.color}` : "";
-  const renderAgentPlus = (sourceHandle: "chat_model" | "memory" | "tool" | "worker", label: string) => {
-    if (!data.onOpenAgentAttachmentDrawer) {
-      return <span className="wf-agent-plus">+</span>;
-    }
+  const nodeType = data.nodeType;
+  if (isHubType(nodeType)) {
+    return <HubNode data={data} selected={selected} />;
+  }
+  if (data.attachedTo && data.attachedAs) {
+    return <SatelliteNode data={data} selected={selected} />;
+  }
+  return <CardNode data={data} selected={selected} />;
+}
 
+interface VariantProps {
+  data: EditorNodeData;
+  selected: boolean;
+}
+
+function Badges({ data }: { data: EditorNodeData }) {
+  return (
+    <>
+      {data.disabled && (
+        <span className="wf-node-disabled-badge" title="Disabled" aria-label="Disabled">
+          ⏸
+        </span>
+      )}
+      {data.pinned && (
+        <span className="wf-node-pinned-badge" title="Pinned data" aria-label="Pinned data">
+          PIN
+        </span>
+      )}
+    </>
+  );
+}
+
+function DebugPreview({ data }: { data: EditorNodeData }) {
+  const preview = data.executionPreview;
+  if (!preview || !(preview.input || preview.output || preview.error)) return null;
+  return (
+    <div className="wf-node-debug-preview">
+      {preview.input && (
+        <div>
+          <strong>In</strong> {preview.input}
+        </div>
+      )}
+      {preview.output && (
+        <div>
+          <strong>Out</strong> {preview.output}
+        </div>
+      )}
+      {preview.error && (
+        <div className="wf-node-debug-error">
+          <strong>Err</strong> {preview.error}
+          {preview.errorRemediation && (
+            <div className="wf-node-debug-remediation">
+              <strong>Fix:</strong> {preview.errorRemediation}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Telemetry({ data }: { data: EditorNodeData }) {
+  const t = data.telemetry;
+  if (!t || !hasMeaningfulTelemetry(t)) return null;
+  const tokens = formatTokens(t);
+  return (
+    <div className="wf-node-telemetry" title={telemetryTooltip(t)}>
+      {tokens && <span className="wf-telemetry-pill">{tokens}</span>}
+      {typeof t.latencyMs === "number" && <span className="wf-telemetry-pill">{formatLatency(t.latencyMs)}</span>}
+      {typeof t.llmCallCount === "number" && t.llmCallCount > 1 && (
+        <span className="wf-telemetry-pill wf-telemetry-pill-faint">×{t.llmCallCount}</span>
+      )}
+    </div>
+  );
+}
+
+function rootClass(kind: "card" | "hub" | "satellite", data: EditorNodeData, selected: boolean): string {
+  const parts = ["wf-node", `wf-node-${kind}`, statusClass(data.executionStatus)];
+  if (selected) parts.push("selected");
+  if (data.disabled) parts.push("wf-node-disabled");
+  if (data.color) parts.push(`wf-node-color-${data.color}`);
+  return parts.join(" ");
+}
+
+function CardNode({ data, selected }: VariantProps) {
+  const nodeType = data.nodeType;
+  const summary = summarizeNode({ type: nodeType, config: data.config });
+  const terminal = TERMINAL_TYPES.has(nodeType);
+  const status = data.executionStatus;
+
+  return (
+    <div className={`${rootClass("card", data, selected)}${terminal ? " wf-node-terminal" : ""}`} style={{ width: ORBIT.cardWidth }}>
+      <Badges data={data} />
+      <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
+      <div className="wf-card-glyph">
+        <NodeTypeIcon nodeType={nodeType} fallbackIcon="core" />
+      </div>
+      <div className="wf-card-body">
+        <div className="wf-card-name" title={data.label}>
+          {data.label}
+        </div>
+        <div className="wf-card-type">{nodeType}</div>
+        <div className="wf-card-summary" title={summary}>
+          {summary}
+        </div>
+      </div>
+      <span className={`wf-status-ring wf-status-${status ?? "idle"}`} title={statusTitle(status)} aria-label={statusTitle(status)} />
+      <StructuralPorts data={data} />
+      <DebugPreview data={data} />
+      <Telemetry data={data} />
+    </div>
+  );
+}
+
+function StructuralPorts({ data }: { data: EditorNodeData }) {
+  const nodeType = data.nodeType;
+  if (nodeType === "if_node") {
     return (
-      <button
-        type="button"
-        className="wf-agent-plus"
-        aria-label={`Add ${label}`}
-        title={`Add ${label}`}
-        onMouseDown={(event) => {
-          event.stopPropagation();
-        }}
-        onClick={(event) => {
-          event.stopPropagation();
-          data.onOpenAgentAttachmentDrawer?.(sourceHandle);
-        }}
-      >
-        +
-      </button>
+      <div className="wf-structural-ports">
+        <div className="wf-structural-port">
+          <span className="port-label">True</span>
+          <Handle id="true" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "32%" }} />
+        </div>
+        <div className="wf-structural-port">
+          <span className="port-label">False</span>
+          <Handle id="false" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "68%" }} />
+        </div>
+      </div>
     );
-  };
+  }
+  if (nodeType === "try_catch") {
+    return (
+      <div className="wf-structural-ports">
+        <div className="wf-structural-port">
+          <span className="port-label">Try</span>
+          <Handle id="success" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "32%" }} />
+        </div>
+        <div className="wf-structural-port">
+          <span className="port-label">Catch</span>
+          <Handle id="error" type="source" position={Position.Right} className="wf-handle wf-handle-main wf-handle-err" style={{ top: "68%" }} />
+        </div>
+      </div>
+    );
+  }
+  if (nodeType === "switch_node") {
+    const cases = Array.isArray(data.config?.cases) ? (data.config.cases as unknown[]) : [];
+    const total = cases.length + 1;
+    const topFor = (index: number) => `${((index + 1) / (total + 1)) * 100}%`;
+    return (
+      <div className="wf-structural-ports">
+        {cases.map((c, i) => {
+          const raw = typeof c === "string" ? c : ((c as Record<string, unknown> | null)?.label ?? (c as Record<string, unknown> | null)?.value ?? `Case ${i + 1}`);
+          const lbl = String(raw ?? "");
+          const normalizedHandleId = lbl.trim() || `case_${i}`;
+          return (
+            <div key={i} className="wf-structural-port">
+              <span className="port-label" title={lbl}>
+                {lbl.length > 8 ? `${lbl.substring(0, 6)}..` : lbl}
+              </span>
+              <Handle id={normalizedHandleId} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: topFor(i) }} />
+            </div>
+          );
+        })}
+        <div className="wf-structural-port">
+          <span className="port-label">Default</span>
+          <Handle id="default" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: topFor(cases.length) }} />
+        </div>
+      </div>
+    );
+  }
+  if (nodeType === "chat_intent_router") {
+    const ports = [
+      { id: "report", label: "Report", top: "20%" },
+      { id: "code", label: "Code", top: "40%" },
+      { id: "message", label: "Message", top: "60%" },
+      { id: "missing_context", label: "Missing", top: "80%" }
+    ];
+    return (
+      <div className="wf-structural-ports">
+        {ports.map((port) => (
+          <div key={port.id} className="wf-structural-port">
+            <span className="port-label" title={port.label}>
+              {port.label}
+            </span>
+            <Handle id={port.id} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: port.top }} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />;
+}
+
+function HubNode({ data, selected }: VariantProps) {
+  const nodeType = data.nodeType;
+  const isSupervisor = nodeType === "supervisor_node";
+  const isWorker = data.attachedAs === "worker";
+  const slots = data.slots ?? emptySlots();
+  const scale = isWorker ? ORBIT.miniRadius / ORBIT.innerRadius : 1;
+  const geometry = ringGeometry(slots, { allowWorkers: isSupervisor });
+  const summary = summarizeNode({ type: nodeType, config: data.config });
+  const status = data.executionStatus;
+  const rings = [ORBIT.innerRadius * scale, ORBIT.outerRadius * scale];
+  if (isSupervisor && !isWorker) rings.push(ORBIT.workerRadius);
 
   return (
     <div
-      className={`wf-node wf-node-${variant} ${statusClass(data.executionStatus)} ${selected ? "selected" : ""}${disabledClass}${colorClass}`}
+      className={`${rootClass("hub", data, selected)}${isSupervisor ? " wf-node-hub-supervisor" : ""}${isWorker ? " wf-node-hub-worker" : ""}`}
+      style={{ width: ORBIT.hubSize, height: ORBIT.hubSize }}
     >
-      {data.disabled && (
-        <span className="wf-node-disabled-badge" title="Disabled" aria-label="Disabled">⏸</span>
-      )}
-      {data.pinned && (
-        <span className="wf-node-pinned-badge" title="Pinned data" aria-label="Pinned data">PIN</span>
-      )}
-      {showSuccessBadge && (
-        <span className="wf-node-status-badge wf-node-status-success" title="Completed" aria-label="Completed">
-          ✓
-        </span>
-      )}
-      {showRunningBadge && (
-        <span className="wf-node-status-badge wf-node-status-running" title="Running" aria-label="Running">
-          ●
-        </span>
-      )}
+      <div className="wf-hub-rings" aria-hidden="true">
+        {rings.map((radius, index) => (
+          <span key={index} className={`wf-ring wf-ring-${index}`} style={{ width: radius * 2, height: radius * 2 }} />
+        ))}
+      </div>
+      <Badges data={data} />
+      <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
+      <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
+      <Handle id="chat_model" type="source" position={Position.Bottom} className="wf-handle-hidden" />
+      <Handle id="memory" type="source" position={Position.Bottom} className="wf-handle-hidden" />
+      <Handle id="tool" type="source" position={Position.Bottom} className="wf-handle-hidden" />
+      {isSupervisor && <Handle id="worker" type="source" position={Position.Bottom} className="wf-handle-hidden" />}
 
-      {variant === "agent" ? (
-        <>
-          <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
-          <div className="wf-node-icon wf-node-agent-icon">
-            <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="ai" />
-          </div>
-          <div className="wf-node-main">
-            <div className="wf-node-title">{data.label}</div>
-            <div className="wf-node-subtitle">AI Agent</div>
-          </div>
-          <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
+      <div className="wf-hub-core">
+        <div className="wf-hub-glyph">
+          <NodeTypeIcon nodeType={nodeType} fallbackIcon="ai" />
+        </div>
+        <div className="wf-hub-title" title={data.label}>
+          {data.label}
+        </div>
+        <div className="wf-hub-type">{isWorker ? "worker" : nodeType}</div>
+        <div className="wf-hub-summary" title={summary}>
+          {summary}
+        </div>
+      </div>
+      <span className={`wf-status-ring wf-status-${status ?? "idle"} wf-hub-status`} title={statusTitle(status)} aria-label={statusTitle(status)} />
 
-          <div className="wf-agent-ports">
-            <div className="wf-agent-port">
-              <span>Chat Model*</span>
-              <Handle
-                id="chat_model"
-                type="source"
-                position={Position.Bottom}
-                className="wf-handle wf-handle-diamond"
-                style={{ left: data.nodeType === "supervisor_node" ? "16%" : "24%" }}
-              />
-              {renderAgentPlus("chat_model", "chat model")}
-            </div>
-            <div className="wf-agent-port">
-              <span>Memory</span>
-              <Handle
-                id="memory"
-                type="source"
-                position={Position.Bottom}
-                className="wf-handle wf-handle-diamond"
-                style={{ left: data.nodeType === "supervisor_node" ? "38%" : "52%" }}
-              />
-              {renderAgentPlus("memory", "memory")}
-            </div>
-            <div className="wf-agent-port">
-              <span>Tool</span>
-              <Handle
-                id="tool"
-                type="source"
-                position={Position.Bottom}
-                className="wf-handle wf-handle-diamond"
-                style={{ left: data.nodeType === "supervisor_node" ? "62%" : "80%" }}
-              />
-              {renderAgentPlus("tool", "tool")}
-            </div>
-            {data.nodeType === "supervisor_node" && (
-              <div className="wf-agent-port">
-                <span>Worker</span>
-                <Handle
-                  id="worker"
-                  type="source"
-                  position={Position.Bottom}
-                  className="wf-handle wf-handle-diamond"
-                  style={{ left: "86%" }}
-                />
-                {renderAgentPlus("worker", "worker")}
-              </div>
-            )}
-          </div>
-        </>
-      ) : variant === "resource" ? (
-        <>
-          <Handle type="target" position={Position.Top} className="wf-handle wf-handle-main" />
-          <div className="wf-node-resource-icon">
-            <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="core" />
-          </div>
-          <Handle type="source" position={Position.Bottom} className="wf-handle wf-handle-main" />
-          <div className="wf-node-resource-title">{data.label}</div>
-        </>
-      ) : (
-        <>
-          <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
-          <div className="wf-node-icon">
-            <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="core" />
-          </div>
-          <div className="wf-node-main">
-            <div className="wf-node-title">{data.label}</div>
-            <div className="wf-node-subtitle">{subtitle}</div>
-          </div>
-          {data.nodeType === "if_node" ? (
-             <div className="wf-structural-ports">
-               <div className="wf-structural-port" style={{ marginTop: 2 }}>
-                  <span className="port-label">True</span>
-                  <Handle id="true" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "30%" }} />
-               </div>
-               <div className="wf-structural-port" style={{ marginBottom: 2 }}>
-                  <span className="port-label">False</span>
-                  <Handle id="false" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "70%" }} />
-               </div>
-             </div>
-          ) : data.nodeType === "try_catch" ? (
-             <div className="wf-structural-ports">
-               <div className="wf-structural-port" style={{ marginTop: 2 }}>
-                  <span className="port-label">Try</span>
-                  <Handle id="success" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "30%" }} />
-               </div>
-               <div className="wf-structural-port" style={{ marginBottom: 2 }}>
-                  <span className="port-label">Catch</span>
-                  <Handle id="error" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "70%" }} />
-               </div>
-             </div>
-          ) : data.nodeType === "switch_node" ? (
-             <div className="wf-structural-ports">
-               {(Array.isArray(data.config?.cases) ? data.config.cases : []).map((c: any, i: number) => {
-                  const lbl = typeof c === "string" ? c : (c?.label || c?.value || `Case ${i+1}`);
-                  const normalizedHandleId = String(lbl ?? "").trim() || `case_${i}`;
-                  return (
-                  <div key={i} className="wf-structural-port">
-                     <span className="port-label" title={lbl}>{lbl.length > 8 ? lbl.substring(0,6) + ".." : lbl}</span>
-                     <Handle id={normalizedHandleId} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: (20 + (i * 15)) + "%" }} />
-                  </div>
-               )})}
-               <div className="wf-structural-port">
-                  <span className="port-label">Default</span>
-                  <Handle id="default" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: (20 + ((Array.isArray(data.config?.cases) ? data.config.cases.length : 0) * 15)) + "%" }} />
-               </div>
-             </div>
-          ) : data.nodeType === "chat_intent_router" ? (
-             <div className="wf-structural-ports">
-               {[
-                 { id: "report", label: "Report", top: "20%" },
-                 { id: "code", label: "Code", top: "40%" },
-                 { id: "message", label: "Message", top: "60%" },
-                 { id: "missing_context", label: "Missing", top: "80%" }
-               ].map((port) => (
-                 <div key={port.id} className="wf-structural-port">
-                    <span className="port-label" title={port.label}>{port.label}</span>
-                    <Handle id={port.id} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: port.top }} />
-                 </div>
-               ))}
-             </div>
-          ) : (
-             <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
-          )}
-        </>
-      )}
-      {preview && (preview.input || preview.output || preview.error) && (
-        <div className="wf-node-debug-preview">
-          {preview.input && (
-            <div>
-              <strong>In</strong> {preview.input}
-            </div>
-          )}
-          {preview.output && (
-            <div>
-              <strong>Out</strong> {preview.output}
-            </div>
-          )}
-          {preview.error && (
-            <div className="wf-node-debug-error">
-              <strong>Err</strong> {preview.error}
-              {preview.errorRemediation && (
-                <div className="wf-node-debug-remediation">
-                  <strong>Fix:</strong> {preview.errorRemediation}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-      {data.telemetry && hasMeaningfulTelemetry(data.telemetry) && (
-        <div className="wf-node-telemetry" title={telemetryTooltip(data.telemetry)}>
-          {formatTokens(data.telemetry) && (
-            <span className="wf-telemetry-pill">{formatTokens(data.telemetry)}</span>
-          )}
-          {typeof data.telemetry.latencyMs === "number" && (
-            <span className="wf-telemetry-pill">{formatLatency(data.telemetry.latencyMs)}</span>
-          )}
-          {typeof data.telemetry.llmCallCount === "number" && data.telemetry.llmCallCount > 1 && (
-            <span className="wf-telemetry-pill wf-telemetry-pill-faint">×{data.telemetry.llmCallCount}</span>
-          )}
-        </div>
-      )}
+      {geometry
+        .filter((slot) => slot.nodeId === null)
+        .map((slot) => {
+          const radius = slot.port === "worker" ? slot.radius : slot.radius * scale;
+          const dx = Math.cos(slot.angle) * radius;
+          const dy = Math.sin(slot.angle) * radius;
+          const required = slot.port === "chat_model";
+          const style = AGENT_ATTACHMENT_STYLES[slot.port];
+          const label = SLOT_LABEL[slot.port];
+          const title = required ? `Add chat model (required) — ${style.description}` : `Add ${style.label.toLowerCase()} — ${style.description}`;
+          const onOpen = data.onOpenAgentAttachmentDrawer;
+          return (
+            <button
+              key={`${slot.port}-${slot.angle.toFixed(3)}`}
+              type="button"
+              className={`wf-slot wf-slot-${slot.port}${required ? " wf-slot-required" : ""} nodrag nopan`}
+              style={{ left: `calc(50% + ${dx}px)`, top: `calc(50% + ${dy}px)` }}
+              title={title}
+              aria-label={title}
+              disabled={!onOpen}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpen?.(slot.port);
+              }}
+            >
+              <span className="wf-slot-glyph">+</span>
+              <span className="wf-slot-label">{label}</span>
+            </button>
+          );
+        })}
+
+      <DebugPreview data={data} />
+      <Telemetry data={data} />
+    </div>
+  );
+}
+
+function SatelliteNode({ data, selected }: VariantProps) {
+  const port = data.attachedAs ?? "tool";
+  const summary = summarizeNode({ type: data.nodeType, config: data.config });
+  const status = data.executionStatus;
+  return (
+    <div
+      className={`${rootClass("satellite", data, selected)} wf-node-satellite-${port}`}
+      style={{ width: ORBIT.satelliteSize, height: ORBIT.satelliteSize }}
+      title={`${AGENT_ATTACHMENT_STYLES[port].label} · ${data.label}`}
+    >
+      <Handle type="target" position={Position.Top} className="wf-handle-hidden" />
+      <Handle type="source" position={Position.Bottom} className="wf-handle-hidden" />
+      <Badges data={data} />
+      <div className="wf-satellite-glyph">
+        <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="ai" />
+      </div>
+      <span className={`wf-status-ring wf-status-${status ?? "idle"} wf-satellite-status`} title={statusTitle(status)} aria-label={statusTitle(status)} />
+      <div className={`wf-satellite-label wf-satellite-label-${data.labelSide ?? "bottom"}`}>
+        <span className="wf-satellite-port">{AGENT_ATTACHMENT_STYLES[port].label}</span>
+        <span className="wf-satellite-name" title={data.label}>
+          {data.label}
+        </span>
+        <span className="wf-satellite-summary" title={summary}>
+          {summary}
+        </span>
+      </div>
+      <Telemetry data={data} />
     </div>
   );
 }
@@ -301,13 +369,13 @@ function hasMeaningfulTelemetry(t: NonNullable<EditorNodeData["telemetry"]>): bo
 }
 
 function formatTokens(t: NonNullable<EditorNodeData["telemetry"]>): string | null {
-  const total = t.totalTokens ?? ((t.inputTokens ?? 0) + (t.outputTokens ?? 0));
+  const total = t.totalTokens ?? (t.inputTokens ?? 0) + (t.outputTokens ?? 0);
   if (!total) return null;
   if (total >= 1000) return `${(total / 1000).toFixed(total >= 10000 ? 0 : 1)}k tok`;
   return `${total} tok`;
 }
 
-function formatLatency(ms: number): string {
+export function formatLatency(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
   return `${Math.round(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;

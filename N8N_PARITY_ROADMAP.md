@@ -380,6 +380,87 @@
 
 ---
 
+## Phase 8: Orbit UI Revamp (in progress, branch `ui/orbit`)
+
+Visual identity change so the Studio stops reading as an n8n clone while keeping every
+feature. Brief: [apps/web/DESIGN.md](apps/web/DESIGN.md); chosen prototype:
+`apps/web/prototype/ui-revamp.html` (direction B · Orbit, with Loom's run tape, docked
+inspector, slot rows and stage auto-layout).
+- [x] Shell: collapsible sidebar, floating HUD pills, ⌘K command palette, restyled login
+- [x] Editor: hub nodes for agents with ring slots, stage strip, Tidy auto-layout, run tape, node palette
+- [x] Inspector: docked drawer with Parameters / Input / Output / Trace, Slots section
+- [x] Pages: dashboard cards with one primary action + overflow menu, runs, settings, chat, secrets, templates, KB
+- [x] Both themes verified in a browser (dashboard, editor, inspector, runs, settings, templates, chat, KB); legacy `styles.css` reduced to ~250 lines of shared helpers on tokens
+- [x] Playwright golden-journey spec updated to the new selectors
+- [ ] Delete `apps/web/prototype/` once the direction is signed off
+
+## Phase 9: n8n Workflow Importer (scheduled after Phase 8)
+
+**Why:** lowest-friction way for n8n users to try L2M on a flow they already have. Interop
+beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to n8n.
+
+### 9.1 Import pipeline
+- [ ] `POST /api/workflows/import/n8n` accepting an n8n workflow export (`nodes[]`, `connections{}`, `settings`, `pinData`)
+- [ ] Pure converter in `packages/workflow-engine/src/import/n8n.ts`: n8n node → L2M node type map, `connections` → edges (main outputs, index-based ports → `if`/`switch` handles), positions carried over, sticky notes → `sticky_note`
+- [ ] Expression translation for the common subset: `{{ $json.x }}` → `{{results.<prev>.x}}`, `$node["Name"].json` → `results.<id>`, `$now`, `$env` → variables; unknown expressions preserved verbatim and flagged
+- [ ] Credentials: n8n `credentials` refs become `secretRef` placeholders with a post-import "resolve secrets" checklist, never raw values
+- [ ] Import report: per-node `mapped | approximated | unsupported` with reasons; unsupported nodes become disabled `noop_node` placeholders carrying the original config so the flow still loads
+
+### 9.2 Node coverage (first wave, by n8n usage frequency)
+- [ ] Triggers: Manual, Webhook, Schedule/Cron, Chat Trigger, Error Trigger, Form Trigger, RSS, Email (IMAP)
+- [ ] Core: HTTP Request, Code (JS/Python), Set/Edit Fields, IF, Switch, Merge, Split Out, Aggregate, Filter, Sort, Limit, Wait, No Op, Stop and Error, Execute Workflow, Sticky Note
+- [ ] AI: OpenAI / Anthropic / Gemini / Ollama chat models → `*_chat_model`, AI Agent → `agent_orchestrator` (sub-node connections `ai_languageModel` / `ai_memory` / `ai_tool` → `chat_model` / `memory` / `tool` attachment edges), Simple Memory → `local_memory`, MCP Client Tool → `mcp_tool`, Structured Output Parser → `output_parser`, vector stores → existing RAG nodes
+- [ ] Apps with existing Tier 1/2 connectors: Slack, GitHub, Google Sheets, Postgres, Notion, Jira, Airtable, HubSpot, Salesforce, Stripe, S3, Telegram, Discord
+
+### 9.3 UX
+- [ ] "Import from n8n" in the HUD overflow and the command palette; drag an n8n JSON onto the canvas
+- [ ] Post-import panel: mapping report, secrets to resolve, one-click Tidy layout, "Run a dry validation"
+- [ ] Docs page "Moving a flow from n8n" with the coverage table generated from the converter's map
+- [ ] Fixture corpus of real n8n exports under `samples/n8n/` with golden-file tests
+
+## Phase 10: MCP Control Plane (after Phase 9)
+
+**Positioning:** L2M is self-hosted. Everything in Phases 10-12 runs inside the user's own
+deployment (SQLite or Postgres, single binary or docker compose). No hosted service, no
+phone-home, no vendor-side registry; anything that would need a shared backend is designed
+as a local file or an endpoint on the user's own instance.
+
+### 10.1 MCP server registry
+- [ ] Registry page listing every configured MCP server (transport, endpoint, auth secretRef, owner, last probe) backed by a `mcp_servers` table
+- [ ] Health probe service: periodic `initialize` + `tools/list`, status history, latency percentiles
+- [ ] Tool schema snapshots per probe; diff view when a server adds, removes, or changes a tool's input schema; optional "block runs on breaking change" setting
+- [ ] Per-tool telemetry rollup from execution traces: call count, p50/p95 latency, error rate, token cost of the agent turns that invoked it
+
+### 10.2 Tool policy
+- [ ] Allow/deny policies per role and per project: which servers and which tools an agent may call; enforced in `agent-runtime` tool discovery (filtered out, not just hidden)
+- [ ] Read-only tool classification (from annotations when the server provides them, else manual) and a "no write tools" switch per workflow
+- [ ] Policy evaluation visible in the Trace tab: "tool X hidden by policy Y"
+
+### 10.3 Control plane UI
+- [ ] "MCP" section in the sidebar: servers, tools, policies, changes feed
+- [ ] Orbit canvas integration: tool satellites show probe status and policy state
+
+## Phase 11: Audit Bundles & Approvals (after Phase 10)
+
+### 11.1 Signed run manifests
+- [ ] Per execution, a manifest recording workflow version hash, every node's resolved config (secret refs only), provider + model + parameters, tool server identities + schema snapshot hashes, prompts, citations, token and cost totals
+- [ ] Manifest signed with a per-deployment key (`AUDIT_SIGNING_KEY_BASE64`, generated locally, stored like `SECRET_MASTER_KEY_BASE64`); verification CLI `l2m audit verify <bundle>` that runs offline
+- [ ] Export "audit bundle" (zip: manifest, node I/O, trace, logs, rendered outputs) from the Runs page and via `GET /api/executions/:id/bundle`; retention follows the existing audit-log retention setting
+
+### 11.2 Approval gates
+- [ ] `approval_gate` node: pauses the run, records who may approve (role/user), optional timeout and fallback branch; resumes through the existing wait/resume plumbing
+- [ ] Approvals inbox page and notifications through the existing notification channels; approve/reject from the Runs page with a reason that lands in the manifest
+- [ ] Agent-level gate: require approval before any tool classified as a write tool is called (configurable per workflow)
+
+## Phase 12: Future (not scheduled)
+
+Ideas from the positioning discussion, kept for later; each must remain self-hosted.
+- [ ] Reference deployment bundles: docker compose profiles that ship L2M with a curated set of open-source MCP servers (GitHub, Postgres, filesystem, Slack) and five tested workflows; first bundle: security / key-management reporting
+- [ ] Local eval benchmarks: run one workflow across providers and produce a cost / latency / accuracy report as a workflow output (no central leaderboard; users publish their own if they want)
+- [ ] Swarm depth: worker pools with token budgets, parallel fan-out with merge strategies, checkpoint and resume for long-running agents, delegation trace on the Orbit canvas
+- [ ] Workflow → standalone MCP server exporter (package a workflow so Claude Code, Cursor or another L2M can call it) to keep lock-in low
+- [ ] "MCP agent operations" checklist and maturity model in the docs
+
 ## Implementation Priority Matrix
 
 | Priority | Phase | Estimated Effort | Business Impact |

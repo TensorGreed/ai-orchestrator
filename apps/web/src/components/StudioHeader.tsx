@@ -1,8 +1,8 @@
-import type { ComponentProps } from "react";
-import { TopBar } from "./TopBar";
+import { StudioHud, type StudioHudProps } from "./StudioHud";
 
-type StudioHeaderProps = ComponentProps<typeof TopBar>;
+export type StudioHeaderProps = StudioHudProps;
 
+/** The floating HUD row. Kept under the legacy export name so App.tsx wiring stays unchanged. */
 export function StudioHeader(props: StudioHeaderProps) {
-  return <TopBar {...props} />;
+  return <StudioHud {...props} />;
 }

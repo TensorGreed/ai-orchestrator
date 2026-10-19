@@ -97,16 +97,16 @@ export function KnowledgeBasePage({ isAdmin, activeProjectId }: KnowledgeBasePag
   }, [refreshList]);
 
   return (
-    <section className="kb-page">
-      <header className="kb-header">
-        <div>
-          <h2>Knowledge Bases</h2>
-          <p className="kb-subtle">
+    <section className="kb-page page-pane">
+      <header className="kb-header page-head">
+        <div className="page-head-copy">
+          <h2 className="page-title">Knowledge bases</h2>
+          <p className="page-sub">
             Persistent SQLite-backed vector store. Upload documents, chunk + embed them, then reference the KB id from a <code>rag_retrieve</code> node with <code>vectorStoreId: "knowledge-base"</code>.
           </p>
         </div>
         {isAdmin && (
-          <button type="button" className="header-btn primary" onClick={() => setShowCreate((v) => !v)}>
+          <button type="button" className="pg-btn primary" onClick={() => setShowCreate((v) => !v)}>
             {showCreate ? "Cancel" : "+ New knowledge base"}
           </button>
         )}
@@ -251,7 +251,7 @@ function CreateKbForm({
         </label>
       </div>
       <div className="kb-form-row">
-        <button type="submit" className="header-btn primary" disabled={busy || !name.trim()}>
+        <button type="submit" className="pg-btn primary" disabled={busy || !name.trim()}>
           {busy ? "Creating…" : "Create knowledge base"}
         </button>
       </div>
@@ -347,7 +347,7 @@ function KnowledgeBaseDetail({
           </div>
         </div>
         {isAdmin && (
-          <button type="button" className="header-btn danger" onClick={() => void handleDelete()} disabled={busy}>
+          <button type="button" className="pg-btn ghost danger" onClick={() => void handleDelete()} disabled={busy}>
             Delete KB
           </button>
         )}
@@ -539,7 +539,7 @@ function UploadPanel({
           <label>Overlap<input type="number" min="0" value={chunkOverlap} onChange={(e) => setChunkOverlap(e.target.value)} /></label>
         </div>
         <div className="kb-form-row">
-          <button type="submit" className="header-btn primary" disabled={busy || !content.trim()}>
+          <button type="submit" className="pg-btn primary" disabled={busy || !content.trim()}>
             {busy ? "Ingesting…" : "Upload & ingest"}
           </button>
         </div>
@@ -585,7 +585,7 @@ function SearchPanel({ kbId, onError }: { kbId: string; onError: (msg: string) =
           <label>Top K<input type="number" min="1" max="50" value={topK} onChange={(e) => setTopK(e.target.value)} /></label>
         </div>
         <div className="kb-form-row">
-          <button type="submit" className="header-btn primary" disabled={busy || !query.trim()}>
+          <button type="submit" className="pg-btn primary" disabled={busy || !query.trim()}>
             {busy ? "Searching…" : "Search"}
           </button>
         </div>

@@ -1,0 +1,135 @@
+import { useMemo } from "react";
+import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { formatLatency } from "./WorkflowCanvasNode";
+
+export interface RunTapeProps {
+  executionResult: WorkflowExecutionResult | null;
+  nodeMetaById: Map<string, { label: string; type: string }>;
+  onSelectNode?: (nodeId: string) => void;
+}
+
+export interface TapeLane {
+  nodeId: string;
+  label: string;
+  type: string;
+  status: string;
+  /** Offset from run start, ms. */
+  startMs: number;
+  durationMs: number;
+  /** Provider-call latency inside the node, ms (LLM time). */
+  llmMs: number | null;
+  error?: string;
+}
+
+function toMs(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, nodeMetaById: Map<string, { label: string; type: string }>): { lanes: TapeLane[]; totalMs: number } {
+  if (!executionResult) return { lanes: [], totalMs: 0 };
+  const runStart = toMs(executionResult.startedAt);
+  const starts = executionResult.nodeResults.map((result) => toMs(result.startedAt)).filter((v): v is number => v !== null);
+  const t0 = runStart ?? (starts.length ? Math.min(...starts) : 0);
+
+  let cursor = 0;
+  const lanes: TapeLane[] = executionResult.nodeResults.map((result) => {
+    const started = toMs(result.startedAt);
+    const completed = toMs(result.completedAt);
+    const duration = typeof result.durationMs === "number" ? result.durationMs : started !== null && completed !== null ? Math.max(completed - started, 0) : 0;
+    const startMs = started !== null ? Math.max(started - t0, 0) : cursor;
+    cursor = startMs + duration;
+    const output = result.output;
+    let llmMs: number | null = null;
+    if (output && typeof output === "object" && !Array.isArray(output)) {
+      const tel = (output as Record<string, unknown>)._telemetry;
+      if (tel && typeof tel === "object" && typeof (tel as Record<string, unknown>).latencyMs === "number") {
+        llmMs = (tel as Record<string, unknown>).latencyMs as number;
+      }
+    }
+    const meta = nodeMetaById.get(result.nodeId);
+    const record = result as unknown as { nodeType?: unknown };
+    return {
+      nodeId: result.nodeId,
+      label: meta?.label ?? result.nodeId,
+      type: typeof record.nodeType === "string" ? record.nodeType : meta?.type ?? "",
+      status: result.status,
+      startMs,
+      durationMs: duration,
+      llmMs,
+      error: result.error
+    };
+  });
+
+  const totalMs = lanes.reduce((acc, lane) => Math.max(acc, lane.startMs + lane.durationMs), 0);
+  return { lanes, totalMs };
+}
+
+export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTapeProps) {
+  const { lanes, totalMs } = useMemo(() => buildTapeLanes(executionResult, nodeMetaById), [executionResult, nodeMetaById]);
+
+  if (!executionResult) {
+    return <div className="logs-placeholder">No run yet. Run the workflow to see per-node timing here.</div>;
+  }
+  if (lanes.length === 0) {
+    return <div className="logs-placeholder">This run produced no node results.</div>;
+  }
+
+  const denominator = Math.max(totalMs, 1);
+  const llmTotal = lanes.reduce((acc, lane) => acc + (lane.llmMs ?? 0), 0);
+
+  return (
+    <div className="run-tape" role="table" aria-label="Run tape">
+      <div className="run-tape-head">
+        <span>
+          last run <b>{formatLatency(totalMs)}</b> · {lanes.length} node{lanes.length === 1 ? "" : "s"} · status <b className={`run-tape-status run-tape-status-${executionResult.status}`}>{executionResult.status}</b>
+        </span>
+        <span className="run-tape-key">
+          <i className="run-tape-key-swatch run-tape-key-node" /> node
+          <i className="run-tape-key-swatch run-tape-key-llm" /> LLM time{llmTotal > 0 ? ` (${formatLatency(llmTotal)})` : ""}
+          <i className="run-tape-key-swatch run-tape-key-err" /> error
+        </span>
+      </div>
+      <div className="run-tape-lanes">
+        {lanes.map((lane) => {
+          const left = (lane.startMs / denominator) * 100;
+          const width = Math.max((lane.durationMs / denominator) * 100, 0.6);
+          const llmWidth = lane.llmMs !== null && lane.durationMs > 0 ? Math.min((lane.llmMs / lane.durationMs) * 100, 100) : 0;
+          const title = [
+            `${lane.label} (${lane.nodeId})`,
+            `${lane.status} · ${formatLatency(lane.durationMs)}`,
+            lane.llmMs !== null ? `LLM ${formatLatency(lane.llmMs)}` : null,
+            lane.error ? `error: ${lane.error}` : null
+          ]
+            .filter(Boolean)
+            .join("\n");
+          const Tag = onSelectNode ? "button" : "div";
+          return (
+            <Tag
+              key={lane.nodeId}
+              type={onSelectNode ? "button" : undefined}
+              className={`run-tape-lane run-tape-lane-${lane.status}`}
+              role="row"
+              title={title}
+              onClick={onSelectNode ? () => onSelectNode(lane.nodeId) : undefined}
+            >
+              <span className="run-tape-label" role="cell">
+                <b>{lane.label}</b>
+                <small>{lane.type || lane.nodeId}</small>
+              </span>
+              <span className="run-tape-track" role="cell">
+                <i className={`run-tape-bar run-tape-bar-${lane.status}`} style={{ left: `${left}%`, width: `${width}%` }}>
+                  {llmWidth > 0 && <i className="run-tape-llm" style={{ width: `${llmWidth}%` }} />}
+                </i>
+              </span>
+              <span className="run-tape-time" role="cell">
+                {formatLatency(lane.durationMs)}
+              </span>
+            </Tag>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

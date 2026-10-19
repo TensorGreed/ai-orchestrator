@@ -65,23 +65,31 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
   );
 
   return (
-    <div className="tpl-gallery">
-      <div className="tpl-header">
-        <h2 className="tpl-title">Template Gallery</h2>
-        <input
-          type="text"
-          className="tpl-search"
-          placeholder="Search templates..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
-      </div>
+    <div className="tpl-gallery page-pane">
+      <header className="page-head tpl-header">
+        <div className="page-head-copy"><h2 className="page-title">Templates</h2><p className="page-sub">Start from a working workflow and make it yours.</p></div>
+        <label className="page-search">
+          <span className="page-search-icon" aria-hidden="true">
+            ⌕
+          </span>
+          <input
+            type="text"
+            className="tpl-search"
+            placeholder="Search templates…"
+            aria-label="Search templates"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </label>
+      </header>
 
-      <div className="tpl-categories">
+      <div className="tpl-categories" role="group" aria-label="Template categories">
         {CATEGORIES.map((cat) => (
           <button
             key={cat}
+            type="button"
             className={`tpl-category-btn${activeCategory === cat ? " active" : ""}`}
+            aria-pressed={activeCategory === cat}
             onClick={() => setActiveCategory(cat)}
           >
             {cat}
@@ -159,7 +167,8 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
               ) : null}
               <div className="tpl-card-actions">
                 <button
-                  className="tpl-use-btn"
+                  type="button"
+                  className="pg-btn primary small tpl-use-btn"
                   disabled={usingTemplateId === tpl.id}
                   onClick={() => void handleUseTemplate(tpl.id)}
                 >

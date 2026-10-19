@@ -222,11 +222,11 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
   ];
 
   return (
-    <section className="settings-page">
-      <header className="settings-header">
-        <div>
-          <h2>Account &amp; Project Settings</h2>
-          <p>
+    <section className="settings-page page-pane">
+      <header className="settings-header page-head">
+        <div className="page-head-copy">
+          <h2 className="page-title">Settings</h2>
+          <p className="page-sub">
             Manage your two-factor authentication, personal API keys, and—if you're a project admin—invite members,
             define custom roles, and wire SSO group-to-role mappings.
           </p>
