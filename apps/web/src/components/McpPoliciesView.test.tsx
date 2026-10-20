@@ -139,7 +139,8 @@ describe("MCP tool policy UI", () => {
     await user.selectOptions(screen.getByLabelText("Classification for calculator"), "read");
     expect(api.setMcpToolClassification).toHaveBeenCalledWith("mcp_1", "calculator", true);
     await waitFor(() => expect(within(table).getByText("manual")).toBeInTheDocument());
-    expect(within(table).getAllByText("Read-only")).toHaveLength(2);
+    // Two classification badges plus the readOnlyHint annotation chip on lookup_kb.
+    expect(within(table).getAllByText("Read-only")).toHaveLength(3);
 
     await user.selectOptions(screen.getByLabelText("Classification for calculator"), "auto");
     expect(api.setMcpToolClassification).toHaveBeenLastCalledWith("mcp_1", "calculator", null);
@@ -198,6 +199,7 @@ describe("MCP tool policy UI", () => {
       roles: ["builder"],
       serverId: "mock-mcp",
       toolPattern: "delete_*",
+      annotationHint: null,
       enabled: true
     });
     expect(await within(list).findByText("Builders: no deletes")).toBeInTheDocument();
@@ -222,6 +224,36 @@ describe("MCP tool policy UI", () => {
     expect(api.deleteMcpToolPolicy).toHaveBeenCalledWith("rule_1");
     await waitFor(() => expect(within(list).queryByText("Viewers: no calculator")).not.toBeInTheDocument());
     confirmSpy.mockRestore();
+  });
+
+  it("adds a rule that targets destructive tools and shows the condition in the list", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [], roles: ["admin", "builder", "operator", "viewer"] });
+    vi.mocked(api.createMcpToolPolicy).mockImplementation(async (payload) => ({
+      rule: makeRule({
+        id: "rule_3",
+        name: payload.name ?? null,
+        roles: payload.roles ?? [],
+        serverId: payload.serverId ?? null,
+        toolPattern: payload.toolPattern ?? "*",
+        annotationHint: payload.annotationHint ?? null
+      })
+    }));
+
+    render(<McpServersPage isAdmin activeProjectId="default" />);
+    await user.click(await screen.findByRole("tab", { name: "Policies" }));
+    await user.click(await screen.findByRole("button", { name: "+ Add rule" }));
+    const form = screen.getByRole("form", { name: "Add tool policy rule" });
+    await user.type(within(form).getByLabelText("Name"), "Operators: no destructive tools");
+    await user.click(within(form).getByLabelText("operator"));
+    await user.selectOptions(within(form).getByLabelText("Annotation condition"), "destructive");
+    await user.click(within(form).getByRole("button", { name: "Add rule" }));
+
+    expect(api.createMcpToolPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ roles: ["operator"], toolPattern: "*", annotationHint: "destructive" })
+    );
+    const list = await screen.findByRole("list", { name: "Tool policy rules" });
+    expect(await within(list).findByText("Destructive tools")).toBeInTheDocument();
   });
 
   it("is read-only for builders", async () => {

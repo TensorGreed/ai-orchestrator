@@ -3,18 +3,47 @@ import path from "node:path";
 import type { MCPServerConfig, MCPToolDefinition, MCPToolResult } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter } from "../types";
 import { withToolAnnotations } from "../tool-annotations";
+import { buildToolCallResult, withOutputSchema } from "../structured-output";
+import {
+  MCP_CLIENT_PROTOCOL_VERSION,
+  buildCancelledNotification,
+  cancelReason,
+  parseProgressNotification,
+  toProgressEvent,
+  type ParsedProgress
+} from "../progress";
 
 interface JsonRpcResponse {
   jsonrpc?: string;
   id?: string | number | null;
+  method?: string;
+  params?: unknown;
   result?: unknown;
   error?: { code?: number; message?: string; data?: unknown };
 }
 
 interface PendingRequest {
+  method: string;
   resolve: (response: JsonRpcResponse) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  /** Set once `notifications/cancelled` went out for this request. */
+  cancelled?: boolean;
+}
+
+/** Thrown when the run's abort signal stopped a request; never retried. */
+class McpRequestCanceledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpRequestCanceledError";
+  }
+}
+
+interface RpcOptions {
+  signal?: AbortSignal;
+  /** Progress token sent in `_meta`; notifications carrying it reach `onProgress`. */
+  progressToken?: string;
+  onProgress?: (progress: ParsedProgress) => void;
 }
 
 interface StdioSession {
@@ -28,12 +57,20 @@ interface StdioSession {
   closedByClient: boolean;
   closeError?: Error;
   createdAt: number;
+  /** Phase 10.5 — progress listeners by progress token. */
+  progressListeners: Map<string | number, (progress: ParsedProgress) => void>;
+  /** `notifications/cancelled` messages written; a session with any is closed gracefully. */
+  cancelsSent: number;
+  /** Tool output schemas from tools/list, once listed in this session. */
+  outputSchemas?: Map<string, Record<string, unknown> | undefined>;
 }
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const STDERR_LOG_BUFFER_LINES = 100;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const CLOSE_GRACE_MS = 2_000;
+/** After cancelling in-flight requests, how long a server gets to exit on stdin EOF before SIGTERM. */
+const STDIN_CLOSE_GRACE_MS = 500;
 
 interface ResolvedSpawn {
   command: string;
@@ -189,27 +226,19 @@ function normalizeDiscoveredTools(serverId: string, serverLabel: string, rawTool
       name: String(item.name),
       description: typeof item.description === "string" ? item.description : "MCP tool",
       inputSchema: toRecord(item.inputSchema ?? item.input_schema),
-      ...withToolAnnotations(item.annotations)
+      ...withToolAnnotations(item.annotations),
+      ...withOutputSchema(item.outputSchema ?? item.output_schema)
     }));
 }
 
-function normalizeToolCallOutput(result: unknown): unknown {
-  const asObj = toRecord(result);
-  const structured = asObj.structuredContent ?? asObj.structured_content;
-  if (structured !== undefined) {
-    return structured;
-  }
-  const content = asObj.content;
-  if (Array.isArray(content)) {
-    const normalized = content.map((entry) => {
-      const row = toRecord(entry);
-      if (typeof row.text === "string") return row.text;
-      if (row.json !== undefined) return row.json;
-      return row;
-    });
-    return normalized.length === 1 ? normalized[0] : normalized;
-  }
-  return result;
+const MAX_TOOL_LIST_PAGES = 20;
+
+function toProgressEventFor(progress: ParsedProgress, toolName: string, config: MCPServerConfig) {
+  return toProgressEvent(progress, {
+    toolName,
+    serverId: config.serverId,
+    ...(config.registryServerId ? { registryServerId: config.registryServerId } : {})
+  });
 }
 
 export class StdioMCPServerAdapter implements MCPServerAdapter {
@@ -308,7 +337,9 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       stderrBuffer: [],
       closed: false,
       closedByClient: false,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      progressListeners: new Map(),
+      cancelsSent: 0
     };
 
     proc.stdout?.setEncoding("utf-8");
@@ -320,7 +351,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
 
     try {
       await this.sendRpc(session, "initialize", {
-        protocolVersion: "2024-11-05",
+        protocolVersion: MCP_CLIENT_PROTOCOL_VERSION,
         capabilities: {},
         clientInfo: { name: "ai-orchestrator", version: "0.1.0" }
       }, normalizeTimeoutMs(config));
@@ -355,8 +386,11 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       return;
     }
 
+    if (typeof parsed.method === "string") {
+      this.handleServerMessage(session, parsed);
+      return;
+    }
     if (parsed.id === undefined || parsed.id === null) {
-      // Server-initiated notification — silently dropped for now.
       return;
     }
     const id = typeof parsed.id === "number" ? parsed.id : Number(parsed.id);
@@ -370,6 +404,59 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     session.pending.delete(id);
     clearTimeout(pending.timer);
     pending.resolve(parsed);
+  }
+
+  /**
+   * Messages the server starts: `notifications/progress` goes to the
+   * listener for its token; a `ping` request is answered; other requests get
+   * "method not found" (L2M offers no client capabilities yet); other
+   * notifications are ignored.
+   */
+  private handleServerMessage(session: StdioSession, message: JsonRpcResponse): void {
+    const progress = parseProgressNotification(message);
+    if (progress) {
+      const listener = session.progressListeners.get(progress.progressToken);
+      if (listener) {
+        try {
+          listener(progress);
+        } catch {
+          // A failing progress sink never fails the tool call.
+        }
+      }
+      return;
+    }
+    if (message.id === undefined || message.id === null) return;
+    const reply =
+      message.method === "ping"
+        ? { jsonrpc: "2.0", id: message.id, result: {} }
+        : { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: `Method not supported by this client: ${message.method}` } };
+    this.writeMessage(session, reply);
+  }
+
+  private writeMessage(session: StdioSession, message: unknown): void {
+    if (session.closed) return;
+    try {
+      session.proc.stdin?.write(JSON.stringify(message) + "\n");
+    } catch {
+      // Best-effort.
+    }
+  }
+
+  /**
+   * Phase 10.5 — send `notifications/cancelled` for an in-flight request
+   * (never for initialize, which the spec forbids) and fail it locally.
+   */
+  private cancelPending(session: StdioSession, id: number, reason: string): void {
+    const pending = session.pending.get(id);
+    if (!pending || pending.cancelled) return;
+    pending.cancelled = true;
+    if (pending.method !== "initialize") {
+      this.writeMessage(session, buildCancelledNotification(id, reason));
+      session.cancelsSent += 1;
+    }
+    session.pending.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(new McpRequestCanceledError(`MCP request canceled: ${reason}`));
   }
 
   private handleStderr(session: StdioSession, chunk: string): void {
@@ -429,14 +516,56 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   async closeSessions(context: MCPExecutionContext): Promise<void> {
     const cache = this.getCache(context);
     const exits: Array<Promise<void>> = [];
+    const reason = context.signal?.aborted ? cancelReason(context.signal) : "MCP session closed.";
     for (const [key, value] of cache) {
       if (value && typeof value === "object" && "proc" in value) {
-        exits.push(this.terminateProcess(value.proc));
-        this.killSession(value);
+        // Phase 10.5 — tell the server about every in-flight request before the process goes away.
+        for (const id of [...value.pending.keys()]) {
+          this.cancelPending(value, id, reason);
+        }
+        if (value.cancelsSent > 0 && !value.closed) {
+          exits.push(this.closeGracefully(value));
+        } else {
+          exits.push(this.terminateProcess(value.proc));
+          this.killSession(value);
+        }
         cache.delete(key);
       }
     }
     await Promise.all(exits);
+  }
+
+  /**
+   * Shutdown the MCP spec describes for stdio: close the server's stdin, let
+   * it exit on its own for a moment (so it reads the cancellations just
+   * written), then SIGTERM, then SIGKILL.
+   */
+  private async closeGracefully(session: StdioSession): Promise<void> {
+    const proc = session.proc;
+    session.closedByClient = true;
+    session.closeError ??= new Error("MCP stdio session was closed.");
+    this.handleClose(session);
+    if (proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) return;
+    const exited = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), STDIN_CLOSE_GRACE_MS);
+      proc.once("exit", () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    try {
+      proc.stdin?.end();
+    } catch {
+      // Already closed.
+    }
+    if (await exited) return;
+    const termination = this.terminateProcess(proc);
+    try {
+      proc.kill();
+    } catch {
+      // Already gone.
+    }
+    await termination;
   }
 
   private terminateProcess(proc: ChildProcess): Promise<void> {
@@ -484,23 +613,46 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     session: StdioSession,
     method: string,
     params: unknown,
-    timeoutMs: number
+    timeoutMs: number,
+    options: RpcOptions = {}
   ): Promise<JsonRpcResponse> {
     if (session.closed) {
       return Promise.reject(session.closeError ?? new Error("MCP stdio session is closed."));
     }
+    const signal = options.signal;
+    if (signal?.aborted) {
+      return Promise.reject(new McpRequestCanceledError(`MCP request canceled: ${cancelReason(signal)}`));
+    }
     session.rpcCounter += 1;
     const id = session.rpcCounter;
-    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
+    const withMeta =
+      options.progressToken && params && typeof params === "object"
+        ? { ...(params as Record<string, unknown>), _meta: { progressToken: options.progressToken } }
+        : params;
+    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params: withMeta }) + "\n";
+    if (options.progressToken && options.onProgress) {
+      session.progressListeners.set(options.progressToken, options.onProgress);
+    }
+    const onAbort = () => this.cancelPending(session, id, cancelReason(signal));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
+      if (options.progressToken) session.progressListeners.delete(options.progressToken);
+    };
 
     return new Promise<JsonRpcResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (session.pending.has(id)) {
+          // Phase 10.5 — a timed-out request is cancelled on the server too.
+          if (method !== "initialize") {
+            this.writeMessage(session, buildCancelledNotification(id, `Timed out after ${timeoutMs}ms`));
+            session.cancelsSent += 1;
+          }
           session.pending.delete(id);
           reject(new Error(`MCP stdio request '${method}' timed out after ${timeoutMs}ms.`));
         }
       }, timeoutMs);
-      session.pending.set(id, { resolve, reject, timer });
+      session.pending.set(id, { method, resolve, reject, timer });
 
       if (session.closed) {
         session.pending.delete(id);
@@ -516,12 +668,19 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
         clearTimeout(timer);
         reject(writeError instanceof Error ? writeError : new Error("Failed to write to MCP stdio process."));
       }
-    }).then((response) => {
-      if (response.error) {
-        throw new Error(response.error.message || "MCP JSON-RPC error");
+    }).then(
+      (response) => {
+        cleanup();
+        if (response.error) {
+          throw new Error(response.error.message || "MCP JSON-RPC error");
+        }
+        return response;
+      },
+      (error: unknown) => {
+        cleanup();
+        throw error;
       }
-      return response;
-    });
+    );
   }
 
   private sendNotification(session: StdioSession, method: string, params: unknown): void {
@@ -560,14 +719,71 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     return session;
   }
 
+  private async listAllTools(
+    session: StdioSession,
+    config: MCPServerConfig,
+    context: MCPExecutionContext
+  ): Promise<MCPToolDefinition[]> {
+    const tools: MCPToolDefinition[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_TOOL_LIST_PAGES; page += 1) {
+      const response = await this.sendRpc(session, "tools/list", cursor ? { cursor } : {}, normalizeTimeoutMs(config), {
+        ...(context.signal ? { signal: context.signal } : {})
+      });
+      const result = toRecord(response.result);
+      tools.push(...normalizeDiscoveredTools(config.serverId, config.label ?? this.definition.label, result.tools));
+      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
+      if (!cursor) break;
+    }
+    session.outputSchemas = new Map(tools.map((tool) => [tool.name, tool.outputSchema]));
+    return tools;
+  }
+
   async discoverTools(config: MCPServerConfig, context: MCPExecutionContext): Promise<MCPToolDefinition[]> {
     const session = await this.getOrCreateSession(config, context);
-    const response = await this.sendRpc(session, "tools/list", {}, normalizeTimeoutMs(config));
-    return normalizeDiscoveredTools(
-      config.serverId,
-      config.label ?? this.definition.label,
-      toRecord(response.result).tools
-    );
+    return this.listAllTools(session, config, context);
+  }
+
+  /** The tool's outputSchema, listing the tools once per session when needed. Unknown → undefined. */
+  private async outputSchemaFor(
+    session: StdioSession,
+    toolName: string,
+    config: MCPServerConfig,
+    context: MCPExecutionContext
+  ): Promise<Record<string, unknown> | undefined> {
+    if (!session.outputSchemas) {
+      try {
+        await this.listAllTools(session, config, context);
+      } catch (error) {
+        if (error instanceof McpRequestCanceledError) throw error;
+        session.outputSchemas = new Map();
+      }
+    }
+    return session.outputSchemas?.get(toolName);
+  }
+
+  private callTool(
+    session: StdioSession,
+    toolName: string,
+    args: Record<string, unknown>,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    timeoutMs: number
+  ): Promise<JsonRpcResponse> {
+    const onProgress = context.onProgress;
+    const progressToken = onProgress ? `l2m-progress-${session.rpcCounter + 1}-${Date.now().toString(36)}` : undefined;
+    return this.sendRpc(session, "tools/call", { name: toolName, arguments: args }, timeoutMs, {
+      ...(context.signal ? { signal: context.signal } : {}),
+      ...(progressToken && onProgress
+        ? {
+            progressToken,
+            onProgress: (progress: ParsedProgress) =>
+              onProgress(
+                toProgressEventFor(progress, toolName, config)
+              )
+          }
+        : {})
+    });
   }
 
   async invokeTool(
@@ -581,15 +797,16 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       let session = await this.getOrCreateSession(config, context);
       let response: JsonRpcResponse;
       try {
-        response = await this.sendRpc(session, "tools/call", { name: toolName, arguments: args }, timeoutMs);
+        response = await this.callTool(session, toolName, args, config, context, timeoutMs);
       } catch (firstError) {
-        if (!session.closed || session.closedByClient) {
+        if (!session.closed || session.closedByClient || firstError instanceof McpRequestCanceledError) {
           throw firstError;
         }
         session = await this.getOrCreateSession(config, context, { forceNew: true });
-        response = await this.sendRpc(session, "tools/call", { name: toolName, arguments: args }, timeoutMs);
+        response = await this.callTool(session, toolName, args, config, context, timeoutMs);
       }
-      return { ok: true, output: normalizeToolCallOutput(response.result) };
+      const outputSchema = await this.outputSchemaFor(session, toolName, config, context);
+      return buildToolCallResult(toolName, response.result, outputSchema);
     } catch (error) {
       return {
         ok: false,

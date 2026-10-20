@@ -2709,3 +2709,22 @@
     transition: none;
   }
 }
+
+/* Phase 10.5 — MCP tool progress reported while a node runs. */
+.run-tape-progress-fill {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--fg);
+  opacity: 0.55;
+}
+
+.run-tape-progress {
+  grid-column: 2 / 4;
+  font: 400 var(--fs-xs) var(--font-mono);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -1,6 +1,7 @@
 import type { McpHiddenTool, McpToolAnnotations, MCPServerConfig, ToolDefinition } from "@ai-orchestrator/shared";
 import type { MCPRegistry } from "./registry";
 import { McpToolPolicyError } from "./tool-policy";
+import { toAgentToolOutput } from "./structured-output";
 import type { MCPExecutionContext, ResolvedMCPTool } from "./types";
 
 export interface ResolvedToolSet {
@@ -10,6 +11,11 @@ export interface ResolvedToolSet {
   hidden: McpHiddenTool[];
   /** Why a tool name is not in the set, when the access check removed it. */
   describeBlocked: (toolName: string) => string | undefined;
+  /**
+   * Calls the tool and returns what the agent's model should see: the
+   * structured result when the tool returned one (with its text content when
+   * that says more than the JSON), otherwise the text output.
+   */
   invokeByExposedName: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -51,6 +57,7 @@ export async function resolveMCPTools(
       annotations?: McpToolAnnotations;
     }
   >();
+
 
   for (const serverConfig of serverConfigs) {
     const adapter = registry.get(serverConfig.serverId);
@@ -99,6 +106,7 @@ export async function resolveMCPTools(
         serverId: serverConfig.serverId,
         ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
         ...(tool.annotations ? { annotations: tool.annotations } : {}),
+        ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
         definition: {
           name: exposedName,
           description: `[${serverConfig.serverId}] ${tool.description}`,
@@ -147,7 +155,7 @@ export async function resolveMCPTools(
       if (!result.ok) {
         throw new Error(result.error ?? `Tool ${toolName} failed`);
       }
-      return result.output;
+      return toAgentToolOutput(result);
     }
   };
 }

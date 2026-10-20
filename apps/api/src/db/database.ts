@@ -7,8 +7,10 @@ import type {
   Folder,
   McpPolicyRole,
   McpClient,
+  McpOAuthConnectionState,
   McpToolAnnotations,
   McpToolClassificationOverride,
+  McpToolHintCondition,
   McpToolPolicyRule,
   McpToolset,
   McpToolsetMember,
@@ -17,7 +19,7 @@ import type {
   Workflow,
   WorkflowListItem
 } from "@ai-orchestrator/shared";
-import { DEFAULT_PROJECT_ID, MCP_POLICY_ROLES } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS } from "@ai-orchestrator/shared";
 
 type BindParams = unknown[];
 
@@ -453,10 +455,17 @@ export interface McpToolSnapshotRecord {
   id: string;
   serverId: string;
   hash: string;
-  tools: Array<{ name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: McpToolAnnotations }>;
+  tools: Array<{
+    name: string;
+    description?: string;
+    inputSchema: Record<string, unknown>;
+    annotations?: McpToolAnnotations;
+    /** Phase 10.5 — present only when the server declared one. */
+    outputSchema?: Record<string, unknown>;
+  }>;
   toolCount: number;
   previousSnapshotId: string | null;
-  changes: Array<{ tool: string; kind: string; path?: string; breaking: boolean; detail: string }>;
+  changes: Array<{ tool: string; kind: string; path?: string; schema?: "output"; breaking: boolean; detail: string }>;
   breaking: boolean;
   acknowledgedAt: string | null;
   acknowledgedBy: string | null;
@@ -631,6 +640,7 @@ interface McpToolPolicyRow {
   roles_json: string | null;
   server_id: string | null;
   tool_pattern: string;
+  annotation_hint?: string | null;
   enabled: number;
   created_by: string | null;
   created_at: string;
@@ -638,6 +648,7 @@ interface McpToolPolicyRow {
 }
 
 function mapMcpToolPolicy(row: McpToolPolicyRow): McpToolPolicyRule {
+  const hint = row.annotation_hint ? toString(row.annotation_hint) : null;
   const roles = row.roles_json ? safeJsonParse(toString(row.roles_json)) : [];
   return {
     id: toString(row.id),
@@ -650,9 +661,73 @@ function mapMcpToolPolicy(row: McpToolPolicyRow): McpToolPolicyRule {
       : [],
     serverId: row.server_id ? toString(row.server_id) : null,
     toolPattern: toString(row.tool_pattern) || "*",
+    annotationHint:
+      hint && MCP_TOOL_HINT_CONDITIONS.includes(hint as McpToolHintCondition) ? (hint as McpToolHintCondition) : null,
     enabled: toNumber(row.enabled) === 1,
     createdBy: row.created_by ? toString(row.created_by) : null,
     createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
+export interface McpOAuthConnectionRecord {
+  serverId: string;
+  /** SecretService secret holding tokens and the client registration; never returned by the API. */
+  secretId: string | null;
+  state: McpOAuthConnectionState;
+  subject: string | null;
+  scope: string | null;
+  authorizationServer: string | null;
+  clientRegistration: "dynamic" | "pre_registered" | null;
+  clientId: string | null;
+  expiresAt: string | null;
+  hasRefreshToken: boolean;
+  lastRefreshAt: string | null;
+  connectedAt: string | null;
+  connectedBy: string | null;
+  lastError: string | null;
+  updatedAt: string;
+}
+
+interface McpOAuthConnectionRow {
+  server_id: string;
+  secret_id: string | null;
+  state: string;
+  subject: string | null;
+  scope: string | null;
+  authorization_server: string | null;
+  client_registration: string | null;
+  client_id: string | null;
+  expires_at: string | null;
+  has_refresh_token: number;
+  last_refresh_at: string | null;
+  connected_at: string | null;
+  connected_by: string | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
+const MCP_OAUTH_STATES: readonly McpOAuthConnectionState[] = ["not_connected", "connected", "expired", "error"];
+
+function mapMcpOAuthConnection(row: McpOAuthConnectionRow): McpOAuthConnectionRecord {
+  const state = toString(row.state) as McpOAuthConnectionState;
+  const registration = row.client_registration ? toString(row.client_registration) : null;
+  const optional = (value: unknown) => (value === null || value === undefined || value === "" ? null : toString(value));
+  return {
+    serverId: toString(row.server_id),
+    secretId: optional(row.secret_id),
+    state: MCP_OAUTH_STATES.includes(state) ? state : "not_connected",
+    subject: optional(row.subject),
+    scope: optional(row.scope),
+    authorizationServer: optional(row.authorization_server),
+    clientRegistration: registration === "dynamic" || registration === "pre_registered" ? registration : null,
+    clientId: optional(row.client_id),
+    expiresAt: optional(row.expires_at),
+    hasRefreshToken: toNumber(row.has_refresh_token) === 1,
+    lastRefreshAt: optional(row.last_refresh_at),
+    connectedAt: optional(row.connected_at),
+    connectedBy: optional(row.connected_by),
+    lastError: optional(row.last_error),
     updatedAt: toString(row.updated_at)
   };
 }
@@ -1754,6 +1829,31 @@ export class SqliteStore {
       );
     `);
     this.ensureWorkflowCreatedByColumn();
+    // Phase 10.5 — rules can require an annotation hint (destructive, read-only, ...).
+    this.ensureColumn("mcp_tool_policies", "annotation_hint", "TEXT");
+
+    // Phase 10.5 — OAuth connections to remote MCP servers. Tokens and client
+    // secrets live only in the SecretService secret `secret_id` names; this
+    // row holds what the UI may show.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_oauth_connections (
+        server_id TEXT PRIMARY KEY,
+        secret_id TEXT,
+        state TEXT NOT NULL DEFAULT 'not_connected',
+        subject TEXT,
+        scope TEXT,
+        authorization_server TEXT,
+        client_registration TEXT,
+        client_id TEXT,
+        expires_at TEXT,
+        has_refresh_token INTEGER NOT NULL DEFAULT 0,
+        last_refresh_at TEXT,
+        connected_at TEXT,
+        connected_by TEXT,
+        last_error TEXT,
+        updated_at TEXT NOT NULL
+      );
+    `);
 
     // Phase 10.4 — MCP gateway: toolsets, their members, client credentials,
     // and the source / client of each telemetry row.
@@ -7461,6 +7561,7 @@ export class SqliteStore {
       this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_oauth_connections WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_servers WHERE id = ?`, [id]);
     })();
     return true;
@@ -7699,6 +7800,62 @@ export class SqliteStore {
   // Phase 10.2 — MCP tool policy
   // ---------------------------------------------------------------------------
 
+  // Phase 10.5 — OAuth connection status rows (no tokens).
+
+  getMcpOAuthConnection(serverId: string): McpOAuthConnectionRecord | null {
+    const row = this.queryOne<McpOAuthConnectionRow>(`SELECT * FROM mcp_oauth_connections WHERE server_id = ?`, [serverId]);
+    return row ? mapMcpOAuthConnection(row) : null;
+  }
+
+  upsertMcpOAuthConnection(record: Omit<McpOAuthConnectionRecord, "updatedAt">): McpOAuthConnectionRecord {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO mcp_oauth_connections (
+         server_id, secret_id, state, subject, scope, authorization_server, client_registration, client_id,
+         expires_at, has_refresh_token, last_refresh_at, connected_at, connected_by, last_error, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(server_id) DO UPDATE SET
+         secret_id = excluded.secret_id,
+         state = excluded.state,
+         subject = excluded.subject,
+         scope = excluded.scope,
+         authorization_server = excluded.authorization_server,
+         client_registration = excluded.client_registration,
+         client_id = excluded.client_id,
+         expires_at = excluded.expires_at,
+         has_refresh_token = excluded.has_refresh_token,
+         last_refresh_at = excluded.last_refresh_at,
+         connected_at = excluded.connected_at,
+         connected_by = excluded.connected_by,
+         last_error = excluded.last_error,
+         updated_at = excluded.updated_at`,
+      [
+        record.serverId,
+        record.secretId,
+        record.state,
+        record.subject,
+        record.scope,
+        record.authorizationServer,
+        record.clientRegistration,
+        record.clientId,
+        record.expiresAt,
+        record.hasRefreshToken ? 1 : 0,
+        record.lastRefreshAt,
+        record.connectedAt,
+        record.connectedBy,
+        record.lastError,
+        now
+      ]
+    );
+    return this.getMcpOAuthConnection(record.serverId)!;
+  }
+
+  deleteMcpOAuthConnection(serverId: string): boolean {
+    if (!this.getMcpOAuthConnection(serverId)) return false;
+    this.exec(`DELETE FROM mcp_oauth_connections WHERE server_id = ?`, [serverId]);
+    return true;
+  }
+
   /** Rules in evaluation order: oldest first. */
   listMcpToolPolicies(): McpToolPolicyRule[] {
     return this.queryAll<McpToolPolicyRow>(`SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, rowid ASC`).map(
@@ -7715,9 +7872,9 @@ export class SqliteStore {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_tool_policies (
-         id, name, description, effect, project_id, roles_json, server_id, tool_pattern, enabled,
+         id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, enabled,
          created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.name,
@@ -7727,6 +7884,7 @@ export class SqliteStore {
         JSON.stringify(input.roles),
         input.serverId,
         input.toolPattern,
+        input.annotationHint ?? null,
         input.enabled ? 1 : 0,
         input.createdBy ?? null,
         now,
@@ -7738,7 +7896,9 @@ export class SqliteStore {
 
   updateMcpToolPolicy(
     id: string,
-    patch: Partial<Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "enabled">>
+    patch: Partial<
+      Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "annotationHint" | "enabled">
+    >
   ): McpToolPolicyRule | null {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
@@ -7749,6 +7909,7 @@ export class SqliteStore {
     if (patch.roles !== undefined) { fields.push("roles_json = ?"); params.push(JSON.stringify(patch.roles)); }
     if (patch.serverId !== undefined) { fields.push("server_id = ?"); params.push(patch.serverId); }
     if (patch.toolPattern !== undefined) { fields.push("tool_pattern = ?"); params.push(patch.toolPattern); }
+    if (patch.annotationHint !== undefined) { fields.push("annotation_hint = ?"); params.push(patch.annotationHint ?? null); }
     if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
     if (fields.length > 0) {
       fields.push("updated_at = ?");

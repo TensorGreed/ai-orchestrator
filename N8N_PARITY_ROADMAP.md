@@ -450,13 +450,13 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 - [x] Client credentials: per-client tokens hashed at rest, each scoped to toolsets and a role; a "Connect a client" page with copy-paste config snippets and per-client usage
 
 ### 10.5 Protocol coverage on the client side
-- [ ] Structured tool output: `outputSchema` and `structuredContent` kept in snapshots, validated, and passed to downstream nodes as typed data
-- [ ] Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) captured, shown on the registry page and used by policy and approvals
+- [x] Structured tool output: `outputSchema` and `structuredContent` kept in snapshots, validated, and passed to downstream nodes as typed data
+- [x] Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) captured, shown on the registry page and used by policy and approvals
 - [ ] Resources and prompts: browse and read resources, use server prompts as templates in agent and LLM nodes; `list_changed` notifications trigger a re-probe
-- [ ] Progress notifications streamed to the run tape; cancelling a run sends `notifications/cancelled` to in-flight tool calls
+- [x] Progress notifications streamed to the run tape; cancelling a run sends `notifications/cancelled` to in-flight tool calls
 - [ ] Elicitation: a server asking for user input pauses the run through the existing wait/resume and clarification plumbing
 - [ ] Sampling: servers may request completions through the agent's attached chat model, gated by policy and counted in cost telemetry
-- [ ] OAuth 2.1 for remote MCP servers (metadata discovery, PKCE, dynamic client registration, token refresh) with tokens held by `SecretService`
+- [x] OAuth 2.1 for remote MCP servers (metadata discovery, PKCE, dynamic client registration, token refresh) with tokens held by `SecretService`
 
 ### 10.6 Onboarding and catalog
 - [x] Import existing MCP client config files (`mcp.json`, `.vscode/mcp.json` and desktop-assistant configs) into the registry in one step, turning env values into secrets

@@ -922,7 +922,7 @@ describe("MCP gateway schema", () => {
   it("ships Postgres migration v23 with the gateway tables, telemetry columns and a reversing down", () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 23);
     expect(migration).toBeDefined();
-    expect(Math.max(...MIGRATIONS.map((entry) => entry.version))).toBe(23);
+    expect(Math.max(...MIGRATIONS.map((entry) => entry.version))).toBeGreaterThanOrEqual(23);
     for (const table of ["mcp_toolsets", "mcp_toolset_members", "mcp_clients"]) {
       expect(migration!.up).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
       expect(migration!.down).toContain(`DROP TABLE IF EXISTS ${table}`);

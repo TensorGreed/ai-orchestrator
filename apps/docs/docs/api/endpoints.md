@@ -20,6 +20,7 @@
 - `GET /api/workflows/:id/export`
 - `POST /api/workflows/:id/validate`
 - `POST /api/workflows/:id/execute`
+- `POST /api/workflows/:id/execute/stream` — SSE: `node_start`, `node_complete`, `llm_delta`, `node_progress` (MCP progress: `nodeId`, `toolName`, `serverId`, `registryServerId`, `progress`, `total`, `percent`, `message`, `at`), `result`
 
 ## Execution history
 
@@ -47,6 +48,11 @@ See [MCP server registry](../product/mcp-server-registry.md).
 - `GET /api/mcp/servers/:id/snapshots/:snapshotId`
 - `POST /api/mcp/servers/:id/accept-change`
 - `GET /api/mcp/servers/:id/telemetry?window=24h|7d|30d`
+- `GET /api/mcp/servers/:id/oauth` (builder; OAuth connection status, never tokens)
+- `POST /api/mcp/servers/:id/oauth/connect` (admin; `{ scope? }` → `{ authorizationUrl, expiresAt, redirectUri }`)
+- `POST /api/mcp/servers/:id/oauth/refresh` (admin)
+- `DELETE /api/mcp/servers/:id/oauth` (admin)
+- `GET /api/mcp/oauth/callback?code=&state=` (authorization server redirect target; see [OAuth for remote servers](../product/mcp-server-registry.md#oauth-for-remote-servers))
 - `GET /api/mcp/telemetry?window=24h|7d|30d` (servers configured inline on nodes)
 
 ## MCP tool policy
@@ -54,7 +60,7 @@ See [MCP server registry](../product/mcp-server-registry.md).
 See [MCP tool policy](../product/mcp-tool-policy.md).
 
 - `GET /api/mcp/policies` (builder)
-- `POST /api/mcp/policies` (admin)
+- `POST /api/mcp/policies` (admin; optional `annotationHint`, see [Annotation conditions](../product/mcp-tool-policy.md#annotation-conditions))
 - `PUT /api/mcp/policies/:id` (admin)
 - `DELETE /api/mcp/policies/:id` (admin)
 - `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, noWriteTools? }`)

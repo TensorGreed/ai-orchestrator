@@ -1148,6 +1148,35 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS mcp_toolset_members;
       DROP TABLE IF EXISTS mcp_toolsets;
     `
+  },
+  {
+    version: 24,
+    description: "Phase 10.5 — MCP client protocol coverage (mcp_tool_policies.annotation_hint, mcp_oauth_connections)",
+    up: `
+      ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS annotation_hint TEXT;
+
+      CREATE TABLE IF NOT EXISTS mcp_oauth_connections (
+        server_id TEXT PRIMARY KEY,
+        secret_id TEXT,
+        state TEXT NOT NULL DEFAULT 'not_connected',
+        subject TEXT,
+        scope TEXT,
+        authorization_server TEXT,
+        client_registration TEXT,
+        client_id TEXT,
+        expires_at TIMESTAMPTZ,
+        has_refresh_token INTEGER NOT NULL DEFAULT 0,
+        last_refresh_at TIMESTAMPTZ,
+        connected_at TIMESTAMPTZ,
+        connected_by TEXT,
+        last_error TEXT,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+    `,
+    down: `
+      DROP TABLE IF EXISTS mcp_oauth_connections;
+      ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS annotation_hint;
+    `
   }
 ];
 

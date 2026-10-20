@@ -394,7 +394,7 @@ export const openApiSpec = {
         summary: "Execute a workflow with SSE streaming",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
-          "200": { description: "SSE stream of node_start, node_complete, llm_delta, result events", content: { "text/event-stream": { schema: { type: "string" } } } },
+          "200": { description: "SSE stream of node_start, node_complete, llm_delta, node_progress (MCP progress notifications: nodeId, toolName, serverId, registryServerId, progress, total, percent, message, at), result events", content: { "text/event-stream": { schema: { type: "string" } } } },
           "404": { description: "Workflow not found" }
         }
       }
@@ -1128,6 +1128,62 @@ export const openApiSpec = {
         responses: { "200": { description: "Probe outcome, updated server and any new snapshot" } }
       }
     },
+    "/api/mcp/servers/{id}/oauth": {
+      get: {
+        tags: ["MCP"],
+        summary: "OAuth connection status for a registry server (builder). Never includes tokens.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ status: state, subject, scope, authorizationServer, clientRegistration, clientId, expiresAt, hasRefreshToken, lastRefreshAt, connectedAt, connectedBy, lastError, redirectUri }, usesOAuth" },
+          "404": { description: "MCP server not found" }
+        }
+      },
+      delete: {
+        tags: ["MCP"],
+        summary: "Disconnect (admin): delete the stored tokens and client registration",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ status }" }, "403": { description: "Not an admin" }, "404": { description: "MCP server not found" } }
+      }
+    },
+    "/api/mcp/servers/{id}/oauth/connect": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Start the OAuth 2.1 authorization code flow (admin): discovery (RFC 9728, RFC 8414 / OIDC), dynamic client registration (RFC 7591) when no client id is configured, PKCE S256 and the RFC 8707 resource parameter. Needs a browser session.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", properties: { scope: { type: "string", maxLength: 1000 } } } } }
+        },
+        responses: {
+          "200": { description: "{ authorizationUrl, expiresAt, redirectUri } — open authorizationUrl in a popup" },
+          "400": { description: "Server does not use OAuth, or no browser session" },
+          "403": { description: "Not an admin" },
+          "502": { description: "Discovery or client registration failed" }
+        }
+      }
+    },
+    "/api/mcp/servers/{id}/oauth/refresh": {
+      post: {
+        tags: ["MCP"],
+        summary: "Refresh the access token now (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ status }" }, "403": { description: "Not an admin" }, "409": { description: "Refresh failed or not connected" } }
+      }
+    },
+    "/api/mcp/oauth/callback": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "Redirect target for the authorization server. Validates the single-use, session-bound state, exchanges the code and renders a page that posts { type: 'l2m:mcp-oauth', serverId, ok, error } to the opener.",
+        parameters: [
+          { name: "code", in: "query", required: false, schema: { type: "string" } },
+          { name: "state", in: "query", required: true, schema: { type: "string" } },
+          { name: "error", in: "query", required: false, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "HTML: connected" }, "400": { description: "HTML: refused (unknown, used or expired state, other session, token error)" } }
+      }
+    },
     "/api/mcp/servers/{id}/snapshots/{snapshotId}": {
       get: {
         tags: ["MCP"],
@@ -1190,6 +1246,12 @@ export const openApiSpec = {
                   roles: { type: "array", items: { type: "string", enum: ["admin", "builder", "operator", "viewer"] }, description: "empty = every role" },
                   serverId: { type: "string", nullable: true, description: "Registry server id, or an adapter id for inline servers; null = any server" },
                   toolPattern: { type: "string", default: "*", description: "Tool name, or a glob where * matches any characters" },
+                  annotationHint: {
+                    type: "string",
+                    nullable: true,
+                    enum: ["destructive", "not_destructive", "read_only", "not_read_only", "idempotent", "not_idempotent", "open_world", "not_open_world"],
+                    description: "Only match tools whose effective annotation hints meet this condition (missing hints use the MCP defaults)"
+                  },
                   enabled: { type: "boolean", default: true }
                 }
               }

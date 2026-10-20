@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import type { NodeProgressSnapshot, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { formatLatency } from "./WorkflowCanvasNode";
 
 export interface RunTapeProps {
@@ -19,6 +19,26 @@ export interface TapeLane {
   /** Provider-call latency inside the node, ms (LLM time). */
   llmMs: number | null;
   error?: string;
+  /** Phase 10.5 — latest MCP tool progress the node reported. */
+  progress?: NodeProgressSnapshot;
+}
+
+/** 0..100 when the server sent a total, else null. */
+export function progressPercent(progress: NodeProgressSnapshot): number | null {
+  if (typeof progress.percent === "number" && Number.isFinite(progress.percent)) {
+    return Math.max(0, Math.min(100, Math.round(progress.percent)));
+  }
+  if (typeof progress.total === "number" && progress.total > 0) {
+    return Math.max(0, Math.min(100, Math.round((progress.progress / progress.total) * 100)));
+  }
+  return null;
+}
+
+/** "tool search_issues: 40% — indexing" */
+export function formatProgress(progress: NodeProgressSnapshot): string {
+  const percent = progressPercent(progress);
+  const amount = percent !== null ? `${percent}%` : `progress ${progress.progress}`;
+  return `tool ${progress.toolName}: ${amount}${progress.message ? ` — ${progress.message}` : ""}`;
 }
 
 function toMs(value: unknown): number | null {
@@ -58,7 +78,8 @@ export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, 
       startMs,
       durationMs: duration,
       llmMs,
-      error: result.error
+      error: result.error,
+      ...(result.progress ? { progress: result.progress } : {})
     };
   });
 
@@ -100,7 +121,8 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
             `${lane.label} (${lane.nodeId})`,
             `${lane.status} · ${formatLatency(lane.durationMs)}`,
             lane.llmMs !== null ? `LLM ${formatLatency(lane.llmMs)}` : null,
-            lane.error ? `error: ${lane.error}` : null
+            lane.error ? `error: ${lane.error}` : null,
+            lane.progress ? formatProgress(lane.progress) : null
           ]
             .filter(Boolean)
             .join("\n");
@@ -121,11 +143,19 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
               <span className="run-tape-track" role="cell">
                 <i className={`run-tape-bar run-tape-bar-${lane.status}`} style={{ left: `${left}%`, width: `${width}%` }}>
                   {llmWidth > 0 && <i className="run-tape-llm" style={{ width: `${llmWidth}%` }} />}
+                  {lane.progress && lane.status === "running" && progressPercent(lane.progress) !== null && (
+                    <i className="run-tape-progress-fill" style={{ width: `${progressPercent(lane.progress)}%` }} />
+                  )}
                 </i>
               </span>
               <span className="run-tape-time" role="cell">
                 {formatLatency(lane.durationMs)}
               </span>
+              {lane.progress && (
+                <span className="run-tape-progress" role="cell">
+                  {formatProgress(lane.progress)}
+                </span>
+              )}
             </Tag>
           );
         })}

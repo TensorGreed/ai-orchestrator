@@ -1,5 +1,6 @@
 import type {
   McpToolAnnotations,
+  McpToolProgressEvent,
   MCPServerConfig,
   MCPServerDefinition,
   MCPToolDefinition,
@@ -11,6 +12,31 @@ import type {
 export interface MCPExecutionContext {
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   runtimeState?: Map<string, unknown>;
+  /**
+   * Phase 10.5 — the run's abort signal. When it fires, adapters send
+   * `notifications/cancelled` for every in-flight request before they stop
+   * waiting (HTTP: and abort the fetch).
+   */
+  signal?: AbortSignal;
+  /**
+   * Phase 10.5 — receives `notifications/progress` for `tools/call` requests.
+   * Setting it makes adapters send a `progressToken` with each call.
+   */
+  onProgress?: (event: McpToolProgressEvent) => void;
+}
+
+/**
+ * Phase 10.5 — hands the http adapter an OAuth access token for a registry
+ * server whose connection uses `authType: "oauth"`. The API implements it on
+ * top of SecretService; tokens never pass through node configs.
+ */
+export interface McpOAuthTokenProvider {
+  /**
+   * A valid access token, refreshed first when it is close to expiry or when
+   * `forceRefresh` is set (the server answered 401). Throws with an
+   * actionable message when the server is not connected.
+   */
+  getAccessToken(registryServerId: string, options?: { forceRefresh?: boolean }): Promise<string>;
 }
 
 export interface MCPServerAdapter {
@@ -38,5 +64,7 @@ export interface ResolvedMCPTool {
   registryServerId?: string;
   /** Phase 10.2 — annotations the server sent for this tool. */
   annotations?: McpToolAnnotations;
+  /** Phase 10.5 — the tool's outputSchema, when declared. */
+  outputSchema?: Record<string, unknown>;
   definition: ToolDefinition;
 }

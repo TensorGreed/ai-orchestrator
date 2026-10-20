@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { McpPolicyRole, McpToolPolicyRule, Project } from "@ai-orchestrator/shared";
+import type { McpPolicyRole, McpToolHintCondition, McpToolPolicyRule, Project } from "@ai-orchestrator/shared";
 import {
   ApiError,
   type McpRegisteredServer,
@@ -44,6 +44,23 @@ function serverLabel(serverId: string | null, lookups: ScopeLookups): string {
   const registered = lookups.servers.find((server) => server.id === serverId);
   if (registered) return registered.name;
   return `${serverId} (inline)`;
+}
+
+/** Phase 10.5 — annotation conditions a rule can require, in the order the form lists them. */
+export const HINT_CONDITION_LABELS: Array<{ value: McpToolHintCondition; label: string }> = [
+  { value: "destructive", label: "Destructive tools" },
+  { value: "not_destructive", label: "Non-destructive tools" },
+  { value: "read_only", label: "Read-only tools" },
+  { value: "not_read_only", label: "Not read-only tools" },
+  { value: "idempotent", label: "Idempotent tools" },
+  { value: "not_idempotent", label: "Not idempotent tools" },
+  { value: "open_world", label: "Open-world tools" },
+  { value: "not_open_world", label: "Closed-world tools" }
+];
+
+function hintLabel(hint: McpToolHintCondition | null | undefined): string {
+  if (!hint) return "Any tool";
+  return HINT_CONDITION_LABELS.find((entry) => entry.value === hint)?.label ?? hint;
 }
 
 function rolesLabel(roles: McpPolicyRole[]): string {
@@ -220,6 +237,12 @@ export function McpPoliciesView({
                     <dt>Server</dt>
                     <dd>{serverLabel(rule.serverId, lookups)}</dd>
                   </div>
+                  {rule.annotationHint && (
+                    <div>
+                      <dt>Annotation</dt>
+                      <dd>{hintLabel(rule.annotationHint)}</dd>
+                    </div>
+                  )}
                   <div>
                     <dt>Roles</dt>
                     <dd>{rolesLabel(rule.roles)}</dd>
@@ -285,6 +308,7 @@ function McpPolicyForm({
   const [roles, setRoles] = useState<McpPolicyRole[]>(initial?.roles ?? []);
   const [serverId, setServerId] = useState(initial?.serverId ?? "");
   const [toolPattern, setToolPattern] = useState(initial?.toolPattern ?? "*");
+  const [annotationHint, setAnnotationHint] = useState<McpToolHintCondition | "">(initial?.annotationHint ?? "");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -303,6 +327,7 @@ function McpPolicyForm({
       roles,
       serverId: serverId || null,
       toolPattern: toolPattern.trim() || "*",
+      annotationHint: annotationHint || null,
       enabled
     };
     setBusy(true);
@@ -367,6 +392,27 @@ function McpPolicyForm({
             placeholder="* or create_* or search_issues"
             spellCheck={false}
           />
+        </label>
+      </div>
+      <div className="kb-form-row">
+        <label>
+          Annotation
+          <select
+            aria-label="Annotation condition"
+            value={annotationHint}
+            onChange={(event) => setAnnotationHint(event.target.value as McpToolHintCondition | "")}
+          >
+            <option value="">Any tool</option>
+            {HINT_CONDITION_LABELS.map((entry) => (
+              <option key={entry.value} value={entry.value}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+          <small className="kb-subtle">
+            Matches the hints a server sends with its tools. Missing hints count as the MCP defaults: not read-only,
+            destructive, not idempotent, open world. An admin's read-only override wins.
+          </small>
         </label>
       </div>
       <div className="kb-form-row kb-form-row-2">

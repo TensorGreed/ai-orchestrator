@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@ai-orchestrator/shared": "workspace:*"
+    "@ai-orchestrator/shared": "workspace:*",
+    "ajv": "8.18.0"
   }
 }

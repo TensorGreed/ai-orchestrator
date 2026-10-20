@@ -92,6 +92,6 @@ describe("HttpMCPServerAdapter tool errors", () => {
     expect(failed.error).toBe("upstream said no");
 
     const ok = await adapter.invokeTool("works", {}, config, context);
-    expect(ok).toEqual({ ok: true, output: "fine" });
+    expect(ok).toEqual({ ok: true, output: "fine", content: "fine" });
   });
 });
