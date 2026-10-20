@@ -420,7 +420,7 @@ beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to
 
 ## Phase 10: MCP Control Plane (after Phase 9)
 
-**Positioning:** L2M is self-hosted. Everything in Phases 10-12 runs inside the user's own
+**Positioning:** L2M is self-hosted. Everything in Phases 10-14 runs inside the user's own
 deployment (SQLite or Postgres, single binary or docker compose). No hosted service, no
 phone-home, no vendor-side registry; anything that would need a shared backend is designed
 as a local file or an endpoint on the user's own instance.
@@ -466,7 +466,7 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 ### 10.7 Runtime safety
 - [ ] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default
 - [ ] Per-server and per-tool rate limits, concurrency caps and a circuit breaker that opens on repeated failures and shows on the registry page
-- [ ] Tool output guard: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace
+- [ ] Tool output guard: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace (delivered by Phase 12, L2M Guard)
 - [ ] Delegated credentials: a tool call can use the triggering user's own token for a server instead of a shared service secret
 
 ### 10.8 Testing and reliability
@@ -486,7 +486,125 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 - [ ] Approvals inbox page and notifications through the existing notification channels; approve/reject from the Runs page with a reason that lands in the manifest
 - [ ] Agent-level gate: require approval before any tool classified as a write tool is called (configurable per workflow)
 
-## Phase 12: Future (not scheduled)
+## Phase 12: L2M Guard — security proxy for AI traffic
+
+**Why:** agents now read untrusted content (web pages, emails, tickets, tool results) and hold
+write access to real systems. A guard that sits on every trust boundary, understands where data
+came from and enforces policy on what an agent may do turns L2M from a builder into the safe way
+to run agents.
+
+**Design principles**
+- One guard engine, four enforcement points: an explicit `guard` node on DAG edges; a `guard`
+  attachment port on agents whose hooks run inside the agent loop (before each model call, before
+  each tool call, after each tool result, before the final answer), which is how agent ↔ MCP
+  traffic is covered without breaking attachment-port semantics; automatic guard profiles bound to
+  projects and workflows; and traffic entering through the MCP gateway (10.4) and the AI gateway (12.6).
+- Detect, then act: allow, block, redact, transform, require approval or route to review, with a
+  shadow mode for every action so policies can be observed before they are enforced.
+- Provenance over pattern matching: data carries labels for where it came from, so defences hold
+  against injection phrasings no detector has seen.
+- Self-hosted: rules, parsers and local models (ONNX runtime or Ollama) run in the deployment; an
+  LLM judge uses a model the workflow already has configured; no third-party scanning service.
+- Measured: every verdict is recorded and every profile is benchmarked against an attack corpus.
+
+### 12.1 Guard engine and placement
+- [ ] `packages/guard-sdk`: detector interface (content, channel — prompt, model output, tool arguments, tool result, final output —, provenance labels and run subject in; findings with score, span and evidence out) and `createDefaultGuardRegistry()`; community detectors through the node SDK
+- [ ] Guard profiles: named, versioned bundles of detectors, thresholds and actions per channel, stored as policy-as-code and synced through git
+- [ ] `guard` node for DAG edges with `pass`, `blocked` and `review` outputs, so flagged items can be routed instead of failing the run
+- [ ] `guard` attachment port on Agent and Supervisor nodes: hooks before each model call, before each tool call, after each tool result and before the final answer, also applied to worker delegation
+- [ ] Automatic boundary profiles per project and per workflow (inherit, override, or enforced by an admin so builders cannot remove them)
+- [ ] Actions: allow, block, redact or mask, transform, require approval (11.2), route to review; per-action shadow mode
+- [ ] Latency tiers: rules and parsers inline, local classifiers next, LLM judge only for uncertain scores; per-profile latency budget with an explicit fail-open or fail-closed choice
+
+### 12.2 Prompt-injection and jailbreak defence
+- [ ] Direct injection and jailbreak detection on user input: rule pack plus a local classifier model, with scores and highlighted spans
+- [ ] Indirect injection scanning of tool results, retrieved documents, web pages, emails and webhook payloads before the model sees them
+- [ ] Spotlighting: untrusted content wrapped with delimiters or datamarking, with matching system-prompt hardening applied automatically
+- [ ] Provenance (taint) tracking: values carry labels (trusted, user, untrusted external, sensitive) through templates, nodes and the agent context; policies such as "once untrusted content is in context, write tools need approval" and "sensitive data may not flow to open-world tools"
+- [ ] Exfiltration channels blocked: markdown images and links that encode data in URLs, unexpected outbound URLs in tool arguments, hidden-unicode and ASCII-smuggling payloads
+- [ ] Canary tokens in system prompts to detect prompt leakage in outputs
+
+### 12.3 Tool-argument security
+- [ ] SQL guard: statements parsed to an AST per dialect; read, write and DDL classified; stacked queries, tautologies and comment tricks blocked; table and column allowlists; mutations require WHERE and a row cap; applied to SQL connector nodes and SQL-shaped MCP arguments
+- [ ] Command guard: shell metacharacter and argument-injection checks for tools that run commands; static checks on code-node source
+- [ ] Path guard: path arguments resolved against allowed roots; traversal and symlink escapes blocked
+- [ ] Egress guard: URL arguments and HTTP nodes checked against an allowlist after DNS resolution; private ranges, link-local and cloud metadata addresses blocked
+- [ ] Strict argument validation against the tool's input schema with size and depth limits before every call
+
+### 12.4 Fine-grained access control for agents
+- [ ] Attribute-based policies on tool calls written in Cedar (embedded, open source): principal is the run subject (10.2) or gateway client, action is the server and tool, resource and context come from the arguments and data labels — e.g. "operators may create issues only in org X's repositories", "refunds above 500 need a manager's approval"
+- [ ] Delegated identity: tool calls carry the end user's identity to downstream systems (token exchange or on-behalf-of) so the target system's own IAM applies; builds on 10.7 delegated credentials
+- [ ] Least-privilege suggestions: from telemetry, propose a policy that allows only the tools and argument ranges a workflow actually uses
+- [ ] Policy simulation: replay recent runs against a draft policy and show what would have been blocked before enforcing it
+
+### 12.5 Data protection and output safety
+- [ ] DLP detectors: PII, PHI and card data (patterns with checksums plus a local NER model), credentials and keys, custom dictionaries and patterns
+- [ ] Reversible tokenisation: sensitive values replaced by tokens before the model call and restored only for authorised outputs, through a per-run token vault
+- [ ] Output checks: content-safety classifier, topic restrictions, schema conformance (extends `output_guardrail`), grounding check against retrieved citations
+- [ ] Guarded data also redacted in execution history, logs, traces and telemetry
+
+### 12.6 AI gateway for applications outside L2M
+- [ ] OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings` endpoints that apply a guard profile and route through the provider registry, so other applications send model traffic through the same guard, budgets and audit
+- [ ] Guard profiles applied per toolset and per client on the MCP gateway (10.4)
+- [ ] Per-client and per-project token budgets, rate limits and model allowlists
+
+### 12.7 Visibility and assurance
+- [ ] Every verdict stored (`guard_events`: channel, detector, score, action, masked evidence spans, profile version) and shown in the Trace tab, run tape and a Security page with trends
+- [ ] Guard events streamed to SIEM destinations through log streaming and included in signed run manifests (11.1)
+- [ ] Red-team corpus and benchmark: attack suites (direct and indirect injection, SQL injection, exfiltration, jailbreaks) run through the eval framework, reporting detection and false-positive rates per profile; CI gate on regressions
+- [ ] Framework mapping in the docs: OWASP Top 10 for LLM applications and for agentic applications, MITRE ATLAS, NIST AI RMF
+
+## Phase 13: Enterprise readiness
+
+**Why:** what a security review, a procurement questionnaire and a platform team need before L2M
+can run in production at a large organisation. L2M already has SAML, LDAP, MFA, SSO group
+mapping, custom roles, API keys, external secret stores, audit log with retention, log streaming,
+git-backed environments, Prometheus metrics, tracing and a Helm chart. The gaps below are ordered
+by what blocks adoption first. All of it stays self-hosted.
+
+### 13.1 Production data tier
+- [ ] Full Postgres parity: every SQLite store method implemented for Postgres (recent features ship schema-only there) and the whole API test suite run against Postgres in CI
+- [ ] Horizontal scaling: shared work queue (Postgres `SKIP LOCKED` or Redis) with stateless API replicas and worker pools, load-tested with several replicas
+- [ ] Zero-downtime upgrades: expand-and-contract migrations, rolling deploys, migration dry runs
+- [ ] Backup, restore and disaster-recovery runbook with stated RPO and RTO; restore drills in CI
+- [ ] External object storage for execution payloads and binaries (S3-compatible, server-side encryption with customer keys)
+
+### 13.2 Identity and access
+- [ ] OIDC single sign-on alongside SAML
+- [ ] SCIM 2.0 provisioning and deprovisioning of users and groups, with immediate session revocation
+- [ ] Session policy: idle and absolute timeouts, concurrent-session limits, MFA required per role, step-up authentication for sensitive actions
+- [ ] Network controls: IP allowlists for UI, API and webhooks, trusted-proxy configuration, mutual TLS option for the MCP gateway
+- [ ] Service accounts with scoped, rotating keys; break-glass admin access with alerting
+
+### 13.3 Data protection and tenancy
+- [ ] Envelope encryption with customer-managed keys (cloud KMS services and Vault Transit); master-key rotation without downtime
+- [ ] Retention per project for executions, logs and guard events; legal hold; data-subject export and deletion
+- [ ] Field-level encryption of execution inputs and outputs at rest
+- [ ] Organisations above projects: isolated tenants in one deployment with their own admins, SSO, keys and quotas
+
+### 13.4 Governance and change control
+- [ ] Environments as a first-class concept (dev, staging, prod) with promotion, diffs and required approvals; protected production workflows need a second reviewer before activation
+- [ ] Signed, attributable changes to workflows and policies; all admin configuration exportable as code and synced through git
+- [ ] Usage and cost chargeback per organisation, project and team, with budgets and alerts
+- [ ] Periodic access reviews: who can do what in each project, with attestation
+
+### 13.5 Supply chain and deployment
+- [ ] SBOM (CycloneDX) per release, signed container images and build provenance; vulnerability policy with a disclosure SLA in SECURITY.md
+- [ ] Air-gapped installation: offline image bundle, no outbound calls, bundled local guard models, documented ports and egress
+- [ ] FIPS 140-3 mode and hardened images (non-root, read-only filesystem, minimal base)
+- [ ] Kubernetes reference architecture (autoscaling, disruption budgets, network policies, external Postgres) and Terraform examples per cloud
+- [ ] Long-term-support release line with security backports and a published upgrade policy
+
+### 13.6 Compliance and trust
+- [ ] Control-mapping documents for customer audits (SOC 2, ISO 27001, HIPAA, GDPR, EU AI Act, NIST AI RMF) with a shared-responsibility model for self-hosted deployments
+- [ ] Security whitepaper, threat model and a third-party penetration-test summary; evidence export for auditors (audit log, access reviews, configuration snapshots)
+- [ ] Accessibility audit to WCAG 2.2 AA with a VPAT; localisation framework
+
+### 13.7 Commercial readiness
+- [ ] Editions and an offline-verifiable licence file (signed, no phone-home) for enterprise features; the open-core boundary is a product decision still to make
+- [ ] Support tiers with severity SLAs, an enterprise admin guide, a sizing guide and published performance benchmarks
+
+## Phase 14: Future (not scheduled)
 
 Ideas from the positioning discussion, kept for later; each must remain self-hosted.
 - [ ] Reference deployment bundles: docker compose profiles that ship L2M with a curated set of open-source MCP servers (GitHub, Postgres, filesystem, Slack) and five tested workflows; first bundle: security / key-management reporting
