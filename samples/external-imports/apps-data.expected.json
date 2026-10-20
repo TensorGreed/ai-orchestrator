@@ -1,0 +1,711 @@
+{
+  "workflow": {
+    "id": "wf-import-nightly_data_sync",
+    "name": "Nightly data sync",
+    "description": "Imported from an external workflow export (5 mapped, 8 approximated, 4 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "sheets_trigger",
+        "type": "google_sheets_trigger",
+        "name": "Sheets Trigger",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "config": {
+          "spreadsheetId": "1AbCdEfGhIjKlMnOp",
+          "range": "Orders!A:Z",
+          "authType": "accessToken",
+          "secretRef": {
+            "secretId": "import-google_sheets_access_token-sheets_account"
+          },
+          "pollIntervalSeconds": 900
+        }
+      },
+      {
+        "id": "read_orders",
+        "type": "google_sheets_read",
+        "name": "Read orders",
+        "position": {
+          "x": 240,
+          "y": 0
+        },
+        "config": {
+          "spreadsheetId": "1AbCdEfGhIjKlMnOp",
+          "range": "Orders!A:F",
+          "authType": "accessToken",
+          "secretRef": {
+            "secretId": "import-google_sheets_access_token-sheets_account"
+          }
+        }
+      },
+      {
+        "id": "append_summary",
+        "type": "google_sheets_append",
+        "name": "Append summary",
+        "position": {
+          "x": 480,
+          "y": 0
+        },
+        "config": {
+          "spreadsheetId": "1AbCdEfGhIjKlMnOp",
+          "range": "Summary",
+          "secretRef": {
+            "secretId": "import-google_sheets_access_token-sheets_account"
+          },
+          "values": [
+            [
+              "{{ $now.toISOString() }}",
+              "{{results.read_orders.values.length}}"
+            ]
+          ],
+          "valueInputOption": "RAW"
+        }
+      },
+      {
+        "id": "upsert_customer",
+        "type": "google_sheets_append",
+        "name": "Upsert customer",
+        "position": {
+          "x": 720,
+          "y": 0
+        },
+        "config": {
+          "spreadsheetId": "1AbCdEfGhIjKlMnOp",
+          "range": "Customers",
+          "secretRef": {
+            "secretId": "import-google_sheets_access_token-sheets_account"
+          },
+          "values": [],
+          "valueInputOption": "USER_ENTERED"
+        }
+      },
+      {
+        "id": "clear_sheet",
+        "type": "noop_node",
+        "name": "Clear sheet",
+        "position": {
+          "x": 0,
+          "y": 200
+        },
+        "config": {
+          "label": "Unsupported: googleSheets",
+          "importedFrom": {
+            "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 4.5,
+            "parameters": {
+              "operation": "clear",
+              "documentId": {
+                "__rl": true,
+                "value": "1AbCdEfGhIjKlMnOp",
+                "mode": "id"
+              },
+              "sheetName": {
+                "__rl": true,
+                "value": "Scratch",
+                "mode": "name"
+              }
+            },
+            "credentials": {
+              "googleSheetsOAuth2Api": "Sheets account"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "load_orders",
+        "type": "postgres_query",
+        "name": "Load orders",
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "config": {
+          "host": "",
+          "port": 5432,
+          "database": "",
+          "user": "",
+          "ssl": false,
+          "secretRef": {
+            "secretId": "import-postgres_password-warehouse"
+          },
+          "query": "SELECT * FROM orders WHERE created_at > $1",
+          "params": [
+            "{{results.read_orders.since}}"
+          ]
+        }
+      },
+      {
+        "id": "recent_customers",
+        "type": "postgres_query",
+        "name": "Recent customers",
+        "position": {
+          "x": 480,
+          "y": 200
+        },
+        "config": {
+          "host": "",
+          "port": 5432,
+          "database": "",
+          "user": "",
+          "ssl": false,
+          "secretRef": {
+            "secretId": "import-postgres_password-warehouse"
+          },
+          "query": "SELECT * FROM \"public\".\"customers\" WHERE \"status\" = $1 AND \"deleted_at\" IS NULL ORDER BY \"created_at\" DESC LIMIT 100",
+          "params": [
+            "active"
+          ]
+        }
+      },
+      {
+        "id": "insert_rows",
+        "type": "noop_node",
+        "name": "Insert rows",
+        "position": {
+          "x": 720,
+          "y": 200
+        },
+        "config": {
+          "label": "Unsupported: postgres",
+          "importedFrom": {
+            "type": "n8n-nodes-base.postgres",
+            "typeVersion": 2.4,
+            "parameters": {
+              "schema": {
+                "__rl": true,
+                "value": "public",
+                "mode": "list"
+              },
+              "table": {
+                "__rl": true,
+                "value": "order_log",
+                "mode": "list"
+              },
+              "columns": {
+                "mappingMode": "autoMapInputData"
+              }
+            },
+            "credentials": {
+              "postgres": "Warehouse"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "postgres_trigger",
+        "type": "postgres_trigger",
+        "name": "Postgres Trigger",
+        "position": {
+          "x": 0,
+          "y": 400
+        },
+        "config": {
+          "host": "",
+          "port": 5432,
+          "database": "",
+          "user": "",
+          "ssl": false,
+          "secretRef": {
+            "secretId": "import-postgres_password-warehouse"
+          },
+          "query": "SELECT * FROM \"public\".\"orders\"",
+          "pollIntervalSeconds": 60
+        }
+      },
+      {
+        "id": "list_leads",
+        "type": "airtable_list_records",
+        "name": "List leads",
+        "position": {
+          "x": 240,
+          "y": 400
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-airtable_personal_access_token-airtable_pat"
+          },
+          "baseId": "appAbCdEf12345678",
+          "table": "tblAbCdEf12345678",
+          "filterByFormula": "{Status} = 'New'",
+          "maxRecords": 50,
+          "view": "viwAbCdEf12345678"
+        }
+      },
+      {
+        "id": "create_lead",
+        "type": "airtable_create_record",
+        "name": "Create lead",
+        "position": {
+          "x": 480,
+          "y": 400
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-airtable_personal_access_token-airtable_pat"
+          },
+          "baseId": "appAbCdEf12345678",
+          "table": "tblAbCdEf12345678",
+          "fieldsJson": "{\"Name\":\"{{results.list_leads.fields.Name}}\",\"Status\":\"Contacted\"}",
+          "typecast": true
+        }
+      },
+      {
+        "id": "update_lead",
+        "type": "airtable_update_record",
+        "name": "Update lead",
+        "position": {
+          "x": 720,
+          "y": 400
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-airtable_personal_access_token-airtable_pat"
+          },
+          "baseId": "appAbCdEf12345678",
+          "table": "tblAbCdEf12345678",
+          "recordId": "{{results.create_lead.id}}",
+          "fieldsJson": "{\"Status\":\"Done\"}"
+        }
+      },
+      {
+        "id": "delete_lead",
+        "type": "noop_node",
+        "name": "Delete lead",
+        "position": {
+          "x": 0,
+          "y": 600
+        },
+        "config": {
+          "label": "Unsupported: airtable",
+          "importedFrom": {
+            "type": "n8n-nodes-base.airtable",
+            "typeVersion": 2.1,
+            "parameters": {
+              "operation": "deleteRecord",
+              "base": {
+                "__rl": true,
+                "value": "appAbCdEf12345678",
+                "mode": "list",
+                "cachedResultName": "CRM"
+              },
+              "table": {
+                "__rl": true,
+                "value": "tblAbCdEf12345678",
+                "mode": "list",
+                "cachedResultName": "Leads"
+              },
+              "id": "={{ $json.id }}"
+            },
+            "credentials": {
+              "airtableTokenApi": "Airtable PAT"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "download_report",
+        "type": "aws_s3_get_object",
+        "name": "Download report",
+        "position": {
+          "x": 240,
+          "y": 600
+        },
+        "config": {
+          "region": "us-east-1",
+          "bucket": "acme-reports",
+          "secretRef": {
+            "secretId": "import-aws_access_key_pair-aws_prod"
+          },
+          "key": "reports/{{results.recent_customers.date}}.csv"
+        }
+      },
+      {
+        "id": "upload_digest",
+        "type": "aws_s3_put_object",
+        "name": "Upload digest",
+        "position": {
+          "x": 480,
+          "y": 600
+        },
+        "config": {
+          "region": "us-east-1",
+          "bucket": "acme-reports",
+          "secretRef": {
+            "secretId": "import-aws_access_key_pair-aws_prod"
+          },
+          "key": "digests/digest-{{ $now.toISOString() }}.txt",
+          "body": "{{results.download_report.summary}}",
+          "contentType": "text/plain"
+        }
+      },
+      {
+        "id": "list_reports",
+        "type": "aws_s3_list_objects",
+        "name": "List reports",
+        "position": {
+          "x": 720,
+          "y": 600
+        },
+        "config": {
+          "region": "us-east-1",
+          "bucket": "acme-reports",
+          "secretRef": {
+            "secretId": "import-aws_access_key_pair-aws_prod"
+          },
+          "prefix": "reports/",
+          "maxKeys": 20
+        }
+      },
+      {
+        "id": "create_bucket",
+        "type": "noop_node",
+        "name": "Create bucket",
+        "position": {
+          "x": 0,
+          "y": 800
+        },
+        "config": {
+          "label": "Unsupported: awsS3",
+          "importedFrom": {
+            "type": "n8n-nodes-base.awsS3",
+            "typeVersion": 2,
+            "parameters": {
+              "resource": "bucket",
+              "operation": "create",
+              "name": "acme-archive"
+            },
+            "credentials": {
+              "aws": "AWS prod"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 1000,
+          "y": 450
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "sheets_trigger",
+        "target": "read_orders"
+      },
+      {
+        "id": "edge_2",
+        "source": "read_orders",
+        "target": "append_summary"
+      },
+      {
+        "id": "edge_3",
+        "source": "read_orders",
+        "target": "load_orders"
+      },
+      {
+        "id": "edge_4",
+        "source": "append_summary",
+        "target": "upsert_customer"
+      },
+      {
+        "id": "edge_5",
+        "source": "upsert_customer",
+        "target": "clear_sheet"
+      },
+      {
+        "id": "edge_6",
+        "source": "load_orders",
+        "target": "recent_customers"
+      },
+      {
+        "id": "edge_7",
+        "source": "recent_customers",
+        "target": "insert_rows"
+      },
+      {
+        "id": "edge_8",
+        "source": "recent_customers",
+        "target": "download_report"
+      },
+      {
+        "id": "edge_9",
+        "source": "postgres_trigger",
+        "target": "list_leads"
+      },
+      {
+        "id": "edge_10",
+        "source": "list_leads",
+        "target": "create_lead"
+      },
+      {
+        "id": "edge_11",
+        "source": "create_lead",
+        "target": "update_lead"
+      },
+      {
+        "id": "edge_12",
+        "source": "update_lead",
+        "target": "delete_lead"
+      },
+      {
+        "id": "edge_13",
+        "source": "download_report",
+        "target": "upload_digest"
+      },
+      {
+        "id": "edge_14",
+        "source": "upload_digest",
+        "target": "list_reports"
+      },
+      {
+        "id": "edge_15",
+        "source": "list_reports",
+        "target": "create_bucket"
+      },
+      {
+        "id": "edge_16",
+        "source": "clear_sheet",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_17",
+        "source": "insert_rows",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_18",
+        "source": "delete_lead",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_19",
+        "source": "create_bucket",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Nightly data sync",
+    "nodes": [
+      {
+        "sourceName": "Sheets Trigger",
+        "sourceType": "n8n-nodes-base.googleSheetsTrigger",
+        "sourceId": "sheets-trigger-id",
+        "targetNodeId": "sheets_trigger",
+        "targetType": "google_sheets_trigger",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Read orders",
+        "sourceType": "n8n-nodes-base.googleSheets",
+        "sourceId": "read-orders-id",
+        "targetNodeId": "read_orders",
+        "targetType": "google_sheets_read",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Append summary",
+        "sourceType": "n8n-nodes-base.googleSheets",
+        "sourceId": "append-summary-id",
+        "targetNodeId": "append_summary",
+        "targetType": "google_sheets_append",
+        "status": "approximated",
+        "reason": "Cells are written in the listed column order (Date, Count); matching on header names is not supported."
+      },
+      {
+        "sourceName": "Upsert customer",
+        "sourceType": "n8n-nodes-base.googleSheets",
+        "sourceId": "upsert-customer-id",
+        "targetNodeId": "upsert_customer",
+        "targetType": "google_sheets_append",
+        "status": "approximated",
+        "reason": "Auto-mapping input items to columns is not supported; set values after import. Append-or-update became a plain append; existing rows are not updated. Matching rows on (Email) is not supported."
+      },
+      {
+        "sourceName": "Clear sheet",
+        "sourceType": "n8n-nodes-base.googleSheets",
+        "sourceId": "clear-sheet-id",
+        "targetNodeId": "clear_sheet",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Google Sheets resource 'sheet' operation 'clear' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Load orders",
+        "sourceType": "n8n-nodes-base.postgres",
+        "sourceId": "load-orders-id",
+        "targetNodeId": "load_orders",
+        "targetType": "postgres_query",
+        "status": "approximated",
+        "reason": "Host, port, database and user live in the source credential and must be filled in after import."
+      },
+      {
+        "sourceName": "Recent customers",
+        "sourceType": "n8n-nodes-base.postgres",
+        "sourceId": "recent-customers-id",
+        "targetNodeId": "recent_customers",
+        "targetType": "postgres_query",
+        "status": "approximated",
+        "reason": "Host, port, database and user live in the source credential and must be filled in after import. The select was rewritten as a SQL query; review it after import."
+      },
+      {
+        "sourceName": "Insert rows",
+        "sourceType": "n8n-nodes-base.postgres",
+        "sourceId": "insert-rows-id",
+        "targetNodeId": "insert_rows",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Postgres resource 'database' operation 'insert' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Postgres Trigger",
+        "sourceType": "n8n-nodes-base.postgresTrigger",
+        "sourceId": "postgres-trigger-id",
+        "targetNodeId": "postgres_trigger",
+        "targetType": "postgres_trigger",
+        "status": "approximated",
+        "reason": "Host, port, database and user live in the source credential and must be filled in after import. The 'INSERT' table trigger is approximated as a polling query every minute; add a watermark condition to the query after import."
+      },
+      {
+        "sourceName": "List leads",
+        "sourceType": "n8n-nodes-base.airtable",
+        "sourceId": "list-leads-id",
+        "targetNodeId": "list_leads",
+        "targetType": "airtable_list_records",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Create lead",
+        "sourceType": "n8n-nodes-base.airtable",
+        "sourceId": "create-lead-id",
+        "targetNodeId": "create_lead",
+        "targetType": "airtable_create_record",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Update lead",
+        "sourceType": "n8n-nodes-base.airtable",
+        "sourceId": "update-lead-id",
+        "targetNodeId": "update_lead",
+        "targetType": "airtable_update_record",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Delete lead",
+        "sourceType": "n8n-nodes-base.airtable",
+        "sourceId": "delete-lead-id",
+        "targetNodeId": "delete_lead",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Airtable resource 'record' operation 'deleteRecord' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Download report",
+        "sourceType": "n8n-nodes-base.awsS3",
+        "sourceId": "download-report-id",
+        "targetNodeId": "download_report",
+        "targetType": "aws_s3_get_object",
+        "status": "approximated",
+        "reason": "The region lives in the source credential; defaulted to us-east-1, change region after import if needed. The AWS secret must hold JSON with accessKeyId and secretAccessKey."
+      },
+      {
+        "sourceName": "Upload digest",
+        "sourceType": "n8n-nodes-base.awsS3",
+        "sourceId": "upload-digest-id",
+        "targetNodeId": "upload_digest",
+        "targetType": "aws_s3_put_object",
+        "status": "approximated",
+        "reason": "The region lives in the source credential; defaulted to us-east-1, change region after import if needed. The AWS secret must hold JSON with accessKeyId and secretAccessKey. Upload options (acl) are not supported and were dropped."
+      },
+      {
+        "sourceName": "List reports",
+        "sourceType": "n8n-nodes-base.awsS3",
+        "sourceId": "list-reports-id",
+        "targetNodeId": "list_reports",
+        "targetType": "aws_s3_list_objects",
+        "status": "approximated",
+        "reason": "The region lives in the source credential; defaulted to us-east-1, change region after import if needed. The AWS secret must hold JSON with accessKeyId and secretAccessKey."
+      },
+      {
+        "sourceName": "Create bucket",
+        "sourceType": "n8n-nodes-base.awsS3",
+        "sourceId": "create-bucket-id",
+        "targetNodeId": "create_bucket",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "AWS S3 resource 'bucket' operation 'create' has no L2M equivalent; imported as a disabled placeholder."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [
+      {
+        "secretId": "import-google_sheets_access_token-sheets_account",
+        "credentialType": "googleSheetsTriggerOAuth2Api",
+        "credentialName": "Google Sheets access token (Sheets account)",
+        "nodeIds": [
+          "sheets_trigger",
+          "read_orders",
+          "append_summary",
+          "upsert_customer"
+        ]
+      },
+      {
+        "secretId": "import-postgres_password-warehouse",
+        "credentialType": "postgres",
+        "credentialName": "Postgres password (Warehouse)",
+        "nodeIds": [
+          "load_orders",
+          "recent_customers",
+          "postgres_trigger"
+        ]
+      },
+      {
+        "secretId": "import-airtable_personal_access_token-airtable_pat",
+        "credentialType": "airtableTokenApi",
+        "credentialName": "Airtable personal access token (Airtable PAT)",
+        "nodeIds": [
+          "list_leads",
+          "create_lead",
+          "update_lead"
+        ]
+      },
+      {
+        "secretId": "import-aws_access_key_pair-aws_prod",
+        "credentialType": "aws",
+        "credentialName": "AWS access key pair (AWS prod)",
+        "nodeIds": [
+          "download_report",
+          "upload_digest",
+          "list_reports"
+        ]
+      }
+    ],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 17,
+      "mapped": 5,
+      "approximated": 8,
+      "unsupported": 4
+    }
+  }
+}

@@ -9,12 +9,13 @@
  */
 import { EXTERNAL_IMPORT_COVERAGE, type ExternalImportCategory, type ExternalImportCoverageEntry } from "./external-builder.js";
 
-const CATEGORY_ORDER: ExternalImportCategory[] = ["trigger", "core", "ai"];
+const CATEGORY_ORDER: ExternalImportCategory[] = ["trigger", "core", "ai", "app"];
 
 const CATEGORY_TITLES: Record<ExternalImportCategory, string> = {
   trigger: "Triggers",
   core: "Core nodes",
-  ai: "AI nodes"
+  ai: "AI nodes",
+  app: "App nodes"
 };
 
 function escapeCell(value: string): string {

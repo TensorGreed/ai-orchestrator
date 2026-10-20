@@ -1,0 +1,729 @@
+{
+  "name": "Nightly data sync",
+  "nodes": [
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1AbCdEfGhIjKlMnOp",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Orders"
+        },
+        "event": "rowAdded",
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 15,
+              "unit": "minutes"
+            }
+          ]
+        }
+      },
+      "id": "sheets-trigger-id",
+      "name": "Sheets Trigger",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "googleSheetsTriggerOAuth2Api": {
+          "id": "cred_sh1",
+          "name": "Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOp/edit#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Orders",
+          "mode": "name"
+        },
+        "options": {
+          "range": "A:F"
+        }
+      },
+      "id": "read-orders-id",
+      "name": "Read orders",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "cred_sh1",
+          "name": "Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1AbCdEfGhIjKlMnOp",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Summary",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $now.toISOString() }}",
+            "Count": "={{ $json.values.length }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "append-summary-id",
+      "name": "Append summary",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "cred_sh1",
+          "name": "Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1AbCdEfGhIjKlMnOp",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "123456",
+          "mode": "list",
+          "cachedResultName": "Customers"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Email"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "upsert-customer-id",
+      "name": "Upsert customer",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "cred_sh1",
+          "name": "Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1AbCdEfGhIjKlMnOp",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Scratch",
+          "mode": "name"
+        }
+      },
+      "id": "clear-sheet-id",
+      "name": "Clear sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        0,
+        200
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "cred_sh1",
+          "name": "Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT * FROM orders WHERE created_at > $1",
+        "options": {
+          "queryReplacement": "={{ $json.since }}"
+        }
+      },
+      "id": "load-orders-id",
+      "name": "Load orders",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        240,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred_pg1",
+          "name": "Warehouse"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "customers",
+          "mode": "list"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "status",
+              "condition": "equal",
+              "value": "active"
+            },
+            {
+              "column": "deleted_at",
+              "condition": "isNull"
+            }
+          ]
+        },
+        "sort": {
+          "values": [
+            {
+              "column": "created_at",
+              "direction": "DESC"
+            }
+          ]
+        },
+        "limit": 100
+      },
+      "id": "recent-customers-id",
+      "name": "Recent customers",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        480,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred_pg1",
+          "name": "Warehouse"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "order_log",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        }
+      },
+      "id": "insert-rows-id",
+      "name": "Insert rows",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        720,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred_pg1",
+          "name": "Warehouse"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "triggerMode": "createTrigger",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "tableName": {
+          "__rl": true,
+          "value": "orders",
+          "mode": "list"
+        },
+        "firesOn": "INSERT"
+      },
+      "id": "postgres-trigger-id",
+      "name": "Postgres Trigger",
+      "type": "n8n-nodes-base.postgresTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "cred_pg1",
+          "name": "Warehouse"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "https://airtable.com/appAbCdEf12345678/tblAbCdEf12345678/viwAbCdEf12345678",
+          "mode": "url"
+        },
+        "table": {
+          "__rl": true,
+          "value": "https://airtable.com/appAbCdEf12345678/tblAbCdEf12345678/viwAbCdEf12345678",
+          "mode": "url"
+        },
+        "filterByFormula": "={Status} = 'New'",
+        "limit": 50,
+        "options": {
+          "view": {
+            "__rl": true,
+            "value": "viwAbCdEf12345678",
+            "mode": "list",
+            "cachedResultName": "Open leads"
+          }
+        }
+      },
+      "id": "list-leads-id",
+      "name": "List leads",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        240,
+        400
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "cred_at1",
+          "name": "Airtable PAT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appAbCdEf12345678",
+          "mode": "list",
+          "cachedResultName": "CRM"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblAbCdEf12345678",
+          "mode": "list",
+          "cachedResultName": "Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Name": "={{ $json.fields.Name }}",
+            "Status": "Contacted"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "id": "create-lead-id",
+      "name": "Create lead",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        480,
+        400
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "cred_at1",
+          "name": "Airtable PAT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "appAbCdEf12345678",
+          "mode": "list",
+          "cachedResultName": "CRM"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblAbCdEf12345678",
+          "mode": "list",
+          "cachedResultName": "Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "id": "={{ $json.id }}",
+            "Status": "Done"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "update-lead-id",
+      "name": "Update lead",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        400
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "cred_at1",
+          "name": "Airtable PAT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "deleteRecord",
+        "base": {
+          "__rl": true,
+          "value": "appAbCdEf12345678",
+          "mode": "list",
+          "cachedResultName": "CRM"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tblAbCdEf12345678",
+          "mode": "list",
+          "cachedResultName": "Leads"
+        },
+        "id": "={{ $json.id }}"
+      },
+      "id": "delete-lead-id",
+      "name": "Delete lead",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        600
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "cred_at1",
+          "name": "Airtable PAT"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "bucketName": "acme-reports",
+        "fileKey": "=reports/{{ $json.date }}.csv"
+      },
+      "id": "download-report-id",
+      "name": "Download report",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        240,
+        600
+      ],
+      "credentials": {
+        "aws": {
+          "id": "cred_aws1",
+          "name": "AWS prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "acme-reports",
+        "fileName": "=digest-{{ $now.toISOString() }}.txt",
+        "binaryData": false,
+        "fileContent": "={{ $json.summary }}",
+        "additionalFields": {
+          "parentFolderKey": "digests/",
+          "acl": "private"
+        }
+      },
+      "id": "upload-digest-id",
+      "name": "Upload digest",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        480,
+        600
+      ],
+      "credentials": {
+        "aws": {
+          "id": "cred_aws1",
+          "name": "AWS prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "bucketName": "acme-reports",
+        "returnAll": false,
+        "limit": 20,
+        "options": {
+          "folderKey": "reports/"
+        }
+      },
+      "id": "list-reports-id",
+      "name": "List reports",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        720,
+        600
+      ],
+      "credentials": {
+        "aws": {
+          "id": "cred_aws1",
+          "name": "AWS prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "bucket",
+        "operation": "create",
+        "name": "acme-archive"
+      },
+      "id": "create-bucket-id",
+      "name": "Create bucket",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 2,
+      "position": [
+        0,
+        800
+      ],
+      "credentials": {
+        "aws": {
+          "id": "cred_aws1",
+          "name": "AWS prod"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Sheets Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read orders": {
+      "main": [
+        [
+          {
+            "node": "Append summary",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Load orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append summary": {
+      "main": [
+        [
+          {
+            "node": "Upsert customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert customer": {
+      "main": [
+        [
+          {
+            "node": "Clear sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load orders": {
+      "main": [
+        [
+          {
+            "node": "Recent customers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recent customers": {
+      "main": [
+        [
+          {
+            "node": "Insert rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Download report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Trigger": {
+      "main": [
+        [
+          {
+            "node": "List leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List leads": {
+      "main": [
+        [
+          {
+            "node": "Create lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create lead": {
+      "main": [
+        [
+          {
+            "node": "Update lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update lead": {
+      "main": [
+        [
+          {
+            "node": "Delete lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download report": {
+      "main": [
+        [
+          {
+            "node": "Upload digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload digest": {
+      "main": [
+        [
+          {
+            "node": "List reports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List reports": {
+      "main": [
+        [
+          {
+            "node": "Create bucket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Berlin"
+  },
+  "pinData": {}
+}

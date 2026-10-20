@@ -1,0 +1,457 @@
+{
+  "workflow": {
+    "id": "wf-import-lead_to_cash",
+    "name": "Lead to cash",
+    "description": "Imported from an external workflow export (2 mapped, 6 approximated, 3 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "stripe_trigger",
+        "type": "stripe_webhook_trigger",
+        "name": "Stripe Trigger",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "config": {
+          "path": "stripe_trigger",
+          "signingSecretRef": {
+            "secretId": "import-stripe_webhook_signing_secret-stripe_live"
+          },
+          "replayToleranceSeconds": 300
+        }
+      },
+      {
+        "id": "create_hubspot_contact",
+        "type": "hubspot_create_contact",
+        "name": "Create HubSpot contact",
+        "position": {
+          "x": 240,
+          "y": 0
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-hubspot_private_app_token-hubspot_app"
+          },
+          "propertiesJson": "{\"email\":\"{{results.stripe_trigger.data.object.customer_details.email}}\",\"firstname\":\"{{ results.stripe_trigger.data.object.customer_details.name.split(' ')[0] }}\",\"lastname\":\"{{ results.stripe_trigger.data.object.customer_details.name.split(' ').slice(1).join(' ') }}\",\"company\":\"Acme\"}"
+        }
+      },
+      {
+        "id": "get_contact",
+        "type": "hubspot_get_contact",
+        "name": "Get contact",
+        "position": {
+          "x": 480,
+          "y": 0
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-hubspot_private_app_token-hubspot_app"
+          },
+          "identifier": "{{results.create_hubspot_contact.id}}",
+          "idProperty": "id"
+        }
+      },
+      {
+        "id": "create_deal",
+        "type": "noop_node",
+        "name": "Create deal",
+        "position": {
+          "x": 720,
+          "y": 0
+        },
+        "config": {
+          "label": "Unsupported: hubspot",
+          "importedFrom": {
+            "type": "n8n-nodes-base.hubspot",
+            "typeVersion": 2.1,
+            "parameters": {
+              "resource": "deal",
+              "operation": "create",
+              "stage": "appointmentscheduled",
+              "additionalFields": {
+                "dealName": "=Deal {{ $json.id }}"
+              }
+            },
+            "credentials": {
+              "hubspotAppToken": "HubSpot app"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "create_lead",
+        "type": "salesforce_create_record",
+        "name": "Create lead",
+        "position": {
+          "x": 0,
+          "y": 200
+        },
+        "config": {
+          "instanceUrl": "",
+          "apiVersion": "v58.0",
+          "secretRef": {
+            "secretId": "import-salesforce_access_token-salesforce_prod"
+          },
+          "sobject": "Lead",
+          "fieldsJson": "{\"company\":\"{{results.get_contact.properties.company}}\",\"lastname\":\"{{results.get_contact.properties.lastname}}\",\"email\":\"{{results.get_contact.properties.email}}\",\"leadSource\":\"Web\",\"phone\":\"{{results.get_contact.properties.phone}}\",\"Imported__c\":\"true\"}"
+        }
+      },
+      {
+        "id": "find_accounts",
+        "type": "salesforce_query",
+        "name": "Find accounts",
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "config": {
+          "instanceUrl": "",
+          "apiVersion": "v58.0",
+          "secretRef": {
+            "secretId": "import-salesforce_access_token-salesforce_prod"
+          },
+          "soql": "SELECT Id, Name FROM Account WHERE Name = '{{results.create_lead.Company}}'"
+        }
+      },
+      {
+        "id": "list_opportunities",
+        "type": "salesforce_query",
+        "name": "List opportunities",
+        "position": {
+          "x": 480,
+          "y": 200
+        },
+        "config": {
+          "instanceUrl": "",
+          "apiVersion": "v58.0",
+          "secretRef": {
+            "secretId": "import-salesforce_access_token-salesforce_prod"
+          },
+          "soql": "SELECT Id, Name, Amount FROM Opportunity LIMIT 10"
+        }
+      },
+      {
+        "id": "add_note",
+        "type": "noop_node",
+        "name": "Add note",
+        "position": {
+          "x": 720,
+          "y": 200
+        },
+        "config": {
+          "label": "Unsupported: salesforce",
+          "importedFrom": {
+            "type": "n8n-nodes-base.salesforce",
+            "typeVersion": 1,
+            "parameters": {
+              "resource": "lead",
+              "operation": "addNote",
+              "leadId": "={{ $json.id }}",
+              "title": "Imported"
+            },
+            "credentials": {
+              "salesforceOAuth2Api": "Salesforce prod"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "stripe_customer",
+        "type": "stripe_create_customer",
+        "name": "Stripe customer",
+        "position": {
+          "x": 0,
+          "y": 400
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-stripe_secret_key-stripe_live"
+          },
+          "name": "{{results.find_accounts.Name}}",
+          "email": "{{results.find_accounts.Email}}",
+          "description": "Imported from CRM",
+          "metadataJson": "{\"source\":\"l2m\",\"lead\":\"{{results.find_accounts.Id}}\"}"
+        }
+      },
+      {
+        "id": "charge_card",
+        "type": "stripe_create_charge",
+        "name": "Charge card",
+        "position": {
+          "x": 240,
+          "y": 400
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-stripe_secret_key-stripe_live"
+          },
+          "amount": 4999,
+          "currency": "usd",
+          "customerId": "{{results.stripe_customer.id}}",
+          "description": "Order {{results.stripe_customer.orderId}}"
+        }
+      },
+      {
+        "id": "create_coupon",
+        "type": "noop_node",
+        "name": "Create coupon",
+        "position": {
+          "x": 480,
+          "y": 400
+        },
+        "config": {
+          "label": "Unsupported: stripe",
+          "importedFrom": {
+            "type": "n8n-nodes-base.stripe",
+            "typeVersion": 1,
+            "parameters": {
+              "resource": "coupon",
+              "operation": "create",
+              "type": "percent",
+              "percentOff": 10,
+              "duration": "once"
+            },
+            "credentials": {
+              "stripeApi": "Stripe live"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 1000,
+          "y": 200
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "stripe_trigger",
+        "target": "create_hubspot_contact"
+      },
+      {
+        "id": "edge_2",
+        "source": "create_hubspot_contact",
+        "target": "get_contact"
+      },
+      {
+        "id": "edge_3",
+        "source": "get_contact",
+        "target": "create_deal"
+      },
+      {
+        "id": "edge_4",
+        "source": "get_contact",
+        "target": "create_lead"
+      },
+      {
+        "id": "edge_5",
+        "source": "create_lead",
+        "target": "find_accounts"
+      },
+      {
+        "id": "edge_6",
+        "source": "find_accounts",
+        "target": "list_opportunities"
+      },
+      {
+        "id": "edge_7",
+        "source": "find_accounts",
+        "target": "stripe_customer"
+      },
+      {
+        "id": "edge_8",
+        "source": "list_opportunities",
+        "target": "add_note"
+      },
+      {
+        "id": "edge_9",
+        "source": "stripe_customer",
+        "target": "charge_card"
+      },
+      {
+        "id": "edge_10",
+        "source": "charge_card",
+        "target": "create_coupon"
+      },
+      {
+        "id": "edge_11",
+        "source": "create_deal",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_12",
+        "source": "add_note",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_13",
+        "source": "create_coupon",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Lead to cash",
+    "nodes": [
+      {
+        "sourceName": "Stripe Trigger",
+        "sourceType": "n8n-nodes-base.stripeTrigger",
+        "sourceId": "stripe-trigger-id",
+        "targetNodeId": "stripe_trigger",
+        "targetType": "stripe_webhook_trigger",
+        "status": "approximated",
+        "reason": "Event filters (checkout.session.completed) are not supported; the trigger receives every event sent to its endpoint, so filter downstream. Create the webhook endpoint in the Stripe dashboard and point it at the imported webhook path."
+      },
+      {
+        "sourceName": "Create HubSpot contact",
+        "sourceType": "n8n-nodes-base.hubspot",
+        "sourceId": "create-hubspot-contact-id",
+        "targetNodeId": "create_hubspot_contact",
+        "targetType": "hubspot_create_contact",
+        "status": "approximated",
+        "reason": "Create-or-update became a plain create; an existing contact with the same email will make the call fail instead of updating it. Contact fields (associatedCompanyId) are not supported and were dropped."
+      },
+      {
+        "sourceName": "Get contact",
+        "sourceType": "n8n-nodes-base.hubspot",
+        "sourceId": "get-contact-id",
+        "targetNodeId": "get_contact",
+        "targetType": "hubspot_get_contact",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Create deal",
+        "sourceType": "n8n-nodes-base.hubspot",
+        "sourceId": "create-deal-id",
+        "targetNodeId": "create_deal",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "HubSpot resource 'deal' operation 'create' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Create lead",
+        "sourceType": "n8n-nodes-base.salesforce",
+        "sourceId": "create-lead-id",
+        "targetNodeId": "create_lead",
+        "targetType": "salesforce_create_record",
+        "status": "approximated",
+        "reason": "The instance URL lives in the source credential; set instanceUrl after import."
+      },
+      {
+        "sourceName": "Find accounts",
+        "sourceType": "n8n-nodes-base.salesforce",
+        "sourceId": "find-accounts-id",
+        "targetNodeId": "find_accounts",
+        "targetType": "salesforce_query",
+        "status": "approximated",
+        "reason": "The instance URL lives in the source credential; set instanceUrl after import."
+      },
+      {
+        "sourceName": "List opportunities",
+        "sourceType": "n8n-nodes-base.salesforce",
+        "sourceId": "list-opportunities-id",
+        "targetNodeId": "list_opportunities",
+        "targetType": "salesforce_query",
+        "status": "approximated",
+        "reason": "The instance URL lives in the source credential; set instanceUrl after import. The list operation was rewritten as SOQL (SELECT Id, Name, Amount FROM Opportunity LIMIT 10); review it after import."
+      },
+      {
+        "sourceName": "Add note",
+        "sourceType": "n8n-nodes-base.salesforce",
+        "sourceId": "add-note-id",
+        "targetNodeId": "add_note",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Salesforce resource 'lead' operation 'addNote' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Stripe customer",
+        "sourceType": "n8n-nodes-base.stripe",
+        "sourceId": "stripe-customer-id",
+        "targetNodeId": "stripe_customer",
+        "targetType": "stripe_create_customer",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Charge card",
+        "sourceType": "n8n-nodes-base.stripe",
+        "sourceId": "charge-card-id",
+        "targetNodeId": "charge_card",
+        "targetType": "stripe_create_charge",
+        "status": "approximated",
+        "reason": "Charge fields (receipt_email) are not supported and were dropped."
+      },
+      {
+        "sourceName": "Create coupon",
+        "sourceType": "n8n-nodes-base.stripe",
+        "sourceId": "create-coupon-id",
+        "targetNodeId": "create_coupon",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Stripe resource 'coupon' operation 'create' has no L2M equivalent; imported as a disabled placeholder."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [
+      {
+        "secretId": "import-stripe_webhook_signing_secret-stripe_live",
+        "credentialType": "stripeApi",
+        "credentialName": "Stripe webhook signing secret (Stripe live)",
+        "nodeIds": [
+          "stripe_trigger"
+        ]
+      },
+      {
+        "secretId": "import-hubspot_private_app_token-hubspot_app",
+        "credentialType": "hubspotAppToken",
+        "credentialName": "HubSpot private app token (HubSpot app)",
+        "nodeIds": [
+          "create_hubspot_contact",
+          "get_contact"
+        ]
+      },
+      {
+        "secretId": "import-salesforce_access_token-salesforce_prod",
+        "credentialType": "salesforceOAuth2Api",
+        "credentialName": "Salesforce access token (Salesforce prod)",
+        "nodeIds": [
+          "create_lead",
+          "find_accounts",
+          "list_opportunities"
+        ]
+      },
+      {
+        "secretId": "import-stripe_secret_key-stripe_live",
+        "credentialType": "stripeApi",
+        "credentialName": "Stripe secret key (Stripe live)",
+        "nodeIds": [
+          "stripe_customer",
+          "charge_card"
+        ]
+      }
+    ],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 11,
+      "mapped": 2,
+      "approximated": 6,
+      "unsupported": 3
+    }
+  }
+}
