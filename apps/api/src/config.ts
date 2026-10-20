@@ -76,6 +76,10 @@ const envSchema = z.object({
   EVAL_JUDGE_MAX_TOKENS: z.coerce.number().int().positive().default(512),
 
   // Phase 8.4 — Audit export to long-term sinks (SIEM, archive, etc.)
+  // Phase 10.1 — MCP server registry health probes. 0 turns the background loop off.
+  MCP_PROBE_INTERVAL_MS: z.coerce.number().int().nonnegative().default(300000),
+  MCP_PROBE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  MCP_PROBE_HISTORY_LIMIT: z.coerce.number().int().positive().default(500),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),

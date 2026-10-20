@@ -953,6 +953,72 @@ export const MIGRATIONS: Migration[] = [
       DROP TRIGGER IF EXISTS kb_chunks_fts_ai;
       DROP TABLE IF EXISTS knowledge_base_chunks_fts;
     `
+  },
+  {
+    version: 20,
+    description: "Phase 10.1 — MCP server registry (mcp_servers, mcp_server_probes, mcp_tool_snapshots)",
+    up: `
+      CREATE TABLE IF NOT EXISTS mcp_servers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        adapter_id TEXT NOT NULL,
+        connection_json TEXT,
+        secret_id TEXT,
+        owner TEXT,
+        project_id TEXT,
+        probe_enabled INTEGER NOT NULL DEFAULT 1,
+        probe_interval_ms INTEGER,
+        block_on_breaking_change INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        last_probe_at TIMESTAMPTZ,
+        last_probe_ok INTEGER,
+        last_probe_latency_ms INTEGER,
+        last_probe_error TEXT,
+        tool_count INTEGER NOT NULL DEFAULT 0,
+        current_snapshot_id TEXT,
+        pending_breaking_snapshot_id TEXT,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_mcp_servers_project ON mcp_servers(project_id);
+
+      CREATE TABLE IF NOT EXISTS mcp_server_probes (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        started_at TIMESTAMPTZ NOT NULL,
+        ok INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        tool_count INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        snapshot_id TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_mcp_server_probes_server ON mcp_server_probes(server_id, started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS mcp_tool_snapshots (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        tools_json TEXT NOT NULL,
+        tool_count INTEGER NOT NULL DEFAULT 0,
+        previous_snapshot_id TEXT,
+        changes_json TEXT,
+        breaking INTEGER NOT NULL DEFAULT 0,
+        acknowledged_at TIMESTAMPTZ,
+        acknowledged_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_snapshots_server ON mcp_tool_snapshots(server_id, created_at DESC);
+    `,
+    down: `
+      DROP TABLE IF EXISTS mcp_tool_snapshots;
+      DROP TABLE IF EXISTS mcp_server_probes;
+      DROP TABLE IF EXISTS mcp_servers;
+    `
   }
 ];
 

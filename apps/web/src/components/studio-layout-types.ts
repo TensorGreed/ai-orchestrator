@@ -9,10 +9,11 @@ export type StudioMode =
   | "chat"
   | "evaluations"
   | "knowledge"
+  | "mcp"
   | "secrets"
   | "settings";
 
-/** Ordered workspace navigation. `adminOnly` items render only when the user can manage secrets. */
+/** Ordered workspace navigation. `adminOnly` items render only for builders and admins (the users who can manage secrets). */
 export const STUDIO_MODE_ITEMS: ReadonlyArray<{ mode: StudioMode; label: string; adminOnly?: boolean }> = [
   { mode: "dashboard", label: "Home" },
   { mode: "editor", label: "Editor" },
@@ -22,6 +23,7 @@ export const STUDIO_MODE_ITEMS: ReadonlyArray<{ mode: StudioMode; label: string;
   { mode: "chat", label: "Chat" },
   { mode: "evaluations", label: "Evaluations" },
   { mode: "knowledge", label: "Knowledge" },
+  { mode: "mcp", label: "MCP servers", adminOnly: true },
   { mode: "secrets", label: "Secrets", adminOnly: true },
   { mode: "settings", label: "Settings" }
 ];

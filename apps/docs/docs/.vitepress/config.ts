@@ -44,7 +44,8 @@ export default defineConfig({
         text: "Product",
         items: [
           { text: "Workflow Editor", link: "/product/workflow-editor" },
-          { text: "Importing from another builder", link: "/product/importing-from-another-builder" }
+          { text: "Importing from another builder", link: "/product/importing-from-another-builder" },
+          { text: "MCP server registry", link: "/product/mcp-server-registry" }
         ]
       },
       {

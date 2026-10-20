@@ -2283,3 +2283,160 @@ export async function fetchEvalRuns(filter: { datasetId?: string; workflowId?: s
 export async function fetchEvalRun(id: string) {
   return apiRequest<EvalRun & { results: EvalResult[] }>(`/api/eval/runs/${encodeURIComponent(id)}`);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 10.1 — MCP server registry
+// ---------------------------------------------------------------------------
+
+export type McpServerStatus = "unknown" | "healthy" | "degraded" | "down";
+
+export interface McpLatencyStats {
+  samples: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  errorRate: number | null;
+}
+
+export interface McpRegisteredServer {
+  id: string;
+  name: string;
+  description: string | null;
+  adapterId: string;
+  connection: Record<string, unknown>;
+  secretId: string | null;
+  owner: string | null;
+  projectId: string | null;
+  probeEnabled: boolean;
+  probeIntervalMs: number | null;
+  blockOnBreakingChange: boolean;
+  status: McpServerStatus;
+  lastProbeAt: string | null;
+  lastProbeOk: boolean | null;
+  lastProbeLatencyMs: number | null;
+  lastProbeError: string | null;
+  toolCount: number;
+  currentSnapshotId: string | null;
+  pendingBreakingSnapshotId: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  latency: McpLatencyStats;
+}
+
+export interface McpServerProbe {
+  id: string;
+  serverId: string;
+  startedAt: string;
+  ok: boolean;
+  latencyMs: number;
+  toolCount: number;
+  error: string | null;
+  snapshotId: string | null;
+}
+
+export interface McpToolSchemaChange {
+  tool: string;
+  kind: string;
+  path?: string;
+  breaking: boolean;
+  detail: string;
+}
+
+export interface McpToolSnapshotSummary {
+  id: string;
+  serverId: string;
+  hash: string;
+  toolCount: number;
+  previousSnapshotId: string | null;
+  changes: McpToolSchemaChange[];
+  breaking: boolean;
+  acknowledgedAt: string | null;
+  acknowledgedBy: string | null;
+  createdAt: string;
+}
+
+export interface McpSnapshotTool {
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface McpServerUsage {
+  workflowId: string;
+  workflowName: string;
+  nodeId: string;
+  nodeName: string;
+  nodeType: string;
+}
+
+export interface McpServerInput {
+  name: string;
+  description?: string | null;
+  adapterId: string;
+  connection?: Record<string, unknown>;
+  secretRef?: { secretId: string } | null;
+  owner?: string | null;
+  projectId?: string | null;
+  probeEnabled?: boolean;
+  probeIntervalMs?: number | null;
+  blockOnBreakingChange?: boolean;
+}
+
+export async function fetchMcpServers(projectId?: string) {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{
+    servers: McpRegisteredServer[];
+    adapters: Array<{ id: string; label: string }>;
+    defaultProbeIntervalMs: number;
+  }>(`/api/mcp/servers${qs}`);
+}
+
+export async function fetchMcpServer(id: string) {
+  return apiRequest<{
+    server: McpRegisteredServer;
+    probes: McpServerProbe[];
+    snapshots: McpToolSnapshotSummary[];
+    usages: McpServerUsage[];
+  }>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
+
+export async function fetchMcpServerTools(id: string) {
+  return apiRequest<{ serverId: string; snapshotId: string | null; probedAt: string | null; tools: McpSnapshotTool[] }>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/tools`
+  );
+}
+
+export async function createMcpServer(payload: McpServerInput) {
+  return apiRequest<{ server: McpRegisteredServer }>("/api/mcp/servers", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateMcpServer(id: string, patch: Partial<McpServerInput>) {
+  return apiRequest<{ server: McpRegisteredServer }>(`/api/mcp/servers/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch)
+  });
+}
+
+export async function deleteMcpServer(id: string, options: { force?: boolean } = {}) {
+  return apiRequest<{ ok: true }>(
+    `/api/mcp/servers/${encodeURIComponent(id)}${options.force ? "?force=true" : ""}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function probeMcpServer(id: string) {
+  return apiRequest<{ server: McpRegisteredServer; probe: McpServerProbe; snapshot: McpToolSnapshotSummary | null }>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/probe`,
+    { method: "POST" }
+  );
+}
+
+export async function acceptMcpServerChange(id: string) {
+  return apiRequest<{ server: McpRegisteredServer }>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/accept-change`,
+    { method: "POST" }
+  );
+}

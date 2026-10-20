@@ -82,6 +82,14 @@ export const KnowledgeIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const McpServersIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="7" rx="2" />
+    <rect x="3" y="13" width="18" height="7" rx="2" />
+    <path d="M7 7.5h.01M7 16.5h.01M11 7.5h6M11 16.5h6" />
+  </Svg>
+);
+
 export const SecretsIcon = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="8" cy="14" r="4" />
@@ -180,6 +188,7 @@ export const MODE_ICONS: Record<StudioMode, (p: IconProps) => ReactElement> = {
   chat: ChatIcon,
   evaluations: EvaluationsIcon,
   knowledge: KnowledgeIcon,
+  mcp: McpServersIcon,
   secrets: SecretsIcon,
   settings: SettingsIcon
 };

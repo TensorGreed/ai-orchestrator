@@ -525,10 +525,13 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     }
 
     if (node.type === "mcp_tool") {
-      if (typeof config.serverId !== "string" || typeof config.toolName !== "string") {
+      const hasServer =
+        typeof config.serverId === "string" ||
+        (typeof config.registryServerId === "string" && config.registryServerId.trim().length > 0);
+      if (!hasServer || typeof config.toolName !== "string") {
         issues.push({
           code: "missing_mcp_tool_config",
-          message: "MCP Tool node requires serverId and toolName.",
+          message: "MCP Tool node requires a registered server (registryServerId) or serverId, and a toolName.",
           nodeId: node.id
         });
       }

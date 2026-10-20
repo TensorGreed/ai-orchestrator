@@ -18,6 +18,14 @@
 
 Use this to create an initial admin automatically when DB is empty.
 
+## MCP server registry probes (optional)
+
+- `MCP_PROBE_INTERVAL_MS` (default `300000`; `0` turns scheduled probes off)
+- `MCP_PROBE_TIMEOUT_MS` (default `30000`)
+- `MCP_PROBE_HISTORY_LIMIT` (default `500` probes kept per server)
+
+See [MCP server registry](../product/mcp-server-registry.md).
+
 ## Provider/connector env fallbacks
 
 Some adapters support env fallback values. Examples:

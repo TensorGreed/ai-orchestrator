@@ -79,6 +79,12 @@ export interface WorkflowExecutionDependencies {
   sessionArtifactStore?: AgentSessionArtifactStore;
   loadWorkflow?: (workflowId: string) => Workflow | undefined;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
+  /**
+   * Phase 10.1 — resolves an MCP server registry entry to the adapter,
+   * connection and secretRef to use. Throws when the entry is missing or
+   * blocked (for example by an unaccepted breaking tool schema change).
+   */
+  resolveRegisteredMcpServer?: (registryServerId: string) => MCPServerConfig | Promise<MCPServerConfig>;
   persistPausedExecution?: (input: {
     executionId: string;
     workflowId: string;
@@ -454,6 +460,33 @@ function buildServerConfigKey(server: MCPServerConfig): string {
   const connection = JSON.stringify(server.connection ?? {});
   const secretId = server.secretRef?.secretId ?? "";
   return `${server.serverId}::${secretId}::${connection}`;
+}
+
+function readRegistryServerId(config: Record<string, unknown>): string | undefined {
+  const value = typeof config.registryServerId === "string" ? config.registryServerId.trim() : "";
+  return value || undefined;
+}
+
+/** Swap a registry reference for the registered server's adapter, connection and secretRef. */
+async function applyRegisteredMcpServer(
+  server: MCPServerConfig,
+  dependencies: Pick<WorkflowExecutionDependencies, "resolveRegisteredMcpServer">
+): Promise<MCPServerConfig> {
+  if (!server.registryServerId) {
+    return server;
+  }
+  if (!dependencies.resolveRegisteredMcpServer) {
+    throw WorkflowError.nodeConfig(
+      `MCP server '${server.registryServerId}' comes from the server registry, which is not available in this runtime.`
+    );
+  }
+  const registered = await dependencies.resolveRegisteredMcpServer(server.registryServerId);
+  return {
+    ...registered,
+    registryServerId: server.registryServerId,
+    allowedTools: server.allowedTools,
+    manualTools: server.manualTools
+  };
 }
 
 function mergeMCPServerConfigs(base: MCPServerConfig[], additional: MCPServerConfig[]): MCPServerConfig[] {
@@ -3882,14 +3915,18 @@ async function executeNode(
       }
       const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
       const args = tryParseJson(renderTemplate(argsTemplate, templateData));
-      const serverConfig: MCPServerConfig = {
-        serverId,
-        connection: toRecord(config.connection),
-        secretRef: config.secretRef as SecretReference | undefined,
-        allowedTools: Array.isArray(config.allowedTools)
-          ? config.allowedTools.map((tool) => String(tool))
-          : undefined
-      };
+      const serverConfig = await applyRegisteredMcpServer(
+        {
+          serverId,
+          registryServerId: readRegistryServerId(config),
+          connection: toRecord(config.connection),
+          secretRef: config.secretRef as SecretReference | undefined,
+          allowedTools: Array.isArray(config.allowedTools)
+            ? config.allowedTools.map((tool) => String(tool))
+            : undefined
+        },
+        dependencies
+      );
 
       const result = await invokeDirectMCPTool(
         serverConfig,
@@ -3907,7 +3944,8 @@ async function executeNode(
 
       return {
         invocation_request: {
-          server_id: serverId,
+          server_id: serverConfig.serverId,
+          ...(serverConfig.registryServerId ? { registry_server_id: serverConfig.registryServerId } : {}),
           tool_name: toolName,
           tool_args: args
         },
@@ -3983,11 +4021,12 @@ async function executeNode(
       const inlineServerConfigs = Array.isArray(config.mcpServers)
         ? config.mcpServers
             .map((entry) => toRecord(entry))
-            .filter((entry) => typeof entry.serverId === "string")
+            .filter((entry) => typeof entry.serverId === "string" || readRegistryServerId(entry) !== undefined)
             .map(
               (entry) =>
                 ({
-                  serverId: String(entry.serverId),
+                  serverId: typeof entry.serverId === "string" ? entry.serverId : "",
+                  registryServerId: readRegistryServerId(entry),
                   label: typeof entry.label === "string" ? entry.label : undefined,
                   connection: toRecord(entry.connection),
                   secretRef: entry.secretRef as SecretReference | undefined,
@@ -4003,7 +4042,8 @@ async function executeNode(
       for (const attached of attachedToolNodes) {
         const attachedConfig = toRecord(attached.config);
         const serverId = String(attachedConfig.serverId ?? "").trim();
-        if (!serverId) {
+        const registryServerId = readRegistryServerId(attachedConfig);
+        if (!serverId && !registryServerId) {
           continue;
         }
 
@@ -4024,16 +4064,23 @@ async function executeNode(
 
         attachedToolServerConfigs.push({
           serverId,
+          registryServerId,
           connection: toRecord(attachedConfig.connection),
           secretRef: attachedConfig.secretRef as SecretReference | undefined,
           allowedTools: allowedTools.size ? [...allowedTools] : undefined
         });
       }
 
+      const resolvedAttachedConfigs = await Promise.all(
+        attachedToolServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies))
+      );
+      const resolvedInlineConfigs = await Promise.all(
+        inlineServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies))
+      );
       const serverConfigs =
-        attachedToolServerConfigs.length > 0
-          ? mergeMCPServerConfigs([], attachedToolServerConfigs)
-          : mergeMCPServerConfigs(inlineServerConfigs, attachedToolServerConfigs);
+        resolvedAttachedConfigs.length > 0
+          ? mergeMCPServerConfigs([], resolvedAttachedConfigs)
+          : mergeMCPServerConfigs(resolvedInlineConfigs, resolvedAttachedConfigs);
       const mcpExecutionContext = {
         resolveSecret: dependencies.resolveSecret,
         runtimeState: new Map<string, unknown>()
@@ -4049,6 +4096,7 @@ async function executeNode(
           handle: "tool",
           input: {
             serverId: String(attachedConfig.serverId ?? ""),
+            ...(readRegistryServerId(attachedConfig) ? { registryServerId: readRegistryServerId(attachedConfig) } : {}),
             toolName: String(attachedConfig.toolName ?? "")
           },
           output: {

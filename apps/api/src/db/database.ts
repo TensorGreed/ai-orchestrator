@@ -394,6 +394,174 @@ function mapLogStreamDestinationRow(row: LogStreamDestinationRow): LogStreamDest
   };
 }
 
+// Phase 10.1 — MCP server registry
+export type McpServerStatus = "unknown" | "healthy" | "degraded" | "down";
+
+export interface McpServerRecord {
+  id: string;
+  name: string;
+  description: string | null;
+  adapterId: string;
+  connection: Record<string, unknown>;
+  secretId: string | null;
+  owner: string | null;
+  projectId: string | null;
+  probeEnabled: boolean;
+  /** null means the deployment default (MCP_PROBE_INTERVAL_MS). */
+  probeIntervalMs: number | null;
+  blockOnBreakingChange: boolean;
+  status: McpServerStatus;
+  lastProbeAt: string | null;
+  lastProbeOk: boolean | null;
+  lastProbeLatencyMs: number | null;
+  lastProbeError: string | null;
+  toolCount: number;
+  currentSnapshotId: string | null;
+  /** Set while a breaking schema change is waiting to be accepted. */
+  pendingBreakingSnapshotId: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpServerProbeRecord {
+  id: string;
+  serverId: string;
+  startedAt: string;
+  ok: boolean;
+  latencyMs: number;
+  toolCount: number;
+  error: string | null;
+  snapshotId: string | null;
+}
+
+export interface McpToolSnapshotRecord {
+  id: string;
+  serverId: string;
+  hash: string;
+  tools: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
+  toolCount: number;
+  previousSnapshotId: string | null;
+  changes: Array<{ tool: string; kind: string; path?: string; breaking: boolean; detail: string }>;
+  breaking: boolean;
+  acknowledgedAt: string | null;
+  acknowledgedBy: string | null;
+  createdAt: string;
+}
+
+interface McpServerRow {
+  id: string;
+  name: string;
+  description: string | null;
+  adapter_id: string;
+  connection_json: string | null;
+  secret_id: string | null;
+  owner: string | null;
+  project_id: string | null;
+  probe_enabled: number;
+  probe_interval_ms: number | null;
+  block_on_breaking_change: number;
+  status: string;
+  last_probe_at: string | null;
+  last_probe_ok: number | null;
+  last_probe_latency_ms: number | null;
+  last_probe_error: string | null;
+  tool_count: number;
+  current_snapshot_id: string | null;
+  pending_breaking_snapshot_id: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface McpServerProbeRow {
+  id: string;
+  server_id: string;
+  started_at: string;
+  ok: number;
+  latency_ms: number;
+  tool_count: number;
+  error: string | null;
+  snapshot_id: string | null;
+}
+
+interface McpToolSnapshotRow {
+  id: string;
+  server_id: string;
+  hash: string;
+  tools_json: string;
+  tool_count: number;
+  previous_snapshot_id: string | null;
+  changes_json: string | null;
+  breaking: number;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  created_at: string;
+}
+
+const MCP_SERVER_STATUSES = new Set<McpServerStatus>(["unknown", "healthy", "degraded", "down"]);
+
+function mapMcpServer(row: McpServerRow): McpServerRecord {
+  const status = toString(row.status) as McpServerStatus;
+  return {
+    id: toString(row.id),
+    name: toString(row.name),
+    description: row.description ? toString(row.description) : null,
+    adapterId: toString(row.adapter_id),
+    connection: row.connection_json
+      ? (safeJsonParse(toString(row.connection_json)) as Record<string, unknown>) ?? {}
+      : {},
+    secretId: row.secret_id ? toString(row.secret_id) : null,
+    owner: row.owner ? toString(row.owner) : null,
+    projectId: row.project_id ? toString(row.project_id) : null,
+    probeEnabled: toNumber(row.probe_enabled) === 1,
+    probeIntervalMs: row.probe_interval_ms === null ? null : toNumber(row.probe_interval_ms),
+    blockOnBreakingChange: toNumber(row.block_on_breaking_change) === 1,
+    status: MCP_SERVER_STATUSES.has(status) ? status : "unknown",
+    lastProbeAt: row.last_probe_at ? toString(row.last_probe_at) : null,
+    lastProbeOk: row.last_probe_ok === null ? null : toNumber(row.last_probe_ok) === 1,
+    lastProbeLatencyMs: row.last_probe_latency_ms === null ? null : toNumber(row.last_probe_latency_ms),
+    lastProbeError: row.last_probe_error ? toString(row.last_probe_error) : null,
+    toolCount: toNumber(row.tool_count),
+    currentSnapshotId: row.current_snapshot_id ? toString(row.current_snapshot_id) : null,
+    pendingBreakingSnapshotId: row.pending_breaking_snapshot_id ? toString(row.pending_breaking_snapshot_id) : null,
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
+function mapMcpServerProbe(row: McpServerProbeRow): McpServerProbeRecord {
+  return {
+    id: toString(row.id),
+    serverId: toString(row.server_id),
+    startedAt: toString(row.started_at),
+    ok: toNumber(row.ok) === 1,
+    latencyMs: toNumber(row.latency_ms),
+    toolCount: toNumber(row.tool_count),
+    error: row.error ? toString(row.error) : null,
+    snapshotId: row.snapshot_id ? toString(row.snapshot_id) : null
+  };
+}
+
+function mapMcpToolSnapshot(row: McpToolSnapshotRow): McpToolSnapshotRecord {
+  const tools = safeJsonParse(toString(row.tools_json));
+  const changes = row.changes_json ? safeJsonParse(toString(row.changes_json)) : [];
+  return {
+    id: toString(row.id),
+    serverId: toString(row.server_id),
+    hash: toString(row.hash),
+    tools: Array.isArray(tools) ? (tools as McpToolSnapshotRecord["tools"]) : [],
+    toolCount: toNumber(row.tool_count),
+    previousSnapshotId: row.previous_snapshot_id ? toString(row.previous_snapshot_id) : null,
+    changes: Array.isArray(changes) ? (changes as McpToolSnapshotRecord["changes"]) : [],
+    breaking: toNumber(row.breaking) === 1,
+    acknowledgedAt: row.acknowledged_at ? toString(row.acknowledged_at) : null,
+    acknowledgedBy: row.acknowledged_by ? toString(row.acknowledged_by) : null,
+    createdAt: toString(row.created_at)
+  };
+}
+
 function toString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
@@ -1250,6 +1418,62 @@ export class SqliteStore {
         INSERT INTO knowledge_base_chunks_fts(rowid, content, kb_id)
         VALUES (new.rowid, new.content, new.knowledge_base_id);
       END;
+    `);
+
+    // Phase 10.1 — MCP server registry
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_servers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        adapter_id TEXT NOT NULL,
+        connection_json TEXT,
+        secret_id TEXT,
+        owner TEXT,
+        project_id TEXT,
+        probe_enabled INTEGER NOT NULL DEFAULT 1,
+        probe_interval_ms INTEGER,
+        block_on_breaking_change INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        last_probe_at TEXT,
+        last_probe_ok INTEGER,
+        last_probe_latency_ms INTEGER,
+        last_probe_error TEXT,
+        tool_count INTEGER NOT NULL DEFAULT 0,
+        current_snapshot_id TEXT,
+        pending_breaking_snapshot_id TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_servers_project ON mcp_servers(project_id);
+
+      CREATE TABLE IF NOT EXISTS mcp_server_probes (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        ok INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        tool_count INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        snapshot_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_server_probes_server ON mcp_server_probes(server_id, started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS mcp_tool_snapshots (
+        id TEXT PRIMARY KEY,
+        server_id TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        tools_json TEXT NOT NULL,
+        tool_count INTEGER NOT NULL DEFAULT 0,
+        previous_snapshot_id TEXT,
+        changes_json TEXT,
+        breaking INTEGER NOT NULL DEFAULT 0,
+        acknowledged_at TEXT,
+        acknowledged_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_snapshots_server ON mcp_tool_snapshots(server_id, created_at DESC);
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -6766,6 +6990,233 @@ export class SqliteStore {
       sourceId: r.source_id ? toString(r.source_id) : "(unsourced)",
       chunkCount: toNumber(r.cnt)
     }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 10.1 — MCP server registry
+  // ---------------------------------------------------------------------------
+
+  createMcpServer(input: {
+    id: string;
+    name: string;
+    description?: string | null;
+    adapterId: string;
+    connection?: Record<string, unknown>;
+    secretId?: string | null;
+    owner?: string | null;
+    projectId?: string | null;
+    probeEnabled?: boolean;
+    probeIntervalMs?: number | null;
+    blockOnBreakingChange?: boolean;
+    createdBy?: string | null;
+  }): void {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO mcp_servers (
+         id, name, description, adapter_id, connection_json, secret_id, owner, project_id,
+         probe_enabled, probe_interval_ms, block_on_breaking_change, status, tool_count,
+         created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', 0, ?, ?, ?)`,
+      [
+        input.id,
+        input.name,
+        input.description ?? null,
+        input.adapterId,
+        JSON.stringify(input.connection ?? {}),
+        input.secretId ?? null,
+        input.owner ?? null,
+        input.projectId ?? null,
+        input.probeEnabled === false ? 0 : 1,
+        input.probeIntervalMs ?? null,
+        input.blockOnBreakingChange ? 1 : 0,
+        input.createdBy ?? null,
+        now,
+        now
+      ]
+    );
+  }
+
+  updateMcpServer(id: string, patch: {
+    name?: string;
+    description?: string | null;
+    adapterId?: string;
+    connection?: Record<string, unknown>;
+    secretId?: string | null;
+    owner?: string | null;
+    projectId?: string | null;
+    probeEnabled?: boolean;
+    probeIntervalMs?: number | null;
+    blockOnBreakingChange?: boolean;
+  }): boolean {
+    const fields: string[] = [];
+    const params: Array<string | number | null> = [];
+    if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
+    if (patch.description !== undefined) { fields.push("description = ?"); params.push(patch.description); }
+    if (patch.adapterId !== undefined) { fields.push("adapter_id = ?"); params.push(patch.adapterId); }
+    if (patch.connection !== undefined) { fields.push("connection_json = ?"); params.push(JSON.stringify(patch.connection)); }
+    if (patch.secretId !== undefined) { fields.push("secret_id = ?"); params.push(patch.secretId); }
+    if (patch.owner !== undefined) { fields.push("owner = ?"); params.push(patch.owner); }
+    if (patch.projectId !== undefined) { fields.push("project_id = ?"); params.push(patch.projectId); }
+    if (patch.probeEnabled !== undefined) { fields.push("probe_enabled = ?"); params.push(patch.probeEnabled ? 1 : 0); }
+    if (patch.probeIntervalMs !== undefined) { fields.push("probe_interval_ms = ?"); params.push(patch.probeIntervalMs); }
+    if (patch.blockOnBreakingChange !== undefined) {
+      fields.push("block_on_breaking_change = ?");
+      params.push(patch.blockOnBreakingChange ? 1 : 0);
+    }
+    if (fields.length === 0) return false;
+    fields.push("updated_at = ?");
+    params.push(new Date().toISOString());
+    params.push(id);
+    this.exec(`UPDATE mcp_servers SET ${fields.join(", ")} WHERE id = ?`, params);
+    return true;
+  }
+
+  deleteMcpServer(id: string): boolean {
+    const existing = this.getMcpServer(id);
+    if (!existing) return false;
+    this.db.transaction(() => {
+      this.exec(`DELETE FROM mcp_server_probes WHERE server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_tool_snapshots WHERE server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_servers WHERE id = ?`, [id]);
+    })();
+    return true;
+  }
+
+  getMcpServer(id: string): McpServerRecord | null {
+    const row = this.queryOne<McpServerRow>(`SELECT * FROM mcp_servers WHERE id = ?`, [id]);
+    return row ? mapMcpServer(row) : null;
+  }
+
+  /** With a projectId: that project's servers plus deployment-wide ones (no project). */
+  listMcpServers(filter: { projectId?: string } = {}): McpServerRecord[] {
+    const rows = filter.projectId
+      ? this.queryAll<McpServerRow>(
+          `SELECT * FROM mcp_servers WHERE project_id = ? OR project_id IS NULL ORDER BY name`,
+          [filter.projectId]
+        )
+      : this.queryAll<McpServerRow>(`SELECT * FROM mcp_servers ORDER BY name`);
+    return rows.map(mapMcpServer);
+  }
+
+  /**
+   * Record one probe and fold it into the server row. When the probe saw a new
+   * tool schema, `snapshot` is stored and becomes the current one; a breaking
+   * snapshot also becomes the pending one until someone accepts it.
+   * `keepProbes` bounds the history kept per server.
+   */
+  recordMcpServerProbe(input: {
+    probe: McpServerProbeRecord;
+    status: McpServerStatus;
+    snapshot?: Omit<McpToolSnapshotRecord, "acknowledgedAt" | "acknowledgedBy">;
+    keepProbes: number;
+  }): void {
+    const { probe, snapshot } = input;
+    this.db.transaction(() => {
+      if (snapshot) {
+        this.exec(
+          `INSERT INTO mcp_tool_snapshots (
+             id, server_id, hash, tools_json, tool_count, previous_snapshot_id, changes_json, breaking, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            snapshot.id,
+            snapshot.serverId,
+            snapshot.hash,
+            JSON.stringify(snapshot.tools),
+            snapshot.toolCount,
+            snapshot.previousSnapshotId,
+            JSON.stringify(snapshot.changes),
+            snapshot.breaking ? 1 : 0,
+            snapshot.createdAt
+          ]
+        );
+      }
+      this.exec(
+        `INSERT INTO mcp_server_probes (id, server_id, started_at, ok, latency_ms, tool_count, error, snapshot_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          probe.id,
+          probe.serverId,
+          probe.startedAt,
+          probe.ok ? 1 : 0,
+          probe.latencyMs,
+          probe.toolCount,
+          probe.error,
+          probe.snapshotId
+        ]
+      );
+      const fields = [
+        "status = ?",
+        "last_probe_at = ?",
+        "last_probe_ok = ?",
+        "last_probe_latency_ms = ?",
+        "last_probe_error = ?"
+      ];
+      const params: Array<string | number | null> = [
+        input.status,
+        probe.startedAt,
+        probe.ok ? 1 : 0,
+        probe.latencyMs,
+        probe.error
+      ];
+      if (probe.ok) {
+        fields.push("tool_count = ?");
+        params.push(probe.toolCount);
+      }
+      if (snapshot) {
+        fields.push("current_snapshot_id = ?");
+        params.push(snapshot.id);
+        if (snapshot.breaking) {
+          fields.push("pending_breaking_snapshot_id = ?");
+          params.push(snapshot.id);
+        }
+      }
+      params.push(probe.serverId);
+      this.exec(`UPDATE mcp_servers SET ${fields.join(", ")} WHERE id = ?`, params);
+      this.exec(
+        `DELETE FROM mcp_server_probes WHERE server_id = ? AND id NOT IN (
+           SELECT id FROM mcp_server_probes WHERE server_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?
+         )`,
+        [probe.serverId, probe.serverId, input.keepProbes]
+      );
+    })();
+  }
+
+  listMcpServerProbes(serverId: string, limit = 100): McpServerProbeRecord[] {
+    return this.queryAll<McpServerProbeRow>(
+      `SELECT * FROM mcp_server_probes WHERE server_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?`,
+      [serverId, limit]
+    ).map(mapMcpServerProbe);
+  }
+
+  getMcpToolSnapshot(id: string): McpToolSnapshotRecord | null {
+    const row = this.queryOne<McpToolSnapshotRow>(`SELECT * FROM mcp_tool_snapshots WHERE id = ?`, [id]);
+    return row ? mapMcpToolSnapshot(row) : null;
+  }
+
+  listMcpToolSnapshots(serverId: string, limit = 50): McpToolSnapshotRecord[] {
+    return this.queryAll<McpToolSnapshotRow>(
+      `SELECT * FROM mcp_tool_snapshots WHERE server_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+      [serverId, limit]
+    ).map(mapMcpToolSnapshot);
+  }
+
+  /** Accept the pending breaking change: unblocks runs until the next breaking diff. */
+  acknowledgeMcpBreakingChange(serverId: string, acknowledgedBy: string): McpToolSnapshotRecord | null {
+    const server = this.getMcpServer(serverId);
+    if (!server?.pendingBreakingSnapshotId) return null;
+    const snapshotId = server.pendingBreakingSnapshotId;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.exec(
+        `UPDATE mcp_tool_snapshots SET acknowledged_at = ?, acknowledged_by = ? WHERE id = ?`,
+        [now, acknowledgedBy, snapshotId]
+      );
+      this.exec(
+        `UPDATE mcp_servers SET pending_breaking_snapshot_id = NULL, updated_at = ? WHERE id = ?`,
+        [now, serverId]
+      );
+    })();
+    return this.getMcpToolSnapshot(snapshotId);
   }
 
   /**

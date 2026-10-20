@@ -415,6 +415,16 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     this.handleClose(session);
   }
 
+  closeSessions(context: MCPExecutionContext): void {
+    const cache = this.getCache(context);
+    for (const [key, value] of cache) {
+      if (value && typeof value === "object" && "proc" in value) {
+        this.killSession(value);
+        cache.delete(key);
+      }
+    }
+  }
+
   private killSession(session: StdioSession): void {
     if (!session.closed) {
       try {

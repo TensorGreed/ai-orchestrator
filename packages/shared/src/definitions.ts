@@ -718,6 +718,7 @@ export const nodeDefinitions: NodeDefinition[] = [
       type: "object",
       properties: {
         serverId: { type: "string" },
+        registryServerId: { type: "string" },
         toolName: { type: "string" },
         argsTemplate: { type: "string" },
         connection: {
@@ -731,7 +732,7 @@ export const nodeDefinitions: NodeDefinition[] = [
           }
         }
       },
-      required: ["serverId", "toolName"]
+      required: ["toolName"]
     },
     sampleConfig: {
       serverId: "mock-mcp",

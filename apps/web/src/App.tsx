@@ -101,6 +101,7 @@ import { deriveRunStatus } from "./components/studio-layout-types";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
 import { SettingsPage } from "./components/SettingsPage";
 import { KnowledgeBasePage } from "./components/KnowledgeBasePage";
+import { McpServersPage } from "./components/McpServersPage";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
@@ -5189,6 +5190,10 @@ function StudioApp() {
               isAdmin={authUser?.role === "admin"}
               activeProjectId={activeProjectId}
             />
+          )}
+
+          {activeMode === "mcp" && (
+            <McpServersPage isAdmin={authUser?.role === "admin"} activeProjectId={activeProjectId} />
           )}
 
           {activeMode === "templates" && (

@@ -49,7 +49,7 @@ import {
   type EmbeddingAdapter
 } from "@ai-orchestrator/workflow-engine";
 import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
-import { SqliteStore } from "./db/database";
+import { SqliteStore, type McpServerRecord } from "./db/database";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
 import { MCP_PRESETS } from "./services/mcp-presets";
@@ -82,6 +82,7 @@ import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
 import { AuditExportService } from "./services/audit-export-service";
+import { McpProbeService, serverConfigFromRecord } from "./services/mcp-probe-service";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -217,6 +218,27 @@ const mcpTestToolSchema = z.object({
     .optional(),
   toolName: z.string().min(1),
   args: z.record(z.string(), z.unknown()).optional()
+});
+
+const mcpSecretRefSchema = z.object({ secretId: z.string().min(1) });
+// Probes faster than every 10 s would hammer stdio servers that spawn a process per probe.
+const mcpProbeIntervalSchema = z.number().int().min(10_000).nullable();
+
+const mcpServerCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(2000).nullable().optional(),
+  adapterId: z.string().min(1),
+  connection: z.record(z.string(), z.unknown()).optional(),
+  secretRef: mcpSecretRefSchema.nullable().optional(),
+  owner: z.string().max(200).nullable().optional(),
+  projectId: z.string().nullable().optional(),
+  probeEnabled: z.boolean().optional(),
+  probeIntervalMs: mcpProbeIntervalSchema.optional(),
+  blockOnBreakingChange: z.boolean().optional()
+});
+
+const mcpServerUpdateSchema = mcpServerCreateSchema.partial().refine((value) => Object.keys(value).length > 0, {
+  message: "Empty update payload"
 });
 
 const approvalDecisionSchema = z.object({
@@ -827,6 +849,40 @@ async function listWebhookEndpointMatchesByPath(
   return matches;
 }
 
+/** Phase 10.1 — every node that points at a registry server, for the detail page and delete guard. */
+function listMcpServerUsages(
+  store: SqliteStore,
+  registryServerId: string
+): Array<{ workflowId: string; workflowName: string; nodeId: string; nodeName: string; nodeType: string }> {
+  const usages: Array<{ workflowId: string; workflowName: string; nodeId: string; nodeName: string; nodeType: string }> = [];
+  for (const summary of store.listWorkflows()) {
+    const workflow = store.getWorkflow(summary.id);
+    if (!workflow) continue;
+    for (const node of workflow.nodes) {
+      const config = (node.config ?? {}) as Record<string, unknown>;
+      const inline = Array.isArray(config.mcpServers) ? config.mcpServers : [];
+      const referenced =
+        config.registryServerId === registryServerId ||
+        inline.some(
+          (entry) =>
+            entry !== null &&
+            typeof entry === "object" &&
+            (entry as Record<string, unknown>).registryServerId === registryServerId
+        );
+      if (referenced) {
+        usages.push({
+          workflowId: workflow.id,
+          workflowName: workflow.name,
+          nodeId: node.id,
+          nodeName: node.name,
+          nodeType: node.type
+        });
+      }
+    }
+  }
+  return usages;
+}
+
 async function listAllWebhookEndpoints(
   store: SqliteStore
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
@@ -1086,6 +1142,20 @@ export function createApp(
         { providerRegistry, mcpRegistry, connectorRegistry }
       )
     : null;
+  // Phase 10.1 — nodes that reference the MCP server registry resolve here at
+  // run time, so a registry edit applies to every workflow using the server.
+  const resolveRegisteredMcpServer = (registryServerId: string): MCPServerConfig => {
+    const server = store.getMcpServer(registryServerId);
+    if (!server) {
+      throw new Error(`MCP server '${registryServerId}' is not in the server registry. Pick a registered server on the node.`);
+    }
+    if (server.blockOnBreakingChange && server.pendingBreakingSnapshotId) {
+      throw new Error(
+        `MCP server '${server.name}' changed its tool schemas in a breaking way and is set to block runs. Review and accept the change on the MCP servers page.`
+      );
+    }
+    return serverConfigFromRecord(server);
+  };
   const activeExecutions = new Map<
     string,
     {
@@ -1384,6 +1454,7 @@ export function createApp(
             }
           },
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+          resolveRegisteredMcpServer,
           persistPausedExecution: async (paused) => {
             store.saveWorkflowExecutionState({
               id: paused.executionId,
@@ -1456,7 +1527,8 @@ export function createApp(
                       return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
                     }
                   },
-                  resolveSecret: (ref) => secretService.resolveSecret(ref)
+                  resolveSecret: (ref) => secretService.resolveSecret(ref),
+                  resolveRegisteredMcpServer
                 }
               );
             } catch (err) {
@@ -2257,6 +2329,29 @@ export function createApp(
     auditExportService.start();
     app.addHook("onClose", async () => {
       await auditExportService.stop();
+    });
+  }
+  const mcpProbeService = new McpProbeService(
+    store,
+    mcpRegistry,
+    {
+      resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+      isLeader: () => leaderElection.isLeader()
+    },
+    {
+      defaultIntervalMs: config.MCP_PROBE_INTERVAL_MS,
+      probeTimeoutMs: config.MCP_PROBE_TIMEOUT_MS,
+      keepProbes: config.MCP_PROBE_HISTORY_LIMIT
+    }
+  );
+  mcpProbeService.setLogger({
+    info: (msg, fields) => app.log.info(fields ?? {}, msg),
+    warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+  });
+  if (runsBackgroundWorkers) {
+    mcpProbeService.start();
+    app.addHook("onClose", async () => {
+      mcpProbeService.stop();
     });
   }
   const logStreamingService = new LogStreamingService(store, config.SECRET_MASTER_KEY_BASE64, {
@@ -8570,6 +8665,246 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         durationMs: Date.now() - startedAt
       };
     }
+  });
+
+  // Phase 10.1 — MCP server registry. Reads are open to builders (they pick
+  // servers on nodes); changing the registry is admin-only because every
+  // workflow that references a server follows the change.
+  const mcpServerSummary = (server: McpServerRecord) => ({
+    ...server,
+    latency: mcpProbeService.latency(server.id)
+  });
+
+  app.get("/api/mcp/servers", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const query = request.query as { projectId?: string } | undefined;
+    return {
+      servers: store.listMcpServers({ projectId: query?.projectId }).map(mcpServerSummary),
+      adapters: mcpRegistry.listDefinitions().map((definition) => ({ id: definition.id, label: definition.label })),
+      defaultProbeIntervalMs: mcpProbeService.defaultIntervalMs
+    };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/mcp/servers/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const server = store.getMcpServer(request.params.id);
+    if (!server) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    return {
+      server: mcpServerSummary(server),
+      probes: store.listMcpServerProbes(server.id, 50),
+      // Snapshot list without the tool bodies; fetch one snapshot for those.
+      snapshots: store.listMcpToolSnapshots(server.id, 20).map(({ tools: _tools, ...snapshot }) => snapshot),
+      usages: listMcpServerUsages(store, server.id)
+    };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/tools", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const server = store.getMcpServer(request.params.id);
+    if (!server) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+    return { serverId: server.id, snapshotId: snapshot?.id ?? null, probedAt: server.lastProbeAt, tools: snapshot?.tools ?? [] };
+  });
+
+  app.get<{ Params: { id: string; snapshotId: string } }>(
+    "/api/mcp/servers/:id/snapshots/:snapshotId",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["builder"]);
+      if (!user) return;
+      const snapshot = store.getMcpToolSnapshot(request.params.snapshotId);
+      if (!snapshot || snapshot.serverId !== request.params.id) {
+        reply.code(404);
+        return { error: "Snapshot not found" };
+      }
+      return { snapshot };
+    }
+  );
+
+  const validateMcpServerInput = (
+    input: { adapterId?: string; secretRef?: { secretId: string } | null },
+    reply: FastifyReply
+  ): { error: string } | null => {
+    if (input.adapterId !== undefined && !mcpRegistry.tryGet(input.adapterId)) {
+      reply.code(400);
+      return { error: `Unknown MCP adapter '${input.adapterId}'` };
+    }
+    if (input.secretRef && !store.getSecret(input.secretRef.secretId)) {
+      reply.code(400);
+      return { error: `Secret '${input.secretRef.secretId}' does not exist` };
+    }
+    return null;
+  };
+
+  const probeInBackground = (serverId: string) => {
+    void mcpProbeService.probe(serverId).catch((err) => {
+      app.log.warn({ serverId, err: err instanceof Error ? err.message : String(err) }, "Initial MCP probe failed");
+    });
+  };
+
+  app.post<{ Body: unknown }>("/api/mcp/servers", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = mcpServerCreateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid MCP server payload", details: parsed.error.issues };
+    }
+    const invalid = validateMcpServerInput(parsed.data, reply);
+    if (invalid) return invalid;
+
+    const id = `mcp_${crypto.randomUUID()}`;
+    store.createMcpServer({
+      id,
+      name: parsed.data.name,
+      description: parsed.data.description ?? null,
+      adapterId: parsed.data.adapterId,
+      connection: parsed.data.connection ?? {},
+      secretId: parsed.data.secretRef?.secretId ?? null,
+      owner: parsed.data.owner ?? user.email,
+      projectId: parsed.data.projectId ?? null,
+      probeEnabled: parsed.data.probeEnabled,
+      probeIntervalMs: parsed.data.probeIntervalMs ?? null,
+      blockOnBreakingChange: parsed.data.blockOnBreakingChange,
+      createdBy: user.email
+    });
+    auditService.record({
+      category: "system",
+      eventType: "mcp_server.created",
+      action: "create",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "mcp_server",
+      resourceId: id,
+      projectId: parsed.data.projectId ?? null,
+      metadata: { name: parsed.data.name, adapterId: parsed.data.adapterId }
+    });
+    if (parsed.data.probeEnabled !== false) {
+      probeInBackground(id);
+    }
+    reply.code(201);
+    return { server: mcpServerSummary(store.getMcpServer(id)!) };
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/mcp/servers/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getMcpServer(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const parsed = mcpServerUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid MCP server payload", details: parsed.error.issues };
+    }
+    const invalid = validateMcpServerInput(parsed.data, reply);
+    if (invalid) return invalid;
+
+    const { secretRef, ...rest } = parsed.data;
+    store.updateMcpServer(existing.id, {
+      ...rest,
+      ...(secretRef !== undefined ? { secretId: secretRef?.secretId ?? null } : {})
+    });
+    auditService.record({
+      category: "system",
+      eventType: "mcp_server.updated",
+      action: "update",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "mcp_server",
+      resourceId: existing.id,
+      metadata: { fields: Object.keys(parsed.data) }
+    });
+    const connectionChanged =
+      parsed.data.adapterId !== undefined || parsed.data.connection !== undefined || secretRef !== undefined;
+    if (connectionChanged && store.getMcpServer(existing.id)?.probeEnabled) {
+      probeInBackground(existing.id);
+    }
+    return { server: mcpServerSummary(store.getMcpServer(existing.id)!) };
+  });
+
+  app.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
+    "/api/mcp/servers/:id",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["admin"]);
+      if (!user) return;
+      const existing = store.getMcpServer(request.params.id);
+      if (!existing) {
+        reply.code(404);
+        return { error: "MCP server not found" };
+      }
+      const usages = listMcpServerUsages(store, existing.id);
+      if (usages.length > 0 && request.query.force !== "true") {
+        reply.code(409);
+        return {
+          error: `MCP server '${existing.name}' is used by ${usages.length} node(s). Repoint them first or delete with force=true.`,
+          usages
+        };
+      }
+      store.deleteMcpServer(existing.id);
+      auditService.record({
+        category: "system",
+        eventType: "mcp_server.deleted",
+        action: "delete",
+        outcome: "success",
+        actor: { email: user.email, type: "user" },
+        resourceType: "mcp_server",
+        resourceId: existing.id,
+        metadata: { name: existing.name, orphanedNodes: usages.length }
+      });
+      return { ok: true };
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/api/mcp/servers/:id/probe", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    if (!store.getMcpServer(request.params.id)) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const outcome = await mcpProbeService.probe(request.params.id);
+    return {
+      server: mcpServerSummary(outcome.server),
+      probe: outcome.probe,
+      snapshot: outcome.snapshot ? (({ tools: _tools, ...snapshot }) => snapshot)(outcome.snapshot) : null
+    };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/mcp/servers/:id/accept-change", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getMcpServer(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const snapshot = store.acknowledgeMcpBreakingChange(existing.id, user.email);
+    if (!snapshot) {
+      reply.code(409);
+      return { error: "There is no pending breaking change to accept" };
+    }
+    auditService.record({
+      category: "system",
+      eventType: "mcp_server.breaking_change_accepted",
+      action: "update",
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "mcp_server",
+      resourceId: existing.id,
+      metadata: { snapshotId: snapshot.id, breakingChanges: snapshot.changes.filter((change) => change.breaking).length }
+    });
+    return { server: mcpServerSummary(store.getMcpServer(existing.id)!) };
   });
 
   app.get("/api/mcp/presets", async (request, reply) => {
