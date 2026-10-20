@@ -17,7 +17,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { McpToolCallRecord } from "../db/database.js";
+import type { McpToolCallRecord, McpToolCallWrite } from "../db/database.js";
 import { percentile } from "./mcp-probe-service.js";
 
 export const MCP_TELEMETRY_WINDOWS = {
@@ -38,7 +38,7 @@ export function parseMcpTelemetryWindow(value: unknown): McpTelemetryWindow | nu
 const MAX_ERROR_CHARS = 500;
 const MAX_WORKER_DEPTH = 4;
 
-export type McpToolCallInput = Omit<McpToolCallRecord, "createdAt">;
+export type McpToolCallInput = McpToolCallWrite;
 
 export interface ExtractMcpToolCallsInput {
   executionId: string;

@@ -2518,7 +2518,7 @@ export const nodeDefinitions: NodeDefinition[] = [
     type: "mcp_server_trigger",
     label: "Expose as MCP Tool",
     category: "Input",
-    description: "Turn this workflow into an MCP tool that other agents (including other L2M agents) can invoke. Serves a manifest at GET /api/mcp-server/:path/manifest and accepts calls at POST /api/mcp-server/:path/invoke. Downstream nodes receive the tool arguments as input.",
+    description: "Turn this workflow into an MCP tool that other agents (including other L2M agents) can invoke. Add the workflow to a toolset on the MCP servers page to serve it to MCP clients at /mcp/:toolset; the legacy REST routes GET /api/mcp-server/:path/manifest and POST /api/mcp-server/:path/invoke keep working. Downstream nodes receive the tool arguments as input.",
     configSchema: {
       type: "object",
       properties: {

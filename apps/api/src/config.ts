@@ -80,6 +80,41 @@ const envSchema = z.object({
   MCP_PROBE_INTERVAL_MS: z.coerce.number().int().nonnegative().default(300000),
   MCP_PROBE_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
   MCP_PROBE_HISTORY_LIMIT: z.coerce.number().int().positive().default(500),
+  // Phase 10.4 — L2M as an MCP server and gateway (/mcp/<toolset>).
+  /**
+   * Comma-separated origins (scheme://host[:port]) whose browser requests the
+   * MCP endpoint accepts, besides requests without an Origin header and the
+   * endpoint's own origin. Everything else gets 403 (DNS-rebinding guard).
+   */
+  MCP_GATEWAY_ALLOWED_ORIGINS: z
+    .string()
+    .default("")
+    .refine(
+      (value) =>
+        value
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+          .every((entry) => /^https?:\/\/[^/\s]+$/i.test(entry)),
+      { message: "MCP_GATEWAY_ALLOWED_ORIGINS must be a comma-separated list of origins like https://tools.example.com" }
+    ),
+  /** A gateway session with no request for this long is closed (and its stdio servers stopped). */
+  MCP_GATEWAY_SESSION_IDLE_MS: z.coerce.number().int().min(10_000).default(1_800_000),
+  /** Open gateway sessions across all clients; the least recently used idle session is closed past it. */
+  MCP_GATEWAY_MAX_SESSIONS: z.coerce.number().int().positive().default(500),
+  /**
+   * Audit log for read-only registry tools called through the gateway: every
+   * call, the first call of each tool per session (default), or none. Write
+   * tools, workflow tools, failures and denials are always recorded.
+   */
+  MCP_GATEWAY_AUDIT_READ_ONLY_CALLS: z.enum(["all", "first_per_session", "none"]).default("first_per_session"),
+  /** Base URL clients reach this instance at, used for the endpoint URLs shown in the UI. Empty = the browser's origin. */
+  MCP_GATEWAY_PUBLIC_URL: z
+    .string()
+    .default("")
+    .refine((value) => value === "" || /^https?:\/\/[^\s]+$/i.test(value), {
+      message: "MCP_GATEWAY_PUBLIC_URL must be an http(s) URL"
+    }),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),

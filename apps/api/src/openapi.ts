@@ -1482,6 +1482,195 @@ export const openApiSpec = {
       }
     },
 
+    // ── MCP gateway (Phase 10.4) ────────────────────────────────────────────
+    "/mcp/{toolset}": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "MCP Streamable HTTP endpoint for a toolset (JSON-RPC 2.0: initialize, ping, tools/list, tools/call, notifications/initialized, notifications/cancelled). Bearer client token scoped to the toolset.",
+        description:
+          "Protocol versions 2025-11-25, 2025-06-18 and 2025-03-26 (batches only in 2025-03-26). Responds with application/json, or text/event-stream when a request carries _meta.progressToken and Accept allows SSE. initialize returns the Mcp-Session-Id header that later requests must send. Origin must be absent, WEB_ORIGIN, MCP_GATEWAY_PUBLIC_URL or listed in MCP_GATEWAY_ALLOWED_ORIGINS.",
+        parameters: [
+          { name: "toolset", in: "path", required: true, schema: { type: "string" } },
+          { name: "Mcp-Session-Id", in: "header", required: false, schema: { type: "string" } },
+          { name: "MCP-Protocol-Version", in: "header", required: false, schema: { type: "string" } }
+        ],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", description: "JSON-RPC 2.0 message (or batch, 2025-03-26 only)" } } } },
+        responses: {
+          "200": { description: "JSON-RPC response (application/json) or SSE stream with progress notifications and the response" },
+          "202": { description: "Notifications accepted" },
+          "400": { description: "Parse error, missing session id, unsupported protocol version or batch" },
+          "401": { description: "Missing, invalid, revoked or expired client token" },
+          "403": { description: "Origin not allowed, or the token is not scoped to this toolset" },
+          "404": { description: "Unknown or disabled toolset, or unknown session" },
+          "503": { description: "Session limit reached and no session is idle" }
+        }
+      },
+      get: {
+        tags: ["MCP"],
+        summary: "Server-initiated SSE stream: not offered (405)",
+        parameters: [{ name: "toolset", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "405": { description: "Method not allowed" } }
+      },
+      delete: {
+        tags: ["MCP"],
+        summary: "End an MCP session (stops the stdio servers it started)",
+        parameters: [
+          { name: "toolset", in: "path", required: true, schema: { type: "string" } },
+          { name: "Mcp-Session-Id", in: "header", required: true, schema: { type: "string" } }
+        ],
+        responses: { "204": { description: "Session ended" }, "404": { description: "Unknown session" } }
+      }
+    },
+    "/api/mcp/toolsets": {
+      get: {
+        tags: ["MCP"],
+        summary: "List MCP gateway toolsets with members, endpoint path and open sessions (builder)",
+        responses: { "200": { description: "Toolsets, the configured public base URL and supported protocol versions" } }
+      },
+      post: {
+        tags: ["MCP"],
+        summary: "Create a toolset (admin)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name"],
+                properties: {
+                  name: { type: "string" },
+                  slug: { type: "string", description: "Lowercase letters, digits and dashes; derived from the name when omitted" },
+                  description: { type: "string", nullable: true },
+                  projectId: { type: "string", nullable: true, description: "Project the tool policy is evaluated in" },
+                  enabled: { type: "boolean", default: true },
+                  members: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      required: ["kind"],
+                      properties: {
+                        kind: { type: "string", enum: ["workflow", "server"] },
+                        workflowId: { type: "string", description: "kind=workflow: a workflow with an Expose as MCP Tool trigger" },
+                        serverId: { type: "string", description: "kind=server: a registry server id" },
+                        toolGlob: { type: "string", nullable: true, description: "kind=server: tool name or glob; null = every tool" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: { "201": { description: "Toolset created" }, "400": { description: "Invalid payload, member or project" }, "409": { description: "Slug taken" } }
+      }
+    },
+    "/api/mcp/toolsets/candidates": {
+      get: {
+        tags: ["MCP"],
+        summary: "Workflows that can join a toolset (they have an Expose as MCP Tool trigger) (builder)",
+        responses: { "200": { description: "Workflows and their tool names" } }
+      }
+    },
+    "/api/mcp/toolsets/{id}": {
+      get: {
+        tags: ["MCP"],
+        summary: "Get a toolset (builder)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Toolset" }, "404": { description: "Not found" } }
+      },
+      put: {
+        tags: ["MCP"],
+        summary: "Update a toolset (admin); members, when sent, replace the list. A new slug or disabling ends its sessions.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Updated toolset" }, "404": { description: "Not found" }, "409": { description: "Slug taken" } }
+      },
+      delete: {
+        tags: ["MCP"],
+        summary: "Delete a toolset (admin); removes it from every client's scope and ends its sessions",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Deleted" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/toolsets/{id}/preview": {
+      get: {
+        tags: ["MCP"],
+        summary: "Tools a role would see through this toolset, tools the policy hides, and member warnings (builder)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "role", in: "query", required: false, schema: { type: "string", enum: ["admin", "builder", "operator", "viewer"] } }
+        ],
+        responses: { "200": { description: "Preview" }, "400": { description: "Unknown role" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/toolsets/{id}/members": {
+      post: {
+        tags: ["MCP"],
+        summary: "Add one member to a toolset (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "201": { description: "Updated toolset" }, "400": { description: "Invalid member" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/toolsets/{id}/members/{memberId}": {
+      delete: {
+        tags: ["MCP"],
+        summary: "Remove a member from a toolset (admin)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "memberId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "Updated toolset" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/clients": {
+      get: {
+        tags: ["MCP"],
+        summary: "List MCP client credentials with status, effective role and 7-day usage (builder). Never returns tokens.",
+        responses: { "200": { description: "Clients" } }
+      },
+      post: {
+        tags: ["MCP"],
+        summary: "Create a client credential (admin). The response is the only one that carries the token.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name", "toolsetIds", "role"],
+                properties: {
+                  name: { type: "string" },
+                  toolsetIds: { type: "array", items: { type: "string" } },
+                  role: { type: "string", enum: ["admin", "builder", "operator", "viewer"], description: "Capped at the creator's current role when used" },
+                  expiresAt: { type: "string", format: "date-time", nullable: true }
+                }
+              }
+            }
+          }
+        },
+        responses: { "201": { description: "Client and its one-time token" }, "400": { description: "Invalid payload or toolset" }, "403": { description: "Role above the creator's" } }
+      }
+    },
+    "/api/mcp/clients/{id}/revoke": {
+      post: {
+        tags: ["MCP"],
+        summary: "Revoke a client credential (admin); its open sessions end",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Revoked client" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/clients/{id}/usage": {
+      get: {
+        tags: ["MCP"],
+        summary: "A client's gateway calls, errors, latency and last use per tool (builder)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "window", in: "query", required: false, schema: { type: "string", enum: ["24h", "7d", "30d"] } }
+        ],
+        responses: { "200": { description: "Usage rollup" }, "404": { description: "Not found" } }
+      }
+    },
+
     // ── OpenAPI (self) ──────────────────────────────────────────────────────
     "/api/openapi.json": {
       get: {

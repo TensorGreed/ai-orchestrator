@@ -287,3 +287,47 @@ export const mcpToolClassificationSchema = z.object({
   /** true / false sets the manual override; null clears it. */
   readOnly: z.boolean().nullable()
 });
+
+// Phase 10.4 — L2M as an MCP server and gateway: toolsets and client credentials.
+
+/** URL segment of a toolset endpoint (`/mcp/<slug>`). */
+export const mcpToolsetSlugSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(63)
+  .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/, "Use lowercase letters, digits and dashes, starting and ending with a letter or digit");
+
+export const mcpToolsetMemberInputSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workflow"),
+    workflowId: z.string().trim().min(1)
+  }),
+  z.object({
+    kind: z.literal("server"),
+    serverId: z.string().trim().min(1),
+    /** Tool name or glob; null or absent exposes every tool of the server. */
+    toolGlob: mcpToolPatternSchema.nullable().optional()
+  })
+]);
+
+export const mcpToolsetInputSchema = z.object({
+  slug: mcpToolsetSlugSchema.optional(),
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(2000).nullable().optional(),
+  projectId: z.string().trim().min(1).nullable().optional(),
+  enabled: z.boolean().optional(),
+  members: z.array(mcpToolsetMemberInputSchema).max(200).optional()
+});
+
+export const mcpToolsetUpdateSchema = mcpToolsetInputSchema
+  .partial()
+  .refine((value) => Object.keys(value).length > 0, { message: "Empty update payload" });
+
+export const mcpClientCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  toolsetIds: z.array(z.string().trim().min(1)).min(1).max(50),
+  role: mcpPolicyRoleSchema,
+  /** ISO timestamp in the future; null or absent = never expires. */
+  expiresAt: z.string().datetime({ offset: true }).nullable().optional()
+});

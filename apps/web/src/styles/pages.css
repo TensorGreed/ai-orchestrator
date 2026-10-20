@@ -3435,3 +3435,231 @@ button.tag-chip:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 10.4 — MCP gateway: toolsets and clients
+   --------------------------------------------------------------------------- */
+
+.mcp-page .page-actions {
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mcp-page .finops-range {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.mcp-gateway {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.mcp-gateway > .mcp-section-head {
+  align-items: flex-start;
+}
+
+.mcp-gateway > .mcp-section-head .kb-subtle {
+  margin: 0;
+  max-width: 72ch;
+}
+
+.mcp-gateway > .mcp-form {
+  padding: 16px 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+
+.mcp-wrap {
+  flex-wrap: wrap;
+}
+
+.mcp-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mcp-endpoint-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.mcp-members,
+.mcp-gw-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-input);
+}
+
+.mcp-member .mcp-flag {
+  align-self: center;
+}
+
+.mcp-member-glob {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.mcp-gw-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-input);
+}
+
+.mcp-gw-tool-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.mcp-gw-tool-desc {
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.mcp-gw-hidden {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mcp-warning {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.mcp-gw-picker {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+
+.mcp-gw-picker .mcp-check span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mcp-gw-server-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.mcp-gw-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 320px;
+  font-size: var(--fs-sm);
+}
+
+.mcp-token-reveal {
+  border-color: var(--accent-line);
+  box-shadow: var(--glow-accent);
+}
+
+.mcp-snippet {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mcp-snippet .kb-subtle {
+  margin: 0;
+}
+
+.mcp-snippet-title {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.mcp-snippet-code {
+  margin: 0;
+  max-width: 100%;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mcp-client-usage {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.mcp-client-usage > .finops-range {
+  align-self: flex-start;
+}
+
+@media (max-width: 880px) {
+  .mcp-gw-server-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .mcp-gw-server-row select {
+    grid-column: 1 / -1;
+  }
+}
+
+.mcp-gw-picker > .pg-btn {
+  align-self: flex-start;
+}

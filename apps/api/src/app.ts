@@ -110,6 +110,7 @@ import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput
 import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
+import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -1370,6 +1371,11 @@ export function createApp(
      * Without it the tool policy uses the workflow owner's role.
      */
     policyActor?: SafeUser | null;
+    /**
+     * Phase 10.4 — an explicit policy subject (an MCP gateway client). Wins
+     * over `policyActor` and the owner fallback.
+     */
+    policySubject?: McpToolPolicySubject;
     executionTimeoutMs?: number;
     customData?: Record<string, unknown>;
     resumeState?: WorkflowExecutionState;
@@ -1417,7 +1423,7 @@ export function createApp(
           ),
           triggerType: input.triggerType,
           triggeredBy: input.triggeredBy,
-          toolPolicySubject: resolveToolPolicySubject(input.workflow.id, input.policyActor),
+          toolPolicySubject: input.policySubject ?? resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
           approvalDecision: input.approvalDecision
         },
@@ -2775,8 +2781,8 @@ export function createApp(
 
   const allowedOrigins = parseConfiguredOrigins(config.WEB_ORIGIN);
 
-  app.register(cors, {
-    origin: (origin, callback) => {
+  const studioCorsOptions = {
+    origin: (origin: string | undefined, callback: (error: Error | null, allow: boolean) => void) => {
       if (!origin) {
         callback(null, true);
         return;
@@ -2791,6 +2797,24 @@ export function createApp(
       callback(null, false);
     },
     credentials: true
+  };
+  // Phase 10.4 — the MCP endpoint authenticates with bearer tokens, never
+  // cookies, and accepts only its own allowed origins.
+  const mcpGatewayOrigins = gatewayAllowedOrigins(config);
+  const mcpCorsOptions = {
+    origin: (origin: string | undefined, callback: (error: Error | null, allow: boolean) => void) => {
+      callback(null, !origin || isGatewayOriginAllowed(mcpGatewayOrigins, origin));
+    },
+    credentials: false,
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Authorization", "Content-Type", "Accept", "Mcp-Session-Id", "MCP-Protocol-Version", "Last-Event-ID"],
+    exposedHeaders: ["Mcp-Session-Id", "WWW-Authenticate"]
+  };
+  app.register(cors, {
+    delegator: (request, callback) => {
+      const isMcpEndpoint = (request.url ?? "").startsWith("/mcp/");
+      callback(null, isMcpEndpoint ? mcpCorsOptions : studioCorsOptions);
+    }
   });
 
   // Phase 4.2 — Security headers via @fastify/helmet
@@ -8083,6 +8107,65 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       };
     }
   );
+
+  // Phase 10.4 — spec-compliant MCP endpoint (/mcp/:toolset), the gateway in
+  // front of the registry, and the toolset / client admin API.
+  registerMcpGatewayRoutes({
+    app,
+    config,
+    store,
+    mcpRegistry,
+    resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+    redact: (value) => String(secretService.redact(value)),
+    resolveRegisteredMcpServer,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    auditUser: (request, user, event) => audit(request, user, event),
+    auditRaw: (event) => {
+      auditService.record(event);
+      logStreamingService.dispatchAudit(event);
+    },
+    runWorkflowTool: async (input) => {
+      const triggerType = "mcp_gateway";
+      const triggeredBy = `mcp-client:${input.client.name}`;
+      const requestInput = { tool: input.toolName, arguments: input.args, clientId: input.client.id };
+      const hooks = createProgressTrackingHooks({
+        executionId: input.executionId,
+        workflow: input.workflow,
+        triggerType,
+        triggeredBy,
+        requestInput,
+        passthroughHooks: {
+          onNodeComplete: (event) => input.onNodeComplete({ nodeId: event.nodeId, status: event.status })
+        }
+      });
+      const result = await runWorkflowExecution({
+        workflow: input.workflow,
+        directInput: {
+          trigger_type: triggerType,
+          trigger_node_id: input.nodeId,
+          arguments: input.args,
+          ...input.args
+        },
+        executionId: input.executionId,
+        triggerType,
+        triggeredBy,
+        policySubject: input.subject,
+        hooks
+      });
+      persistExecutionHistory({
+        executionId: input.executionId,
+        workflow: input.workflow,
+        result,
+        triggerType,
+        triggeredBy,
+        requestInput
+      });
+      return { status: result.status, output: result.output, error: result.error };
+    },
+    cancelExecution: (executionId, reason) => {
+      activeExecutions.get(executionId)?.controller.abort(reason);
+    }
+  });
 
   app.post<{ Body: unknown }>("/api/webhooks/execute/stream", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);

@@ -24,7 +24,8 @@ export interface ApiKeyVerification {
   scopes: string[];
 }
 
-function hashSecret(secret: string): string {
+/** sha256 hex of a token secret; shared with MCP gateway client credentials (Phase 10.4). */
+export function hashSecret(secret: string): string {
   return crypto.createHash("sha256").update(secret).digest("hex");
 }
 

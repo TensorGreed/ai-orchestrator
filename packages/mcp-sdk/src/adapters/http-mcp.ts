@@ -454,9 +454,18 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
         );
       }
 
+      const output = normalizeToolCallOutput(result.response.result);
+      // A tool-level failure comes back as a result with isError: true.
+      if (toRecord(result.response.result).isError === true) {
+        return {
+          ok: false,
+          output,
+          error: typeof output === "string" && output.trim() ? output : `MCP tool '${toolName}' reported an error.`
+        };
+      }
       return {
         ok: true,
-        output: normalizeToolCallOutput(result.response.result)
+        output
       };
     } catch (error) {
       return {

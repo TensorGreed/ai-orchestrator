@@ -59,6 +59,40 @@ See [MCP tool policy](../product/mcp-tool-policy.md).
 - `DELETE /api/mcp/policies/:id` (admin)
 - `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, noWriteTools? }`)
 
+## MCP gateway
+
+See [MCP gateway](../product/mcp-gateway.md).
+
+MCP endpoint (client token, `Authorization: Bearer l2m_mcp_...`):
+
+- `POST /mcp/:toolset` (Streamable HTTP, JSON-RPC 2.0: `initialize`, `ping`, `tools/list`, `tools/call`, notifications; JSON or SSE responses)
+- `DELETE /mcp/:toolset` (ends the session named by `Mcp-Session-Id`)
+- `GET /mcp/:toolset` (405)
+
+Toolsets:
+
+- `GET /api/mcp/toolsets` (builder)
+- `POST /api/mcp/toolsets` (admin; `{ name, slug?, description?, projectId?, enabled?, members? }`)
+- `GET /api/mcp/toolsets/candidates` (builder; workflows with an Expose as MCP Tool trigger)
+- `GET /api/mcp/toolsets/:id` (builder)
+- `PUT /api/mcp/toolsets/:id` (admin; `members` replaces the member list)
+- `DELETE /api/mcp/toolsets/:id` (admin)
+- `GET /api/mcp/toolsets/:id/preview?role=` (builder; tools visible to a role and tools hidden by policy)
+- `POST /api/mcp/toolsets/:id/members` (admin; `{ kind: "workflow", workflowId }` or `{ kind: "server", serverId, toolGlob? }`)
+- `DELETE /api/mcp/toolsets/:id/members/:memberId` (admin)
+
+Clients:
+
+- `GET /api/mcp/clients` (builder; status, effective role, open sessions, 7-day calls and errors)
+- `POST /api/mcp/clients` (admin; `{ name, toolsetIds, role, expiresAt? }`; the response carries the token once)
+- `POST /api/mcp/clients/:id/revoke` (admin)
+- `GET /api/mcp/clients/:id/usage?window=24h|7d|30d` (builder)
+
+Legacy workflow tool routes (configured on the `mcp_server_trigger` node):
+
+- `GET /api/mcp-server/:path/manifest`
+- `POST /api/mcp-server/:path/invoke`
+
 ## Secrets
 
 - `POST /api/secrets`

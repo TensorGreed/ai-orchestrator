@@ -1093,6 +1093,61 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS mcp_tool_classifications;
       DROP TABLE IF EXISTS mcp_tool_policies;
     `
+  },
+  {
+    version: 23,
+    description: "Phase 10.4 — MCP gateway (mcp_toolsets, mcp_toolset_members, mcp_clients, mcp_tool_calls.source/client_id)",
+    up: `
+      CREATE TABLE IF NOT EXISTS mcp_toolsets (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        description TEXT,
+        project_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mcp_toolset_members (
+        id TEXT PRIMARY KEY,
+        toolset_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        workflow_id TEXT,
+        server_id TEXT,
+        tool_glob TEXT,
+        position INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_toolset_members_toolset ON mcp_toolset_members(toolset_id, position);
+
+      CREATE TABLE IF NOT EXISTS mcp_clients (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        token_prefix TEXT NOT NULL UNIQUE,
+        token_hash TEXT NOT NULL,
+        toolset_ids_json TEXT NOT NULL DEFAULT '[]',
+        role TEXT NOT NULL,
+        created_by TEXT,
+        created_by_email TEXT,
+        expires_at TIMESTAMPTZ,
+        last_used_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'workflow';
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS client_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_client ON mcp_tool_calls(client_id, started_at);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_mcp_tool_calls_client;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS client_id;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS source;
+      DROP TABLE IF EXISTS mcp_clients;
+      DROP TABLE IF EXISTS mcp_toolset_members;
+      DROP TABLE IF EXISTS mcp_toolsets;
+    `
   }
 ];
 

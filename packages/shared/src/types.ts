@@ -690,11 +690,18 @@ export interface McpToolPolicyRule {
  */
 export interface McpToolPolicySubject {
   role: McpPolicyRole;
-  source: "user" | "owner" | "fallback";
+  /**
+   * `client`: a call through the MCP gateway (Phase 10.4); the role is the
+   * client credential's role, capped at its creator's current role.
+   */
+  source: "user" | "owner" | "fallback" | "client";
   userId?: string;
   email?: string;
   /** Why the subject fell back to `viewer`, when it did. */
   fallbackReason?: string;
+  /** MCP client credential id and name, for `source: "client"`. */
+  clientId?: string;
+  clientName?: string;
 }
 
 /** Admin override of a registry tool's read-only classification. */
@@ -871,4 +878,74 @@ export interface ImportReport {
     approximated: number;
     unsupported: number;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10.4 — L2M as an MCP server and gateway
+// ---------------------------------------------------------------------------
+
+/** One entry of a toolset: a workflow exposing `mcp_server_trigger` tools, or a registry server. */
+export type McpToolsetMemberSpec =
+  | { kind: "workflow"; workflowId: string }
+  | { kind: "server"; serverId: string; toolGlob: string | null };
+
+export type McpToolsetMember = McpToolsetMemberSpec & { id: string };
+
+/** A named group of tools served at `/mcp/<slug>`. */
+export interface McpToolset {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  /** Project the gateway evaluates tool policy in; null = no project. */
+  projectId: string | null;
+  enabled: boolean;
+  members: McpToolsetMember[];
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A client credential for the MCP gateway. The token itself is never stored or returned again. */
+export interface McpClient {
+  id: string;
+  name: string;
+  /** First characters of the token, safe to display. */
+  tokenPrefix: string;
+  toolsetIds: string[];
+  role: McpPolicyRole;
+  /** User id of the admin who created the credential. */
+  createdBy: string | null;
+  createdByEmail: string | null;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+/** One tool a toolset exposes, as an MCP client would list it. */
+export interface McpGatewayToolView {
+  name: string;
+  kind: "workflow" | "server";
+  description: string;
+  inputSchema: Record<string, unknown>;
+  annotations?: McpToolAnnotations;
+  workflowId?: string;
+  workflowName?: string;
+  serverId?: string;
+  serverName?: string;
+  /** Upstream tool name on the registry server. */
+  toolName?: string;
+  readOnly: boolean;
+}
+
+/** A tool the policy keeps away from the role a preview or client uses. */
+export interface McpGatewayHiddenToolView {
+  name: string;
+  serverId: string;
+  serverName: string;
+  toolName: string;
+  ruleId?: string;
+  ruleName?: string;
+  message: string;
 }

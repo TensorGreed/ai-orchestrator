@@ -46,7 +46,8 @@ export default defineConfig({
           { text: "Workflow Editor", link: "/product/workflow-editor" },
           { text: "Importing from another builder", link: "/product/importing-from-another-builder" },
           { text: "MCP server registry", link: "/product/mcp-server-registry" },
-          { text: "MCP tool policy", link: "/product/mcp-tool-policy" }
+          { text: "MCP tool policy", link: "/product/mcp-tool-policy" },
+          { text: "MCP gateway", link: "/product/mcp-gateway" }
         ]
       },
       {
