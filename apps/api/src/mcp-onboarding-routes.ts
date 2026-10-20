@@ -48,6 +48,8 @@ export interface McpOnboardingDeps {
   resolveRegisteredMcpServer: (registryServerId: string) => MCPServerConfig;
   withScopedMcpContext: <T>(run: (context: MCPExecutionContext) => Promise<T>) => Promise<T>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** Whether the user may run workflows in the project; the playground runs tools under the same permission. */
+  canExecuteInProject: (user: SafeUser, projectId: string) => boolean;
   auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
   /** Probe a server in the background, like a normal registration. */
   probeInBackground: (serverId: string) => void;
@@ -312,10 +314,20 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       reply.code(404);
       return { error: "MCP server not found" };
     }
-    const projectId = parsed.data.projectId ?? server.projectId ?? "default";
+    // A project-scoped server is only ever evaluated in its own project, so a
+    // caller cannot pick another project whose policy rules are more lenient.
+    if (server.projectId && parsed.data.projectId && parsed.data.projectId !== server.projectId) {
+      reply.code(400);
+      return { error: `MCP server '${server.name}' belongs to another project.` };
+    }
+    const projectId = server.projectId ?? parsed.data.projectId ?? "default";
     if (!store.getProject(projectId)) {
       reply.code(400);
       return { error: `Project '${projectId}' does not exist` };
+    }
+    if (!deps.canExecuteInProject(user, projectId)) {
+      reply.code(403);
+      return { error: `You do not have permission to run tools in project '${projectId}'.` };
     }
     const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
     if (!snapshot) {

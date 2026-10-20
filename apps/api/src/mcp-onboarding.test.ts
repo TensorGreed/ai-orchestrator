@@ -397,6 +397,58 @@ describe("MCP playground", () => {
     expect(context.store.listAuditLogs({ pageSize: 50 }).items.some((entry) => entry.eventType === "mcp_tool.playground_call")).toBe(true);
   });
 
+  it("evaluates a project-scoped server only in its own project", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    context.store.upsertProject({ id: "team-a", name: "Team A" });
+    context.store.upsertProject({ id: "team-b", name: "Team B" });
+    const created = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/servers",
+      headers: { cookie: admin },
+      payload: { name: "Scoped", adapterId: "mock-mcp", connection: {}, probeEnabled: false, projectId: "team-a" }
+    });
+    const id = created.json().server.id as string;
+    await context.app.inject({ method: "POST", url: `/api/mcp/servers/${id}/probe`, headers: { cookie: admin } });
+
+    const elsewhere = await context.app.inject({
+      method: "POST",
+      url: `/api/mcp/servers/${id}/playground/call`,
+      headers: { cookie: builder },
+      payload: { toolName: "lookup_kb", args: { topic: "mcp" }, projectId: "team-b" }
+    });
+    expect(elsewhere.statusCode).toBe(400);
+
+    const own = await context.app.inject({
+      method: "POST",
+      url: `/api/mcp/servers/${id}/playground/call`,
+      headers: { cookie: builder },
+      payload: { toolName: "lookup_kb", args: { topic: "mcp" } }
+    });
+    expect(own.statusCode).toBe(200);
+    expect((own.json() as McpPlaygroundCallResponse).policy).toEqual({ role: "builder", projectId: "team-a" });
+  });
+
+  it("refuses callers without permission to run workflows in the project", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const id = await mockServer(context, admin);
+    const builderUser = context.store.getUserByEmail("builder@example.com");
+    if (!builderUser) throw new Error("builder missing");
+    context.store.upsertProjectRole({ userId: builderUser.id, projectId: "default", role: "viewer" });
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: `/api/mcp/servers/${id}/playground/call`,
+      headers: { cookie: builder },
+      payload: { toolName: "lookup_kb", args: { topic: "mcp" } }
+    });
+    expect(response.statusCode).toBe(403);
+    expect(context.store.listMcpToolCalls({ registryServerId: id, since: "2020-01-01T00:00:00.000Z" })).toHaveLength(0);
+  });
+
   it("asks before calling a write tool", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");

@@ -9446,6 +9446,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     resolveRegisteredMcpServer,
     withScopedMcpContext,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    canExecuteInProject: (user, projectId) => rbacService.can(user, projectId, "workflow:execute"),
     auditUser: (request, user, event) => audit(request, user, event),
     probeInBackground,
     serverSummary: mcpServerSummary

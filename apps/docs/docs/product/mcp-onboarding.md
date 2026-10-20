@@ -245,7 +245,7 @@ Arguments are entered through a form generated from the tool's input schema:
 When you call a tool:
 
 - it runs through the registry like an agent's call: the server's stored connection, secrets injected on the server side, and an unaccepted breaking change blocks the call;
-- [tool policy](./mcp-tool-policy) is evaluated for **your** role and the active project; a blocked tool returns the rule that blocks it;
+- [tool policy](./mcp-tool-policy) is evaluated for **your** role and the active project; a blocked tool returns the rule that blocks it. A server that belongs to a project is always evaluated in that project, and you need permission to run workflows there;
 - a tool classified as **write** asks for confirmation first;
 - the call is recorded in the server's telemetry with source `playground` and in the audit log (`mcp_tool.playground_call`, tool name, outcome and duration; arguments and results are not audited).
 
