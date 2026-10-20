@@ -509,6 +509,12 @@ export interface MCPServerDefinition {
 
 export interface MCPServerConfig {
   serverId: string;
+  /**
+   * Phase 10.1 — id of an entry in the MCP server registry (`mcp_servers`).
+   * When set, the runtime takes the adapter, connection and secretRef from the
+   * registry entry; any inline values on the node are ignored.
+   */
+  registryServerId?: string;
   label?: string;
   connection?: Record<string, unknown>;
   secretRef?: SecretReference;

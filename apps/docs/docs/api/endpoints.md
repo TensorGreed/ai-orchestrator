@@ -32,6 +32,20 @@
 - `POST /api/connectors/test`
 - `POST /api/mcp/discover-tools`
 
+## MCP server registry
+
+See [MCP server registry](../product/mcp-server-registry.md).
+
+- `GET /api/mcp/servers`
+- `POST /api/mcp/servers`
+- `GET /api/mcp/servers/:id`
+- `PUT /api/mcp/servers/:id`
+- `DELETE /api/mcp/servers/:id`
+- `POST /api/mcp/servers/:id/probe`
+- `GET /api/mcp/servers/:id/tools`
+- `GET /api/mcp/servers/:id/snapshots/:snapshotId`
+- `POST /api/mcp/servers/:id/accept-change`
+
 ## Secrets
 
 - `POST /api/secrets`

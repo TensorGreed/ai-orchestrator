@@ -2919,3 +2919,311 @@ button.tag-chip:hover {
     transition: none !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 10.1 — MCP server registry
+   --------------------------------------------------------------------------- */
+
+.mcp-item-head,
+.mcp-title-row,
+.mcp-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mcp-title-row {
+  justify-content: flex-start;
+}
+
+.mcp-title-row h3 {
+  margin: 0;
+}
+
+.mcp-dot,
+.mcp-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--fg-faint);
+}
+
+.mcp-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.mcp-status-healthy .mcp-status-dot,
+.mcp-dot.mcp-status-healthy {
+  background: var(--ok);
+}
+
+.mcp-status-degraded .mcp-status-dot,
+.mcp-dot.mcp-status-degraded {
+  background: var(--warn);
+}
+
+.mcp-status-down .mcp-status-dot,
+.mcp-dot.mcp-status-down {
+  background: var(--err);
+}
+
+.mcp-status-healthy {
+  background: var(--ok-soft);
+}
+
+.mcp-status-degraded {
+  background: var(--warn-soft);
+}
+
+.mcp-status-down {
+  background: var(--err-soft);
+}
+
+.mcp-flag {
+  align-self: flex-start;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: var(--err-soft);
+  color: var(--fg);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.mcp-flag-neutral {
+  background: var(--bg-elev-3);
+  color: var(--fg-muted);
+}
+
+.kb-detail > .mcp-form {
+  padding: 16px 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+
+.mcp-check {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mcp-breaking {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--err);
+  border-radius: var(--r-lg);
+  background: var(--err-soft);
+}
+
+.mcp-breaking-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mcp-breaking-head p {
+  margin: 4px 0 0;
+}
+
+.mcp-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mcp-stat {
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.mcp-stat-label {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.mcp-stat-value {
+  margin-top: 4px;
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+.mcp-stat-hint {
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--fg-faint);
+}
+
+.mcp-strip {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 56px;
+  padding: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.mcp-strip-cell {
+  display: flex;
+  align-items: flex-end;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  border-radius: 4px 4px 0 0;
+  outline: none;
+}
+
+.mcp-strip-cell:hover,
+.mcp-strip-cell:focus-visible {
+  background: var(--bg-elev-2);
+}
+
+.mcp-strip-cell.is-empty {
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.mcp-strip-bar {
+  width: 100%;
+  border-radius: 4px 4px 0 0;
+  background: var(--accent);
+}
+
+.mcp-strip-bar.is-failed {
+  background: var(--err);
+}
+
+.mcp-strip-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+  color: var(--fg-faint);
+}
+
+.mcp-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mcp-inputs code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.mcp-inputs code.is-required {
+  color: var(--fg);
+}
+
+.mcp-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-history-item {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev);
+}
+
+.mcp-history-item > .mcp-changes {
+  padding: 0 12px 10px;
+}
+
+.mcp-history-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mcp-changes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-sm);
+}
+
+.mcp-changes li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--fg-muted);
+}
+
+.mcp-changes code {
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+.mcp-change-tag {
+  flex: none;
+  min-width: 82px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  background: var(--bg-elev-3);
+  font-size: var(--fs-xs);
+  text-align: center;
+  color: var(--fg-muted);
+}
+
+.mcp-changes li.is-breaking .mcp-change-tag {
+  background: var(--err-soft);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+@media (max-width: 880px) {
+  .mcp-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mcp-strip-axis span:nth-child(2) {
+    display: none;
+  }
+}

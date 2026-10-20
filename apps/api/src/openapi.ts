@@ -925,6 +925,100 @@ export const openApiSpec = {
         responses: { "200": { description: "Curated MCP server presets" } }
       }
     },
+    "/api/mcp/servers": {
+      get: {
+        tags: ["MCP"],
+        summary: "List registered MCP servers with status and probe latency (builder)",
+        parameters: [{ name: "projectId", in: "query", schema: { type: "string" } }],
+        responses: { "200": { description: "Registered servers, available adapters and the default probe interval" } }
+      },
+      post: {
+        tags: ["MCP"],
+        summary: "Register an MCP server (admin). Probes it once in the background unless probing is off.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name", "adapterId"],
+                properties: {
+                  name: { type: "string" },
+                  description: { type: "string", nullable: true },
+                  adapterId: { type: "string", description: "http_mcp, stdio_mcp, mock-mcp or a community adapter" },
+                  connection: { type: "object" },
+                  secretRef: { type: "object", nullable: true, properties: { secretId: { type: "string" } } },
+                  owner: { type: "string", nullable: true },
+                  projectId: { type: "string", nullable: true },
+                  probeEnabled: { type: "boolean" },
+                  probeIntervalMs: { type: "integer", minimum: 10000, nullable: true },
+                  blockOnBreakingChange: { type: "boolean" }
+                }
+              }
+            }
+          }
+        },
+        responses: { "201": { description: "Server registered" }, "400": { description: "Invalid payload, adapter or secret" } }
+      }
+    },
+    "/api/mcp/servers/{id}": {
+      get: {
+        tags: ["MCP"],
+        summary: "Server detail: recent probes, tool snapshots (without tool bodies) and the nodes that use it",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Server detail" }, "404": { description: "Not found" } }
+      },
+      put: {
+        tags: ["MCP"],
+        summary: "Update a registered server (admin); any field from the create payload",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Updated server" }, "404": { description: "Not found" } }
+      },
+      delete: {
+        tags: ["MCP"],
+        summary: "Delete a registered server (admin). Refused with 409 while nodes use it unless force=true.",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "force", in: "query", schema: { type: "string", enum: ["true"] } }
+        ],
+        responses: { "200": { description: "Deleted" }, "409": { description: "Still in use; lists the nodes" } }
+      }
+    },
+    "/api/mcp/servers/{id}/tools": {
+      get: {
+        tags: ["MCP"],
+        summary: "Tools from the server's current schema snapshot",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Tool list" } }
+      }
+    },
+    "/api/mcp/servers/{id}/probe": {
+      post: {
+        tags: ["MCP"],
+        summary: "Probe the server now (initialize + tools/list) and record the result",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Probe outcome, updated server and any new snapshot" } }
+      }
+    },
+    "/api/mcp/servers/{id}/snapshots/{snapshotId}": {
+      get: {
+        tags: ["MCP"],
+        summary: "One tool schema snapshot with its tools and the diff against the previous snapshot",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "snapshotId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "Snapshot" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/servers/{id}/accept-change": {
+      post: {
+        tags: ["MCP"],
+        summary: "Accept the pending breaking tool schema change (admin); unblocks runs",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Accepted" }, "409": { description: "No pending breaking change" } }
+      }
+    },
 
     // ── Connectors ──────────────────────────────────────────────────────────
     "/api/connectors/test": {

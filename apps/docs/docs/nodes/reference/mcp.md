@@ -19,7 +19,8 @@ Directly invokes an MCP tool outside the agent loop.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `serverId` | `string` | yes | — |
+| `serverId` | `string` | no | — |
+| `registryServerId` | `string` | no | — |
 | `toolName` | `string` | yes | — |
 | `argsTemplate` | `string` | no | — |
 | `connection` | `object` | no | — |

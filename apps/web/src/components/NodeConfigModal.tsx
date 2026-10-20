@@ -6,6 +6,8 @@ import {
   createSecret,
   discoverMcpTools,
   fetchMcpPresets,
+  fetchMcpServers,
+  fetchMcpServerTools,
   fetchProviderModels,
   fetchWorkflows,
   previewExpression,
@@ -14,6 +16,7 @@ import {
   testMcpTool,
   testProvider,
   type McpPreset,
+  type McpRegisteredServer,
   type McpTestToolResult,
   type SecretListItem
 } from "../lib/api";
@@ -1071,6 +1074,7 @@ export function NodeInspector({
   const [probeResult, setProbeResult] = useState<McpTestToolResult | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [mcpPresets, setMcpPresets] = useState<McpPreset[]>([]);
+  const [registeredMcpServers, setRegisteredMcpServers] = useState<McpRegisteredServer[] | null>(null);
   const [mcpPresetSelection, setMcpPresetSelection] = useState("");
   const [codeTestInput, setCodeTestInput] = useState("{\n  \"user_prompt\": \"Hello from code node\"\n}");
   const [codeTestBusy, setCodeTestBusy] = useState(false);
@@ -1205,7 +1209,10 @@ export function NodeInspector({
 
   useEffect(() => {
     const initialConfig = asRecord(node.data.config);
-    if (node.data.nodeType === "mcp_tool") {
+    const usesRegisteredServer =
+      typeof initialConfig.registryServerId === "string" && initialConfig.registryServerId.trim().length > 0;
+    // A registered server owns its connection, so don't fill in inline defaults for it.
+    if (node.data.nodeType === "mcp_tool" && !usesRegisteredServer) {
       const baseConnection = asRecord(initialConfig.connection);
       setConfig({
         ...initialConfig,
@@ -1672,12 +1679,18 @@ export function NodeInspector({
   );
 
   const discoverToolsForMcpNode = useCallback(
-    async (params?: { serverId?: string; connection?: Record<string, unknown>; currentToolName?: string }) => {
+    async (params?: {
+      serverId?: string;
+      registryServerId?: string;
+      connection?: Record<string, unknown>;
+      currentToolName?: string;
+    }) => {
       const serverId = (params?.serverId ?? toStringValue(config.serverId)).trim();
+      const registryServerId = (params?.registryServerId ?? toStringValue(config.registryServerId)).trim();
       const connection = params?.connection ?? asRecord(config.connection);
       const currentToolName = params?.currentToolName ?? toStringValue(config.toolName).trim();
 
-      if (!serverId) {
+      if (!serverId && !registryServerId) {
         setDiscoverError("Set MCP Server Id before discovering tools.");
         setDiscoverMessage(null);
         setDiscoveredTools([]);
@@ -1689,21 +1702,35 @@ export function NodeInspector({
         setDiscoverError(null);
         setDiscoverMessage(null);
 
-        const response = await discoverMcpTools({
-          serverId,
-          connection,
-          secretRef:
-            typeof asRecord(config.secretRef).secretId === "string"
-              ? { secretId: String(asRecord(config.secretRef).secretId) }
-              : undefined
-        });
+        // A registered server's tools come from its latest probe snapshot, so
+        // opening the node never spawns or calls the server.
+        const response = registryServerId
+          ? await fetchMcpServerTools(registryServerId).then((result) => ({
+              tools: result.tools.map((tool) => ({
+                serverId: serverId || registryServerId,
+                name: tool.name,
+                description: tool.description ?? "",
+                inputSchema: tool.inputSchema
+              }))
+            }))
+          : await discoverMcpTools({
+              serverId,
+              connection,
+              secretRef:
+                typeof asRecord(config.secretRef).secretId === "string"
+                  ? { secretId: String(asRecord(config.secretRef).secretId) }
+                  : undefined
+            });
 
+        const sourceLabel = registryServerId ? "the registered server's last probe" : `'${serverId}'`;
         setDiscoveredTools(response.tools);
         setMcpToolSearchQuery("");
         setDiscoverMessage(
           response.tools.length
-            ? `Discovered ${response.tools.length} tools from '${serverId}'.`
-            : `No tools found for '${serverId}'.`
+            ? `Found ${response.tools.length} tools from ${sourceLabel}.`
+            : registryServerId
+              ? "No tool snapshot yet. Probe the server on the MCP servers page."
+              : `No tools found for '${serverId}'.`
         );
 
         if (!currentToolName && response.tools[0]?.name) {
@@ -1723,7 +1750,7 @@ export function NodeInspector({
         setDiscoverBusy(false);
       }
     },
-    [config.connection, config.secretRef, config.serverId, config.toolName]
+    [config.connection, config.registryServerId, config.secretRef, config.serverId, config.toolName]
   );
 
   useEffect(() => {
@@ -1731,7 +1758,8 @@ export function NodeInspector({
       return;
     }
     const serverId = toStringValue(config.serverId).trim();
-    if (!serverId) {
+    const registryServerId = toStringValue(config.registryServerId).trim();
+    if (!serverId && !registryServerId) {
       return;
     }
     if (discoveredTools.length > 0) {
@@ -1739,11 +1767,13 @@ export function NodeInspector({
     }
     void discoverToolsForMcpNode({
       serverId,
+      registryServerId,
       connection: asRecord(config.connection),
       currentToolName: toStringValue(config.toolName).trim()
     });
   }, [
     config.connection,
+    config.registryServerId,
     config.serverId,
     config.toolName,
     discoverToolsForMcpNode,
@@ -1780,14 +1810,23 @@ export function NodeInspector({
       }
     }
 
-    const serverId = toStringValue(config.serverId).trim();
+    const registryServerId = toStringValue(config.registryServerId).trim();
+    const registered = registryServerId
+      ? registeredMcpServers?.find((server) => server.id === registryServerId)
+      : undefined;
+    if (registryServerId && !registered) {
+      setProbeError("The registered server could not be loaded. Check the MCP servers page.");
+      setProbeResult(null);
+      return;
+    }
+    const serverId = registered ? registered.adapterId : toStringValue(config.serverId).trim();
     if (!serverId) {
       setProbeError("Set the MCP Server Adapter before probing.");
       setProbeResult(null);
       return;
     }
 
-    const secretId = toStringValue(asRecord(config.secretRef).secretId).trim();
+    const secretId = registered ? registered.secretId ?? "" : toStringValue(asRecord(config.secretRef).secretId).trim();
 
     try {
       setProbeBusy(true);
@@ -1795,7 +1834,7 @@ export function NodeInspector({
       setProbeResult(null);
       const result = await testMcpTool({
         serverId,
-        connection: asRecord(config.connection),
+        connection: registered ? registered.connection : asRecord(config.connection),
         secretRef: secretId ? { secretId } : undefined,
         toolName: targetName,
         args: parsedArgs
@@ -1811,11 +1850,13 @@ export function NodeInspector({
     }
   }, [
     config.connection,
+    config.registryServerId,
     config.secretRef,
     config.serverId,
     discoveredTools,
     probeArgs,
-    probeToolName
+    probeToolName,
+    registeredMcpServers
   ]);
 
   useEffect(() => {
@@ -1839,6 +1880,28 @@ export function NodeInspector({
       cancelled = true;
     };
   }, [mcpPresets.length, node.data.nodeType]);
+
+  useEffect(() => {
+    if (node.data.nodeType !== "mcp_tool" || registeredMcpServers !== null) {
+      return;
+    }
+    let cancelled = false;
+    fetchMcpServers()
+      .then((response) => {
+        if (!cancelled) {
+          setRegisteredMcpServers(response.servers);
+        }
+      })
+      .catch(() => {
+        // Viewers cannot list the registry; the node falls back to inline configuration.
+        if (!cancelled) {
+          setRegisteredMcpServers([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [node.data.nodeType, registeredMcpServers]);
 
   const applyMcpPreset = useCallback(
     (presetId: string) => {
@@ -2532,344 +2595,422 @@ export function NodeInspector({
         })
       : discoveredTools;
     const shouldShowToolSearch = discoveredTools.length > 10;
+    const registryServerId = toStringValue(config.registryServerId).trim();
+    const registeredServer = registryServerId
+      ? registeredMcpServers?.find((server) => server.id === registryServerId)
+      : undefined;
+    const registryOptions = [
+      { value: "", label: "None, configure on this node" },
+      ...(registeredMcpServers ?? []).map((server) => ({
+        value: server.id,
+        label: `${server.name} (${server.adapterId}, ${server.status === "unknown" ? "not probed" : server.status})`
+      })),
+      ...(registryServerId && !registeredServer && registeredMcpServers !== null
+        ? [{ value: registryServerId, label: `Missing server (${registryServerId})` }]
+        : [])
+    ];
 
     return (
       <>
         <div className="cfg-tip">
-          Configure MCP only on this node. Attach this MCP Tool node to an AI Agent <code>Tool</code> port to expose it.
+          Attach this MCP Tool node to an AI Agent <code>Tool</code> port to expose it. Pick a registered server to share one
+          governed connection across workflows, or configure the connection on this node.
         </div>
 
-        {mcpPresets.length > 0 && (
-          <div className="cfg-group">
-            <SelectField
-              label="Load preset (optional)"
-              value={mcpPresetSelection}
-              onChange={(next) => {
-                setMcpPresetSelection(next);
-                if (next) {
-                  applyMcpPreset(next);
+        {(registryServerId || (registeredMcpServers?.length ?? 0) > 0) && (
+          <SelectField
+            label="Registered server"
+            value={registryServerId}
+            onChange={(next) => {
+              const picked = registeredMcpServers?.find((server) => server.id === next);
+              setConfig((current) => {
+                const nextConfig: Record<string, unknown> = { ...current, toolName: "__all__", allowedTools: undefined };
+                if (picked) {
+                  nextConfig.registryServerId = picked.id;
+                  nextConfig.serverId = picked.adapterId;
+                  // The registry entry owns the connection and secret; drop stale inline copies.
+                  delete nextConfig.connection;
+                  delete nextConfig.secretRef;
+                } else {
+                  delete nextConfig.registryServerId;
                 }
-              }}
-              options={[
-                { value: "", label: "— Pick a popular MCP server —" },
-                ...mcpPresets.map((preset) => ({
-                  value: preset.id,
-                  label: `${preset.name} (${preset.category})`
-                }))
-              ]}
-            />
-            {mcpPresetSelection &&
-              (() => {
-                const preset = mcpPresets.find((entry) => entry.id === mcpPresetSelection);
-                if (!preset) {
-                  return null;
-                }
-                return (
-                  <div className="cfg-tip">
-                    <strong>{preset.name}</strong> — {preset.description}
-                    {preset.notes && (
-                      <div style={{ marginTop: "6px" }}>
-                        <em>{preset.notes}</em>
-                      </div>
-                    )}
-                    {preset.credentialHint && (
-                      <div style={{ marginTop: "6px" }}>
-                        Requires <code>{preset.credentialHint.envVar}</code>:{" "}
-                        {preset.credentialHint.description} Add it as an Auth Secret below
-                        and the value will be injected into the child process env.
-                      </div>
-                    )}
-                    <div style={{ marginTop: "6px" }}>
-                      Source:{" "}
-                      <a href={preset.source} target="_blank" rel="noreferrer">
-                        {preset.source}
-                      </a>
-                    </div>
-                  </div>
-                );
-              })()}
-          </div>
-        )}
-
-        <SelectField
-          label="MCP Server Adapter"
-          value={serverSelectValue}
-          onChange={(next) => {
-            setConfig((current) => ({
-              ...current,
-              serverId: next === "__custom__" ? "" : next,
-              toolName: "__all__",
-              allowedTools: undefined
-            }));
-            setDiscoveredTools([]);
-            setDiscoverMessage(null);
-            setDiscoverError(null);
-          }}
-          options={[...mcpServerIdOptions, { value: "__custom__", label: "Custom Adapter ID" }]}
-          help={
-            <>
-              Picks how the runtime talks to the MCP server. <strong>http_mcp</strong> is for
-              remote servers reachable over HTTP streamable. <strong>stdio_mcp</strong> spawns
-              a local child process and speaks JSON-RPC over stdin/stdout — used by 90% of
-              community MCP servers (filesystem, git, github, postgres, etc.). <strong>mock-mcp</strong>
-              ships demo tools (calculator, time) so you can wire an agent end-to-end without
-              a real server. <strong>Custom Adapter ID</strong> is for a registered third-party
-              adapter you've added via the connector SDK.
-            </>
-          }
-        />
-
-        {!hasKnownServerId && (
-          <TextField
-            label="Custom Adapter ID"
-            value={selectedServerId}
-            onChange={(next) => setConfig((current) => ({ ...current, serverId: next }))}
-            placeholder="my_custom_mcp_adapter"
+                return nextConfig;
+              });
+              setDiscoveredTools([]);
+              setDiscoverMessage(null);
+              setDiscoverError(null);
+            }}
+            options={registryOptions}
             help={
               <>
-                The id you registered with <code>createDefaultMCPRegistry().register(...)</code>.
-                Must match exactly. If you haven't built one, pick a built-in adapter above
-                instead.
+                Servers registered on the <strong>MCP servers</strong> page are probed on a schedule and keep their tool
+                schema history. The node uses the registry's adapter, connection and secret at run time, so editing the
+                server there updates every workflow that picks it.
               </>
             }
           />
         )}
 
-        <div className="cfg-tip">
-          Active adapter: <code>{selectedServerLabel}</code>
-          {selectedServerId === "mock-mcp" ? (
-            <div style={{ marginTop: "6px" }}>
-              <strong>Note:</strong> Mock adapter always returns demo tools and ignores endpoint/auth values.
-            </div>
-          ) : null}
-        </div>
-
-        {selectedServerId === "stdio_mcp" ? (
+        {registryServerId ? (
+          <div className="cfg-tip">
+            {registeredServer ? (
+              <>
+                Using <strong>{registeredServer.name}</strong> via <code>{registeredServer.adapterId}</code>, status{" "}
+                <strong>{registeredServer.status === "unknown" ? "not probed" : registeredServer.status}</strong>,{" "}
+                {registeredServer.toolCount} tools.
+                {registeredServer.pendingBreakingSnapshotId && (
+                  <div style={{ marginTop: "6px" }}>
+                    <strong>Breaking tool schema change pending.</strong>{" "}
+                    {registeredServer.blockOnBreakingChange
+                      ? "Runs are blocked until an admin accepts it on the MCP servers page."
+                      : "Check the MCP servers page before relying on changed tools."}
+                  </div>
+                )}
+              </>
+            ) : registeredMcpServers === null ? (
+              "Loading registered server…"
+            ) : (
+              <>
+                Registered server <code>{registryServerId}</code> no longer exists. Runs fail until you pick another
+                server.
+              </>
+            )}
+          </div>
+        ) : (
           <>
-            <TextField
-              label="Command"
-              value={toStringValue(connection.command)}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    command: next
+          {mcpPresets.length > 0 && (
+            <div className="cfg-group">
+              <SelectField
+                label="Load preset (optional)"
+                value={mcpPresetSelection}
+                onChange={(next) => {
+                  setMcpPresetSelection(next);
+                  if (next) {
+                    applyMcpPreset(next);
                   }
-                }))
-              }
-              placeholder="npx"
-            />
-            <TextAreaField
-              label="Arguments (one per line)"
-              value={(Array.isArray(connection.args) ? connection.args : [])
-                .filter((value): value is string => typeof value === "string")
-                .join("\n")}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    args: next.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
+                }}
+                options={[
+                  { value: "", label: "— Pick a popular MCP server —" },
+                  ...mcpPresets.map((preset) => ({
+                    value: preset.id,
+                    label: `${preset.name} (${preset.category})`
+                  }))
+                ]}
+              />
+              {mcpPresetSelection &&
+                (() => {
+                  const preset = mcpPresets.find((entry) => entry.id === mcpPresetSelection);
+                  if (!preset) {
+                    return null;
                   }
-                }))
-              }
-              rows={4}
-            />
-            <div className="cfg-tip">
-              Example: <code>-y</code>, <code>@modelcontextprotocol/server-filesystem</code>, <code>/tmp</code>
+                  return (
+                    <div className="cfg-tip">
+                      <strong>{preset.name}</strong> — {preset.description}
+                      {preset.notes && (
+                        <div style={{ marginTop: "6px" }}>
+                          <em>{preset.notes}</em>
+                        </div>
+                      )}
+                      {preset.credentialHint && (
+                        <div style={{ marginTop: "6px" }}>
+                          Requires <code>{preset.credentialHint.envVar}</code>:{" "}
+                          {preset.credentialHint.description} Add it as an Auth Secret below
+                          and the value will be injected into the child process env.
+                        </div>
+                      )}
+                      <div style={{ marginTop: "6px" }}>
+                        Source:{" "}
+                        <a href={preset.source} target="_blank" rel="noreferrer">
+                          {preset.source}
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })()}
             </div>
-            <TextAreaField
-              label="Environment Variables (KEY=value per line)"
-              value={Object.entries(asRecord(connection.env))
-                .filter(([, value]) => typeof value === "string")
-                .map(([key, value]) => `${key}=${value as string}`)
-                .join("\n")}
-              onChange={(next) => {
-                const envEntries: Record<string, string> = {};
-                for (const line of next.split(/\r?\n/)) {
-                  const trimmed = line.trim();
-                  if (!trimmed) continue;
-                  const eq = trimmed.indexOf("=");
-                  if (eq <= 0) continue;
-                  envEntries[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1);
-                }
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    env: envEntries
-                  }
-                }));
-              }}
-              rows={3}
-            />
+          )}
+
+          <SelectField
+            label="MCP Server Adapter"
+            value={serverSelectValue}
+            onChange={(next) => {
+              setConfig((current) => ({
+                ...current,
+                serverId: next === "__custom__" ? "" : next,
+                toolName: "__all__",
+                allowedTools: undefined
+              }));
+              setDiscoveredTools([]);
+              setDiscoverMessage(null);
+              setDiscoverError(null);
+            }}
+            options={[...mcpServerIdOptions, { value: "__custom__", label: "Custom Adapter ID" }]}
+            help={
+              <>
+                Picks how the runtime talks to the MCP server. <strong>http_mcp</strong> is for
+                remote servers reachable over HTTP streamable. <strong>stdio_mcp</strong> spawns
+                a local child process and speaks JSON-RPC over stdin/stdout — used by 90% of
+                community MCP servers (filesystem, git, github, postgres, etc.). <strong>mock-mcp</strong>
+                ships demo tools (calculator, time) so you can wire an agent end-to-end without
+                a real server. <strong>Custom Adapter ID</strong> is for a registered third-party
+                adapter you've added via the connector SDK.
+              </>
+            }
+          />
+
+          {!hasKnownServerId && (
             <TextField
-              label="Working Directory (optional)"
-              value={toStringValue(connection.cwd)}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    cwd: next
-                  }
-                }))
-              }
-              placeholder="/path/to/server"
-            />
-            <NumberField
-              label="Request Timeout (ms)"
-              value={toNumberValue(connection.timeoutMs, 120000)}
-              min={1000}
-              step={1000}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    timeoutMs: next
-                  }
-                }))
-              }
-            />
-            <TextField
-              label="Inject Secret as Env Var (optional)"
-              value={toStringValue(connection.secretEnvVar)}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    secretEnvVar: next
-                  }
-                }))
-              }
-              placeholder="GITHUB_TOKEN"
+              label="Custom Adapter ID"
+              value={selectedServerId}
+              onChange={(next) => setConfig((current) => ({ ...current, serverId: next }))}
+              placeholder="my_custom_mcp_adapter"
               help={
                 <>
-                  Most stdio MCP servers read credentials from environment variables (e.g.
-                  <code> GITHUB_PERSONAL_ACCESS_TOKEN</code>, <code>BRAVE_API_KEY</code>,
-                  <code> SLACK_BOT_TOKEN</code>). Pick the matching <strong>Auth Secret</strong>
-                  below and put the env var name here — the resolved secret value gets injected
-                  into the spawned process under that name. Leave blank if the server reads no
-                  credentials or you prefer to set the env var globally on the host.
+                  The id you registered with <code>createDefaultMCPRegistry().register(...)</code>.
+                  Must match exactly. If you haven't built one, pick a built-in adapter above
+                  instead.
                 </>
               }
             />
-            <div className="cfg-tip">
-              The configured Auth Secret (below) is injected into the child process under this env var name. Many MCP servers read credentials from the environment (e.g. <code>GITHUB_TOKEN</code>, <code>OPENAI_API_KEY</code>).
-            </div>
-          </>
-        ) : selectedServerId === "mock-mcp" ? (
-          <NumberField
-            label="Request Timeout (ms)"
-            value={toNumberValue(connection.timeoutMs, 120000)}
-            min={1000}
-            step={1000}
-            onChange={(next) =>
-              setConfig((current) => ({
-                ...current,
-                connection: {
-                  ...asRecord(current.connection),
-                  timeoutMs: next
-                }
-              }))
-            }
-          />
-        ) : (
-          <>
-            <SelectField
-              label="Server Transport"
-              value={toStringValue(connection.transport, "http_streamable")}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    transport: next
-                  }
-                }))
-              }
-              options={[{ value: "http_streamable", label: "HTTP Streamable" }]}
-            />
-            <TextField
-              label="Endpoint"
-              value={toStringValue(connection.endpoint, "http://127.0.0.1:7001/mcp")}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    endpoint: next
-                  }
-                }))
-              }
-            />
-            <NumberField
-              label="Request Timeout (ms)"
-              value={toNumberValue(connection.timeoutMs, 120000)}
-              min={1000}
-              step={1000}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    timeoutMs: next
-                  }
-                }))
-              }
-            />
-            <SelectField
-              label="Authentication"
-              value={authType}
-              onChange={(next) =>
-                setConfig((current) => ({
-                  ...current,
-                  connection: {
-                    ...asRecord(current.connection),
-                    authType: next
-                  }
-                }))
-              }
-              options={[
-                { value: "none", label: "None" },
-                { value: "bearer", label: "Bearer Token" },
-                { value: "basic", label: "Basic Auth" }
-              ]}
-            />
-            {authType === "basic" && (
+          )}
+
+          <div className="cfg-tip">
+            Active adapter: <code>{selectedServerLabel}</code>
+            {selectedServerId === "mock-mcp" ? (
+              <div style={{ marginTop: "6px" }}>
+                <strong>Note:</strong> Mock adapter always returns demo tools and ignores endpoint/auth values.
+              </div>
+            ) : null}
+          </div>
+
+          {selectedServerId === "stdio_mcp" ? (
+            <>
               <TextField
-                label="Basic Auth Username"
-                value={toStringValue(connection.username)}
+                label="Command"
+                value={toStringValue(connection.command)}
                 onChange={(next) =>
                   setConfig((current) => ({
                     ...current,
                     connection: {
                       ...asRecord(current.connection),
-                      username: next
+                      command: next
                     }
                   }))
                 }
-                placeholder="api-user"
+                placeholder="npx"
               />
-            )}
+              <TextAreaField
+                label="Arguments (one per line)"
+                value={(Array.isArray(connection.args) ? connection.args : [])
+                  .filter((value): value is string => typeof value === "string")
+                  .join("\n")}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      args: next.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
+                    }
+                  }))
+                }
+                rows={4}
+              />
+              <div className="cfg-tip">
+                Example: <code>-y</code>, <code>@modelcontextprotocol/server-filesystem</code>, <code>/tmp</code>
+              </div>
+              <TextAreaField
+                label="Environment Variables (KEY=value per line)"
+                value={Object.entries(asRecord(connection.env))
+                  .filter(([, value]) => typeof value === "string")
+                  .map(([key, value]) => `${key}=${value as string}`)
+                  .join("\n")}
+                onChange={(next) => {
+                  const envEntries: Record<string, string> = {};
+                  for (const line of next.split(/\r?\n/)) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+                    const eq = trimmed.indexOf("=");
+                    if (eq <= 0) continue;
+                    envEntries[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1);
+                  }
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      env: envEntries
+                    }
+                  }));
+                }}
+                rows={3}
+              />
+              <TextField
+                label="Working Directory (optional)"
+                value={toStringValue(connection.cwd)}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      cwd: next
+                    }
+                  }))
+                }
+                placeholder="/path/to/server"
+              />
+              <NumberField
+                label="Request Timeout (ms)"
+                value={toNumberValue(connection.timeoutMs, 120000)}
+                min={1000}
+                step={1000}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      timeoutMs: next
+                    }
+                  }))
+                }
+              />
+              <TextField
+                label="Inject Secret as Env Var (optional)"
+                value={toStringValue(connection.secretEnvVar)}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      secretEnvVar: next
+                    }
+                  }))
+                }
+                placeholder="GITHUB_TOKEN"
+                help={
+                  <>
+                    Most stdio MCP servers read credentials from environment variables (e.g.
+                    <code> GITHUB_PERSONAL_ACCESS_TOKEN</code>, <code>BRAVE_API_KEY</code>,
+                    <code> SLACK_BOT_TOKEN</code>). Pick the matching <strong>Auth Secret</strong>
+                    below and put the env var name here — the resolved secret value gets injected
+                    into the spawned process under that name. Leave blank if the server reads no
+                    credentials or you prefer to set the env var globally on the host.
+                  </>
+                }
+              />
+              <div className="cfg-tip">
+                The configured Auth Secret (below) is injected into the child process under this env var name. Many MCP servers read credentials from the environment (e.g. <code>GITHUB_TOKEN</code>, <code>OPENAI_API_KEY</code>).
+              </div>
+            </>
+          ) : selectedServerId === "mock-mcp" ? (
+            <NumberField
+              label="Request Timeout (ms)"
+              value={toNumberValue(connection.timeoutMs, 120000)}
+              min={1000}
+              step={1000}
+              onChange={(next) =>
+                setConfig((current) => ({
+                  ...current,
+                  connection: {
+                    ...asRecord(current.connection),
+                    timeoutMs: next
+                  }
+                }))
+              }
+            />
+          ) : (
+            <>
+              <SelectField
+                label="Server Transport"
+                value={toStringValue(connection.transport, "http_streamable")}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      transport: next
+                    }
+                  }))
+                }
+                options={[{ value: "http_streamable", label: "HTTP Streamable" }]}
+              />
+              <TextField
+                label="Endpoint"
+                value={toStringValue(connection.endpoint, "http://127.0.0.1:7001/mcp")}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      endpoint: next
+                    }
+                  }))
+                }
+              />
+              <NumberField
+                label="Request Timeout (ms)"
+                value={toNumberValue(connection.timeoutMs, 120000)}
+                min={1000}
+                step={1000}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      timeoutMs: next
+                    }
+                  }))
+                }
+              />
+              <SelectField
+                label="Authentication"
+                value={authType}
+                onChange={(next) =>
+                  setConfig((current) => ({
+                    ...current,
+                    connection: {
+                      ...asRecord(current.connection),
+                      authType: next
+                    }
+                  }))
+                }
+                options={[
+                  { value: "none", label: "None" },
+                  { value: "bearer", label: "Bearer Token" },
+                  { value: "basic", label: "Basic Auth" }
+                ]}
+              />
+              {authType === "basic" && (
+                <TextField
+                  label="Basic Auth Username"
+                  value={toStringValue(connection.username)}
+                  onChange={(next) =>
+                    setConfig((current) => ({
+                      ...current,
+                      connection: {
+                        ...asRecord(current.connection),
+                        username: next
+                      }
+                    }))
+                  }
+                  placeholder="api-user"
+                />
+              )}
+            </>
+          )}
+
+          {renderCredentialSecretField({
+            fieldKey: "mcp_auth_secret",
+            label: "Auth Secret",
+            value: toStringValue(asRecord(config.secretRef).secretId),
+            noneLabel: "None",
+            preferredProvider: "custom",
+            onSelect: (next) =>
+              setConfig((current) => ({
+                ...current,
+                secretRef: next ? { secretId: next } : undefined
+              }))
+          })}
           </>
         )}
-
-        {renderCredentialSecretField({
-          fieldKey: "mcp_auth_secret",
-          label: "Auth Secret",
-          value: toStringValue(asRecord(config.secretRef).secretId),
-          noneLabel: "None",
-          preferredProvider: "custom",
-          onSelect: (next) =>
-            setConfig((current) => ({
-              ...current,
-              secretRef: next ? { secretId: next } : undefined
-            }))
-        })}
 
         <div className="cfg-inline-actions">
           <button
@@ -2878,13 +3019,14 @@ export function NodeInspector({
             onClick={() =>
               void discoverToolsForMcpNode({
                 serverId: toStringValue(config.serverId),
+                registryServerId,
                 connection: asRecord(config.connection),
                 currentToolName: selectedToolName
               })
             }
             disabled={discoverBusy}
           >
-            {discoverBusy ? "Discovering..." : "Discover Tools"}
+            {discoverBusy ? "Discovering..." : registryServerId ? "Reload Tools" : "Discover Tools"}
           </button>
           {discoverMessage && <span className="muted">{discoverMessage}</span>}
         </div>

@@ -172,6 +172,18 @@ describe("StdioMCPServerAdapter", () => {
     expect(ctx.runtimeState.size).toBe(1);
   });
 
+  it("closeSessions kills the cached child process and empties the runtime state", async () => {
+    const adapter = new StdioMCPServerAdapter();
+    const ctx = makeContext();
+    await adapter.discoverTools(makeConfig(), ctx);
+    const session = [...ctx.runtimeState.values()][0] as { proc: { killed: boolean } };
+
+    adapter.closeSessions(ctx);
+
+    expect(ctx.runtimeState.size).toBe(0);
+    expect(session.proc.killed).toBe(true);
+  });
+
   it("rejects with a helpful error when the command cannot be spawned", async () => {
     const adapter = new StdioMCPServerAdapter();
     const config: MCPServerConfig = {

@@ -21,6 +21,12 @@ export interface MCPServerAdapter {
     config: MCPServerConfig,
     context: MCPExecutionContext
   ): Promise<MCPToolResult>;
+  /**
+   * Release anything the adapter cached in `context.runtimeState` (child
+   * processes, sessions). Callers that create a short-lived context, such as
+   * the registry health probe, call this when they are done with it.
+   */
+  closeSessions?(context: MCPExecutionContext): Promise<void> | void;
 }
 
 export interface ResolvedMCPTool {
