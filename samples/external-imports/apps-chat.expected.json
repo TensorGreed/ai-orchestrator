@@ -1,0 +1,417 @@
+{
+  "workflow": {
+    "id": "wf-import-incident_notifications",
+    "name": "Incident notifications",
+    "description": "Imported from an external workflow export (1 mapped, 5 approximated, 3 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "slack_trigger",
+        "type": "slack_trigger",
+        "name": "Slack Trigger",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "config": {
+          "path": "slack_trigger",
+          "signingSecretRef": {
+            "secretId": "import-slack_signing_secret-ops_slack"
+          },
+          "replayToleranceSeconds": 300
+        }
+      },
+      {
+        "id": "post_to_channel",
+        "type": "slack_send_message",
+        "name": "Post to channel",
+        "position": {
+          "x": 240,
+          "y": 0
+        },
+        "config": {
+          "authType": "bot",
+          "channel": "C0INCIDENTS",
+          "text": ":rotating_light: New incident: {{results.slack_trigger.event.text}}",
+          "secretRef": {
+            "secretId": "import-slack_bot_token-ops_slack"
+          }
+        }
+      },
+      {
+        "id": "reply_in_thread",
+        "type": "slack_send_message",
+        "name": "Reply in thread",
+        "position": {
+          "x": 480,
+          "y": 0
+        },
+        "config": {
+          "authType": "bot",
+          "channel": "C0INCIDENTS",
+          "text": "",
+          "secretRef": {
+            "secretId": "import-slack_bot_token-ops_slack"
+          },
+          "blocks": "[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"Acknowledged by {{results.post_to_channel.user}}\"}}]",
+          "threadTs": "{{results.post_to_channel.ts}}"
+        }
+      },
+      {
+        "id": "add_reaction",
+        "type": "noop_node",
+        "name": "Add reaction",
+        "position": {
+          "x": 0,
+          "y": 200
+        },
+        "config": {
+          "label": "Unsupported: slack",
+          "importedFrom": {
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2.2,
+            "parameters": {
+              "resource": "reaction",
+              "operation": "add",
+              "channelId": {
+                "__rl": true,
+                "value": "C0INCIDENTS",
+                "mode": "id"
+              },
+              "timestamp": "={{ $json.ts }}",
+              "name": "eyes"
+            },
+            "credentials": {
+              "slackApi": "Ops Slack"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "telegram_alert",
+        "type": "telegram_send_message",
+        "name": "Telegram alert",
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "config": {
+          "chatId": "-1001234567890",
+          "text": "<b>Incident</b> {{results.post_to_channel.ts}}",
+          "secretRef": {
+            "secretId": "import-telegram_bot_token-alerts_bot"
+          },
+          "parseMode": "HTML"
+        }
+      },
+      {
+        "id": "telegram_trigger",
+        "type": "telegram_trigger",
+        "name": "Telegram Trigger",
+        "position": {
+          "x": 480,
+          "y": 200
+        },
+        "config": {
+          "path": "telegram_trigger",
+          "signingSecretRef": {
+            "secretId": "import-telegram_webhook_secret_token-alerts_bot"
+          }
+        }
+      },
+      {
+        "id": "discord_webhook",
+        "type": "discord_send_message",
+        "name": "Discord webhook",
+        "position": {
+          "x": 0,
+          "y": 400
+        },
+        "config": {
+          "webhookUrl": "",
+          "content": "Incident in {{results.telegram_trigger.message.chat.title}}",
+          "secretRef": {
+            "secretId": "import-discord_webhook_url-ops_discord_hook"
+          },
+          "username": "L2M bot",
+          "embedsJson": "[{\"title\":\"Incident\",\"description\":\"{{results.telegram_trigger.message.text}}\",\"color\":15158332}]"
+        }
+      },
+      {
+        "id": "discord_bot_dm",
+        "type": "noop_node",
+        "name": "Discord bot DM",
+        "position": {
+          "x": 240,
+          "y": 400
+        },
+        "config": {
+          "label": "Unsupported: discord",
+          "importedFrom": {
+            "type": "n8n-nodes-base.discord",
+            "typeVersion": 2,
+            "parameters": {
+              "authentication": "botToken",
+              "resource": "message",
+              "operation": "send",
+              "guildId": {
+                "__rl": true,
+                "value": "1234",
+                "mode": "list",
+                "cachedResultName": "Acme"
+              },
+              "channelId": {
+                "__rl": true,
+                "value": "5678",
+                "mode": "list",
+                "cachedResultName": "#ops"
+              },
+              "content": "=Escalated: {{ $json.message.text }}"
+            },
+            "credentials": {
+              "discordBotApi": "Ops bot"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "telegram_photo",
+        "type": "noop_node",
+        "name": "Telegram photo",
+        "position": {
+          "x": 480,
+          "y": 400
+        },
+        "config": {
+          "label": "Unsupported: telegram",
+          "importedFrom": {
+            "type": "n8n-nodes-base.telegram",
+            "typeVersion": 1.2,
+            "parameters": {
+              "operation": "sendPhoto",
+              "chatId": "-1001234567890",
+              "file": "https://example.com/incident.png"
+            },
+            "credentials": {
+              "telegramApi": "Alerts bot"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 760,
+          "y": 300
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "slack_trigger",
+        "target": "post_to_channel"
+      },
+      {
+        "id": "edge_2",
+        "source": "post_to_channel",
+        "target": "reply_in_thread"
+      },
+      {
+        "id": "edge_3",
+        "source": "reply_in_thread",
+        "target": "add_reaction"
+      },
+      {
+        "id": "edge_4",
+        "source": "reply_in_thread",
+        "target": "telegram_alert"
+      },
+      {
+        "id": "edge_5",
+        "source": "telegram_trigger",
+        "target": "discord_webhook"
+      },
+      {
+        "id": "edge_6",
+        "source": "telegram_trigger",
+        "target": "telegram_photo"
+      },
+      {
+        "id": "edge_7",
+        "source": "discord_webhook",
+        "target": "discord_bot_dm"
+      },
+      {
+        "id": "edge_8",
+        "source": "add_reaction",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_9",
+        "source": "telegram_alert",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_10",
+        "source": "discord_bot_dm",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_11",
+        "source": "telegram_photo",
+        "target": "import_output"
+      }
+    ],
+    "tags": [
+      "ops"
+    ]
+  },
+  "report": {
+    "sourceName": "Incident notifications",
+    "nodes": [
+      {
+        "sourceName": "Slack Trigger",
+        "sourceType": "n8n-nodes-base.slackTrigger",
+        "sourceId": "slack-trigger-id",
+        "targetNodeId": "slack_trigger",
+        "targetType": "slack_trigger",
+        "status": "approximated",
+        "reason": "Event filters (app_mention) are not supported; the trigger receives every event sent to its endpoint, so filter downstream. The channel filter (C0INCIDENTS) is not supported; events from every channel reach the trigger. Point the Slack event subscription at the imported webhook path after import."
+      },
+      {
+        "sourceName": "Post to channel",
+        "sourceType": "n8n-nodes-base.slack",
+        "sourceId": "post-to-channel-id",
+        "targetNodeId": "post_to_channel",
+        "targetType": "slack_send_message",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Reply in thread",
+        "sourceType": "n8n-nodes-base.slack",
+        "sourceId": "reply-in-thread-id",
+        "targetNodeId": "reply_in_thread",
+        "targetType": "slack_send_message",
+        "status": "approximated",
+        "reason": "Message options (link_names, unfurl_links) are not supported and were dropped."
+      },
+      {
+        "sourceName": "Add reaction",
+        "sourceType": "n8n-nodes-base.slack",
+        "sourceId": "add-reaction-id",
+        "targetNodeId": "add_reaction",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Slack resource 'reaction' operation 'add' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Telegram alert",
+        "sourceType": "n8n-nodes-base.telegram",
+        "sourceId": "telegram-alert-id",
+        "targetNodeId": "telegram_alert",
+        "targetType": "telegram_send_message",
+        "status": "approximated",
+        "reason": "Message options (disable_notification) are not supported and were dropped."
+      },
+      {
+        "sourceName": "Telegram Trigger",
+        "sourceType": "n8n-nodes-base.telegramTrigger",
+        "sourceId": "telegram-trigger-id",
+        "targetNodeId": "telegram_trigger",
+        "targetType": "telegram_trigger",
+        "status": "approximated",
+        "reason": "Update filters (message) are not supported; the trigger receives every event sent to its endpoint, so filter downstream. Register the imported webhook path with the bot's setWebhook call after import."
+      },
+      {
+        "sourceName": "Discord webhook",
+        "sourceType": "n8n-nodes-base.discord",
+        "sourceId": "discord-webhook-id",
+        "targetNodeId": "discord_webhook",
+        "targetType": "discord_send_message",
+        "status": "approximated",
+        "reason": "The webhook URL lives in the source credential; set webhookUrl after import (the secret placeholder tracks that credential)."
+      },
+      {
+        "sourceName": "Discord bot DM",
+        "sourceType": "n8n-nodes-base.discord",
+        "sourceId": "discord-bot-dm-id",
+        "targetNodeId": "discord_bot_dm",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Discord message sending with 'botToken' authentication has no L2M equivalent (only webhook sends are supported); imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Telegram photo",
+        "sourceType": "n8n-nodes-base.telegram",
+        "sourceId": "telegram-photo-id",
+        "targetNodeId": "telegram_photo",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Telegram resource 'message' operation 'sendPhoto' has no L2M equivalent; imported as a disabled placeholder."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [
+      {
+        "secretId": "import-slack_signing_secret-ops_slack",
+        "credentialType": "slackApi",
+        "credentialName": "Slack signing secret (Ops Slack)",
+        "nodeIds": [
+          "slack_trigger"
+        ]
+      },
+      {
+        "secretId": "import-slack_bot_token-ops_slack",
+        "credentialType": "slackApi",
+        "credentialName": "Slack bot token (Ops Slack)",
+        "nodeIds": [
+          "post_to_channel",
+          "reply_in_thread"
+        ]
+      },
+      {
+        "secretId": "import-telegram_bot_token-alerts_bot",
+        "credentialType": "telegramApi",
+        "credentialName": "Telegram bot token (Alerts bot)",
+        "nodeIds": [
+          "telegram_alert"
+        ]
+      },
+      {
+        "secretId": "import-telegram_webhook_secret_token-alerts_bot",
+        "credentialType": "telegramApi",
+        "credentialName": "Telegram webhook secret token (Alerts bot)",
+        "nodeIds": [
+          "telegram_trigger"
+        ]
+      },
+      {
+        "secretId": "import-discord_webhook_url-ops_discord_hook",
+        "credentialType": "discordWebhookApi",
+        "credentialName": "Discord webhook URL (Ops Discord hook)",
+        "nodeIds": [
+          "discord_webhook"
+        ]
+      }
+    ],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 9,
+      "mapped": 1,
+      "approximated": 5,
+      "unsupported": 3
+    }
+  }
+}

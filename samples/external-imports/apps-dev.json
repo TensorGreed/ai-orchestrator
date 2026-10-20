@@ -1,0 +1,537 @@
+{
+  "name": "Bug triage",
+  "nodes": [
+    {
+      "parameters": {
+        "owner": {
+          "__rl": true,
+          "value": "tensorgreed",
+          "mode": "list",
+          "cachedResultName": "tensorgreed"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "ai-orchestrator",
+          "mode": "list",
+          "cachedResultName": "ai-orchestrator"
+        },
+        "events": [
+          "issues",
+          "issue_comment"
+        ]
+      },
+      "id": "github-trigger-id",
+      "name": "GitHub Trigger",
+      "type": "n8n-nodes-base.githubTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "githubApi": {
+          "id": "cred_g1",
+          "name": "GitHub bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "comment",
+        "owner": {
+          "__rl": true,
+          "value": "tensorgreed",
+          "mode": "list",
+          "cachedResultName": "tensorgreed"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "ai-orchestrator",
+          "mode": "list",
+          "cachedResultName": "ai-orchestrator"
+        },
+        "issueNumber": "={{ $json.body.issue.number }}",
+        "body": "=Thanks {{ $json.body.issue.user.login }}, we're on it."
+      },
+      "id": "comment-on-issue-id",
+      "name": "Comment on issue",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "githubApi": {
+          "id": "cred_g1",
+          "name": "GitHub bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "owner": {
+          "__rl": true,
+          "value": "https://github.com/tensorgreed",
+          "mode": "url"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "https://github.com/tensorgreed/ai-orchestrator",
+          "mode": "url"
+        },
+        "title": "=[triage] {{ $json.body.issue.title }}",
+        "body": "=Mirrored from #{{ $json.body.issue.number }}",
+        "labels": {
+          "labels": [
+            "bug"
+          ]
+        },
+        "assignees": {}
+      },
+      "id": "create-issue-id",
+      "name": "Create issue",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {
+        "githubApi": {
+          "id": "cred_g1",
+          "name": "GitHub bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "edit",
+        "owner": {
+          "__rl": true,
+          "value": "tensorgreed",
+          "mode": "list",
+          "cachedResultName": "tensorgreed"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "ai-orchestrator",
+          "mode": "list",
+          "cachedResultName": "ai-orchestrator"
+        },
+        "issueNumber": 42,
+        "editFields": {
+          "state": "closed"
+        }
+      },
+      "id": "close-issue-id",
+      "name": "Close issue",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        0
+      ],
+      "credentials": {
+        "githubApi": {
+          "id": "cred_g1",
+          "name": "GitHub bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "get",
+        "owner": {
+          "__rl": true,
+          "value": "tensorgreed",
+          "mode": "list",
+          "cachedResultName": "tensorgreed"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "ai-orchestrator",
+          "mode": "list",
+          "cachedResultName": "ai-orchestrator"
+        },
+        "filePath": "CHANGELOG.md",
+        "asBinaryProperty": false
+      },
+      "id": "read-changelog-id",
+      "name": "Read changelog",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        200
+      ],
+      "credentials": {
+        "githubApi": {
+          "id": "cred_g1",
+          "name": "GitHub bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "release",
+        "operation": "create",
+        "owner": {
+          "__rl": true,
+          "value": "tensorgreed",
+          "mode": "list",
+          "cachedResultName": "tensorgreed"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "ai-orchestrator",
+          "mode": "list",
+          "cachedResultName": "ai-orchestrator"
+        },
+        "releaseTag": "=v{{ $json.version }}"
+      },
+      "id": "create-release-id",
+      "name": "Create release",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        200
+      ],
+      "credentials": {
+        "githubApi": {
+          "id": "cred_g1",
+          "name": "GitHub bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "project": {
+          "__rl": true,
+          "value": "10001",
+          "mode": "list",
+          "cachedResultName": "Platform"
+        },
+        "issueType": {
+          "__rl": true,
+          "value": "10004",
+          "mode": "list",
+          "cachedResultName": "Bug"
+        },
+        "summary": "={{ $('Create issue').item.json.title }}",
+        "additionalFields": {
+          "description": "=See {{ $('Create issue').item.json.html_url }}",
+          "labels": [
+            "imported"
+          ],
+          "priority": "3",
+          "componentIds": [
+            "10100"
+          ]
+        }
+      },
+      "id": "jira-ticket-id",
+      "name": "Jira ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        480,
+        200
+      ],
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "cred_j1",
+          "name": "Jira cloud"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "limit": 20,
+        "options": {
+          "jql": "project = PLAT AND status != Done",
+          "fields": "summary,status"
+        }
+      },
+      "id": "find-open-bugs-id",
+      "name": "Find open bugs",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        720,
+        200
+      ],
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "cred_j1",
+          "name": "Jira cloud"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "issueComment",
+        "operation": "add",
+        "issueKey": "={{ $json.key }}",
+        "comment": "=Imported"
+      },
+      "id": "jira-comment-id",
+      "name": "Jira comment",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ],
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "cred_j1",
+          "name": "Jira cloud"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "databaseId": {
+          "__rl": true,
+          "value": "https://www.notion.so/acme/8f3c5c1a2b3d4e5f8a9b0c1d2e3f4a5b?v=1a2b3c",
+          "mode": "url"
+        },
+        "propertiesUi": {
+          "propertyValues": [
+            {
+              "key": "Name|title",
+              "title": "={{ $('Create issue').item.json.title }}"
+            },
+            {
+              "key": "Status|select",
+              "selectValue": "Triage"
+            },
+            {
+              "key": "Priority|number",
+              "numberValue": 2
+            },
+            {
+              "key": "Tags|multi_select",
+              "multiSelectValue": [
+                "bug",
+                "import"
+              ]
+            },
+            {
+              "key": "Owner|people",
+              "peopleValue": [
+                "user-1"
+              ]
+            }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            {
+              "type": "paragraph",
+              "textContent": "Body"
+            }
+          ]
+        }
+      },
+      "id": "notion-page-id",
+      "name": "Notion page",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        400
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "cred_n1",
+          "name": "Notion workspace"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": {
+          "__rl": true,
+          "value": "8f3c5c1a2b3d4e5f8a9b0c1d2e3f4a5b",
+          "mode": "id"
+        },
+        "limit": 25,
+        "filterType": "json",
+        "filterJson": "={\"property\":\"Status\",\"select\":{\"equals\":\"{{ $json.status }}\"}}",
+        "options": {
+          "sort": {
+            "sortValue": [
+              {
+                "timestamp": "created_time",
+                "type": "timestamp",
+                "direction": "descending"
+              },
+              {
+                "key": "Priority|number",
+                "type": "property",
+                "direction": "ascending"
+              }
+            ]
+          }
+        }
+      },
+      "id": "notion-query-id",
+      "name": "Notion query",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        400
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "cred_n1",
+          "name": "Notion workspace"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "block",
+        "operation": "append",
+        "blockId": {
+          "__rl": true,
+          "value": "abc",
+          "mode": "id"
+        },
+        "blockUi": {}
+      },
+      "id": "notion-block-id",
+      "name": "Notion block",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        400
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "cred_n1",
+          "name": "Notion workspace"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "GitHub Trigger": {
+      "main": [
+        [
+          {
+            "node": "Comment on issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comment on issue": {
+      "main": [
+        [
+          {
+            "node": "Create issue",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Close issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create issue": {
+      "main": [
+        [
+          {
+            "node": "Jira ticket",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Find open bugs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jira ticket": {
+      "main": [
+        [
+          {
+            "node": "Notion page",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Jira comment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion page": {
+      "main": [
+        [
+          {
+            "node": "Notion block",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find open bugs": {
+      "main": [
+        [
+          {
+            "node": "Notion query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close issue": {
+      "main": [
+        [
+          {
+            "node": "Read changelog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read changelog": {
+      "main": [
+        [
+          {
+            "node": "Create release",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

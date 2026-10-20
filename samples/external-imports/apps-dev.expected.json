@@ -1,0 +1,518 @@
+{
+  "workflow": {
+    "id": "wf-import-bug_triage",
+    "name": "Bug triage",
+    "description": "Imported from an external workflow export (4 mapped, 5 approximated, 3 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "github_trigger",
+        "type": "github_webhook_trigger",
+        "name": "GitHub Trigger",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "config": {
+          "path": "github_trigger",
+          "secretRef": {
+            "secretId": "import-github_webhook_secret-github_bot"
+          }
+        }
+      },
+      {
+        "id": "comment_on_issue",
+        "type": "github_action",
+        "name": "Comment on issue",
+        "position": {
+          "x": 240,
+          "y": 0
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-github_personal_access_token-github_bot"
+          },
+          "owner": "tensorgreed",
+          "repo": "ai-orchestrator",
+          "operation": "commentIssue",
+          "issueNumber": "{{results.github_trigger.body.issue.number}}",
+          "body": "Thanks {{results.github_trigger.body.issue.user.login}}, we're on it."
+        }
+      },
+      {
+        "id": "create_issue",
+        "type": "github_action",
+        "name": "Create issue",
+        "position": {
+          "x": 480,
+          "y": 0
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-github_personal_access_token-github_bot"
+          },
+          "owner": "tensorgreed",
+          "repo": "ai-orchestrator",
+          "operation": "createIssue",
+          "title": "[triage] {{results.comment_on_issue.body.issue.title}}",
+          "body": "Mirrored from #{{results.comment_on_issue.body.issue.number}}"
+        }
+      },
+      {
+        "id": "close_issue",
+        "type": "github_action",
+        "name": "Close issue",
+        "position": {
+          "x": 720,
+          "y": 0
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-github_personal_access_token-github_bot"
+          },
+          "owner": "tensorgreed",
+          "repo": "ai-orchestrator",
+          "operation": "closeIssue",
+          "issueNumber": 42
+        }
+      },
+      {
+        "id": "read_changelog",
+        "type": "github_action",
+        "name": "Read changelog",
+        "position": {
+          "x": 0,
+          "y": 200
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-github_personal_access_token-github_bot"
+          },
+          "owner": "tensorgreed",
+          "repo": "ai-orchestrator",
+          "operation": "getFile",
+          "path": "CHANGELOG.md"
+        }
+      },
+      {
+        "id": "create_release",
+        "type": "noop_node",
+        "name": "Create release",
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "config": {
+          "label": "Unsupported: github",
+          "importedFrom": {
+            "type": "n8n-nodes-base.github",
+            "typeVersion": 1.1,
+            "parameters": {
+              "resource": "release",
+              "operation": "create",
+              "owner": {
+                "__rl": true,
+                "value": "tensorgreed",
+                "mode": "list",
+                "cachedResultName": "tensorgreed"
+              },
+              "repository": {
+                "__rl": true,
+                "value": "ai-orchestrator",
+                "mode": "list",
+                "cachedResultName": "ai-orchestrator"
+              },
+              "releaseTag": "=v{{ $json.version }}"
+            },
+            "credentials": {
+              "githubApi": "GitHub bot"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "jira_ticket",
+        "type": "jira_create_issue",
+        "name": "Jira ticket",
+        "position": {
+          "x": 480,
+          "y": 200
+        },
+        "config": {
+          "baseUrl": "",
+          "email": "",
+          "secretRef": {
+            "secretId": "import-jira_api_token-jira_cloud"
+          },
+          "projectKey": "10001",
+          "issueType": "Bug",
+          "summary": "{{results.create_issue.title}}",
+          "description": "See {{results.create_issue.html_url}}",
+          "fieldsJson": "{\"labels\":[\"imported\"],\"priority\":{\"id\":\"3\"}}"
+        }
+      },
+      {
+        "id": "find_open_bugs",
+        "type": "jira_search_issues",
+        "name": "Find open bugs",
+        "position": {
+          "x": 720,
+          "y": 200
+        },
+        "config": {
+          "baseUrl": "",
+          "email": "",
+          "secretRef": {
+            "secretId": "import-jira_api_token-jira_cloud"
+          },
+          "jql": "project = PLAT AND status != Done",
+          "maxResults": 20
+        }
+      },
+      {
+        "id": "jira_comment",
+        "type": "noop_node",
+        "name": "Jira comment",
+        "position": {
+          "x": 0,
+          "y": 400
+        },
+        "config": {
+          "label": "Unsupported: jira",
+          "importedFrom": {
+            "type": "n8n-nodes-base.jira",
+            "typeVersion": 1,
+            "parameters": {
+              "resource": "issueComment",
+              "operation": "add",
+              "issueKey": "={{ $json.key }}",
+              "comment": "=Imported"
+            },
+            "credentials": {
+              "jiraSoftwareCloudApi": "Jira cloud"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "notion_page",
+        "type": "notion_create_page",
+        "name": "Notion page",
+        "position": {
+          "x": 240,
+          "y": 400
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-notion_integration_token-notion_workspace"
+          },
+          "databaseId": "8f3c5c1a2b3d4e5f8a9b0c1d2e3f4a5b",
+          "titleProperty": "Name",
+          "title": "{{results.create_issue.title}}",
+          "propertiesJson": "{\"Status\":{\"select\":{\"name\":\"Triage\"}},\"Priority\":{\"number\":2},\"Tags\":{\"multi_select\":[{\"name\":\"bug\"},{\"name\":\"import\"}]}}"
+        }
+      },
+      {
+        "id": "notion_query",
+        "type": "notion_query_database",
+        "name": "Notion query",
+        "position": {
+          "x": 480,
+          "y": 400
+        },
+        "config": {
+          "secretRef": {
+            "secretId": "import-notion_integration_token-notion_workspace"
+          },
+          "databaseId": "8f3c5c1a2b3d4e5f8a9b0c1d2e3f4a5b",
+          "pageSize": 25,
+          "filterJson": "{\"property\":\"Status\",\"select\":{\"equals\":\"{{results.find_open_bugs.status}}\"}}",
+          "sortsJson": "[{\"timestamp\":\"created_time\",\"direction\":\"descending\"},{\"property\":\"Priority\",\"direction\":\"ascending\"}]"
+        }
+      },
+      {
+        "id": "notion_block",
+        "type": "noop_node",
+        "name": "Notion block",
+        "position": {
+          "x": 720,
+          "y": 400
+        },
+        "config": {
+          "label": "Unsupported: notion",
+          "importedFrom": {
+            "type": "n8n-nodes-base.notion",
+            "typeVersion": 2.2,
+            "parameters": {
+              "resource": "block",
+              "operation": "append",
+              "blockId": {
+                "__rl": true,
+                "value": "abc",
+                "mode": "id"
+              },
+              "blockUi": {}
+            },
+            "credentials": {
+              "notionApi": "Notion workspace"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 1000,
+          "y": 350
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "github_trigger",
+        "target": "comment_on_issue"
+      },
+      {
+        "id": "edge_2",
+        "source": "comment_on_issue",
+        "target": "create_issue"
+      },
+      {
+        "id": "edge_3",
+        "source": "comment_on_issue",
+        "target": "close_issue"
+      },
+      {
+        "id": "edge_4",
+        "source": "create_issue",
+        "target": "jira_ticket"
+      },
+      {
+        "id": "edge_5",
+        "source": "create_issue",
+        "target": "find_open_bugs"
+      },
+      {
+        "id": "edge_6",
+        "source": "jira_ticket",
+        "target": "notion_page"
+      },
+      {
+        "id": "edge_7",
+        "source": "jira_ticket",
+        "target": "jira_comment"
+      },
+      {
+        "id": "edge_8",
+        "source": "notion_page",
+        "target": "notion_block"
+      },
+      {
+        "id": "edge_9",
+        "source": "find_open_bugs",
+        "target": "notion_query"
+      },
+      {
+        "id": "edge_10",
+        "source": "close_issue",
+        "target": "read_changelog"
+      },
+      {
+        "id": "edge_11",
+        "source": "read_changelog",
+        "target": "create_release"
+      },
+      {
+        "id": "edge_12",
+        "source": "create_release",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_13",
+        "source": "jira_comment",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_14",
+        "source": "notion_query",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_15",
+        "source": "notion_block",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Bug triage",
+    "nodes": [
+      {
+        "sourceName": "GitHub Trigger",
+        "sourceType": "n8n-nodes-base.githubTrigger",
+        "sourceId": "github-trigger-id",
+        "targetNodeId": "github_trigger",
+        "targetType": "github_webhook_trigger",
+        "status": "approximated",
+        "reason": "Event filters (issues, issue_comment) are not supported; the trigger receives every event sent to its endpoint, so filter downstream. Create the webhook on tensorgreed/ai-orchestrator by hand and point it at the imported webhook path."
+      },
+      {
+        "sourceName": "Comment on issue",
+        "sourceType": "n8n-nodes-base.github",
+        "sourceId": "comment-on-issue-id",
+        "targetNodeId": "comment_on_issue",
+        "targetType": "github_action",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Create issue",
+        "sourceType": "n8n-nodes-base.github",
+        "sourceId": "create-issue-id",
+        "targetNodeId": "create_issue",
+        "targetType": "github_action",
+        "status": "approximated",
+        "reason": "Issue labels are not supported and were dropped."
+      },
+      {
+        "sourceName": "Close issue",
+        "sourceType": "n8n-nodes-base.github",
+        "sourceId": "close-issue-id",
+        "targetNodeId": "close_issue",
+        "targetType": "github_action",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Read changelog",
+        "sourceType": "n8n-nodes-base.github",
+        "sourceId": "read-changelog-id",
+        "targetNodeId": "read_changelog",
+        "targetType": "github_action",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Create release",
+        "sourceType": "n8n-nodes-base.github",
+        "sourceId": "create-release-id",
+        "targetNodeId": "create_release",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "GitHub resource 'release' operation 'create' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Jira ticket",
+        "sourceType": "n8n-nodes-base.jira",
+        "sourceId": "jira-ticket-id",
+        "targetNodeId": "jira_ticket",
+        "targetType": "jira_create_issue",
+        "status": "approximated",
+        "reason": "The Jira site URL and account email live in the source credential; set baseUrl and email after import. The project is referenced by id (10001, 'Platform'); replace projectKey with the project key after import. Additional fields (componentIds) are not supported and were dropped."
+      },
+      {
+        "sourceName": "Find open bugs",
+        "sourceType": "n8n-nodes-base.jira",
+        "sourceId": "find-open-bugs-id",
+        "targetNodeId": "find_open_bugs",
+        "targetType": "jira_search_issues",
+        "status": "approximated",
+        "reason": "The Jira site URL and account email live in the source credential; set baseUrl and email after import. Search options (fields) are not supported and were dropped."
+      },
+      {
+        "sourceName": "Jira comment",
+        "sourceType": "n8n-nodes-base.jira",
+        "sourceId": "jira-comment-id",
+        "targetNodeId": "jira_comment",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Jira resource 'issueComment' operation 'add' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Notion page",
+        "sourceType": "n8n-nodes-base.notion",
+        "sourceId": "notion-page-id",
+        "targetNodeId": "notion_page",
+        "targetType": "notion_create_page",
+        "status": "approximated",
+        "reason": "Properties of unsupported types (Owner|people) were dropped. Page content blocks are not supported; add contentMarkdown after import."
+      },
+      {
+        "sourceName": "Notion query",
+        "sourceType": "n8n-nodes-base.notion",
+        "sourceId": "notion-query-id",
+        "targetNodeId": "notion_query",
+        "targetType": "notion_query_database",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Notion block",
+        "sourceType": "n8n-nodes-base.notion",
+        "sourceId": "notion-block-id",
+        "targetNodeId": "notion_block",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Notion resource 'block' operation 'append' has no L2M equivalent; imported as a disabled placeholder."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [
+      {
+        "secretId": "import-github_webhook_secret-github_bot",
+        "credentialType": "githubApi",
+        "credentialName": "GitHub webhook secret (GitHub bot)",
+        "nodeIds": [
+          "github_trigger"
+        ]
+      },
+      {
+        "secretId": "import-github_personal_access_token-github_bot",
+        "credentialType": "githubApi",
+        "credentialName": "GitHub personal access token (GitHub bot)",
+        "nodeIds": [
+          "comment_on_issue",
+          "create_issue",
+          "close_issue",
+          "read_changelog"
+        ]
+      },
+      {
+        "secretId": "import-jira_api_token-jira_cloud",
+        "credentialType": "jiraSoftwareCloudApi",
+        "credentialName": "Jira API token (Jira cloud)",
+        "nodeIds": [
+          "jira_ticket",
+          "find_open_bugs"
+        ]
+      },
+      {
+        "secretId": "import-notion_integration_token-notion_workspace",
+        "credentialType": "notionApi",
+        "credentialName": "Notion integration token (Notion workspace)",
+        "nodeIds": [
+          "notion_page",
+          "notion_query"
+        ]
+      }
+    ],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 12,
+      "mapped": 4,
+      "approximated": 5,
+      "unsupported": 3
+    }
+  }
+}

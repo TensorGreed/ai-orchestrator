@@ -20,6 +20,8 @@ import {
   type ImportReportNodeEntry,
   type ImportReportSecret
 } from "@ai-orchestrator/shared";
+import type { ConversionContext, ConvertedNode, ExpressionScope, NodeHandler, SourceConnection, SourceNode, SourceWorkflow } from "./handler-types.js";
+import { createAppRegistrations, type AppKit } from "./apps/index.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -39,76 +41,6 @@ export class ExternalWorkflowImportError extends Error {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Source shapes (loosely typed on purpose; everything is defensively read)
-// ---------------------------------------------------------------------------
-
-interface SourceNode {
-  id?: string;
-  name: string;
-  type: string;
-  typeVersion?: number;
-  position?: unknown;
-  parameters: Record<string, unknown>;
-  credentials: Record<string, Record<string, unknown>>;
-  disabled: boolean;
-  notes?: string;
-}
-
-interface SourceConnectionTarget {
-  node: string;
-  type: string;
-  index: number;
-}
-
-interface SourceConnection {
-  sourceName: string;
-  connectionType: string;
-  outputIndex: number;
-  target: SourceConnectionTarget;
-}
-
-interface SourceWorkflow {
-  name: string;
-  nodes: SourceNode[];
-  connections: SourceConnection[];
-  settings: Record<string, unknown>;
-  pinData: Record<string, unknown>;
-  tags: string[];
-}
-
-// ---------------------------------------------------------------------------
-// Conversion context shared by all node handlers
-// ---------------------------------------------------------------------------
-
-interface ExpressionScope {
-  nodeId: string;
-  sourceName: string;
-  /** Id of the node feeding this node's main input, when there is exactly one obvious one. */
-  previousNodeId?: string;
-}
-
-interface ConvertedNode {
-  node: WorkflowNode;
-  status: ImportNodeStatus;
-  reason: string;
-  /** Source output index → L2M sourceHandle for branching nodes. */
-  outputHandles?: string[];
-  /** Nodes that only make sense as agent attachments and must not be wired into the DAG. */
-  attachmentOnly?: boolean;
-}
-
-interface ConversionContext {
-  source: SourceWorkflow;
-  nodeIdByName: Map<string, string>;
-  previousNodeIdByName: Map<string, string | undefined>;
-  report: ImportReport;
-  secrets: Map<string, ImportReportSecret>;
-  variables: Set<string>;
-  settingsTimezone: string;
-}
-
-type NodeHandler = (source: SourceNode, ctx: ConversionContext, scope: ExpressionScope) => ConvertedNode;
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -737,6 +669,30 @@ function placeholderSecret(ctx: ConversionContext, nodeId: string, credentialTyp
   const secretId = `import-${slugifyNodeId(credentialType)}-${nodeId}`;
   if (!ctx.secrets.has(secretId)) {
     ctx.secrets.set(secretId, { secretId, credentialType, credentialName, nodeIds: [nodeId] });
+  }
+  return { secretId };
+}
+
+/**
+ * Secret placeholder for an app node. The checklist entry is named after what
+ * the user has to provide (for example "Slack bot token"), with the export's
+ * credential name appended so several accounts stay distinguishable. Nodes
+ * that need the same kind of secret from the same source credential share one
+ * placeholder; a trigger's signing secret and a send node's token stay apart
+ * even when the export lists one credential for both.
+ */
+function appSecret(source: SourceNode, ctx: ConversionContext, scope: ExpressionScope, credentialType: string, label: string): { secretId: string } {
+  const listed = Object.entries(source.credentials).find(([type]) => type === credentialType) ?? Object.entries(source.credentials)[0];
+  if (!listed) return placeholderSecret(ctx, scope.nodeId, credentialType, label);
+  const [listedType, credential] = listed;
+  const exportName = asString(credential.name).trim();
+  const secretId = `import-${slugifyNodeId(label)}-${slugifyNodeId(exportName || listedType)}`;
+  const credentialName = exportName ? `${label} (${exportName})` : label;
+  const existing = ctx.secrets.get(secretId);
+  if (existing) {
+    if (!existing.nodeIds.includes(scope.nodeId)) existing.nodeIds.push(scope.nodeId);
+  } else {
+    ctx.secrets.set(secretId, { secretId, credentialType: listedType, credentialName, nodeIds: [scope.nodeId] });
   }
   return { secretId };
 }
@@ -1852,7 +1808,7 @@ const structuredOutputParser: NodeHandler = (source, _ctx, scope) => {
 const BASE = "n8n-nodes-base.";
 const LANGCHAIN = "@n8n/n8n-nodes-langchain.";
 
-export type ExternalImportCategory = "trigger" | "core" | "ai";
+export type ExternalImportCategory = "trigger" | "core" | "ai" | "app";
 
 export interface ExternalImportCoverageEntry {
   /** Source node type identifier as it appears in an export (data, not prose). */
@@ -1922,7 +1878,26 @@ const REGISTRATIONS: readonly HandlerRegistration[] = [
   { sourceType: `${LANGCHAIN}outputParserStructured`, targetType: "output_parser", category: "ai", notes: "Runs as a step after the agent; schemas are inferred from example output when no manual schema is given.", handler: structuredOutputParser }
 ];
 
-const NODE_HANDLERS = new Map<string, NodeHandler>(REGISTRATIONS.map((entry) => [normalizeType(entry.sourceType), entry.handler]));
+const APP_KIT: AppKit = {
+  toRecord,
+  toArray,
+  asString,
+  asNumber,
+  unwrapResourceLocator,
+  slugifyNodeId,
+  tpl,
+  baseNode,
+  mapped,
+  approximated,
+  unsupportedPlaceholder,
+  appSecret
+};
+
+const APP_REGISTRATIONS: readonly HandlerRegistration[] = createAppRegistrations(APP_KIT).map((entry) => ({ ...entry, category: "app" as const }));
+
+const ALL_REGISTRATIONS: readonly HandlerRegistration[] = [...REGISTRATIONS, ...APP_REGISTRATIONS];
+
+const NODE_HANDLERS = new Map<string, NodeHandler>(ALL_REGISTRATIONS.map((entry) => [normalizeType(entry.sourceType), entry.handler]));
 
 function resolveHandler(type: string): NodeHandler | undefined {
   const normalized = normalizeType(type);
@@ -1937,7 +1912,7 @@ export const EXTERNAL_IMPORT_SUPPORTED_TYPES: readonly string[] = Object.freeze(
 
 /** Source type → L2M node type coverage, including the chat model fallback, for docs and coverage tables. */
 export const EXTERNAL_IMPORT_COVERAGE: readonly ExternalImportCoverageEntry[] = Object.freeze([
-  ...REGISTRATIONS.map(({ sourceType, targetType, category, notes }) => ({ sourceType, targetType, category, notes })),
+  ...ALL_REGISTRATIONS.map(({ sourceType, targetType, category, notes }) => ({ sourceType, targetType, category, notes })),
   {
     sourceType: `${LANGCHAIN}lmChat*`,
     targetType: "openai_compatible_chat_model",

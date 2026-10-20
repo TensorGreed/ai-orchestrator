@@ -68,6 +68,20 @@ An unsupported node is imported as a **disabled** `noop_node` named after the or
 
 Because the placeholder is a pass-through, the edges into and out of it are kept and the rest of the flow still loads, validates and runs. Attachments that cannot be honoured, for example a tool sub-node with no L2M equivalent, are dropped and listed in `report.warnings`.
 
+## App nodes
+
+Nodes for Slack, GitHub, Google Sheets, Postgres, Notion, Jira, Airtable, HubSpot, Salesforce, Stripe, AWS S3, Telegram and Discord are converted onto L2M's connector nodes. The source builder expresses these as a *resource* and an *operation*, so the converter dispatches on that pair:
+
+- A pair L2M covers is `mapped`, for example posting a Slack message, commenting on a GitHub issue, searching Airtable records or creating a Stripe customer.
+- A pair that is close but loses settings is `approximated`, and the reason names each dropped setting: a Sheets "append or update" becomes a plain append, a HubSpot "create or update" becomes a create, Slack attachments and message options are dropped, a Postgres select is rewritten as SQL.
+- Any other pair becomes a disabled placeholder whose reason names the resource and operation, so you can see at a glance what to rebuild.
+
+Ids are read from the source's resource pickers: ids are kept, URLs for spreadsheets, Notion databases, Airtable bases and Slack channels are parsed down to the id, and anything referenced only by name is flagged for review. Every string parameter goes through the same expression translation as core nodes.
+
+Triggers (Slack, GitHub, Sheets, Postgres, Stripe, Telegram, Discord) map onto the L2M trigger nodes. The webhook-style ones get a fresh path named after the node and a signing-secret placeholder; the reason tells you to point the external subscription at the new path, and lists any event filters the L2M trigger cannot apply.
+
+Connection details that live inside a source credential rather than on the node, such as a Postgres host, a Jira site URL, a Salesforce instance URL, a Discord webhook URL or an AWS region, are not part of the export. Those nodes import as `approximated` with empty fields to fill in, and the credential itself still appears in the secrets checklist under a name that says what to provide, for example "Postgres password" or "Slack bot token". A trigger's signing secret and a send node's token get separate entries even when the export lists one credential for both.
+
 ## Expression translation
 
 The common expression subset is translated into L2M template syntax. Translated references resolve against `results`, which exposes the output of every completed node by id.

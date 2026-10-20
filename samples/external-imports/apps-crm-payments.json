@@ -1,0 +1,386 @@
+{
+  "name": "Lead to cash",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "checkout.session.completed"
+        ]
+      },
+      "id": "stripe-trigger-id",
+      "name": "Stripe Trigger",
+      "type": "n8n-nodes-base.stripeTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "stripeApi": {
+          "id": "cred_st1",
+          "name": "Stripe live"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "email": "={{ $json.data.object.customer_details.email }}",
+        "additionalFields": {
+          "firstName": "={{ $json.data.object.customer_details.name.split(' ')[0] }}",
+          "lastName": "={{ $json.data.object.customer_details.name.split(' ').slice(1).join(' ') }}",
+          "companyName": "Acme",
+          "associatedCompanyId": 123
+        }
+      },
+      "id": "create-hubspot-contact-id",
+      "name": "Create HubSpot contact",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.1,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "cred_h1",
+          "name": "HubSpot app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "contactId": "={{ $json.id }}"
+      },
+      "id": "get-contact-id",
+      "name": "Get contact",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.1,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "cred_h1",
+          "name": "HubSpot app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "deal",
+        "operation": "create",
+        "stage": "appointmentscheduled",
+        "additionalFields": {
+          "dealName": "=Deal {{ $json.id }}"
+        }
+      },
+      "id": "create-deal-id",
+      "name": "Create deal",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        0
+      ],
+      "credentials": {
+        "hubspotAppToken": {
+          "id": "cred_h1",
+          "name": "HubSpot app"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "company": "={{ $json.properties.company }}",
+        "lastname": "={{ $json.properties.lastname }}",
+        "additionalFields": {
+          "email": "={{ $json.properties.email }}",
+          "leadSource": "Web",
+          "phone": "={{ $json.properties.phone }}",
+          "customFieldsUi": {
+            "customFieldsValues": [
+              {
+                "fieldId": "Imported__c",
+                "value": "true"
+              }
+            ]
+          }
+        }
+      },
+      "id": "create-lead-id",
+      "name": "Create lead",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "credentials": {
+        "salesforceOAuth2Api": {
+          "id": "cred_sf1",
+          "name": "Salesforce prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "search",
+        "operation": "query",
+        "query": "=SELECT Id, Name FROM Account WHERE Name = '{{ $json.Company }}'"
+      },
+      "id": "find-accounts-id",
+      "name": "Find accounts",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [
+        240,
+        200
+      ],
+      "credentials": {
+        "salesforceOAuth2Api": {
+          "id": "cred_sf1",
+          "name": "Salesforce prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "opportunity",
+        "operation": "getAll",
+        "limit": 10,
+        "options": {
+          "fields": "Id, Name, Amount"
+        }
+      },
+      "id": "list-opportunities-id",
+      "name": "List opportunities",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [
+        480,
+        200
+      ],
+      "credentials": {
+        "salesforceOAuth2Api": {
+          "id": "cred_sf1",
+          "name": "Salesforce prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "lead",
+        "operation": "addNote",
+        "leadId": "={{ $json.id }}",
+        "title": "Imported"
+      },
+      "id": "add-note-id",
+      "name": "Add note",
+      "type": "n8n-nodes-base.salesforce",
+      "typeVersion": 1,
+      "position": [
+        720,
+        200
+      ],
+      "credentials": {
+        "salesforceOAuth2Api": {
+          "id": "cred_sf1",
+          "name": "Salesforce prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "customer",
+        "operation": "create",
+        "name": "={{ $json.Name }}",
+        "additionalFields": {
+          "email": "={{ $json.Email }}",
+          "description": "Imported from CRM",
+          "metadata": {
+            "metadataProperties": [
+              {
+                "key": "source",
+                "value": "l2m"
+              },
+              {
+                "key": "lead",
+                "value": "={{ $json.Id }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "stripe-customer-id",
+      "name": "Stripe customer",
+      "type": "n8n-nodes-base.stripe",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ],
+      "credentials": {
+        "stripeApi": {
+          "id": "cred_st1",
+          "name": "Stripe live"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "charge",
+        "operation": "create",
+        "customerId": "={{ $json.id }}",
+        "amount": 4999,
+        "currency": "usd",
+        "additionalFields": {
+          "description": "=Order {{ $json.orderId }}",
+          "receipt_email": "={{ $json.email }}"
+        }
+      },
+      "id": "charge-card-id",
+      "name": "Charge card",
+      "type": "n8n-nodes-base.stripe",
+      "typeVersion": 1,
+      "position": [
+        240,
+        400
+      ],
+      "credentials": {
+        "stripeApi": {
+          "id": "cred_st1",
+          "name": "Stripe live"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "coupon",
+        "operation": "create",
+        "type": "percent",
+        "percentOff": 10,
+        "duration": "once"
+      },
+      "id": "create-coupon-id",
+      "name": "Create coupon",
+      "type": "n8n-nodes-base.stripe",
+      "typeVersion": 1,
+      "position": [
+        480,
+        400
+      ],
+      "credentials": {
+        "stripeApi": {
+          "id": "cred_st1",
+          "name": "Stripe live"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Stripe Trigger": {
+      "main": [
+        [
+          {
+            "node": "Create HubSpot contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create HubSpot contact": {
+      "main": [
+        [
+          {
+            "node": "Get contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get contact": {
+      "main": [
+        [
+          {
+            "node": "Create deal",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create lead": {
+      "main": [
+        [
+          {
+            "node": "Find accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find accounts": {
+      "main": [
+        [
+          {
+            "node": "List opportunities",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Stripe customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List opportunities": {
+      "main": [
+        [
+          {
+            "node": "Add note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stripe customer": {
+      "main": [
+        [
+          {
+            "node": "Charge card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Charge card": {
+      "main": [
+        [
+          {
+            "node": "Create coupon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

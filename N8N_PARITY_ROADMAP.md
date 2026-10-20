@@ -410,7 +410,7 @@ beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to
 - [x] Triggers: Manual, Webhook, Schedule/Cron, Chat Trigger, Error Trigger, Form Trigger, RSS, Email (IMAP)
 - [x] Core: HTTP Request, Code (JS/Python), Set/Edit Fields, IF, Switch, Merge, Split Out, Aggregate, Filter, Sort, Limit, Wait, No Op, Stop and Error, Execute Workflow, Sticky Note
 - [x] AI: OpenAI / Anthropic / Gemini / Ollama chat models → `*_chat_model`, AI Agent → `agent_orchestrator` (sub-node connections `ai_languageModel` / `ai_memory` / `ai_tool` → `chat_model` / `memory` / `tool` attachment edges), Simple Memory → `local_memory`, MCP Client Tool → `mcp_tool`, Structured Output Parser → `output_parser` (vector stores → existing RAG nodes still open)
-- [ ] Apps with existing Tier 1/2 connectors: Slack, GitHub, Google Sheets, Postgres, Notion, Jira, Airtable, HubSpot, Salesforce, Stripe, S3, Telegram, Discord
+- [x] Apps with existing Tier 1/2 connectors: Slack, GitHub, Google Sheets, Postgres, Notion, Jira, Airtable, HubSpot, Salesforce, Stripe, S3, Telegram, Discord (resource/operation pairs dispatched onto the existing connector nodes in `packages/workflow-engine/src/import/apps/`; unsupported pairs stay disabled placeholders)
 
 ### 9.3 UX
 - [x] "Import from n8n" in the HUD overflow and the command palette; drag an n8n JSON onto the canvas

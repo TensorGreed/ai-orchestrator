@@ -14,7 +14,7 @@ import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type { AgentRuntimeAdapter } from "@ai-orchestrator/agent-runtime";
-import type { AgentRunRequest, AgentRunState, WorkflowEdge, WorkflowNode } from "@ai-orchestrator/shared";
+import { nodeDefinitions, workflowNodeSchema, type AgentRunRequest, type AgentRunState, type WorkflowEdge, type WorkflowNode } from "@ai-orchestrator/shared";
 import { executeCodeNodeSandbox, executeWorkflow } from "../executor";
 import { validateWorkflowGraph } from "../validation";
 import { renderExternalImportCoverageMarkdown } from "./coverage-markdown";
@@ -35,7 +35,11 @@ const FIXTURES = [
   "switch-three-outputs",
   "ai-agent-tools",
   "schedule-code-execute",
-  "unsupported-and-odd-expressions"
+  "unsupported-and-odd-expressions",
+  "apps-chat",
+  "apps-dev",
+  "apps-data",
+  "apps-crm-payments"
 ] as const;
 
 function loadFixture(name: string): unknown {
@@ -428,19 +432,29 @@ describe("external workflow import — unsupported nodes and odd expressions", (
   const conversion = convertFixture("unsupported-and-odd-expressions");
 
   it("turns unsupported nodes into disabled noop placeholders carrying the original config", () => {
+    const calculator = nodeById(conversion, "calculator");
+    expect(calculator.type).toBe("noop_node");
+    expect(calculator.disabled).toBe(true);
+    expect(calculator.config.label).toBe("Unsupported: toolCalculator");
+    expect(calculator.config.importedFrom).toMatchObject({ type: "@n8n/n8n-nodes-langchain.toolCalculator" });
+    expect(reportFor(conversion, "Calculator")).toMatchObject({ status: "unsupported", targetType: "noop_node" });
+    expect(reportFor(conversion, "Embeddings OpenAI").status).toBe("unsupported");
+    expect(conversion.report.summary).toEqual({ total: 13, mapped: 6, approximated: 5, unsupported: 2 });
+  });
+
+  it("maps the chat and sheet app nodes in the mixed flow without echoing credential ids", () => {
     const slack = nodeById(conversion, "slack");
-    expect(slack.type).toBe("noop_node");
-    expect(slack.disabled).toBe(true);
-    expect(slack.config.label).toBe("Unsupported: slack");
-    expect(slack.config.importedFrom).toMatchObject({
-      type: "n8n-nodes-base.slack",
-      parameters: { text: "=New feedback from {{ $json.Name }}" },
-      credentials: { slackApi: "Slack bot" }
+    expect(slack.type).toBe("slack_send_message");
+    expect(slack.config).toEqual({
+      authType: "bot",
+      channel: "C123",
+      text: "New feedback from {{results.feedback_form.Name}}",
+      secretRef: { secretId: "import-slack_bot_token-slack_bot" }
     });
-    expect(JSON.stringify(slack.config)).not.toContain("cred_3");
-    expect(reportFor(conversion, "Slack")).toMatchObject({ status: "unsupported", targetType: "noop_node" });
-    expect(reportFor(conversion, "Google Sheets").status).toBe("unsupported");
-    expect(conversion.report.summary).toEqual({ total: 13, mapped: 5, approximated: 4, unsupported: 4 });
+    expect(JSON.stringify(conversion.workflow)).not.toContain("cred_3");
+    expect(reportFor(conversion, "Slack").status).toBe("mapped");
+    expect(nodeById(conversion, "google_sheets").type).toBe("google_sheets_append");
+    expect(reportFor(conversion, "Google Sheets")).toMatchObject({ status: "approximated", reason: expect.stringContaining("No columns were defined") });
   });
 
   it("keeps the main chain through placeholders so the flow still loads", () => {
@@ -845,6 +859,406 @@ describe("external workflow import — additional node variants", () => {
     expect(rendered).toContain("| `n8n-nodes-base.httpRequest` | `http_request` |");
     expect(checkedIn).toBe(rendered);
   });
+});
+
+
+describe("external workflow import — chat apps (Slack, Telegram, Discord)", () => {
+  const conversion = convertFixture("apps-chat");
+
+  it("maps a channel post to a bot-token send with translated text", () => {
+    expect(nodeById(conversion, "post_to_channel").config).toEqual({
+      authType: "bot",
+      channel: "C0INCIDENTS",
+      text: ":rotating_light: New incident: {{results.slack_trigger.event.text}}",
+      secretRef: { secretId: "import-slack_bot_token-ops_slack" }
+    });
+    expect(reportFor(conversion, "Post to channel").status).toBe("mapped");
+  });
+
+  it("derives the channel id from an archive URL, keeps blocks and thread_ts, and reports dropped options", () => {
+    const reply = nodeById(conversion, "reply_in_thread");
+    expect(reply.config).toMatchObject({ channel: "C0INCIDENTS", threadTs: "{{results.post_to_channel.ts}}" });
+    expect(JSON.parse(String(reply.config.blocks))).toEqual([{ type: "section", text: { type: "mrkdwn", text: "Acknowledged by {{results.post_to_channel.user}}" } }]);
+    expect(reportFor(conversion, "Reply in thread")).toMatchObject({ status: "approximated", reason: "Message options (link_names, unfurl_links) are not supported and were dropped." });
+  });
+
+  it("maps triggers onto the L2M trigger nodes and flags event filters", () => {
+    expect(nodeById(conversion, "slack_trigger").config).toEqual({ path: "slack_trigger", signingSecretRef: { secretId: "import-slack_signing_secret-ops_slack" }, replayToleranceSeconds: 300 });
+    expect(reportFor(conversion, "Slack Trigger").reason).toContain("Event filters (app_mention)");
+    expect(nodeById(conversion, "telegram_trigger").config).toEqual({ path: "telegram_trigger", signingSecretRef: { secretId: "import-telegram_webhook_secret_token-alerts_bot" } });
+  });
+
+  it("maps Telegram and Discord sends and keeps unsupported operations as placeholders", () => {
+    expect(nodeById(conversion, "telegram_alert").config).toEqual({
+      chatId: "-1001234567890",
+      text: "<b>Incident</b> {{results.post_to_channel.ts}}",
+      secretRef: { secretId: "import-telegram_bot_token-alerts_bot" },
+      parseMode: "HTML"
+    });
+    const discord = nodeById(conversion, "discord_webhook");
+    expect(discord.config).toMatchObject({ webhookUrl: "", content: "Incident in {{results.telegram_trigger.message.chat.title}}", username: "L2M bot" });
+    expect(JSON.parse(String(discord.config.embedsJson))).toEqual([{ title: "Incident", description: "{{results.telegram_trigger.message.text}}", color: 15158332 }]);
+    expect(reportFor(conversion, "Discord webhook")).toMatchObject({ status: "approximated", reason: expect.stringContaining("webhook URL lives in the source credential") });
+    expect(reportFor(conversion, "Discord bot DM")).toMatchObject({ status: "unsupported", reason: expect.stringContaining("'botToken'") });
+    expect(reportFor(conversion, "Add reaction")).toMatchObject({ status: "unsupported", reason: "Slack resource 'reaction' operation 'add' has no L2M equivalent; imported as a disabled placeholder." });
+    expect(reportFor(conversion, "Telegram photo").reason).toContain("operation 'sendPhoto'");
+  });
+
+  it("keeps a trigger's signing secret apart from the send token even when the export shares one credential", () => {
+    expect(conversion.report.secretsToResolve).toEqual([
+      { secretId: "import-slack_signing_secret-ops_slack", credentialType: "slackApi", credentialName: "Slack signing secret (Ops Slack)", nodeIds: ["slack_trigger"] },
+      { secretId: "import-slack_bot_token-ops_slack", credentialType: "slackApi", credentialName: "Slack bot token (Ops Slack)", nodeIds: ["post_to_channel", "reply_in_thread"] },
+      { secretId: "import-telegram_bot_token-alerts_bot", credentialType: "telegramApi", credentialName: "Telegram bot token (Alerts bot)", nodeIds: ["telegram_alert"] },
+      { secretId: "import-telegram_webhook_secret_token-alerts_bot", credentialType: "telegramApi", credentialName: "Telegram webhook secret token (Alerts bot)", nodeIds: ["telegram_trigger"] },
+      { secretId: "import-discord_webhook_url-ops_discord_hook", credentialType: "discordWebhookApi", credentialName: "Discord webhook URL (Ops Discord hook)", nodeIds: ["discord_webhook"] }
+    ]);
+    expect(JSON.stringify(conversion)).not.toMatch(/cred_[a-z]+\d/);
+  });
+});
+
+describe("external workflow import — developer apps (GitHub, Jira, Notion)", () => {
+  const conversion = convertFixture("apps-dev");
+
+  it("maps issue comment, close and file get to github_action operations", () => {
+    expect(nodeById(conversion, "comment_on_issue").config).toEqual({
+      secretRef: { secretId: "import-github_personal_access_token-github_bot" },
+      owner: "tensorgreed",
+      repo: "ai-orchestrator",
+      operation: "commentIssue",
+      issueNumber: "{{results.github_trigger.body.issue.number}}",
+      body: "Thanks {{results.github_trigger.body.issue.user.login}}, we're on it."
+    });
+    expect(nodeById(conversion, "close_issue").config).toMatchObject({ operation: "closeIssue", issueNumber: 42 });
+    expect(nodeById(conversion, "read_changelog").config).toMatchObject({ operation: "getFile", path: "CHANGELOG.md" });
+    expect(["Comment on issue", "Close issue", "Read changelog"].map((name) => reportFor(conversion, name).status)).toEqual(["mapped", "mapped", "mapped"]);
+  });
+
+  it("derives owner and repository from URLs and reports dropped labels", () => {
+    expect(nodeById(conversion, "create_issue").config).toMatchObject({ owner: "tensorgreed", repo: "ai-orchestrator", operation: "createIssue", title: "[triage] {{results.comment_on_issue.body.issue.title}}" });
+    expect(reportFor(conversion, "Create issue")).toMatchObject({ status: "approximated", reason: "Issue labels are not supported and were dropped." });
+    expect(reportFor(conversion, "Create release").reason).toBe("GitHub resource 'release' operation 'create' has no L2M equivalent; imported as a disabled placeholder.");
+  });
+
+  it("maps the GitHub trigger with its own webhook secret placeholder", () => {
+    expect(nodeById(conversion, "github_trigger").config).toEqual({ path: "github_trigger", secretRef: { secretId: "import-github_webhook_secret-github_bot" } });
+    expect(reportFor(conversion, "GitHub Trigger").reason).toContain("tensorgreed/ai-orchestrator");
+  });
+
+  it("maps Jira issue creation and JQL search, flagging ids and credential-held settings", () => {
+    const ticket = nodeById(conversion, "jira_ticket");
+    expect(ticket.config).toEqual({
+      baseUrl: "",
+      email: "",
+      secretRef: { secretId: "import-jira_api_token-jira_cloud" },
+      projectKey: "10001",
+      issueType: "Bug",
+      summary: "{{results.create_issue.title}}",
+      description: "See {{results.create_issue.html_url}}",
+      fieldsJson: JSON.stringify({ labels: ["imported"], priority: { id: "3" } })
+    });
+    const reason = reportFor(conversion, "Jira ticket").reason;
+    expect(reason).toContain("set baseUrl and email after import");
+    expect(reason).toContain("referenced by id (10001, 'Platform')");
+    expect(reason).toContain("(componentIds)");
+    expect(nodeById(conversion, "find_open_bugs").config).toMatchObject({ jql: "project = PLAT AND status != Done", maxResults: 20 });
+  });
+
+  it("maps Notion database pages with translated property types and JSON filters", () => {
+    const page = nodeById(conversion, "notion_page");
+    expect(page.config).toMatchObject({ databaseId: "8f3c5c1a2b3d4e5f8a9b0c1d2e3f4a5b", titleProperty: "Name", title: "{{results.create_issue.title}}" });
+    expect(JSON.parse(String(page.config.propertiesJson))).toEqual({
+      Status: { select: { name: "Triage" } },
+      Priority: { number: 2 },
+      Tags: { multi_select: [{ name: "bug" }, { name: "import" }] }
+    });
+    expect(reportFor(conversion, "Notion page").reason).toBe("Properties of unsupported types (Owner|people) were dropped. Page content blocks are not supported; add contentMarkdown after import.");
+    const query = nodeById(conversion, "notion_query");
+    expect(query.config).toMatchObject({ pageSize: 25, filterJson: '{"property":"Status","select":{"equals":"{{results.find_open_bugs.status}}"}}' });
+    expect(JSON.parse(String(query.config.sortsJson))).toEqual([{ timestamp: "created_time", direction: "descending" }, { property: "Priority", direction: "ascending" }]);
+    expect(reportFor(conversion, "Notion query").status).toBe("mapped");
+  });
+});
+
+describe("external workflow import — data apps (Sheets, Postgres, Airtable, S3)", () => {
+  const conversion = convertFixture("apps-data");
+
+  it("derives the spreadsheet id from the URL and builds A1 ranges from sheet names", () => {
+    expect(nodeById(conversion, "read_orders").config).toEqual({
+      spreadsheetId: "1AbCdEfGhIjKlMnOp",
+      range: "Orders!A:F",
+      authType: "accessToken",
+      secretRef: { secretId: "import-google_sheets_access_token-sheets_account" }
+    });
+    expect(reportFor(conversion, "Read orders").status).toBe("mapped");
+    expect(nodeById(conversion, "sheets_trigger").config).toMatchObject({ range: "Orders!A:Z", pollIntervalSeconds: 900 });
+    expect(reportFor(conversion, "Sheets Trigger").status).toBe("mapped");
+  });
+
+  it("turns defined columns into a row of translated cells and flags append-or-update", () => {
+    expect(nodeById(conversion, "append_summary").config).toMatchObject({
+      range: "Summary",
+      values: [["{{ $now.toISOString() }}", "{{results.read_orders.values.length}}"]],
+      valueInputOption: "RAW"
+    });
+    expect(reportFor(conversion, "Append summary").reason).toContain("listed column order (Date, Count)");
+    expect(nodeById(conversion, "upsert_customer").type).toBe("google_sheets_append");
+    expect(reportFor(conversion, "Upsert customer").reason).toContain("Append-or-update became a plain append");
+    expect(reportFor(conversion, "Clear sheet").status).toBe("unsupported");
+  });
+
+  it("maps Postgres queries with parameters and rewrites selects as SQL", () => {
+    expect(nodeById(conversion, "load_orders").config).toMatchObject({ host: "", port: 5432, query: "SELECT * FROM orders WHERE created_at > $1", params: ["{{results.read_orders.since}}"] });
+    expect(nodeById(conversion, "recent_customers").config).toMatchObject({
+      query: 'SELECT * FROM "public"."customers" WHERE "status" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC LIMIT 100',
+      params: ["active"]
+    });
+    expect(nodeById(conversion, "postgres_trigger").config).toMatchObject({ query: 'SELECT * FROM "public"."orders"', pollIntervalSeconds: 60 });
+    expect(reportFor(conversion, "Insert rows").reason).toBe("Postgres resource 'database' operation 'insert' has no L2M equivalent; imported as a disabled placeholder.");
+  });
+
+  it("derives Airtable base, table and view ids from URLs and maps record operations", () => {
+    expect(nodeById(conversion, "list_leads").config).toEqual({
+      secretRef: { secretId: "import-airtable_personal_access_token-airtable_pat" },
+      baseId: "appAbCdEf12345678",
+      table: "tblAbCdEf12345678",
+      filterByFormula: "{Status} = 'New'",
+      maxRecords: 50,
+      view: "viwAbCdEf12345678"
+    });
+    expect(nodeById(conversion, "create_lead").config).toMatchObject({ fieldsJson: '{"Name":"{{results.list_leads.fields.Name}}","Status":"Contacted"}', typecast: true });
+    expect(nodeById(conversion, "update_lead").config).toMatchObject({ recordId: "{{results.create_lead.id}}", fieldsJson: '{"Status":"Done"}' });
+    expect(["List leads", "Create lead", "Update lead"].map((name) => reportFor(conversion, name).status)).toEqual(["mapped", "mapped", "mapped"]);
+  });
+
+  it("maps S3 file operations with a default region", () => {
+    expect(nodeById(conversion, "download_report").config).toMatchObject({ region: "us-east-1", bucket: "acme-reports", key: "reports/{{results.recent_customers.date}}.csv" });
+    expect(nodeById(conversion, "upload_digest").config).toMatchObject({ key: "digests/digest-{{ $now.toISOString() }}.txt", body: "{{results.download_report.summary}}", contentType: "text/plain" });
+    expect(nodeById(conversion, "list_reports").config).toMatchObject({ prefix: "reports/", maxKeys: 20 });
+    expect(reportFor(conversion, "Upload digest").reason).toContain("(acl)");
+    expect(reportFor(conversion, "Create bucket").status).toBe("unsupported");
+  });
+});
+
+describe("external workflow import — CRM and payment apps (HubSpot, Salesforce, Stripe)", () => {
+  const conversion = convertFixture("apps-crm-payments");
+
+  it("maps HubSpot contact upsert to a create with renamed properties and get by id", () => {
+    const contact = nodeById(conversion, "create_hubspot_contact");
+    expect(JSON.parse(String(contact.config.propertiesJson))).toMatchObject({ email: "{{results.stripe_trigger.data.object.customer_details.email}}", company: "Acme" });
+    expect(reportFor(conversion, "Create HubSpot contact").reason).toContain("(associatedCompanyId)");
+    expect(nodeById(conversion, "get_contact").config).toEqual({ secretRef: { secretId: "import-hubspot_private_app_token-hubspot_app" }, identifier: "{{results.create_hubspot_contact.id}}", idProperty: "id" });
+    expect(reportFor(conversion, "Get contact").status).toBe("mapped");
+    expect(reportFor(conversion, "Create deal").status).toBe("unsupported");
+  });
+
+  it("maps Salesforce creates and queries, rewriting list operations as SOQL", () => {
+    const lead = nodeById(conversion, "create_lead");
+    expect(lead.config).toMatchObject({ instanceUrl: "", apiVersion: "v58.0", sobject: "Lead" });
+    expect(JSON.parse(String(lead.config.fieldsJson))).toEqual({
+      company: "{{results.get_contact.properties.company}}",
+      lastname: "{{results.get_contact.properties.lastname}}",
+      email: "{{results.get_contact.properties.email}}",
+      leadSource: "Web",
+      phone: "{{results.get_contact.properties.phone}}",
+      Imported__c: "true"
+    });
+    expect(nodeById(conversion, "find_accounts").config.soql).toBe("SELECT Id, Name FROM Account WHERE Name = '{{results.create_lead.Company}}'");
+    expect(nodeById(conversion, "list_opportunities").config.soql).toBe("SELECT Id, Name, Amount FROM Opportunity LIMIT 10");
+    expect(reportFor(conversion, "Add note").status).toBe("unsupported");
+  });
+
+  it("maps Stripe customers and charges with metadata and the webhook trigger", () => {
+    expect(nodeById(conversion, "stripe_customer").config).toEqual({
+      secretRef: { secretId: "import-stripe_secret_key-stripe_live" },
+      name: "{{results.find_accounts.Name}}",
+      email: "{{results.find_accounts.Email}}",
+      description: "Imported from CRM",
+      metadataJson: '{"source":"l2m","lead":"{{results.find_accounts.Id}}"}'
+    });
+    expect(reportFor(conversion, "Stripe customer").status).toBe("mapped");
+    expect(nodeById(conversion, "charge_card").config).toMatchObject({ amount: 4999, currency: "usd", customerId: "{{results.stripe_customer.id}}" });
+    expect(reportFor(conversion, "Charge card").reason).toBe("Charge fields (receipt_email) are not supported and were dropped.");
+    expect(nodeById(conversion, "stripe_trigger").config).toEqual({ path: "stripe_trigger", signingSecretRef: { secretId: "import-stripe_webhook_signing_secret-stripe_live" }, replayToleranceSeconds: 300 });
+    expect(reportFor(conversion, "Stripe Trigger").reason).toContain("Event filters (checkout.session.completed)");
+  });
+});
+
+describe("external workflow import — app handler behaviour", () => {
+  it("dispatches on the source defaults when resource and operation are omitted", () => {
+    const conversion = convertExternalWorkflow(
+      exportWith([
+        { name: "Slack", type: "n8n-nodes-base.slack", parameters: { channelId: { __rl: true, value: "C1", mode: "id" }, text: "hi" } },
+        { name: "Telegram", type: "n8n-nodes-base.telegram", parameters: { chatId: "1", text: "hi" } },
+        { name: "Postgres", type: "n8n-nodes-base.postgres", parameters: { table: { __rl: true, value: "t", mode: "list" } } },
+        { name: "Stripe", type: "n8n-nodes-base.stripe", parameters: {} }
+      ])
+    );
+    expect(nodeById(conversion, "slack").type).toBe("slack_send_message");
+    expect(nodeById(conversion, "telegram").type).toBe("telegram_send_message");
+    expect(reportFor(conversion, "Postgres").reason).toBe("Postgres resource 'database' operation 'insert' has no L2M equivalent; imported as a disabled placeholder.");
+    expect(reportFor(conversion, "Stripe").reason).toBe("Stripe resource 'balance' operation 'get' has no L2M equivalent; imported as a disabled placeholder.");
+  });
+
+  it("keeps the original parameters on a placeholder for an unknown resource/operation pair", () => {
+    const conversion = convertExternalWorkflow(
+      exportWith([{ name: "Sheets", type: "n8n-nodes-base.googleSheets", parameters: { resource: "spreadsheet", operation: "create", title: "New" }, credentials: { googleSheetsOAuth2Api: { id: "c1", name: "Sheets" } } }])
+    );
+    const node = nodeById(conversion, "sheets");
+    expect(node.type).toBe("noop_node");
+    expect(node.disabled).toBe(true);
+    expect(node.config.importedFrom).toMatchObject({ parameters: { resource: "spreadsheet", operation: "create", title: "New" }, credentials: { googleSheetsOAuth2Api: "Sheets" } });
+    expect(reportFor(conversion, "Sheets").reason).toBe("Google Sheets resource 'spreadsheet' operation 'create' has no L2M equivalent; imported as a disabled placeholder.");
+  });
+
+  it("unwraps resource locators: ids are kept, URLs are parsed, names and unparseable URLs are flagged", () => {
+    const conversion = convertExternalWorkflow(
+      exportWith([
+        { name: "By id", type: "n8n-nodes-base.airtable", parameters: { operation: "search", base: { __rl: true, value: "appAAAAAAAAAAAAAA", mode: "list", cachedResultName: "CRM" }, table: { __rl: true, value: "tblBBBBBBBBBBBBBB", mode: "id" } } },
+        { name: "By url", type: "n8n-nodes-base.notion", parameters: { resource: "databasePage", operation: "getAll", databaseId: { __rl: true, value: "https://www.notion.so/acme/Tasks-0123456789abcdef0123456789abcdef", mode: "url" } } },
+        { name: "By name", type: "n8n-nodes-base.slack", parameters: { channelId: { __rl: true, value: "#general", mode: "name" }, text: "hi" } },
+        { name: "Odd url", type: "n8n-nodes-base.googleSheets", parameters: { documentId: { __rl: true, value: "https://example.com/not-a-sheet", mode: "url" }, sheetName: { __rl: true, value: "Sheet1", mode: "name" } } },
+        { name: "By expression", type: "n8n-nodes-base.slack", parameters: { channelId: { __rl: true, value: "={{ $json.channel }}", mode: "id" }, text: "hi" } }
+      ], { "By id": { main: [[{ node: "By expression" }]] } })
+    );
+    expect(nodeById(conversion, "by_id").config).toMatchObject({ baseId: "appAAAAAAAAAAAAAA", table: "tblBBBBBBBBBBBBBB" });
+    expect(reportFor(conversion, "By id").status).toBe("mapped");
+    expect(nodeById(conversion, "by_url").config.databaseId).toBe("0123456789abcdef0123456789abcdef");
+    expect(reportFor(conversion, "By url").status).toBe("mapped");
+    expect(nodeById(conversion, "by_name").config.channel).toBe("#general");
+    expect(reportFor(conversion, "By name")).toMatchObject({ status: "approximated", reason: "The Slack channel is referenced by name ('#general'); replace it with the id after import." });
+    expect(nodeById(conversion, "odd_url").config.spreadsheetId).toBe("https://example.com/not-a-sheet");
+    expect(reportFor(conversion, "Odd url").reason).toContain("referenced by URL");
+    expect(nodeById(conversion, "by_expression").config.channel).toBe("{{results.by_id.channel}}");
+  });
+
+  it("flags sheets picked by gid without a cached title", () => {
+    const conversion = convertExternalWorkflow(
+      exportWith([{ name: "Sheet", type: "n8n-nodes-base.googleSheets", parameters: { documentId: { __rl: true, value: "1X", mode: "id" }, sheetName: { __rl: true, value: "123456", mode: "id" } } }])
+    );
+    expect(nodeById(conversion, "sheet").config.range).toBe("A:Z");
+    expect(reportFor(conversion, "Sheet").reason).toContain("referenced by its gid (123456)");
+  });
+
+  it("creates a per-node placeholder when the export lists no credential and shares one per credential otherwise", () => {
+    const conversion = convertExternalWorkflow(
+      exportWith([
+        { name: "No cred", type: "n8n-nodes-base.telegram", parameters: { chatId: "1", text: "a" } },
+        { name: "Cred A", type: "n8n-nodes-base.telegram", parameters: { chatId: "1", text: "b" }, credentials: { telegramApi: { id: "c1", name: "Bot one" } } },
+        { name: "Cred A again", type: "n8n-nodes-base.telegram", parameters: { chatId: "1", text: "c" }, credentials: { telegramApi: { id: "c1", name: "Bot one" } } },
+        { name: "Cred B", type: "n8n-nodes-base.telegram", parameters: { chatId: "1", text: "d" }, credentials: { telegramApi: { id: "c2", name: "Bot two" } } }
+      ])
+    );
+    expect(nodeById(conversion, "no_cred").config.secretRef).toEqual({ secretId: "import-telegramapi-no_cred" });
+    expect(nodeById(conversion, "cred_a").config.secretRef).toEqual(nodeById(conversion, "cred_a_again").config.secretRef);
+    expect(conversion.report.secretsToResolve).toEqual([
+      { secretId: "import-telegramapi-no_cred", credentialType: "telegramApi", credentialName: "Telegram bot token", nodeIds: ["no_cred"] },
+      { secretId: "import-telegram_bot_token-bot_one", credentialType: "telegramApi", credentialName: "Telegram bot token (Bot one)", nodeIds: ["cred_a", "cred_a_again"] },
+      { secretId: "import-telegram_bot_token-bot_two", credentialType: "telegramApi", credentialName: "Telegram bot token (Bot two)", nodeIds: ["cred_b"] }
+    ]);
+    expect(JSON.stringify(conversion)).not.toContain('"c1"');
+  });
+
+  it("translates and flags expressions inside app parameters exactly like core nodes", () => {
+    const conversion = convertExternalWorkflow(
+      exportWith(
+        [
+          { name: "Start", type: "n8n-nodes-base.manualTrigger" },
+          {
+            name: "Ticket",
+            type: "n8n-nodes-base.jira",
+            parameters: {
+              project: { __rl: true, value: "PLAT", mode: "id" },
+              issueType: { __rl: true, value: "Bug", mode: "name" },
+              summary: "={{ $json.title }} ({{ $('Start').item.json.id }})",
+              additionalFields: { description: "={{ $binary.data.fileName }}", labels: ["x"] }
+            }
+          },
+          {
+            name: "Row",
+            type: "n8n-nodes-base.airtable",
+            parameters: {
+              operation: "create",
+              base: { __rl: true, value: "appAAAAAAAAAAAAAA", mode: "id" },
+              table: { __rl: true, value: "tblBBBBBBBBBBBBBB", mode: "id" },
+              columns: { mappingMode: "defineBelow", value: { Key: "={{ $json.key }}", Env: "={{ $env.REGION }}" } }
+            }
+          }
+        ],
+        { Start: { main: [[{ node: "Ticket" }]] }, Ticket: { main: [[{ node: "Row" }]] } }
+      )
+    );
+    expect(nodeById(conversion, "ticket").config).toMatchObject({
+      projectKey: "PLAT",
+      issueType: "Bug",
+      summary: "{{results.start.title}} ({{results.start.id}})",
+      description: "{{ $binary.data.fileName }}"
+    });
+    expect(nodeById(conversion, "row").config.fieldsJson).toBe('{"Key":"{{results.ticket.key}}","Env":"{{vars.REGION}}"}');
+    expect(conversion.report.unresolvedExpressions).toEqual([
+      { nodeId: "ticket", sourceName: "Ticket", path: "additionalFields.description", expression: "$binary.data.fileName", reason: "unsupported runtime reference '$binary'" }
+    ]);
+    expect(conversion.report.variablesToSet).toEqual(["REGION"]);
+    expect(conversion.workflow.variables).toEqual({ REGION: "" });
+  });
+
+  it("maps older Discord nodes that only knew webhook sends", () => {
+    const conversion = convertExternalWorkflow(
+      exportWith([{ name: "Discord", type: "n8n-nodes-base.discord", parameters: { webhookUri: "https://discord.com/api/webhooks/1/abc", text: "=Hi {{ $json.name }}" } }])
+    );
+    expect(nodeById(conversion, "discord").config).toMatchObject({ webhookUrl: "https://discord.com/api/webhooks/1/abc", content: "Hi {{ $json.name }}" });
+    expect(reportFor(conversion, "Discord").status).toBe("mapped");
+  });
+});
+
+describe("external workflow import — converted app nodes against the shared node contract", () => {
+  const APP_FIXTURES = ["apps-chat", "apps-dev", "apps-data", "apps-crm-payments"] as const;
+  const JSON_SCHEMA_TYPES: Record<string, (value: unknown) => boolean> = {
+    string: (value) => typeof value === "string",
+    number: (value) => typeof value === "number" && Number.isFinite(value),
+    boolean: (value) => typeof value === "boolean",
+    object: (value) => typeof value === "object" && value !== null && !Array.isArray(value),
+    array: (value) => Array.isArray(value)
+  };
+
+  it("maps every app source type in the registration table onto a node that exists in the shared definitions", () => {
+    const definedTypes = new Set(nodeDefinitions.map((definition) => definition.type));
+    const appEntries = EXTERNAL_IMPORT_COVERAGE.filter((entry) => entry.category === "app");
+    expect(appEntries.length).toBe(20);
+    for (const entry of appEntries) expect(definedTypes.has(entry.targetType)).toBe(true);
+  });
+
+  for (const fixture of APP_FIXTURES) {
+    it(`${fixture}: every converted app node passes validation and its config matches the node's config schema`, () => {
+      const conversion = convertFixture(fixture);
+      const validation = validateWorkflowGraph(conversion.workflow);
+      expect(validation.issues).toEqual([]);
+
+      const appNodes = conversion.workflow.nodes.filter((node) => !["noop_node", "output"].includes(node.type));
+      expect(appNodes.length).toBeGreaterThan(0);
+      for (const node of appNodes) {
+        expect(() => workflowNodeSchema.parse(node)).not.toThrow();
+        const definition = nodeDefinitions.find((entry) => entry.type === node.type);
+        expect(definition, `definition for ${node.type}`).toBeDefined();
+        const schema = definition!.configSchema as { properties?: Record<string, { type?: string; enum?: unknown[] }>; required?: string[] };
+        const status = conversion.report.nodes.find((entry) => entry.targetNodeId === node.id)!.status;
+        const unknownKeys = Object.keys(node.config).filter((key) => !(key in (schema.properties ?? {})));
+        expect(unknownKeys, `${node.id} config keys`).toEqual([]);
+        for (const key of schema.required ?? []) {
+          expect(node.config, `${node.id} requires ${key}`).toHaveProperty(key);
+          // Mapped nodes are runnable as imported; approximated nodes may leave credential-held values empty.
+          if (status === "mapped") expect(node.config[key], `${node.id}.${key}`).not.toBe("");
+        }
+        for (const [key, value] of Object.entries(node.config)) {
+          const property = schema.properties?.[key];
+          const check = property?.type ? JSON_SCHEMA_TYPES[property.type] : undefined;
+          if (check && !(typeof value === "string" && property?.type === "number" && value.includes("{{"))) {
+            expect(check(value), `${node.id}.${key} should be ${property?.type}`).toBe(true);
+          }
+          if (property?.enum && typeof value === "string" && !value.includes("{{")) expect(property.enum, `${node.id}.${key}`).toContain(value);
+        }
+      }
+    });
+  }
 });
 
 describe("external workflow import — execution of a converted flow", () => {

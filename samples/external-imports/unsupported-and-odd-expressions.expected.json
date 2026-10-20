@@ -2,7 +2,7 @@
   "workflow": {
     "id": "wf-import-feedback_intake_mixed",
     "name": "Feedback intake (mixed)",
-    "description": "Imported from an external workflow export (5 mapped, 4 approximated, 4 unsupported).",
+    "description": "Imported from an external workflow export (6 mapped, 5 approximated, 2 unsupported).",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "variables": {
@@ -54,62 +54,38 @@
       },
       {
         "id": "slack",
-        "type": "noop_node",
+        "type": "slack_send_message",
         "name": "Slack",
         "position": {
           "x": 240,
           "y": 0
         },
         "config": {
-          "label": "Unsupported: slack",
-          "importedFrom": {
-            "type": "n8n-nodes-base.slack",
-            "typeVersion": 2.2,
-            "parameters": {
-              "select": "channel",
-              "channelId": {
-                "__rl": true,
-                "value": "C123",
-                "mode": "id"
-              },
-              "text": "=New feedback from {{ $json.Name }}",
-              "otherOptions": {}
-            },
-            "credentials": {
-              "slackApi": "Slack bot"
-            }
+          "authType": "bot",
+          "channel": "C123",
+          "text": "New feedback from {{results.feedback_form.Name}}",
+          "secretRef": {
+            "secretId": "import-slack_bot_token-slack_bot"
           }
-        },
-        "disabled": true
+        }
       },
       {
         "id": "google_sheets",
-        "type": "noop_node",
+        "type": "google_sheets_append",
         "name": "Google Sheets",
         "position": {
           "x": 480,
           "y": 0
         },
         "config": {
-          "label": "Unsupported: googleSheets",
-          "importedFrom": {
-            "type": "n8n-nodes-base.googleSheets",
-            "typeVersion": 4.5,
-            "parameters": {
-              "operation": "append",
-              "documentId": {
-                "__rl": true,
-                "value": "1AbC",
-                "mode": "id"
-              },
-              "sheetName": "Feedback"
-            },
-            "credentials": {
-              "googleSheetsOAuth2Api": "Sheets account"
-            }
-          }
-        },
-        "disabled": true
+          "spreadsheetId": "1AbC",
+          "range": "Feedback",
+          "secretRef": {
+            "secretId": "import-google_sheets_access_token-sheets_account"
+          },
+          "values": [],
+          "valueInputOption": "USER_ENTERED"
+        }
       },
       {
         "id": "odd_fields",
@@ -406,18 +382,18 @@
         "sourceType": "n8n-nodes-base.slack",
         "sourceId": "f-2",
         "targetNodeId": "slack",
-        "targetType": "noop_node",
-        "status": "unsupported",
-        "reason": "Node type 'n8n-nodes-base.slack' has no L2M equivalent; imported as a disabled placeholder."
+        "targetType": "slack_send_message",
+        "status": "mapped",
+        "reason": "Mapped directly."
       },
       {
         "sourceName": "Google Sheets",
         "sourceType": "n8n-nodes-base.googleSheets",
         "sourceId": "f-3",
         "targetNodeId": "google_sheets",
-        "targetType": "noop_node",
-        "status": "unsupported",
-        "reason": "Node type 'n8n-nodes-base.googleSheets' has no L2M equivalent; imported as a disabled placeholder."
+        "targetType": "google_sheets_append",
+        "status": "approximated",
+        "reason": "No columns were defined; set values after import."
       },
       {
         "sourceName": "Odd fields",
@@ -542,6 +518,22 @@
     ],
     "secretsToResolve": [
       {
+        "secretId": "import-slack_bot_token-slack_bot",
+        "credentialType": "slackApi",
+        "credentialName": "Slack bot token (Slack bot)",
+        "nodeIds": [
+          "slack"
+        ]
+      },
+      {
+        "secretId": "import-google_sheets_access_token-sheets_account",
+        "credentialType": "googleSheetsOAuth2Api",
+        "credentialName": "Google Sheets access token (Sheets account)",
+        "nodeIds": [
+          "google_sheets"
+        ]
+      },
+      {
         "secretId": "import-anthropicapi-anthropic_account",
         "credentialType": "anthropicApi",
         "credentialName": "Anthropic account",
@@ -570,9 +562,9 @@
     ],
     "summary": {
       "total": 13,
-      "mapped": 5,
-      "approximated": 4,
-      "unsupported": 4
+      "mapped": 6,
+      "approximated": 5,
+      "unsupported": 2
     }
   }
 }

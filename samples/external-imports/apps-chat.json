@@ -1,0 +1,332 @@
+{
+  "name": "Incident notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "trigger": [
+          "app_mention"
+        ],
+        "channelId": {
+          "__rl": true,
+          "value": "C0INCIDENTS",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "slack-trigger-id",
+      "name": "Slack Trigger",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "cred_s1",
+          "name": "Ops Slack"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0INCIDENTS",
+          "mode": "id"
+        },
+        "text": "=:rotating_light: New incident: {{ $json.event.text }}",
+        "otherOptions": {}
+      },
+      "id": "post-to-channel-id",
+      "name": "Post to channel",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "cred_s1",
+          "name": "Ops Slack"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "https://acme.slack.com/archives/C0INCIDENTS/p1700000000",
+          "mode": "url"
+        },
+        "messageType": "block",
+        "blocksUi": "=[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"Acknowledged by {{ $json.user }}\"}}]",
+        "otherOptions": {
+          "thread_ts": {
+            "replyValues": {
+              "thread_ts": "={{ $('Post to channel').item.json.ts }}"
+            }
+          },
+          "link_names": true,
+          "unfurl_links": false
+        }
+      },
+      "id": "reply-in-thread-id",
+      "name": "Reply in thread",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "cred_s1",
+          "name": "Ops Slack"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "reaction",
+        "operation": "add",
+        "channelId": {
+          "__rl": true,
+          "value": "C0INCIDENTS",
+          "mode": "id"
+        },
+        "timestamp": "={{ $json.ts }}",
+        "name": "eyes"
+      },
+      "id": "add-reaction-id",
+      "name": "Add reaction",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        200
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "cred_s1",
+          "name": "Ops Slack"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "-1001234567890",
+        "text": "=<b>Incident</b> {{ $('Post to channel').item.json.ts }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "disable_notification": true
+        }
+      },
+      "id": "telegram-alert-id",
+      "name": "Telegram alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "cred_t1",
+          "name": "Alerts bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "telegram-trigger-id",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "cred_t1",
+          "name": "Alerts bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "resource": "message",
+        "operation": "send",
+        "content": "=Incident in {{ $json.message.chat.title }}",
+        "options": {
+          "username": "L2M bot"
+        },
+        "embeds": {
+          "values": [
+            {
+              "title": "Incident",
+              "description": "={{ $json.message.text }}",
+              "color": 15158332
+            }
+          ]
+        }
+      },
+      "id": "discord-webhook-id",
+      "name": "Discord webhook",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        0,
+        400
+      ],
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "cred_d1",
+          "name": "Ops Discord hook"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "botToken",
+        "resource": "message",
+        "operation": "send",
+        "guildId": {
+          "__rl": true,
+          "value": "1234",
+          "mode": "list",
+          "cachedResultName": "Acme"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "5678",
+          "mode": "list",
+          "cachedResultName": "#ops"
+        },
+        "content": "=Escalated: {{ $json.message.text }}"
+      },
+      "id": "discord-bot-dm-id",
+      "name": "Discord bot DM",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        240,
+        400
+      ],
+      "credentials": {
+        "discordBotApi": {
+          "id": "cred_d2",
+          "name": "Ops bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "-1001234567890",
+        "file": "https://example.com/incident.png"
+      },
+      "id": "telegram-photo-id",
+      "name": "Telegram photo",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        480,
+        400
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "cred_t1",
+          "name": "Alerts bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Slack Trigger": {
+      "main": [
+        [
+          {
+            "node": "Post to channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to channel": {
+      "main": [
+        [
+          {
+            "node": "Reply in thread",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply in thread": {
+      "main": [
+        [
+          {
+            "node": "Add reaction",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Discord webhook",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram photo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discord webhook": {
+      "main": [
+        [
+          {
+            "node": "Discord bot DM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "id": "t1",
+      "name": "ops"
+    }
+  ]
+}

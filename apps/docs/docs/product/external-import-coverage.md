@@ -67,4 +67,29 @@
 | `@n8n/n8n-nodes-langchain.outputParserStructured` | `output_parser` | Runs as a step after the agent; schemas are inferred from example output when no manual schema is given. |
 | `@n8n/n8n-nodes-langchain.lmChat*` | `openai_compatible_chat_model` | Any other chat model type is approximated as an OpenAI-compatible endpoint with a placeholder base URL. |
 
+### App nodes
+
+| Source node type | L2M node | Notes |
+|---|---|---|
+| `n8n-nodes-base.slack` | `slack_send_message` | Message posting maps to a bot-token send; attachments and most message options are dropped; other resources and operations become placeholders. |
+| `n8n-nodes-base.slackTrigger` | `slack_trigger` | Event and channel filters are not supported; the signing secret becomes a placeholder. |
+| `n8n-nodes-base.telegram` | `telegram_send_message` | Text messages map directly; keyboards and most options are dropped; other resources and operations become placeholders. |
+| `n8n-nodes-base.telegramTrigger` | `telegram_trigger` | Update filters are not supported; the webhook secret token becomes a placeholder. |
+| `n8n-nodes-base.discord` | `discord_send_message` | Webhook sends map with content, username and embeds; bot-token sends and other operations become placeholders. |
+| `n8n-nodes-base.discordTrigger` | `discord_trigger` | Event filters are not supported; the application public key must be set after import. |
+| `n8n-nodes-base.github` | `github_action` | Issue create/comment/close, file get/create/edit and repository issue listing map to github_action operations; labels, assignees and filters are dropped; other operations become placeholders. |
+| `n8n-nodes-base.githubTrigger` | `github_webhook_trigger` | Event filters are not supported; the webhook must be created on the repository by hand. |
+| `n8n-nodes-base.jira` | `jira_create_issue` | Issue creation and JQL search map; the site URL and email live in the credential; other operations become placeholders. |
+| `n8n-nodes-base.notion` | `notion_create_page` | Database page creation and querying map; simple property types are translated, manual filters and content blocks are dropped; other operations become placeholders. |
+| `n8n-nodes-base.googleSheets` | `google_sheets_read` | Read, append, append-or-update and update map to the Sheets nodes; row filters and header matching are dropped; sheets picked by gid need the range set; other operations become placeholders. |
+| `n8n-nodes-base.googleSheetsTrigger` | `google_sheets_trigger` | Polls the sheet for new rows; row-update events are approximated. |
+| `n8n-nodes-base.postgres` | `postgres_query` | Execute-query and select map to a query; the connection details live in the credential; insert, update, upsert and delete become placeholders. |
+| `n8n-nodes-base.postgresTrigger` | `postgres_trigger` | Table and LISTEN triggers are approximated as a polling query. |
+| `n8n-nodes-base.airtable` | `airtable_list_records` | Search, create and update map to the Airtable nodes; auto-mapped fields are dropped; get, upsert and delete become placeholders. |
+| `n8n-nodes-base.awsS3` | `aws_s3_get_object` | File download, upload and listing map to the S3 nodes; the region lives in the credential; binary uploads need the body set; bucket and folder operations become placeholders. |
+| `n8n-nodes-base.hubspot` | `hubspot_create_contact` | Contact create-or-update becomes a create and contact get maps directly; other resources and operations become placeholders. |
+| `n8n-nodes-base.salesforce` | `salesforce_create_record` | Record creation and SOQL search map; list operations become SOQL; the instance URL lives in the credential; other operations become placeholders. |
+| `n8n-nodes-base.stripe` | `stripe_create_customer` | Customer and charge creation map with metadata; addresses, shipping and payment sources are dropped; other resources and operations become placeholders. |
+| `n8n-nodes-base.stripeTrigger` | `stripe_webhook_trigger` | Event filters are not supported; the signing secret becomes a placeholder. |
+
 Any other source node type is imported as a disabled `noop_node` placeholder that keeps the original parameters, so the workflow still loads and validates.
