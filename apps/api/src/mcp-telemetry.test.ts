@@ -204,6 +204,8 @@ function call(overrides: Partial<McpToolCallRecord>): Omit<McpToolCallRecord, "c
     turnInputTokens: null,
     turnOutputTokens: null,
     estimatedCostUsd: null,
+    source: "workflow",
+    clientId: null,
     ...overrides
   };
 }

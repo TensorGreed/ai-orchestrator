@@ -14,8 +14,22 @@ beforeAll(async () => {
       body += chunk;
     });
     request.on("end", () => {
-      const rpc = JSON.parse(body || "{}") as { id?: string; method?: string };
+      const rpc = JSON.parse(body || "{}") as { id?: string; method?: string; params?: { name?: string } };
       response.setHeader("content-type", "application/json");
+      if (rpc.method === "tools/call") {
+        const failed = rpc.params?.name === "fails";
+        response.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: rpc.id,
+            result: {
+              content: [{ type: "text", text: failed ? "upstream said no" : "fine" }],
+              ...(failed ? { isError: true } : {})
+            }
+          })
+        );
+        return;
+      }
       if (rpc.method === "initialize") {
         response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { protocolVersion: "2024-11-05", capabilities: {} } }));
         return;
@@ -64,5 +78,20 @@ describe("HttpMCPServerAdapter tool annotations", () => {
     expect(tools[0].annotations).toEqual({ readOnlyHint: true, openWorldHint: true });
     expect(tools[1].annotations).toEqual({ destructiveHint: true });
     expect(tools[2]).not.toHaveProperty("annotations");
+  });
+});
+
+describe("HttpMCPServerAdapter tool errors", () => {
+  it("reports a result with isError: true as a failed call carrying the tool's message", async () => {
+    const adapter = new HttpMCPServerAdapter();
+    const context = { resolveSecret: async () => undefined, runtimeState: new Map<string, unknown>() };
+    const config = { serverId: "http_mcp", connection: { endpoint } };
+
+    const failed = await adapter.invokeTool("fails", {}, config, context);
+    expect(failed.ok).toBe(false);
+    expect(failed.error).toBe("upstream said no");
+
+    const ok = await adapter.invokeTool("works", {}, config, context);
+    expect(ok).toEqual({ ok: true, output: "fine" });
   });
 });

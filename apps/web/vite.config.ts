@@ -54,6 +54,11 @@ export default defineConfig(({ mode }) => {
           target: `http://${targetHost}:${targetPort}`,
           changeOrigin: true
         },
+        // Phase 10.4 — the MCP gateway endpoint (/mcp/<toolset>).
+        "/mcp/": {
+          target: `http://${targetHost}:${targetPort}`,
+          changeOrigin: true
+        },
         "/health": {
           target: `http://${targetHost}:${targetPort}`,
           changeOrigin: true

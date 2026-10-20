@@ -444,10 +444,10 @@ as a local file or an endpoint on the user's own instance.
 **Why:** today a workflow exposed with `mcp_server_trigger` is reachable only through a custom
 manifest/invoke REST pair, so standard MCP clients cannot connect. A spec-compliant endpoint makes
 L2M the one governed MCP hub that every AI client in an organisation points at.
-- [ ] Spec-compliant Streamable HTTP MCP endpoint (JSON-RPC `initialize`, `tools/list`, `tools/call`, progress and cancellation) that IDE agents, desktop assistants and other L2M instances connect to directly; the existing REST pair stays for compatibility
-- [ ] Workflows with `mcp_server_trigger` become tools on that endpoint, grouped into named toolsets with one URL each
-- [ ] Gateway mode: re-expose registered servers' tools through the same endpoint so every call gets L2M's secret injection, tool policy (10.2), telemetry (10.1) and audit log; local stdio servers become reachable without exposing the host
-- [ ] Client credentials: per-client tokens hashed at rest, each scoped to toolsets and a role; a "Connect a client" page with copy-paste config snippets and per-client usage
+- [x] Spec-compliant Streamable HTTP MCP endpoint (JSON-RPC `initialize`, `tools/list`, `tools/call`, progress and cancellation) that IDE agents, desktop assistants and other L2M instances connect to directly; the existing REST pair stays for compatibility
+- [x] Workflows with `mcp_server_trigger` become tools on that endpoint, grouped into named toolsets with one URL each
+- [x] Gateway mode: re-expose registered servers' tools through the same endpoint so every call gets L2M's secret injection, tool policy (10.2), telemetry (10.1) and audit log; local stdio servers become reachable without exposing the host
+- [x] Client credentials: per-client tokens hashed at rest, each scoped to toolsets and a role; a "Connect a client" page with copy-paste config snippets and per-client usage
 
 ### 10.5 Protocol coverage on the client side
 - [ ] Structured tool output: `outputSchema` and `structuredContent` kept in snapshots, validated, and passed to downstream nodes as typed data

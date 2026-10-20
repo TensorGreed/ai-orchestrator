@@ -9,6 +9,9 @@
  * Phase 10.2 — a Policies view holds the MCP tool policy rules, and the Tools
  * table shows each tool's read-only classification and whether the viewer's
  * role may use it.
+ *
+ * Phase 10.4 — Toolsets and Clients views manage the MCP gateway: toolsets
+ * served at /mcp/<slug> and the client tokens that may call them.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -38,7 +41,9 @@ import {
   probeMcpServer,
   updateMcpServer
 } from "../lib/api";
+import { McpClientsView } from "./McpClientsView";
 import { McpPoliciesView } from "./McpPoliciesView";
+import { McpToolsetsView } from "./McpToolsetsView";
 
 const STATUS_LABEL: Record<McpRegisteredServer["status"], string> = {
   unknown: "Not probed",
@@ -98,7 +103,7 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [detailVersion, setDetailVersion] = useState(0);
-  const [view, setView] = useState<"servers" | "policies">("servers");
+  const [view, setView] = useState<"servers" | "policies" | "toolsets" | "clients">("servers");
 
   const refreshList = useCallback(async () => {
     setLoading(true);
@@ -157,6 +162,24 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
             >
               Policies
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "toolsets"}
+              className={view === "toolsets" ? "finops-range-btn active" : "finops-range-btn"}
+              onClick={() => setView("toolsets")}
+            >
+              Toolsets
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "clients"}
+              className={view === "clients" ? "finops-range-btn active" : "finops-range-btn"}
+              onClick={() => setView("clients")}
+            >
+              Clients
+            </button>
           </div>
           {view === "servers" && (
             <button type="button" className="pg-btn" onClick={() => void onServerChanged()} disabled={loading}>
@@ -176,6 +199,10 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
       {view === "policies" && (
         <McpPoliciesView isAdmin={isAdmin} servers={servers} adapters={adapters} activeProjectId={activeProjectId} />
       )}
+
+      {view === "toolsets" && <McpToolsetsView isAdmin={isAdmin} servers={servers} activeProjectId={activeProjectId} />}
+
+      {view === "clients" && <McpClientsView isAdmin={isAdmin} />}
 
       {view === "servers" && showCreate && isAdmin && (
         <McpServerForm

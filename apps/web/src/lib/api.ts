@@ -2,7 +2,13 @@ import type {
   Folder,
   ImportReport,
   LLMProviderConfig,
+  McpClient,
+  McpGatewayHiddenToolView,
+  McpGatewayToolView,
   McpPolicyRole,
+  McpToolset,
+  McpToolsetMember,
+  McpToolsetMemberSpec,
   McpToolAnnotations,
   McpToolClassification,
   McpToolPolicyRule,
@@ -2580,5 +2586,117 @@ export async function acceptMcpServerChange(id: string) {
   return apiRequest<{ server: McpRegisteredServer }>(
     `/api/mcp/servers/${encodeURIComponent(id)}/accept-change`,
     { method: "POST" }
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10.4 — MCP gateway: toolsets and client credentials
+// ---------------------------------------------------------------------------
+
+export type McpToolsetMemberView = McpToolsetMember & { label: string; missing: boolean };
+
+export interface McpToolsetView extends Omit<McpToolset, "members"> {
+  endpointPath: string;
+  members: McpToolsetMemberView[];
+  activeSessions: number;
+}
+
+export interface McpToolsetInput {
+  name: string;
+  slug?: string;
+  description?: string | null;
+  projectId?: string | null;
+  enabled?: boolean;
+  members?: McpToolsetMemberSpec[];
+}
+
+export interface McpToolsetPreview {
+  toolsetId: string;
+  role: McpPolicyRole;
+  projectId: string | null;
+  tools: McpGatewayToolView[];
+  hidden: McpGatewayHiddenToolView[];
+  warnings: string[];
+}
+
+export interface McpToolsetCandidate {
+  id: string;
+  name: string;
+  projectId: string | null;
+  tools: string[];
+}
+
+export interface McpClientUsageSummary {
+  calls: number;
+  errors: number;
+  lastCalledAt: string | null;
+}
+
+export interface McpClientView extends McpClient {
+  status: "active" | "revoked" | "expired";
+  effectiveRole: McpPolicyRole;
+  activeSessions: number;
+  usage: McpClientUsageSummary;
+}
+
+export async function fetchMcpToolsets() {
+  return apiRequest<{ toolsets: McpToolsetView[]; gatewayBaseUrl: string | null; protocolVersions: string[] }>(
+    "/api/mcp/toolsets"
+  );
+}
+
+export async function fetchMcpToolsetCandidates() {
+  return apiRequest<{ workflows: McpToolsetCandidate[] }>("/api/mcp/toolsets/candidates");
+}
+
+export async function createMcpToolset(payload: McpToolsetInput) {
+  return apiRequest<{ toolset: McpToolsetView }>("/api/mcp/toolsets", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateMcpToolset(id: string, patch: Partial<McpToolsetInput>) {
+  return apiRequest<{ toolset: McpToolsetView }>(`/api/mcp/toolsets/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch)
+  });
+}
+
+export async function deleteMcpToolset(id: string) {
+  return apiRequest<{ ok: true }>(`/api/mcp/toolsets/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function previewMcpToolset(id: string, role: McpPolicyRole) {
+  return apiRequest<McpToolsetPreview>(
+    `/api/mcp/toolsets/${encodeURIComponent(id)}/preview?role=${encodeURIComponent(role)}`
+  );
+}
+
+export async function fetchMcpClients() {
+  return apiRequest<{ usageWindow: string; clients: McpClientView[] }>("/api/mcp/clients");
+}
+
+export async function createMcpClient(payload: {
+  name: string;
+  toolsetIds: string[];
+  role: McpPolicyRole;
+  expiresAt?: string | null;
+}) {
+  return apiRequest<{ client: McpClientView; token: string }>("/api/mcp/clients", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function revokeMcpClient(id: string) {
+  return apiRequest<{ client: McpClientView }>(`/api/mcp/clients/${encodeURIComponent(id)}/revoke`, {
+    method: "POST"
+  });
+}
+
+export async function fetchMcpClientUsage(id: string, window: McpTelemetryWindow = "7d") {
+  return apiRequest<McpTelemetryResponse & { clientId: string; lastUsedAt: string | null }>(
+    `/api/mcp/clients/${encodeURIComponent(id)}/usage?window=${encodeURIComponent(window)}`
   );
 }

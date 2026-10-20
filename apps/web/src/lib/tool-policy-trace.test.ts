@@ -15,6 +15,9 @@ describe("tool policy trace view", () => {
     expect(
       describeToolPolicySubject({ role: "viewer", source: "fallback", fallbackReason: "the workflow owner no longer exists" })
     ).toBe("Evaluated as viewer — workflow owner no longer exists");
+    expect(describeToolPolicySubject({ role: "builder", source: "client", clientId: "mcc_1", clientName: "IDE agent" })).toBe(
+      "Evaluated as builder — MCP client IDE agent"
+    );
   });
 
   it("reads _toolPolicy from an agent output and builds hidden-tool lines", () => {

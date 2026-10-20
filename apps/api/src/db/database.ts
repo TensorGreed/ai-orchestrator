@@ -6,9 +6,13 @@ import type {
   ChatMessage,
   Folder,
   McpPolicyRole,
+  McpClient,
   McpToolAnnotations,
   McpToolClassificationOverride,
   McpToolPolicyRule,
+  McpToolset,
+  McpToolsetMember,
+  McpToolsetMemberSpec,
   Project,
   Workflow,
   WorkflowListItem
@@ -478,7 +482,122 @@ export interface McpToolCallRecord {
   turnOutputTokens: number | null;
   /** null when no model price is known (or no model turn was involved). */
   estimatedCostUsd: number | null;
+  /**
+   * Phase 10.4 — `workflow`: a call made by a node during a run.
+   * `gateway`: a `tools/call` an MCP client sent to `/mcp/<toolset>`.
+   */
+  source: McpToolCallSource;
+  /** MCP client credential that made a gateway call. */
+  clientId: string | null;
   createdAt: string;
+}
+
+export type McpToolCallSource = "workflow" | "gateway";
+
+/** What callers write; `source` defaults to `workflow`. */
+export type McpToolCallWrite = Omit<McpToolCallRecord, "createdAt" | "source" | "clientId"> & {
+  source?: McpToolCallSource;
+  clientId?: string | null;
+};
+
+/** Phase 10.4 — per-client usage rolled up from gateway telemetry rows. */
+export interface McpClientUsageRow {
+  clientId: string;
+  calls: number;
+  errors: number;
+  lastCalledAt: string | null;
+}
+
+// Phase 10.4 — MCP gateway toolsets and client credentials.
+interface McpToolsetRow {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  project_id: string | null;
+  enabled: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface McpToolsetMemberRow {
+  id: string;
+  toolset_id: string;
+  kind: string;
+  workflow_id: string | null;
+  server_id: string | null;
+  tool_glob: string | null;
+  position: number;
+}
+
+interface McpClientRow {
+  id: string;
+  name: string;
+  token_prefix: string;
+  token_hash: string;
+  toolset_ids_json: string | null;
+  role: string;
+  created_by: string | null;
+  created_by_email: string | null;
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+/** A client row including the token hash; only the credential check reads the hash. */
+export interface McpClientSecretRecord extends McpClient {
+  tokenHash: string;
+}
+
+function mapMcpToolsetMember(row: McpToolsetMemberRow): McpToolsetMember | null {
+  if (toString(row.kind) === "workflow" && row.workflow_id) {
+    return { id: toString(row.id), kind: "workflow", workflowId: toString(row.workflow_id) };
+  }
+  if (toString(row.kind) === "server" && row.server_id) {
+    return {
+      id: toString(row.id),
+      kind: "server",
+      serverId: toString(row.server_id),
+      toolGlob: row.tool_glob ? toString(row.tool_glob) : null
+    };
+  }
+  return null;
+}
+
+function mapMcpToolset(row: McpToolsetRow, members: McpToolsetMember[]): McpToolset {
+  return {
+    id: toString(row.id),
+    slug: toString(row.slug),
+    name: toString(row.name),
+    description: row.description ? toString(row.description) : null,
+    projectId: row.project_id ? toString(row.project_id) : null,
+    enabled: toNumber(row.enabled) === 1,
+    members,
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
+function mapMcpClient(row: McpClientRow): McpClientSecretRecord {
+  const toolsetIds = row.toolset_ids_json ? safeJsonParse(toString(row.toolset_ids_json)) : [];
+  const role = toString(row.role) as McpPolicyRole;
+  return {
+    id: toString(row.id),
+    name: toString(row.name),
+    tokenPrefix: toString(row.token_prefix),
+    tokenHash: toString(row.token_hash),
+    toolsetIds: Array.isArray(toolsetIds) ? toolsetIds.filter((id): id is string => typeof id === "string") : [],
+    role: MCP_POLICY_ROLES.includes(role) ? role : "viewer",
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdByEmail: row.created_by_email ? toString(row.created_by_email) : null,
+    expiresAt: row.expires_at ? toString(row.expires_at) : null,
+    lastUsedAt: row.last_used_at ? toString(row.last_used_at) : null,
+    revokedAt: row.revoked_at ? toString(row.revoked_at) : null,
+    createdAt: toString(row.created_at)
+  };
 }
 
 interface McpToolCallRow {
@@ -496,6 +615,8 @@ interface McpToolCallRow {
   turn_input_tokens: number | null;
   turn_output_tokens: number | null;
   estimated_cost_usd: number | null;
+  source: string | null;
+  client_id: string | null;
   created_at: string;
 }
 
@@ -569,6 +690,8 @@ function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
     turnInputTokens: row.turn_input_tokens === null ? null : toNumber(row.turn_input_tokens),
     turnOutputTokens: row.turn_output_tokens === null ? null : toNumber(row.turn_output_tokens),
     estimatedCostUsd: row.estimated_cost_usd === null ? null : Number(row.estimated_cost_usd),
+    source: row.source === "gateway" ? "gateway" : "workflow",
+    clientId: row.client_id ? toString(row.client_id) : null,
     createdAt: toString(row.created_at)
   };
 }
@@ -1630,6 +1753,51 @@ export class SqliteStore {
       );
     `);
     this.ensureWorkflowCreatedByColumn();
+
+    // Phase 10.4 — MCP gateway: toolsets, their members, client credentials,
+    // and the source / client of each telemetry row.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_toolsets (
+        id TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        description TEXT,
+        project_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mcp_toolset_members (
+        id TEXT PRIMARY KEY,
+        toolset_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        workflow_id TEXT,
+        server_id TEXT,
+        tool_glob TEXT,
+        position INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_toolset_members_toolset ON mcp_toolset_members(toolset_id, position);
+
+      CREATE TABLE IF NOT EXISTS mcp_clients (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        token_prefix TEXT NOT NULL UNIQUE,
+        token_hash TEXT NOT NULL,
+        toolset_ids_json TEXT NOT NULL DEFAULT '[]',
+        role TEXT NOT NULL,
+        created_by TEXT,
+        created_by_email TEXT,
+        expires_at TEXT,
+        last_used_at TEXT,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    this.ensureColumn("mcp_tool_calls", "source", "TEXT NOT NULL", "'workflow'");
+    this.ensureColumn("mcp_tool_calls", "client_id", "TEXT");
+    this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_client ON mcp_tool_calls(client_id, started_at)`);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
     this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
@@ -7291,6 +7459,7 @@ export class SqliteStore {
       this.exec(`DELETE FROM mcp_tool_snapshots WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_servers WHERE id = ?`, [id]);
     })();
     return true;
@@ -7438,37 +7607,73 @@ export class SqliteStore {
    * same execution twice (for example after an approval resume) never
    * double-counts its calls.
    */
-  replaceMcpToolCallsForExecution(executionId: string, calls: Array<Omit<McpToolCallRecord, "createdAt">>): void {
-    const now = new Date().toISOString();
+  replaceMcpToolCallsForExecution(executionId: string, calls: McpToolCallWrite[]): void {
     this.db.transaction(() => {
-      this.exec(`DELETE FROM mcp_tool_calls WHERE execution_id = ?`, [executionId]);
+      // The gateway's own row for a workflow tool shares the execution id and is kept.
+      this.exec(`DELETE FROM mcp_tool_calls WHERE execution_id = ? AND source = 'workflow'`, [executionId]);
       for (const call of calls) {
-        this.exec(
-          `INSERT INTO mcp_tool_calls (
-             id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
-             started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
-             estimated_cost_usd, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            call.id,
-            executionId,
-            call.workflowId,
-            call.nodeId,
-            call.registryServerId,
-            call.adapterId,
-            call.toolName,
-            call.startedAt,
-            call.durationMs,
-            call.ok ? 1 : 0,
-            call.error,
-            call.turnInputTokens,
-            call.turnOutputTokens,
-            call.estimatedCostUsd,
-            now
-          ]
-        );
+        this.insertMcpToolCallRow({ ...call, executionId });
       }
     })();
+  }
+
+  /** Phase 10.4 — one gateway call, recorded as it finishes. */
+  insertMcpToolCall(call: McpToolCallWrite): void {
+    this.insertMcpToolCallRow(call);
+  }
+
+  private insertMcpToolCallRow(call: McpToolCallWrite): void {
+    this.exec(
+      `INSERT INTO mcp_tool_calls (
+         id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
+         started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
+         estimated_cost_usd, source, client_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        call.id,
+        call.executionId,
+        call.workflowId,
+        call.nodeId,
+        call.registryServerId,
+        call.adapterId,
+        call.toolName,
+        call.startedAt,
+        call.durationMs,
+        call.ok ? 1 : 0,
+        call.error,
+        call.turnInputTokens,
+        call.turnOutputTokens,
+        call.estimatedCostUsd,
+        call.source ?? "workflow",
+        call.clientId ?? null,
+        new Date().toISOString()
+      ]
+    );
+  }
+
+  /** Phase 10.4 — gateway calls one client made since `since`. */
+  listMcpToolCallsForClient(clientId: string, since: string): McpToolCallRecord[] {
+    return this.queryAll<McpToolCallRow>(
+      `SELECT * FROM mcp_tool_calls WHERE client_id = ? AND started_at >= ? ORDER BY started_at`,
+      [clientId, since]
+    ).map(mapMcpToolCall);
+  }
+
+  /** Phase 10.4 — calls, errors and last call per client since `since`. */
+  summarizeMcpClientUsage(since: string): McpClientUsageRow[] {
+    return this.queryAll<{ client_id: string; calls: number; errors: number; last_called_at: string | null }>(
+      `SELECT client_id, COUNT(*) AS calls, SUM(CASE WHEN ok = 1 THEN 0 ELSE 1 END) AS errors,
+              MAX(started_at) AS last_called_at
+         FROM mcp_tool_calls
+        WHERE client_id IS NOT NULL AND started_at >= ?
+        GROUP BY client_id`,
+      [since]
+    ).map((row) => ({
+      clientId: toString(row.client_id),
+      calls: toNumber(row.calls),
+      errors: toNumber(row.errors),
+      lastCalledAt: row.last_called_at ? toString(row.last_called_at) : null
+    }));
   }
 
   /**
@@ -7478,7 +7683,8 @@ export class SqliteStore {
   listMcpToolCalls(filter: { registryServerId: string | null; since: string }): McpToolCallRecord[] {
     const rows = filter.registryServerId === null
       ? this.queryAll<McpToolCallRow>(
-          `SELECT * FROM mcp_tool_calls WHERE registry_server_id IS NULL AND started_at >= ? ORDER BY started_at`,
+          // Gateway rows without a registry server are workflow tools, not inline servers.
+          `SELECT * FROM mcp_tool_calls WHERE registry_server_id IS NULL AND source = 'workflow' AND started_at >= ? ORDER BY started_at`,
           [filter.since]
         )
       : this.queryAll<McpToolCallRow>(
@@ -7600,6 +7806,189 @@ export class SqliteStore {
       setBy: input.setBy,
       setAt: now
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 10.4 — MCP gateway toolsets and client credentials
+  // ---------------------------------------------------------------------------
+
+  private listMcpToolsetMembers(toolsetId: string): McpToolsetMember[] {
+    return this.queryAll<McpToolsetMemberRow>(
+      `SELECT * FROM mcp_toolset_members WHERE toolset_id = ? ORDER BY position ASC, rowid ASC`,
+      [toolsetId]
+    )
+      .map(mapMcpToolsetMember)
+      .filter((member): member is McpToolsetMember => member !== null);
+  }
+
+  private writeMcpToolsetMembers(toolsetId: string, members: Array<McpToolsetMemberSpec & { id?: string }>): void {
+    this.exec(`DELETE FROM mcp_toolset_members WHERE toolset_id = ?`, [toolsetId]);
+    members.forEach((member, index) => {
+      this.exec(
+        `INSERT INTO mcp_toolset_members (id, toolset_id, kind, workflow_id, server_id, tool_glob, position)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          member.id ?? `mtm_${randomUUID()}`,
+          toolsetId,
+          member.kind,
+          member.kind === "workflow" ? member.workflowId : null,
+          member.kind === "server" ? member.serverId : null,
+          member.kind === "server" ? member.toolGlob ?? null : null,
+          index
+        ]
+      );
+    });
+  }
+
+  listMcpToolsets(): McpToolset[] {
+    return this.queryAll<McpToolsetRow>(`SELECT * FROM mcp_toolsets ORDER BY name COLLATE NOCASE, slug`).map((row) =>
+      mapMcpToolset(row, this.listMcpToolsetMembers(toString(row.id)))
+    );
+  }
+
+  getMcpToolset(id: string): McpToolset | null {
+    const row = this.queryOne<McpToolsetRow>(`SELECT * FROM mcp_toolsets WHERE id = ?`, [id]);
+    return row ? mapMcpToolset(row, this.listMcpToolsetMembers(toString(row.id))) : null;
+  }
+
+  getMcpToolsetBySlug(slug: string): McpToolset | null {
+    const row = this.queryOne<McpToolsetRow>(`SELECT * FROM mcp_toolsets WHERE slug = ?`, [slug]);
+    return row ? mapMcpToolset(row, this.listMcpToolsetMembers(toString(row.id))) : null;
+  }
+
+  createMcpToolset(input: {
+    id: string;
+    slug: string;
+    name: string;
+    description: string | null;
+    projectId: string | null;
+    enabled: boolean;
+    createdBy: string | null;
+    members: McpToolsetMemberSpec[];
+  }): McpToolset {
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.exec(
+        `INSERT INTO mcp_toolsets (id, slug, name, description, project_id, enabled, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [input.id, input.slug, input.name, input.description, input.projectId, input.enabled ? 1 : 0, input.createdBy, now, now]
+      );
+      this.writeMcpToolsetMembers(input.id, input.members);
+    })();
+    return this.getMcpToolset(input.id)!;
+  }
+
+  updateMcpToolset(
+    id: string,
+    patch: {
+      slug?: string;
+      name?: string;
+      description?: string | null;
+      projectId?: string | null;
+      enabled?: boolean;
+      members?: Array<McpToolsetMemberSpec & { id?: string }>;
+    }
+  ): McpToolset | null {
+    if (!this.getMcpToolset(id)) return null;
+    const fields: string[] = [];
+    const params: Array<string | number | null> = [];
+    if (patch.slug !== undefined) { fields.push("slug = ?"); params.push(patch.slug); }
+    if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
+    if (patch.description !== undefined) { fields.push("description = ?"); params.push(patch.description); }
+    if (patch.projectId !== undefined) { fields.push("project_id = ?"); params.push(patch.projectId); }
+    if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
+    fields.push("updated_at = ?");
+    params.push(new Date().toISOString());
+    params.push(id);
+    this.db.transaction(() => {
+      this.exec(`UPDATE mcp_toolsets SET ${fields.join(", ")} WHERE id = ?`, params);
+      if (patch.members !== undefined) {
+        this.writeMcpToolsetMembers(id, patch.members);
+      }
+    })();
+    return this.getMcpToolset(id);
+  }
+
+  /** Deletes the toolset and its members, and drops it from every client's scope. */
+  deleteMcpToolset(id: string): boolean {
+    if (!this.getMcpToolset(id)) return false;
+    this.db.transaction(() => {
+      this.exec(`DELETE FROM mcp_toolset_members WHERE toolset_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_toolsets WHERE id = ?`, [id]);
+      for (const client of this.listMcpClients()) {
+        if (!client.toolsetIds.includes(id)) continue;
+        this.exec(`UPDATE mcp_clients SET toolset_ids_json = ? WHERE id = ?`, [
+          JSON.stringify(client.toolsetIds.filter((entry) => entry !== id)),
+          client.id
+        ]);
+      }
+    })();
+    return true;
+  }
+
+  createMcpClient(input: {
+    id: string;
+    name: string;
+    tokenPrefix: string;
+    tokenHash: string;
+    toolsetIds: string[];
+    role: McpPolicyRole;
+    createdBy: string | null;
+    createdByEmail: string | null;
+    expiresAt: string | null;
+  }): McpClient {
+    this.exec(
+      `INSERT INTO mcp_clients (
+         id, name, token_prefix, token_hash, toolset_ids_json, role, created_by, created_by_email, expires_at, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.name,
+        input.tokenPrefix,
+        input.tokenHash,
+        JSON.stringify(input.toolsetIds),
+        input.role,
+        input.createdBy,
+        input.createdByEmail,
+        input.expiresAt,
+        new Date().toISOString()
+      ]
+    );
+    return this.getMcpClient(input.id)!;
+  }
+
+  /** Without the token hash. */
+  getMcpClient(id: string): McpClient | null {
+    const row = this.queryOne<McpClientRow>(`SELECT * FROM mcp_clients WHERE id = ?`, [id]);
+    if (!row) return null;
+    const { tokenHash: _hash, ...client } = mapMcpClient(row);
+    return client;
+  }
+
+  /** With the token hash; for the credential check only. */
+  findMcpClientByTokenPrefix(prefix: string): McpClientSecretRecord | null {
+    const row = this.queryOne<McpClientRow>(`SELECT * FROM mcp_clients WHERE token_prefix = ?`, [prefix]);
+    return row ? mapMcpClient(row) : null;
+  }
+
+  listMcpClients(): McpClient[] {
+    return this.queryAll<McpClientRow>(`SELECT * FROM mcp_clients ORDER BY created_at DESC, rowid DESC`).map((row) => {
+      const { tokenHash: _hash, ...client } = mapMcpClient(row);
+      return client;
+    });
+  }
+
+  revokeMcpClient(id: string): McpClient | null {
+    const existing = this.getMcpClient(id);
+    if (!existing) return null;
+    if (!existing.revokedAt) {
+      this.exec(`UPDATE mcp_clients SET revoked_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+    }
+    return this.getMcpClient(id);
+  }
+
+  touchMcpClient(id: string, at: string): void {
+    this.exec(`UPDATE mcp_clients SET last_used_at = ? WHERE id = ?`, [at, id]);
   }
 
   /**

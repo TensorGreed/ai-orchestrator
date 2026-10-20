@@ -27,6 +27,9 @@ export function describeToolPolicySubject(subject: McpToolPolicySubject): string
       ? `Evaluated as ${subject.role} — triggered by ${who}`
       : `Evaluated as ${subject.role} — triggered by a signed-in user`;
   }
+  if (subject.source === "client") {
+    return `Evaluated as ${subject.role} — MCP client ${subject.clientName ?? subject.clientId ?? "unknown"}`;
+  }
   if (subject.source === "owner") {
     return who ? `Evaluated as ${subject.role} — workflow owner ${who}` : `Evaluated as ${subject.role} — workflow owner`;
   }
