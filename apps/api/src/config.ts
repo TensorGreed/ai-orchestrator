@@ -187,6 +187,16 @@ const envSchema = z.object({
 
 export type AppConfig = z.infer<typeof envSchema>;
 
+/** Parses an environment-shaped record into AppConfig, applying the same defaults as the process environment. */
+export function parseConfig(env: Record<string, string | undefined>): AppConfig {
+  const parsed = envSchema.safeParse(env);
+  if (!parsed.success) {
+    throw new Error(`Invalid environment configuration: ${parsed.error.message}`);
+  }
+
+  return parsed.data;
+}
+
 export function getConfig(): AppConfig {
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {

@@ -17,7 +17,9 @@ import type { AgentRuntimeAdapter } from "@ai-orchestrator/agent-runtime";
 import type { AgentRunRequest, AgentRunState, WorkflowEdge, WorkflowNode } from "@ai-orchestrator/shared";
 import { executeCodeNodeSandbox, executeWorkflow } from "../executor";
 import { validateWorkflowGraph } from "../validation";
+import { renderExternalImportCoverageMarkdown } from "./coverage-markdown";
 import {
+  EXTERNAL_IMPORT_COVERAGE,
   EXTERNAL_IMPORT_SUPPORTED_TYPES,
   ExternalWorkflowImportError,
   convertExternalWorkflow,
@@ -828,6 +830,20 @@ describe("external workflow import — additional node variants", () => {
     expect(EXTERNAL_IMPORT_SUPPORTED_TYPES).toContain("n8n-nodes-base.httprequest");
     expect(EXTERNAL_IMPORT_SUPPORTED_TYPES).toContain("@n8n/n8n-nodes-langchain.agent");
     expect(EXTERNAL_IMPORT_SUPPORTED_TYPES.length).toBeGreaterThan(40);
+    const directEntries = EXTERNAL_IMPORT_COVERAGE.filter((entry) => !entry.sourceType.endsWith("*"));
+    expect(directEntries.map((entry) => entry.sourceType.toLowerCase()).sort()).toEqual([...EXTERNAL_IMPORT_SUPPORTED_TYPES].sort());
+    expect(EXTERNAL_IMPORT_COVERAGE.find((entry) => entry.sourceType === "n8n-nodes-base.httpRequest")).toMatchObject({
+      targetType: "http_request",
+      category: "core"
+    });
+  });
+
+  it("keeps the checked-in docs coverage table in sync with the converter", () => {
+    const docsPath = join(FIXTURE_DIR, "..", "..", "apps", "docs", "docs", "product", "external-import-coverage.md");
+    const checkedIn = readFileSync(docsPath, "utf8");
+    const rendered = renderExternalImportCoverageMarkdown();
+    expect(rendered).toContain("| `n8n-nodes-base.httpRequest` | `http_request` |");
+    expect(checkedIn).toBe(rendered);
   });
 });
 

@@ -1890,69 +1890,99 @@ const structuredOutputParser: NodeHandler = (source, _ctx, scope) => {
 const BASE = "n8n-nodes-base.";
 const LANGCHAIN = "@n8n/n8n-nodes-langchain.";
 
-const NODE_HANDLERS: Record<string, NodeHandler> = {
-  [`${BASE}manualtrigger`]: manualTrigger,
-  [`${BASE}webhook`]: webhookTrigger,
-  [`${BASE}scheduletrigger`]: scheduleTrigger,
-  [`${BASE}cron`]: scheduleTrigger,
-  [`${BASE}interval`]: scheduleTrigger,
-  [`${LANGCHAIN}chattrigger`]: chatTrigger,
-  [`${BASE}errortrigger`]: errorTrigger,
-  [`${BASE}formtrigger`]: formTrigger,
-  [`${BASE}rssfeedreadtrigger`]: rssTrigger,
-  [`${BASE}emailreadimap`]: imapTrigger,
-  [`${BASE}httprequest`]: httpRequest,
-  [`${BASE}code`]: codeNode,
-  [`${BASE}function`]: codeNode,
-  [`${BASE}set`]: setNode,
-  [`${BASE}if`]: ifNode,
-  [`${BASE}switch`]: switchNode,
-  [`${BASE}merge`]: mergeNode,
-  [`${BASE}splitout`]: splitOutNode,
-  [`${BASE}itemlists`]: splitOutNode,
-  [`${BASE}aggregate`]: aggregateNode,
-  [`${BASE}filter`]: filterNode,
-  [`${BASE}sort`]: sortNode,
-  [`${BASE}limit`]: limitNode,
-  [`${BASE}wait`]: waitNode,
-  [`${BASE}noop`]: noOpNode,
-  [`${BASE}stopanderror`]: stopAndErrorNode,
-  [`${BASE}executeworkflow`]: executeWorkflowNode,
-  [`${BASE}stickynote`]: stickyNote,
-  [`${LANGCHAIN}lmchatopenai`]: chatModelHandler("openai_chat_model", { model: "gpt-4o-mini" }),
-  [`${LANGCHAIN}lmopenai`]: chatModelHandler("openai_chat_model", { model: "gpt-4o-mini" }, "Completion model approximated as a chat model."),
-  [`${LANGCHAIN}lmchatanthropic`]: chatModelHandler("anthropic_chat_model", { model: "claude-3-5-sonnet-latest" }),
-  [`${LANGCHAIN}lmchatgooglegemini`]: chatModelHandler("google_gemini_chat_model", { model: "gemini-2.5-flash" }),
-  [`${LANGCHAIN}lmchatollama`]: chatModelHandler("ollama_chat_model", { model: "llama3.1", baseUrl: "http://localhost:11434/v1" }),
-  [`${LANGCHAIN}lmollama`]: chatModelHandler("ollama_chat_model", { model: "llama3.1", baseUrl: "http://localhost:11434/v1" }),
-  [`${LANGCHAIN}lmchatazureopenai`]: azureChatModel,
-  [`${LANGCHAIN}lmchatopenrouter`]: chatModelHandler("openai_compatible_chat_model", { model: "openai/gpt-4o-mini", baseUrl: "https://openrouter.ai/api/v1" }),
-  [`${LANGCHAIN}lmchatgroq`]: chatModelHandler("openai_compatible_chat_model", { model: "llama-3.1-8b-instant", baseUrl: "https://api.groq.com/openai/v1" }),
-  [`${LANGCHAIN}lmchatmistralcloud`]: chatModelHandler("openai_compatible_chat_model", { model: "mistral-small-latest", baseUrl: "https://api.mistral.ai/v1" }),
-  [`${LANGCHAIN}lmchatdeepseek`]: chatModelHandler("openai_compatible_chat_model", { model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1" }),
-  [`${LANGCHAIN}lmchatxaigrok`]: chatModelHandler("openai_compatible_chat_model", { model: "grok-2", baseUrl: "https://api.x.ai/v1" }),
-  [`${LANGCHAIN}agent`]: aiAgent,
-  [`${LANGCHAIN}memorybufferwindow`]: simpleMemory,
-  [`${LANGCHAIN}memorypostgreschat`]: simpleMemory,
-  [`${LANGCHAIN}memoryredischat`]: simpleMemory,
-  [`${LANGCHAIN}memorymongodbchat`]: simpleMemory,
-  [`${LANGCHAIN}memoryzep`]: simpleMemory,
-  [`${LANGCHAIN}memorymotorhead`]: simpleMemory,
-  [`${LANGCHAIN}memoryxata`]: simpleMemory,
-  [`${LANGCHAIN}mcpclienttool`]: mcpClientTool,
-  [`${LANGCHAIN}outputparserstructured`]: structuredOutputParser
-};
+export type ExternalImportCategory = "trigger" | "core" | "ai";
+
+export interface ExternalImportCoverageEntry {
+  /** Source node type identifier as it appears in an export (data, not prose). */
+  sourceType: string;
+  targetType: WorkflowNodeType;
+  category: ExternalImportCategory;
+  /** What is lost or approximated, if anything. Empty when the mapping is direct. */
+  notes: string;
+}
+
+interface HandlerRegistration extends ExternalImportCoverageEntry {
+  handler: NodeHandler;
+}
+
+const OPENAI_COMPATIBLE_NOTE = "OpenAI-compatible endpoint with the provider's public base URL.";
+
+const REGISTRATIONS: readonly HandlerRegistration[] = [
+  { sourceType: `${BASE}manualTrigger`, targetType: "manual_trigger", category: "trigger", notes: "", handler: manualTrigger },
+  { sourceType: `${BASE}webhook`, targetType: "webhook_input", category: "trigger", notes: "Header auth becomes bearer_token on the authorization header; other auth modes are dropped.", handler: webhookTrigger },
+  { sourceType: `${BASE}scheduleTrigger`, targetType: "schedule_trigger", category: "trigger", notes: "Interval rules become cron; only the first rule is kept; second-level intervals become every minute.", handler: scheduleTrigger },
+  { sourceType: `${BASE}cron`, targetType: "schedule_trigger", category: "trigger", notes: "Legacy trigger times become cron; only the first entry is kept.", handler: scheduleTrigger },
+  { sourceType: `${BASE}interval`, targetType: "schedule_trigger", category: "trigger", notes: "Defaults to hourly when no interval can be read.", handler: scheduleTrigger },
+  { sourceType: `${LANGCHAIN}chatTrigger`, targetType: "chat_trigger", category: "trigger", notes: "", handler: chatTrigger },
+  { sourceType: `${BASE}errorTrigger`, targetType: "error_trigger", category: "trigger", notes: "", handler: errorTrigger },
+  { sourceType: `${BASE}formTrigger`, targetType: "form_trigger", category: "trigger", notes: "File fields become text fields.", handler: formTrigger },
+  { sourceType: `${BASE}rssFeedReadTrigger`, targetType: "rss_trigger", category: "trigger", notes: "Poll times become a poll interval in seconds.", handler: rssTrigger },
+  { sourceType: `${BASE}emailReadImap`, targetType: "imap_email_trigger", category: "trigger", notes: "Host, port and user live in the credential and must be filled in after import.", handler: imapTrigger },
+  { sourceType: `${BASE}httpRequest`, targetType: "http_request", category: "core", notes: "Query parameters are appended to the URL; binary responses become text; auth becomes a secretRef placeholder.", handler: httpRequest },
+  { sourceType: `${BASE}code`, targetType: "code_node", category: "core", notes: "JavaScript is wrapped in a compatibility shim; Python is kept verbatim.", handler: codeNode },
+  { sourceType: `${BASE}function`, targetType: "code_node", category: "core", notes: "Legacy function code is wrapped in the same compatibility shim.", handler: codeNode },
+  { sourceType: `${BASE}set`, targetType: "set_node", category: "core", notes: "'Keep only set fields' is not supported; other fields pass through.", handler: setNode },
+  { sourceType: `${BASE}if`, targetType: "if_node", category: "core", notes: "Conditions compile to one expression; outputs 0 and 1 become the true and false handles.", handler: ifNode },
+  { sourceType: `${BASE}switch`, targetType: "switch_node", category: "core", notes: "Same-field equality rules become cases; other rule sets compile to a routing expression.", handler: switchNode },
+  { sourceType: `${BASE}merge`, targetType: "merge_node", category: "core", notes: "Combine-by-fields keeps the first match field; SQL and position combines become append.", handler: mergeNode },
+  { sourceType: `${BASE}splitOut`, targetType: "split_out_node", category: "core", notes: "Only the first field to split out is kept.", handler: splitOutNode },
+  { sourceType: `${BASE}itemLists`, targetType: "split_out_node", category: "core", notes: "Legacy item list node treated as split out.", handler: splitOutNode },
+  { sourceType: `${BASE}aggregate`, targetType: "aggregate_node", category: "core", notes: "Collecting values into an array is approximated with the concatenate operation.", handler: aggregateNode },
+  { sourceType: `${BASE}filter`, targetType: "filter_node", category: "core", notes: "Field-path conditions map directly; expression conditions need review.", handler: filterNode },
+  { sourceType: `${BASE}sort`, targetType: "sort_node", category: "core", notes: "Only the first sort field is kept; custom sort code needs review.", handler: sortNode },
+  { sourceType: `${BASE}limit`, targetType: "limit_node", category: "core", notes: "", handler: limitNode },
+  { sourceType: `${BASE}wait`, targetType: "wait_node", category: "core", notes: "Timer, webhook and specific-time resumes are supported; form resume is approximated as a timer.", handler: waitNode },
+  { sourceType: `${BASE}noOp`, targetType: "noop_node", category: "core", notes: "", handler: noOpNode },
+  { sourceType: `${BASE}stopAndError`, targetType: "stop_and_error", category: "core", notes: "Error objects are reduced to message and errorCode.", handler: stopAndErrorNode },
+  { sourceType: `${BASE}executeWorkflow`, targetType: "execute_workflow", category: "core", notes: "The workflow id refers to the source system and must be repointed; per-item mode becomes a single call.", handler: executeWorkflowNode },
+  { sourceType: `${BASE}stickyNote`, targetType: "sticky_note", category: "core", notes: "", handler: stickyNote },
+  { sourceType: `${LANGCHAIN}lmChatOpenAi`, targetType: "openai_chat_model", category: "ai", notes: "", handler: chatModelHandler("openai_chat_model", { model: "gpt-4o-mini" }) },
+  { sourceType: `${LANGCHAIN}lmOpenAi`, targetType: "openai_chat_model", category: "ai", notes: "Completion model approximated as a chat model.", handler: chatModelHandler("openai_chat_model", { model: "gpt-4o-mini" }, "Completion model approximated as a chat model.") },
+  { sourceType: `${LANGCHAIN}lmChatAnthropic`, targetType: "anthropic_chat_model", category: "ai", notes: "", handler: chatModelHandler("anthropic_chat_model", { model: "claude-3-5-sonnet-latest" }) },
+  { sourceType: `${LANGCHAIN}lmChatGoogleGemini`, targetType: "google_gemini_chat_model", category: "ai", notes: "", handler: chatModelHandler("google_gemini_chat_model", { model: "gemini-2.5-flash" }) },
+  { sourceType: `${LANGCHAIN}lmChatOllama`, targetType: "ollama_chat_model", category: "ai", notes: "Base URL defaults to the local Ollama endpoint.", handler: chatModelHandler("ollama_chat_model", { model: "llama3.1", baseUrl: "http://localhost:11434/v1" }) },
+  { sourceType: `${LANGCHAIN}lmOllama`, targetType: "ollama_chat_model", category: "ai", notes: "Base URL defaults to the local Ollama endpoint.", handler: chatModelHandler("ollama_chat_model", { model: "llama3.1", baseUrl: "http://localhost:11434/v1" }) },
+  { sourceType: `${LANGCHAIN}lmChatAzureOpenAi`, targetType: "azure_openai_chat_model", category: "ai", notes: "The endpoint lives in the credential and must be set after import.", handler: azureChatModel },
+  { sourceType: `${LANGCHAIN}lmChatOpenRouter`, targetType: "openai_compatible_chat_model", category: "ai", notes: OPENAI_COMPATIBLE_NOTE, handler: chatModelHandler("openai_compatible_chat_model", { model: "openai/gpt-4o-mini", baseUrl: "https://openrouter.ai/api/v1" }) },
+  { sourceType: `${LANGCHAIN}lmChatGroq`, targetType: "openai_compatible_chat_model", category: "ai", notes: OPENAI_COMPATIBLE_NOTE, handler: chatModelHandler("openai_compatible_chat_model", { model: "llama-3.1-8b-instant", baseUrl: "https://api.groq.com/openai/v1" }) },
+  { sourceType: `${LANGCHAIN}lmChatMistralCloud`, targetType: "openai_compatible_chat_model", category: "ai", notes: OPENAI_COMPATIBLE_NOTE, handler: chatModelHandler("openai_compatible_chat_model", { model: "mistral-small-latest", baseUrl: "https://api.mistral.ai/v1" }) },
+  { sourceType: `${LANGCHAIN}lmChatDeepSeek`, targetType: "openai_compatible_chat_model", category: "ai", notes: OPENAI_COMPATIBLE_NOTE, handler: chatModelHandler("openai_compatible_chat_model", { model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1" }) },
+  { sourceType: `${LANGCHAIN}lmChatXAiGrok`, targetType: "openai_compatible_chat_model", category: "ai", notes: OPENAI_COMPATIBLE_NOTE, handler: chatModelHandler("openai_compatible_chat_model", { model: "grok-2", baseUrl: "https://api.x.ai/v1" }) },
+  { sourceType: `${LANGCHAIN}agent`, targetType: "agent_orchestrator", category: "ai", notes: "Model, memory and tool sub-nodes become attachment edges; an attached output parser becomes the next step.", handler: aiAgent },
+  { sourceType: `${LANGCHAIN}memoryBufferWindow`, targetType: "local_memory", category: "ai", notes: "", handler: simpleMemory },
+  { sourceType: `${LANGCHAIN}memoryPostgresChat`, targetType: "local_memory", category: "ai", notes: "External memory stores are approximated with the local Simple Memory store.", handler: simpleMemory },
+  { sourceType: `${LANGCHAIN}memoryRedisChat`, targetType: "local_memory", category: "ai", notes: "External memory stores are approximated with the local Simple Memory store.", handler: simpleMemory },
+  { sourceType: `${LANGCHAIN}memoryMongoDbChat`, targetType: "local_memory", category: "ai", notes: "External memory stores are approximated with the local Simple Memory store.", handler: simpleMemory },
+  { sourceType: `${LANGCHAIN}memoryZep`, targetType: "local_memory", category: "ai", notes: "External memory stores are approximated with the local Simple Memory store.", handler: simpleMemory },
+  { sourceType: `${LANGCHAIN}memoryMotorhead`, targetType: "local_memory", category: "ai", notes: "External memory stores are approximated with the local Simple Memory store.", handler: simpleMemory },
+  { sourceType: `${LANGCHAIN}memoryXata`, targetType: "local_memory", category: "ai", notes: "External memory stores are approximated with the local Simple Memory store.", handler: simpleMemory },
+  { sourceType: `${LANGCHAIN}mcpClientTool`, targetType: "mcp_tool", category: "ai", notes: "SSE transport becomes HTTP streamable; tool exclusion lists are not supported.", handler: mcpClientTool },
+  { sourceType: `${LANGCHAIN}outputParserStructured`, targetType: "output_parser", category: "ai", notes: "Runs as a step after the agent; schemas are inferred from example output when no manual schema is given.", handler: structuredOutputParser }
+];
+
+const NODE_HANDLERS = new Map<string, NodeHandler>(REGISTRATIONS.map((entry) => [normalizeType(entry.sourceType), entry.handler]));
 
 function resolveHandler(type: string): NodeHandler | undefined {
   const normalized = normalizeType(type);
-  const direct = NODE_HANDLERS[normalized];
+  const direct = NODE_HANDLERS.get(normalized);
   if (direct) return direct;
   if (normalized.startsWith(`${LANGCHAIN}lmchat`)) return genericChatModel;
   return undefined;
 }
 
-/** Source types the converter knows how to map, for documentation and coverage tables. */
-export const EXTERNAL_IMPORT_SUPPORTED_TYPES: readonly string[] = Object.freeze(Object.keys(NODE_HANDLERS));
+/** Normalized (lower-case) source types the converter maps directly. */
+export const EXTERNAL_IMPORT_SUPPORTED_TYPES: readonly string[] = Object.freeze([...NODE_HANDLERS.keys()]);
+
+/** Source type → L2M node type coverage, including the chat model fallback, for docs and coverage tables. */
+export const EXTERNAL_IMPORT_COVERAGE: readonly ExternalImportCoverageEntry[] = Object.freeze([
+  ...REGISTRATIONS.map(({ sourceType, targetType, category, notes }) => ({ sourceType, targetType, category, notes })),
+  {
+    sourceType: `${LANGCHAIN}lmChat*`,
+    targetType: "openai_compatible_chat_model",
+    category: "ai",
+    notes: "Any other chat model type is approximated as an OpenAI-compatible endpoint with a placeholder base URL."
+  }
+]);
 
 // ---------------------------------------------------------------------------
 // Edge building

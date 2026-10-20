@@ -10,6 +10,7 @@ export * from "./template";
 export * from "./expression";
 export * from "./graph";
 export * from "./import/external-builder";
+export * from "./import/coverage-markdown";
 export {
   PHASE35_TRIGGER_NODE_TYPES,
   isPhase35TriggerNode
