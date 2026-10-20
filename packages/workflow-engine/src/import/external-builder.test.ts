@@ -429,7 +429,7 @@ describe("external workflow import — unsupported nodes and odd expressions", (
     const slack = nodeById(conversion, "slack");
     expect(slack.type).toBe("noop_node");
     expect(slack.disabled).toBe(true);
-    expect(slack.config.label).toBe("Unsupported: n8n-nodes-base.slack");
+    expect(slack.config.label).toBe("Unsupported: slack");
     expect(slack.config.importedFrom).toMatchObject({
       type: "n8n-nodes-base.slack",
       parameters: { text: "=New feedback from {{ $json.Name }}" },

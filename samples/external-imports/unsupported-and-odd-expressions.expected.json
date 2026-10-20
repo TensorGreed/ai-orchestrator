@@ -61,7 +61,7 @@
           "y": 0
         },
         "config": {
-          "label": "Unsupported: n8n-nodes-base.slack",
+          "label": "Unsupported: slack",
           "importedFrom": {
             "type": "n8n-nodes-base.slack",
             "typeVersion": 2.2,
@@ -91,7 +91,7 @@
           "y": 0
         },
         "config": {
-          "label": "Unsupported: n8n-nodes-base.googleSheets",
+          "label": "Unsupported: googleSheets",
           "importedFrom": {
             "type": "n8n-nodes-base.googleSheets",
             "typeVersion": 4.5,
@@ -222,7 +222,7 @@
           "y": 220
         },
         "config": {
-          "label": "Unsupported: @n8n/n8n-nodes-langchain.toolCalculator",
+          "label": "Unsupported: toolCalculator",
           "importedFrom": {
             "type": "@n8n/n8n-nodes-langchain.toolCalculator",
             "typeVersion": 1,
@@ -241,7 +241,7 @@
           "y": 220
         },
         "config": {
-          "label": "Unsupported: @n8n/n8n-nodes-langchain.embeddingsOpenAi",
+          "label": "Unsupported: embeddingsOpenAi",
           "importedFrom": {
             "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
             "typeVersion": 1.2,

@@ -652,8 +652,9 @@ function buildTemplateData(
   };
 
   // `results.<nodeId>.<key>` addresses any completed node, not just direct parents.
-  // Data that already carries a `results` key keeps it.
-  if (!("results" in base) && context.nodeOutputs) {
+  // It is always rebuilt here so a node that spreads its input (for example a code
+  // node returning `{ ...input }`) cannot hand a stale copy to later nodes.
+  if (context.nodeOutputs) {
     const snapshot = serializeNodeOutputs(context.nodeOutputs);
     Object.defineProperty(snapshot, DERIVED_RESULTS_MARKER, { value: true, enumerable: false });
     base.results = snapshot;

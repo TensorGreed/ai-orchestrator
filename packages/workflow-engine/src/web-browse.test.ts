@@ -1,6 +1,31 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
 import http from "node:http";
+import { chromium } from "playwright";
 import { browseUrl } from "./web-browse.js";
+
+/**
+ * Resolve the Chromium executable the same way web-browse.ts does:
+ * PDF_CHROMIUM_EXECUTABLE_PATH wins, otherwise Playwright's bundled browser.
+ * The rendering block is skipped (not failed) when neither exists, so the
+ * suite stays green on machines that never ran `playwright install chromium`.
+ */
+function resolveChromiumExecutable(): string | undefined {
+  const fromEnv = process.env.PDF_CHROMIUM_EXECUTABLE_PATH?.trim();
+  if (fromEnv) return existsSync(fromEnv) ? fromEnv : undefined;
+  try {
+    const bundled = chromium.executablePath();
+    return bundled && existsSync(bundled) ? bundled : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const chromiumExecutable = resolveChromiumExecutable();
+const browserAvailable = Boolean(chromiumExecutable);
+const skipReason = browserAvailable
+  ? ""
+  : "no Chromium executable found (set PDF_CHROMIUM_EXECUTABLE_PATH or run `pnpm exec playwright install chromium`)";
 
 /**
  * Spin up an in-process HTTP server with a fixed HTML response so the
@@ -42,18 +67,8 @@ const SPA_HTML = `<!doctype html>
 
 let server: http.Server;
 let baseUrl: string;
-let playwrightAvailable = true;
 
 beforeAll(async () => {
-  // Skip the entire describe block if Playwright browsers aren't installed.
-  // This keeps the suite green on dev machines that haven't run
-  // `pnpm exec playwright install chromium`. CI runs the install step.
-  try {
-    await import("playwright");
-  } catch {
-    playwrightAvailable = false;
-  }
-
   server = http.createServer((req, res) => {
     if (req.url === "/spa") {
       res.writeHead(200, { "content-type": "text/html" });
@@ -76,8 +91,6 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-const skipIfNoBrowser = () => playwrightAvailable ? false : "playwright browsers not installed";
-
 describe("web_browse", () => {
   describe("validation", () => {
     it("rejects file:// URLs", async () => {
@@ -92,24 +105,14 @@ describe("web_browse", () => {
       await expect(browseUrl({ url: "not a url" })).rejects.toThrow(/invalid url/i);
     });
 
-    it("accepts http, https, and data URLs", async () => {
-      // We only verify validation here, not actual rendering.
-      // Real rendering tests are below and gated on Playwright availability.
-      // No assertion needed — just confirming no throw at validation time.
-      // (validation runs synchronously before browser launch.)
-      const reason = skipIfNoBrowser();
-      if (reason) {
-        // Expect validation to pass but Playwright launch to fail with a known message
-        await expect(browseUrl({ url: "https://example.com" })).rejects.toThrow(/Playwright/i);
-        return;
-      }
+    it.skipIf(browserAvailable)("accepts http, https, and data URLs at validation time even without a browser", async () => {
+      // Validation runs before the browser launch, so the only failure left is the launch itself.
+      await expect(browseUrl({ url: "https://example.com" })).rejects.toThrow(/Executable|Playwright|launch/i);
     });
   });
 
-  describe("rendering (requires Playwright browsers)", () => {
+  describe.skipIf(!browserAvailable)(`rendering (requires Playwright browsers)${skipReason ? ` [skipped: ${skipReason}]` : ""}`, () => {
     it("returns title, html, text, and meta tags", async () => {
-      const reason = skipIfNoBrowser();
-      if (reason) return;
       const r = await browseUrl({ url: baseUrl, screenshot: false });
       expect(r.status).toBe(200);
       expect(r.title).toBe("Test Page");
@@ -121,8 +124,6 @@ describe("web_browse", () => {
     }, 30000);
 
     it("extracts links with text + rel", async () => {
-      const reason = skipIfNoBrowser();
-      if (reason) return;
       const r = await browseUrl({ url: baseUrl, screenshot: false });
       expect(r.links.length).toBeGreaterThanOrEqual(2);
       const firstLink = r.links.find((l) => l.href.includes("target1"));
@@ -132,8 +133,6 @@ describe("web_browse", () => {
     }, 30000);
 
     it("extracts images with src + alt + dimensions", async () => {
-      const reason = skipIfNoBrowser();
-      if (reason) return;
       const r = await browseUrl({ url: baseUrl, screenshot: false });
       const logo = r.images.find((img) => img.src.includes("logo.png"));
       expect(logo).toBeDefined();
@@ -141,16 +140,12 @@ describe("web_browse", () => {
     }, 30000);
 
     it("captures a screenshot as PNG data URL by default", async () => {
-      const reason = skipIfNoBrowser();
-      if (reason) return;
       const r = await browseUrl({ url: baseUrl });
       expect(r.screenshot).toMatch(/^data:image\/png;base64,/);
       expect(r.screenshot!.length).toBeGreaterThan(1000);
     }, 30000);
 
     it("captures linkTags so callers can find favicon / canonical", async () => {
-      const reason = skipIfNoBrowser();
-      if (reason) return;
       const r = await browseUrl({ url: baseUrl, screenshot: false });
       const favicon = r.linkTags.find((l) => l.rel === "icon");
       expect(favicon).toBeDefined();
@@ -160,8 +155,6 @@ describe("web_browse", () => {
     }, 30000);
 
     it("waitForSelector waits for SPA-rendered content", async () => {
-      const reason = skipIfNoBrowser();
-      if (reason) return;
       const r = await browseUrl({
         url: `${baseUrl}/spa`,
         waitForSelector: "#loaded",
@@ -171,16 +164,12 @@ describe("web_browse", () => {
     }, 30000);
 
     it("returns the http status code on 4xx pages without throwing", async () => {
-      const reason = skipIfNoBrowser();
-      if (reason) return;
       const r = await browseUrl({ url: `${baseUrl}/404`, screenshot: false });
       expect(r.status).toBe(404);
       expect(r.html).toMatch(/not found/);
     }, 30000);
 
     it("skips text/links/images when those flags are off (lean output)", async () => {
-      const reason = skipIfNoBrowser();
-      if (reason) return;
       const r = await browseUrl({
         url: baseUrl,
         screenshot: false,

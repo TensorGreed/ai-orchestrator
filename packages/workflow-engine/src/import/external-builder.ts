@@ -817,7 +817,7 @@ function unsupportedPlaceholder(source: SourceNode, scope: ExpressionScope, reas
     credentialNames[credentialType] = asString(credential.name).trim() || credentialType;
   }
   const node = baseNode(source, scope, "noop_node", {
-    label: `Unsupported: ${source.type}`,
+    label: `Unsupported: ${shortType(source.type)}`,
     importedFrom: {
       type: source.type,
       typeVersion: source.typeVersion,
