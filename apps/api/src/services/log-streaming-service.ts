@@ -127,7 +127,7 @@ export class LogStreamingService {
 
   private flushTimer: NodeJS.Timeout | null = null;
   private pruneTimer: NodeJS.Timeout | null = null;
-  private flushing = false;
+  private flushInFlight: Promise<void> | null = null;
   private stopped = false;
 
   constructor(
@@ -316,18 +316,25 @@ export class LogStreamingService {
     }
   }
 
-  async flush(): Promise<void> {
-    if (this.flushing) return;
-    this.flushing = true;
-    try {
-      while (this.queue.length > 0) {
-        const entry = this.queue.shift();
-        if (!entry) break;
-        await this.send(entry);
+  /**
+   * Drains the queue. Concurrent callers share the drain already in progress,
+   * so `stop()` waits for in-flight sends instead of returning while one is
+   * still writing to the store.
+   */
+  flush(): Promise<void> {
+    if (this.flushInFlight) return this.flushInFlight;
+    this.flushInFlight = (async () => {
+      try {
+        while (this.queue.length > 0) {
+          const entry = this.queue.shift();
+          if (!entry) break;
+          await this.send(entry);
+        }
+      } finally {
+        this.flushInFlight = null;
       }
-    } finally {
-      this.flushing = false;
-    }
+    })();
+    return this.flushInFlight;
   }
 
   /**
