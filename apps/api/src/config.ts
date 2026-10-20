@@ -122,6 +122,22 @@ const envSchema = z.object({
   MCP_CATALOG_MODE: z.enum(["merge", "exclusive"]).default("merge"),
   /** Admins may only register or import stdio servers whose command matches an approved catalog entry. */
   MCP_CATALOG_ENFORCE: booleanFromEnv.default(false),
+  // Phase 10.5 — OAuth 2.1 for remote MCP servers.
+  /**
+   * Base URL the authorization server redirects the admin's browser back to
+   * (`<base>/api/mcp/oauth/callback`). Empty = MCP_GATEWAY_PUBLIC_URL, else
+   * the first WEB_ORIGIN (the web dev server proxies /api to the API).
+   */
+  MCP_OAUTH_REDIRECT_BASE_URL: z
+    .string()
+    .default("")
+    .refine((value) => value === "" || /^https?:\/\/[^\s]+$/i.test(value), {
+      message: "MCP_OAUTH_REDIRECT_BASE_URL must be an http(s) URL"
+    }),
+  /** How long an authorization started with Connect stays valid. */
+  MCP_OAUTH_STATE_TTL_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(600_000),
+  /** Access tokens are refreshed this long before they expire. */
+  MCP_OAUTH_REFRESH_SKEW_MS: z.coerce.number().int().nonnegative().max(3_600_000).default(60_000),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),

@@ -3,6 +3,7 @@ import type { LLMProviderConfig, MCPToolDefinition, McpToolPolicyTrace, Workflow
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
+import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import {
   createSecret,
   discoverMcpTools,
@@ -1725,7 +1726,9 @@ export function NodeInspector({
                   serverId: serverId || registryServerId,
                   name: tool.name,
                   description: tool.description ?? "",
-                  inputSchema: tool.inputSchema
+                  inputSchema: tool.inputSchema,
+                  ...(tool.annotations ? { annotations: tool.annotations } : {}),
+                  ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {})
                 };
               })
             }))
@@ -3319,6 +3322,11 @@ export function NodeInspector({
           <div className="cfg-group">
             <h4>Discovered Tool Metadata</h4>
             <div className="cfg-tip">{selectedTool.description || "No description provided."}</div>
+            {selectedTool.annotations && (
+              <div className="cfg-tip" data-testid="mcp-tool-annotations">
+                <McpAnnotationChips annotations={selectedTool.annotations} />
+              </div>
+            )}
             <TextAreaField
               label="Input Schema (read-only)"
               value={JSON.stringify(selectedTool.inputSchema ?? {}, null, 2)}
@@ -3326,6 +3334,15 @@ export function NodeInspector({
               rows={5}
               readOnly
             />
+            <div className="cfg-tip" data-testid="mcp-tool-output-schema">
+              <strong>Output</strong>{" "}
+              {selectedTool.outputSchema ? (
+                <>
+                  structured; downstream nodes read it as <code>{"{{results.<node>.structured.<field>}}"}</code>
+                </>
+              ) : null}
+              <McpOutputSchema schema={selectedTool.outputSchema} />
+            </div>
           </div>
         )}
 
@@ -3356,6 +3373,11 @@ export function NodeInspector({
               />
               {probeTool?.description && (
                 <div className="cfg-tip">{probeTool.description}</div>
+              )}
+              {probeTool?.annotations && (
+                <div className="cfg-tip">
+                  <McpAnnotationChips annotations={probeTool.annotations} />
+                </div>
               )}
               {probeTool?.inputSchema && Object.keys(asRecord(probeTool.inputSchema)).length > 0 && (
                 <TextAreaField

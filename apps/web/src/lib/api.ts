@@ -18,6 +18,8 @@ import type {
   McpToolsetMemberSpec,
   McpToolAnnotations,
   McpToolClassification,
+  McpToolHintCondition,
+  McpOAuthConnectionStatus,
   McpToolPolicyRule,
   MCPToolDefinition,
   Project,
@@ -267,11 +269,25 @@ export interface StreamErrorEvent {
   message: string;
 }
 
+/** Phase 10.5 — MCP `notifications/progress` for a running node's tool call. */
+export interface StreamNodeProgressEvent {
+  nodeId: string;
+  toolName: string;
+  serverId: string;
+  registryServerId?: string;
+  progress: number;
+  total?: number;
+  message?: string;
+  percent?: number;
+  at: string;
+}
+
 interface WorkflowExecuteStreamHandlers {
   onExecutionStarted?: (event: StreamExecutionStartedEvent) => void;
   onNodeStart?: (event: StreamNodeStartEvent) => void;
   onNodeComplete?: (event: StreamNodeCompleteEvent) => void;
   onLlmDelta?: (event: StreamLlmDeltaEvent) => void;
+  onNodeProgress?: (event: StreamNodeProgressEvent) => void;
   onError?: (event: StreamErrorEvent) => void;
 }
 
@@ -380,6 +396,11 @@ async function streamWorkflowExecutionRequest(
 
       if (parsedFrame.event === "llm_delta" && data && typeof data === "object") {
         handlers.onLlmDelta?.(data as StreamLlmDeltaEvent);
+        continue;
+      }
+
+      if (parsedFrame.event === "node_progress" && data && typeof data === "object") {
+        handlers.onNodeProgress?.(data as StreamNodeProgressEvent);
         continue;
       }
 
@@ -2384,6 +2405,8 @@ export interface McpSnapshotTool extends Partial<McpToolPolicyMarks> {
   description?: string;
   inputSchema: Record<string, unknown>;
   annotations?: McpToolAnnotations;
+  /** Phase 10.5 — JSON Schema of the tool's structured output, when declared. */
+  outputSchema?: Record<string, unknown>;
 }
 
 // Phase 10.2 — MCP tool policy.
@@ -2410,6 +2433,8 @@ export interface McpToolPolicyRuleInput {
   roles?: McpPolicyRole[];
   serverId?: string | null;
   toolPattern?: string;
+  /** Phase 10.5 — only tools with this effective annotation hint; null = any tool. */
+  annotationHint?: McpToolHintCondition | null;
   enabled?: boolean;
 }
 
@@ -2523,6 +2548,31 @@ export async function fetchMcpServerTools(id: string, projectId?: string) {
     policy?: { role: McpPolicyRole; projectId: string };
     tools: McpSnapshotTool[];
   }>(`/api/mcp/servers/${encodeURIComponent(id)}/tools${qs}`);
+}
+
+// Phase 10.5 — OAuth 2.1 connection for a registry server (tokens never reach the browser).
+export async function fetchMcpServerOAuth(id: string) {
+  return apiRequest<{ status: McpOAuthConnectionStatus }>(`/api/mcp/servers/${encodeURIComponent(id)}/oauth`);
+}
+
+export async function connectMcpServerOAuth(id: string, payload: { scope?: string } = {}) {
+  return apiRequest<{ authorizationUrl: string; expiresAt: string; redirectUri: string }>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/oauth/connect`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+export async function refreshMcpServerOAuth(id: string) {
+  return apiRequest<{ status: McpOAuthConnectionStatus }>(`/api/mcp/servers/${encodeURIComponent(id)}/oauth/refresh`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export async function disconnectMcpServerOAuth(id: string) {
+  return apiRequest<{ status: McpOAuthConnectionStatus }>(`/api/mcp/servers/${encodeURIComponent(id)}/oauth`, {
+    method: "DELETE"
+  });
 }
 
 export type McpTelemetryWindow = "24h" | "7d" | "30d";

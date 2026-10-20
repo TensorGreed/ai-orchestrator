@@ -5,6 +5,7 @@ import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
   evaluateMcpToolAccess,
   invokeDirectMCPTool,
+  policyNeedsAnnotations,
   resolveMCPTools,
   type McpToolAccessCheck,
   type McpToolAccessSubjectTool,
@@ -24,6 +25,7 @@ import type {
   McpToolPolicyRule,
   McpToolPolicySubject,
   McpToolPolicyTrace,
+  McpToolProgressEvent,
   NodeExecutionResult,
   SecretReference,
   Workflow,
@@ -148,6 +150,11 @@ export interface WorkflowExecutionDependencies {
     processed: number;
     total: number;
   }) => Promise<void> | void;
+  /**
+   * Phase 10.5 — `notifications/progress` from an upstream MCP server while
+   * an MCP Tool node or an agent's tool call runs.
+   */
+  onMcpProgress?: (event: McpToolProgressEvent & { nodeId: string }) => Promise<void> | void;
   abortSignal?: AbortSignal;
   logger?: (message: string, metadata?: unknown) => void;
   triggerErrorWorkflow?: (input: {
@@ -301,6 +308,41 @@ function createMcpSessionReleaser(
     },
     close
   };
+}
+
+/** Progress events kept on a node's output (`_mcpProgress`), newest last. */
+const MAX_NODE_PROGRESS_EVENTS = 20;
+
+/**
+ * Phase 10.5 — the MCP execution context for one agent or MCP Tool node: the
+ * run's abort signal (adapters cancel in-flight calls with it) and a progress
+ * sink that forwards to `onMcpProgress` and keeps the last events for the
+ * node's output.
+ */
+function createNodeMcpContext(
+  dependencies: Pick<WorkflowExecutionDependencies, "resolveSecret" | "abortSignal" | "onMcpProgress">,
+  nodeId: string
+): { context: MCPExecutionContext; progress: McpToolProgressEvent[] } {
+  const progress: McpToolProgressEvent[] = [];
+  const context: MCPExecutionContext = {
+    resolveSecret: dependencies.resolveSecret,
+    runtimeState: new Map<string, unknown>(),
+    ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
+    onProgress: (event) => {
+      progress.push(event);
+      if (progress.length > MAX_NODE_PROGRESS_EVENTS) progress.shift();
+      if (!dependencies.onMcpProgress) return;
+      try {
+        const pending = dependencies.onMcpProgress({ ...event, nodeId });
+        if (pending && typeof (pending as Promise<void>).catch === "function") {
+          (pending as Promise<void>).catch(() => undefined);
+        }
+      } catch {
+        // Progress reporting never fails the tool call.
+      }
+    }
+  };
+  return { context, progress };
 }
 
 function getAbortMessage(signal?: AbortSignal): string {
@@ -551,6 +593,8 @@ interface RunToolPolicy {
   trace: McpToolPolicyTrace;
   accessCheck: McpToolAccessCheck;
   evaluate: (tool: McpToolAccessSubjectTool) => ReturnType<typeof evaluateMcpToolAccess>;
+  /** Phase 10.5 — some rule has an annotation condition, so a tool's hints must be known to decide. */
+  needsAnnotations: boolean;
 }
 
 /**
@@ -612,7 +656,7 @@ async function buildRunToolPolicy(
       }
     };
   };
-  return { trace, accessCheck, evaluate };
+  return { trace, accessCheck, evaluate, needsAnnotations: policyNeedsAnnotations(snapshot.rules) };
 }
 
 const MCP_TOOL_BLOCKED_REMEDIATION =
@@ -4114,10 +4158,7 @@ async function executeNode(
       // A per-node context keeps a spawned stdio server scoped to this call
       // instead of the adapter-wide fallback cache, which would keep it alive
       // for the life of the process.
-      const directMcpContext = {
-        resolveSecret: dependencies.resolveSecret,
-        runtimeState: new Map<string, unknown>()
-      };
+      const { context: directMcpContext, progress: directProgress } = createNodeMcpContext(dependencies, node.id);
       const releaseDirectMcpSessions = createMcpSessionReleaser(dependencies.mcpRegistry, directMcpContext, node.id);
       dependencies.abortSignal?.addEventListener("abort", releaseDirectMcpSessions.onAbort, { once: true });
       let result: Awaited<ReturnType<typeof invokeDirectMCPTool>>;
@@ -4132,8 +4173,20 @@ async function executeNode(
             ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
             toolName
           };
+          // Phase 10.5 — rules with an annotation condition need the tool's hints up front.
+          if (toolPolicy.needsAnnotations) {
+            const annotations = await discoverToolAnnotations(serverConfig, toolName, dependencies.mcpRegistry, directMcpContext);
+            if (annotations) {
+              policyTool.annotations = annotations;
+            }
+          }
           let decision = toolPolicy.evaluate(policyTool);
-          if (!decision.allowed && decision.reason === "no_write_tools" && decision.classification.source === "unknown") {
+          if (
+            !decision.allowed &&
+            decision.reason === "no_write_tools" &&
+            decision.classification.source === "unknown" &&
+            !policyTool.annotations
+          ) {
             const annotations = await discoverToolAnnotations(serverConfig, toolName, dependencies.mcpRegistry, directMcpContext);
             if (annotations) {
               decision = toolPolicy.evaluate({ ...policyTool, annotations });
@@ -4168,7 +4221,11 @@ async function executeNode(
           tool_args: args
         },
         tool_output: result.output,
-        tool_name: toolName
+        // Phase 10.5 — the validated structuredContent, for {{results.<node>.structured.<field>}}.
+        ...(result.structured ? { structured: result.structured } : {}),
+        ...(result.content !== undefined ? { content: result.content } : {}),
+        tool_name: toolName,
+        ...(directProgress.length > 0 ? { _mcpProgress: directProgress } : {})
       };
     }
 
@@ -4299,10 +4356,7 @@ async function executeNode(
         resolvedAttachedConfigs.length > 0
           ? mergeMCPServerConfigs([], resolvedAttachedConfigs)
           : mergeMCPServerConfigs(resolvedInlineConfigs, resolvedAttachedConfigs);
-      const mcpExecutionContext = {
-        resolveSecret: dependencies.resolveSecret,
-        runtimeState: new Map<string, unknown>()
-      };
+      const { context: mcpExecutionContext, progress: agentMcpProgress } = createNodeMcpContext(dependencies, node.id);
       // Stdio MCP servers spawned for this node live in this context only.
       // Close them once the node is done, however it ends: success, error,
       // clarification pause, or cancellation/timeout through the abort signal.
@@ -4490,6 +4544,7 @@ async function executeNode(
           // Phase 10.1 — map exposed tool names back to their MCP server so
           // per-tool telemetry can attribute each call in `steps`.
           _mcpTools: buildMcpToolAttribution(resolvedTools.resolved),
+          ...(agentMcpProgress.length > 0 ? { _mcpProgress: agentMcpProgress } : {}),
           // Phase 10.2 — whose role the tool policy used and which tools it hid.
           ...(toolPolicy ? { _toolPolicy: { ...toolPolicy.trace, hidden: resolvedTools.hidden } } : {}),
           // Phase 7.1 — surface cumulative agent telemetry on the node output.

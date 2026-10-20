@@ -10,6 +10,18 @@ interface EncryptedSecret {
   ciphertext: string;
 }
 
+/**
+ * Phase 10.5 — secrets L2M manages for itself (MCP OAuth tokens and client
+ * registrations). They are never handed to node configs: `resolveSecret`
+ * refuses them, the secrets list hides them and the generic delete route
+ * leaves them alone. Only `resolveInternalSecret` reads them.
+ */
+export const INTERNAL_SECRET_PROVIDERS: ReadonlySet<string> = new Set(["mcp_oauth"]);
+
+export function isInternalSecretProvider(provider: string | null | undefined): boolean {
+  return typeof provider === "string" && INTERNAL_SECRET_PROVIDERS.has(provider);
+}
+
 function parseMasterKey(rawKey?: string): Buffer {
   if (!rawKey) {
     throw new Error("SECRET_MASTER_KEY_BASE64 environment variable is required");
@@ -126,6 +138,9 @@ export class SecretService {
     if (!row) {
       return undefined;
     }
+    if (isInternalSecretProvider(row.provider)) {
+      return undefined;
+    }
 
     if (row.source === "external") {
       return await this.resolveExternal(row);
@@ -201,12 +216,38 @@ export class SecretService {
     return value;
   }
 
+  /** Phase 10.5 — read a secret L2M manages itself (see INTERNAL_SECRET_PROVIDERS). */
+  resolveInternalSecret(secretId: string): string | undefined {
+    const row = this.store.getSecret(secretId);
+    if (!row || !isInternalSecretProvider(row.provider) || row.source === "external") {
+      return undefined;
+    }
+    return this.decrypt({ iv: row.iv, authTag: row.auth_tag, ciphertext: row.ciphertext });
+  }
+
+  /** Phase 10.5 — replace the value of an internal secret in place (token rotation). */
+  updateInternalSecret(secretId: string, value: string): boolean {
+    const row = this.store.getSecret(secretId);
+    if (!row || !isInternalSecretProvider(row.provider)) {
+      return false;
+    }
+    this.store.saveSecret({
+      id: row.id,
+      name: row.name,
+      provider: row.provider,
+      projectId: row.projectId,
+      source: "local",
+      ...this.encrypt(value)
+    });
+    return true;
+  }
+
   invalidateExternalCache(secretId: string): void {
     this.store.deleteExternalSecretCacheEntry(secretId);
   }
 
   listSecrets(options: { projectId?: string } = {}) {
-    return this.store.listSecrets({ projectId: options.projectId }).map((row) => ({
+    return this.store.listSecrets({ projectId: options.projectId }).filter((row) => !isInternalSecretProvider(row.provider)).map((row) => ({
       id: row.id,
       name: row.name,
       provider: row.provider,

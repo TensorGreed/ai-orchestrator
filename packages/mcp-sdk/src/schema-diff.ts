@@ -16,6 +16,18 @@ import { normalizeToolAnnotations } from "./tool-annotations";
  *
  * Phase 10.2 — tool annotations are part of the snapshot only when a server
  * sends them, so the hash of a server without annotations is unchanged.
+ *
+ * Phase 10.5 — the same holds for `outputSchema`. Output changes are judged
+ * from the consumer's side (a downstream node or template reading the
+ * structured result), so the input rules apply in reverse:
+ *   - breaking: the output schema disappears, an output property disappears,
+ *     a required output property becomes optional (it may now be missing),
+ *     a property's type widens or changes (consumers may get a type they do
+ *     not handle), an enum gains a value
+ *   - not breaking: an output schema appears, a property is added, an
+ *     optional property becomes required, a type narrows, an enum loses a
+ *     value
+ * Output changes carry `schema: "output"`; input changes leave it unset.
  */
 
 export interface McpToolSnapshotEntry {
@@ -23,6 +35,8 @@ export interface McpToolSnapshotEntry {
   description?: string;
   inputSchema: Record<string, unknown>;
   annotations?: McpToolAnnotations;
+  /** Phase 10.5 — present only when the server declared one. */
+  outputSchema?: Record<string, unknown>;
 }
 
 export type McpToolChangeKind =
@@ -34,6 +48,9 @@ export type McpToolChangeKind =
   | "property_removed"
   | "property_type_changed"
   | "property_type_widened"
+  | "property_type_narrowed"
+  | "output_schema_added"
+  | "output_schema_removed"
   | "property_now_required"
   | "property_no_longer_required"
   | "enum_value_added"
@@ -42,8 +59,10 @@ export type McpToolChangeKind =
 export interface McpToolSchemaChange {
   tool: string;
   kind: McpToolChangeKind;
-  /** Dotted path inside the input schema; `items[]` marks array items. Absent for tool-level changes. */
+  /** Dotted path inside the input (or output) schema; `items[]` marks array items. Absent for tool-level changes. */
   path?: string;
+  /** Phase 10.5 — `output` for changes to the tool's outputSchema; absent for input changes. */
+  schema?: "output";
   breaking: boolean;
   detail: string;
 }
@@ -72,8 +91,12 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
+function hasOutputSchema(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export function normalizeToolSnapshot(
-  tools: Array<{ name: string; description?: string; inputSchema?: unknown; annotations?: unknown }>
+  tools: Array<{ name: string; description?: string; inputSchema?: unknown; annotations?: unknown; outputSchema?: unknown }>
 ): McpToolSnapshotEntry[] {
   return [...tools]
     .map((tool) => {
@@ -82,7 +105,10 @@ export function normalizeToolSnapshot(
         name: tool.name,
         description: tool.description ?? "",
         inputSchema: canonicalize(toRecord(tool.inputSchema)) as Record<string, unknown>,
-        ...(annotations ? { annotations: canonicalize(annotations) as McpToolAnnotations } : {})
+        ...(annotations ? { annotations: canonicalize(annotations) as McpToolAnnotations } : {}),
+        ...(hasOutputSchema(tool.outputSchema)
+          ? { outputSchema: canonicalize(tool.outputSchema) as Record<string, unknown> }
+          : {})
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -114,25 +140,35 @@ function joinPath(parent: string | undefined, key: string): string {
   return parent ? `${parent}.${key}` : key;
 }
 
+type SchemaSide = "input" | "output";
+
 function diffSchema(
   tool: string,
   path: string | undefined,
   before: Record<string, unknown>,
   after: Record<string, unknown>,
-  changes: McpToolSchemaChange[]
+  changes: McpToolSchemaChange[],
+  side: SchemaSide = "input"
 ): void {
+  const output = side === "output";
+  const push = (change: McpToolSchemaChange) => changes.push(output ? { ...change, schema: "output" } : change);
   if (path) {
     const beforeTypes = typeSet(before);
     const afterTypes = typeSet(after);
     // An untyped schema accepts anything, so dropping the type is a widening.
     const widened = afterTypes.size === 0 || [...beforeTypes].every((entry) => afterTypes.has(entry));
+    const narrowed =
+      afterTypes.size > 0 && (beforeTypes.size === 0 || [...afterTypes].every((entry) => beforeTypes.has(entry)));
     const same = beforeTypes.size === afterTypes.size && widened;
     if (!same) {
       const detail = `type ${describeTypes(beforeTypes)} → ${describeTypes(afterTypes)}`;
       if (beforeTypes.size > 0 && widened) {
-        changes.push({ tool, kind: "property_type_widened", path, breaking: false, detail });
+        // Inputs: callers' values are still accepted. Outputs: consumers may get a type they do not handle.
+        push({ tool, kind: "property_type_widened", path, breaking: output, detail });
+      } else if (output && narrowed) {
+        push({ tool, kind: "property_type_narrowed", path, breaking: false, detail });
       } else {
-        changes.push({ tool, kind: "property_type_changed", path, breaking: true, detail });
+        push({ tool, kind: "property_type_changed", path, breaking: true, detail });
       }
     }
 
@@ -143,14 +179,14 @@ function diffSchema(
       if (Array.isArray(after.enum)) {
         for (const value of beforeEnum) {
           if (!afterEnum.includes(value)) {
-            changes.push({ tool, kind: "enum_value_removed", path, breaking: true, detail: `enum value ${value} removed` });
+            push({ tool, kind: "enum_value_removed", path, breaking: !output, detail: `enum value ${value} removed` });
           }
         }
       }
       if (Array.isArray(before.enum)) {
         for (const value of afterEnum) {
           if (!beforeEnum.includes(value)) {
-            changes.push({ tool, kind: "enum_value_added", path, breaking: false, detail: `enum value ${value} added` });
+            push({ tool, kind: "enum_value_added", path, breaking: output, detail: `enum value ${value} added` });
           }
         }
       }
@@ -165,44 +201,45 @@ function diffSchema(
   for (const key of Object.keys(beforeProps).sort()) {
     const childPath = joinPath(path, key);
     if (!(key in afterProps)) {
-      changes.push({ tool, kind: "property_removed", path: childPath, breaking: true, detail: `property ${childPath} removed` });
+      push({ tool, kind: "property_removed", path: childPath, breaking: true, detail: `property ${childPath} removed` });
       continue;
     }
     if (!beforeRequired.has(key) && afterRequired.has(key)) {
-      changes.push({
+      push({
         tool,
         kind: "property_now_required",
         path: childPath,
-        breaking: true,
+        breaking: !output,
         detail: `property ${childPath} is now required`
       });
     } else if (beforeRequired.has(key) && !afterRequired.has(key)) {
-      changes.push({
+      push({
         tool,
         kind: "property_no_longer_required",
         path: childPath,
-        breaking: false,
+        breaking: output,
         detail: `property ${childPath} is now optional`
       });
     }
-    diffSchema(tool, childPath, toRecord(beforeProps[key]), toRecord(afterProps[key]), changes);
+    diffSchema(tool, childPath, toRecord(beforeProps[key]), toRecord(afterProps[key]), changes, side);
   }
 
   for (const key of Object.keys(afterProps).sort()) {
     if (key in beforeProps) continue;
     const childPath = joinPath(path, key);
     const required = afterRequired.has(key);
-    changes.push({
+    push({
       tool,
       kind: "property_added",
       path: childPath,
-      breaking: required,
+      // A new output property never breaks a consumer; a new required input breaks callers.
+      breaking: !output && required,
       detail: required ? `required property ${childPath} added` : `optional property ${childPath} added`
     });
   }
 
   if (before.items || after.items) {
-    diffSchema(tool, joinPath(path, "items[]"), toRecord(before.items), toRecord(after.items), changes);
+    diffSchema(tool, joinPath(path, "items[]"), toRecord(before.items), toRecord(after.items), changes, side);
   }
 }
 
@@ -231,6 +268,19 @@ export function diffToolSnapshots(before: McpToolSnapshotEntry[], after: McpTool
       });
     }
     diffSchema(name, undefined, previous.inputSchema, next.inputSchema, changes);
+    if (previous.outputSchema && !next.outputSchema) {
+      changes.push({
+        tool: name,
+        kind: "output_schema_removed",
+        schema: "output",
+        breaking: true,
+        detail: "output schema removed; structured results are no longer guaranteed"
+      });
+    } else if (!previous.outputSchema && next.outputSchema) {
+      changes.push({ tool: name, kind: "output_schema_added", schema: "output", breaking: false, detail: "output schema added" });
+    } else if (previous.outputSchema && next.outputSchema) {
+      diffSchema(name, undefined, previous.outputSchema, next.outputSchema, changes, "output");
+    }
   }
 
   for (const name of afterByName.keys()) {

@@ -122,6 +122,29 @@ describe("MCP Tool node registry picker", () => {
     expect(saved).not.toHaveProperty("secretRef");
   });
 
+  it("shows annotation chips and the output schema for a registered server's tool", async () => {
+    vi.mocked(api.fetchMcpServerTools).mockResolvedValue({
+      serverId: "mcp_gh",
+      snapshotId: "snap_1",
+      probedAt: registered.lastProbeAt,
+      tools: [
+        {
+          name: "search_issues",
+          description: "Search",
+          inputSchema: { type: "object" },
+          annotations: { readOnlyHint: true, openWorldHint: false, title: "Search issues" },
+          outputSchema: { type: "object", properties: { total: { type: "integer" } }, required: ["total"] }
+        }
+      ]
+    });
+    render(<NodeInspector {...makeProps(makeToolNode({ registryServerId: "mcp_gh", serverId: "stdio_mcp", toolName: "search_issues" }))} />);
+
+    expect((await screen.findAllByText("Read-only")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Closed world").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("total*").length).toBeGreaterThan(0);
+    expect(screen.queryByText("No output schema; the tool returns text.")).not.toBeInTheDocument();
+  });
+
   it("keeps inline configuration when no server is registered", async () => {
     vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [], adapters: [], defaultProbeIntervalMs: 300000 });
     render(<NodeInspector {...makeProps(makeToolNode({ serverId: "http_mcp", toolName: "__all__" }))} />);

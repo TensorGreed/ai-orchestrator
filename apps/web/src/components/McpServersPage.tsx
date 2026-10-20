@@ -45,9 +45,12 @@ import {
   probeMcpServer,
   updateMcpServer
 } from "../lib/api";
+import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
+import { McpAuthFields } from "./McpAuthFields";
 import { McpCatalogBanner } from "./McpCatalogBanner";
 import { McpClientsView } from "./McpClientsView";
 import { McpImportDialog } from "./McpImportDialog";
+import { McpOAuthPanel, usesOAuth } from "./McpOAuthPanel";
 import { McpPlaygroundPage } from "./McpPlaygroundPage";
 import { McpPoliciesView } from "./McpPoliciesView";
 import { McpToolsetsView } from "./McpToolsetsView";
@@ -495,6 +498,11 @@ function McpServerForm({
           </small>
         </label>
       </div>
+      {adapterId === "http_mcp" && (
+        <div className="kb-form-row">
+          <McpAuthFields connectionJson={connectionJson} onConnectionJsonChange={setConnectionJson} />
+        </div>
+      )}
       <div className="kb-form-row kb-form-row-2">
         <label className="mcp-check">
           <input type="checkbox" checked={probeEnabled} onChange={(e) => setProbeEnabled(e.target.checked)} />
@@ -746,6 +754,8 @@ function McpServerDetail({
         />
       </div>
 
+      {usesOAuth(server.adapterId, server.connection) && <McpOAuthPanel serverId={server.id} isAdmin={isAdmin} />}
+
       <ProbeStrip probes={probes} />
 
       <ToolsSection
@@ -978,6 +988,7 @@ function ToolsSection({
               <th>Tool</th>
               <th>Access</th>
               <th>Inputs</th>
+              <th>Outputs</th>
               <th className="num">Calls</th>
               <th className="num">p50</th>
               <th className="num">p95</th>
@@ -994,6 +1005,7 @@ function ToolsSection({
                   <td>
                     <code>{name}</code>
                     {tool?.description ? <div className="kb-subtle">{tool.description}</div> : null}
+                    {tool?.annotations ? <McpAnnotationChips annotations={tool.annotations} /> : null}
                   </td>
                   <td>
                     {tool ? (
@@ -1010,6 +1022,7 @@ function ToolsSection({
                   <td>
                     {tool ? <ToolInputs schema={tool.inputSchema} /> : <span className="kb-subtle">not in current snapshot</span>}
                   </td>
+                  <td>{tool ? <McpOutputSchema schema={tool.outputSchema} compact /> : "—"}</td>
                   <td className="num">{called ? formatCount(called.calls) : "—"}</td>
                   <td className="num">{called ? formatMs(called.p50Ms) : "—"}</td>
                   <td className="num">{called ? formatMs(called.p95Ms) : "—"}</td>

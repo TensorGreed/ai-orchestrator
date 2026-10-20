@@ -259,6 +259,17 @@ export const mcpToolPatternSchema = z
   .max(200)
   .regex(/^[A-Za-z0-9_.:\/*-]+$/, "Use a tool name, or a glob where * matches any characters");
 
+export const mcpToolHintConditionSchema = z.enum([
+  "destructive",
+  "not_destructive",
+  "read_only",
+  "not_read_only",
+  "idempotent",
+  "not_idempotent",
+  "open_world",
+  "not_open_world"
+]);
+
 export const mcpToolPolicyRuleInputSchema = z.object({
   name: z.string().trim().max(120).nullable().optional(),
   description: z.string().max(2000).nullable().optional(),
@@ -268,6 +279,8 @@ export const mcpToolPolicyRuleInputSchema = z.object({
   serverId: z.string().trim().min(1).nullable().optional(),
   /** Defaults to "*" (every tool) when a rule is created without one. */
   toolPattern: mcpToolPatternSchema.optional(),
+  /** Phase 10.5 — only tools with this effective annotation hint; null = any tool. */
+  annotationHint: mcpToolHintConditionSchema.nullable().optional(),
   enabled: z.boolean().optional()
 });
 
@@ -282,6 +295,14 @@ export const mcpToolPolicyEvaluateSchema = z.object({
   toolName: z.string().trim().min(1).max(200),
   noWriteTools: z.boolean().optional()
 });
+
+// Phase 10.5 — OAuth connect for remote MCP servers.
+export const mcpOAuthConnectSchema = z
+  .object({
+    /** Space-separated scopes to request; defaults to the server's `scopes_supported`. */
+    scope: z.string().trim().max(1000).optional()
+  })
+  .strict();
 
 export const mcpToolClassificationSchema = z.object({
   /** true / false sets the manual override; null clears it. */

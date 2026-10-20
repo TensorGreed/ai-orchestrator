@@ -4143,3 +4143,174 @@ img.mcp-pg-block {
     padding: 14px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 10.5 — MCP tool annotations, output schemas and OAuth connections
+   --------------------------------------------------------------------------- */
+
+.mcp-hints {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.mcp-hint-title {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--fg);
+  margin-right: 2px;
+}
+
+.mcp-hint {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.mcp-hint-ok {
+  background: var(--ok-soft);
+  color: var(--fg);
+}
+
+.mcp-hint-warn {
+  background: var(--warn-soft);
+  color: var(--fg);
+}
+
+.mcp-hint-err {
+  background: var(--err-soft);
+  border-color: var(--err);
+  color: var(--fg);
+}
+
+.mcp-output-schema {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcp-output-type {
+  color: var(--fg-faint);
+}
+
+.mcp-output-raw summary {
+  cursor: pointer;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.mcp-output-raw pre {
+  margin: 4px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  font: 400 var(--fs-xs) var(--font-mono);
+  color: var(--fg);
+}
+
+.mcp-oauth {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+}
+
+.mcp-oauth-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mcp-oauth-head h4 {
+  margin: 0;
+}
+
+.mcp-oauth-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.mcp-oauth-state::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+
+.mcp-oauth-state.is-connected::before {
+  background: var(--ok);
+}
+
+.mcp-oauth-state.is-expired::before {
+  background: var(--warn);
+}
+
+.mcp-oauth-state.is-error::before {
+  background: var(--err);
+}
+
+.mcp-oauth-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 14px;
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.mcp-oauth-facts dt {
+  color: var(--fg-muted);
+}
+
+.mcp-oauth-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mcp-oauth-redirect {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mcp-oauth-redirect .pg-btn {
+  min-height: 0;
+  height: auto;
+  padding: 0 6px;
+  line-height: inherit;
+}
+
+.mcp-oauth-redirect code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.mcp-auth-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}

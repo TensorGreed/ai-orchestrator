@@ -290,6 +290,8 @@ export interface NodeExecutionResult {
   errorRemediation?: string;
   retryable?: boolean;
   attempts?: number;
+  /** Phase 10.5 — latest MCP tool progress reported while the node ran. */
+  progress?: NodeProgressSnapshot;
 }
 
 export interface WorkflowExecutionResult {
@@ -508,6 +510,11 @@ export interface MCPToolDefinition extends ToolDefinition {
   serverLabel?: string;
   /** Phase 10.2 — behaviour hints the server sent with `tools/list`, when it sent any. */
   annotations?: McpToolAnnotations;
+  /**
+   * Phase 10.5 — JSON Schema the tool's `structuredContent` conforms to, when
+   * the server declared one in `tools/list`.
+   */
+  outputSchema?: Record<string, unknown>;
 }
 
 /**
@@ -554,8 +561,38 @@ export interface MCPToolInvocation {
 
 export interface MCPToolResult {
   ok: boolean;
+  /**
+   * The tool's result as L2M has always shaped it: `structuredContent` when
+   * the server sent it, otherwise the text of the content blocks.
+   */
   output: unknown;
   error?: string;
+  /** Phase 10.5 — the `structuredContent` object, validated against the tool's `outputSchema` when it has one. */
+  structured?: Record<string, unknown>;
+  /** Phase 10.5 — the content blocks normalized to text (one string, or an array for several blocks). */
+  content?: unknown;
+}
+
+/**
+ * Phase 10.5 — one `notifications/progress` message an upstream MCP server
+ * sent for an in-flight `tools/call`.
+ */
+export interface McpToolProgressEvent {
+  toolName: string;
+  /** Adapter id of the server (`http_mcp`, `stdio_mcp`, ...). */
+  serverId: string;
+  registryServerId?: string;
+  progress: number;
+  total?: number;
+  message?: string;
+  /** ISO 8601 time L2M received the notification. */
+  at: string;
+}
+
+/** Latest MCP tool progress of a running node, as the run tape shows it. */
+export interface NodeProgressSnapshot extends McpToolProgressEvent {
+  /** 0..100 when the server sent a total. */
+  percent?: number;
 }
 
 export interface ConnectorDocument {
@@ -657,6 +694,27 @@ export interface McpToolAttribution {
 // ---------------------------------------------------------------------------
 
 export type McpPolicyRole = "admin" | "builder" | "operator" | "viewer";
+
+/** Phase 10.5 — annotation conditions a tool policy rule can require. */
+export type McpToolHintCondition =
+  | "destructive"
+  | "not_destructive"
+  | "read_only"
+  | "not_read_only"
+  | "idempotent"
+  | "not_idempotent"
+  | "open_world"
+  | "not_open_world";
+export const MCP_TOOL_HINT_CONDITIONS: readonly McpToolHintCondition[] = [
+  "destructive",
+  "not_destructive",
+  "read_only",
+  "not_read_only",
+  "idempotent",
+  "not_idempotent",
+  "open_world",
+  "not_open_world"
+];
 export const MCP_POLICY_ROLES: readonly McpPolicyRole[] = ["admin", "builder", "operator", "viewer"];
 
 /**
@@ -676,6 +734,12 @@ export interface McpToolPolicyRule {
   roles: McpPolicyRole[];
   serverId: string | null;
   toolPattern: string;
+  /**
+   * Phase 10.5 — limits the rule to tools whose effective annotation hint is
+   * true (`destructive`, `read_only`, `idempotent`, `open_world`), or false
+   * for the `not_` forms. Null = any tool. See `effectiveToolHints`.
+   */
+  annotationHint?: McpToolHintCondition | null;
   enabled: boolean;
   createdBy?: string | null;
   createdAt?: string;
@@ -878,6 +942,38 @@ export interface ImportReport {
     approximated: number;
     unsupported: number;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10.5 — OAuth 2.1 connections to remote MCP servers
+// ---------------------------------------------------------------------------
+
+export type McpOAuthConnectionState = "not_connected" | "connected" | "expired" | "error";
+
+/**
+ * What the API shows about a registry server's OAuth connection. Tokens and
+ * client secrets never appear here; they live in a SecretService secret.
+ */
+export interface McpOAuthConnectionStatus {
+  serverId: string;
+  state: McpOAuthConnectionState;
+  /** Who the access token acts as, when the authorization server said. */
+  subject: string | null;
+  scope: string | null;
+  /** Issuer URL of the authorization server the server's metadata named. */
+  authorizationServer: string | null;
+  /** How L2M got its client id: RFC 7591 registration, or an id an admin entered. */
+  clientRegistration: "dynamic" | "pre_registered" | null;
+  clientId: string | null;
+  expiresAt: string | null;
+  hasRefreshToken: boolean;
+  lastRefreshAt: string | null;
+  connectedAt: string | null;
+  connectedBy: string | null;
+  lastError: string | null;
+  updatedAt: string | null;
+  /** The redirect URL to allow on the authorization server for this L2M instance. */
+  redirectUri: string;
 }
 
 // ---------------------------------------------------------------------------

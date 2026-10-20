@@ -3,6 +3,7 @@ import type {
   McpPolicyRole,
   McpToolAnnotations,
   McpToolClassification,
+  McpToolHintCondition,
   McpToolPolicyRule
 } from "@ai-orchestrator/shared";
 
@@ -13,7 +14,7 @@ import type {
  *
  * Evaluation order for one tool call:
  *   1. Collect the enabled rules whose scope matches the call: project, role,
- *      server and tool pattern must all match.
+ *      server, tool pattern and (Phase 10.5) annotation hint must all match.
  *   2. No matching rule → allowed (the default; installs without rules behave
  *      as before).
  *   3. No matching deny rule → allowed.
@@ -33,6 +34,66 @@ export interface McpToolPolicyRequest {
   /** Registry entry the server came from; absent for servers configured inline on a node. */
   registryServerId?: string;
   toolName: string;
+  /** Phase 10.5 — the tool's annotations, for rules with an `annotationHint`. */
+  annotations?: McpToolAnnotations | null;
+  /** Admin read-only override; it also decides `read_only` / `destructive` hints. */
+  manualReadOnly?: boolean | null;
+}
+
+/**
+ * Phase 10.5 — a tool's annotation hints with the MCP defaults filled in, the
+ * way the spec defines a missing hint: `readOnlyHint` false,
+ * `destructiveHint` true, `idempotentHint` false, `openWorldHint` true. An
+ * admin's read-only override replaces `readOnlyHint`. `destructiveHint` and
+ * `idempotentHint` only mean something for a tool that is not read-only, so a
+ * read-only tool is never destructive. A tool without annotations therefore
+ * counts as destructive and open-world, which is the safe reading for deny
+ * rules.
+ */
+export interface EffectiveToolHints {
+  readOnly: boolean;
+  destructive: boolean;
+  idempotent: boolean;
+  openWorld: boolean;
+}
+
+export function effectiveToolHints(
+  annotations?: McpToolAnnotations | null,
+  manualReadOnly?: boolean | null
+): EffectiveToolHints {
+  const readOnly = typeof manualReadOnly === "boolean" ? manualReadOnly : annotations?.readOnlyHint === true;
+  return {
+    readOnly,
+    destructive: readOnly ? false : annotations?.destructiveHint !== false,
+    idempotent: readOnly ? true : annotations?.idempotentHint === true,
+    openWorld: annotations?.openWorldHint !== false
+  };
+}
+
+const HINT_KEYS: Record<string, keyof EffectiveToolHints> = {
+  destructive: "destructive",
+  read_only: "readOnly",
+  idempotent: "idempotent",
+  open_world: "openWorld"
+};
+
+/** True when the tool's effective hints satisfy `condition`; a null condition matches every tool. */
+export function matchesHintCondition(
+  condition: McpToolHintCondition | null | undefined,
+  hints: EffectiveToolHints
+): boolean {
+  if (!condition) return true;
+  const negated = condition.startsWith("not_");
+  const key = HINT_KEYS[negated ? condition.slice(4) : condition];
+  if (!key) return false;
+  return negated ? !hints[key] : hints[key];
+}
+
+/** Human-readable form of a hint condition, for messages and the UI. */
+export function describeHintCondition(condition: McpToolHintCondition): string {
+  const negated = condition.startsWith("not_");
+  const base = (negated ? condition.slice(4) : condition).replace("_", "-");
+  return negated ? `not ${base}` : base;
 }
 
 export interface McpToolPolicyDecision {
@@ -88,7 +149,16 @@ export function ruleMatches(rule: McpToolPolicyRule, request: McpToolPolicyReque
   if (rule.projectId && rule.projectId !== (request.projectId ?? null)) return false;
   if (rule.roles.length > 0 && !rule.roles.includes(request.role)) return false;
   if (!matchesPolicyServer(rule.serverId, request)) return false;
-  return matchesToolPattern(rule.toolPattern, request.toolName);
+  if (!matchesToolPattern(rule.toolPattern, request.toolName)) return false;
+  if (rule.annotationHint) {
+    return matchesHintCondition(rule.annotationHint, effectiveToolHints(request.annotations, request.manualReadOnly));
+  }
+  return true;
+}
+
+/** True when any enabled rule needs the tool's annotations to decide whether it matches. */
+export function policyNeedsAnnotations(rules: readonly McpToolPolicyRule[]): boolean {
+  return rules.some((rule) => rule.enabled && Boolean(rule.annotationHint));
 }
 
 /**
@@ -110,8 +180,8 @@ function rolesWithin(inner: McpPolicyRole[], outer: McpPolicyRole[]): boolean {
   return inner.every((role) => outer.includes(role));
 }
 
-function scalarWithin(inner: string | null, outer: string | null): boolean {
-  return outer === null || inner === outer;
+function scalarWithin(inner: string | null | undefined, outer: string | null | undefined): boolean {
+  return outer === null || outer === undefined || inner === outer;
 }
 
 /** True when `inner`'s scope sits inside `outer`'s in every field and is smaller in at least one. */
@@ -120,13 +190,15 @@ export function isStrictlyNarrower(inner: McpToolPolicyRule, outer: McpToolPolic
     scalarWithin(inner.projectId, outer.projectId) &&
     rolesWithin(inner.roles, outer.roles) &&
     scalarWithin(inner.serverId, outer.serverId) &&
-    patternWithin(inner.toolPattern, outer.toolPattern);
+    patternWithin(inner.toolPattern, outer.toolPattern) &&
+    scalarWithin(inner.annotationHint, outer.annotationHint);
   if (!within) return false;
   const reverse =
     scalarWithin(outer.projectId, inner.projectId) &&
     rolesWithin(outer.roles, inner.roles) &&
     scalarWithin(outer.serverId, inner.serverId) &&
-    patternWithin(outer.toolPattern, inner.toolPattern);
+    patternWithin(outer.toolPattern, inner.toolPattern) &&
+    scalarWithin(outer.annotationHint, inner.annotationHint);
   return !reverse;
 }
 
@@ -179,8 +251,6 @@ export function classifyMcpTool(input: {
 export interface McpToolAccessInput extends McpToolPolicyRequest {
   rules: readonly McpToolPolicyRule[];
   noWriteTools?: boolean;
-  annotations?: McpToolAnnotations | null;
-  manualReadOnly?: boolean | null;
   /** Display name for the server in messages (a registry server's name); ids are used when omitted. */
   serverLabel?: string;
 }
@@ -213,7 +283,9 @@ export function evaluateMcpToolAccess(input: McpToolAccessInput): McpToolAccessD
       ...(policy.rule.name ? { ruleName: policy.rule.name } : {}),
       policy,
       classification,
-      message: `${toolLabel} is blocked by policy ${describePolicyRule(policy.rule)} for role ${input.role}.`
+      message: `${toolLabel} is blocked by policy ${describePolicyRule(policy.rule)} for role ${input.role}${
+        policy.rule.annotationHint ? ` (rule applies to ${describeHintCondition(policy.rule.annotationHint)} tools)` : ""
+      }.`
     };
   }
   if (input.noWriteTools && !classification.readOnly) {

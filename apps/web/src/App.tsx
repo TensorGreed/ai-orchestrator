@@ -64,7 +64,8 @@ import {
   type SecretListItem,
   type StreamExecutionStartedEvent,
   type StreamNodeCompleteEvent,
-  type StreamNodeStartEvent
+  type StreamNodeStartEvent,
+  type StreamNodeProgressEvent
 } from "./lib/api";
 import {
   createBlankWorkflow,
@@ -559,6 +560,21 @@ function applyNodeCompleteToExecutionResult(
     status: "partial",
     completedAt: event.completedAt,
     nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult)
+  };
+}
+
+/** Phase 10.5 — keep the latest MCP tool progress on the node's result (the run tape shows it). */
+function applyNodeProgressToExecutionResult(
+  current: WorkflowExecutionResult | null,
+  event: StreamNodeProgressEvent
+): WorkflowExecutionResult | null {
+  if (!current) return current;
+  const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId);
+  if (!existing) return current;
+  const { nodeId: _nodeId, ...progress } = event;
+  return {
+    ...current,
+    nodeResults: upsertNodeResult(current.nodeResults, { ...existing, progress })
   };
 }
 
@@ -3044,6 +3060,12 @@ function StudioApp() {
             };
           });
         },
+        onNodeProgress: (event) => {
+          if (!isDebugMode) {
+            return;
+          }
+          setExecutionResult((current) => applyNodeProgressToExecutionResult(current, event));
+        },
         onNodeComplete: (event) => {
           if (!isDebugMode) {
             return;
@@ -3139,6 +3161,12 @@ function StudioApp() {
               [event.nodeId]: "running"
             };
           });
+        },
+        onNodeProgress: (event) => {
+          if (!isDebugMode) {
+            return;
+          }
+          setExecutionResult((current) => applyNodeProgressToExecutionResult(current, event));
         },
         onNodeComplete: (event) => {
           if (!isDebugMode) {
@@ -3284,6 +3312,11 @@ function StudioApp() {
               initializedStatuses = true;
             }
             setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: "running", at: event.startedAt }].slice(-40));
+          },
+          onNodeProgress: (event) => {
+            if (isDebugMode) {
+              setExecutionResult((current) => applyNodeProgressToExecutionResult(current, event));
+            }
           },
           onNodeComplete: (event) => {
             if (isDebugMode) {

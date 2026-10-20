@@ -21,6 +21,7 @@ Rules live on the **MCP servers** page, in the **Policies** view.
 | Roles | Any subset of `admin`, `builder`, `operator`, `viewer`. Empty means every role. |
 | Server | A registry server id, or an adapter id (`mock-mcp`, `http_mcp`, `stdio_mcp`, ...) for servers configured inline on a node. Empty means any server. |
 | Tool pattern | An exact tool name, or a glob where `*` matches any run of characters (including none). Other characters, such as `.`, are matched literally. Defaults to `*`. |
+| Annotation condition | Optional. Only tools whose annotation hints meet the condition match, for example **destructive** tools. See [Annotation conditions](#annotation-conditions). |
 | Name, description | Optional. The name is what traces and error messages show. |
 | Enabled | Disabled rules are ignored. |
 
@@ -30,7 +31,7 @@ An adapter id never matches a registered server. A rule on `http_mcp` reaches HT
 
 For one tool call:
 
-1. Collect the enabled rules whose scope matches the call. Project, role, server and tool pattern must all match.
+1. Collect the enabled rules whose scope matches the call. Project, role, server, tool pattern and annotation condition must all match.
 2. If no rule matches, the tool is **allowed**. This is the default.
 3. If no matching rule is a deny rule, the tool is **allowed**.
 4. A matching deny rule is set aside when a matching allow rule is **strictly narrower** than it. That is how an allow rule carves an exception out of a broader deny.
@@ -44,6 +45,7 @@ An allow rule is **strictly narrower** than a deny rule when it is inside the de
 - **Roles:** a subset is inside a larger set. Any set is inside "every role", but "every role" is not inside a specific set.
 - **Server:** a specific server is inside "any server", and inside the same server.
 - **Tool pattern:** containment is checked conservatively. Anything is inside `*`, and an exact name is inside a glob that matches it. Two different globs are never treated as nested.
+- **Annotation condition:** a rule with a condition is inside a rule without one, and inside a rule with the same condition. Two different conditions are never treated as nested.
 
 ### Examples
 
@@ -52,6 +54,8 @@ An allow rule is **strictly narrower** than a deny rule when it is inside the de
 **A broad allow does not override a narrow deny.** Rules: deny server `GitHub` for `viewer`, and allow tool `search_issues` on server `GitHub` for every role. The allow covers every role, so it is not inside the viewer-only deny. Viewers stay blocked from `search_issues`.
 
 **No deletes in one project.** Rule: deny tool `delete_*` in project `Finance`. Every role loses `delete_issue`, `delete_file` and similar tools in that project only.
+
+**No destructive tools for operators.** Rule: deny for `operator` with annotation condition **destructive**. Operators lose every tool that is not read-only and does not declare `destructiveHint: false`, on every server. Add an allow rule for `operator` on one tool name with the same condition to make an exception.
 
 **Inline stdio servers off.** Rule: deny server `stdio_mcp`. Every stdio server configured inline on a node is blocked. Registered stdio servers are not affected, because an adapter id never matches a registry entry.
 
@@ -90,6 +94,24 @@ Each tool is read-only or a write tool, decided in this order:
 The HTTP and stdio adapters keep the annotations a server sends: `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`. Annotations are hints from the server, not guarantees, which is why the admin override exists. Servers configured inline on a node have no registry entry, so their tools are read-only only through annotations.
 
 The built-in `mock-mcp` server marks `get_current_time` and `lookup_kb` read-only and leaves `calculator` unannotated, so `calculator` counts as a write tool. That makes it handy for trying the switch below.
+
+## Annotation conditions
+
+A rule can carry an **annotation condition** (`annotationHint` in the API). The rule then matches only tools whose hints meet it, on top of its other fields.
+
+| Condition | Matches tools that are |
+|---|---|
+| `destructive` / `not_destructive` | destructive / not destructive |
+| `read_only` / `not_read_only` | read-only / not read-only |
+| `idempotent` / `not_idempotent` | idempotent / not idempotent |
+| `open_world` / `not_open_world` | open-world / closed-world |
+
+The hints are the MCP tool annotations from `tools/list`, read as the MCP specification says when a hint is missing: `readOnlyHint` defaults to `false`, `destructiveHint` to `true`, `idempotentHint` to `false` and `openWorldHint` to `true`. So a tool with no annotations counts as destructive and open-world, which is the safe reading for deny rules. Two more adjustments:
+
+- An admin's **Mark read-only** or **Mark write** override replaces `readOnlyHint`.
+- A read-only tool is never destructive, whatever `destructiveHint` says.
+
+For registered servers the hints come from the server's current snapshot. Agents see them when they discover tools. A direct MCP Tool node lists the server's tools before the call when any enabled rule has a condition; if the hints cannot be read, the defaults above apply. A blocked call's message names the condition, for example `... is blocked by policy 'No destructive tools for operators' (mtp_…) for role operator (rule applies to destructive tools).`
 
 ## No write tools
 
@@ -157,7 +179,7 @@ Changes are written to the audit log with resource type `mcp_policy` and events 
 ## Endpoints
 
 - `GET /api/mcp/policies`: rules in evaluation order, plus the roles a rule can target (builder)
-- `POST /api/mcp/policies`: create a rule (admin)
+- `POST /api/mcp/policies`: create a rule; `annotationHint` is one of the conditions above, or `null` (admin)
 - `PUT /api/mcp/policies/:id`: update any field of a rule (admin)
 - `DELETE /api/mcp/policies/:id`: delete a rule (admin)
 - `POST /api/mcp/policies/evaluate`: dry-run `{ projectId, role, serverId, toolName, noWriteTools? }`. Returns the decision, the deciding rule, the matching rules, the denies a narrower allow set aside, and the tool's classification (builder)
@@ -165,4 +187,4 @@ Changes are written to the audit log with resource type `mcp_policy` and events 
 
 ## Storage
 
-Rules are kept in `mcp_tool_policies` and overrides in `mcp_tool_classifications`. SQLite creates both at startup. On Postgres, migration v22 creates them and adds `workflows.created_by`.
+Rules are kept in `mcp_tool_policies` and overrides in `mcp_tool_classifications`. SQLite creates both at startup. On Postgres, migration v22 creates them and adds `workflows.created_by`; migration v24 adds the `annotation_hint` column.

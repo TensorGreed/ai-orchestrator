@@ -17,6 +17,7 @@ import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
   MCP_POLICY_ROLES,
+  mcpOAuthConnectSchema,
   mcpToolClassificationSchema,
   mcpToolPolicyEvaluateSchema,
   mcpToolPolicyRuleInputSchema,
@@ -29,7 +30,9 @@ import {
   type McpToolAnnotations,
   type McpToolPolicyRule,
   type McpToolPolicySubject,
+  type McpToolProgressEvent,
   type MCPServerConfig,
+  type NodeProgressSnapshot,
   type SecretReference,
   type Workflow,
   type WorkflowExecutionState,
@@ -112,6 +115,13 @@ import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
+import {
+  McpOAuthService,
+  McpOAuthUserError,
+  renderOAuthCallbackPage,
+  resolveMcpOAuthRedirectUri
+} from "./services/mcp-oauth-service.js";
+import { isInternalSecretProvider } from "./services/secret-service.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -1145,7 +1155,26 @@ export function createApp(
   });
   const providerRegistry = createDefaultProviderRegistry();
   const connectorRegistry = createDefaultConnectorRegistry();
-  const mcpRegistry = createDefaultMCPRegistry();
+  // Phase 10.5 — OAuth connections for remote MCP servers. The http adapter
+  // asks this service for access tokens; tokens stay in SecretService.
+  const mcpOAuthService = new McpOAuthService(store, secretService, {
+    redirectUri: resolveMcpOAuthRedirectUri(config),
+    stateTtlMs: config.MCP_OAUTH_STATE_TTL_MS,
+    refreshSkewMs: config.MCP_OAUTH_REFRESH_SKEW_MS,
+    onAudit: (event) => {
+      auditService.record({
+        category: "system",
+        eventType: event.eventType,
+        action: "update",
+        outcome: event.outcome,
+        actor: { type: "system" },
+        resourceType: "mcp_server",
+        resourceId: event.serverId,
+        metadata: event.metadata
+      });
+    }
+  });
+  const mcpRegistry = createDefaultMCPRegistry({ oauth: mcpOAuthService });
   const agentRuntime = createDefaultAgentRuntime();
 
   // Phase 6 — community-package loader. Constructed eagerly so admin routes
@@ -1261,6 +1290,8 @@ export function createApp(
       error?: string;
     }) => Promise<void> | void;
     onLLMDelta?: (event: { nodeId: string; delta: string; index: number }) => Promise<void> | void;
+    /** Phase 10.5 — `notifications/progress` from an MCP server during an MCP Tool node or agent tool call. */
+    onMcpProgress?: (event: McpToolProgressEvent & { nodeId: string }) => Promise<void> | void;
   };
   type ExecutionHistoryRecord = Parameters<SqliteStore["saveExecutionHistory"]>[0];
 
@@ -1586,6 +1617,7 @@ export function createApp(
           onNodeStart: input.hooks?.onNodeStart,
           onNodeComplete: input.hooks?.onNodeComplete,
           onLLMDelta: input.hooks?.onLLMDelta,
+          onMcpProgress: input.hooks?.onMcpProgress,
           abortSignal: controller?.signal
         }
       );
@@ -1842,11 +1874,14 @@ export function createApp(
         input?: unknown;
         output?: unknown;
         error?: string;
+        progress?: NodeProgressSnapshot;
       }
     >();
     let startedAt: string | null = null;
     let currentStatus: "running" | "waiting_approval" = "running";
     let startLogged = false;
+    // Progress notifications can be frequent; history writes for them are throttled.
+    let lastProgressPersistMs = 0;
 
     const snapshotNodeResults = () => [...nodeResultsById.values()];
     const persistProgress = (completedAt?: string) => {
@@ -1933,7 +1968,8 @@ export function createApp(
           durationMs: event.durationMs,
           input: event.input ?? existing?.input,
           output: event.output ?? existing?.output,
-          error: event.error
+          error: event.error,
+          ...(existing?.progress ? { progress: existing.progress } : {})
         });
         if (event.status === "waiting_approval") {
           currentStatus = "waiting_approval";
@@ -1963,6 +1999,37 @@ export function createApp(
               error: secretService.redact(error instanceof Error ? error.message : String(error))
             },
             "Execution node-complete hook failed"
+          );
+        }
+      },
+      onMcpProgress: async (event) => {
+        const { nodeId, ...progressEvent } = event;
+        const snapshot: NodeProgressSnapshot = {
+          ...progressEvent,
+          ...(typeof event.total === "number" && event.total > 0
+            ? { percent: Math.max(0, Math.min(100, Math.round((event.progress / event.total) * 100))) }
+            : {})
+        };
+        const existing = nodeResultsById.get(nodeId);
+        if (existing) {
+          nodeResultsById.set(nodeId, { ...existing, progress: snapshot });
+          const nowMs = Date.now();
+          if (nowMs - lastProgressPersistMs >= 1000) {
+            lastProgressPersistMs = nowMs;
+            persistProgress();
+          }
+        }
+        try {
+          await input.passthroughHooks?.onMcpProgress?.({ nodeId, ...snapshot });
+        } catch (error) {
+          app.log.warn(
+            {
+              executionId: input.executionId,
+              workflowId: input.workflow.id,
+              nodeId,
+              error: secretService.redact(error instanceof Error ? error.message : String(error))
+            },
+            "Execution MCP-progress hook failed"
           );
         }
       },
@@ -6670,6 +6737,9 @@ export function createApp(
           },
           onLLMDelta: (event) => {
             sendSseEvent("llm_delta", event);
+          },
+          onMcpProgress: (event) => {
+            sendSseEvent("node_progress", event);
           }
         }
       });
@@ -8259,6 +8329,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           },
           onLLMDelta: (event) => {
             sendSseEvent("llm_delta", event);
+          },
+          onMcpProgress: (event) => {
+            sendSseEvent("node_progress", event);
           }
         }
       });
@@ -8725,7 +8798,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
     const row = store.getSecret(request.params.id);
-    if (!row) {
+    if (!row || isInternalSecretProvider(row.provider)) {
+      // Phase 10.5 — MCP OAuth secrets are managed from the MCP servers page only.
       reply.code(404);
       return { error: "Secret not found" };
     }
@@ -9131,6 +9205,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           usages
         };
       }
+      // Phase 10.5 — the OAuth tokens and client registration go with the server.
+      mcpOAuthService.disconnect(existing.id);
       store.deleteMcpServer(existing.id);
       auditService.record({
         category: "system",
@@ -9237,7 +9313,164 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     roles: rule.roles,
     serverId: rule.serverId,
     toolPattern: rule.toolPattern,
+    annotationHint: rule.annotationHint ?? null,
     enabled: rule.enabled
+  });
+
+  // Phase 10.5 — OAuth 2.1 connections for remote MCP servers. Status is
+  // readable by builders; connecting, refreshing and disconnecting are
+  // admin-only. No route ever returns a token.
+  const findOAuthServer = (serverId: string, reply: FastifyReply) => {
+    const server = store.getMcpServer(serverId);
+    if (!server) {
+      reply.code(404);
+      return null;
+    }
+    return server;
+  };
+
+  app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const server = findOAuthServer(request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
+    return { status: mcpOAuthService.status(server.id), usesOAuth: McpOAuthService.usesOAuth(server) };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/mcp/servers/:id/oauth/connect", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const server = findOAuthServer(request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
+    const parsed = mcpOAuthConnectSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid OAuth connect payload", details: parsed.error.issues };
+    }
+    const sessionId = getSessionIdFromRequest(request);
+    if (!sessionId) {
+      // The callback is bound to a browser session; API keys cannot complete it.
+      reply.code(400);
+      return { error: "Connecting a server needs a signed-in browser session." };
+    }
+    try {
+      const started = await mcpOAuthService.startAuthorization({
+        server,
+        sessionId,
+        userEmail: user.email,
+        ...(parsed.data.scope ? { scope: parsed.data.scope } : {})
+      });
+      audit(request, user, {
+        category: "system",
+        eventType: "mcp_server.oauth_connect_started",
+        action: "update",
+        outcome: "success",
+        resourceType: "mcp_server",
+        resourceId: server.id,
+        projectId: server.projectId,
+        metadata: { name: server.name }
+      });
+      return started;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "OAuth connect failed";
+      audit(request, user, {
+        category: "system",
+        eventType: "mcp_server.oauth_connect_started",
+        action: "update",
+        outcome: "failure",
+        resourceType: "mcp_server",
+        resourceId: server.id,
+        projectId: server.projectId,
+        metadata: { name: server.name, error: message.slice(0, 300) }
+      });
+      reply.code(error instanceof McpOAuthUserError ? error.statusCode : 500);
+      return { error: message };
+    }
+  });
+
+  app.get<{ Querystring: Record<string, string | undefined> }>("/api/mcp/oauth/callback", async (request, reply) => {
+    const query = request.query ?? {};
+    const sessionId = getSessionIdFromRequest(request);
+    const sessionUser = sessionId ? authService.getSessionUser(sessionId) : null;
+    const outcome =
+      sessionUser && sessionUser.role === "admin"
+        ? await mcpOAuthService.completeAuthorization({
+            state: query.state,
+            code: query.code,
+            ...(query.error ? { error: query.error } : {}),
+            ...(query.error_description ? { errorDescription: query.error_description } : {}),
+            sessionId
+          })
+        : {
+            serverId: null,
+            ok: false,
+            error: "Sign in to L2M as an admin in this browser, then connect the server again."
+          };
+    if (outcome.serverId) {
+      audit(request, sessionUser ?? null, {
+        category: "system",
+        eventType: "mcp_server.oauth_connected",
+        action: "update",
+        outcome: outcome.ok ? "success" : "failure",
+        resourceType: "mcp_server",
+        resourceId: outcome.serverId,
+        metadata: outcome.ok ? {} : { error: (outcome.error ?? "").slice(0, 300) }
+      });
+    }
+    const webOrigin = config.WEB_ORIGIN.split(",").map((entry) => entry.trim()).find(Boolean) ?? "/";
+    const page = renderOAuthCallbackPage(outcome, webOrigin);
+    reply
+      .code(outcome.ok ? 200 : 400)
+      .header("content-type", "text/html; charset=utf-8")
+      .header("cache-control", "no-store")
+      .header(
+        "content-security-policy",
+        `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${page.nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
+      );
+    return page.html;
+  });
+
+  app.post<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth/refresh", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const server = findOAuthServer(request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
+    try {
+      const status = await mcpOAuthService.refreshNow(server.id);
+      audit(request, user, {
+        category: "system",
+        eventType: "mcp_server.oauth_refreshed",
+        action: "update",
+        outcome: "success",
+        resourceType: "mcp_server",
+        resourceId: server.id,
+        projectId: server.projectId,
+        metadata: {}
+      });
+      return { status };
+    } catch (error) {
+      reply.code(409);
+      return { error: error instanceof Error ? error.message : "Token refresh failed", status: mcpOAuthService.status(server.id) };
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const server = findOAuthServer(request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
+    const status = mcpOAuthService.disconnect(server.id);
+    audit(request, user, {
+      category: "system",
+      eventType: "mcp_server.oauth_disconnected",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_server",
+      resourceId: server.id,
+      projectId: server.projectId,
+      metadata: { name: server.name }
+    });
+    return { status };
   });
 
   app.get("/api/mcp/policies", async (request, reply) => {
@@ -9265,6 +9498,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       roles: [...new Set(parsed.data.roles ?? [])],
       serverId: parsed.data.serverId ?? null,
       toolPattern: parsed.data.toolPattern ?? "*",
+      annotationHint: parsed.data.annotationHint ?? null,
       enabled: parsed.data.enabled !== false,
       createdBy: user.email
     });

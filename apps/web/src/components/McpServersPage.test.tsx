@@ -207,7 +207,7 @@ describe("McpServersPage", () => {
     expect(within(rows[0]).getByText("1.1k")).toBeInTheDocument();
     expect(within(rows[0]).getByText("$0.0042")).toBeInTheDocument();
     expect(within(rows[1]).getByText("create_issue")).toBeInTheDocument();
-    expect(within(rows[1]).getAllByText("—")).toHaveLength(6);
+    expect(within(rows[1]).getAllByText("—")).toHaveLength(7);
     expect(screen.getByText(/12 calls in the last 7 days · 3 failed/)).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText("Telemetry window"), "30d");
@@ -217,7 +217,7 @@ describe("McpServersPage", () => {
     expect(within(after[0]).getByText("create_issue")).toBeInTheDocument();
     expect(within(after[0]).getByText("2.4 s")).toBeInTheDocument();
     expect(within(after[0]).getByText("$1.50")).toBeInTheDocument();
-    expect(within(after[1]).getAllByText("—")).toHaveLength(6);
+    expect(within(after[1]).getAllByText("—")).toHaveLength(7);
   });
 
   it("switches the probe chart to a table", async () => {
