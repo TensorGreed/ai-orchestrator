@@ -16,6 +16,7 @@
 - `DELETE /api/workflows/:id`
 - `POST /api/workflows/:id/duplicate`
 - `POST /api/workflows/import`
+- `POST /api/workflows/import/external` — convert an export from another builder; see [Importing from another builder](../product/importing-from-another-builder.md)
 - `GET /api/workflows/:id/export`
 - `POST /api/workflows/:id/validate`
 - `POST /api/workflows/:id/execute`

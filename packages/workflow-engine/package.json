@@ -6,7 +6,8 @@
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "gen:import-coverage": "tsx scripts/export-import-coverage.ts"
   },
   "dependencies": {
     "@ai-orchestrator/agent-runtime": "workspace:*",
@@ -25,6 +26,7 @@
   },
   "devDependencies": {
     "@types/nodemailer": "^8.0.0",
-    "@types/pg": "^8.20.0"
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.20.5"
   }
 }

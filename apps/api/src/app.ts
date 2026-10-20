@@ -43,6 +43,8 @@ import {
   GoogleVertexEmbeddingAdapter,
   HuggingFaceEmbeddingAdapter,
   chunkDocuments,
+  convertExternalWorkflow,
+  ExternalWorkflowImportError,
   type ChunkOptions,
   type EmbeddingAdapter
 } from "@ai-orchestrator/workflow-engine";
@@ -176,6 +178,15 @@ const authLoginSchema = z.object({
 const workflowImportSchema = z.object({
   json: z.string().optional(),
   workflow: z.unknown().optional()
+});
+
+const externalWorkflowImportSchema = z.object({
+  source: z.unknown().optional(),
+  sourceText: z.string().optional(),
+  projectId: z.string().min(1).max(120).optional(),
+  folderId: z.string().min(1).max(120).optional(),
+  name: z.string().min(1).max(120).optional(),
+  dryRun: z.boolean().optional()
 });
 
 const workflowDuplicateSchema = z.object({
@@ -5841,6 +5852,112 @@ export function createApp(
         error: error instanceof Error ? error.message : "Failed to import workflow"
       };
     }
+  });
+
+  // External workflow import: convert an export from another builder into an
+  // L2M workflow, optionally persisting it. Credential values never reach this
+  // route's response; the report only lists secrets to resolve by name.
+  app.post<{ Body: unknown }>("/api/workflows/import/external", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+
+    const parsed = externalWorkflowImportSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid external import payload", details: parsed.error.issues };
+    }
+
+    let source: unknown = parsed.data.source;
+    if (source === undefined && typeof parsed.data.sourceText === "string") {
+      try {
+        source = JSON.parse(parsed.data.sourceText);
+      } catch (error) {
+        reply.code(400);
+        return {
+          error: `sourceText is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    }
+    if (source === undefined) {
+      reply.code(400);
+      return { error: "Provide the export as 'source' (JSON object) or 'sourceText' (JSON string)." };
+    }
+
+    const folder = parsed.data.folderId ? store.getFolder(parsed.data.folderId) : null;
+    if (parsed.data.folderId && !folder) {
+      reply.code(400);
+      return { error: "Target folder does not exist" };
+    }
+    const projectId = parsed.data.projectId ?? folder?.projectId ?? "default";
+    if (!store.getProject(projectId)) {
+      reply.code(400);
+      return { error: "Target project does not exist" };
+    }
+    if (folder && folder.projectId !== projectId) {
+      reply.code(400);
+      return { error: `Folder '${folder.id}' belongs to project '${folder.projectId}', not '${projectId}'` };
+    }
+    if (!rbacService.can(user, projectId, "workflow:write")) {
+      deny(reply, 403, `Permission 'workflow:write' required in project '${projectId}'`);
+      return;
+    }
+
+    let conversion: ReturnType<typeof convertExternalWorkflow>;
+    try {
+      conversion = convertExternalWorkflow(source);
+    } catch (error) {
+      reply.code(400);
+      if (error instanceof ExternalWorkflowImportError) {
+        return { error: error.message };
+      }
+      return { error: error instanceof Error ? error.message : "Failed to convert the external workflow export" };
+    }
+
+    const name = parsed.data.name?.trim();
+    const workflow: Workflow = {
+      ...conversion.workflow,
+      id: makeUniqueWorkflowId(store, conversion.workflow.id),
+      name: name || conversion.workflow.name,
+      projectId,
+      folderId: folder?.id
+    };
+
+    const validation = validateWorkflowGraph(workflow);
+    if (!validation.valid) {
+      reply.code(400);
+      return {
+        error: `Converted workflow failed validation: ${validation.issues.map((issue) => issue.message).join("; ")}`,
+        validation,
+        report: conversion.report
+      };
+    }
+
+    if (parsed.data.dryRun === true) {
+      return { workflow, report: conversion.report, dryRun: true };
+    }
+
+    const savedWorkflow = store.upsertWorkflow(workflow);
+    workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "imported from another builder" });
+    schedulerService?.reloadWorkflow(savedWorkflow.id);
+    triggerService?.reloadWorkflow(savedWorkflow.id);
+    audit(request, user, {
+      category: "workflow",
+      eventType: "workflow.import_external",
+      action: "create",
+      resourceType: "workflow",
+      resourceId: savedWorkflow.id,
+      projectId: savedWorkflow.projectId,
+      metadata: {
+        name: savedWorkflow.name,
+        sourceName: conversion.report.sourceName,
+        summary: conversion.report.summary,
+        unresolvedExpressions: conversion.report.unresolvedExpressions.length,
+        secretsToResolve: conversion.report.secretsToResolve.map((secret) => secret.secretId)
+      }
+    });
+    return { workflow: savedWorkflow, report: conversion.report };
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/export", async (request, reply) => {

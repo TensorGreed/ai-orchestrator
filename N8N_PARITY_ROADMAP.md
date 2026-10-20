@@ -400,7 +400,7 @@ inspector, slot rows and stage auto-layout).
 beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to n8n.
 
 ### 9.1 Import pipeline
-- [ ] `POST /api/workflows/import/n8n` accepting an n8n workflow export (`nodes[]`, `connections{}`, `settings`, `pinData`)
+- [x] `POST /api/workflows/import/external` accepting an n8n workflow export (`nodes[]`, `connections{}`, `settings`, `pinData`), with `dryRun`, project/folder targeting and an audit event
 - [x] Pure converter in `packages/workflow-engine/src/import/external-builder.ts`: n8n node → L2M node type map, `connections` → edges (main outputs, index-based ports → `if`/`switch` handles), positions carried over, sticky notes → `sticky_note`
 - [x] Expression translation for the common subset: `{{ $json.x }}` → `{{results.<prev>.x}}`, `$node["Name"].json` → `results.<id>`, `$now`, `$env` → variables; unknown expressions preserved verbatim and flagged
 - [x] Credentials: n8n `credentials` refs become `secretRef` placeholders with a post-import "resolve secrets" checklist, never raw values
@@ -415,7 +415,7 @@ beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to
 ### 9.3 UX
 - [ ] "Import from n8n" in the HUD overflow and the command palette; drag an n8n JSON onto the canvas
 - [ ] Post-import panel: mapping report, secrets to resolve, one-click Tidy layout, "Run a dry validation"
-- [ ] Docs page "Moving a flow from n8n" with the coverage table generated from the converter's map
+- [x] Docs page "Importing a workflow from another builder" with the coverage table generated from the converter's map (`pnpm --filter @ai-orchestrator/workflow-engine gen:import-coverage`)
 - [x] Fixture corpus of real exports under `samples/external-imports/` with golden-file tests
 
 ## Phase 10: MCP Control Plane (after Phase 9)
