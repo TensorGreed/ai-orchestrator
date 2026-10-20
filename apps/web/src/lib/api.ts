@@ -20,6 +20,16 @@ import type {
   McpToolClassification,
   McpToolHintCondition,
   McpOAuthConnectionStatus,
+  McpElicitationAction,
+  McpElicitationView,
+  McpPolicyKind,
+  McpPrompt,
+  McpPromptGetResult,
+  McpResource,
+  McpResourceContent,
+  McpResourceTemplate,
+  McpSamplingSettings,
+  McpServerCapabilities,
   McpToolPolicyRule,
   MCPToolDefinition,
   Project,
@@ -282,12 +292,19 @@ export interface StreamNodeProgressEvent {
   at: string;
 }
 
+/** Phase 10.5 — an MCP server's question to the person running the workflow, as it starts waiting or is settled. */
+export interface StreamElicitationEvent {
+  phase: "created" | "settled";
+  elicitation: McpElicitationView;
+}
+
 interface WorkflowExecuteStreamHandlers {
   onExecutionStarted?: (event: StreamExecutionStartedEvent) => void;
   onNodeStart?: (event: StreamNodeStartEvent) => void;
   onNodeComplete?: (event: StreamNodeCompleteEvent) => void;
   onLlmDelta?: (event: StreamLlmDeltaEvent) => void;
   onNodeProgress?: (event: StreamNodeProgressEvent) => void;
+  onElicitation?: (event: StreamElicitationEvent) => void;
   onError?: (event: StreamErrorEvent) => void;
 }
 
@@ -401,6 +418,11 @@ async function streamWorkflowExecutionRequest(
 
       if (parsedFrame.event === "node_progress" && data && typeof data === "object") {
         handlers.onNodeProgress?.(data as StreamNodeProgressEvent);
+        continue;
+      }
+
+      if (parsedFrame.event === "mcp_elicitation" && data && typeof data === "object") {
+        handlers.onElicitation?.(data as StreamElicitationEvent);
         continue;
       }
 
@@ -2362,6 +2384,8 @@ export interface McpRegisteredServer {
   toolCount: number;
   currentSnapshotId: string | null;
   pendingBreakingSnapshotId: string | null;
+  /** Phase 10.5 — whether and how the server may sample a model through the client. */
+  sampling: McpSamplingSettings;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -2435,6 +2459,8 @@ export interface McpToolPolicyRuleInput {
   toolPattern?: string;
   /** Phase 10.5 — only tools with this effective annotation hint; null = any tool. */
   annotationHint?: McpToolHintCondition | null;
+  /** Phase 10.5 — what the rule governs; `tool` when left out. */
+  kind?: McpPolicyKind;
   enabled?: boolean;
 }
 
@@ -2519,6 +2545,8 @@ export interface McpServerInput {
   probeEnabled?: boolean;
   probeIntervalMs?: number | null;
   blockOnBreakingChange?: boolean;
+  /** Phase 10.5 — partial sampling settings; fields left out keep their value. */
+  sampling?: Partial<McpSamplingSettings> | null;
 }
 
 export async function fetchMcpServers(projectId?: string) {
@@ -2588,6 +2616,10 @@ export interface McpTelemetryTotals {
   outputTokens: number;
   /** null when no call could be priced. */
   costUsd: number | null;
+  /** Phase 10.5 — `sampling/createMessage` requests the calls triggered, and the tokens those used. */
+  samplingRequests: number;
+  samplingInputTokens: number;
+  samplingOutputTokens: number;
   lastCalledAt: string | null;
 }
 
@@ -2798,6 +2830,92 @@ export async function callMcpPlaygroundTool(
   payload: { toolName: string; args: Record<string, unknown>; projectId?: string | null; confirmWrite?: boolean }
 ) {
   return apiRequest<McpPlaygroundCallResponse>(`/api/mcp/servers/${encodeURIComponent(serverId)}/playground/call`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10.5 — MCP resources, prompts and elicitation
+// ---------------------------------------------------------------------------
+
+/** The caller's access to one catalog entry under the tool policy. */
+export interface McpCatalogAccess {
+  allowed: boolean;
+  ruleId?: string;
+  ruleName?: string;
+  message?: string;
+}
+
+export type McpCatalogResource = McpResource & { access: McpCatalogAccess };
+export type McpCatalogResourceTemplate = McpResourceTemplate & { access: McpCatalogAccess };
+export type McpCatalogPrompt = McpPrompt & { access: McpCatalogAccess };
+
+export async function fetchMcpServerResources(id: string, options: { projectId?: string | null; refresh?: boolean } = {}) {
+  const params = new URLSearchParams();
+  if (options.projectId) params.set("projectId", options.projectId);
+  if (options.refresh) params.set("refresh", "true");
+  const qs = params.size > 0 ? `?${params.toString()}` : "";
+  return apiRequest<{
+    serverId: string;
+    capabilities: McpServerCapabilities;
+    updatedAt: string | null;
+    policy: { role: McpPolicyRole; projectId: string };
+    resources: McpCatalogResource[];
+    resourceTemplates: McpCatalogResourceTemplate[];
+  }>(`/api/mcp/servers/${encodeURIComponent(id)}/resources${qs}`);
+}
+
+export interface McpResourceReadResponse {
+  serverId: string;
+  uri: string;
+  bytes: number;
+  durationMs: number;
+  contents: McpResourceContent[];
+  policy: { role: McpPolicyRole; projectId: string };
+}
+
+export async function readMcpServerResource(id: string, payload: { uri: string; projectId?: string | null }) {
+  return apiRequest<McpResourceReadResponse>(`/api/mcp/servers/${encodeURIComponent(id)}/resources/read`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchMcpServerPrompts(id: string, options: { projectId?: string | null; refresh?: boolean } = {}) {
+  const params = new URLSearchParams();
+  if (options.projectId) params.set("projectId", options.projectId);
+  if (options.refresh) params.set("refresh", "true");
+  const qs = params.size > 0 ? `?${params.toString()}` : "";
+  return apiRequest<{
+    serverId: string;
+    capabilities: McpServerCapabilities;
+    updatedAt: string | null;
+    policy: { role: McpPolicyRole; projectId: string };
+    prompts: McpCatalogPrompt[];
+  }>(`/api/mcp/servers/${encodeURIComponent(id)}/prompts${qs}`);
+}
+
+export async function getMcpServerPrompt(id: string, payload: { name: string; arguments?: Record<string, string>; projectId?: string | null }) {
+  return apiRequest<{ serverId: string; durationMs: number; prompt: McpPromptGetResult; policy: { role: McpPolicyRole; projectId: string } }>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/prompts/get`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+export async function fetchMcpElicitations(options: { status?: McpElicitationView["status"] | "all"; executionId?: string } = {}) {
+  const params = new URLSearchParams();
+  if (options.status) params.set("status", options.status);
+  if (options.executionId) params.set("executionId", options.executionId);
+  const qs = params.size > 0 ? `?${params.toString()}` : "";
+  return apiRequest<{ items: McpElicitationView[] }>(`/api/mcp/elicitations${qs}`);
+}
+
+export async function answerMcpElicitation(
+  id: string,
+  payload: { action: McpElicitationAction; content?: Record<string, string | number | boolean> }
+) {
+  return apiRequest<{ elicitation: McpElicitationView }>(`/api/mcp/elicitations/${encodeURIComponent(id)}/answer`, {
     method: "POST",
     body: JSON.stringify(payload)
   });

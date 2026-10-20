@@ -197,7 +197,7 @@ describe("MCP tool policy — discovery filter", () => {
     );
 
     expect(result.status).toBe("success");
-    expect(toolNames(runtime.requests[0])).toEqual(["mock-mcp__get_current_time", "mock-mcp__lookup_kb"]);
+    expect(toolNames(runtime.requests[0])).toEqual(["mock-mcp__ask_user", "mock-mcp__get_current_time", "mock-mcp__lookup_kb", "mock-mcp__summarize_with_model"]);
     const trace = nodeOutput(result, "agent")?._toolPolicy as McpToolPolicyTrace;
     expect(trace.subject).toEqual(viewer);
     expect(trace.projectId).toBe("default");
@@ -220,7 +220,7 @@ describe("MCP tool policy — discovery filter", () => {
       { workflow: agentWorkflow({}), webhookPayload: { user_prompt: "go" }, toolPolicySubject: builder },
       deps({ runtime, rules: [rule({ id: "r-calc", effect: "deny", roles: ["viewer"], toolPattern: "calculator" })] })
     );
-    expect(toolNames(runtime.requests[0])).toHaveLength(3);
+    expect(toolNames(runtime.requests[0])).toHaveLength(5);
   });
 
   it("evaluates a run without a subject as viewer and says so", async () => {
@@ -233,7 +233,7 @@ describe("MCP tool policy — discovery filter", () => {
     const trace = nodeOutput(result, "agent")?._toolPolicy as McpToolPolicyTrace;
     expect(trace.subject.role).toBe("viewer");
     expect(trace.subject.source).toBe("fallback");
-    expect(trace.hidden).toHaveLength(3);
+    expect(trace.hidden).toHaveLength(5);
   });
 
   it("applies the policy to a supervisor and to each worker it delegates to", async () => {
@@ -288,7 +288,7 @@ describe("MCP tool policy — discovery filter", () => {
 
     // Delegate through the supervisor's tool bridge: the worker resolves its own tools under the same policy.
     const workerOutput = (await runtime.invokeTool!("delegate_to_Researcher", { task_prompt: "look it up" })) as Record<string, unknown>;
-    expect(toolNames(runtime.requests[1])).toEqual(["mock-mcp__get_current_time", "mock-mcp__lookup_kb"]);
+    expect(toolNames(runtime.requests[1])).toEqual(["mock-mcp__ask_user", "mock-mcp__get_current_time", "mock-mcp__lookup_kb", "mock-mcp__summarize_with_model"]);
     const workerTrace = workerOutput._toolPolicy as McpToolPolicyTrace;
     expect(workerTrace.subject).toEqual(viewer);
     expect(workerTrace.hidden).toEqual([expect.objectContaining({ tool: "calculator", server: "mock-mcp", reason: "policy", ruleId: "r-calc" })]);
@@ -308,7 +308,7 @@ describe("MCP tool policy — discovery filter", () => {
       { workflow: agentWorkflow({}), webhookPayload: { user_prompt: "go" }, toolPolicySubject: viewer },
       deps({ runtime: registryRuntime, rules: [rule({ id: "r-adapter", effect: "deny", serverId: "mock-mcp" })] })
     );
-    expect(toolNames(registryRuntime.requests[0])).toHaveLength(3);
+    expect(toolNames(registryRuntime.requests[0])).toHaveLength(5);
   });
 });
 
@@ -380,7 +380,7 @@ describe("MCP tool policy — no write tools", () => {
       { workflow: agentWorkflow({ noWriteTools: true }), webhookPayload: { user_prompt: "go" }, toolPolicySubject: builder },
       deps({ runtime })
     );
-    expect(toolNames(runtime.requests[0])).toEqual(["mock-mcp__get_current_time", "mock-mcp__lookup_kb"]);
+    expect(toolNames(runtime.requests[0])).toEqual(["mock-mcp__ask_user", "mock-mcp__get_current_time", "mock-mcp__lookup_kb", "mock-mcp__summarize_with_model"]);
     const trace = nodeOutput(result, "agent")?._toolPolicy as McpToolPolicyTrace;
     expect(trace.noWriteTools).toBe(true);
     expect(trace.hidden).toEqual([{ tool: "calculator", server: "mock-mcp", registryServerId: "mcp_mock", reason: "no_write_tools" }]);
@@ -392,7 +392,7 @@ describe("MCP tool policy — no write tools", () => {
       { workflow: agentWorkflow({ noWriteTools: true, toolConfig: { serverId: "mock-mcp", toolName: "__all__" } }), webhookPayload: { user_prompt: "go" } },
       deps({ runtime, withPolicyStore: false })
     );
-    expect(toolNames(runtime.requests[0])).toEqual(["mock-mcp__get_current_time", "mock-mcp__lookup_kb"]);
+    expect(toolNames(runtime.requests[0])).toEqual(["mock-mcp__ask_user", "mock-mcp__get_current_time", "mock-mcp__lookup_kb", "mock-mcp__summarize_with_model"]);
   });
 
   it("lets an admin's manual classification win over annotations, both ways", async () => {
@@ -407,7 +407,7 @@ describe("MCP tool policy — no write tools", () => {
         ]
       })
     );
-    expect(toolNames(runtime.requests[0])).toEqual(["mock-mcp__calculator", "mock-mcp__get_current_time"]);
+    expect(toolNames(runtime.requests[0])).toEqual(["mock-mcp__ask_user", "mock-mcp__calculator", "mock-mcp__get_current_time", "mock-mcp__summarize_with_model"]);
   });
 
   it("blocks a direct call to an unannotated tool and allows an annotated read-only one", async () => {

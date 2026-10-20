@@ -167,6 +167,50 @@ Cost uses the same pricing table as usage and budgets (`LLM_PRICING_OVERRIDES_JS
 
 Rows live in the `mcp_tool_calls` table and are pruned with execution history: calls older than `EXECUTION_HISTORY_RETENTION_DAYS` are deleted by the same job. Deleting a registry entry deletes its calls. Re-saving the same execution, for example after an approval resumes it, replaces its rows instead of adding to them.
 
+## Resources and prompts
+
+Besides tools, a server can publish **resources** (files, records, documents, each with a URI) and **prompts** (reusable message templates with named arguments). Each probe records what the server advertises in its capabilities and, for those it has, lists its resources, resource templates and prompts into the server's catalog. The lists are shown on the Playground's **Resources** and **Prompts** panels, in the MCP Tool node inspector (read a resource) and in the prompt picker of agent, LLM and chat model nodes.
+
+When a server sends `notifications/resources/list_changed`, `prompts/list_changed` or `tools/list_changed` during a run, the registry re-probes it a couple of seconds later (one re-probe per server however many notifications arrive), so the catalog and the tool snapshot follow the server without waiting for the next scheduled probe.
+
+Reads are capped by `MCP_RESOURCE_MAX_BYTES`; a larger resource fails the read with a message that names the limit. Resource reads and prompt fetches go through [tool policy](./mcp-tool-policy.md) with their own rule kinds, and are written to the audit log as `mcp_resource.read` / `mcp_resource.read_denied` and `mcp_prompt.get` / `mcp_prompt.get_denied` (URI or prompt name, never the contents).
+
+### Reading a resource from a workflow
+
+An MCP Tool node has an **Operation** setting: **Call a tool** (the default) or **Read a resource**. In read mode the node takes a **Resource URI**, which is a template (for example a URI that ends in a variable from `vars`), and can be picked from the server's list. The node's output carries `text` (the text contents joined), `resource` (the first content item with its `uri`, `mimeType`, `text` or base64 `blob`, and `bytes`) and `contents` (every item), so a later node can reference the node's `text` output through a template.
+
+### Using a server prompt
+
+Agent, Supervisor, LLM Call and the chat model nodes have a **Server prompt** picker under their prompt fields. Pick a registered server, one of its prompts, fill in the prompt's arguments (templates are allowed) and choose whether it becomes the **system** or the **user** message. The prompt is fetched when the node runs, so the server's current version applies; the node's own template for that message is replaced, the other one is kept. The node's output records what was used under `_serverPrompt`, which the inspector's Trace tab shows. A prompt that is missing, that the policy denies, or that lacks a required argument fails the node with a message that says so.
+
+## Elicitation: a server asks the person a question
+
+A server can pause a tool call and ask for input (`elicitation/create`) with a message and a flat schema of string, number, boolean and enum fields. L2M advertises the capability to every server it connects to and handles the request by trigger type:
+
+- **Attended runs** (started from the editor, Chat, a retry or a resumed approval) pause the tool call and show a form to the person who started the run, in the Chat bubble and under **Waiting for you** on the Runs page. Operators and admins can answer any pending request; other users only the ones from their own runs. **Send answer** validates the values against the schema and accepts, **Decline** and **Cancel** send only the action. The tool call then continues with the server's reply.
+- **Unattended runs** (webhooks, schedules, queue workers, the gateway, the public chat widget) are declined at once, with a note in the trace saying why.
+- **Credential-looking requests** are refused regardless of the trigger: a schema with a field named like a token, key, password, cookie or similar is never shown as a form. Secrets go on the server's registry entry, not through a question to the user.
+
+A request that nobody answers expires after `MCP_ELICITATION_TIMEOUT_MS`, capped by the run's execution timeout, and the server is told it was declined. Cancelling the run cancels its open requests. Every outcome is recorded on the node's output under `_mcpElicitations` (Trace tab) and in the audit log as `mcp_elicitation.requested`, `accepted`, `declined`, `cancelled`, `expired`, `auto_declined` or `refused`. Audit rows carry the field names, never the values entered.
+
+## Sampling: a server asks the model for a completion
+
+A server can ask the client to run a completion on its behalf (`sampling/createMessage`). This lets a tool use the workflow's model without having its own API key, and it also means a server could spend your tokens or steer the model with its own prompts, so it is **off by default** and governed per server.
+
+| Setting (server registry, **Sampling**) | Default | Meaning |
+|---|---|---|
+| Allow sampling | off | Servers are refused with "Sampling is off for MCP server …" until an admin turns it on. |
+| Max tokens | 1024 | Upper bound on `maxTokens` per request; larger requests are clamped. |
+| Allowed models | empty (any) | Model names the server may ask for in `modelPreferences.hints`. The first allowed hint wins; with no usable hint the attached node's model answers. |
+| Max requests per call | 3 | Requests one tool call may make; the next one is refused with "Sampling budget exhausted". |
+| Default model | none | Provider and model used when no chat model is attached: direct MCP Tool nodes and gateway calls. Without it those calls refuse sampling. |
+
+Inside an agent or supervisor, requests are fulfilled by the chat model attached to the node, within the model's own provider and secret. Tool policy evaluates a rule of kind **sampling** with the model name as the pattern, so admins can deny sampling for a role or allow only certain models. Prompts the server sends are passed to the model as they are; they are not combined with the agent's system message.
+
+Tokens used by sampling are counted on the tool call that triggered them: the row in `mcp_tool_calls` carries `sampling_requests`, `sampling_input_tokens` and `sampling_output_tokens`, the server page's totals include them, and the run's usage adds them to the node's `_telemetry` (`samplingUsage`, `samplingRequests`). Each request, with the model that answered or the reason it was refused, is on the node's output under `_mcpSampling` and in the inspector's Trace tab.
+
+**Risk notes.** Turn sampling on only for servers you trust: the server chooses the prompt and reads the answer, and each request costs tokens on your provider account. Keep **Max requests per call** small, restrict **Allowed models** to cheap models where possible, and use a sampling policy rule to keep it away from unattended roles. L2M never forwards sampling to another instance or service; the model is always one configured in this deployment.
+
 ## Tool policy
 
 Admins can restrict which tools of a server each role may use, per project, and mark tools read-only or write. Workflows can also block every write tool. The server page's **Policies** view holds the rules, and the Tools table shows each tool's read-only classification and whether your role may use it. See [MCP tool policy](./mcp-tool-policy.md).
@@ -181,6 +225,8 @@ Admins can restrict which tools of a server each role may use, per project, and 
 | `MCP_OAUTH_REDIRECT_BASE_URL` | empty | Base URL for the OAuth callback. Empty uses `MCP_GATEWAY_PUBLIC_URL`, then the first `WEB_ORIGIN`. |
 | `MCP_OAUTH_STATE_TTL_MS` | `600000` | How long a started OAuth authorization stays valid (1 to 60 minutes). |
 | `MCP_OAUTH_REFRESH_SKEW_MS` | `60000` | Refresh OAuth access tokens this long before they expire. |
+| `MCP_ELICITATION_TIMEOUT_MS` | `600000` | How long a server's question waits for an answer (10 seconds to 24 hours), capped by the run's execution timeout. |
+| `MCP_RESOURCE_MAX_BYTES` | `5242880` | Largest resource a run or the playground reads. |
 
 Servers can override the interval (at least 10 seconds) or opt out of scheduled probing. In an HA deployment only the leader instance runs scheduled probes. stdio servers start a short-lived process for each probe, which is closed when the probe ends.
 
@@ -191,6 +237,10 @@ Servers can override the interval (at least 10 seconds) or opt out of scheduled 
 | List servers, view detail and telemetry, probe now, view OAuth status | builder and above |
 | Register, edit, delete, accept a breaking change | admin |
 | Connect, refresh and disconnect OAuth | admin, from a signed-in browser session |
+| List a server's resources and prompts | builder and above |
+| Read a resource, fetch a prompt | builder and above, with permission to run workflows in the project |
+| Answer a server's question | the user whose run asked, or operator and above |
+| Sampling settings | admin (edit the server) |
 
 Deleting a server that nodes still use is refused with the list of those nodes, unless the delete is forced. Register, update, delete and accept are written to the audit log as `mcp_server.*` events, and so are the OAuth steps (`mcp_server.oauth_connect_started`, `oauth_connected`, `oauth_refreshed`, `oauth_refresh_failed`, `oauth_disconnected`), without any token.
 
@@ -212,3 +262,11 @@ Deleting a server that nodes still use is refused with the list of those nodes, 
 - `POST /api/mcp/servers/:id/oauth/refresh`: refresh the access token now (admin)
 - `DELETE /api/mcp/servers/:id/oauth`: disconnect and delete the tokens (admin)
 - `GET /api/mcp/oauth/callback?code=&state=`: the authorization server's redirect target; renders a page that reports the result to the opener and closes
+- `GET /api/mcp/servers/:id/resources?projectId=&refresh=true`: resources and resource templates from the last probe (`refresh` lists them again now), each with an `access` mark for the caller's role
+- `POST /api/mcp/servers/:id/resources/read`: `{ uri, projectId? }`; returns `contents`, `bytes` and `durationMs`. 403 when policy blocks it, 404 when the server has no such resource, 413 over `MCP_RESOURCE_MAX_BYTES`
+- `GET /api/mcp/servers/:id/prompts?projectId=&refresh=true`: prompts with their arguments and `access` marks
+- `POST /api/mcp/servers/:id/prompts/get`: `{ name, arguments?, projectId? }`; returns the rendered `prompt` with its messages. 400 when a required argument is missing, 403 when blocked, 404 when unknown
+- `GET /api/mcp/elicitations?status=pending|accepted|declined|cancelled|expired|auto_declined|all&executionId=`: a server's questions; users below operator see their own runs only
+- `GET /api/mcp/elicitations/:id`: one question
+- `POST /api/mcp/elicitations/:id/answer`: `{ action: "accept" | "decline" | "cancel", content? }`; 403 for someone else's run below operator, 409 when already settled
+- The run stream (`POST /api/workflows/:id/execute/stream`) emits `mcp_elicitation` events with `{ phase: "created" | "settled", elicitation }`

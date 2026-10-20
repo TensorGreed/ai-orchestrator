@@ -315,7 +315,7 @@ describe("MCP tool policy routes", () => {
       tools: Array<{ name: string; access: { allowed: boolean; ruleId?: string }; classification: { source: string } }>;
     }>();
     expect(body.policy).toEqual({ role: "builder", projectId: "default" });
-    expect(body.tools).toHaveLength(3);
+    expect(body.tools).toHaveLength(5);
     const calc = body.tools.find((tool) => tool.name === "calculator")!;
     expect(calc.access).toMatchObject({ allowed: false, reason: "policy", ruleId: rule.id, ruleName: "No builder calc" });
     expect(calc.classification).toEqual({ readOnly: false, source: "unknown" });
@@ -333,7 +333,7 @@ describe("MCP tool policy routes", () => {
       payload: { serverId: "mock-mcp", projectId: "default" }
     });
     const discoveredTools = discovered.json<{ tools: Array<{ name: string; access: { allowed: boolean }; annotations?: unknown }> }>().tools;
-    expect(discoveredTools).toHaveLength(3);
+    expect(discoveredTools).toHaveLength(5);
     expect(discoveredTools.find((tool) => tool.name === "lookup_kb")!.access.allowed).toBe(false);
     expect(discoveredTools.find((tool) => tool.name === "calculator")!.access.allowed).toBe(false);
     expect(discoveredTools.find((tool) => tool.name === "get_current_time")!.annotations).toEqual({ readOnlyHint: true });

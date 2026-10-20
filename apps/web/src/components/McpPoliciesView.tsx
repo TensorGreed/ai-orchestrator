@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { McpPolicyRole, McpToolHintCondition, McpToolPolicyRule, Project } from "@ai-orchestrator/shared";
+import type { McpPolicyKind, McpPolicyRole, McpToolHintCondition, McpToolPolicyRule, Project } from "@ai-orchestrator/shared";
 import {
   ApiError,
   type McpRegisteredServer,
@@ -57,6 +57,27 @@ export const HINT_CONDITION_LABELS: Array<{ value: McpToolHintCondition; label: 
   { value: "open_world", label: "Open-world tools" },
   { value: "not_open_world", label: "Closed-world tools" }
 ];
+
+const KIND_LABELS: Record<McpPolicyKind, string> = {
+  tool: "Tool",
+  resource: "Resource",
+  prompt: "Prompt",
+  sampling: "Sampling"
+};
+
+const KIND_PATTERN_LABELS: Record<McpPolicyKind, string> = {
+  tool: "Tool name or pattern",
+  resource: "Resource URI or pattern",
+  prompt: "Prompt name or pattern",
+  sampling: "Model name or pattern"
+};
+
+const KIND_PATTERN_PLACEHOLDERS: Record<McpPolicyKind, string> = {
+  tool: "* or create_* or search_issues",
+  resource: "* or file:///srv/docs/* or db://public/*",
+  prompt: "* or summarize_*",
+  sampling: "* or gpt-4o-mini"
+};
 
 function hintLabel(hint: McpToolHintCondition | null | undefined): string {
   if (!hint) return "Any tool";
@@ -228,7 +249,7 @@ export function McpPoliciesView({
                 {rule.description && <p className="kb-subtle mcp-rule-desc">{rule.description}</p>}
                 <dl className="mcp-rule-scope">
                   <div>
-                    <dt>Tool</dt>
+                    <dt>{KIND_LABELS[rule.kind ?? "tool"]}</dt>
                     <dd>
                       <code>{rule.toolPattern}</code>
                     </dd>
@@ -309,6 +330,7 @@ function McpPolicyForm({
   const [serverId, setServerId] = useState(initial?.serverId ?? "");
   const [toolPattern, setToolPattern] = useState(initial?.toolPattern ?? "*");
   const [annotationHint, setAnnotationHint] = useState<McpToolHintCondition | "">(initial?.annotationHint ?? "");
+  const [kind, setKind] = useState<McpPolicyKind>(initial?.kind ?? "tool");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -327,7 +349,8 @@ function McpPolicyForm({
       roles,
       serverId: serverId || null,
       toolPattern: toolPattern.trim() || "*",
-      annotationHint: annotationHint || null,
+      annotationHint: kind === "tool" ? annotationHint || null : null,
+      kind,
       enabled
     };
     setBusy(true);
@@ -384,22 +407,37 @@ function McpPolicyForm({
           </select>
         </label>
         <label>
-          Tool name or pattern
+          {KIND_PATTERN_LABELS[kind]}
           <input
             type="text"
             value={toolPattern}
             onChange={(event) => setToolPattern(event.target.value)}
-            placeholder="* or create_* or search_issues"
+            placeholder={KIND_PATTERN_PLACEHOLDERS[kind]}
             spellCheck={false}
           />
         </label>
       </div>
-      <div className="kb-form-row">
+      <div className="kb-form-row kb-form-row-2">
+        <label>
+          Applies to
+          <select aria-label="Rule kind" value={kind} onChange={(event) => setKind(event.target.value as McpPolicyKind)}>
+            {(Object.keys(KIND_LABELS) as McpPolicyKind[]).map((entry) => (
+              <option key={entry} value={entry}>
+                {KIND_LABELS[entry]}
+              </option>
+            ))}
+          </select>
+          <small className="kb-subtle">
+            Tool calls, resource reads (matched on the URI), server prompts (matched on the prompt name) or sampling
+            requests (matched on the model name).
+          </small>
+        </label>
         <label>
           Annotation
           <select
             aria-label="Annotation condition"
             value={annotationHint}
+            disabled={kind !== "tool"}
             onChange={(event) => setAnnotationHint(event.target.value as McpToolHintCondition | "")}
           >
             <option value="">Any tool</option>

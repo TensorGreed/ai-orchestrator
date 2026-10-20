@@ -271,7 +271,17 @@ export const nodeDefinitions: NodeDefinition[] = [
       properties: {
         provider: { type: "object" },
         promptKey: { type: "string" },
-        systemPromptKey: { type: "string" }
+        systemPromptKey: { type: "string" },
+        /** Phase 10.5 — a registry server prompt fetched at run time as the system or user prompt. */
+        serverPrompt: {
+          type: "object",
+          properties: {
+            registryServerId: { type: "string" },
+            name: { type: "string" },
+            arguments: { type: "object", additionalProperties: { type: "string" } },
+            target: { type: "string", enum: ["system", "user"] }
+          }
+        }
       },
       required: ["provider"]
     },
@@ -507,6 +517,16 @@ export const nodeDefinitions: NodeDefinition[] = [
       type: "object",
       properties: {
         agentType: { type: "string", enum: ["tools", "react", "plan-and-execute", "sql"] },
+        /** Phase 10.5 — a registry server prompt fetched at run time as the system or user prompt. */
+        serverPrompt: {
+          type: "object",
+          properties: {
+            registryServerId: { type: "string" },
+            name: { type: "string" },
+            arguments: { type: "object", additionalProperties: { type: "string" } },
+            target: { type: "string", enum: ["system", "user"] }
+          }
+        },
         systemPromptTemplate: { type: "string" },
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
@@ -542,6 +562,16 @@ export const nodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        /** Phase 10.5 — a registry server prompt fetched at run time as the system or user prompt. */
+        serverPrompt: {
+          type: "object",
+          properties: {
+            registryServerId: { type: "string" },
+            name: { type: "string" },
+            arguments: { type: "object", additionalProperties: { type: "string" } },
+            target: { type: "string", enum: ["system", "user"] }
+          }
+        },
         systemPromptTemplate: { type: "string" },
         userPromptTemplate: { type: "string" },
         sessionIdTemplate: { type: "string" },
@@ -719,6 +749,9 @@ export const nodeDefinitions: NodeDefinition[] = [
       properties: {
         serverId: { type: "string" },
         registryServerId: { type: "string" },
+        /** Phase 10.5 — `call_tool` (default) or `read_resource` (reads `resourceUri` into the workflow). */
+        operation: { type: "string", enum: ["call_tool", "read_resource"] },
+        resourceUri: { type: "string" },
         toolName: { type: "string" },
         argsTemplate: { type: "string" },
         connection: {

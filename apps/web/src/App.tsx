@@ -18,6 +18,7 @@ import {
   WORKFLOW_SCHEMA_VERSION,
   nodeDefinitions,
   type Folder,
+  type McpElicitationView,
   type Project,
   type ImportReport,
   type Workflow,
@@ -100,6 +101,7 @@ import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
 import { deriveRunStatus } from "./components/studio-layout-types";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
+import { McpElicitationForm } from "./components/McpElicitationForm";
 import { SettingsPage } from "./components/SettingsPage";
 import { KnowledgeBasePage } from "./components/KnowledgeBasePage";
 import { McpServersPage } from "./components/McpServersPage";
@@ -168,6 +170,12 @@ interface ChatMessageEntry {
     question: string;
     reason?: string;
   };
+  /**
+   * Phase 10.5 — questions MCP servers asked during this turn
+   * (`elicitation/create`). A pending one renders as a form inside the
+   * bubble; the run resumes once it is answered.
+   */
+  elicitations?: McpElicitationView[];
 }
 
 export interface ChatCitation {
@@ -2556,6 +2564,21 @@ function StudioApp() {
     []
   );
 
+  // Phase 10.5 — keep the server's questions on the assistant message; a
+  // settled request replaces its pending entry.
+  const upsertChatMessageElicitation = useCallback((workflowId: string, messageId: string, elicitation: McpElicitationView) => {
+    setChatMessagesByWorkflow((current) => {
+      const nextMessages = (current[workflowId] ?? []).map((entry) => {
+        if (entry.id !== messageId) return entry;
+        const existing = entry.elicitations ?? [];
+        const index = existing.findIndex((item) => item.id === elicitation.id);
+        const elicitations = index >= 0 ? existing.map((item, at) => (at === index ? elicitation : item)) : [...existing, elicitation];
+        return { ...entry, elicitations };
+      });
+      return { ...current, [workflowId]: nextMessages };
+    });
+  }, []);
+
   // Phase 9.4 — attach extracted citations to the assistant message so the
   // chat bubble can render [N] markers as clickable footnotes.
   const setChatMessageCitations = useCallback((workflowId: string, messageId: string, citations: ChatCitation[]) => {
@@ -3341,6 +3364,11 @@ function StudioApp() {
           onLlmDelta: (event) => {
             streamedAnyDelta = true;
             chatDeltaBufferRef.current += event.delta;
+          },
+          onElicitation: (event) => {
+            if (activeAssistantMessageIdRef.current) {
+              upsertChatMessageElicitation(workflowId, activeAssistantMessageIdRef.current, event.elicitation);
+            }
           },
           onError: (event) => {
             setChatError(event.message);
@@ -5130,6 +5158,18 @@ function StudioApp() {
                         </div>
                         {isClarify && entry.clarification?.reason && (
                           <div className="chat-clarify-reason">{entry.clarification.reason}</div>
+                        )}
+                        {entry.role === "assistant" && entry.elicitations && entry.elicitations.length > 0 && (
+                          <div className="chat-elicitations">
+                            {entry.elicitations.map((elicitation) => (
+                              <McpElicitationForm
+                                key={elicitation.id}
+                                elicitation={elicitation}
+                                compact
+                                onAnswered={(settled) => upsertChatMessageElicitation(currentWorkflow.id, entry.id, settled)}
+                              />
+                            ))}
+                          </div>
                         )}
                         {entry.role === "assistant" && entry.citations && entry.citations.length > 0 && (
                           <CitationFooter citations={entry.citations} />

@@ -187,7 +187,7 @@ export const mcpPlaygroundCallSchema = z.object({
 export type McpPlaygroundCallRequest = z.infer<typeof mcpPlaygroundCallSchema>;
 
 /** What a playground panel can show for a server; panels render per capability. */
-export type McpPlaygroundCapability = "tools";
+export type McpPlaygroundCapability = "tools" | "resources" | "prompts";
 
 export interface McpPlaygroundExchange {
   transport:

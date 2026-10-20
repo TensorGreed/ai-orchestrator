@@ -20,6 +20,7 @@ Runs iterative tool-aware agent loop.
 | Field | Type | Required | Values |
 |---|---|---|---|
 | `agentType` | `string` | no | `tools` \| `react` \| `plan-and-execute` \| `sql` |
+| `serverPrompt` | `object` | no | — |
 | `systemPromptTemplate` | `string` | no | — |
 | `userPromptTemplate` | `string` | no | — |
 | `sessionIdTemplate` | `string` | no | — |
@@ -59,6 +60,7 @@ Swarm Supervisor that coordinates attached Worker nodes.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
+| `serverPrompt` | `object` | no | — |
 | `systemPromptTemplate` | `string` | no | — |
 | `userPromptTemplate` | `string` | no | — |
 | `sessionIdTemplate` | `string` | no | — |

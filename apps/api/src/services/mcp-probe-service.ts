@@ -14,11 +14,12 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { MCPServerConfig, SecretReference } from "@ai-orchestrator/shared";
+import type { McpListChangedEvent, MCPServerConfig, McpServerCatalog, SecretReference } from "@ai-orchestrator/shared";
 import {
   diffToolSnapshots,
   hashToolSnapshot,
   normalizeToolSnapshot,
+  type MCPExecutionContext,
   type MCPRegistry
 } from "@ai-orchestrator/mcp-sdk";
 import type {
@@ -39,7 +40,12 @@ export interface McpProbeOutcome {
   probe: McpServerProbeRecord;
   /** Present when the probe saw a tool schema different from the current snapshot. */
   snapshot?: McpToolSnapshotRecord;
+  /** Phase 10.5 — resources, templates and prompts the server advertised (informational, never part of the tool hash). */
+  catalog?: McpServerCatalog;
 }
+
+/** Phase 10.5 — how long after a `list_changed` notification the re-probe runs; bursts collapse into one. */
+export const LIST_CHANGED_REPROBE_DELAY_MS = 2_000;
 
 export interface McpLatencyStats {
   samples: number;
@@ -58,6 +64,7 @@ export function serverConfigFromRecord(server: McpServerRecord): MCPServerConfig
     registryServerId: server.id,
     label: server.name,
     connection: server.connection,
+    sampling: server.sampling,
     secretRef: server.secretId ? ({ secretId: server.secretId } satisfies SecretReference) : undefined
   };
 }
@@ -110,6 +117,8 @@ export class McpProbeService {
   private readonly inFlight = new Map<string, Promise<McpProbeOutcome>>();
   private logger?: Logger;
 
+  private readonly reprobeTimers = new Map<string, NodeJS.Timeout>();
+
   constructor(
     private readonly store: SqliteStore,
     private readonly mcpRegistry: MCPRegistry,
@@ -124,8 +133,39 @@ export class McpProbeService {
       tickMs?: number;
       probeTimeoutMs?: number;
       keepProbes?: number;
+      /** Phase 10.5 — debounce for re-probes after `list_changed` notifications. */
+      listChangedDelayMs?: number;
     }
   ) {}
+
+  /**
+   * Phase 10.5 — a session saw `notifications/{tools,resources,prompts}/list_changed`
+   * for a registry server. The next probe refreshes the tool snapshot and the
+   * catalog; notifications that arrive within the debounce window share it.
+   */
+  onListChanged(event: McpListChangedEvent): void {
+    const serverId = event.registryServerId;
+    if (!serverId) return;
+    if (this.reprobeTimers.has(serverId)) return;
+    const timer = setTimeout(() => {
+      this.reprobeTimers.delete(serverId);
+      if (!this.store.getMcpServer(serverId)) return;
+      this.probe(serverId).catch((err) => {
+        this.logger?.warn("MCP re-probe after list_changed failed", {
+          serverId,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      });
+    }, this.options.listChangedDelayMs ?? LIST_CHANGED_REPROBE_DELAY_MS);
+    timer.unref?.();
+    this.reprobeTimers.set(serverId, timer);
+    this.logger?.info("MCP server list changed; re-probe scheduled", { serverId, kind: event.kind });
+  }
+
+  /** Servers with a re-probe waiting (tests and shutdown). */
+  pendingReprobes(): string[] {
+    return [...this.reprobeTimers.keys()];
+  }
 
   setLogger(logger: Logger): void {
     this.logger = logger;
@@ -145,6 +185,8 @@ export class McpProbeService {
   }
 
   stop(): void {
+    for (const timer of this.reprobeTimers.values()) clearTimeout(timer);
+    this.reprobeTimers.clear();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -194,10 +236,11 @@ export class McpProbeService {
 
     const startedAt = new Date();
     const started = performance.now();
-    const context = { resolveSecret: this.deps.resolveSecret, runtimeState: new Map<string, unknown>() };
+    const context: MCPExecutionContext = { resolveSecret: this.deps.resolveSecret, runtimeState: new Map<string, unknown>() };
     const adapter = this.mcpRegistry.tryGet(server.adapterId);
     let tools: Array<{ name: string; description?: string; inputSchema?: unknown }> | null = null;
     let error: string | null = null;
+    let catalog: McpServerCatalog | undefined;
 
     if (!adapter) {
       error = `Unknown MCP adapter: ${server.adapterId}`;
@@ -212,9 +255,12 @@ export class McpProbeService {
           });
         }
       };
-      const discovery = adapter.discoverTools(serverConfigFromRecord(server), context);
+      const serverConfig = serverConfigFromRecord(server);
+      const timeoutMs = this.options.probeTimeoutMs ?? 30_000;
+      const discovery = adapter.discoverTools(serverConfig, context);
       try {
-        tools = await withTimeout(discovery, this.options.probeTimeoutMs ?? 30_000);
+        tools = await withTimeout(discovery, timeoutMs);
+        catalog = await withTimeout(captureCatalog(adapter, serverConfig, context), timeoutMs);
       } catch (err) {
         error = err instanceof Error ? err.message : String(err);
         // A timed-out discovery can still finish opening a session; close that too.
@@ -270,6 +316,9 @@ export class McpProbeService {
       snapshot,
       keepProbes: this.options.keepProbes ?? 500
     });
+    if (catalog) {
+      this.store.upsertMcpServerCatalog(serverId, catalog);
+    }
 
     if (snapshot?.breaking) {
       this.logger?.warn("MCP server tool schema changed in a breaking way", {
@@ -282,6 +331,40 @@ export class McpProbeService {
     if (!updated) {
       throw new Error(`MCP server disappeared during probe: ${serverId}`);
     }
-    return { server: updated, probe, snapshot };
+    return { server: updated, probe, snapshot, ...(catalog ? { catalog } : {}) };
   }
+}
+
+/**
+ * Phase 10.5 — list what the server advertises beyond tools. Only the lists
+ * the server's capabilities announce are requested; a failing list leaves
+ * that part empty rather than failing the probe, since the tool snapshot is
+ * what health is judged on.
+ */
+export async function captureCatalog(
+  adapter: ReturnType<MCPRegistry["get"]>,
+  serverConfig: MCPServerConfig,
+  context: MCPExecutionContext
+): Promise<McpServerCatalog> {
+  const capabilities = (await adapter.describeServer?.(serverConfig, context)) ?? {};
+  const quiet = async <T>(run: (() => Promise<T>) | undefined, fallback: T): Promise<T> => {
+    if (!run) return fallback;
+    try {
+      return await run();
+    } catch {
+      return fallback;
+    }
+  };
+  const wantsResources = Boolean(capabilities.resources) && typeof adapter.listResources === "function";
+  const wantsPrompts = Boolean(capabilities.prompts) && typeof adapter.listPrompts === "function";
+  return {
+    capabilities,
+    resources: wantsResources ? await quiet(() => adapter.listResources!(serverConfig, context), []) : [],
+    resourceTemplates:
+      wantsResources && typeof adapter.listResourceTemplates === "function"
+        ? await quiet(() => adapter.listResourceTemplates!(serverConfig, context), [])
+        : [],
+    prompts: wantsPrompts ? await quiet(() => adapter.listPrompts!(serverConfig, context), []) : [],
+    updatedAt: new Date().toISOString()
+  };
 }

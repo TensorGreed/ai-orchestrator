@@ -1177,6 +1177,60 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS mcp_oauth_connections;
       ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS annotation_hint;
     `
+  },
+  {
+    version: 25,
+    description:
+      "Phase 10.5 — MCP resources, prompts, elicitation and sampling (mcp_tool_policies.kind, mcp_servers.sampling_json, mcp_server_catalogs, mcp_elicitations, mcp_tool_calls sampling columns)",
+    up: `
+      ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'tool';
+      ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS sampling_json TEXT;
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS sampling_requests INTEGER;
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS sampling_input_tokens INTEGER;
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS sampling_output_tokens INTEGER;
+
+      CREATE TABLE IF NOT EXISTS mcp_server_catalogs (
+        server_id TEXT PRIMARY KEY,
+        capabilities_json TEXT,
+        resources_json TEXT,
+        resource_templates_json TEXT,
+        prompts_json TEXT,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mcp_elicitations (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        node_id TEXT NOT NULL,
+        server_id TEXT NOT NULL,
+        registry_server_id TEXT,
+        server_name TEXT,
+        tool_name TEXT NOT NULL,
+        message TEXT NOT NULL,
+        schema_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        answered_at TIMESTAMPTZ,
+        answered_by TEXT,
+        reason TEXT,
+        created_by TEXT,
+        trigger_type TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_elicitations_status ON mcp_elicitations(status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mcp_elicitations_execution ON mcp_elicitations(execution_id);
+    `,
+    down: `
+      DROP TABLE IF EXISTS mcp_elicitations;
+      DROP TABLE IF EXISTS mcp_server_catalogs;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS sampling_output_tokens;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS sampling_input_tokens;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS sampling_requests;
+      ALTER TABLE mcp_servers DROP COLUMN IF EXISTS sampling_json;
+      ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS kind;
+    `
   }
 ];
 

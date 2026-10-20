@@ -11,12 +11,20 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { McpPlaygroundCallResponse } from "@ai-orchestrator/shared";
+import type { McpPlaygroundCallResponse, McpPromptGetResult, McpResourceContent } from "@ai-orchestrator/shared";
 import {
   ApiError,
   callMcpPlaygroundTool,
+  fetchMcpServerPrompts,
+  fetchMcpServerResources,
   fetchMcpServerTools,
+  getMcpServerPrompt,
+  readMcpServerResource,
+  type McpCatalogPrompt,
+  type McpCatalogResource,
+  type McpCatalogResourceTemplate,
   type McpRegisteredServer,
+  type McpResourceReadResponse,
   type McpSnapshotTool
 } from "../lib/api";
 import {
@@ -455,8 +463,484 @@ function ToolsPanel({ server, projectId, userId }: ToolsPanelProps) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+const TEMPLATE_VARIABLE = /\{([^}]+)\}/g;
+
+/** `{name}` placeholders of an RFC 6570 level-1 template, in order. */
+export function templateVariables(uriTemplate: string): string[] {
+  const names: string[] = [];
+  for (const match of uriTemplate.matchAll(TEMPLATE_VARIABLE)) {
+    const name = match[1].trim();
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+export function expandTemplate(uriTemplate: string, values: Record<string, string>): string {
+  return uriTemplate.replace(TEMPLATE_VARIABLE, (_match, name: string) => encodeURIComponent(values[name.trim()] ?? ""));
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function isJsonMime(mimeType: string | undefined): boolean {
+  return Boolean(mimeType && /json/i.test(mimeType));
+}
+
+function prettyJson(text: string): string | null {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return null;
+  }
+}
+
+function extensionFor(mimeType: string | undefined): string {
+  if (!mimeType) return "bin";
+  const subtype = mimeType.split("/")[1]?.split(";")[0] ?? "";
+  if (subtype === "plain") return "txt";
+  if (subtype === "svg+xml") return "svg";
+  return subtype.replace(/^x-/, "") || "bin";
+}
+
+function downloadName(uri: string, mimeType: string | undefined): string {
+  const last = uri.split(/[/:]/).filter(Boolean).pop() ?? "resource";
+  return /\.[A-Za-z0-9]+$/.test(last) ? last : `${last}.${extensionFor(mimeType)}`;
+}
+
+function ResourceContentView({ content, uri }: { content: McpResourceContent; uri: string }) {
+  const [raw, setRaw] = useState(false);
+  if ("blob" in content) {
+    const href = `data:${content.mimeType ?? "application/octet-stream"};base64,${content.blob}`;
+    const image = content.mimeType?.startsWith("image/");
+    const bytes = Math.floor((content.blob.length * 3) / 4) - (content.blob.endsWith("==") ? 2 : content.blob.endsWith("=") ? 1 : 0);
+    return (
+      <div className="mcp-pg-resource-blob">
+        {image ? <img className="mcp-pg-block is-image" src={href} alt={`Resource ${uri}`} /> : null}
+        <a className="pg-btn small" href={href} download={downloadName(content.uri || uri, content.mimeType)}>
+          Download {content.mimeType ?? "binary"} ({formatBytes(bytes)})
+        </a>
+      </div>
+    );
+  }
+  const formatted = isJsonMime(content.mimeType) && !raw ? prettyJson(content.text) : null;
+  return (
+    <div className="mcp-pg-resource-text">
+      {isJsonMime(content.mimeType) && (
+        <button type="button" className="kb-link-btn" onClick={() => setRaw((current) => !current)}>
+          {raw ? "Format JSON" : "Show raw"}
+        </button>
+      )}
+      <pre className="mcp-pg-block is-text">{formatted ?? content.text}</pre>
+    </div>
+  );
+}
+
+interface CatalogPanelProps {
+  server: McpRegisteredServer;
+  projectId?: string | null;
+  userId?: string;
+}
+
+function ResourcesPanel({ server, projectId }: CatalogPanelProps) {
+  const [resources, setResources] = useState<McpCatalogResource[]>([]);
+  const [templates, setTemplates] = useState<McpCatalogResourceTemplate[]>([]);
+  const [supported, setSupported] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
+  const [customUri, setCustomUri] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [result, setResult] = useState<McpResourceReadResponse | null>(null);
+
+  const load = useCallback(
+    (refresh: boolean) => {
+      let cancelled = false;
+      setLoading(true);
+      setLoadError(null);
+      fetchMcpServerResources(server.id, { projectId, refresh })
+        .then((response) => {
+          if (cancelled) return;
+          setResources(response.resources);
+          setTemplates(response.resourceTemplates);
+          setSupported(Boolean(response.capabilities.resources) || response.resources.length > 0 || response.resourceTemplates.length > 0);
+          setUpdatedAt(response.updatedAt);
+          setSelected((current) => current ?? response.resources[0]?.uri ?? response.resourceTemplates[0]?.uriTemplate ?? null);
+        })
+        .catch((error) => {
+          if (!cancelled) setLoadError(formatError(error));
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [server.id, projectId]
+  );
+
+  useEffect(() => load(false), [load]);
+
+  const resource = resources.find((entry) => entry.uri === selected) ?? null;
+  const template = templates.find((entry) => entry.uriTemplate === selected) ?? null;
+  const variables = template ? templateVariables(template.uriTemplate) : [];
+  const uri = resource ? resource.uri : template ? expandTemplate(template.uriTemplate, templateValues) : customUri.trim();
+  const access = resource?.access ?? template?.access ?? null;
+  const blocked = access && !access.allowed ? access : null;
+
+  const read = async () => {
+    if (!uri) return;
+    setBusy(true);
+    setReadError(null);
+    setResult(null);
+    try {
+      setResult(await readMcpServerResource(server.id, { uri, ...(projectId ? { projectId } : {}) }));
+    } catch (error) {
+      setReadError(formatError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading) return <p className="kb-subtle">Loading resources…</p>;
+  if (loadError) return <div className="settings-error">{loadError}</div>;
+  if (!supported) {
+    return <p className="kb-subtle">This server does not advertise resources. Probe it on the Servers tab after it starts offering some.</p>;
+  }
+
+  return (
+    <div className="mcp-pg-tools">
+      <aside className="mcp-pg-toollist" aria-label="Resources">
+        {resources.map((entry) => (
+          <button
+            key={entry.uri}
+            type="button"
+            className={entry.uri === selected ? "kb-item active" : "kb-item"}
+            onClick={() => {
+              setSelected(entry.uri);
+              setResult(null);
+              setReadError(null);
+            }}
+          >
+            <div className="mcp-item-head">
+              <span className="kb-item-name">{entry.title ?? entry.name}</span>
+              {entry.mimeType && <code className="mcp-pg-field-type">{entry.mimeType}</code>}
+            </div>
+            <span className="kb-subtle mcp-pg-uri">{entry.uri}</span>
+            {!entry.access.allowed && <span className="mcp-blocked">Blocked for your role</span>}
+          </button>
+        ))}
+        {templates.map((entry) => (
+          <button
+            key={entry.uriTemplate}
+            type="button"
+            className={entry.uriTemplate === selected ? "kb-item active" : "kb-item"}
+            onClick={() => {
+              setSelected(entry.uriTemplate);
+              setResult(null);
+              setReadError(null);
+            }}
+          >
+            <div className="mcp-item-head">
+              <span className="kb-item-name">{entry.title ?? entry.name}</span>
+              <code className="mcp-pg-field-type">template</code>
+            </div>
+            <span className="kb-subtle mcp-pg-uri">{entry.uriTemplate}</span>
+            {!entry.access.allowed && <span className="mcp-blocked">Blocked for your role</span>}
+          </button>
+        ))}
+        <button
+          type="button"
+          className={selected === "__custom__" ? "kb-item active" : "kb-item"}
+          onClick={() => {
+            setSelected("__custom__");
+            setResult(null);
+            setReadError(null);
+          }}
+        >
+          <span className="kb-item-name">Any URI…</span>
+        </button>
+        <button type="button" className="kb-link-btn" onClick={() => load(true)}>
+          Refresh list{updatedAt ? ` (listed ${new Date(updatedAt).toLocaleTimeString()})` : ""}
+        </button>
+      </aside>
+
+      <div className="mcp-pg-main">
+        <header className="mcp-pg-tool-head">
+          <h3>{resource?.title ?? resource?.name ?? template?.title ?? template?.name ?? "Read a resource"}</h3>
+          {(resource?.description ?? template?.description) && <p className="kb-subtle">{resource?.description ?? template?.description}</p>}
+          {blocked && (
+            <p className="mcp-blocked" role="status">
+              {blocked.message ?? "Tool policy blocks this resource for your role in this project."}
+            </p>
+          )}
+        </header>
+        {template && variables.length > 0 && (
+          <div className="mcp-pg-fields">
+            {variables.map((name) => (
+              <div key={name} className="mcp-pg-field">
+                <label htmlFor={`mcp-pg-tpl-${name}`} className="mcp-pg-field-label">
+                  {name}
+                </label>
+                <input
+                  id={`mcp-pg-tpl-${name}`}
+                  type="text"
+                  value={templateValues[name] ?? ""}
+                  onChange={(event) => setTemplateValues((current) => ({ ...current, [name]: event.target.value }))}
+                  disabled={busy}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+        {selected === "__custom__" && (
+          <div className="mcp-pg-field">
+            <label htmlFor="mcp-pg-custom-uri" className="mcp-pg-field-label">
+              Resource URI
+            </label>
+            <input id="mcp-pg-custom-uri" type="text" value={customUri} onChange={(event) => setCustomUri(event.target.value)} disabled={busy} spellCheck={false} />
+          </div>
+        )}
+        <p className="kb-subtle">
+          URI <code>{uri || "—"}</code>
+        </p>
+        <div className="mcp-form-actions">
+          <button type="button" className="pg-btn primary" onClick={() => void read()} disabled={busy || !uri || Boolean(blocked)}>
+            {busy ? "Reading…" : "Read resource"}
+          </button>
+        </div>
+        {readError && (
+          <div className="settings-error" role="alert">
+            {readError}
+          </div>
+        )}
+        {result && (
+          <section className="mcp-pg-result" aria-label="Resource contents">
+            <div className="mcp-pg-result-head">
+              <span className="mcp-status mcp-status-healthy">
+                <span className="mcp-status-dot" aria-hidden="true" />
+                Read {formatBytes(result.bytes)}
+              </span>
+              <span className="kb-subtle">
+                {result.durationMs} ms · as {result.policy.role} in {result.policy.projectId}
+              </span>
+            </div>
+            {result.contents.map((content, index) => (
+              <ResourceContentView key={`${content.uri}-${index}`} content={content} uri={result.uri} />
+            ))}
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Prompts
+// ---------------------------------------------------------------------------
+
+function PromptMessageView({ message }: { message: McpPromptGetResult["messages"][number] }) {
+  const content = message.content;
+  return (
+    <div className="mcp-pg-prompt-message">
+      <span className="mcp-pg-prompt-role">{message.role}</span>
+      {content.type === "text" ? (
+        <pre className="mcp-pg-block is-text">{content.text}</pre>
+      ) : content.type === "image" && typeof content.data === "string" && content.mimeType?.startsWith("image/") ? (
+        <img className="mcp-pg-block is-image" src={`data:${content.mimeType};base64,${content.data}`} alt="Prompt image" />
+      ) : content.type === "resource" ? (
+        <pre className="mcp-pg-block is-text">{"text" in content.resource ? content.resource.text : `[${content.resource.mimeType ?? "binary"} resource ${content.resource.uri}]`}</pre>
+      ) : (
+        <pre className="mcp-pg-block">{pretty(content)}</pre>
+      )}
+    </div>
+  );
+}
+
+function PromptsPanel({ server, projectId }: CatalogPanelProps) {
+  const [prompts, setPrompts] = useState<McpCatalogPrompt[]>([]);
+  const [supported, setSupported] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [name, setName] = useState<string | null>(null);
+  const [args, setArgs] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [getError, setGetError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ prompt: McpPromptGetResult; durationMs: number } | null>(null);
+
+  const load = useCallback(
+    (refresh: boolean) => {
+      let cancelled = false;
+      setLoading(true);
+      setLoadError(null);
+      fetchMcpServerPrompts(server.id, { projectId, refresh })
+        .then((response) => {
+          if (cancelled) return;
+          setPrompts(response.prompts);
+          setSupported(Boolean(response.capabilities.prompts) || response.prompts.length > 0);
+          setUpdatedAt(response.updatedAt);
+          setName((current) => (current && response.prompts.some((entry) => entry.name === current) ? current : response.prompts[0]?.name ?? null));
+        })
+        .catch((error) => {
+          if (!cancelled) setLoadError(formatError(error));
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [server.id, projectId]
+  );
+
+  useEffect(() => load(false), [load]);
+
+  const prompt = prompts.find((entry) => entry.name === name) ?? null;
+  const blocked = prompt?.access && !prompt.access.allowed ? prompt.access : null;
+
+  useEffect(() => {
+    setArgs({});
+    setErrors({});
+    setResult(null);
+    setGetError(null);
+  }, [name]);
+
+  const render = async () => {
+    if (!prompt) return;
+    const missing: Record<string, string> = {};
+    for (const argument of prompt.arguments ?? []) {
+      if (argument.required && !(args[argument.name] ?? "").trim()) missing[argument.name] = "Required";
+    }
+    setErrors(missing);
+    if (Object.keys(missing).length > 0) return;
+    setBusy(true);
+    setGetError(null);
+    try {
+      const filled = Object.fromEntries(Object.entries(args).filter(([, value]) => value.trim().length > 0));
+      const response = await getMcpServerPrompt(server.id, { name: prompt.name, arguments: filled, ...(projectId ? { projectId } : {}) });
+      setResult({ prompt: response.prompt, durationMs: response.durationMs });
+    } catch (error) {
+      setGetError(formatError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading) return <p className="kb-subtle">Loading prompts…</p>;
+  if (loadError) return <div className="settings-error">{loadError}</div>;
+  if (!supported || prompts.length === 0) {
+    return <p className="kb-subtle">This server does not advertise prompts. Probe it on the Servers tab after it starts offering some.</p>;
+  }
+
+  return (
+    <div className="mcp-pg-tools">
+      <aside className="mcp-pg-toollist" aria-label="Prompts">
+        {prompts.map((entry) => (
+          <button key={entry.name} type="button" className={entry.name === name ? "kb-item active" : "kb-item"} onClick={() => setName(entry.name)}>
+            <div className="mcp-item-head">
+              <span className="kb-item-name">{entry.title ?? entry.name}</span>
+              {(entry.arguments?.length ?? 0) > 0 && <code className="mcp-pg-field-type">{entry.arguments!.length} args</code>}
+            </div>
+            {!entry.access.allowed && <span className="mcp-blocked">Blocked for your role</span>}
+          </button>
+        ))}
+        <button type="button" className="kb-link-btn" onClick={() => load(true)}>
+          Refresh list{updatedAt ? ` (listed ${new Date(updatedAt).toLocaleTimeString()})` : ""}
+        </button>
+      </aside>
+
+      {prompt && (
+        <div className="mcp-pg-main">
+          <header className="mcp-pg-tool-head">
+            <h3>{prompt.title ?? prompt.name}</h3>
+            {prompt.description && <p className="kb-subtle">{prompt.description}</p>}
+            {blocked && (
+              <p className="mcp-blocked" role="status">
+                {blocked.message ?? "Tool policy blocks this prompt for your role in this project."}
+              </p>
+            )}
+          </header>
+          {(prompt.arguments?.length ?? 0) > 0 ? (
+            <div className="mcp-pg-fields">
+              {prompt.arguments!.map((argument) => (
+                <div key={argument.name} className={errors[argument.name] ? "mcp-pg-field has-error" : "mcp-pg-field"}>
+                  <span className="mcp-pg-field-label">
+                    <label htmlFor={`mcp-pg-arg-${argument.name}`}>{argument.name}</label>
+                    {argument.required ? <span className="mcp-pg-field-req" aria-label="required">*</span> : null}
+                  </span>
+                  {argument.description && <small className="kb-subtle">{argument.description}</small>}
+                  <input
+                    id={`mcp-pg-arg-${argument.name}`}
+                    type="text"
+                    value={args[argument.name] ?? ""}
+                    onChange={(event) => setArgs((current) => ({ ...current, [argument.name]: event.target.value }))}
+                    disabled={busy}
+                  />
+                  {errors[argument.name] && (
+                    <small className="mcp-pg-field-error" role="alert">
+                      {errors[argument.name]}
+                    </small>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="kb-subtle">This prompt takes no arguments.</p>
+          )}
+          <div className="mcp-form-actions">
+            <button type="button" className="pg-btn primary" onClick={() => void render()} disabled={busy || Boolean(blocked)}>
+              {busy ? "Rendering…" : "Preview prompt"}
+            </button>
+          </div>
+          {getError && (
+            <div className="settings-error" role="alert">
+              {getError}
+            </div>
+          )}
+          {result && (
+            <section className="mcp-pg-result" aria-label="Rendered prompt">
+              <div className="mcp-pg-result-head">
+                <span className="mcp-status mcp-status-healthy">
+                  <span className="mcp-status-dot" aria-hidden="true" />
+                  {result.prompt.messages.length} message{result.prompt.messages.length === 1 ? "" : "s"}
+                </span>
+                <span className="kb-subtle">{result.durationMs} ms</span>
+              </div>
+              {result.prompt.description && <p className="kb-subtle">{result.prompt.description}</p>}
+              {result.prompt.messages.map((message, index) => (
+                <PromptMessageView key={index} message={message} />
+              ))}
+              <p className="kb-subtle">
+                Use this prompt as the system or user message of an LLM or agent node: pick the server and prompt in the node's
+                inspector.
+              </p>
+            </section>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Capability panels; each server shows the panels for what it supports. */
-const PLAYGROUND_PANELS = [{ id: "tools" as const, label: "Tools", Component: ToolsPanel }];
+const PLAYGROUND_PANELS = [
+  { id: "tools" as const, label: "Tools", Component: ToolsPanel },
+  { id: "resources" as const, label: "Resources", Component: ResourcesPanel },
+  { id: "prompts" as const, label: "Prompts", Component: PromptsPanel }
+];
 
 interface McpPlaygroundPageProps {
   servers: McpRegisteredServer[];
@@ -509,7 +993,8 @@ export function McpPlaygroundPage({ servers, activeProjectId, userId }: McpPlayg
           </div>
         )}
         <span className="kb-subtle mcp-pg-note">
-          Calls run on the server with its stored credentials, under your role's tool policy, and count in the server's telemetry.
+          Calls and reads run on the server with its stored credentials, under your role's tool policy, and tool calls count in
+          the server's telemetry.
         </span>
       </div>
       {server && <panel.Component key={server.id} server={server} projectId={activeProjectId} userId={userId} />}

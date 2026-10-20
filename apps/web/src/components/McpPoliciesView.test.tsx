@@ -200,6 +200,7 @@ describe("MCP tool policy UI", () => {
       serverId: "mock-mcp",
       toolPattern: "delete_*",
       annotationHint: null,
+      kind: "tool",
       enabled: true
     });
     expect(await within(list).findByText("Builders: no deletes")).toBeInTheDocument();

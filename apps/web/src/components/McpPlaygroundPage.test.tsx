@@ -10,7 +10,11 @@ vi.mock("../lib/api", async () => {
   return {
     ...actual,
     fetchMcpServerTools: vi.fn(),
-    callMcpPlaygroundTool: vi.fn()
+    callMcpPlaygroundTool: vi.fn(),
+    fetchMcpServerResources: vi.fn(),
+    readMcpServerResource: vi.fn(),
+    fetchMcpServerPrompts: vi.fn(),
+    getMcpServerPrompt: vi.fn()
   };
 });
 
@@ -196,5 +200,133 @@ describe("maskExchange", () => {
       note: ""
     });
     expect(masked.transport).toEqual({ kind: "stdio", command: "node", args: [], env: { API_TOKEN: "••••••", MODE: "x" } });
+  });
+
+  describe("resources and prompts panels", () => {
+    const capabilities = { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } };
+    const policy = { role: "builder" as const, projectId: "default" };
+
+    beforeEach(() => {
+      vi.mocked(api.fetchMcpServerResources).mockResolvedValue({
+        serverId: "mcp_echo",
+        capabilities,
+        updatedAt: "2026-10-20T10:00:00.000Z",
+        policy,
+        resources: [
+          { uri: "mock://docs/readme", name: "readme", title: "Read me", mimeType: "text/plain", access: { allowed: true } },
+          { uri: "mock://secrets/vault", name: "vault", mimeType: "text/plain", access: { allowed: false, message: "Blocked by rule No vault" } }
+        ],
+        resourceTemplates: [{ uriTemplate: "mock://kb/{topic}", name: "kb", title: "Knowledge base", access: { allowed: true } }]
+      });
+      vi.mocked(api.fetchMcpServerPrompts).mockResolvedValue({
+        serverId: "mcp_echo",
+        capabilities,
+        updatedAt: "2026-10-20T10:00:00.000Z",
+        policy,
+        prompts: [
+          {
+            name: "explain_topic",
+            title: "Explain a topic",
+            description: "Explains a topic for a reader",
+            arguments: [
+              { name: "topic", required: true },
+              { name: "audience", required: false }
+            ],
+            access: { allowed: true }
+          }
+        ]
+      });
+    });
+
+    it("lists resources and templates, expands template variables and shows the contents read", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.readMcpServerResource).mockResolvedValue({
+        serverId: "mcp_echo",
+        uri: "mock://kb/rag",
+        bytes: 12,
+        durationMs: 3,
+        contents: [{ uri: "mock://kb/rag", mimeType: "application/json", text: '{"topic":"rag"}' }],
+        policy
+      });
+      render(<McpPlaygroundPage servers={[makeServer()]} activeProjectId="default" userId="u1" />);
+      await user.click(screen.getByRole("tab", { name: "Resources" }));
+
+      const list = await screen.findByRole("complementary", { name: "Resources" });
+      expect(within(list).getByText("mock://docs/readme")).toBeInTheDocument();
+      expect(within(list).getByText("Blocked for your role")).toBeInTheDocument();
+
+      // Blocked entries cannot be read.
+      await user.click(within(list).getByRole("button", { name: /vault/ }));
+      expect(screen.getByRole("status")).toHaveTextContent("Blocked by rule No vault");
+      expect(screen.getByRole("button", { name: "Read resource" })).toBeDisabled();
+
+      await user.click(within(list).getByRole("button", { name: /Knowledge base/ }));
+      await user.type(screen.getByLabelText("topic"), "rag");
+      expect(screen.getByText("mock://kb/rag")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Read resource" }));
+
+      await waitFor(() => expect(api.readMcpServerResource).toHaveBeenCalledWith("mcp_echo", { uri: "mock://kb/rag", projectId: "default" }));
+      const result = await screen.findByRole("region", { name: "Resource contents" });
+      expect(within(result).getByText(/"topic": "rag"/)).toBeInTheDocument();
+      await user.click(within(result).getByRole("button", { name: "Show raw" }));
+      expect(within(result).getByText('{"topic":"rag"}')).toBeInTheDocument();
+    });
+
+    it("explains when a server offers no resources and refreshes the list on request", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.fetchMcpServerResources).mockResolvedValue({
+        serverId: "mcp_echo",
+        capabilities: { tools: { listChanged: false } },
+        updatedAt: null,
+        policy,
+        resources: [],
+        resourceTemplates: []
+      });
+      render(<McpPlaygroundPage servers={[makeServer()]} activeProjectId="default" userId="u1" />);
+      await user.click(screen.getByRole("tab", { name: "Resources" }));
+      expect(await screen.findByText(/does not advertise resources/)).toBeInTheDocument();
+    });
+
+    it("renders a prompt with its arguments and previews the messages", async () => {
+      const user = userEvent.setup();
+      vi.mocked(api.getMcpServerPrompt).mockResolvedValue({
+        serverId: "mcp_echo",
+        durationMs: 2,
+        policy,
+        prompt: {
+          name: "explain_topic",
+          description: "Explain rag",
+          messages: [
+            { role: "user", content: { type: "text", text: "Explain rag to engineers" } },
+            { role: "assistant", content: { type: "text", text: "Sure." } }
+          ]
+        }
+      });
+      render(<McpPlaygroundPage servers={[makeServer()]} activeProjectId="default" userId="u1" />);
+      await user.click(screen.getByRole("tab", { name: "Prompts" }));
+
+      const list = await screen.findByRole("complementary", { name: "Prompts" });
+      await user.click(within(list).getByRole("button", { name: /Explain a topic/ }));
+      expect(screen.getByRole("heading", { name: "Explain a topic" })).toBeInTheDocument();
+
+      // Required arguments are checked before the request is sent.
+      await user.click(screen.getByRole("button", { name: "Preview prompt" }));
+      expect(screen.getByRole("alert")).toHaveTextContent("Required");
+      expect(api.getMcpServerPrompt).not.toHaveBeenCalled();
+
+      await user.type(screen.getByLabelText("topic"), "rag");
+      await user.type(screen.getByLabelText("audience"), "engineers");
+      await user.click(screen.getByRole("button", { name: "Preview prompt" }));
+      await waitFor(() =>
+        expect(api.getMcpServerPrompt).toHaveBeenCalledWith("mcp_echo", {
+          name: "explain_topic",
+          arguments: { topic: "rag", audience: "engineers" },
+          projectId: "default"
+        })
+      );
+      const rendered = await screen.findByRole("region", { name: "Rendered prompt" });
+      expect(within(rendered).getByText("2 messages")).toBeInTheDocument();
+      expect(within(rendered).getByText("Explain rag to engineers")).toBeInTheDocument();
+    });
   });
 });

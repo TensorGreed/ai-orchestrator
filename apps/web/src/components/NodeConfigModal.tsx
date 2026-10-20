@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import type { LLMProviderConfig, MCPToolDefinition, McpToolPolicyTrace, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import type {
+  LLMProviderConfig,
+  MCPToolDefinition,
+  McpElicitationTraceEntry,
+  McpSamplingTraceEntry,
+  McpToolPolicyTrace,
+  WorkflowExecutionResult
+} from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
@@ -8,6 +15,8 @@ import {
   createSecret,
   discoverMcpTools,
   fetchMcpPresets,
+  fetchMcpServerPrompts,
+  fetchMcpServerResources,
   fetchMcpServers,
   fetchMcpServerTools,
   fetchProviderModels,
@@ -17,6 +26,9 @@ import {
   testConnector,
   testMcpTool,
   testProvider,
+  type McpCatalogPrompt,
+  type McpCatalogResource,
+  type McpCatalogResourceTemplate,
   type McpPreset,
   type McpRegisteredServer,
   type McpTestToolResult,
@@ -357,6 +369,45 @@ function FieldLabel({ label, help }: { label: string; help?: React.ReactNode }) 
       {help ? <HelpHint>{help}</HelpHint> : null}
     </span>
   );
+}
+
+/** Phase 10.5 — nodes whose system or user prompt can come from an MCP server prompt. */
+const SERVER_PROMPT_NODE_TYPES = new Set([
+  "agent_orchestrator",
+  "supervisor_node",
+  "llm_call",
+  "openai_chat_model",
+  "anthropic_chat_model",
+  "ollama_chat_model",
+  "openai_compatible_chat_model",
+  "ai_gateway_chat_model",
+  "azure_openai_chat_model"
+]);
+
+interface ServerPromptBindingConfig {
+  registryServerId: string;
+  name: string;
+  arguments: Record<string, string>;
+  target: "system" | "user";
+}
+
+function readServerPromptConfig(value: unknown): ServerPromptBindingConfig | null {
+  const record = asRecord(value);
+  const registryServerId = toStringValue(record.registryServerId).trim();
+  if (!registryServerId) return null;
+  const rawArguments = asRecord(record.arguments);
+  return {
+    registryServerId,
+    name: toStringValue(record.name).trim(),
+    arguments: Object.fromEntries(Object.entries(rawArguments).map(([key, entry]) => [key, toStringValue(entry)])),
+    target: record.target === "user" ? "user" : "system"
+  };
+}
+
+function readTraceList<T>(output: unknown, key: string): T[] {
+  const record = asRecord(output);
+  const list = record[key];
+  return Array.isArray(list) ? (list as T[]) : [];
 }
 
 function ToggleField({
@@ -926,7 +977,7 @@ function ExpressionField({
           </button>
         )}
       </div>
-      <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={rows} />
+      <textarea aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} rows={rows} />
       {formatError && <div className="cfg-field-error">{formatError}</div>}
       <div className="expression-suggestions" aria-label={`${label} suggestions`}>
         {EXPRESSION_SUGGESTIONS.map((item) => (
@@ -1085,6 +1136,11 @@ export function NodeInspector({
   const [probeError, setProbeError] = useState<string | null>(null);
   const [mcpPresets, setMcpPresets] = useState<McpPreset[]>([]);
   const [registeredMcpServers, setRegisteredMcpServers] = useState<McpRegisteredServer[] | null>(null);
+  // Phase 10.5 — prompts and resources of registry servers, loaded once per server for the pickers.
+  const [serverPromptLists, setServerPromptLists] = useState<Record<string, McpCatalogPrompt[] | "loading" | "error">>({});
+  const [serverResourceLists, setServerResourceLists] = useState<
+    Record<string, { resources: McpCatalogResource[]; templates: McpCatalogResourceTemplate[] } | "loading" | "error">
+  >({});
   const [mcpPresetSelection, setMcpPresetSelection] = useState("");
   const [codeTestInput, setCodeTestInput] = useState("{\n  \"user_prompt\": \"Hello from code node\"\n}");
   const [codeTestBusy, setCodeTestBusy] = useState(false);
@@ -1908,7 +1964,7 @@ export function NodeInspector({
   }, [mcpPresets.length, node.data.nodeType]);
 
   useEffect(() => {
-    if (node.data.nodeType !== "mcp_tool" || registeredMcpServers !== null) {
+    if ((node.data.nodeType !== "mcp_tool" && !SERVER_PROMPT_NODE_TYPES.has(node.data.nodeType)) || registeredMcpServers !== null) {
       return;
     }
     let cancelled = false;
@@ -2361,6 +2417,134 @@ export function NodeInspector({
     );
   };
 
+  const loadServerPrompts = useCallback(
+    (registryServerId: string) => {
+      if (!registryServerId || serverPromptLists[registryServerId] !== undefined) return;
+      setServerPromptLists((current) => ({ ...current, [registryServerId]: "loading" }));
+      fetchMcpServerPrompts(registryServerId, { projectId: workflowContext?.projectId ?? null })
+        .then((response) => setServerPromptLists((current) => ({ ...current, [registryServerId]: response.prompts })))
+        .catch(() => setServerPromptLists((current) => ({ ...current, [registryServerId]: "error" })));
+    },
+    [serverPromptLists, workflowContext?.projectId]
+  );
+
+  const loadServerResources = useCallback(
+    (registryServerId: string) => {
+      if (!registryServerId || serverResourceLists[registryServerId] !== undefined) return;
+      setServerResourceLists((current) => ({ ...current, [registryServerId]: "loading" }));
+      fetchMcpServerResources(registryServerId, { projectId: workflowContext?.projectId ?? null })
+        .then((response) =>
+          setServerResourceLists((current) => ({
+            ...current,
+            [registryServerId]: { resources: response.resources, templates: response.resourceTemplates }
+          }))
+        )
+        .catch(() => setServerResourceLists((current) => ({ ...current, [registryServerId]: "error" })));
+    },
+    [serverResourceLists, workflowContext?.projectId]
+  );
+
+  const serverPromptBinding = useMemo(() => readServerPromptConfig(config.serverPrompt), [config.serverPrompt]);
+
+  useEffect(() => {
+    if (serverPromptBinding) loadServerPrompts(serverPromptBinding.registryServerId);
+  }, [serverPromptBinding, loadServerPrompts]);
+
+  /**
+   * Phase 10.5 — bind a prompt an MCP server advertises as this node's
+   * system or user message. Arguments are templates, resolved at run time
+   * like the node's own prompts; the registry server is the source of truth,
+   * so the picker shows what its last probe listed.
+   */
+  const renderServerPromptPicker = () => {
+    const binding = serverPromptBinding;
+    const serverOptions = [
+      { value: "", label: "None, use the prompt fields above" },
+      ...(registeredMcpServers ?? []).map((server) => ({ value: server.id, label: server.name })),
+      ...(binding && !(registeredMcpServers ?? []).some((server) => server.id === binding.registryServerId) && registeredMcpServers !== null
+        ? [{ value: binding.registryServerId, label: `Missing server (${binding.registryServerId})` }]
+        : [])
+    ];
+    if (serverOptions.length === 1 && !binding) {
+      return null;
+    }
+    const prompts = binding ? serverPromptLists[binding.registryServerId] : undefined;
+    const promptList = Array.isArray(prompts) ? prompts : [];
+    const selectedPrompt = binding ? promptList.find((entry) => entry.name === binding.name) : undefined;
+    const promptOptions = [
+      { value: "", label: promptList.length === 0 ? "No prompts listed (probe the server)" : "Pick a prompt" },
+      ...promptList.map((entry) => ({ value: entry.name, label: entry.title ?? entry.name })),
+      ...(binding?.name && !promptList.some((entry) => entry.name === binding.name) ? [{ value: binding.name, label: binding.name }] : [])
+    ];
+    const updateBinding = (patch: Partial<ServerPromptBindingConfig> | null) =>
+      setConfig((current) => {
+        if (!patch) {
+          const { serverPrompt: _removed, ...rest } = current;
+          return rest;
+        }
+        const existing = readServerPromptConfig(current.serverPrompt) ?? { registryServerId: "", name: "", arguments: {}, target: "system" as const };
+        return { ...current, serverPrompt: { ...existing, ...patch } };
+      });
+    return (
+      <div className="cfg-group" data-testid="server-prompt-picker">
+        <SelectField
+          label="Server prompt"
+          value={binding?.registryServerId ?? ""}
+          onChange={(next) => {
+            if (!next) {
+              updateBinding(null);
+              return;
+            }
+            updateBinding({ registryServerId: next, name: "", arguments: {} });
+            loadServerPrompts(next);
+          }}
+          options={serverOptions}
+          help={
+            <>
+              Use a prompt an MCP server publishes instead of writing it here. It is fetched when the node runs, so the
+              server's latest version applies; the tool policy's prompt rules decide who may use it.
+            </>
+          }
+        />
+        {binding && (
+          <>
+            {prompts === "error" && <div className="error-banner">Could not list this server's prompts.</div>}
+            <SelectField
+              label="Prompt"
+              value={binding.name}
+              onChange={(next) => updateBinding({ name: next, arguments: {} })}
+              options={promptOptions}
+              help={selectedPrompt?.description ? selectedPrompt.description : prompts === "loading" ? "Loading prompts…" : undefined}
+            />
+            {selectedPrompt?.access && !selectedPrompt.access.allowed && (
+              <div className="error-banner">{selectedPrompt.access.message ?? "Tool policy blocks this prompt for your role."}</div>
+            )}
+            {selectedPrompt?.arguments?.map((argument) => (
+              <ExpressionField
+                key={argument.name}
+                label={`${argument.name}${argument.required ? " (required)" : ""}`}
+                value={binding.arguments[argument.name] ?? ""}
+                onChange={(next) => updateBinding({ arguments: { ...binding.arguments, [argument.name]: next } })}
+                rows={2}
+                mode="template"
+                previewContext={expressionPreviewContext}
+              />
+            ))}
+            <SelectField
+              label="Use as"
+              value={binding.target}
+              onChange={(next) => updateBinding({ target: next === "user" ? "user" : "system" })}
+              options={[
+                { value: "system", label: "System message" },
+                { value: "user", label: "User message" }
+              ]}
+            />
+          </>
+        )}
+      </div>
+    );
+  };
+
   const renderAgentParameters = () => {
     return (
       <>
@@ -2408,6 +2592,8 @@ export function NodeInspector({
           mode="template"
           previewContext={expressionPreviewContext}
         />
+
+        {renderServerPromptPicker()}
 
         <TextField
           label="Session Id Template"
@@ -2622,6 +2808,7 @@ export function NodeInspector({
       : discoveredTools;
     const shouldShowToolSearch = discoveredTools.length > 10;
     const registryServerId = toStringValue(config.registryServerId).trim();
+    const readsResource = config.operation === "read_resource";
     const registeredServer = registryServerId
       ? registeredMcpServers?.find((server) => server.id === registryServerId)
       : undefined;
@@ -2649,6 +2836,7 @@ export function NodeInspector({
             value={registryServerId}
             onChange={(next) => {
               const picked = registeredMcpServers?.find((server) => server.id === next);
+              if (picked && config.operation === "read_resource") loadServerResources(picked.id);
               setConfig((current) => {
                 const nextConfig: Record<string, unknown> = { ...current, toolName: "__all__", allowedTools: undefined };
                 if (picked) {
@@ -3038,6 +3226,66 @@ export function NodeInspector({
           </>
         )}
 
+        <SelectField
+          label="Operation"
+          value={readsResource ? "read_resource" : "call_tool"}
+          onChange={(next) =>
+            setConfig((current) => {
+              if (next === "read_resource") {
+                loadServerResources(toStringValue(current.registryServerId).trim());
+                return { ...current, operation: "read_resource" };
+              }
+              const { operation: _removed, ...rest } = current;
+              return rest;
+            })
+          }
+          options={[
+            { value: "call_tool", label: "Call a tool" },
+            { value: "read_resource", label: "Read a resource" }
+          ]}
+          help={
+            <>
+              Reading a resource fetches one item the server publishes (a file, a record, a document) into the workflow as{" "}
+              <code>text</code> and <code>contents</code>. Reads are governed by the tool policy's resource rules.
+            </>
+          }
+        />
+
+        {readsResource ? (
+          <>
+            {registryServerId &&
+              (() => {
+                const listing = serverResourceLists[registryServerId];
+                const resourceOptions =
+                  listing && listing !== "loading" && listing !== "error"
+                    ? [
+                        ...listing.resources.map((entry) => ({ value: entry.uri, label: `${entry.title ?? entry.name} · ${entry.uri}` })),
+                        ...listing.templates.map((entry) => ({ value: entry.uriTemplate, label: `${entry.title ?? entry.name} · ${entry.uriTemplate}` }))
+                      ]
+                    : [];
+                return (
+                  <SelectField
+                    label="Pick from the server's list"
+                    value={resourceOptions.some((option) => option.value === toStringValue(config.resourceUri)) ? toStringValue(config.resourceUri) : ""}
+                    onChange={(next) => {
+                      if (next) setConfig((current) => ({ ...current, resourceUri: next }));
+                    }}
+                    options={[{ value: "", label: listing === "loading" ? "Loading…" : listing === "error" ? "Could not list resources" : resourceOptions.length ? "Choose a resource or template" : "No resources listed (probe the server)" }, ...resourceOptions]}
+                    help="Templates keep their {placeholders}; replace them below with values or expressions."
+                  />
+                );
+              })()}
+            <ExpressionField
+              label="Resource URI"
+              value={toStringValue(config.resourceUri)}
+              onChange={(next) => setConfig((current) => ({ ...current, resourceUri: next }))}
+              rows={2}
+              mode="template"
+              previewContext={expressionPreviewContext}
+            />
+          </>
+        ) : (
+          <>
         <div className="cfg-inline-actions">
           <button
             type="button"
@@ -3451,6 +3699,8 @@ export function NodeInspector({
           mode="template"
           previewContext={expressionPreviewContext}
         />
+          </>
+        )}
       </>
     );
   };
@@ -3469,6 +3719,7 @@ export function NodeInspector({
           value={toStringValue(config.systemPromptKey, "system_prompt")}
           onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
         />
+        {renderServerPromptPicker()}
       </>
     );
   };
@@ -4228,6 +4479,7 @@ export function NodeInspector({
           value={toStringValue(config.systemPromptKey, "system_prompt")}
           onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
         />
+        {renderServerPromptPicker()}
         <div className="cfg-tip">{options.help}</div>
         <div className="cfg-inline-actions">
           <button
@@ -4323,6 +4575,7 @@ export function NodeInspector({
           value={toStringValue(config.systemPromptKey, "system_prompt")}
           onChange={(next) => setConfig((current) => ({ ...current, systemPromptKey: next }))}
         />
+        {renderServerPromptPicker()}
         <div className="cfg-tip">
           Use <code>OpenAI Compatible</code> when the gateway exposes <code>/v1/chat/completions</code>.
           Use <code>Anthropic</code> when it exposes Anthropic-compatible <code>/v1/messages</code>.
@@ -8677,6 +8930,9 @@ export function NodeInspector({
     const error = trace?.error ?? currentNodeResult?.error;
     const errorRemediation = trace?.errorRemediation ?? currentNodeResult?.errorRemediation;
     const toolPolicy = trace?.toolPolicy ?? readToolPolicyTrace(currentNodeResult?.output);
+    const sampling = readTraceList<McpSamplingTraceEntry>(currentNodeResult?.output, "_mcpSampling");
+    const elicitations = readTraceList<McpElicitationTraceEntry>(currentNodeResult?.output, "_mcpElicitations");
+    const serverPrompt = asRecord(asRecord(currentNodeResult?.output)._serverPrompt);
     const hasRun = Boolean(status || durationMs !== undefined || telemetry || error || toolPolicy);
     if (!hasRun) {
       return <div className="insp-empty">No run yet. Run the workflow or this node to see its trace.</div>;
@@ -8737,6 +8993,59 @@ export function NodeInspector({
               );
             })()
           : null}
+        {serverPrompt.name ? (
+          <div className="insp-trace-policy insp-trace-list" data-testid="insp-trace-server-prompt">
+            <strong>Server prompt</strong>
+            <p>
+              <code>{String(serverPrompt.name)}</code> from <code>{String(serverPrompt.registryServerId ?? "")}</code> used as the{" "}
+              {serverPrompt.target === "user" ? "user" : "system"} message ({String(serverPrompt.chars ?? 0)} characters,{" "}
+              {String(serverPrompt.messageCount ?? 0)} message{serverPrompt.messageCount === 1 ? "" : "s"}).
+            </p>
+          </div>
+        ) : null}
+        {sampling.length > 0 ? (
+          <div className="insp-trace-policy insp-trace-list" data-testid="insp-trace-sampling">
+            <strong>Sampling requests</strong>
+            <p>
+              The server asked the model to generate {sampling.length} time{sampling.length === 1 ? "" : "s"}:{" "}
+              {formatCount(sampling.reduce((sum, entry) => sum + (entry.inputTokens ?? 0), 0))} tokens in,{" "}
+              {formatCount(sampling.reduce((sum, entry) => sum + (entry.outputTokens ?? 0), 0))} out. These count on the
+              tool call that triggered them.
+            </p>
+            <ul>
+              {sampling.map((entry, index) => (
+                <li key={`${entry.at}-${index}`}>
+                  <code>{entry.toolName}</code> → {entry.ok ? `${entry.model ?? "model"} answered` : `refused: ${entry.error ?? "unknown"}`}
+                  {entry.requestedModels.length > 0 ? ` (asked for ${entry.requestedModels.join(", ")})` : ""} · {formatMs(entry.durationMs)}
+                  {entry.ok && entry.response ? <pre>{entry.response}</pre> : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {elicitations.length > 0 ? (
+          <div className="insp-trace-policy insp-trace-list" data-testid="insp-trace-elicitations">
+            <strong>Server questions</strong>
+            <ul>
+              {elicitations.map((entry, index) => (
+                <li key={`${entry.at}-${index}`}>
+                  <code>{entry.toolName}</code> asked “{entry.message}” →{" "}
+                  {entry.action === "accept" ? "answered" : entry.action === "cancel" ? "cancelled" : "declined"}
+                  {entry.source === "unattended"
+                    ? " automatically (unattended run)"
+                    : entry.source === "refused"
+                      ? " (refused: the request asked for credentials)"
+                      : entry.source === "timeout"
+                        ? " (no answer in time)"
+                        : entry.source === "unavailable"
+                          ? " (nobody could answer here)"
+                          : ""}
+                  {entry.note ? <span className="insp-trace-remedy"> {entry.note}</span> : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </div>
     );
   };

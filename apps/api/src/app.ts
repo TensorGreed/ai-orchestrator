@@ -19,6 +19,7 @@ import {
   MCP_POLICY_ROLES,
   mcpOAuthConnectSchema,
   mcpToolClassificationSchema,
+  mcpSamplingSettingsPatchSchema,
   mcpToolPolicyEvaluateSchema,
   mcpToolPolicyRuleInputSchema,
   mcpToolPolicyRuleUpdateSchema,
@@ -31,6 +32,7 @@ import {
   type McpToolPolicyRule,
   type McpToolPolicySubject,
   type McpToolProgressEvent,
+  type McpElicitationView,
   type MCPServerConfig,
   type NodeProgressSnapshot,
   type SecretReference,
@@ -95,6 +97,8 @@ import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
 import { AuditExportService } from "./services/audit-export-service";
 import { McpProbeService, serverConfigFromRecord } from "./services/mcp-probe-service";
+import { McpElicitationService } from "./services/mcp-elicitation-service.js";
+import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
 import {
   evaluateToolForContext,
   manualReadOnlyFor,
@@ -269,7 +273,9 @@ const mcpServerCreateSchema = z.object({
   projectId: z.string().nullable().optional(),
   probeEnabled: z.boolean().optional(),
   probeIntervalMs: mcpProbeIntervalSchema.optional(),
-  blockOnBreakingChange: z.boolean().optional()
+  blockOnBreakingChange: z.boolean().optional(),
+  // Phase 10.5 — whether and how the server may sample a model through the client.
+  sampling: mcpSamplingSettingsPatchSchema.nullable().optional()
 });
 
 const mcpServerUpdateSchema = mcpServerCreateSchema.partial().refine((value) => Object.keys(value).length > 0, {
@@ -1292,6 +1298,8 @@ export function createApp(
     onLLMDelta?: (event: { nodeId: string; delta: string; index: number }) => Promise<void> | void;
     /** Phase 10.5 — `notifications/progress` from an MCP server during an MCP Tool node or agent tool call. */
     onMcpProgress?: (event: McpToolProgressEvent & { nodeId: string }) => Promise<void> | void;
+    /** Phase 10.5 — an `elicitation/create` request started waiting for a person, or was settled. */
+    onMcpElicitation?: (event: { phase: "created" | "settled"; elicitation: McpElicitationView }) => Promise<void> | void;
   };
   type ExecutionHistoryRecord = Parameters<SqliteStore["saveExecutionHistory"]>[0];
 
@@ -1431,6 +1439,7 @@ export function createApp(
       ...input.workflow,
       variables: { ...projectVars, ...(input.workflow.variables ?? {}) }
     };
+    const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
     try {
       const result = await executeWorkflow(
         {
@@ -1448,11 +1457,7 @@ export function createApp(
           sessionId: input.sessionId,
           executionId: input.executionId,
           customData: input.customData,
-          executionTimeoutMs: normalizeExecutionTimeoutMs(
-            input.executionTimeoutMs,
-            undefined,
-            config.WORKFLOW_EXECUTION_TIMEOUT_MS
-          ),
+          executionTimeoutMs,
           triggerType: input.triggerType,
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? resolveToolPolicySubject(input.workflow.id, input.policyActor),
@@ -1532,6 +1537,27 @@ export function createApp(
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
           resolveRegisteredMcpServer,
           loadMcpToolPolicy,
+          // Phase 10.5 — resources, elicitation and list_changed notifications.
+          mcpResourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
+          onMcpListChanged: (event) => mcpProbeService.onListChanged(event),
+          onMcpElicitation: input.executionId
+            ? (elicitation) =>
+                mcpElicitationService.ask({
+                  request: { message: elicitation.message, requestedSchema: elicitation.requestedSchema },
+                  executionId: input.executionId!,
+                  workflowId: mergedWorkflow.id,
+                  workflowName: mergedWorkflow.name,
+                  nodeId: elicitation.nodeId,
+                  serverId: elicitation.serverId,
+                  registryServerId: elicitation.registryServerId,
+                  serverName: elicitation.registryServerId ? store.getMcpServer(elicitation.registryServerId)?.name : undefined,
+                  toolName: elicitation.toolName,
+                  triggerType: input.triggerType,
+                  createdBy: input.policyActor?.id ?? null,
+                  timeoutMs: executionTimeoutMs,
+                  signal: controller?.signal
+                })
+            : undefined,
           persistPausedExecution: async (paused) => {
             store.saveWorkflowExecutionState({
               id: paused.executionId,
@@ -1635,6 +1661,9 @@ export function createApp(
 
       return result;
     } finally {
+      if (input.executionId) {
+        mcpElicitationService.releaseExecution(input.executionId, "The run ended before the request was answered.");
+      }
       releaseActiveExecution(input.executionId, controller);
     }
   };
@@ -2496,10 +2525,26 @@ export function createApp(
   });
   if (runsBackgroundWorkers) {
     mcpProbeService.start();
-    app.addHook("onClose", async () => {
-      mcpProbeService.stop();
-    });
   }
+  app.addHook("onClose", async () => {
+    mcpProbeService.stop();
+  });
+  // Phase 10.5 — questions MCP servers ask the person running a workflow.
+  const mcpElicitationService = new McpElicitationService(store, {
+    timeoutMs: config.MCP_ELICITATION_TIMEOUT_MS,
+    audit: (event) => {
+      auditService.record(event);
+      logStreamingService.dispatchAudit(event);
+    },
+    logger: {
+      info: (msg, fields) => app.log.info(fields ?? {}, msg),
+      warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+    }
+  });
+  mcpElicitationService.expireStale();
+  app.addHook("onClose", async () => {
+    mcpElicitationService.stop();
+  });
   // Phase 10.6 — deployment-local MCP catalog. Every instance reads and
   // watches the file itself (presets and enforcement are served everywhere).
   const mcpCatalogService = new McpCatalogService({
@@ -6720,6 +6765,10 @@ export function createApp(
       startedAt: new Date().toISOString()
     });
 
+    // Phase 10.5 — questions a server asks during the run reach the chat as they happen.
+    const unsubscribeElicitations = mcpElicitationService.subscribe(executionId, (event) => {
+      sendSseEvent("mcp_elicitation", event);
+    });
     try {
       const progressHooks = createProgressTrackingHooks({
         executionId,
@@ -6786,6 +6835,7 @@ export function createApp(
       const message = error instanceof Error ? error.message : "Execution failed";
       sendSseEvent("error", { message });
     } finally {
+      unsubscribeElicitations();
       if (!streamClosed) {
         reply.raw.end();
       }
@@ -8201,6 +8251,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     config,
     store,
     mcpRegistry,
+    providerRegistry,
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     redact: (value) => String(secretService.redact(value)),
     resolveRegisteredMcpServer,
@@ -9120,6 +9171,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       probeEnabled: parsed.data.probeEnabled,
       probeIntervalMs: parsed.data.probeIntervalMs ?? null,
       blockOnBreakingChange: parsed.data.blockOnBreakingChange,
+      sampling: parsed.data.sampling ?? null,
       createdBy: user.email
     });
     auditService.record({
@@ -9164,10 +9216,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (blocked) return blocked;
     }
 
-    const { secretRef, ...rest } = parsed.data;
+    const { secretRef, sampling, ...rest } = parsed.data;
     store.updateMcpServer(existing.id, {
       ...rest,
-      ...(secretRef !== undefined ? { secretId: secretRef?.secretId ?? null } : {})
+      ...(secretRef !== undefined ? { secretId: secretRef?.secretId ?? null } : {}),
+      // A partial sampling patch keeps what it does not mention.
+      ...(sampling !== undefined ? { sampling: sampling ? { ...existing.sampling, ...sampling } : null } : {})
     });
     auditService.record({
       category: "system",
@@ -9314,6 +9368,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     serverId: rule.serverId,
     toolPattern: rule.toolPattern,
     annotationHint: rule.annotationHint ?? null,
+    kind: rule.kind ?? "tool",
     enabled: rule.enabled
   });
 
@@ -9499,6 +9554,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       serverId: parsed.data.serverId ?? null,
       toolPattern: parsed.data.toolPattern ?? "*",
       annotationHint: parsed.data.annotationHint ?? null,
+      kind: parsed.data.kind ?? "tool",
       enabled: parsed.data.enabled !== false,
       createdBy: user.email
     });
@@ -9585,7 +9641,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ...(registered ? { registryServerId: registered.id, serverLabel: registered.name } : {}),
         noWriteTools: parsed.data.noWriteTools === true
       },
-      { name: toolName, ...(annotations ? { annotations } : {}) }
+      { name: toolName, ...(annotations ? { annotations } : {}) },
+      parsed.data.kind ?? "tool"
     );
     return {
       allowed: decision.allowed,
@@ -9602,7 +9659,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       server: registered
         ? { kind: "registry" as const, id: registered.id, name: registered.name, adapterId: registered.adapterId }
         : { kind: "inline" as const, adapterId: serverId },
-      request: { projectId, role, serverId, toolName, noWriteTools: parsed.data.noWriteTools === true }
+      request: { projectId, role, serverId, toolName, kind: parsed.data.kind ?? "tool", noWriteTools: parsed.data.noWriteTools === true }
     };
   });
 
@@ -9684,6 +9741,22 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     auditUser: (request, user, event) => audit(request, user, event),
     probeInBackground,
     serverSummary: mcpServerSummary
+  });
+
+  // Phase 10.5 — resources, prompts and elicitation requests.
+  registerMcpClientFeatureRoutes({
+    app,
+    store,
+    mcpRegistry,
+    elicitations: mcpElicitationService,
+    resourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
+    resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+    redact: (value) => String(secretService.redact(value)),
+    resolveRegisteredMcpServer,
+    withScopedMcpContext,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    canExecuteInProject: (user, projectId) => rbacService.can(user, projectId, "workflow:execute"),
+    auditUser: (request, user, event) => audit(request, user, event)
   });
 
   // -------------------------------------------------------------------------

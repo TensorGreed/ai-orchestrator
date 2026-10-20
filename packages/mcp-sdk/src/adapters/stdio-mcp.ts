@@ -1,7 +1,31 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import type { MCPServerConfig, MCPToolDefinition, MCPToolResult } from "@ai-orchestrator/shared";
-import type { MCPExecutionContext, MCPServerAdapter } from "../types";
+import type {
+  McpPrompt,
+  McpPromptGetResult,
+  McpResource,
+  McpResourceReadResult,
+  McpResourceTemplate,
+  McpServerCapabilities,
+  MCPServerConfig,
+  MCPToolDefinition,
+  MCPToolResult
+} from "@ai-orchestrator/shared";
+import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin } from "../types";
+import {
+  DEFAULT_RESOURCE_MAX_BYTES,
+  MAX_LIST_PAGES,
+  answerServerRequest,
+  buildClientCapabilities,
+  isServerRequest,
+  normalizePromptGetResult,
+  normalizePrompts,
+  normalizeResourceReadResult,
+  normalizeResourceTemplates,
+  normalizeResources,
+  normalizeServerCapabilities,
+  parseListChangedNotification
+} from "../client-features";
 import { withToolAnnotations } from "../tool-annotations";
 import { buildToolCallResult, withOutputSchema } from "../structured-output";
 import {
@@ -24,9 +48,12 @@ interface JsonRpcResponse {
 
 interface PendingRequest {
   method: string;
+  /** The tool a `tools/call` request is for, so server requests can name their origin. */
+  toolName?: string;
   resolve: (response: JsonRpcResponse) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  timeoutMs: number;
   /** Set once `notifications/cancelled` went out for this request. */
   cancelled?: boolean;
 }
@@ -44,6 +71,7 @@ interface RpcOptions {
   /** Progress token sent in `_meta`; notifications carrying it reach `onProgress`. */
   progressToken?: string;
   onProgress?: (progress: ParsedProgress) => void;
+  toolName?: string;
 }
 
 interface StdioSession {
@@ -63,6 +91,13 @@ interface StdioSession {
   cancelsSent: number;
   /** Tool output schemas from tools/list, once listed in this session. */
   outputSchemas?: Map<string, Record<string, unknown> | undefined>;
+  /** Phase 10.5 — what the server declared in `initialize`. */
+  capabilities: McpServerCapabilities;
+  /** The context the session was created for; server-initiated requests are answered through it. */
+  context: MCPExecutionContext;
+  config: MCPServerConfig;
+  /** Answers to server requests still being written. */
+  serverRequests: Set<Promise<void>>;
 }
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -339,7 +374,11 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       closedByClient: false,
       createdAt: Date.now(),
       progressListeners: new Map(),
-      cancelsSent: 0
+      cancelsSent: 0,
+      capabilities: {},
+      context,
+      config,
+      serverRequests: new Set()
     };
 
     proc.stdout?.setEncoding("utf-8");
@@ -350,11 +389,12 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     proc.on("error", (error) => this.handleProcError(session, error));
 
     try {
-      await this.sendRpc(session, "initialize", {
+      const initialized = await this.sendRpc(session, "initialize", {
         protocolVersion: MCP_CLIENT_PROTOCOL_VERSION,
-        capabilities: {},
+        capabilities: buildClientCapabilities(context),
         clientInfo: { name: "ai-orchestrator", version: "0.1.0" }
       }, normalizeTimeoutMs(config));
+      session.capabilities = normalizeServerCapabilities(toRecord(initialized.result).capabilities);
     } catch (error) {
       this.killSession(session);
       throw error;
@@ -408,9 +448,10 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
 
   /**
    * Messages the server starts: `notifications/progress` goes to the
-   * listener for its token; a `ping` request is answered; other requests get
-   * "method not found" (L2M offers no client capabilities yet); other
-   * notifications are ignored.
+   * listener for its token; `list_changed` notifications reach
+   * `onListChanged`; `ping`, `elicitation/create` and
+   * `sampling/createMessage` are answered through the context handlers;
+   * other requests get "method not found"; other notifications are ignored.
    */
   private handleServerMessage(session: StdioSession, message: JsonRpcResponse): void {
     const progress = parseProgressNotification(message);
@@ -425,12 +466,74 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       }
       return;
     }
-    if (message.id === undefined || message.id === null) return;
-    const reply =
-      message.method === "ping"
-        ? { jsonrpc: "2.0", id: message.id, result: {} }
-        : { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: `Method not supported by this client: ${message.method}` } };
-    this.writeMessage(session, reply);
+    const listChanged = parseListChangedNotification(message);
+    if (listChanged) {
+      try {
+        session.context.onListChanged?.({
+          kind: listChanged,
+          serverId: session.config.serverId,
+          ...(session.config.registryServerId ? { registryServerId: session.config.registryServerId } : {}),
+          at: new Date().toISOString()
+        });
+      } catch {
+        // A failing listener never breaks the session.
+      }
+      return;
+    }
+    if (!isServerRequest(message)) return;
+    const origin = this.requestOrigin(session);
+    // A person may take a while to answer an elicitation: the in-flight
+    // request's timeout is suspended until the answer has been written.
+    const resumeTimers = this.suspendTimers(session);
+    const answer = answerServerRequest(message, session.context, origin)
+      .then((reply) => this.writeMessage(session, reply))
+      .catch(() => undefined)
+      .finally(() => {
+        resumeTimers();
+        session.serverRequests.delete(answer);
+      });
+    session.serverRequests.add(answer);
+  }
+
+  /** Stop the timeout of every pending request; returns a function that starts them again from zero. */
+  private suspendTimers(session: StdioSession): () => void {
+    const suspended: Array<{ id: number; pending: PendingRequest; timeoutMs: number }> = [];
+    for (const [id, pending] of session.pending) {
+      if (!pending.timeoutMs) continue;
+      clearTimeout(pending.timer);
+      suspended.push({ id, pending, timeoutMs: pending.timeoutMs });
+    }
+    return () => {
+      for (const entry of suspended) {
+        if (session.pending.get(entry.id) !== entry.pending) continue;
+        entry.pending.timer = setTimeout(() => this.expirePending(session, entry.id, entry.pending.method, entry.timeoutMs), entry.timeoutMs);
+      }
+    };
+  }
+
+  private expirePending(session: StdioSession, id: number, method: string, timeoutMs: number): void {
+    const pending = session.pending.get(id);
+    if (!pending) return;
+    // Phase 10.5 — a timed-out request is cancelled on the server too.
+    if (method !== "initialize") {
+      this.writeMessage(session, buildCancelledNotification(id, `Timed out after ${timeoutMs}ms`));
+      session.cancelsSent += 1;
+    }
+    session.pending.delete(id);
+    pending.reject(new Error(`MCP stdio request '${method}' timed out after ${timeoutMs}ms.`));
+  }
+
+  /** The tool call in flight (the latest one), for server requests made during it. */
+  private requestOrigin(session: StdioSession): McpServerRequestOrigin {
+    let toolName: string | undefined;
+    for (const pending of session.pending.values()) {
+      if (pending.method === "tools/call" && pending.toolName) toolName = pending.toolName;
+    }
+    return {
+      serverId: session.config.serverId,
+      ...(session.config.registryServerId ? { registryServerId: session.config.registryServerId } : {}),
+      ...(toolName ? { toolName } : {})
+    };
   }
 
   private writeMessage(session: StdioSession, message: unknown): void {
@@ -641,18 +744,8 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     };
 
     return new Promise<JsonRpcResponse>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (session.pending.has(id)) {
-          // Phase 10.5 — a timed-out request is cancelled on the server too.
-          if (method !== "initialize") {
-            this.writeMessage(session, buildCancelledNotification(id, `Timed out after ${timeoutMs}ms`));
-            session.cancelsSent += 1;
-          }
-          session.pending.delete(id);
-          reject(new Error(`MCP stdio request '${method}' timed out after ${timeoutMs}ms.`));
-        }
-      }, timeoutMs);
-      session.pending.set(id, { method, resolve, reject, timer });
+      const timer = setTimeout(() => this.expirePending(session, id, method, timeoutMs), timeoutMs);
+      session.pending.set(id, { method, resolve, reject, timer, timeoutMs, ...(options.toolName ? { toolName: options.toolName } : {}) });
 
       if (session.closed) {
         session.pending.delete(id);
@@ -710,6 +803,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     } else {
       const existing = this.readSession(cache, key);
       if (existing) {
+        existing.context = context;
         return existing;
       }
     }
@@ -717,6 +811,83 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     const session = await this.createSession(config, context);
     cache.set(key, session);
     return session;
+  }
+
+  /** Follow a paginated list method to the end, collecting `key` of each page. */
+  private async listAllPages(
+    session: StdioSession,
+    method: string,
+    key: string,
+    config: MCPServerConfig,
+    context: MCPExecutionContext
+  ): Promise<unknown[]> {
+    const items: unknown[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+      const response = await this.sendRpc(session, method, cursor ? { cursor } : {}, normalizeTimeoutMs(config), {
+        ...(context.signal ? { signal: context.signal } : {})
+      });
+      const result = toRecord(response.result);
+      if (Array.isArray(result[key])) items.push(...(result[key] as unknown[]));
+      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
+      if (!cursor) break;
+    }
+    return items;
+  }
+
+  async describeServer(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpServerCapabilities> {
+    const session = await this.getOrCreateSession(config, context);
+    return session.capabilities;
+  }
+
+  async listResources(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpResource[]> {
+    const session = await this.getOrCreateSession(config, context);
+    if (!session.capabilities.resources) return [];
+    return normalizeResources(await this.listAllPages(session, "resources/list", "resources", config, context));
+  }
+
+  async listResourceTemplates(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpResourceTemplate[]> {
+    const session = await this.getOrCreateSession(config, context);
+    if (!session.capabilities.resources) return [];
+    return normalizeResourceTemplates(
+      await this.listAllPages(session, "resources/templates/list", "resourceTemplates", config, context)
+    );
+  }
+
+  async readResource(
+    uri: string,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    options: McpReadResourceOptions = {}
+  ): Promise<McpResourceReadResult> {
+    const session = await this.getOrCreateSession(config, context);
+    const response = await this.sendRpc(session, "resources/read", { uri }, normalizeTimeoutMs(config), {
+      ...(context.signal ? { signal: context.signal } : {})
+    });
+    return normalizeResourceReadResult(uri, response.result, options.maxBytes ?? DEFAULT_RESOURCE_MAX_BYTES);
+  }
+
+  async listPrompts(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpPrompt[]> {
+    const session = await this.getOrCreateSession(config, context);
+    if (!session.capabilities.prompts) return [];
+    return normalizePrompts(await this.listAllPages(session, "prompts/list", "prompts", config, context));
+  }
+
+  async getPrompt(
+    name: string,
+    args: Record<string, string>,
+    config: MCPServerConfig,
+    context: MCPExecutionContext
+  ): Promise<McpPromptGetResult> {
+    const session = await this.getOrCreateSession(config, context);
+    const response = await this.sendRpc(
+      session,
+      "prompts/get",
+      { name, ...(Object.keys(args).length > 0 ? { arguments: args } : {}) },
+      normalizeTimeoutMs(config),
+      { ...(context.signal ? { signal: context.signal } : {}) }
+    );
+    return normalizePromptGetResult(name, response.result);
   }
 
   private async listAllTools(
@@ -773,6 +944,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     const onProgress = context.onProgress;
     const progressToken = onProgress ? `l2m-progress-${session.rpcCounter + 1}-${Date.now().toString(36)}` : undefined;
     return this.sendRpc(session, "tools/call", { name: toolName, arguments: args }, timeoutMs, {
+      toolName,
       ...(context.signal ? { signal: context.signal } : {}),
       ...(progressToken && onProgress
         ? {
