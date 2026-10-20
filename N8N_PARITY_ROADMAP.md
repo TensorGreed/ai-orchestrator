@@ -440,6 +440,40 @@ as a local file or an endpoint on the user's own instance.
 - [ ] "MCP" section in the sidebar: servers, tools, policies, changes feed
 - [ ] Orbit canvas integration: tool satellites show probe status and policy state
 
+### 10.4 L2M as an MCP server and gateway
+**Why:** today a workflow exposed with `mcp_server_trigger` is reachable only through a custom
+manifest/invoke REST pair, so standard MCP clients cannot connect. A spec-compliant endpoint makes
+L2M the one governed MCP hub that every AI client in an organisation points at.
+- [ ] Spec-compliant Streamable HTTP MCP endpoint (JSON-RPC `initialize`, `tools/list`, `tools/call`, progress and cancellation) that IDE agents, desktop assistants and other L2M instances connect to directly; the existing REST pair stays for compatibility
+- [ ] Workflows with `mcp_server_trigger` become tools on that endpoint, grouped into named toolsets with one URL each
+- [ ] Gateway mode: re-expose registered servers' tools through the same endpoint so every call gets L2M's secret injection, tool policy (10.2), telemetry (10.1) and audit log; local stdio servers become reachable without exposing the host
+- [ ] Client credentials: per-client tokens hashed at rest, each scoped to toolsets and a role; a "Connect a client" page with copy-paste config snippets and per-client usage
+
+### 10.5 Protocol coverage on the client side
+- [ ] Structured tool output: `outputSchema` and `structuredContent` kept in snapshots, validated, and passed to downstream nodes as typed data
+- [ ] Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) captured, shown on the registry page and used by policy and approvals
+- [ ] Resources and prompts: browse and read resources, use server prompts as templates in agent and LLM nodes; `list_changed` notifications trigger a re-probe
+- [ ] Progress notifications streamed to the run tape; cancelling a run sends `notifications/cancelled` to in-flight tool calls
+- [ ] Elicitation: a server asking for user input pauses the run through the existing wait/resume and clarification plumbing
+- [ ] Sampling: servers may request completions through the agent's attached chat model, gated by policy and counted in cost telemetry
+- [ ] OAuth 2.1 for remote MCP servers (metadata discovery, PKCE, dynamic client registration, token refresh) with tokens held by `SecretService`
+
+### 10.6 Onboarding and catalog
+- [ ] Import existing MCP client config files (`mcp.json`, `.vscode/mcp.json` and desktop-assistant configs) into the registry in one step, turning env values into secrets
+- [ ] Deployment-local catalog file of approved servers with pinned package versions; presets read from it, no vendor-side registry
+- [ ] MCP playground page: pick a server, call any tool through a schema-driven form, read resources, inspect the raw JSON-RPC exchange
+
+### 10.7 Runtime safety
+- [ ] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default
+- [ ] Per-server and per-tool rate limits, concurrency caps and a circuit breaker that opens on repeated failures and shows on the registry page
+- [ ] Tool output guard: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace
+- [ ] Delegated credentials: a tool call can use the triggering user's own token for a server instead of a shared service secret
+
+### 10.8 Testing and reliability
+- [ ] Record and replay: capture a run's tool calls as a cassette and replay runs and evals deterministically against it
+- [ ] Mock server from a snapshot: generate a stub MCP server from a schema snapshot for tests and offline demos
+- [ ] `l2m mcp check` CLI for CI: probe servers and fail on breaking schema changes against the accepted snapshot
+
 ## Phase 11: Audit Bundles & Approvals (after Phase 10)
 
 ### 11.1 Signed run manifests
@@ -458,7 +492,7 @@ Ideas from the positioning discussion, kept for later; each must remain self-hos
 - [ ] Reference deployment bundles: docker compose profiles that ship L2M with a curated set of open-source MCP servers (GitHub, Postgres, filesystem, Slack) and five tested workflows; first bundle: security / key-management reporting
 - [ ] Local eval benchmarks: run one workflow across providers and produce a cost / latency / accuracy report as a workflow output (no central leaderboard; users publish their own if they want)
 - [ ] Swarm depth: worker pools with token budgets, parallel fan-out with merge strategies, checkpoint and resume for long-running agents, delegation trace on the Orbit canvas
-- [ ] Workflow → standalone MCP server exporter (package a workflow so Claude Code, Cursor or another L2M can call it) to keep lock-in low
+- [ ] Workflow → standalone MCP server exporter (package a workflow so Claude Code, Cursor or another L2M can call it) to keep lock-in low (the in-instance endpoint is 10.4; this item is the standalone package)
 - [ ] "MCP agent operations" checklist and maturity model in the docs
 
 ## Implementation Priority Matrix
