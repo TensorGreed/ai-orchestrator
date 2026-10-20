@@ -1,0 +1,146 @@
+{
+  "format": "mcp_typed_map",
+  "warnings": [],
+  "summary": {
+    "total": 2,
+    "mapped": 1,
+    "approximated": 1,
+    "skipped": 0,
+    "create": 2,
+    "update": 0,
+    "copy": 0,
+    "skip": 0,
+    "blocked": 0
+  },
+  "entries": [
+    {
+      "key": "local-fs",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem@2025.8.21",
+          "/data"
+        ],
+        "env": {
+          "LOG_LEVEL": "info"
+        }
+      },
+      "secretMode": "none",
+      "slots": [],
+      "report": [
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "npx -y @modelcontextprotocol/server-filesystem@2025.8.21 /data"
+        },
+        {
+          "field": "env.LOG_LEVEL",
+          "status": "mapped",
+          "message": "Kept in the connection."
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "local-fs",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "crm",
+      "adapterId": "http_mcp",
+      "transport": "http",
+      "connection": {
+        "endpoint": "https://crm.example.com/mcp/",
+        "transport": "http_streamable",
+        "headers": {
+          "X-Crm-Tenant": "acme"
+        },
+        "secretHeaders": [
+          "Authorization"
+        ]
+      },
+      "secretMode": "bundle",
+      "slots": [
+        {
+          "id": "header:Authorization",
+          "kind": "secret",
+          "target": "header",
+          "name": "Authorization",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "enabled",
+          "status": "approximated",
+          "message": "The server is turned off in the file; it is imported with probing off."
+        },
+        {
+          "field": "url",
+          "status": "mapped",
+          "message": "https://crm.example.com/mcp/"
+        },
+        {
+          "field": "headers.Authorization",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
+        },
+        {
+          "field": "headers.X-Crm-Tenant",
+          "status": "mapped",
+          "message": "Kept in the connection."
+        },
+        {
+          "field": "headers",
+          "status": "mapped",
+          "message": "1 credential (Authorization) are stored together as one secret bundle."
+        }
+      ],
+      "status": "approximated",
+      "disabledInSource": true,
+      "blockedReason": null,
+      "name": "crm",
+      "duplicate": null,
+      "decision": "create"
+    }
+  ],
+  "materialized": {
+    "local-fs": {
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem@2025.8.21",
+          "/data"
+        ],
+        "env": {
+          "LOG_LEVEL": "info"
+        }
+      },
+      "secretNames": [],
+      "missing": []
+    },
+    "crm": {
+      "connection": {
+        "endpoint": "https://crm.example.com/mcp/",
+        "transport": "http_streamable",
+        "headers": {
+          "X-Crm-Tenant": "acme"
+        },
+        "secretHeaders": [
+          "Authorization"
+        ]
+      },
+      "secretNames": [
+        "Authorization"
+      ],
+      "missing": []
+    }
+  }
+}

@@ -1,0 +1,216 @@
+{
+  "format": "mcp_servers",
+  "warnings": [],
+  "summary": {
+    "total": 3,
+    "mapped": 0,
+    "approximated": 3,
+    "skipped": 0,
+    "create": 1,
+    "update": 0,
+    "copy": 0,
+    "skip": 0,
+    "blocked": 2
+  },
+  "entries": [
+    {
+      "key": "search",
+      "adapterId": "http_mcp",
+      "transport": "http",
+      "connection": {
+        "endpoint": "https://search.example.com/mcp",
+        "transport": "http_streamable",
+        "timeoutMs": 30000,
+        "secretHeaders": [
+          "X-Api-Key"
+        ]
+      },
+      "secretMode": "bundle",
+      "slots": [
+        {
+          "id": "header:X-Api-Key",
+          "kind": "secret",
+          "target": "header",
+          "name": "X-Api-Key",
+          "origin": "env_ref",
+          "envRef": "SEARCH_API_KEY",
+          "needsValue": true,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "trust",
+          "status": "skipped",
+          "message": "Trust settings are not imported; use tool policies and read-only classification instead."
+        },
+        {
+          "field": "timeout",
+          "status": "mapped",
+          "message": "Timeout 30000 ms."
+        },
+        {
+          "field": "url",
+          "status": "mapped",
+          "message": "https://search.example.com/mcp"
+        },
+        {
+          "field": "headers.X-Api-Key",
+          "status": "mapped",
+          "message": "Reference to SEARCH_API_KEY on the client machine; enter its value below (stored as a secret)."
+        },
+        {
+          "field": "headers",
+          "status": "mapped",
+          "message": "1 credential (X-Api-Key) are stored together as one secret bundle."
+        }
+      ],
+      "status": "approximated",
+      "disabledInSource": false,
+      "blockedReason": "Values needed: X-Api-Key.",
+      "name": "search",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "notes",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "node",
+        "args": [
+          "/opt/notes-mcp/dist/index.js"
+        ],
+        "env": {
+          "NOTES_DIR": "${HOME}/notes"
+        },
+        "cwd": "/opt/notes-mcp",
+        "secretEnvVar": "NOTES_TOKEN"
+      },
+      "secretMode": "single",
+      "slots": [
+        {
+          "id": "env:NOTES_TOKEN",
+          "kind": "secret",
+          "target": "env",
+          "name": "NOTES_TOKEN",
+          "origin": "env_ref",
+          "envRef": "NOTES_TOKEN",
+          "needsValue": true,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "includeTools",
+          "status": "skipped",
+          "message": "Tool filters are not imported; express them as tool policy rules for this server."
+        },
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "node /opt/notes-mcp/dist/index.js"
+        },
+        {
+          "field": "env.NOTES_TOKEN",
+          "status": "mapped",
+          "message": "Reference to NOTES_TOKEN on the client machine; enter its value below (stored as a secret)."
+        },
+        {
+          "field": "env.NOTES_DIR",
+          "status": "approximated",
+          "message": "${HOME} is expanded by the client on its own machine; kept verbatim, adjust it for the L2M host."
+        },
+        {
+          "field": "cwd",
+          "status": "mapped",
+          "message": "Working directory kept; it must exist on the L2M host."
+        }
+      ],
+      "status": "approximated",
+      "disabledInSource": false,
+      "blockedReason": "Values needed: NOTES_TOKEN.",
+      "name": "notes",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "db",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "pg-mcp@1.0.0",
+          "postgresql://report:••••@db.internal:5432/sales"
+        ]
+      },
+      "secretMode": "none",
+      "slots": [],
+      "report": [
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "npx -y pg-mcp@1.0.0 postgresql://report:••••@db.internal:5432/sales"
+        },
+        {
+          "field": "args",
+          "status": "approximated",
+          "message": "An argument looks like a credential. It stays in the plain connection; move it to an env var so it can be a secret."
+        }
+      ],
+      "status": "approximated",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "db",
+      "duplicate": null,
+      "decision": "create"
+    }
+  ],
+  "materialized": {
+    "search": {
+      "connection": {
+        "endpoint": "https://search.example.com/mcp",
+        "transport": "http_streamable",
+        "timeoutMs": 30000,
+        "secretHeaders": [
+          "X-Api-Key"
+        ]
+      },
+      "secretNames": [
+        "X-Api-Key"
+      ],
+      "missing": []
+    },
+    "notes": {
+      "connection": {
+        "command": "node",
+        "args": [
+          "/opt/notes-mcp/dist/index.js"
+        ],
+        "env": {
+          "NOTES_DIR": "${HOME}/notes"
+        },
+        "cwd": "/opt/notes-mcp",
+        "secretEnvVar": "NOTES_TOKEN"
+      },
+      "secretNames": [
+        "NOTES_TOKEN"
+      ],
+      "missing": []
+    },
+    "db": {
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "pg-mcp@1.0.0",
+          "postgresql://report:hunter2-fixture@db.internal:5432/sales"
+        ]
+      },
+      "secretNames": [],
+      "missing": []
+    }
+  }
+}

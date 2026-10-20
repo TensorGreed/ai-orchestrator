@@ -927,8 +927,99 @@ export const openApiSpec = {
     "/api/mcp/presets": {
       get: {
         tags: ["MCP"],
-        summary: "List the curated catalogue of popular MCP servers (one-click install templates)",
-        responses: { "200": { description: "Curated MCP server presets" } }
+        summary:
+          "List MCP server presets: approved entries of the deployment catalog (MCP_CATALOG_FILE) and, in merge mode, the built-in presets",
+        responses: { "200": { description: "Presets (each with origin builtin | catalog) and the catalog status" } }
+      }
+    },
+    "/api/mcp/catalog": {
+      get: {
+        tags: ["MCP"],
+        summary: "Deployment catalog status (file, mode, enforcement, validation errors) and its entries (builder)",
+        responses: { "200": { description: "Catalog status and entries" } }
+      }
+    },
+    "/api/mcp/catalog/reload": {
+      post: {
+        tags: ["MCP"],
+        summary: "Re-read and validate the catalog file now (admin). A broken file keeps the last good catalog.",
+        responses: { "200": { description: "New catalog status" }, "409": { description: "No catalog file configured" } }
+      }
+    },
+    "/api/mcp/servers/import": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Import MCP client config files into the registry (admin; builders may dryRun). Credentials become SecretService secrets; responses never contain their values.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["content"],
+                properties: {
+                  content: {
+                    description: "The config file as text (comments and trailing commas allowed) or as a parsed object",
+                    oneOf: [{ type: "string" }, { type: "object" }]
+                  },
+                  fileName: { type: "string" },
+                  dryRun: { type: "boolean", description: "Preview only; nothing is saved" },
+                  projectId: { type: "string", nullable: true },
+                  probe: { type: "boolean", description: "Probe imported servers in the background (default true)" },
+                  entries: {
+                    type: "object",
+                    description: "Per entry key: decision (create | update | copy | skip), name, and values for slots by slot id",
+                    additionalProperties: {
+                      type: "object",
+                      properties: {
+                        decision: { type: "string", enum: ["create", "update", "copy", "skip"] },
+                        name: { type: "string" },
+                        values: { type: "object", additionalProperties: { type: "string" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Per-entry preview or results with a mapped / approximated / skipped report" },
+          "400": { description: "Unreadable file or invalid payload" },
+          "403": { description: "Not allowed (import needs admin)" }
+        }
+      }
+    },
+    "/api/mcp/servers/{id}/playground/call": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Call one tool of a registered server for the signed-in user (builder). Tool policy is enforced for the caller's role and project; write tools need confirmWrite.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["toolName"],
+                properties: {
+                  toolName: { type: "string" },
+                  args: { type: "object" },
+                  projectId: { type: "string" },
+                  confirmWrite: { type: "boolean" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Result content, structured content, duration and the JSON-RPC exchange (credentials masked)" },
+          "403": { description: "Blocked by tool policy" },
+          "404": { description: "Server or tool not found" },
+          "409": { description: "Write tool needs confirmation, no snapshot yet, or runs are blocked by a breaking change" }
+        }
       }
     },
     "/api/mcp/servers": {

@@ -1,0 +1,16 @@
+{
+  "editor.fontSize": 14,
+  /* MCP servers live under "mcp" in user settings */
+  "mcp": {
+    "inputs": [
+      { "type": "pickString", "id": "region", "description": "Region", "options": ["eu", "us"], "default": "eu" },
+    ],
+    "servers": {
+      "metrics": {
+        "command": "npx",
+        "args": ["-y", "metrics-mcp@2.0.0"],
+        "env": { "METRICS_REGION": "${input:region}", "METRICS_TOKEN": "mt-fixture-5555", "METRICS_SIGNING_KEY": "msk-fixture-6666" }, // two secrets
+      },
+    },
+  },
+}

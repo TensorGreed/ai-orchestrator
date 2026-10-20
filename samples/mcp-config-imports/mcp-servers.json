@@ -1,0 +1,41 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "/srv/shared"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_fixtureTokenValue000000000000000000",
+        "GITHUB_API_URL": "https://api.github.example.com"
+      }
+    },
+    "warehouse": {
+      "command": "uvx",
+      "args": ["warehouse-mcp==0.4.1", "--readonly"],
+      "env": {
+        "WAREHOUSE_API_KEY": "wh-key-fixture-1111",
+        "WAREHOUSE_API_SECRET": "wh-secret-fixture-2222",
+        "WAREHOUSE_REGION": "eu-west-1"
+      },
+      "autoApprove": ["list_tables"]
+    },
+    "docs-search": {
+      "type": "http",
+      "url": "https://mcp.docs.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer docs-fixture-bearer-3333",
+        "X-Workspace": "engineering"
+      }
+    },
+    "legacy-events": {
+      "url": "https://events.example.com/sse",
+      "disabled": true
+    },
+    "broken": {
+      "description": "no command and no url"
+    }
+  }
+}

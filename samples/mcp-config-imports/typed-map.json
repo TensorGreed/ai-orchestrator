@@ -1,0 +1,17 @@
+{
+  "$schema": "https://example.com/config.json",
+  "mcp": {
+    "local-fs": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "/data"],
+      "environment": { "LOG_LEVEL": "info" },
+      "enabled": true
+    },
+    "crm": {
+      "type": "remote",
+      "url": "https://crm.example.com/mcp/",
+      "headers": { "Authorization": "Basic Y3JtOmZpeHR1cmU=", "X-Crm-Tenant": "acme" },
+      "enabled": false
+    }
+  }
+}

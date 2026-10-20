@@ -93,6 +93,16 @@ Legacy workflow tool routes (configured on the `mcp_server_trigger` node):
 - `GET /api/mcp-server/:path/manifest`
 - `POST /api/mcp-server/:path/invoke`
 
+## MCP onboarding
+
+See [MCP onboarding and catalog](../product/mcp-onboarding.md).
+
+- `POST /api/mcp/servers/import` (admin; builders with `dryRun: true`; `{ content, fileName?, dryRun?, projectId?, probe?, entries?: { [key]: { decision?, name?, values? } } }`)
+- `GET /api/mcp/presets` (viewer; built-in and approved catalog presets plus the catalog status)
+- `GET /api/mcp/catalog` (builder; catalog status, validation errors and entries)
+- `POST /api/mcp/catalog/reload` (admin)
+- `POST /api/mcp/servers/:id/playground/call` (builder; `{ toolName, args, projectId?, confirmWrite? }`)
+
 ## Secrets
 
 - `POST /api/secrets`

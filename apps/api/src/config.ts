@@ -115,6 +115,13 @@ const envSchema = z.object({
     .refine((value) => value === "" || /^https?:\/\/[^\s]+$/i.test(value), {
       message: "MCP_GATEWAY_PUBLIC_URL must be an http(s) URL"
     }),
+  // Phase 10.6 — deployment-local catalog of approved MCP servers.
+  /** JSON file of approved servers; empty = the built-in presets only. Read on start and when it changes. */
+  MCP_CATALOG_FILE: z.string().default(""),
+  /** `merge`: catalog entries plus the built-in presets. `exclusive`: catalog entries only. */
+  MCP_CATALOG_MODE: z.enum(["merge", "exclusive"]).default("merge"),
+  /** Admins may only register or import stdio servers whose command matches an approved catalog entry. */
+  MCP_CATALOG_ENFORCE: booleanFromEnv.default(false),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),

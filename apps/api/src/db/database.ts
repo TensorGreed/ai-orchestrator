@@ -485,6 +485,7 @@ export interface McpToolCallRecord {
   /**
    * Phase 10.4 — `workflow`: a call made by a node during a run.
    * `gateway`: a `tools/call` an MCP client sent to `/mcp/<toolset>`.
+   * Phase 10.6 — `playground`: a call a builder made from the MCP playground.
    */
   source: McpToolCallSource;
   /** MCP client credential that made a gateway call. */
@@ -492,7 +493,7 @@ export interface McpToolCallRecord {
   createdAt: string;
 }
 
-export type McpToolCallSource = "workflow" | "gateway";
+export type McpToolCallSource = "workflow" | "gateway" | "playground";
 
 /** What callers write; `source` defaults to `workflow`. */
 export type McpToolCallWrite = Omit<McpToolCallRecord, "createdAt" | "source" | "clientId"> & {
@@ -690,7 +691,7 @@ function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
     turnInputTokens: row.turn_input_tokens === null ? null : toNumber(row.turn_input_tokens),
     turnOutputTokens: row.turn_output_tokens === null ? null : toNumber(row.turn_output_tokens),
     estimatedCostUsd: row.estimated_cost_usd === null ? null : Number(row.estimated_cost_usd),
-    source: row.source === "gateway" ? "gateway" : "workflow",
+    source: row.source === "gateway" || row.source === "playground" ? row.source : "workflow",
     clientId: row.client_id ? toString(row.client_id) : null,
     createdAt: toString(row.created_at)
   };

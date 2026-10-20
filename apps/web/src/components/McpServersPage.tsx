@@ -12,6 +12,10 @@
  *
  * Phase 10.4 — Toolsets and Clients views manage the MCP gateway: toolsets
  * served at /mcp/<slug> and the client tokens that may call them.
+ *
+ * Phase 10.6 — "Import config" brings servers in from client config files,
+ * the catalog banner reports the deployment catalog, and the Playground view
+ * calls one tool through a schema-driven form.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -41,7 +45,10 @@ import {
   probeMcpServer,
   updateMcpServer
 } from "../lib/api";
+import { McpCatalogBanner } from "./McpCatalogBanner";
 import { McpClientsView } from "./McpClientsView";
+import { McpImportDialog } from "./McpImportDialog";
+import { McpPlaygroundPage } from "./McpPlaygroundPage";
 import { McpPoliciesView } from "./McpPoliciesView";
 import { McpToolsetsView } from "./McpToolsetsView";
 
@@ -91,10 +98,14 @@ export function StatusBadge({ status }: { status: McpRegisteredServer["status"] 
 
 interface McpServersPageProps {
   isAdmin: boolean;
+  /** Builder or above: may preview imports and use the playground. Defaults to isAdmin. */
+  canBuild?: boolean;
+  /** Keys the playground's per-user call history in this browser. */
+  currentUserId?: string;
   activeProjectId?: string | null;
 }
 
-export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps) {
+export function McpServersPage({ isAdmin, canBuild = isAdmin, currentUserId, activeProjectId }: McpServersPageProps) {
   const [servers, setServers] = useState<McpRegisteredServer[]>([]);
   const [adapters, setAdapters] = useState<Array<{ id: string; label: string }>>([]);
   const [defaultIntervalMs, setDefaultIntervalMs] = useState(0);
@@ -103,7 +114,8 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [detailVersion, setDetailVersion] = useState(0);
-  const [view, setView] = useState<"servers" | "policies" | "toolsets" | "clients">("servers");
+  const [view, setView] = useState<"servers" | "policies" | "toolsets" | "clients" | "playground">("servers");
+  const [showImport, setShowImport] = useState(false);
 
   const refreshList = useCallback(async () => {
     setLoading(true);
@@ -180,10 +192,26 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
             >
               Clients
             </button>
+            {canBuild && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view === "playground"}
+                className={view === "playground" ? "finops-range-btn active" : "finops-range-btn"}
+                onClick={() => setView("playground")}
+              >
+                Playground
+              </button>
+            )}
           </div>
           {view === "servers" && (
             <button type="button" className="pg-btn" onClick={() => void onServerChanged()} disabled={loading}>
               Refresh
+            </button>
+          )}
+          {canBuild && view === "servers" && (
+            <button type="button" className="pg-btn" onClick={() => setShowImport(true)}>
+              Import config
             </button>
           )}
           {isAdmin && view === "servers" && (
@@ -203,6 +231,24 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
       {view === "toolsets" && <McpToolsetsView isAdmin={isAdmin} servers={servers} activeProjectId={activeProjectId} />}
 
       {view === "clients" && <McpClientsView isAdmin={isAdmin} />}
+
+      {view === "playground" && canBuild && (
+        <McpPlaygroundPage servers={servers} activeProjectId={activeProjectId} userId={currentUserId} />
+      )}
+
+      {view === "servers" && canBuild && <McpCatalogBanner isAdmin={isAdmin} />}
+
+      <McpImportDialog
+        open={showImport}
+        canImport={isAdmin}
+        projectId={activeProjectId ?? null}
+        onClose={() => setShowImport(false)}
+        onImported={(imported) => {
+          void refreshList().then(() => {
+            if (imported[0]) setSelectedId(imported[0].id);
+          });
+        }}
+      />
 
       {view === "servers" && showCreate && isAdmin && (
         <McpServerForm

@@ -1,0 +1,18 @@
+{
+  "numStartups": 12,
+  "mcpServers": {
+    "fetch": { "type": "stdio", "command": "uvx", "args": ["mcp-server-fetch==2025.4.7"], "env": {} }
+  },
+  "projects": {
+    "/home/dev/shop": {
+      "mcpServers": {
+        "payments": {
+          "type": "http",
+          "url": "https://payments.example.com/mcp",
+          "headers": { "Authorization": "Bearer pay-fixture-7777" }
+        },
+        "fetch": { "type": "stdio", "command": "uvx", "args": ["mcp-server-fetch==2025.4.7", "--ignore-robots-txt"] }
+      }
+    }
+  }
+}

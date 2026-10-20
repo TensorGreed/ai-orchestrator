@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "servers": [
+    {
+      "id": "filesystem",
+      "name": "Filesystem (shared drive)",
+      "description": "Read and write files under /srv/shared only.",
+      "adapter": "stdio_mcp",
+      "connection": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "/srv/shared"],
+        "timeoutMs": 60000
+      },
+      "tags": ["Files"],
+      "approved": true,
+      "notes": "Change the directory argument to the folders this deployment exposes."
+    },
+    {
+      "id": "time",
+      "name": "Time",
+      "description": "Time and timezone conversion. No credentials.",
+      "adapter": "stdio_mcp",
+      "connection": { "command": "uvx", "args": ["mcp-server-time==0.6.2"], "timeoutMs": 30000 },
+      "tags": ["Utilities"],
+      "approved": true
+    },
+    {
+      "id": "warehouse",
+      "name": "Data warehouse",
+      "description": "Read-only SQL over the analytics warehouse.",
+      "adapter": "stdio_mcp",
+      "connection": {
+        "command": "docker",
+        "args": ["run", "-i", "--rm", "-e", "WAREHOUSE_API_KEY", "-e", "WAREHOUSE_API_SECRET", "registry.internal/warehouse-mcp:1.4.0"],
+        "secretEnvVars": ["WAREHOUSE_API_KEY", "WAREHOUSE_API_SECRET"]
+      },
+      "requiredSecrets": [
+        { "name": "WAREHOUSE_API_KEY", "description": "Service account key id" },
+        { "name": "WAREHOUSE_API_SECRET", "description": "Service account secret" }
+      ],
+      "tags": ["Databases"],
+      "approved": true,
+      "notes": "Store both values as one JSON secret: {\"WAREHOUSE_API_KEY\": \"…\", \"WAREHOUSE_API_SECRET\": \"…\"}."
+    },
+    {
+      "id": "echo",
+      "name": "Echo (demo)",
+      "description": "The dependency-free demo server shipped in samples/mcp-echo-server.",
+      "adapter": "stdio_mcp",
+      "connection": { "command": "node", "args": ["samples/mcp-echo-server/server.mjs"] },
+      "tags": ["Demo"],
+      "approved": true
+    },
+    {
+      "id": "docs-search",
+      "name": "Docs search",
+      "description": "Internal documentation search over Streamable HTTP.",
+      "adapter": "http_mcp",
+      "connection": { "endpoint": "https://mcp.docs.internal/mcp", "transport": "http_streamable", "authType": "bearer" },
+      "requiredSecrets": [{ "name": "Authorization", "description": "Bearer token from the docs team" }],
+      "tags": ["Search"],
+      "approved": true
+    },
+    {
+      "id": "browser",
+      "name": "Headless browser",
+      "description": "Under security review; listed for visibility, not offered yet.",
+      "adapter": "stdio_mcp",
+      "connection": { "command": "npx", "args": ["-y", "@example/browser-mcp@0.3.1"] },
+      "tags": ["Productivity"],
+      "approved": false
+    }
+  ]
+}

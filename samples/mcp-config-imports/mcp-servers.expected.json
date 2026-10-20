@@ -1,0 +1,351 @@
+{
+  "format": "mcp_servers",
+  "warnings": [],
+  "summary": {
+    "total": 6,
+    "mapped": 3,
+    "approximated": 2,
+    "skipped": 1,
+    "create": 5,
+    "update": 0,
+    "copy": 0,
+    "skip": 1,
+    "blocked": 0
+  },
+  "entries": [
+    {
+      "key": "filesystem",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem@2025.8.21",
+          "/srv/shared"
+        ]
+      },
+      "secretMode": "none",
+      "slots": [],
+      "report": [
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "npx -y @modelcontextprotocol/server-filesystem@2025.8.21 /srv/shared"
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "filesystem",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "github",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-github"
+        ],
+        "env": {
+          "GITHUB_API_URL": "https://api.github.example.com"
+        },
+        "secretEnvVar": "GITHUB_PERSONAL_ACCESS_TOKEN"
+      },
+      "secretMode": "single",
+      "slots": [
+        {
+          "id": "env:GITHUB_PERSONAL_ACCESS_TOKEN",
+          "kind": "secret",
+          "target": "env",
+          "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "npx -y @modelcontextprotocol/server-github"
+        },
+        {
+          "field": "env.GITHUB_PERSONAL_ACCESS_TOKEN",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
+        },
+        {
+          "field": "env.GITHUB_API_URL",
+          "status": "mapped",
+          "message": "Kept in the connection."
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "github",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "warehouse",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "uvx",
+        "args": [
+          "warehouse-mcp==0.4.1",
+          "--readonly"
+        ],
+        "env": {
+          "WAREHOUSE_REGION": "eu-west-1"
+        },
+        "secretEnvVars": [
+          "WAREHOUSE_API_KEY",
+          "WAREHOUSE_API_SECRET"
+        ]
+      },
+      "secretMode": "bundle",
+      "slots": [
+        {
+          "id": "env:WAREHOUSE_API_KEY",
+          "kind": "secret",
+          "target": "env",
+          "name": "WAREHOUSE_API_KEY",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        },
+        {
+          "id": "env:WAREHOUSE_API_SECRET",
+          "kind": "secret",
+          "target": "env",
+          "name": "WAREHOUSE_API_SECRET",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "autoApprove",
+          "status": "skipped",
+          "message": "Tool auto-approval is not imported; L2M decides tool access through tool policies (Policies tab)."
+        },
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "uvx warehouse-mcp==0.4.1 --readonly"
+        },
+        {
+          "field": "env.WAREHOUSE_API_KEY",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
+        },
+        {
+          "field": "env.WAREHOUSE_API_SECRET",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
+        },
+        {
+          "field": "env.WAREHOUSE_REGION",
+          "status": "mapped",
+          "message": "Kept in the connection."
+        },
+        {
+          "field": "env",
+          "status": "mapped",
+          "message": "2 credentials (WAREHOUSE_API_KEY, WAREHOUSE_API_SECRET) are stored together as one secret bundle."
+        }
+      ],
+      "status": "approximated",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "warehouse",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "docs-search",
+      "adapterId": "http_mcp",
+      "transport": "http",
+      "connection": {
+        "endpoint": "https://mcp.docs.example.com/mcp",
+        "transport": "http_streamable",
+        "headers": {
+          "X-Workspace": "engineering"
+        },
+        "authType": "bearer"
+      },
+      "secretMode": "single",
+      "slots": [
+        {
+          "id": "header:Authorization",
+          "kind": "secret",
+          "target": "header",
+          "name": "Authorization",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "url",
+          "status": "mapped",
+          "message": "https://mcp.docs.example.com/mcp"
+        },
+        {
+          "field": "headers.Authorization",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
+        },
+        {
+          "field": "headers.X-Workspace",
+          "status": "mapped",
+          "message": "Kept in the connection."
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "docs-search",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "legacy-events",
+      "adapterId": "http_mcp",
+      "transport": "sse",
+      "connection": {
+        "endpoint": "https://events.example.com/sse",
+        "transport": "http_streamable"
+      },
+      "secretMode": "none",
+      "slots": [],
+      "report": [
+        {
+          "field": "disabled",
+          "status": "approximated",
+          "message": "The server is turned off in the file; it is imported with probing off."
+        },
+        {
+          "field": "url",
+          "status": "mapped",
+          "message": "https://events.example.com/sse"
+        },
+        {
+          "field": "type",
+          "status": "approximated",
+          "message": "Registered as Streamable HTTP. A server that only offers the legacy SSE transport fails its first probe; point it at the server's Streamable HTTP endpoint."
+        }
+      ],
+      "status": "approximated",
+      "disabledInSource": true,
+      "blockedReason": null,
+      "name": "legacy-events",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "broken",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {},
+      "secretMode": "none",
+      "slots": [],
+      "report": [
+        {
+          "field": "command",
+          "status": "skipped",
+          "message": "The entry has neither a command nor a URL."
+        }
+      ],
+      "status": "skipped",
+      "disabledInSource": false,
+      "blockedReason": "The entry has neither a command nor a URL, so there is nothing to register.",
+      "name": "broken",
+      "duplicate": null,
+      "decision": "skip"
+    }
+  ],
+  "materialized": {
+    "filesystem": {
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem@2025.8.21",
+          "/srv/shared"
+        ]
+      },
+      "secretNames": [],
+      "missing": []
+    },
+    "github": {
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-github"
+        ],
+        "env": {
+          "GITHUB_API_URL": "https://api.github.example.com"
+        },
+        "secretEnvVar": "GITHUB_PERSONAL_ACCESS_TOKEN"
+      },
+      "secretNames": [
+        "GITHUB_PERSONAL_ACCESS_TOKEN"
+      ],
+      "missing": []
+    },
+    "warehouse": {
+      "connection": {
+        "command": "uvx",
+        "args": [
+          "warehouse-mcp==0.4.1",
+          "--readonly"
+        ],
+        "env": {
+          "WAREHOUSE_REGION": "eu-west-1"
+        },
+        "secretEnvVars": [
+          "WAREHOUSE_API_KEY",
+          "WAREHOUSE_API_SECRET"
+        ]
+      },
+      "secretNames": [
+        "WAREHOUSE_API_KEY",
+        "WAREHOUSE_API_SECRET"
+      ],
+      "missing": []
+    },
+    "docs-search": {
+      "connection": {
+        "endpoint": "https://mcp.docs.example.com/mcp",
+        "transport": "http_streamable",
+        "headers": {
+          "X-Workspace": "engineering"
+        },
+        "authType": "bearer"
+      },
+      "secretNames": [
+        "Authorization"
+      ],
+      "missing": []
+    },
+    "legacy-events": {
+      "connection": {
+        "endpoint": "https://events.example.com/sse",
+        "transport": "http_streamable"
+      },
+      "secretNames": [],
+      "missing": []
+    }
+  }
+}

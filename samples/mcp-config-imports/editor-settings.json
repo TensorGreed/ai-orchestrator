@@ -1,0 +1,14 @@
+{
+  "ui_font_size": 15,
+  "context_servers": {
+    "time": {
+      "source": "custom",
+      "command": { "path": "uvx", "args": ["mcp-server-time==0.6.2"], "env": {} },
+      "settings": {}
+    },
+    "translator": {
+      "command": { "path": "/usr/local/bin/translator-mcp", "args": ["--stdio"], "env": { "TRANSLATOR_AUTH": "tr-fixture-4444" } },
+      "settings": { "default_language": "de" }
+    }
+  }
+}
