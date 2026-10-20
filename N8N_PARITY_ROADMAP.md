@@ -401,22 +401,22 @@ beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to
 
 ### 9.1 Import pipeline
 - [ ] `POST /api/workflows/import/n8n` accepting an n8n workflow export (`nodes[]`, `connections{}`, `settings`, `pinData`)
-- [ ] Pure converter in `packages/workflow-engine/src/import/n8n.ts`: n8n node → L2M node type map, `connections` → edges (main outputs, index-based ports → `if`/`switch` handles), positions carried over, sticky notes → `sticky_note`
-- [ ] Expression translation for the common subset: `{{ $json.x }}` → `{{results.<prev>.x}}`, `$node["Name"].json` → `results.<id>`, `$now`, `$env` → variables; unknown expressions preserved verbatim and flagged
-- [ ] Credentials: n8n `credentials` refs become `secretRef` placeholders with a post-import "resolve secrets" checklist, never raw values
-- [ ] Import report: per-node `mapped | approximated | unsupported` with reasons; unsupported nodes become disabled `noop_node` placeholders carrying the original config so the flow still loads
+- [x] Pure converter in `packages/workflow-engine/src/import/external-builder.ts`: n8n node → L2M node type map, `connections` → edges (main outputs, index-based ports → `if`/`switch` handles), positions carried over, sticky notes → `sticky_note`
+- [x] Expression translation for the common subset: `{{ $json.x }}` → `{{results.<prev>.x}}`, `$node["Name"].json` → `results.<id>`, `$now`, `$env` → variables; unknown expressions preserved verbatim and flagged
+- [x] Credentials: n8n `credentials` refs become `secretRef` placeholders with a post-import "resolve secrets" checklist, never raw values
+- [x] Import report: per-node `mapped | approximated | unsupported` with reasons; unsupported nodes become disabled `noop_node` placeholders carrying the original config so the flow still loads
 
 ### 9.2 Node coverage (first wave, by n8n usage frequency)
-- [ ] Triggers: Manual, Webhook, Schedule/Cron, Chat Trigger, Error Trigger, Form Trigger, RSS, Email (IMAP)
-- [ ] Core: HTTP Request, Code (JS/Python), Set/Edit Fields, IF, Switch, Merge, Split Out, Aggregate, Filter, Sort, Limit, Wait, No Op, Stop and Error, Execute Workflow, Sticky Note
-- [ ] AI: OpenAI / Anthropic / Gemini / Ollama chat models → `*_chat_model`, AI Agent → `agent_orchestrator` (sub-node connections `ai_languageModel` / `ai_memory` / `ai_tool` → `chat_model` / `memory` / `tool` attachment edges), Simple Memory → `local_memory`, MCP Client Tool → `mcp_tool`, Structured Output Parser → `output_parser`, vector stores → existing RAG nodes
+- [x] Triggers: Manual, Webhook, Schedule/Cron, Chat Trigger, Error Trigger, Form Trigger, RSS, Email (IMAP)
+- [x] Core: HTTP Request, Code (JS/Python), Set/Edit Fields, IF, Switch, Merge, Split Out, Aggregate, Filter, Sort, Limit, Wait, No Op, Stop and Error, Execute Workflow, Sticky Note
+- [x] AI: OpenAI / Anthropic / Gemini / Ollama chat models → `*_chat_model`, AI Agent → `agent_orchestrator` (sub-node connections `ai_languageModel` / `ai_memory` / `ai_tool` → `chat_model` / `memory` / `tool` attachment edges), Simple Memory → `local_memory`, MCP Client Tool → `mcp_tool`, Structured Output Parser → `output_parser` (vector stores → existing RAG nodes still open)
 - [ ] Apps with existing Tier 1/2 connectors: Slack, GitHub, Google Sheets, Postgres, Notion, Jira, Airtable, HubSpot, Salesforce, Stripe, S3, Telegram, Discord
 
 ### 9.3 UX
 - [ ] "Import from n8n" in the HUD overflow and the command palette; drag an n8n JSON onto the canvas
 - [ ] Post-import panel: mapping report, secrets to resolve, one-click Tidy layout, "Run a dry validation"
 - [ ] Docs page "Moving a flow from n8n" with the coverage table generated from the converter's map
-- [ ] Fixture corpus of real n8n exports under `samples/n8n/` with golden-file tests
+- [x] Fixture corpus of real exports under `samples/external-imports/` with golden-file tests
 
 ## Phase 10: MCP Control Plane (after Phase 9)
 

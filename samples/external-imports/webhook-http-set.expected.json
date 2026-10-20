@@ -1,0 +1,173 @@
+{
+  "workflow": {
+    "id": "wf-import-lead_enrichment_webhook",
+    "name": "Lead enrichment webhook",
+    "description": "Imported from an external workflow export (2 mapped, 1 approximated, 0 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "webhook",
+        "type": "webhook_input",
+        "name": "Webhook",
+        "position": {
+          "x": -200,
+          "y": 300
+        },
+        "config": {
+          "path": "lead-enrich",
+          "method": "POST",
+          "authMode": "none",
+          "responseMode": "lastNode",
+          "responseCode": 200
+        }
+      },
+      {
+        "id": "http_request",
+        "type": "http_request",
+        "name": "HTTP Request",
+        "position": {
+          "x": 40,
+          "y": 300
+        },
+        "config": {
+          "method": "GET",
+          "urlTemplate": "https://api.example.com/v1/people/{{results.webhook.body.userId}}?include=company",
+          "responseType": "json",
+          "headersTemplate": "{\n  \"Accept\": \"application/json\",\n  \"X-Request-Id\": \"{{execution.id}}\"\n}",
+          "timeoutMs": 10000,
+          "secretRef": {
+            "secretId": "import-httpheaderauth-enrichment_api_key"
+          }
+        }
+      },
+      {
+        "id": "edit_fields",
+        "type": "set_node",
+        "name": "Edit Fields",
+        "position": {
+          "x": 280,
+          "y": 300
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "email",
+              "valueTemplate": "{{results.webhook.body.email}}"
+            },
+            {
+              "key": "company",
+              "valueTemplate": "{{results.http_request.company.name}}"
+            },
+            {
+              "key": "enrichedAt",
+              "valueTemplate": "{{ $now.toISOString() }}"
+            },
+            {
+              "key": "score",
+              "valueTemplate": "42"
+            },
+            {
+              "key": "source",
+              "valueTemplate": "webhook"
+            }
+          ]
+        }
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 560,
+          "y": 300
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "webhook",
+        "target": "http_request"
+      },
+      {
+        "id": "edge_2",
+        "source": "http_request",
+        "target": "edit_fields"
+      },
+      {
+        "id": "edge_3",
+        "source": "edit_fields",
+        "target": "import_output"
+      }
+    ],
+    "pinnedData": {
+      "webhook": {
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "userId": "u_123",
+          "email": "ada@example.com"
+        }
+      }
+    },
+    "tags": [
+      "leads"
+    ]
+  },
+  "report": {
+    "sourceName": "Lead enrichment webhook",
+    "nodes": [
+      {
+        "sourceName": "Webhook",
+        "sourceType": "n8n-nodes-base.webhook",
+        "sourceId": "0a1b2c3d-1111-4a4a-8b8b-000000000001",
+        "targetNodeId": "webhook",
+        "targetType": "webhook_input",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "HTTP Request",
+        "sourceType": "n8n-nodes-base.httpRequest",
+        "sourceId": "0a1b2c3d-1111-4a4a-8b8b-000000000002",
+        "targetNodeId": "http_request",
+        "targetType": "http_request",
+        "status": "approximated",
+        "reason": "Query parameters were appended to the URL template. Authentication 'genericCredentialType' was mapped to a secretRef placeholder; verify how the secret is applied."
+      },
+      {
+        "sourceName": "Edit Fields",
+        "sourceType": "n8n-nodes-base.set",
+        "sourceId": "0a1b2c3d-1111-4a4a-8b8b-000000000003",
+        "targetNodeId": "edit_fields",
+        "targetType": "set_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [
+      {
+        "secretId": "import-httpheaderauth-enrichment_api_key",
+        "credentialType": "httpHeaderAuth",
+        "credentialName": "Enrichment API key",
+        "nodeIds": [
+          "http_request"
+        ]
+      }
+    ],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 3,
+      "mapped": 2,
+      "approximated": 1,
+      "unsupported": 0
+    }
+  }
+}

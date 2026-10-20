@@ -1,0 +1,578 @@
+{
+  "workflow": {
+    "id": "wf-import-feedback_intake_mixed",
+    "name": "Feedback intake (mixed)",
+    "description": "Imported from an external workflow export (5 mapped, 4 approximated, 4 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "variables": {
+      "API_BASE": "",
+      "region": ""
+    },
+    "nodes": [
+      {
+        "id": "feedback_form",
+        "type": "form_trigger",
+        "name": "Feedback form",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "config": {
+          "path": "feedback",
+          "title": "Feedback",
+          "fields": [
+            {
+              "name": "name",
+              "label": "Name",
+              "type": "text",
+              "required": true
+            },
+            {
+              "name": "rating",
+              "label": "Rating",
+              "type": "select",
+              "required": false,
+              "options": [
+                "1",
+                "2",
+                "3"
+              ]
+            },
+            {
+              "name": "attachment",
+              "label": "Attachment",
+              "type": "text",
+              "required": false
+            }
+          ],
+          "authMode": "public",
+          "description": "Tell us what you think",
+          "submitLabel": "Send",
+          "successMessage": "Thanks!"
+        }
+      },
+      {
+        "id": "slack",
+        "type": "noop_node",
+        "name": "Slack",
+        "position": {
+          "x": 240,
+          "y": 0
+        },
+        "config": {
+          "label": "Unsupported: slack",
+          "importedFrom": {
+            "type": "n8n-nodes-base.slack",
+            "typeVersion": 2.2,
+            "parameters": {
+              "select": "channel",
+              "channelId": {
+                "__rl": true,
+                "value": "C123",
+                "mode": "id"
+              },
+              "text": "=New feedback from {{ $json.Name }}",
+              "otherOptions": {}
+            },
+            "credentials": {
+              "slackApi": "Slack bot"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "google_sheets",
+        "type": "noop_node",
+        "name": "Google Sheets",
+        "position": {
+          "x": 480,
+          "y": 0
+        },
+        "config": {
+          "label": "Unsupported: googleSheets",
+          "importedFrom": {
+            "type": "n8n-nodes-base.googleSheets",
+            "typeVersion": 4.5,
+            "parameters": {
+              "operation": "append",
+              "documentId": {
+                "__rl": true,
+                "value": "1AbC",
+                "mode": "id"
+              },
+              "sheetName": "Feedback"
+            },
+            "credentials": {
+              "googleSheetsOAuth2Api": "Sheets account"
+            }
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "odd_fields",
+        "type": "set_node",
+        "name": "Odd fields",
+        "position": {
+          "x": 720,
+          "y": 0
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "attachment",
+              "valueTemplate": "{{ $binary.data.fileName }}"
+            },
+            {
+              "key": "year",
+              "valueTemplate": "{{ $now.toFormat('yyyy') }}"
+            },
+            {
+              "key": "missing",
+              "valueTemplate": "{{ $('Nope').item.json.value }}"
+            },
+            {
+              "key": "apiBase",
+              "valueTemplate": "{{vars.API_BASE}}"
+            },
+            {
+              "key": "region",
+              "valueTemplate": "{{vars.region}}"
+            },
+            {
+              "key": "meta",
+              "valueTemplate": "{{workflow.name}} / {{execution.id}}"
+            },
+            {
+              "key": "day",
+              "valueTemplate": "{{ $today.toISOString().slice(0, 10) }}"
+            },
+            {
+              "key": "stamp",
+              "valueTemplate": "{{ $now.toISOString() }}"
+            },
+            {
+              "key": "fallback",
+              "valueTemplate": "{{ $ifEmpty(results.google_sheets.Rating, 'n/a') }}"
+            },
+            {
+              "key": "runs",
+              "valueTemplate": "{{ $runIndex }}"
+            }
+          ]
+        }
+      },
+      {
+        "id": "python",
+        "type": "code_node",
+        "name": "Python",
+        "position": {
+          "x": 960,
+          "y": 0
+        },
+        "config": {
+          "language": "python",
+          "mode": "runOnceForAllItems",
+          "code": "for item in _input.all():\n    item.json['seen'] = True\nreturn _input.all()"
+        }
+      },
+      {
+        "id": "summarise",
+        "type": "agent_orchestrator",
+        "name": "Summarise",
+        "position": {
+          "x": 1200,
+          "y": 0
+        },
+        "config": {
+          "agentType": "tools",
+          "systemPromptTemplate": "{{system_prompt}}",
+          "userPromptTemplate": "{{user_prompt}}",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxIterations": 10,
+          "toolCallingEnabled": true
+        }
+      },
+      {
+        "id": "anthropic_chat_model",
+        "type": "anthropic_chat_model",
+        "name": "Anthropic Chat Model",
+        "position": {
+          "x": 1100,
+          "y": 220
+        },
+        "config": {
+          "model": "claude-3-5-sonnet-latest",
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt",
+          "temperature": 0,
+          "secretRef": {
+            "secretId": "import-anthropicapi-anthropic_account"
+          }
+        }
+      },
+      {
+        "id": "calculator",
+        "type": "noop_node",
+        "name": "Calculator",
+        "position": {
+          "x": 1300,
+          "y": 220
+        },
+        "config": {
+          "label": "Unsupported: toolCalculator",
+          "importedFrom": {
+            "type": "@n8n/n8n-nodes-langchain.toolCalculator",
+            "typeVersion": 1,
+            "parameters": {},
+            "credentials": {}
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "embeddings_openai",
+        "type": "noop_node",
+        "name": "Embeddings OpenAI",
+        "position": {
+          "x": 1500,
+          "y": 220
+        },
+        "config": {
+          "label": "Unsupported: embeddingsOpenAi",
+          "importedFrom": {
+            "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+            "typeVersion": 1.2,
+            "parameters": {
+              "options": {}
+            },
+            "credentials": {}
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "error_trigger",
+        "type": "error_trigger",
+        "name": "Error Trigger",
+        "position": {
+          "x": 0,
+          "y": 400
+        },
+        "config": {}
+      },
+      {
+        "id": "rss_feed_trigger",
+        "type": "rss_trigger",
+        "name": "RSS Feed Trigger",
+        "position": {
+          "x": 0,
+          "y": 600
+        },
+        "config": {
+          "feedUrl": "https://example.com/feed.xml",
+          "pollIntervalSeconds": 900,
+          "active": true
+        }
+      },
+      {
+        "id": "email_trigger_imap",
+        "type": "imap_email_trigger",
+        "name": "Email Trigger (IMAP)",
+        "position": {
+          "x": 0,
+          "y": 800
+        },
+        "config": {
+          "host": "",
+          "port": 993,
+          "secure": true,
+          "user": "",
+          "mailbox": "INBOX",
+          "pollIntervalSeconds": 60,
+          "secretRef": {
+            "secretId": "import-imap-support_inbox"
+          }
+        }
+      },
+      {
+        "id": "top_ratings",
+        "type": "filter_node",
+        "name": "Top ratings",
+        "position": {
+          "x": 1440,
+          "y": 0
+        },
+        "config": {
+          "conditions": [
+            {
+              "field": "results.summarise.Rating",
+              "operator": "eq",
+              "value": "3"
+            }
+          ],
+          "combineWith": "AND",
+          "passMode": "pass"
+        }
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 1780,
+          "y": 450
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "feedback_form",
+        "target": "slack"
+      },
+      {
+        "id": "edge_2",
+        "source": "slack",
+        "target": "google_sheets"
+      },
+      {
+        "id": "edge_3",
+        "source": "google_sheets",
+        "target": "odd_fields"
+      },
+      {
+        "id": "edge_4",
+        "source": "odd_fields",
+        "target": "python"
+      },
+      {
+        "id": "edge_5",
+        "source": "python",
+        "target": "summarise"
+      },
+      {
+        "id": "edge_6",
+        "source": "summarise",
+        "target": "top_ratings"
+      },
+      {
+        "id": "edge_chat_model_7",
+        "source": "summarise",
+        "target": "anthropic_chat_model",
+        "sourceHandle": "chat_model"
+      },
+      {
+        "id": "edge_8",
+        "source": "error_trigger",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_9",
+        "source": "rss_feed_trigger",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_10",
+        "source": "email_trigger_imap",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_11",
+        "source": "top_ratings",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Feedback intake (mixed)",
+    "nodes": [
+      {
+        "sourceName": "Feedback form",
+        "sourceType": "n8n-nodes-base.formTrigger",
+        "sourceId": "f-1",
+        "targetNodeId": "feedback_form",
+        "targetType": "form_trigger",
+        "status": "approximated",
+        "reason": "Form field 'Attachment' of type 'file' approximated as text."
+      },
+      {
+        "sourceName": "Slack",
+        "sourceType": "n8n-nodes-base.slack",
+        "sourceId": "f-2",
+        "targetNodeId": "slack",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Node type 'n8n-nodes-base.slack' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Google Sheets",
+        "sourceType": "n8n-nodes-base.googleSheets",
+        "sourceId": "f-3",
+        "targetNodeId": "google_sheets",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Node type 'n8n-nodes-base.googleSheets' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Odd fields",
+        "sourceType": "n8n-nodes-base.set",
+        "sourceId": "f-4",
+        "targetNodeId": "odd_fields",
+        "targetType": "set_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Python",
+        "sourceType": "n8n-nodes-base.code",
+        "sourceId": "f-5",
+        "targetNodeId": "python",
+        "targetType": "code_node",
+        "status": "approximated",
+        "reason": "Python code was kept verbatim; the L2M runner exposes `items` instead of the source item helpers."
+      },
+      {
+        "sourceName": "Summarise",
+        "sourceType": "@n8n/n8n-nodes-langchain.agent",
+        "sourceId": "f-6",
+        "targetNodeId": "summarise",
+        "targetType": "agent_orchestrator",
+        "status": "approximated",
+        "reason": "Automatic prompt input approximated with the {{user_prompt}} template."
+      },
+      {
+        "sourceName": "Anthropic Chat Model",
+        "sourceType": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+        "sourceId": "f-7",
+        "targetNodeId": "anthropic_chat_model",
+        "targetType": "anthropic_chat_model",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Calculator",
+        "sourceType": "@n8n/n8n-nodes-langchain.toolCalculator",
+        "sourceId": "f-8",
+        "targetNodeId": "calculator",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Node type '@n8n/n8n-nodes-langchain.toolCalculator' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Embeddings OpenAI",
+        "sourceType": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+        "sourceId": "f-9",
+        "targetNodeId": "embeddings_openai",
+        "targetType": "noop_node",
+        "status": "unsupported",
+        "reason": "Node type '@n8n/n8n-nodes-langchain.embeddingsOpenAi' has no L2M equivalent; imported as a disabled placeholder."
+      },
+      {
+        "sourceName": "Error Trigger",
+        "sourceType": "n8n-nodes-base.errorTrigger",
+        "sourceId": "f-10",
+        "targetNodeId": "error_trigger",
+        "targetType": "error_trigger",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "RSS Feed Trigger",
+        "sourceType": "n8n-nodes-base.rssFeedReadTrigger",
+        "sourceId": "f-11",
+        "targetNodeId": "rss_feed_trigger",
+        "targetType": "rss_trigger",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Email Trigger (IMAP)",
+        "sourceType": "n8n-nodes-base.emailReadImap",
+        "sourceId": "f-12",
+        "targetNodeId": "email_trigger_imap",
+        "targetType": "imap_email_trigger",
+        "status": "approximated",
+        "reason": "IMAP host, port and user live in the source credential and must be filled in after import."
+      },
+      {
+        "sourceName": "Top ratings",
+        "sourceType": "n8n-nodes-base.filter",
+        "sourceId": "f-13",
+        "targetNodeId": "top_ratings",
+        "targetType": "filter_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      }
+    ],
+    "unresolvedExpressions": [
+      {
+        "nodeId": "odd_fields",
+        "sourceName": "Odd fields",
+        "path": "assignments[0].value",
+        "expression": "$binary.data.fileName",
+        "reason": "unsupported runtime reference '$binary'"
+      },
+      {
+        "nodeId": "odd_fields",
+        "sourceName": "Odd fields",
+        "path": "assignments[1].value",
+        "expression": "$now.toFormat('yyyy')",
+        "reason": "date helper .toFormat() has no direct equivalent"
+      },
+      {
+        "nodeId": "odd_fields",
+        "sourceName": "Odd fields",
+        "path": "assignments[2].value",
+        "expression": "$('Nope').item.json.value",
+        "reason": "unknown node reference 'Nope'"
+      },
+      {
+        "nodeId": "odd_fields",
+        "sourceName": "Odd fields",
+        "path": "assignments[9].value",
+        "expression": "$runIndex",
+        "reason": "unsupported runtime reference '$runIndex'"
+      }
+    ],
+    "secretsToResolve": [
+      {
+        "secretId": "import-anthropicapi-anthropic_account",
+        "credentialType": "anthropicApi",
+        "credentialName": "Anthropic account",
+        "nodeIds": [
+          "anthropic_chat_model"
+        ]
+      },
+      {
+        "secretId": "import-imap-support_inbox",
+        "credentialType": "imap",
+        "credentialName": "Support inbox",
+        "nodeIds": [
+          "email_trigger_imap"
+        ]
+      }
+    ],
+    "variablesToSet": [
+      "API_BASE",
+      "region"
+    ],
+    "warnings": [
+      "Workflow timezone 'Mars/Olympus' is not a valid IANA zone; schedules use UTC.",
+      "Connection from 'Summarise' to 'Ghost node' references a node that does not exist and was dropped.",
+      "'Calculator' (noop_node) cannot be attached to 'Summarise' as tool; the attachment was dropped.",
+      "Connection type 'ai_embedding' from 'Embeddings OpenAI' to 'Summarise' is not supported and was dropped."
+    ],
+    "summary": {
+      "total": 13,
+      "mapped": 5,
+      "approximated": 4,
+      "unsupported": 4
+    }
+  }
+}

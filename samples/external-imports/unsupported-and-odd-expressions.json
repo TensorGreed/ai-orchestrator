@@ -1,0 +1,454 @@
+{
+  "name": "Feedback intake (mixed)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Feedback",
+        "formDescription": "Tell us what you think",
+        "formPath": "feedback",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Name",
+              "fieldType": "text",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Rating",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "1"
+                  },
+                  {
+                    "option": "2"
+                  },
+                  {
+                    "option": "3"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Attachment",
+              "fieldType": "file"
+            }
+          ]
+        },
+        "options": {
+          "buttonLabel": "Send",
+          "formSubmittedText": "Thanks!"
+        }
+      },
+      "id": "f-1",
+      "name": "Feedback form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "feedback"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C123",
+          "mode": "id"
+        },
+        "text": "=New feedback from {{ $json.Name }}",
+        "otherOptions": {}
+      },
+      "id": "f-2",
+      "name": "Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "cred_3",
+          "name": "Slack bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1AbC",
+          "mode": "id"
+        },
+        "sheetName": "Feedback"
+      },
+      "id": "f-3",
+      "name": "Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "cred_4",
+          "name": "Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o1",
+              "name": "attachment",
+              "value": "={{ $binary.data.fileName }}",
+              "type": "string"
+            },
+            {
+              "id": "o2",
+              "name": "year",
+              "value": "={{ $now.toFormat('yyyy') }}",
+              "type": "string"
+            },
+            {
+              "id": "o3",
+              "name": "missing",
+              "value": "={{ $('Nope').item.json.value }}",
+              "type": "string"
+            },
+            {
+              "id": "o4",
+              "name": "apiBase",
+              "value": "={{ $env.API_BASE }}",
+              "type": "string"
+            },
+            {
+              "id": "o5",
+              "name": "region",
+              "value": "={{ $vars.region }}",
+              "type": "string"
+            },
+            {
+              "id": "o6",
+              "name": "meta",
+              "value": "={{ $workflow.name }} / {{ $execution.id }}",
+              "type": "string"
+            },
+            {
+              "id": "o7",
+              "name": "day",
+              "value": "={{ $today.toISODate() }}",
+              "type": "string"
+            },
+            {
+              "id": "o8",
+              "name": "stamp",
+              "value": "={{ $now }}",
+              "type": "string"
+            },
+            {
+              "id": "o9",
+              "name": "fallback",
+              "value": "={{ $ifEmpty($json.Rating, 'n/a') }}",
+              "type": "string"
+            },
+            {
+              "id": "o10",
+              "name": "runs",
+              "value": "={{ $runIndex }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f-4",
+      "name": "Odd fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "for item in _input.all():\n    item.json['seen'] = True\nreturn _input.all()",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "f-5",
+      "name": "Python",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "auto",
+        "options": {}
+      },
+      "id": "f-6",
+      "name": "Summarise",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        1200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "model": "claude-3-5-sonnet-latest",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "f-7",
+      "name": "Anthropic Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.2,
+      "position": [
+        1100,
+        220
+      ],
+      "credentials": {
+        "anthropicApi": {
+          "id": "cred_5",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "f-8",
+      "name": "Calculator",
+      "type": "@n8n/n8n-nodes-langchain.toolCalculator",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "f-9",
+      "name": "Embeddings OpenAI",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        1500,
+        220
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f-10",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "feedUrl": "https://example.com/feed.xml",
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 15,
+              "unit": "minutes"
+            }
+          ]
+        }
+      },
+      "id": "f-11",
+      "name": "RSS Feed Trigger",
+      "type": "n8n-nodes-base.rssFeedReadTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "mailbox": "INBOX",
+        "options": {}
+      },
+      "id": "f-12",
+      "name": "Email Trigger (IMAP)",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [
+        0,
+        800
+      ],
+      "credentials": {
+        "imap": {
+          "id": "cred_6",
+          "name": "Support inbox"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.Rating }}",
+              "rightValue": "3",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f-13",
+      "name": "Top ratings",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Feedback form": {
+      "main": [
+        [
+          {
+            "node": "Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Odd fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Odd fields": {
+      "main": [
+        [
+          {
+            "node": "Python",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Python": {
+      "main": [
+        [
+          {
+            "node": "Summarise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarise": {
+      "main": [
+        [
+          {
+            "node": "Top ratings",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Ghost node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Summarise",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculator": {
+      "ai_tool": [
+        [
+          {
+            "node": "Summarise",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Summarise",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Mars/Olympus"
+  }
+}

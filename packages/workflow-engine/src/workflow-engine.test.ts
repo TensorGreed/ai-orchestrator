@@ -221,6 +221,63 @@ describe("workflow engine", () => {
     expect(validation.issues.some((issue) => issue.code === "invalid_output_parser_parsing_mode")).toBe(true);
   });
 
+  it("exposes a fresh results snapshot to every node even when an earlier node spreads its input", async () => {
+    const workflow: Workflow = {
+      id: "wf-results-snapshot",
+      name: "Results snapshot",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "n1", type: "text_input", name: "Input", position: { x: 0, y: 0 }, config: { text: "hello" } },
+        {
+          id: "n2",
+          type: "code_node",
+          name: "Spread",
+          position: { x: 200, y: 0 },
+          config: { code: "return { ...input, stamp: 'from-code' };" }
+        },
+        {
+          id: "n3",
+          type: "set_node",
+          name: "Read results",
+          position: { x: 400, y: 0 },
+          config: {
+            assignments: [
+              { key: "fromCode", valueTemplate: "{{results.n2.stamp}}" },
+              { key: "fromInput", valueTemplate: "{{results.n1.text}}" }
+            ]
+          }
+        },
+        { id: "n4", type: "output", name: "Output", position: { x: 600, y: 0 }, config: { responseTemplate: "{{fromCode}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "n1", target: "n2" },
+        { id: "e2", source: "n2", target: "n3" },
+        { id: "e3", source: "n3", target: "n4" }
+      ]
+    };
+
+    const result = await executeWorkflow(
+      { workflow },
+      {
+        providerRegistry: createProviderRegistry(),
+        connectorRegistry: createDefaultConnectorRegistry(),
+        mcpRegistry: createDefaultMCPRegistry(),
+        agentRuntime: new FakeAgentRuntime(),
+        resolveSecret: async () => undefined
+      }
+    );
+
+    expect(result.status).toBe("success");
+    const codeOutput = result.nodeResults.find((entry) => entry.nodeId === "n2")?.output as Record<string, unknown>;
+    // The code node copied the stale snapshot it was given (which cannot contain itself).
+    expect(Object.keys(codeOutput.results as Record<string, unknown>)).toEqual(["n1"]);
+    const setOutput = result.nodeResults.find((entry) => entry.nodeId === "n3")?.output as Record<string, unknown>;
+    expect(setOutput.fromCode).toBe("from-code");
+    expect(setOutput.fromInput).toBe("hello");
+    expect(result.output).toEqual({ result: "from-code" });
+  });
+
   it("executes basic flow", async () => {
     const workflow = basicWorkflow();
     const result = await executeWorkflow(

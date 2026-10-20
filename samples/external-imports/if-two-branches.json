@@ -1,0 +1,178 @@
+{
+  "name": "Order approval",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b-1",
+      "name": "When clicking \u2018Test workflow\u2019",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "status",
+              "value": "active",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "amount",
+              "value": 250,
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b-2",
+      "name": "Sample Order",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "active",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.amount }}",
+              "rightValue": 100,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b-3",
+      "name": "Needs approval?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hooks.example.com/approvals",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"amount\": {{ $json.amount }},\n  \"requestedBy\": \"{{ $('Sample Order').item.json.status }}\"\n}",
+        "options": {}
+      },
+      "id": "b-4",
+      "name": "Request approval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        -120
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b-5",
+      "name": "Auto approve",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        680,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Approval rule\nOrders above 100 go to a human.",
+        "height": 120,
+        "width": 260,
+        "color": 4
+      },
+      "id": "b-6",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        380,
+        -220
+      ]
+    }
+  ],
+  "connections": {
+    "When clicking \u2018Test workflow\u2019": {
+      "main": [
+        [
+          {
+            "node": "Sample Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample Order": {
+      "main": [
+        [
+          {
+            "node": "Needs approval?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs approval?": {
+      "main": [
+        [
+          {
+            "node": "Request approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Auto approve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,273 @@
+{
+  "workflow": {
+    "id": "wf-import-event_router",
+    "name": "Event router",
+    "description": "Imported from an external workflow export (7 mapped, 0 approximated, 0 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "event_webhook",
+        "type": "webhook_input",
+        "name": "Event webhook",
+        "position": {
+          "x": 0,
+          "y": 200
+        },
+        "config": {
+          "path": "events",
+          "method": "POST",
+          "authMode": "none",
+          "responseMode": "onReceived"
+        }
+      },
+      {
+        "id": "route_by_type",
+        "type": "switch_node",
+        "name": "Route by type",
+        "position": {
+          "x": 240,
+          "y": 200
+        },
+        "config": {
+          "switchValue": "{{results.event_webhook.body.type}}",
+          "cases": [
+            {
+              "value": "order.created",
+              "label": "order"
+            },
+            {
+              "value": "refund.requested",
+              "label": "refund"
+            },
+            {
+              "value": "ticket.opened",
+              "label": "ticket"
+            }
+          ],
+          "defaultLabel": "default"
+        }
+      },
+      {
+        "id": "tag_order",
+        "type": "set_node",
+        "name": "Tag order",
+        "position": {
+          "x": 520,
+          "y": 0
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "queue",
+              "valueTemplate": "orders"
+            }
+          ]
+        }
+      },
+      {
+        "id": "tag_refund",
+        "type": "set_node",
+        "name": "Tag refund",
+        "position": {
+          "x": 520,
+          "y": 160
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "queue",
+              "valueTemplate": "refunds"
+            }
+          ]
+        }
+      },
+      {
+        "id": "tag_ticket",
+        "type": "set_node",
+        "name": "Tag ticket",
+        "position": {
+          "x": 520,
+          "y": 320
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "queue",
+              "valueTemplate": "support"
+            }
+          ]
+        }
+      },
+      {
+        "id": "unknown_event",
+        "type": "stop_and_error",
+        "name": "Unknown event",
+        "position": {
+          "x": 520,
+          "y": 480
+        },
+        "config": {
+          "errorCode": "WORKFLOW_STOPPED",
+          "message": "Unknown event type: {{results.route_by_type.body.type}}"
+        }
+      },
+      {
+        "id": "merge",
+        "type": "merge_node",
+        "name": "Merge",
+        "position": {
+          "x": 800,
+          "y": 80
+        },
+        "config": {
+          "mode": "combine_by_key",
+          "combineKey": "queue"
+        }
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 1080,
+          "y": 200
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "event_webhook",
+        "target": "route_by_type"
+      },
+      {
+        "id": "edge_2",
+        "source": "route_by_type",
+        "target": "tag_order",
+        "sourceHandle": "order"
+      },
+      {
+        "id": "edge_3",
+        "source": "route_by_type",
+        "target": "tag_refund",
+        "sourceHandle": "refund"
+      },
+      {
+        "id": "edge_4",
+        "source": "route_by_type",
+        "target": "tag_ticket",
+        "sourceHandle": "ticket"
+      },
+      {
+        "id": "edge_5",
+        "source": "route_by_type",
+        "target": "unknown_event",
+        "sourceHandle": "default"
+      },
+      {
+        "id": "edge_6",
+        "source": "tag_order",
+        "target": "merge",
+        "label": "input 1"
+      },
+      {
+        "id": "edge_7",
+        "source": "tag_refund",
+        "target": "merge",
+        "label": "input 2"
+      },
+      {
+        "id": "edge_8",
+        "source": "tag_ticket",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_9",
+        "source": "merge",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Event router",
+    "nodes": [
+      {
+        "sourceName": "Event webhook",
+        "sourceType": "n8n-nodes-base.webhook",
+        "sourceId": "c-1",
+        "targetNodeId": "event_webhook",
+        "targetType": "webhook_input",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Route by type",
+        "sourceType": "n8n-nodes-base.switch",
+        "sourceId": "c-2",
+        "targetNodeId": "route_by_type",
+        "targetType": "switch_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Tag order",
+        "sourceType": "n8n-nodes-base.set",
+        "sourceId": "c-3",
+        "targetNodeId": "tag_order",
+        "targetType": "set_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Tag refund",
+        "sourceType": "n8n-nodes-base.set",
+        "sourceId": "c-4",
+        "targetNodeId": "tag_refund",
+        "targetType": "set_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Tag ticket",
+        "sourceType": "n8n-nodes-base.set",
+        "sourceId": "c-5",
+        "targetNodeId": "tag_ticket",
+        "targetType": "set_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Unknown event",
+        "sourceType": "n8n-nodes-base.stopAndError",
+        "sourceId": "c-6",
+        "targetNodeId": "unknown_event",
+        "targetType": "stop_and_error",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Merge",
+        "sourceType": "n8n-nodes-base.merge",
+        "sourceId": "c-7",
+        "targetNodeId": "merge",
+        "targetType": "merge_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 7,
+      "mapped": 7,
+      "approximated": 0,
+      "unsupported": 0
+    }
+  }
+}
