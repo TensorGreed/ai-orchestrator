@@ -451,7 +451,7 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 
 ### 10.5 Protocol coverage on the client side
 - [x] Structured tool output: `outputSchema` and `structuredContent` kept in snapshots, validated, and passed to downstream nodes as typed data
-- [x] Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) captured, shown on the registry page and used by policy and approvals
+- [x] Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) captured, shown on the registry page and used by policy (approval gates use them with 11.2)
 - [ ] Resources and prompts: browse and read resources, use server prompts as templates in agent and LLM nodes; `list_changed` notifications trigger a re-probe
 - [x] Progress notifications streamed to the run tape; cancelling a run sends `notifications/cancelled` to in-flight tool calls
 - [ ] Elicitation: a server asking for user input pauses the run through the existing wait/resume and clarification plumbing
