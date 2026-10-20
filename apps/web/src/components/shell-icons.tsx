@@ -156,6 +156,18 @@ export const PlusIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const MenuIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 7h16M4 12h16M4 17h16" />
+  </Svg>
+);
+
+export const CloseIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 6l12 12M18 6 6 18" />
+  </Svg>
+);
+
 export const MoreIcon = (p: IconProps) => (
   <Svg {...p} fill="currentColor" stroke="none">
     <circle cx="5" cy="12" r="1.8" />

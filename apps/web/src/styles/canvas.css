@@ -2117,6 +2117,22 @@
   }
 }
 
+/* Phone widths: keep the canvas toolbar inside the viewport and give the canvas back the
+   room the minimap would take (zoom controls and Fit remain). */
+@media (max-width: 880px) {
+  .canvas-toolbar {
+    right: 12px;
+  }
+
+  .canvas-toolbar-sep {
+    display: none;
+  }
+
+  .react-flow__minimap {
+    display: none;
+  }
+}
+
 /* ---- Import: file drop hint, preview dialog, post-import checklist ------- */
 
 .canvas-file-drop {

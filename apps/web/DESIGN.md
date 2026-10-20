@@ -46,7 +46,7 @@ Key tokens: `--bg`, `--bg-elev`, `--bg-elev-2`, `--bg-input`, `--line`, `--line-
 `--port-model|memory|tool|worker` (+ `-soft`), `--agent`, `--agent-soft`, `--ok`,
 `--warn`, `--err`, `--running`, `--font-display|body|mono`, `--r-sm|md|lg|pill`,
 `--shadow-sm|md|lg`, `--glow-accent`, `--glow-agent`, `--sidebar-w`,
-`--sidebar-w-collapsed`, `--hud-h`, `--inspector-w`, `--strip-h`, `--dur`, `--ease`.
+`--sidebar-w-collapsed`, `--sidebar-w-drawer`, `--hud-h`, `--inspector-w`, `--strip-h`, `--dur`, `--ease`.
 
 Theme switching keeps the existing mechanism: `data-theme="dark" | "light"` on `<html>`.
 Dark is the default (`:root`).
@@ -70,6 +70,13 @@ Dark is the default (`:root`).
   Evaluations, Knowledge, Secrets (admins), Settings. Collapses to an icon rail; the
   collapsed state is remembered per browser. Active item uses `--accent-soft` fill and an
   accent edge. Keyboard accessible, `aria-current="page"` on the active item.
+- **Phone widths (≤ 880px).** The sidebar leaves the layout and becomes an off-canvas drawer
+  (`--sidebar-w-drawer`) opened from a menu button at the start of the HUD. It closes on
+  navigation, Escape and scrim click, takes focus while open and hands it back to the menu
+  button. The desktop collapsed preference is not changed by the drawer. Secondary HUD pills
+  (theme, shortcuts, docs, Refresh secrets, the editor's Save) hide; each stays reachable from
+  the command palette, and the editor's Save also sits in the "⋯" overflow. The node inspector
+  takes the full width.
 - **HUD (top).** Not a solid bar: a row of floating pills on the glow background.
   Left: breadcrumb pill "Project / Workflow name" (name editable inline in the editor).
   Middle-left: run status pill (dot + "last run 42 s · 6 of 14 ok" or "running…").
