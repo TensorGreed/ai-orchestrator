@@ -513,7 +513,7 @@ to run agents.
 - [ ] `guard` node for DAG edges with `pass`, `blocked` and `review` outputs, so flagged items can be routed instead of failing the run
 - [ ] `guard` attachment port on Agent and Supervisor nodes: hooks before each model call, before each tool call, after each tool result and before the final answer, also applied to worker delegation
 - [ ] Automatic boundary profiles per project and per workflow (inherit, override, or enforced by an admin so builders cannot remove them)
-- [ ] Actions: allow, block, redact or mask, transform, require approval (11.2), route to review; per-action shadow mode
+- [ ] Actions: allow, block, redact or mask, tokenise or encrypt through an attached protection provider (12.5), transform, require approval (11.2), route to review; per-action shadow mode
 - [ ] Latency tiers: rules and parsers inline, local classifiers next, LLM judge only for uncertain scores; per-profile latency budget with an explicit fail-open or fail-closed choice
 
 ### 12.2 Prompt-injection and jailbreak defence
@@ -539,7 +539,13 @@ to run agents.
 
 ### 12.5 Data protection and output safety
 - [ ] DLP detectors: PII, PHI and card data (patterns with checksums plus a local NER model), credentials and keys, custom dictionaries and patterns
-- [ ] Reversible tokenisation: sensitive values replaced by tokens before the model call and restored only for authorised outputs, through a per-run token vault
+- [ ] Pluggable protection providers: a provider interface (`protect` / `reveal`) in `packages/guard-sdk` with `createDefaultProtectionRegistry()`; providers attach to a guard node or profile through a `protection` port (0..N), so an external tokeniser or encrypter can be plugged in without changing the guard
+- [ ] Built-in providers: local token vault (random or deterministic, format-preserving tokens), format-preserving encryption and AES-GCM encryption with keys held by `SecretService` or a customer KMS (13.3), keyed hashing for irreversible pseudonyms, and masking
+- [ ] External providers: a generic HTTP adapter for an organisation's own tokenisation or encryption service (auth through `secretRef`), plus adapters for vault transform/transit engines and cloud de-identification APIs; community providers through the node SDK
+- [ ] Per data-class mapping in the profile: each detected class (card number, email, national id, credential, custom class) maps to a provider and a mode (reversible token, encryption, pseudonym, mask); deterministic modes keep joins and lookups working across runs
+- [ ] Applied on every channel where data can leak: MCP tool responses (after each tool result, before the model sees them), workflow and node outputs, webhook and chat responses, and both gateways
+- [ ] Controlled reveal: a `reveal` step (node or output-side action) restores original values only for destinations and subjects a policy allows; every reveal is audited
+- [ ] Fallback policy: when sensitive data is found and no provider covers its class, or the provider is unavailable or errors, the profile's fallback applies, which defaults to deny (block the response or fail the step); prompt-injection findings are never tokenised and always follow their own block or review action
 - [ ] Output checks: content-safety classifier, topic restrictions, schema conformance (extends `output_guardrail`), grounding check against retrieved citations
 - [ ] Guarded data also redacted in execution history, logs, traces and telemetry
 
