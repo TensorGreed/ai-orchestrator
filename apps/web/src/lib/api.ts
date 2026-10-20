@@ -1,11 +1,13 @@
 import type {
   Folder,
+  ImportReport,
   LLMProviderConfig,
   MCPToolDefinition,
   Project,
   Workflow,
   WorkflowExecutionResult,
-  WorkflowListItem
+  WorkflowListItem,
+  WorkflowValidationResult
 } from "@ai-orchestrator/shared";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -153,6 +155,37 @@ export async function importWorkflow(payload: { json?: string; workflow?: unknow
   return apiRequest<Workflow>("/api/workflows/import", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+export interface ExternalImportResponse {
+  workflow: Workflow;
+  report: ImportReport;
+  dryRun?: boolean;
+}
+
+/**
+ * Converts a workflow exported from another builder. With `dryRun` nothing is
+ * stored and the converted workflow plus its mapping report are returned.
+ */
+export async function importExternalWorkflow(payload: {
+  sourceText?: string;
+  source?: unknown;
+  projectId?: string;
+  folderId?: string;
+  name?: string;
+  dryRun?: boolean;
+}) {
+  return apiRequest<ExternalImportResponse>("/api/workflows/import/external", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function validateStoredWorkflow(id: string) {
+  return apiRequest<WorkflowValidationResult>(`/api/workflows/${encodeURIComponent(id)}/validate`, {
+    method: "POST",
+    body: JSON.stringify({})
   });
 }
 

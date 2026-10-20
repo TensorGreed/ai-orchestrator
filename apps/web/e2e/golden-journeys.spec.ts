@@ -1,4 +1,11 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
+
+const EXTERNAL_FIXTURE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../samples/external-imports/if-two-branches.json"
+);
 
 const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL ?? "admin@example.com";
 const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD ?? "ChangeThisPassword123!";
@@ -205,5 +212,34 @@ test.describe("golden journeys", () => {
       const body = await history.json();
       return String(body.status);
     }).toBe("success");
+  });
+
+  test("imports a workflow from another builder with a preview and a checklist", async ({ page }) => {
+    await openStudio(page);
+
+    await sidebarItem(page, "Home").click();
+    await page.getByRole("button", { name: "Import…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Import from another builder" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByTestId("import-file-input").setInputFiles(EXTERNAL_FIXTURE);
+
+    // Preview first: nothing is stored until the user confirms.
+    await expect(dialog.getByRole("button", { name: "Import workflow" })).toBeVisible();
+    await expect(dialog.getByText(/mapped/).first()).toBeVisible();
+    const importedName = `Imported ${Date.now()}`;
+    await dialog.getByRole("textbox", { name: "Workflow name" }).fill(importedName);
+    await dialog.getByRole("button", { name: "Import workflow" }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(sidebarItem(page, "Editor")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("textbox", { name: "Workflow name" })).toHaveValue(importedName);
+    const checklist = page.getByRole("complementary", { name: "Import checklist" });
+    await expect(checklist).toBeVisible();
+
+    await checklist.getByRole("button", { name: "Validate" }).click();
+    await expect(checklist.getByText(/Saved and valid|Validation found/)).toBeVisible();
+
+    await checklist.getByRole("button", { name: "Dismiss import checklist" }).click();
+    await expect(checklist).toBeHidden();
   });
 });

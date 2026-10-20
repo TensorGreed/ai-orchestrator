@@ -13,57 +13,19 @@ import {
   type Workflow,
   type WorkflowEdge,
   type WorkflowNode,
-  type WorkflowNodeType
+  type WorkflowNodeType,
+  type ImportNodeStatus,
+  type ImportReport,
+  type ImportReportExpression,
+  type ImportReportNodeEntry,
+  type ImportReportSecret
 } from "@ai-orchestrator/shared";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-export type ImportNodeStatus = "mapped" | "approximated" | "unsupported";
-
-export interface ImportReportNodeEntry {
-  sourceName: string;
-  sourceType: string;
-  sourceId?: string;
-  targetNodeId: string;
-  targetType: WorkflowNodeType;
-  status: ImportNodeStatus;
-  reason: string;
-}
-
-export interface ImportReportExpression {
-  nodeId: string;
-  sourceName: string;
-  /** Config path the expression lives at, e.g. `urlTemplate` or `assignments[1].valueTemplate`. */
-  path: string;
-  /** Original expression body, exactly as it appeared in the export. */
-  expression: string;
-  reason: string;
-}
-
-export interface ImportReportSecret {
-  secretId: string;
-  credentialType: string;
-  credentialName: string;
-  nodeIds: string[];
-}
-
-export interface ImportReport {
-  sourceName: string;
-  nodes: ImportReportNodeEntry[];
-  unresolvedExpressions: ImportReportExpression[];
-  secretsToResolve: ImportReportSecret[];
-  /** Workflow variables created as placeholders for `$env` / `$vars` references. */
-  variablesToSet: string[];
-  warnings: string[];
-  summary: {
-    total: number;
-    mapped: number;
-    approximated: number;
-    unsupported: number;
-  };
-}
+export type { ImportNodeStatus, ImportReportNodeEntry, ImportReportExpression, ImportReportSecret, ImportReport };
 
 export interface ExternalWorkflowConversion {
   workflow: Workflow;
