@@ -301,7 +301,7 @@
 **n8n equivalent:** Conversational, OpenAI Functions, Plan-and-Execute, ReAct, SQL, Tools agents
 - [x] Plan-and-Execute agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `plan-and-execute`
 - [x] ReAct agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `react`
-- [x] SQL Agent (natural language to SQL) — `packages/agent-runtime/src/default-agent-runtime.ts` `sql` agentType
+- [ ] SQL Agent (natural language to SQL) (partial: `sql` agentType adds SQL instructions to the system prompt in `packages/agent-runtime/src/default-agent-runtime.ts`, missing: schema introspection and query tools)
 - [x] Agent type selection in agent_orchestrator config — `apps/web/src/components/NodeConfigModal.tsx` `agentType`
 
 ### 6.2 LangChain-Style Chains
@@ -357,9 +357,9 @@
 - [x] Workflow transfer between projects — `apps/api/src/app.ts` `POST /api/workflows/:id/transfer`
 - [x] Execution stop/cancel endpoint — `apps/api/src/app.ts` `POST /api/executions/:id/cancel`
 - [x] Credential schema endpoint — `apps/api/src/app.ts` `GET /api/secrets/schema`
-- [x] User invite/management endpoints — `apps/api/src/app.ts` `PUT /api/users/:id`
+- [ ] User invite/management endpoints (partial: `PUT /api/users/:id` and project member invites in `apps/api/src/app.ts`, missing: a deployment-level user invite endpoint)
 - [x] Project CRUD endpoints — `apps/api/src/app.ts` `POST /api/projects`
-- [x] Tag CRUD endpoints — `apps/api/src/app.ts` `POST /api/tags`
+- [ ] Tag CRUD endpoints (partial: `GET`/`POST`/`DELETE /api/tags` in `apps/api/src/app.ts`, missing: rename via `PUT`)
 - [x] Variable CRUD endpoints — `apps/api/src/app.ts` `POST /api/variables`
 - [x] Source control push/pull endpoints — `apps/api/src/app.ts` `POST /api/git/push`
 - [x] Audit report endpoint — `apps/api/src/app.ts` `GET /api/audit/export`
