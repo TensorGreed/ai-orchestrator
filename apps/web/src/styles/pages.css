@@ -3127,6 +3127,11 @@ button.tag-chip:hover {
   color: var(--fg-faint);
 }
 
+/* Telemetry figures stay on one line so columns line up. */
+.mcp-tool-table td.num {
+  white-space: nowrap;
+}
+
 .mcp-inputs {
   display: flex;
   flex-wrap: wrap;

@@ -140,6 +140,34 @@ describe("MCP server registry references", () => {
     expect(runtime.lastRequest?.tools.map((tool) => tool.name)).toEqual(["mock-mcp__calculator"]);
   });
 
+  it("maps exposed tool names back to adapter, tool and registry entry on the agent output", async () => {
+    const result = await executeWorkflow(
+      {
+        workflow: agentWorkflow({ registryServerId: "mcp_calc", toolName: "calculator" }),
+        webhookPayload: { user_prompt: "add" }
+      },
+      dependencies()
+    );
+
+    const agent = result.nodeResults.find((entry) => entry.nodeId === "agent")?.output as Record<string, unknown>;
+    expect(agent._mcpTools).toEqual({
+      "mock-mcp__calculator": { adapterId: "mock-mcp", toolName: "calculator", registryServerId: "mcp_calc" }
+    });
+  });
+
+  it("keeps inline servers unattributed to the registry", async () => {
+    const result = await executeWorkflow(
+      {
+        workflow: agentWorkflow({ serverId: "mock-mcp", toolName: "calculator" }),
+        webhookPayload: { user_prompt: "add" }
+      },
+      dependencies()
+    );
+
+    const agent = result.nodeResults.find((entry) => entry.nodeId === "agent")?.output as Record<string, unknown>;
+    expect(agent._mcpTools).toEqual({ "mock-mcp__calculator": { adapterId: "mock-mcp", toolName: "calculator" } });
+  });
+
   it("resolves registry entries in the agent's inline mcpServers list", async () => {
     const runtime = new CapturingAgentRuntime();
     const result = await executeWorkflow(

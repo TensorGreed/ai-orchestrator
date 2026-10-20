@@ -193,8 +193,8 @@ export class UsageService {
 
   /** Public so /api/usage/pricing can show the table to admins. */
   priceTelemetry(providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number): number {
-    const p = this.pricing[providerId]?.[model];
-    if (!p) {
+    const cost = this.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens);
+    if (cost === null) {
       const key = `${providerId}/${model}`;
       if (!this.seenUnpricedModels.has(key)) {
         this.seenUnpricedModels.add(key);
@@ -202,6 +202,16 @@ export class UsageService {
       }
       return 0;
     }
+    return cost;
+  }
+
+  /**
+   * Same pricing as priceTelemetry, but null when the model has no price,
+   * so callers can tell "free" apart from "unknown" (Phase 10.1 tool telemetry).
+   */
+  estimateCostUsd(providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number): number | null {
+    const p = this.pricing[providerId]?.[model];
+    if (!p) return null;
     const billableInput = Math.max(0, inputTokens - cachedInputTokens);
     const cachedRate = p.cachedInputUsdPer1M ?? p.inputUsdPer1M;
     const inputCost = (billableInput / 1_000_000) * p.inputUsdPer1M;

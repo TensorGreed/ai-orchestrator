@@ -4,6 +4,7 @@
  * List on the left, detail on the right (same layout as the knowledge base
  * page). The detail shows probe health, the tool schema history with diffs,
  * the pending breaking change (if any) and the nodes that use the server.
+ * The Tools table carries per-tool call telemetry for a selectable window.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -15,7 +16,10 @@ import {
   type McpServerProbe,
   type McpServerUsage,
   type McpSnapshotTool,
+  type McpTelemetryResponse,
+  type McpTelemetryWindow,
   type McpToolSnapshotSummary,
+  type McpToolTelemetry,
   type SecretListItem,
   acceptMcpServerChange,
   createMcpServer,
@@ -23,6 +27,7 @@ import {
   fetchMcpPresets,
   fetchMcpServer,
   fetchMcpServers,
+  fetchMcpServerTelemetry,
   fetchMcpServerTools,
   fetchSecrets,
   probeMcpServer,
@@ -441,6 +446,26 @@ function McpServerDetail({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  const [telemetryWindow, setTelemetryWindow] = useState<McpTelemetryWindow>("7d");
+  const [telemetry, setTelemetry] = useState<McpTelemetryResponse | null>(null);
+  const [telemetryError, setTelemetryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setTelemetryError(null);
+    fetchMcpServerTelemetry(serverId, telemetryWindow)
+      .then((response) => {
+        if (!cancelled) setTelemetry(response);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setTelemetry(null);
+        setTelemetryError(formatError(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [serverId, telemetryWindow]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -611,35 +636,13 @@ function McpServerDetail({
 
       <ProbeStrip probes={probes} />
 
-      <section className="kb-section">
-        <h4>Tools ({tools.length})</h4>
-        {tools.length === 0 ? (
-          <p className="kb-subtle">No tool snapshot yet. Run a probe to list the server's tools.</p>
-        ) : (
-          <table className="kb-table">
-            <thead>
-              <tr>
-                <th>Tool</th>
-                <th>Inputs</th>
-                <th>Description</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tools.map((tool) => (
-                <tr key={tool.name}>
-                  <td>
-                    <code>{tool.name}</code>
-                  </td>
-                  <td>
-                    <ToolInputs schema={tool.inputSchema} />
-                  </td>
-                  <td>{tool.description || <span className="kb-subtle">—</span>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+      <ToolsSection
+        tools={tools}
+        telemetry={telemetry}
+        telemetryError={telemetryError}
+        selectedWindow={telemetryWindow}
+        onWindowChange={setTelemetryWindow}
+      />
 
       <section className="kb-section">
         <h4>Schema history ({snapshots.length})</h4>
@@ -684,6 +687,141 @@ function McpServerDetail({
         )}
       </section>
     </div>
+  );
+}
+
+const TELEMETRY_WINDOWS: Array<{ value: McpTelemetryWindow; label: string; long: string }> = [
+  { value: "24h", label: "24 h", long: "24 hours" },
+  { value: "7d", label: "7 d", long: "7 days" },
+  { value: "30d", label: "30 d", long: "30 days" }
+];
+
+function formatCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 10_000) return `${Math.round(value / 1000)}k`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return String(value);
+}
+
+function formatCost(value: number | null): string {
+  if (value === null) return "—";
+  if (value === 0) return "$0";
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
+function formatRate(rate: number): string {
+  const pct = rate * 100;
+  return pct > 0 && pct < 1 ? "<1%" : `${Math.round(pct)}%`;
+}
+
+function ErrorsCell({ stats }: { stats: McpToolTelemetry }) {
+  if (stats.errors === 0) return <>0</>;
+  return (
+    <span className="mcp-status mcp-status-down" title={`${stats.errors} of ${stats.calls} calls failed`}>
+      <span className="mcp-status-dot" aria-hidden="true" />
+      {stats.errors} · {formatRate(stats.errorRate)}
+    </span>
+  );
+}
+
+/**
+ * Snapshot tools with their call telemetry, busiest first. Tools that were
+ * called in the window but are no longer in the snapshot are listed too.
+ */
+function ToolsSection({
+  tools,
+  telemetry,
+  telemetryError,
+  selectedWindow,
+  onWindowChange
+}: {
+  tools: McpSnapshotTool[];
+  telemetry: McpTelemetryResponse | null;
+  telemetryError: string | null;
+  selectedWindow: McpTelemetryWindow;
+  onWindowChange: (value: McpTelemetryWindow) => void;
+}) {
+  const rows = useMemo(() => {
+    const stats = new Map((telemetry?.tools ?? []).map((entry) => [entry.toolName, entry]));
+    const listed = tools.map((tool) => ({ name: tool.name, tool, stats: stats.get(tool.name) }));
+    const known = new Set(tools.map((tool) => tool.name));
+    const removed = (telemetry?.tools ?? [])
+      .filter((entry) => !known.has(entry.toolName))
+      .map((entry) => ({ name: entry.toolName, tool: undefined, stats: entry }));
+    return [...listed, ...removed].sort((a, b) => (b.stats?.calls ?? 0) - (a.stats?.calls ?? 0));
+  }, [tools, telemetry]);
+  const windowLabel = TELEMETRY_WINDOWS.find((entry) => entry.value === selectedWindow)?.long ?? selectedWindow;
+  const totals = telemetry?.totals;
+
+  return (
+    <section className="kb-section">
+      <div className="mcp-section-head">
+        <h4>Tools ({tools.length})</h4>
+        <select
+          className="finops-select"
+          aria-label="Telemetry window"
+          value={selectedWindow}
+          onChange={(event) => onWindowChange(event.target.value as McpTelemetryWindow)}
+        >
+          {TELEMETRY_WINDOWS.map((entry) => (
+            <option key={entry.value} value={entry.value}>
+              Last {entry.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {telemetryError ? (
+        <p className="kb-subtle">Call telemetry unavailable: {telemetryError}</p>
+      ) : totals ? (
+        <p className="kb-subtle">
+          {totals.calls === 0
+            ? `No calls in the last ${windowLabel}.`
+            : `${totals.calls} ${totals.calls === 1 ? "call" : "calls"} in the last ${windowLabel} · ${totals.errors} failed · ${formatCost(totals.costUsd)} estimated`}
+        </p>
+      ) : null}
+      {rows.length === 0 ? (
+        <p className="kb-subtle">No tool snapshot yet. Run a probe to list the server's tools.</p>
+      ) : (
+        <table className="kb-table mcp-tool-table">
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>Inputs</th>
+              <th className="num">Calls</th>
+              <th className="num">p50</th>
+              <th className="num">p95</th>
+              <th className="num">Errors</th>
+              <th className="num">Tokens</th>
+              <th className="num">Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ name, tool, stats }) => {
+              const called = stats && stats.calls > 0 ? stats : undefined;
+              return (
+                <tr key={name}>
+                  <td>
+                    <code>{name}</code>
+                    {tool?.description ? <div className="kb-subtle">{tool.description}</div> : null}
+                  </td>
+                  <td>
+                    {tool ? <ToolInputs schema={tool.inputSchema} /> : <span className="kb-subtle">not in current snapshot</span>}
+                  </td>
+                  <td className="num">{called ? formatCount(called.calls) : "—"}</td>
+                  <td className="num">{called ? formatMs(called.p50Ms) : "—"}</td>
+                  <td className="num">{called ? formatMs(called.p95Ms) : "—"}</td>
+                  <td className="num">{called ? <ErrorsCell stats={called} /> : "—"}</td>
+                  <td className="num" title={called ? `${called.inputTokens} in · ${called.outputTokens} out` : undefined}>
+                    {called ? formatCount(called.inputTokens + called.outputTokens) : "—"}
+                  </td>
+                  <td className="num">{called ? formatCost(called.costUsd) : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 

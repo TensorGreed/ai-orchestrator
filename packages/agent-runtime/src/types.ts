@@ -23,6 +23,8 @@ export interface InternalToolResult {
   toolName: string;
   output: unknown;
   error?: string;
+  startedAt?: string;
+  durationMs?: number;
 }
 
 export interface AgentSessionMemoryStore {
@@ -72,6 +74,6 @@ export function createToolErrorResult(call: ToolCall, error: unknown): InternalT
     toolCallId: call.id,
     toolName: call.name,
     output: null,
-    error: error instanceof Error ? error.message : "Tool call failed"
+    error: error instanceof Error ? error.message : typeof error === "string" && error ? error : "Tool call failed"
   };
 }

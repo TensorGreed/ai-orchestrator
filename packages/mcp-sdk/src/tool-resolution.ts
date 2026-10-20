@@ -52,6 +52,7 @@ export async function resolveMCPTools(
         exposedName,
         originalName: tool.name,
         serverId: serverConfig.serverId,
+        ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
         definition: {
           name: exposedName,
           description: `[${serverConfig.serverId}] ${tool.description}`,

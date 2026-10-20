@@ -429,7 +429,7 @@ as a local file or an endpoint on the user's own instance.
 - [x] Registry page listing every configured MCP server (transport, endpoint, auth secretRef, owner, last probe) backed by a `mcp_servers` table; MCP Tool nodes and agent `mcpServers` entries reference it with `registryServerId`
 - [x] Health probe service: periodic `initialize` + `tools/list`, status history, latency percentiles (leader-only, `MCP_PROBE_INTERVAL_MS`, per-server override)
 - [x] Tool schema snapshots per probe; diff view when a server adds, removes, or changes a tool's input schema; optional "block runs on breaking change" setting
-- [ ] Per-tool telemetry rollup from execution traces: call count, p50/p95 latency, error rate, token cost of the agent turns that invoked it
+- [x] Per-tool telemetry rollup from execution traces: call count, p50/p95 latency, error rate, token cost of the agent turns that invoked it (`mcp_tool_calls`, migration v21; `GET /api/mcp/servers/:id/telemetry`, `GET /api/mcp/telemetry`; columns on the server page's Tools table)
 
 ### 10.2 Tool policy
 - [ ] Allow/deny policies per role and per project: which servers and which tools an agent may call; enforced in `agent-runtime` tool discovery (filtered out, not just hidden)

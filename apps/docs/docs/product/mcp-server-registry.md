@@ -68,6 +68,38 @@ The diff compares each tool's input schema with the previous snapshot, including
 
 A breaking snapshot becomes the server's **pending breaking change** and the page shows its diff. If **Block runs on breaking change** is on, every run that uses the server is refused until an admin presses **Accept change**. Acceptance is recorded on the snapshot and in the audit log. The block is off by default.
 
+## Tool telemetry
+
+Every MCP tool call made by a run is recorded when the run finishes, so the server page can show how each tool is actually used. The **Tools** table on a server's page adds these columns for the window picked above it (last 24 hours, 7 days or 30 days; 7 days by default), busiest tool first:
+
+| Column | Meaning |
+|---|---|
+| Calls | Tool calls that started in the window. |
+| p50, p95 | Nearest-rank latency percentiles of the successful calls, measured around the tool invocation. |
+| Errors | Failed calls and their share of all calls. |
+| Tokens | Input plus output tokens attributed to the calls (hover for the split). |
+| Cost | Estimated cost of those tokens. |
+
+A tool with no calls in the window shows "—". A tool that was called but is no longer in the current snapshot is still listed, marked "not in current snapshot".
+
+### What is counted
+
+- **Agent tool calls.** Each call an Agent or Supervisor node makes to an MCP tool, including calls made by worker agents it delegates to. Calls the runtime refuses before reaching the server (for example a missing required argument, or a tool disabled after repeated failures) count as failed calls of that tool. Calls to built-in tools such as the session cache are not MCP calls and are not counted.
+- **MCP Tool nodes.** A direct MCP Tool node that ran, timed by the node. A node that failed counts as a failed call, including a node refused because its server has an unaccepted breaking change.
+- MCP Tool nodes attached to an agent's `tool` port are not calls on their own; the agent's calls through them are.
+
+Calls are attributed to a registry entry when the node or `mcpServers` entry used `registryServerId`. Calls to servers configured inline on a node have no registry entry; they are listed by adapter and tool at `GET /api/mcp/telemetry`, so they are not invisible.
+
+### How tokens and cost are attributed
+
+An agent turn is one model call. When a turn asks for several tool calls, its input and output tokens are split evenly across those calls (whole tokens, the remainder going to the first calls), including any non-MCP calls in the same turn. The tokens of the turn that reads the tool results and answers are not attributed to any tool.
+
+Cost uses the same pricing table as usage and budgets (`LLM_PRICING_OVERRIDES_JSON` overrides it). When the model has no price, for example a local model, the call keeps its tokens but has no cost, and the column shows "—" if no call in the window could be priced. Direct MCP Tool nodes involve no model turn, so they carry no tokens or cost.
+
+### Retention
+
+Rows live in the `mcp_tool_calls` table and are pruned with execution history: calls older than `EXECUTION_HISTORY_RETENTION_DAYS` are deleted by the same job. Deleting a registry entry deletes its calls. Re-saving the same execution, for example after an approval resumes it, replaces its rows instead of adding to them.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -82,7 +114,7 @@ Servers can override the interval (at least 10 seconds) or opt out of scheduled 
 
 | Action | Role |
 |---|---|
-| List servers, view detail, probe now | builder and above |
+| List servers, view detail and telemetry, probe now | builder and above |
 | Register, edit, delete, accept a breaking change | admin |
 
 Deleting a server that nodes still use is refused with the list of those nodes, unless the delete is forced. Register, update, delete and accept are written to the audit log as `mcp_server.*` events.
@@ -98,3 +130,5 @@ Deleting a server that nodes still use is refused with the list of those nodes, 
 - `GET /api/mcp/servers/:id/tools`: tools from the current snapshot
 - `GET /api/mcp/servers/:id/snapshots/:snapshotId`: one snapshot with its tools and diff
 - `POST /api/mcp/servers/:id/accept-change`: accept the pending breaking change (admin)
+- `GET /api/mcp/servers/:id/telemetry?window=24h|7d|30d`: per-tool calls, errors, latency, tokens and cost, plus server totals
+- `GET /api/mcp/telemetry?window=24h|7d|30d`: the same for servers configured inline on nodes, by adapter and tool

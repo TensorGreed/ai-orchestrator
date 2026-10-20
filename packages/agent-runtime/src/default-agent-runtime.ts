@@ -1,6 +1,7 @@
 import type {
   AgentRunRequest,
   AgentRunState,
+  AgentRunStep,
   AgentToolOutputLimits,
   ChatMessage,
   ToolDefinition
@@ -913,6 +914,22 @@ ${effectiveSystemPrompt}`;
       return Object.keys(out).length ? out : undefined;
     };
 
+    // Phase 10.1 — per-iteration usage so tool telemetry can attribute the
+    // tokens of the turn that requested a tool call to that call.
+    const turnTelemetry = (response: { usage?: AgentRunStep["usage"]; latencyMs?: number }) => {
+      const out: Pick<AgentRunStep, "usage" | "latencyMs"> = {};
+      if (response.usage) {
+        const usage: NonNullable<AgentRunStep["usage"]> = {};
+        if (typeof response.usage.inputTokens === "number") usage.inputTokens = response.usage.inputTokens;
+        if (typeof response.usage.outputTokens === "number") usage.outputTokens = response.usage.outputTokens;
+        if (typeof response.usage.totalTokens === "number") usage.totalTokens = response.usage.totalTokens;
+        if (typeof response.usage.cachedInputTokens === "number") usage.cachedInputTokens = response.usage.cachedInputTokens;
+        if (Object.keys(usage).length) out.usage = usage;
+      }
+      if (typeof response.latencyMs === "number") out.latencyMs = response.latencyMs;
+      return out;
+    };
+
     try {
       for (let iteration = 1; iteration <= request.maxIterations; iteration += 1) {
         // --- LLM call with per-iteration retry ---
@@ -1010,7 +1027,8 @@ ${effectiveSystemPrompt}`;
               iteration,
               modelOutput: "",
               requestedTools: [],
-              toolResults: []
+              toolResults: [],
+              ...turnTelemetry(modelResponse)
             });
             continue;
           }
@@ -1031,6 +1049,9 @@ ${effectiveSystemPrompt}`;
           let failedToolCount = 0;
 
           for (const call of requestedTools) {
+            const callStartedMs = Date.now();
+            const callStartedAt = new Date(callStartedMs).toISOString();
+            const resultsBeforeCall = toolResults.length;
             try {
               // --- Check if tool exists before invoking ---
               const toolDefinition = toolDefinitionByName.get(call.name);
@@ -1128,7 +1149,8 @@ ${effectiveSystemPrompt}`;
                   iteration,
                   modelOutput: modelResponse.content,
                   requestedTools,
-                  toolResults: []
+                  toolResults: [],
+                  ...turnTelemetry(modelResponse)
                 });
                 const clarifyResult: AgentRunState = {
                   finalAnswer: question || "Awaiting clarification.",
@@ -1229,6 +1251,12 @@ ${effectiveSystemPrompt}`;
                 toolCallId: call.id,
                 name: call.name
               });
+            } finally {
+              // Phase 10.1 — stamp timing on whatever result this call produced.
+              const callDurationMs = Math.max(0, Date.now() - callStartedMs);
+              for (let index = resultsBeforeCall; index < toolResults.length; index += 1) {
+                toolResults[index] = { ...toolResults[index], startedAt: callStartedAt, durationMs: callDurationMs };
+              }
             }
           }
 
@@ -1247,7 +1275,8 @@ ${effectiveSystemPrompt}`;
             iteration,
             modelOutput: modelResponse.content,
             requestedTools,
-            toolResults
+            toolResults,
+            ...turnTelemetry(modelResponse)
           });
 
           continue;
@@ -1258,7 +1287,8 @@ ${effectiveSystemPrompt}`;
           iteration,
           modelOutput: modelResponse.content,
           requestedTools: [],
-          toolResults: []
+          toolResults: [],
+          ...turnTelemetry(modelResponse)
         });
 
         const result: AgentRunState = {
