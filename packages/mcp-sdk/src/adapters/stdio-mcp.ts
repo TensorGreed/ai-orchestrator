@@ -23,6 +23,8 @@ interface StdioSession {
   rpcCounter: number;
   stderrBuffer: string[];
   closed: boolean;
+  /** True when this side ended the session; such a session is not retried. */
+  closedByClient: boolean;
   closeError?: Error;
   createdAt: number;
 }
@@ -30,6 +32,7 @@ interface StdioSession {
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const STDERR_LOG_BUFFER_LINES = 100;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const CLOSE_GRACE_MS = 2_000;
 
 interface ResolvedSpawn {
   command: string;
@@ -302,6 +305,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       rpcCounter: 0,
       stderrBuffer: [],
       closed: false,
+      closedByClient: false,
       createdAt: Date.now()
     };
 
@@ -415,25 +419,63 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     this.handleClose(session);
   }
 
-  closeSessions(context: MCPExecutionContext): void {
+  /**
+   * Terminate every child process cached in this context and wait for each to
+   * exit. A child that ignores SIGTERM is sent SIGKILL after a grace period, so
+   * the caller can rely on the processes being gone once this resolves.
+   */
+  async closeSessions(context: MCPExecutionContext): Promise<void> {
     const cache = this.getCache(context);
+    const exits: Array<Promise<void>> = [];
     for (const [key, value] of cache) {
       if (value && typeof value === "object" && "proc" in value) {
+        exits.push(this.terminateProcess(value.proc));
         this.killSession(value);
         cache.delete(key);
       }
     }
+    await Promise.all(exits);
+  }
+
+  private terminateProcess(proc: ChildProcess): Promise<void> {
+    // No pid means the spawn itself failed, so there is nothing to wait for.
+    if (proc.pid === undefined || proc.exitCode !== null || proc.signalCode !== null) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      const forceTimer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }, CLOSE_GRACE_MS);
+      const giveUpTimer = setTimeout(done, CLOSE_GRACE_MS * 2);
+      function done() {
+        clearTimeout(forceTimer);
+        clearTimeout(giveUpTimer);
+        resolve();
+      }
+      proc.once("exit", done);
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        done();
+      }
+    });
   }
 
   private killSession(session: StdioSession): void {
-    if (!session.closed) {
-      try {
-        session.proc.kill();
-      } catch {
-        // ignore
-      }
+    if (session.closed) {
+      return;
     }
-    session.closed = true;
+    try {
+      session.proc.kill();
+    } catch {
+      // ignore
+    }
+    session.closedByClient = true;
+    // Fail any in-flight requests now instead of leaving them to their timeout.
+    session.closeError ??= new Error("MCP stdio session was closed.");
+    this.handleClose(session);
   }
 
   private sendRpc(
@@ -539,7 +581,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       try {
         response = await this.sendRpc(session, "tools/call", { name: toolName, arguments: args }, timeoutMs);
       } catch (firstError) {
-        if (!session.closed) {
+        if (!session.closed || session.closedByClient) {
           throw firstError;
         }
         session = await this.getOrCreateSession(config, context, { forceNew: true });

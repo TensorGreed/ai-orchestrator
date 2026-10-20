@@ -49,6 +49,8 @@ process.stdin.on('data', (chunk) => {
           id: req.id,
           result: { structuredContent: { sum: (Number(args.a) || 0) + (Number(args.b) || 0) } }
         }) + '\\n');
+      } else if (name === 'hang') {
+        // Never answers, so the request stays in flight.
       } else if (name === 'envcheck') {
         process.stdout.write(JSON.stringify({
           jsonrpc: '2.0',
@@ -182,6 +184,37 @@ describe("StdioMCPServerAdapter", () => {
 
     expect(ctx.runtimeState.size).toBe(0);
     expect(session.proc.killed).toBe(true);
+  });
+
+  it("closeSessions resolves only once the child process has exited", async () => {
+    const adapter = new StdioMCPServerAdapter();
+    const ctx = makeContext();
+    await adapter.discoverTools(makeConfig(), ctx);
+    const session = [...ctx.runtimeState.values()][0] as { proc: { pid: number } };
+    const pid = session.proc.pid;
+    expect(() => process.kill(pid, 0)).not.toThrow();
+
+    await adapter.closeSessions(ctx);
+
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("closeSessions fails in-flight requests instead of leaving them to time out", async () => {
+    const adapter = new StdioMCPServerAdapter();
+    const ctx = makeContext();
+    await adapter.discoverTools(makeConfig({ timeoutMs: 60_000 }), ctx);
+    const started = Date.now();
+    const pending = adapter.invokeTool("hang", {}, makeConfig({ timeoutMs: 60_000 }), ctx);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    await adapter.closeSessions(ctx);
+    const result = await pending;
+
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/closed/i);
+    // A session closed on purpose is not respawned by the retry path.
+    expect(ctx.runtimeState.size).toBe(0);
   });
 
   it("rejects with a helpful error when the command cannot be spawned", async () => {
