@@ -110,7 +110,7 @@
 - [x] Built-in methods: JS-native string/number/date/array/object access via sandboxed `with` scope
 - [x] `$jmespath()` support for complex JSON querying (dot paths, `[index]`, `[*]`, `[?field=='x']`)
 - [x] `$if()`, `$ifEmpty()` inline conditionals
-- [ ] Expression editor with autocomplete and syntax highlighting in UI (deferred to Phase 4 — UI work)
+- [ ] Expression editor with autocomplete and syntax highlighting in UI (deferred to Phase 4 — UI work) (partial: `NodeConfigModal.tsx` `ExpressionField` suggestions + `POST /api/expressions/preview`, missing: syntax highlighting)
 
 ### 2.3 Python Support in Code Node
 **n8n equivalent:** Code node with JS + Python
@@ -175,12 +175,12 @@
 
 ### 3.4 Connector SDK V2 — Community Node System
 **n8n equivalent:** npm-based community nodes (5800+)
-- [ ] Standardized node package format (`l2m-nodes-*` npm packages)
-- [ ] Node package manifest (name, version, description, node types, credentials)
-- [ ] Install community nodes from UI (Settings > Community Nodes)
+- [x] Standardized node package format (`l2m-nodes-*` npm packages) — `apps/api/src/services/community-package-loader.ts` `l2m-nodes-*` loader
+- [ ] Node package manifest (name, version, description, node types, credentials) (partial: package.json `l2m` field with kind + apiVersion validated, missing: version/description/node types/credentials manifest fields)
+- [x] Install community nodes from UI (Settings > Community Nodes) — `apps/web/src/components/SettingsPage.tsx` `CommunityNodesTab`
 - [ ] Node discovery registry / marketplace
-- [ ] Node sandboxing for untrusted packages
-- [ ] Hot-reload on install (no restart required)
+- [ ] Node sandboxing for untrusted packages (partial: `--ignore-scripts` install + `COMMUNITY_NODES_ALLOWLIST`, missing: runtime isolation of package code)
+- [x] Hot-reload on install (no restart required) — `apps/api/src/app.ts` `POST /api/community-nodes/reload`
 
 ### 3.5 Trigger System Expansion
 **n8n equivalent:** 15 core triggers + 90 app-specific
@@ -299,29 +299,29 @@
 
 ### 6.1 Additional AI Agent Types
 **n8n equivalent:** Conversational, OpenAI Functions, Plan-and-Execute, ReAct, SQL, Tools agents
-- [ ] Plan-and-Execute agent type
-- [ ] ReAct agent type
-- [ ] SQL Agent (natural language to SQL)
-- [ ] Agent type selection in agent_orchestrator config
+- [x] Plan-and-Execute agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `plan-and-execute`
+- [x] ReAct agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `react`
+- [x] SQL Agent (natural language to SQL) — `packages/agent-runtime/src/default-agent-runtime.ts` `sql` agentType
+- [x] Agent type selection in agent_orchestrator config — `apps/web/src/components/NodeConfigModal.tsx` `agentType`
 
 ### 6.2 LangChain-Style Chains
 **n8n equivalent:** Basic LLM Chain, QA Chain, Summarization Chain, extractors, classifiers
-- [ ] `basic_llm_chain` — simple prompt → response
-- [ ] `qa_chain` — RAG question answering (enhance existing rag_retrieve)
-- [ ] `summarization_chain` — document summarization
-- [ ] `information_extractor` — structured extraction from text
-- [ ] `text_classifier` — classify text into categories
-- [ ] `sentiment_analysis` — sentiment scoring
+- [x] `basic_llm_chain` — simple prompt → response — `packages/workflow-engine/src/executor.ts` `basic_llm_chain`
+- [x] `qa_chain` — RAG question answering (enhance existing rag_retrieve) — `packages/workflow-engine/src/executor.ts` `qa_chain`
+- [x] `summarization_chain` — document summarization — `packages/workflow-engine/src/executor.ts` `summarization_chain`
+- [x] `information_extractor` — structured extraction from text — `packages/workflow-engine/src/executor.ts` `information_extractor`
+- [x] `text_classifier` — classify text into categories — `packages/workflow-engine/src/executor.ts` `text_classifier`
+- [x] `sentiment_analysis` — sentiment scoring — `packages/workflow-engine/src/executor.ts` `sentiment_analysis`
 
 ### 6.3 Additional AI Infrastructure
-- [ ] Additional embedding adapters: AWS Bedrock, Cohere, Google Vertex, Mistral, HuggingFace
-- [ ] Additional vector stores: Chroma, Weaviate, Supabase, MongoDB Atlas, Milvus, Redis, Zep
+- [ ] Additional embedding adapters: AWS Bedrock, Cohere, Google Vertex, Mistral, HuggingFace (partial: Cohere, Mistral, Google Vertex, HuggingFace in `packages/workflow-engine/src/rag-adapters.ts`, missing: AWS Bedrock)
+- [ ] Additional vector stores: Chroma, Weaviate, Supabase, MongoDB Atlas, Milvus, Redis, Zep (partial: Chroma, Weaviate, Redis in `rag-adapters.ts`, missing: Supabase, MongoDB Atlas, Milvus, Zep)
 - [ ] Additional memory backends: MongoDB, PostgreSQL, Redis, Zep
-- [ ] Text splitters: Character, Recursive Character, Token
+- [x] Text splitters: Character, Recursive Character, Token — `packages/workflow-engine/src/chunker.ts` character/recursive/token strategies
 - [ ] Retrievers: Contextual Compression, MultiQuery, Workflow Retriever
-- [ ] AI evaluation framework (test/evaluate agent performance)
-- [ ] AI Transform node (natural language to code)
-- [ ] Guardrails node enhancement (validate AI outputs against schemas)
+- [x] AI evaluation framework (test/evaluate agent performance) — `apps/api/src/app.ts` `POST /api/eval/runs`
+- [x] AI Transform node (natural language to code) — `packages/workflow-engine/src/executor.ts` `ai_transform`
+- [x] Guardrails node enhancement (validate AI outputs against schemas) — `packages/workflow-engine/src/executor.ts` `matches_schema` check
 
 ### 6.4 AI Tools Expansion
 - [ ] Wikipedia tool
@@ -329,7 +329,7 @@
 - [ ] Wolfram Alpha tool
 - [ ] Think tool (agent reasoning step)
 - [ ] Workflow-as-tool (call another workflow as an agent tool)
-- [ ] Agent-as-tool (call another agent as a tool)
+- [x] Agent-as-tool (call another agent as a tool) — `supervisor_node` in `packages/shared/src/definitions.ts` (workers as synthetic tools)
 
 ---
 
@@ -344,39 +344,39 @@
 
 ### 7.2 Performance
 - [ ] Parallel node execution within workflows (independent branches)
-- [ ] Execution data pruning (configurable retention)
-- [ ] Large workflow optimization (1000+ nodes)
-- [ ] Binary data handling (file passthrough between nodes)
+- [x] Execution data pruning (configurable retention) — `apps/api/src/app.ts` `pruneExecutionHistory` (`EXECUTION_HISTORY_RETENTION_DAYS`)
+- [ ] Large workflow optimization (1000+ nodes) (partial: `computeDepthLevels` + DescendantCache in `packages/workflow-engine/src/validation.ts` with `performance.test.ts` (500-node sort), missing: 1000+ node executor path)
+- [ ] Binary data handling (file passthrough between nodes) (partial: `packages/workflow-engine/src/binary-store.ts` `FileSystemBinaryStore` + file nodes, missing: executor/API wiring of `binaryDataStore`)
 - [ ] Streaming execution for large datasets (item-level processing)
 
 ### 7.3 API Completeness
 **n8n equivalent:** Full OpenAPI 3.0 REST API
-- [ ] OpenAPI 3.0 spec generation
-- [ ] API key authentication
-- [ ] Workflow activate/deactivate endpoints
-- [ ] Workflow transfer between projects
-- [ ] Execution stop/cancel endpoint
-- [ ] Credential schema endpoint
-- [ ] User invite/management endpoints
-- [ ] Project CRUD endpoints
-- [ ] Tag CRUD endpoints
-- [ ] Variable CRUD endpoints
-- [ ] Source control push/pull endpoints
-- [ ] Audit report endpoint
-- [ ] Pagination on all list endpoints
+- [x] OpenAPI 3.0 spec generation — `apps/api/src/app.ts` `GET /api/openapi.json`
+- [x] API key authentication — `apps/api/src/services/api-key-service.ts`
+- [x] Workflow activate/deactivate endpoints — `apps/api/src/app.ts` `POST /api/workflows/:id/activate`
+- [x] Workflow transfer between projects — `apps/api/src/app.ts` `POST /api/workflows/:id/transfer`
+- [x] Execution stop/cancel endpoint — `apps/api/src/app.ts` `POST /api/executions/:id/cancel`
+- [x] Credential schema endpoint — `apps/api/src/app.ts` `GET /api/secrets/schema`
+- [x] User invite/management endpoints — `apps/api/src/app.ts` `PUT /api/users/:id`
+- [x] Project CRUD endpoints — `apps/api/src/app.ts` `POST /api/projects`
+- [x] Tag CRUD endpoints — `apps/api/src/app.ts` `POST /api/tags`
+- [x] Variable CRUD endpoints — `apps/api/src/app.ts` `POST /api/variables`
+- [x] Source control push/pull endpoints — `apps/api/src/app.ts` `POST /api/git/push`
+- [x] Audit report endpoint — `apps/api/src/app.ts` `GET /api/audit/export`
+- [ ] Pagination on all list endpoints (partial: `page`/`pageSize` on `GET /api/executions`, missing: other list endpoints)
 
 ### 7.4 Workflow Templates & Sharing
-- [ ] Template library with categories
-- [ ] One-click import from template gallery
-- [ ] Workflow export/share via URL
-- [ ] Community template submissions
-- [ ] Template search and filtering
+- [x] Template library with categories — `apps/api/src/app.ts` `GET /api/templates`
+- [x] One-click import from template gallery — `apps/api/src/app.ts` `POST /api/templates/:id/use`
+- [x] Workflow export/share via URL — `apps/api/src/app.ts` `GET /api/workflows/:id/share-link`
+- [ ] Community template submissions (partial: `POST /api/templates` for admin/builder, missing: moderation/public submission flow)
+- [x] Template search and filtering — `apps/web/src/components/TemplateGallery.tsx`
 
 ### 7.5 Notifications
-- [ ] Error notification framework (via error workflows)
-- [ ] Built-in email notification on workflow failure
-- [ ] Slack/Teams webhook notification presets
-- [ ] Notification preferences in Settings UI
+- [x] Error notification framework (via error workflows) — `apps/api/src/services/notification-service.ts`
+- [x] Built-in email notification on workflow failure — `apps/api/src/services/notification-service.ts` SMTP channel
+- [x] Slack/Teams webhook notification presets — `apps/api/src/services/notification-service.ts` slack/teams channels
+- [x] Notification preferences in Settings UI — `apps/web/src/components/SettingsPage.tsx` `NotificationsTab`
 
 ---
 
