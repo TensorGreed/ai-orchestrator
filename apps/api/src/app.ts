@@ -7,7 +7,7 @@ import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import fastifyRawBody from "fastify-raw-body";
-import Fastify, { type FastifyReply } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
@@ -83,6 +83,12 @@ import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
 import { AuditExportService } from "./services/audit-export-service";
 import { McpProbeService, serverConfigFromRecord } from "./services/mcp-probe-service";
+import {
+  extractMcpToolCalls,
+  MCP_TELEMETRY_WINDOWS,
+  parseMcpTelemetryWindow,
+  rollupMcpToolCalls
+} from "./services/mcp-tool-telemetry";
 import { VariablesService } from "./services/variables-service";
 import { WorkflowVersionService } from "./services/workflow-version-service";
 import { AuditService, type AuditActor, type AuditCategory, type AuditEventInput } from "./services/audit-service";
@@ -1604,6 +1610,26 @@ export function createApp(
     };
   };
 
+  const recordMcpToolCalls = (executionId: string, workflow: Workflow, nodeResults: unknown) => {
+    try {
+      const calls = extractMcpToolCalls({
+        executionId,
+        workflow,
+        nodeResults,
+        priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) =>
+          usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+        registryAdapterId: (registryServerId) => store.getMcpServer(registryServerId)?.adapterId,
+        redact: (value) => String(secretService.redact(value))
+      });
+      store.replaceMcpToolCallsForExecution(executionId, calls);
+    } catch (err) {
+      app.log.warn(
+        { error: secretService.redact(err instanceof Error ? err.message : String(err)), executionId },
+        "Failed to record MCP tool call telemetry"
+      );
+    }
+  };
+
   const persistExecutionHistory = (input: {
     executionId: string;
     workflow: Workflow;
@@ -1735,6 +1761,9 @@ export function createApp(
         "Failed to record usage event"
       );
     }
+
+    // Phase 10.1 — one mcp_tool_calls row per MCP tool call in this run.
+    recordMcpToolCalls(input.executionId, input.workflow, input.result.nodeResults);
 
     app.log.info(
       {
@@ -8740,6 +8769,43 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return { snapshot };
     }
   );
+
+  // Phase 10.1 — per-tool telemetry rolled up from mcp_tool_calls.
+  const resolveTelemetryWindow = (request: FastifyRequest, reply: FastifyReply) => {
+    const window = parseMcpTelemetryWindow((request.query as { window?: unknown } | undefined)?.window);
+    if (!window) {
+      reply.code(400);
+      return null;
+    }
+    const since = new Date(Date.now() - MCP_TELEMETRY_WINDOWS[window]).toISOString();
+    return { window, since };
+  };
+  const telemetryWindowError = { error: `window must be one of ${Object.keys(MCP_TELEMETRY_WINDOWS).join(", ")}` };
+
+  app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/telemetry", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const range = resolveTelemetryWindow(request, reply);
+    if (!range) return telemetryWindowError;
+    const server = store.getMcpServer(request.params.id);
+    if (!server) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const rollup = rollupMcpToolCalls(store.listMcpToolCalls({ registryServerId: server.id, since: range.since }));
+    return { serverId: server.id, window: range.window, since: range.since, ...rollup };
+  });
+
+  app.get("/api/mcp/telemetry", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const range = resolveTelemetryWindow(request, reply);
+    if (!range) return telemetryWindowError;
+    const rollup = rollupMcpToolCalls(store.listMcpToolCalls({ registryServerId: null, since: range.since }), {
+      byAdapter: true
+    });
+    return { scope: "inline", window: range.window, since: range.since, ...rollup };
+  });
 
   const validateMcpServerInput = (
     input: { adapterId?: string; secretRef?: { secretId: string } | null },

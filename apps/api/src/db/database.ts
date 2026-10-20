@@ -449,6 +449,66 @@ export interface McpToolSnapshotRecord {
   createdAt: string;
 }
 
+/** Phase 10.1 — one MCP tool call extracted from an execution's node results. */
+export interface McpToolCallRecord {
+  id: string;
+  executionId: string;
+  workflowId: string;
+  nodeId: string;
+  /** null for servers configured inline on a node rather than in the registry. */
+  registryServerId: string | null;
+  adapterId: string;
+  toolName: string;
+  startedAt: string;
+  durationMs: number | null;
+  ok: boolean;
+  error: string | null;
+  /** Share of the requesting agent turn's tokens; null when not attributable. */
+  turnInputTokens: number | null;
+  turnOutputTokens: number | null;
+  /** null when no model price is known (or no model turn was involved). */
+  estimatedCostUsd: number | null;
+  createdAt: string;
+}
+
+interface McpToolCallRow {
+  id: string;
+  execution_id: string;
+  workflow_id: string;
+  node_id: string;
+  registry_server_id: string | null;
+  adapter_id: string;
+  tool_name: string;
+  started_at: string;
+  duration_ms: number | null;
+  ok: number;
+  error: string | null;
+  turn_input_tokens: number | null;
+  turn_output_tokens: number | null;
+  estimated_cost_usd: number | null;
+  created_at: string;
+}
+
+function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
+  return {
+    id: toString(row.id),
+    executionId: toString(row.execution_id),
+    workflowId: toString(row.workflow_id),
+    nodeId: toString(row.node_id),
+    registryServerId: row.registry_server_id ? toString(row.registry_server_id) : null,
+    adapterId: toString(row.adapter_id),
+    toolName: toString(row.tool_name),
+    startedAt: toString(row.started_at),
+    durationMs: row.duration_ms === null ? null : toNumber(row.duration_ms),
+    ok: toNumber(row.ok) === 1,
+    error: row.error ? toString(row.error) : null,
+    turnInputTokens: row.turn_input_tokens === null ? null : toNumber(row.turn_input_tokens),
+    turnOutputTokens: row.turn_output_tokens === null ? null : toNumber(row.turn_output_tokens),
+    estimatedCostUsd: row.estimated_cost_usd === null ? null : Number(row.estimated_cost_usd),
+    createdAt: toString(row.created_at)
+  };
+}
+
 interface McpServerRow {
   id: string;
   name: string;
@@ -1476,6 +1536,9 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_mcp_tool_snapshots_server ON mcp_tool_snapshots(server_id, created_at DESC);
     `);
 
+    // Phase 10.1 — per-tool-call telemetry extracted from execution traces.
+    this.ensureMcpToolCallsTable();
+
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
     this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
     this.ensureColumn("workflows", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
@@ -1494,6 +1557,31 @@ export class SqliteStore {
     this.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_revoked_expires ON sessions(revoked_at, expires_at)`);
 
     this.persist();
+  }
+
+  private ensureMcpToolCallsTable(): void {
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_tool_calls (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        registry_server_id TEXT,
+        adapter_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        duration_ms INTEGER,
+        ok INTEGER NOT NULL,
+        error TEXT,
+        turn_input_tokens INTEGER,
+        turn_output_tokens INTEGER,
+        estimated_cost_usd REAL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_registry ON mcp_tool_calls(registry_server_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_adapter_tool ON mcp_tool_calls(adapter_id, tool_name, started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_execution ON mcp_tool_calls(execution_id);
+    `);
   }
 
   private columnExists(table: string, column: string): boolean {
@@ -2764,6 +2852,8 @@ export class SqliteStore {
       [input.before]
     );
     this.exec(`DELETE FROM execution_history WHERE started_at < ?`, [input.before]);
+    // Phase 10.1 — tool-call telemetry follows the execution-history retention.
+    this.exec(`DELETE FROM mcp_tool_calls WHERE started_at < ?`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -7077,6 +7167,7 @@ export class SqliteStore {
     this.db.transaction(() => {
       this.exec(`DELETE FROM mcp_server_probes WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_snapshots WHERE server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_servers WHERE id = ?`, [id]);
     })();
     return true;
@@ -7217,6 +7308,61 @@ export class SqliteStore {
       );
     })();
     return this.getMcpToolSnapshot(snapshotId);
+  }
+
+  /**
+   * Replace the tool-call rows of one execution. Idempotent, so persisting the
+   * same execution twice (for example after an approval resume) never
+   * double-counts its calls.
+   */
+  replaceMcpToolCallsForExecution(executionId: string, calls: Array<Omit<McpToolCallRecord, "createdAt">>): void {
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.exec(`DELETE FROM mcp_tool_calls WHERE execution_id = ?`, [executionId]);
+      for (const call of calls) {
+        this.exec(
+          `INSERT INTO mcp_tool_calls (
+             id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
+             started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
+             estimated_cost_usd, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            call.id,
+            executionId,
+            call.workflowId,
+            call.nodeId,
+            call.registryServerId,
+            call.adapterId,
+            call.toolName,
+            call.startedAt,
+            call.durationMs,
+            call.ok ? 1 : 0,
+            call.error,
+            call.turnInputTokens,
+            call.turnOutputTokens,
+            call.estimatedCostUsd,
+            now
+          ]
+        );
+      }
+    })();
+  }
+
+  /**
+   * Tool calls started at or after `since`. `registryServerId: null` selects
+   * calls to inline-configured servers; a string selects one registry entry.
+   */
+  listMcpToolCalls(filter: { registryServerId: string | null; since: string }): McpToolCallRecord[] {
+    const rows = filter.registryServerId === null
+      ? this.queryAll<McpToolCallRow>(
+          `SELECT * FROM mcp_tool_calls WHERE registry_server_id IS NULL AND started_at >= ? ORDER BY started_at`,
+          [filter.since]
+        )
+      : this.queryAll<McpToolCallRow>(
+          `SELECT * FROM mcp_tool_calls WHERE registry_server_id = ? AND started_at >= ? ORDER BY started_at`,
+          [filter.registryServerId, filter.since]
+        );
+    return rows.map(mapMcpToolCall);
   }
 
   /**

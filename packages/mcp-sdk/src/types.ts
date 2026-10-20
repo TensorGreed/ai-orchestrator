@@ -33,5 +33,7 @@ export interface ResolvedMCPTool {
   exposedName: string;
   originalName: string;
   serverId: string;
+  /** Registry entry the tool came from, when the server config referenced one. */
+  registryServerId?: string;
   definition: ToolDefinition;
 }

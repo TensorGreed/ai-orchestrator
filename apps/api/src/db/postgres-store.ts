@@ -1446,6 +1446,8 @@ export class PostgresStore {
       `DELETE FROM execution_history WHERE started_at < $1`,
       [input.before]
     );
+    // Phase 10.1 — tool-call telemetry follows the execution-history retention.
+    await this.pool.query(`DELETE FROM mcp_tool_calls WHERE started_at < $1`, [input.before]);
     return result.rowCount ?? 0;
   }
 

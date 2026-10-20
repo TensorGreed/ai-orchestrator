@@ -592,16 +592,40 @@ export interface AgentRunRequest {
   images?: ChatMessageImage[];
 }
 
+export interface AgentRunStepToolResult {
+  toolCallId: string;
+  toolName: string;
+  output: unknown;
+  error?: string;
+  /** Phase 10.1 — when the runtime started executing this tool call (ISO 8601). */
+  startedAt?: string;
+  /** Phase 10.1 — wall-clock time spent executing this tool call, in ms. */
+  durationMs?: number;
+}
+
 export interface AgentRunStep {
   iteration: number;
   modelOutput: string;
   requestedTools: ToolCall[];
-  toolResults: Array<{
-    toolCallId: string;
-    toolName: string;
-    output: unknown;
-    error?: string;
-  }>;
+  toolResults: AgentRunStepToolResult[];
+  /**
+   * Phase 10.1 — token usage reported by the provider for this iteration's
+   * model call, so tokens can be attributed to the tool calls it requested.
+   */
+  usage?: LLMUsage;
+  /** Phase 10.1 — latency of this iteration's model call in ms, when reported. */
+  latencyMs?: number;
+}
+
+/**
+ * Phase 10.1 — maps the name an agent sees for an MCP tool
+ * (`<adapterId>__<tool>`) back to the server and tool it came from.
+ * Agent node outputs carry these under `_mcpTools`, keyed by exposed name.
+ */
+export interface McpToolAttribution {
+  adapterId: string;
+  toolName: string;
+  registryServerId?: string;
 }
 
 export interface AgentRunState {

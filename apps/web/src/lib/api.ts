@@ -2406,6 +2406,46 @@ export async function fetchMcpServerTools(id: string) {
   );
 }
 
+export type McpTelemetryWindow = "24h" | "7d" | "30d";
+
+export interface McpTelemetryTotals {
+  calls: number;
+  errors: number;
+  /** 0..1 */
+  errorRate: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  /** null when no call could be priced. */
+  costUsd: number | null;
+  lastCalledAt: string | null;
+}
+
+export interface McpToolTelemetry extends McpTelemetryTotals {
+  toolName: string;
+  /** Present on the inline-server rollup, which groups by adapter and tool. */
+  adapterId?: string;
+}
+
+export interface McpTelemetryResponse {
+  window: McpTelemetryWindow;
+  since: string;
+  totals: McpTelemetryTotals;
+  tools: McpToolTelemetry[];
+}
+
+export async function fetchMcpServerTelemetry(id: string, window: McpTelemetryWindow = "7d") {
+  return apiRequest<McpTelemetryResponse & { serverId: string }>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/telemetry?window=${encodeURIComponent(window)}`
+  );
+}
+
+/** Usage of MCP servers configured inline on nodes (not in the registry). */
+export async function fetchInlineMcpTelemetry(window: McpTelemetryWindow = "7d") {
+  return apiRequest<McpTelemetryResponse & { scope: "inline" }>(`/api/mcp/telemetry?window=${encodeURIComponent(window)}`);
+}
+
 export async function createMcpServer(payload: McpServerInput) {
   return apiRequest<{ server: McpRegisteredServer }>("/api/mcp/servers", {
     method: "POST",

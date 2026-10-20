@@ -45,6 +45,8 @@ See [MCP server registry](../product/mcp-server-registry.md).
 - `GET /api/mcp/servers/:id/tools`
 - `GET /api/mcp/servers/:id/snapshots/:snapshotId`
 - `POST /api/mcp/servers/:id/accept-change`
+- `GET /api/mcp/servers/:id/telemetry?window=24h|7d|30d`
+- `GET /api/mcp/telemetry?window=24h|7d|30d` (servers configured inline on nodes)
 
 ## Secrets
 

@@ -992,6 +992,34 @@ export const openApiSpec = {
         responses: { "200": { description: "Tool list" } }
       }
     },
+    "/api/mcp/servers/{id}/telemetry": {
+      get: {
+        tags: ["MCP"],
+        summary: "Per-tool call telemetry for a registered server: calls, errors, p50/p95 latency, tokens and cost",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "window", in: "query", required: false, schema: { type: "string", enum: ["24h", "7d", "30d"], default: "7d" } }
+        ],
+        responses: {
+          "200": { description: "Server totals and one row per tool, busiest first" },
+          "400": { description: "Unknown window" },
+          "404": { description: "MCP server not found" }
+        }
+      }
+    },
+    "/api/mcp/telemetry": {
+      get: {
+        tags: ["MCP"],
+        summary: "Per-tool call telemetry for MCP servers configured inline on nodes, grouped by adapter and tool",
+        parameters: [
+          { name: "window", in: "query", required: false, schema: { type: "string", enum: ["24h", "7d", "30d"], default: "7d" } }
+        ],
+        responses: {
+          "200": { description: "Totals and one row per adapter and tool, busiest first" },
+          "400": { description: "Unknown window" }
+        }
+      }
+    },
     "/api/mcp/servers/{id}/probe": {
       post: {
         tags: ["MCP"],

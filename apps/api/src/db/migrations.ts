@@ -1019,6 +1019,36 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS mcp_server_probes;
       DROP TABLE IF EXISTS mcp_servers;
     `
+  },
+  {
+    version: 21,
+    description: "Phase 10.1 — per-tool MCP call telemetry (mcp_tool_calls)",
+    up: `
+      CREATE TABLE IF NOT EXISTS mcp_tool_calls (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        registry_server_id TEXT,
+        adapter_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        started_at TIMESTAMPTZ NOT NULL,
+        duration_ms INTEGER,
+        ok INTEGER NOT NULL,
+        error TEXT,
+        turn_input_tokens INTEGER,
+        turn_output_tokens INTEGER,
+        estimated_cost_usd DOUBLE PRECISION,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_registry ON mcp_tool_calls(registry_server_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_adapter_tool ON mcp_tool_calls(adapter_id, tool_name, started_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_execution ON mcp_tool_calls(execution_id);
+    `,
+    down: `
+      DROP TABLE IF EXISTS mcp_tool_calls;
+    `
   }
 ];
 

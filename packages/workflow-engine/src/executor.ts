@@ -14,6 +14,7 @@ import type {
   ConnectorDocument,
   LLMProviderConfig,
   MCPServerConfig,
+  McpToolAttribution,
   NodeExecutionResult,
   SecretReference,
   Workflow,
@@ -496,7 +497,21 @@ function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | und
 function buildServerConfigKey(server: MCPServerConfig): string {
   const connection = JSON.stringify(server.connection ?? {});
   const secretId = server.secretRef?.secretId ?? "";
-  return `${server.serverId}::${secretId}::${connection}`;
+  return `${server.registryServerId ?? ""}::${server.serverId}::${secretId}::${connection}`;
+}
+
+function buildMcpToolAttribution(
+  resolved: Array<{ exposedName: string; originalName: string; serverId: string; registryServerId?: string }>
+): Record<string, McpToolAttribution> {
+  const out: Record<string, McpToolAttribution> = {};
+  for (const entry of resolved) {
+    out[entry.exposedName] = {
+      adapterId: entry.serverId,
+      toolName: entry.originalName,
+      ...(entry.registryServerId ? { registryServerId: entry.registryServerId } : {})
+    };
+  }
+  return out;
 }
 
 function readRegistryServerId(config: Record<string, unknown>): string | undefined {
@@ -4303,6 +4318,9 @@ async function executeNode(
           steps: agentState.steps,
           messages: agentState.messages,
           _provider: provider,
+          // Phase 10.1 — map exposed tool names back to their MCP server so
+          // per-tool telemetry can attribute each call in `steps`.
+          _mcpTools: buildMcpToolAttribution(resolvedTools.resolved),
           // Phase 7.1 — surface cumulative agent telemetry on the node output.
           _telemetry: {
             providerId: provider.providerId,

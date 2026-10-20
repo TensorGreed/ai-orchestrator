@@ -11,6 +11,7 @@ vi.mock("../lib/api", async () => {
     fetchMcpServers: vi.fn(),
     fetchMcpServer: vi.fn(),
     fetchMcpServerTools: vi.fn(),
+    fetchMcpServerTelemetry: vi.fn(),
     fetchMcpPresets: vi.fn(),
     fetchSecrets: vi.fn(),
     createMcpServer: vi.fn(),
@@ -71,6 +72,14 @@ const breakingSnapshot: api.McpToolSnapshotSummary = {
   createdAt: "2026-10-20T10:00:00.000Z"
 };
 
+function emptyTotals(): api.McpTelemetryTotals {
+  return { calls: 0, errors: 0, errorRate: 0, p50Ms: null, p95Ms: null, inputTokens: 0, outputTokens: 0, costUsd: null, lastCalledAt: null };
+}
+
+function emptyTelemetry(window: api.McpTelemetryWindow): api.McpTelemetryResponse & { serverId: string } {
+  return { serverId: "mcp_1", window, since: "2026-10-13T10:00:00.000Z", totals: emptyTotals(), tools: [] };
+}
+
 function mockDetail(server: api.McpRegisteredServer) {
   vi.mocked(api.fetchMcpServer).mockResolvedValue({
     server,
@@ -97,6 +106,7 @@ describe("McpServersPage", () => {
     vi.resetAllMocks();
     vi.mocked(api.fetchMcpPresets).mockResolvedValue({ presets: [] });
     vi.mocked(api.fetchSecrets).mockResolvedValue([]);
+    vi.mocked(api.fetchMcpServerTelemetry).mockImplementation(async (_id, window = "7d") => emptyTelemetry(window));
   });
 
   it("lists servers and shows health, latency, tools and usages for the selected one", async () => {
@@ -116,10 +126,83 @@ describe("McpServersPage", () => {
     expect(screen.getByText("340 ms")).toBeInTheDocument();
     expect(screen.getByText("33%")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Last 3 probes, oldest first" })).toBeInTheDocument();
-    expect(screen.getByRole("cell", { name: "search_issues" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: /search_issues/ })).toBeInTheDocument();
     expect(screen.getByText("Triage")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "+ Register server" })).not.toBeInTheDocument();
+  });
+
+  it("shows per-tool call telemetry in the tools table and switches the window", async () => {
+    const user = userEvent.setup();
+    const server = makeServer();
+    vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [server], adapters: [], defaultProbeIntervalMs: 300000 });
+    mockDetail(server);
+    vi.mocked(api.fetchMcpServerTools).mockResolvedValue({
+      serverId: server.id,
+      snapshotId: "snap_2",
+      probedAt: server.lastProbeAt,
+      tools: [
+        { name: "create_issue", description: "Create an issue", inputSchema: { type: "object", properties: {} } },
+        { name: "search_issues", description: "Search issues", inputSchema: { type: "object", properties: {} } }
+      ]
+    });
+    vi.mocked(api.fetchMcpServerTelemetry).mockImplementation(async (_id, window = "7d") => {
+      if (window === "30d") {
+        return {
+          ...emptyTelemetry(window),
+          totals: { ...emptyTotals(), calls: 900, errors: 0 },
+          tools: [{ ...emptyTotals(), toolName: "create_issue", calls: 900, p50Ms: 75, p95Ms: 2400, inputTokens: 1200, outputTokens: 300, costUsd: 1.5 }]
+        };
+      }
+      return {
+        ...emptyTelemetry(window),
+        totals: { ...emptyTotals(), calls: 12, errors: 3, costUsd: 0.0042 },
+        tools: [
+          {
+            toolName: "search_issues",
+            calls: 12,
+            errors: 3,
+            errorRate: 0.25,
+            p50Ms: 140,
+            p95Ms: 880,
+            inputTokens: 900,
+            outputTokens: 150,
+            costUsd: 0.0042,
+            lastCalledAt: "2026-10-20T09:00:00.000Z"
+          }
+        ]
+      };
+    });
+
+    render(<McpServersPage isAdmin={false} />);
+
+    const table = (await screen.findByRole("columnheader", { name: "Calls" })).closest("table") as HTMLTableElement;
+    for (const header of ["p50", "p95", "Errors", "Tokens", "Cost"]) {
+      expect(within(table).getByRole("columnheader", { name: header })).toBeInTheDocument();
+    }
+    await waitFor(() => expect(within(table).getByText("12")).toBeInTheDocument());
+    expect(api.fetchMcpServerTelemetry).toHaveBeenCalledWith("mcp_1", "7d");
+
+    const rows = within(table).getAllByRole("row").slice(1);
+    // Busiest first: search_issues has calls, create_issue has none.
+    expect(within(rows[0]).getByText("search_issues")).toBeInTheDocument();
+    expect(within(rows[0]).getByText("140 ms")).toBeInTheDocument();
+    expect(within(rows[0]).getByText("880 ms")).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/3 · 25%/)).toBeInTheDocument();
+    expect(within(rows[0]).getByText("1.1k")).toBeInTheDocument();
+    expect(within(rows[0]).getByText("$0.0042")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("create_issue")).toBeInTheDocument();
+    expect(within(rows[1]).getAllByText("—")).toHaveLength(6);
+    expect(screen.getByText(/12 calls in the last 7 days · 3 failed/)).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Telemetry window"), "30d");
+    await waitFor(() => expect(api.fetchMcpServerTelemetry).toHaveBeenLastCalledWith("mcp_1", "30d"));
+    await waitFor(() => expect(within(table).getByText("900")).toBeInTheDocument());
+    const after = within(table).getAllByRole("row").slice(1);
+    expect(within(after[0]).getByText("create_issue")).toBeInTheDocument();
+    expect(within(after[0]).getByText("2.4 s")).toBeInTheDocument();
+    expect(within(after[0]).getByText("$1.50")).toBeInTheDocument();
+    expect(within(after[1]).getAllByText("—")).toHaveLength(6);
   });
 
   it("switches the probe chart to a table", async () => {
