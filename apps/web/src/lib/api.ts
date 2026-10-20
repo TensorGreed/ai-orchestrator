@@ -2,6 +2,10 @@ import type {
   Folder,
   ImportReport,
   LLMProviderConfig,
+  McpPolicyRole,
+  McpToolAnnotations,
+  McpToolClassification,
+  McpToolPolicyRule,
   MCPToolDefinition,
   Project,
   Workflow,
@@ -501,10 +505,13 @@ export async function discoverMcpTools(payload: {
   connection?: Record<string, unknown>;
   secretRef?: { secretId: string };
   allowedTools?: string[];
+  /** Phase 10.2 — project whose tool policy marks the tools. */
+  projectId?: string;
 }) {
   return apiRequest<{
     serverId: string;
-    tools: MCPToolDefinition[];
+    policy?: { role: McpPolicyRole; projectId: string };
+    tools: Array<MCPToolDefinition & Partial<McpToolPolicyMarks>>;
   }>("/api/mcp/discover-tools", {
     method: "POST",
     body: JSON.stringify(payload)
@@ -2355,10 +2362,100 @@ export interface McpToolSnapshotSummary {
   createdAt: string;
 }
 
-export interface McpSnapshotTool {
+export interface McpSnapshotTool extends Partial<McpToolPolicyMarks> {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  annotations?: McpToolAnnotations;
+}
+
+// Phase 10.2 — MCP tool policy.
+export interface McpToolAccess {
+  allowed: boolean;
+  reason?: "policy" | "no_write_tools";
+  ruleId?: string;
+  ruleName?: string;
+  message?: string;
+}
+
+/** What the API adds to each listed tool: classification and the caller's access. */
+export interface McpToolPolicyMarks {
+  classification: McpToolClassification;
+  manualReadOnly: boolean | null;
+  access: McpToolAccess;
+}
+
+export interface McpToolPolicyRuleInput {
+  name?: string | null;
+  description?: string | null;
+  effect: "allow" | "deny";
+  projectId?: string | null;
+  roles?: McpPolicyRole[];
+  serverId?: string | null;
+  toolPattern?: string;
+  enabled?: boolean;
+}
+
+export interface McpToolPolicyEvaluation {
+  allowed: boolean;
+  reason: "policy" | "no_write_tools" | null;
+  ruleId: string | null;
+  ruleName: string | null;
+  message: string | null;
+  decidedBy: "default" | "rule";
+  decidingRuleId: string | null;
+  matchedRules: McpToolPolicyRule[];
+  overriddenDenies: Array<{ denyId: string; byId: string }>;
+  classification: McpToolClassification;
+  manualReadOnly: boolean | null;
+  server: { kind: "registry"; id: string; name: string; adapterId: string } | { kind: "inline"; adapterId: string };
+}
+
+export async function fetchMcpToolPolicies() {
+  return apiRequest<{ rules: McpToolPolicyRule[]; roles: McpPolicyRole[] }>("/api/mcp/policies");
+}
+
+export async function createMcpToolPolicy(payload: McpToolPolicyRuleInput) {
+  return apiRequest<{ rule: McpToolPolicyRule }>("/api/mcp/policies", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateMcpToolPolicy(id: string, patch: Partial<McpToolPolicyRuleInput>) {
+  return apiRequest<{ rule: McpToolPolicyRule }>(`/api/mcp/policies/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch)
+  });
+}
+
+export async function deleteMcpToolPolicy(id: string) {
+  return apiRequest<{ ok: true }>(`/api/mcp/policies/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function evaluateMcpToolPolicy(payload: {
+  projectId?: string | null;
+  role: McpPolicyRole;
+  serverId: string;
+  toolName: string;
+  noWriteTools?: boolean;
+}) {
+  return apiRequest<McpToolPolicyEvaluation>("/api/mcp/policies/evaluate", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function setMcpToolClassification(serverId: string, toolName: string, readOnly: boolean | null) {
+  return apiRequest<{
+    serverId: string;
+    toolName: string;
+    classification: McpToolClassification;
+    manualReadOnly: boolean | null;
+  }>(`/api/mcp/servers/${encodeURIComponent(serverId)}/tools/${encodeURIComponent(toolName)}/classification`, {
+    method: "PUT",
+    body: JSON.stringify({ readOnly })
+  });
 }
 
 export interface McpServerUsage {
@@ -2400,10 +2497,15 @@ export async function fetchMcpServer(id: string) {
   }>(`/api/mcp/servers/${encodeURIComponent(id)}`);
 }
 
-export async function fetchMcpServerTools(id: string) {
-  return apiRequest<{ serverId: string; snapshotId: string | null; probedAt: string | null; tools: McpSnapshotTool[] }>(
-    `/api/mcp/servers/${encodeURIComponent(id)}/tools`
-  );
+export async function fetchMcpServerTools(id: string, projectId?: string) {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{
+    serverId: string;
+    snapshotId: string | null;
+    probedAt: string | null;
+    policy?: { role: McpPolicyRole; projectId: string };
+    tools: McpSnapshotTool[];
+  }>(`/api/mcp/servers/${encodeURIComponent(id)}/tools${qs}`);
 }
 
 export type McpTelemetryWindow = "24h" | "7d" | "30d";

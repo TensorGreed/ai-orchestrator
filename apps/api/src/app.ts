@@ -16,10 +16,19 @@ import { createDefaultMCPRegistry, invokeDirectMCPTool, type MCPExecutionContext
 import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
+  MCP_POLICY_ROLES,
+  mcpToolClassificationSchema,
+  mcpToolPolicyEvaluateSchema,
+  mcpToolPolicyRuleInputSchema,
+  mcpToolPolicyRuleUpdateSchema,
   nodeDefinitions,
   workflowExecuteRequestSchema,
   workflowSchema,
   type LLMProviderConfig,
+  type McpPolicyRole,
+  type McpToolAnnotations,
+  type McpToolPolicyRule,
+  type McpToolPolicySubject,
   type MCPServerConfig,
   type SecretReference,
   type Workflow,
@@ -83,6 +92,12 @@ import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
 import { AuditExportService } from "./services/audit-export-service";
 import { McpProbeService, serverConfigFromRecord } from "./services/mcp-probe-service";
+import {
+  evaluateToolForContext,
+  manualReadOnlyFor,
+  markMcpTools,
+  resolveMcpToolPolicySubject
+} from "./services/mcp-tool-policy";
 import {
   extractMcpToolCalls,
   MCP_TELEMETRY_WINDOWS,
@@ -203,6 +218,8 @@ const workflowDuplicateSchema = z.object({
 
 const mcpDiscoverSchema = z.object({
   serverId: z.string().min(1),
+  /** Phase 10.2 — project whose tool policy marks the discovered tools; defaults to "default". */
+  projectId: z.string().min(1).optional(),
   label: z.string().optional(),
   connection: z.record(z.string(), z.unknown()).optional(),
   secretRef: z
@@ -1162,6 +1179,14 @@ export function createApp(
     }
     return serverConfigFromRecord(server);
   };
+  // Phase 10.2 — MCP tool policy. Rules and overrides are read when an agent
+  // or MCP Tool node starts, so an admin's change applies to the next node.
+  const loadMcpToolPolicy = () => ({
+    rules: store.listMcpToolPolicies(),
+    classifications: store.listMcpToolClassifications()
+  });
+  const resolveToolPolicySubject = (workflowId: string, actor?: SafeUser | null): McpToolPolicySubject =>
+    resolveMcpToolPolicySubject(store, workflowId, actor);
   const activeExecutions = new Map<
     string,
     {
@@ -1339,6 +1364,12 @@ export function createApp(
     executionId?: string;
     triggerType?: string;
     triggeredBy?: string;
+    /**
+     * Phase 10.2 — the signed-in user who started this run. Set only by
+     * routes that authenticate a user; never derived from a request body.
+     * Without it the tool policy uses the workflow owner's role.
+     */
+    policyActor?: SafeUser | null;
     executionTimeoutMs?: number;
     customData?: Record<string, unknown>;
     resumeState?: WorkflowExecutionState;
@@ -1386,6 +1417,7 @@ export function createApp(
           ),
           triggerType: input.triggerType,
           triggeredBy: input.triggeredBy,
+          toolPolicySubject: resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
           approvalDecision: input.approvalDecision
         },
@@ -1461,6 +1493,7 @@ export function createApp(
           },
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
           resolveRegisteredMcpServer,
+          loadMcpToolPolicy,
           persistPausedExecution: async (paused) => {
             store.saveWorkflowExecutionState({
               id: paused.executionId,
@@ -1508,6 +1541,7 @@ export function createApp(
                     timestamp: payload.timestamp
                   },
                   triggerType: "error",
+                  toolPolicySubject: resolveToolPolicySubject(errorWf.id),
                   executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
                 },
                 {
@@ -1534,7 +1568,8 @@ export function createApp(
                     }
                   },
                   resolveSecret: (ref) => secretService.resolveSecret(ref),
-                  resolveRegisteredMcpServer
+                  resolveRegisteredMcpServer,
+                  loadMcpToolPolicy
                 }
               );
             } catch (err) {
@@ -2180,6 +2215,12 @@ export function createApp(
       }
     : undefined;
 
+  const evalPolicyActor = (email: string | undefined): SafeUser | null => {
+    const found = email ? store.getUserByEmail(email) : null;
+    if (!found || !MCP_POLICY_ROLES.includes(found.role as McpPolicyRole)) return null;
+    return { id: found.id, email: found.email, role: found.role as UserRole };
+  };
+
   const evalService = new EvalService(store, async (input) => {
     const workflow = store.getWorkflow(input.workflowId);
     if (!workflow) {
@@ -2197,7 +2238,9 @@ export function createApp(
         executionId,
         directInput: { trigger_type: "eval", eval_run_id: input.runId, eval_fixture_name: input.fixtureName, ...fixtureRecord },
         triggerType: "eval",
-        triggeredBy: input.triggeredBy
+        triggeredBy: input.triggeredBy,
+        // Eval runs are started by a signed-in builder; their email is recorded server-side.
+        policyActor: evalPolicyActor(input.triggeredBy)
       });
       persistExecutionHistory({
         executionId,
@@ -5074,7 +5117,7 @@ export function createApp(
         ...entry.workflow,
         workflowVersion: (entry.workflow.workflowVersion ?? 1) + 1
       };
-      const saved = store.upsertWorkflow(restoredWorkflow);
+      const saved = store.upsertWorkflow(restoredWorkflow, { createdBy: user.id });
       workflowVersionService.snapshot({
         workflow: saved,
         createdBy: user.id,
@@ -5725,7 +5768,7 @@ export function createApp(
       };
     }
 
-    const savedWorkflow = store.upsertWorkflow(parsed.data);
+    const savedWorkflow = store.upsertWorkflow(parsed.data, { createdBy: user.id });
     workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "created" });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
     triggerService?.reloadWorkflow(savedWorkflow.id);
@@ -5770,7 +5813,7 @@ export function createApp(
       };
     }
 
-    const savedWorkflow = store.upsertWorkflow(parsed.data);
+    const savedWorkflow = store.upsertWorkflow(parsed.data, { createdBy: user.id });
     workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "updated" });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
     triggerService?.reloadWorkflow(savedWorkflow.id);
@@ -5848,7 +5891,7 @@ export function createApp(
     duplicatedWorkflow.name = duplicateName;
     duplicatedWorkflow.workflowVersion = 1;
 
-    const savedWorkflow = store.upsertWorkflow(duplicatedWorkflow);
+    const savedWorkflow = store.upsertWorkflow(duplicatedWorkflow, { createdBy: user.id });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
     triggerService?.reloadWorkflow(savedWorkflow.id);
     return savedWorkflow;
@@ -5966,7 +6009,7 @@ export function createApp(
         };
       }
 
-      const savedWorkflow = store.upsertWorkflow(workflow);
+      const savedWorkflow = store.upsertWorkflow(workflow, { createdBy: user.id });
       schedulerService?.reloadWorkflow(savedWorkflow.id);
       triggerService?.reloadWorkflow(savedWorkflow.id);
       return savedWorkflow;
@@ -6062,7 +6105,7 @@ export function createApp(
       return { workflow, report: conversion.report, dryRun: true };
     }
 
-    const savedWorkflow = store.upsertWorkflow(workflow);
+    const savedWorkflow = store.upsertWorkflow(workflow, { createdBy: user.id });
     workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "imported from another builder" });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
     triggerService?.reloadWorkflow(savedWorkflow.id);
@@ -6468,6 +6511,7 @@ export function createApp(
       customData: executionPayload.customData
     });
     const result = await runWorkflowExecution({
+      policyActor: user,
       workflow,
       startNodeId: executionPayload.startNodeId,
       runMode: executionPayload.runMode,
@@ -6590,6 +6634,7 @@ export function createApp(
         }
       });
       const result = await runWorkflowExecution({
+        policyActor: user,
         workflow,
         startNodeId: executionPayload.startNodeId,
         runMode: executionPayload.runMode,
@@ -7013,6 +7058,7 @@ export function createApp(
     });
 
     const result = await runWorkflowExecution({
+      policyActor: user,
       workflow,
       startNodeId: executionPayload.startNodeId,
       runMode: executionPayload.runMode,
@@ -7135,6 +7181,7 @@ export function createApp(
     }
 
     const result = await runWorkflowExecution({
+      policyActor: user,
       workflow: state.workflow,
       executionId: pending.id,
       triggerType: "approval_resume",
@@ -7190,6 +7237,7 @@ export function createApp(
     }
 
     const result = await runWorkflowExecution({
+      policyActor: user,
       workflow: state.workflow,
       executionId: pending.id,
       triggerType: "approval_resume",
@@ -7253,6 +7301,7 @@ export function createApp(
       customData: parsed.data.customData
     });
     const result = await runWorkflowExecution({
+      policyActor: user,
       workflow,
       webhookPayload: {
         system_prompt: parsed.data.system_prompt,
@@ -7684,6 +7733,7 @@ export function createApp(
         requestInput: body
       });
       const result = await runWorkflowExecution({
+        policyActor: user,
         workflow,
         directInput: { trigger_type: "manual", trigger_node_id: manualNode.id, ...body },
         executionId,
@@ -8114,6 +8164,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
       });
       const result = await runWorkflowExecution({
+        policyActor: user,
         workflow,
         webhookPayload: {
           system_prompt: parsed.data.system_prompt,
@@ -8650,10 +8701,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const tools = await withScopedMcpContext((mcpContext) =>
         mcpRegistry.get(parsed.data.serverId).discoverTools(serverConfig, mcpContext)
       );
+      const projectId = parsed.data.projectId ?? "default";
 
       return {
         serverId: parsed.data.serverId,
-        tools
+        // Phase 10.2 — marked, never hidden, so builders see why an agent will not get a tool.
+        policy: { role: user.role, projectId },
+        tools: markMcpTools(tools, {
+          rules: store.listMcpToolPolicies(),
+          classifications: [],
+          role: user.role,
+          projectId,
+          adapterId: parsed.data.serverId
+        })
       };
     } catch (error) {
       reply.code(400);
@@ -8753,7 +8813,25 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return { error: "MCP server not found" };
     }
     const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
-    return { serverId: server.id, snapshotId: snapshot?.id ?? null, probedAt: server.lastProbeAt, tools: snapshot?.tools ?? [] };
+    const query = request.query as { projectId?: unknown } | undefined;
+    const projectId =
+      typeof query?.projectId === "string" && query.projectId.trim() ? query.projectId.trim() : server.projectId ?? "default";
+    return {
+      serverId: server.id,
+      snapshotId: snapshot?.id ?? null,
+      probedAt: server.lastProbeAt,
+      // Phase 10.2 — read-only classification and what the caller's role may use in this project.
+      policy: { role: user.role, projectId },
+      tools: markMcpTools(snapshot?.tools ?? [], {
+        rules: store.listMcpToolPolicies(),
+        classifications: store.listMcpToolClassifications(server.id),
+        role: user.role,
+        projectId,
+        adapterId: server.adapterId,
+        registryServerId: server.id,
+        serverLabel: server.name
+      })
+    };
   });
 
   app.get<{ Params: { id: string; snapshotId: string } }>(
@@ -8984,6 +9062,245 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     });
     return { server: mcpServerSummary(store.getMcpServer(existing.id)!) };
   });
+
+  // -------------------------------------------------------------------------
+  // Phase 10.2 — MCP tool policy. Builders can read rules and dry-run them
+  // (they need to know why an agent will not see a tool); only admins change
+  // rules or tool classifications.
+  // -------------------------------------------------------------------------
+
+  /** A rule's server is a registry entry or, for inline servers, an adapter id. */
+  const validatePolicyScope = (
+    input: { projectId?: string | null; serverId?: string | null },
+    reply: FastifyReply
+  ): { error: string } | null => {
+    if (input.projectId && !store.getProject(input.projectId)) {
+      reply.code(400);
+      return { error: `Project '${input.projectId}' does not exist` };
+    }
+    if (input.serverId && !store.getMcpServer(input.serverId) && !mcpRegistry.tryGet(input.serverId)) {
+      reply.code(400);
+      return { error: `'${input.serverId}' is neither a registered MCP server nor an MCP adapter id` };
+    }
+    return null;
+  };
+
+  const recordPolicyAudit = (
+    user: SafeUser,
+    eventType: string,
+    action: "create" | "update" | "delete",
+    resourceId: string,
+    metadata: Record<string, unknown>,
+    projectId: string | null = null
+  ) => {
+    auditService.record({
+      category: "system",
+      eventType,
+      action,
+      outcome: "success",
+      actor: { email: user.email, type: "user" },
+      resourceType: "mcp_policy",
+      resourceId,
+      projectId,
+      metadata
+    });
+  };
+
+  const policyAuditMetadata = (rule: McpToolPolicyRule) => ({
+    name: rule.name,
+    effect: rule.effect,
+    projectId: rule.projectId,
+    roles: rule.roles,
+    serverId: rule.serverId,
+    toolPattern: rule.toolPattern,
+    enabled: rule.enabled
+  });
+
+  app.get("/api/mcp/policies", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    return { rules: store.listMcpToolPolicies(), roles: MCP_POLICY_ROLES };
+  });
+
+  app.post<{ Body: unknown }>("/api/mcp/policies", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const parsed = mcpToolPolicyRuleInputSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid MCP tool policy rule", details: parsed.error.issues };
+    }
+    const invalid = validatePolicyScope(parsed.data, reply);
+    if (invalid) return invalid;
+    const rule = store.createMcpToolPolicy({
+      id: `mtp_${crypto.randomUUID()}`,
+      name: parsed.data.name?.trim() || null,
+      description: parsed.data.description?.trim() || null,
+      effect: parsed.data.effect,
+      projectId: parsed.data.projectId ?? null,
+      roles: [...new Set(parsed.data.roles ?? [])],
+      serverId: parsed.data.serverId ?? null,
+      toolPattern: parsed.data.toolPattern ?? "*",
+      enabled: parsed.data.enabled !== false,
+      createdBy: user.email
+    });
+    recordPolicyAudit(user, "mcp_policy.created", "create", rule.id, policyAuditMetadata(rule), rule.projectId);
+    reply.code(201);
+    return { rule };
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>("/api/mcp/policies/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getMcpToolPolicy(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "MCP tool policy rule not found" };
+    }
+    const parsed = mcpToolPolicyRuleUpdateSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid MCP tool policy rule", details: parsed.error.issues };
+    }
+    const invalid = validatePolicyScope(parsed.data, reply);
+    if (invalid) return invalid;
+    const { name, description, roles, ...rest } = parsed.data;
+    const rule = store.updateMcpToolPolicy(existing.id, {
+      ...rest,
+      ...(name !== undefined ? { name: name?.trim() || null } : {}),
+      ...(description !== undefined ? { description: description?.trim() || null } : {}),
+      ...(roles !== undefined ? { roles: [...new Set(roles)] } : {})
+    })!;
+    recordPolicyAudit(
+      user,
+      "mcp_policy.updated",
+      "update",
+      rule.id,
+      { ...policyAuditMetadata(rule), fields: Object.keys(parsed.data) },
+      rule.projectId
+    );
+    return { rule };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/mcp/policies/:id", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const existing = store.getMcpToolPolicy(request.params.id);
+    if (!existing) {
+      reply.code(404);
+      return { error: "MCP tool policy rule not found" };
+    }
+    store.deleteMcpToolPolicy(existing.id);
+    recordPolicyAudit(user, "mcp_policy.deleted", "delete", existing.id, policyAuditMetadata(existing), existing.projectId);
+    return { ok: true };
+  });
+
+  app.post<{ Body: unknown }>("/api/mcp/policies/evaluate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const parsed = mcpToolPolicyEvaluateSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid evaluate payload", details: parsed.error.issues };
+    }
+    const { role, serverId, toolName } = parsed.data;
+    const projectId = parsed.data.projectId ?? null;
+    const registered = store.getMcpServer(serverId);
+    if (!registered && !mcpRegistry.tryGet(serverId)) {
+      reply.code(404);
+      return { error: `'${serverId}' is neither a registered MCP server nor an MCP adapter id` };
+    }
+    let annotations: McpToolAnnotations | undefined;
+    if (registered?.currentSnapshotId) {
+      annotations = store
+        .getMcpToolSnapshot(registered.currentSnapshotId)
+        ?.tools.find((tool) => tool.name === toolName)?.annotations;
+    }
+    const classifications = registered ? store.listMcpToolClassifications(registered.id) : [];
+    const decision = evaluateToolForContext(
+      {
+        rules: store.listMcpToolPolicies(),
+        classifications,
+        role: role as McpPolicyRole,
+        projectId,
+        adapterId: registered ? registered.adapterId : serverId,
+        ...(registered ? { registryServerId: registered.id, serverLabel: registered.name } : {}),
+        noWriteTools: parsed.data.noWriteTools === true
+      },
+      { name: toolName, ...(annotations ? { annotations } : {}) }
+    );
+    return {
+      allowed: decision.allowed,
+      reason: decision.reason ?? null,
+      ruleId: decision.ruleId ?? null,
+      ruleName: decision.ruleName ?? null,
+      message: decision.message ?? null,
+      decidedBy: decision.policy.decidedBy,
+      decidingRuleId: decision.policy.rule?.id ?? null,
+      matchedRules: decision.policy.matchedRules,
+      overriddenDenies: decision.policy.overriddenDenies.map((entry) => ({ denyId: entry.deny.id, byId: entry.by.id })),
+      classification: decision.classification,
+      manualReadOnly: manualReadOnlyFor(classifications, registered?.id, toolName),
+      server: registered
+        ? { kind: "registry" as const, id: registered.id, name: registered.name, adapterId: registered.adapterId }
+        : { kind: "inline" as const, adapterId: serverId },
+      request: { projectId, role, serverId, toolName, noWriteTools: parsed.data.noWriteTools === true }
+    };
+  });
+
+  app.put<{ Params: { id: string; toolName: string }; Body: unknown }>(
+    "/api/mcp/servers/:id/tools/:toolName/classification",
+    async (request, reply) => {
+      const user = await requireRole(request, reply, ["admin"]);
+      if (!user) return;
+      const server = store.getMcpServer(request.params.id);
+      if (!server) {
+        reply.code(404);
+        return { error: "MCP server not found" };
+      }
+      const toolName = request.params.toolName.trim();
+      if (!toolName || toolName.length > 200) {
+        reply.code(400);
+        return { error: "Tool name is required" };
+      }
+      const parsed = mcpToolClassificationSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        reply.code(400);
+        return { error: "Invalid classification payload", details: parsed.error.issues };
+      }
+      const override = store.setMcpToolClassification({
+        registryServerId: server.id,
+        toolName,
+        readOnly: parsed.data.readOnly,
+        setBy: user.email
+      });
+      recordPolicyAudit(
+        user,
+        parsed.data.readOnly === null ? "mcp_policy.classification_cleared" : "mcp_policy.classification_set",
+        "update",
+        `${server.id}:${toolName}`,
+        { serverId: server.id, serverName: server.name, toolName, readOnly: parsed.data.readOnly },
+        server.projectId
+      );
+      const snapshot = server.currentSnapshotId ? store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+      const annotations = snapshot?.tools.find((tool) => tool.name === toolName)?.annotations;
+      const [marked] = markMcpTools([{ name: toolName, ...(annotations ? { annotations } : {}) }], {
+        rules: [],
+        classifications: store.listMcpToolClassifications(server.id),
+        role: user.role,
+        projectId: server.projectId ?? "default",
+        adapterId: server.adapterId,
+        registryServerId: server.id
+      });
+      return {
+        serverId: server.id,
+        toolName,
+        override,
+        classification: marked.classification,
+        manualReadOnly: marked.manualReadOnly
+      };
+    }
+  );
 
   app.get("/api/mcp/presets", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
@@ -9336,7 +9653,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const imported = importWorkflowFromJson(template.workflowJson);
     imported.id = crypto.randomUUID();
     imported.name = `${template.name} (from template)`;
-    store.upsertWorkflow(imported);
+    store.upsertWorkflow(imported, { createdBy: user.id });
 
     audit(request, user, {
       category: "workflow",
@@ -9388,7 +9705,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const imported = importWorkflowFromJson(json);
       imported.id = crypto.randomUUID();
       imported.name = `${imported.name} (imported)`;
-      store.upsertWorkflow(imported);
+      store.upsertWorkflow(imported, { createdBy: user.id });
       return { workflowId: imported.id, name: imported.name };
     } catch {
       reply.code(400);

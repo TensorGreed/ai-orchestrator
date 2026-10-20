@@ -5,6 +5,10 @@
  * page). The detail shows probe health, the tool schema history with diffs,
  * the pending breaking change (if any) and the nodes that use the server.
  * The Tools table carries per-tool call telemetry for a selectable window.
+ *
+ * Phase 10.2 — a Policies view holds the MCP tool policy rules, and the Tools
+ * table shows each tool's read-only classification and whether the viewer's
+ * role may use it.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -22,6 +26,7 @@ import {
   type McpToolTelemetry,
   type SecretListItem,
   acceptMcpServerChange,
+  setMcpToolClassification,
   createMcpServer,
   deleteMcpServer,
   fetchMcpPresets,
@@ -33,6 +38,7 @@ import {
   probeMcpServer,
   updateMcpServer
 } from "../lib/api";
+import { McpPoliciesView } from "./McpPoliciesView";
 
 const STATUS_LABEL: Record<McpRegisteredServer["status"], string> = {
   unknown: "Not probed",
@@ -92,6 +98,7 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [detailVersion, setDetailVersion] = useState(0);
+  const [view, setView] = useState<"servers" | "policies">("servers");
 
   const refreshList = useCallback(async () => {
     setLoading(true);
@@ -131,10 +138,32 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
           </p>
         </div>
         <div className="page-actions">
-          <button type="button" className="pg-btn" onClick={() => void onServerChanged()} disabled={loading}>
-            Refresh
-          </button>
-          {isAdmin && (
+          <div className="finops-range" role="tablist" aria-label="MCP view">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "servers"}
+              className={view === "servers" ? "finops-range-btn active" : "finops-range-btn"}
+              onClick={() => setView("servers")}
+            >
+              Servers
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "policies"}
+              className={view === "policies" ? "finops-range-btn active" : "finops-range-btn"}
+              onClick={() => setView("policies")}
+            >
+              Policies
+            </button>
+          </div>
+          {view === "servers" && (
+            <button type="button" className="pg-btn" onClick={() => void onServerChanged()} disabled={loading}>
+              Refresh
+            </button>
+          )}
+          {isAdmin && view === "servers" && (
             <button type="button" className="pg-btn primary" onClick={() => setShowCreate((v) => !v)}>
               {showCreate ? "Cancel" : "+ Register server"}
             </button>
@@ -144,7 +173,11 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
 
       {error && <div className="settings-error">{error}</div>}
 
-      {showCreate && isAdmin && (
+      {view === "policies" && (
+        <McpPoliciesView isAdmin={isAdmin} servers={servers} adapters={adapters} activeProjectId={activeProjectId} />
+      )}
+
+      {view === "servers" && showCreate && isAdmin && (
         <McpServerForm
           adapters={adapters}
           projectId={activeProjectId ?? null}
@@ -158,6 +191,7 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
         />
       )}
 
+      {view === "servers" && (
       <div className="kb-layout">
         <aside className="kb-list" aria-label="Registered MCP servers">
           {loading && servers.length === 0 ? (
@@ -195,6 +229,7 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
               key={`${selectedId}:${detailVersion}`}
               serverId={selectedId}
               isAdmin={isAdmin}
+              projectId={activeProjectId ?? undefined}
               adapters={adapters}
               defaultIntervalMs={defaultIntervalMs}
               onChanged={onServerChanged}
@@ -208,6 +243,7 @@ export function McpServersPage({ isAdmin, activeProjectId }: McpServersPageProps
           )}
         </div>
       </div>
+      )}
     </section>
   );
 }
@@ -425,6 +461,7 @@ function McpServerForm({
 function McpServerDetail({
   serverId,
   isAdmin,
+  projectId,
   adapters,
   defaultIntervalMs,
   onChanged,
@@ -432,6 +469,8 @@ function McpServerDetail({
 }: {
   serverId: string;
   isAdmin: boolean;
+  /** Project whose tool policy marks the tools; the server's own project when omitted. */
+  projectId?: string;
   adapters: Array<{ id: string; label: string }>;
   defaultIntervalMs: number;
   onChanged: () => Promise<void>;
@@ -471,7 +510,7 @@ function McpServerDetail({
     setLoading(true);
     setError(null);
     try {
-      const [detail, toolList] = await Promise.all([fetchMcpServer(serverId), fetchMcpServerTools(serverId)]);
+      const [detail, toolList] = await Promise.all([fetchMcpServer(serverId), fetchMcpServerTools(serverId, projectId)]);
       setServer(detail.server);
       setProbes(detail.probes);
       setSnapshots(detail.snapshots);
@@ -482,7 +521,7 @@ function McpServerDetail({
     } finally {
       setLoading(false);
     }
-  }, [serverId]);
+  }, [serverId, projectId]);
 
   useEffect(() => {
     void refresh();
@@ -637,6 +676,11 @@ function McpServerDetail({
       <ProbeStrip probes={probes} />
 
       <ToolsSection
+        serverId={server.id}
+        isAdmin={isAdmin}
+        onToolChanged={(name, patch) =>
+          setTools((current) => current.map((tool) => (tool.name === name ? { ...tool, ...patch } : tool)))
+        }
         tools={tools}
         telemetry={telemetry}
         telemetryError={telemetryError}
@@ -728,13 +772,85 @@ function ErrorsCell({ stats }: { stats: McpToolTelemetry }) {
  * Snapshot tools with their call telemetry, busiest first. Tools that were
  * called in the window but are no longer in the snapshot are listed too.
  */
+function ClassificationCell({
+  serverId,
+  tool,
+  isAdmin,
+  onChanged
+}: {
+  serverId: string;
+  tool: McpSnapshotTool;
+  isAdmin: boolean;
+  onChanged: (patch: Pick<McpSnapshotTool, "classification" | "manualReadOnly">) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const classification = tool.classification;
+  const access = tool.access;
+  const sourceLabel = !classification
+    ? null
+    : classification.source === "unknown"
+      ? "unknown → write"
+      : classification.source;
+
+  const change = async (value: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const readOnly = value === "auto" ? null : value === "read";
+      const result = await setMcpToolClassification(serverId, tool.name, readOnly);
+      onChanged({ classification: result.classification, manualReadOnly: result.manualReadOnly });
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mcp-access">
+      {classification && (
+        <span className={classification.readOnly ? "mcp-class is-read" : "mcp-class is-write"}>
+          {classification.readOnly ? "Read-only" : "Write"}
+          <span className="mcp-class-source">{sourceLabel}</span>
+        </span>
+      )}
+      {access && !access.allowed && (
+        <span className="mcp-blocked" title={access.message}>
+          Blocked for your role{access.ruleName ? `: ${access.ruleName}` : access.ruleId ? `: ${access.ruleId}` : ""}
+        </span>
+      )}
+      {isAdmin && (
+        <select
+          className="mcp-class-select"
+          aria-label={`Classification for ${tool.name}`}
+          value={tool.manualReadOnly === true ? "read" : tool.manualReadOnly === false ? "write" : "auto"}
+          disabled={busy}
+          onChange={(event) => void change(event.target.value)}
+        >
+          <option value="auto">Auto (annotation)</option>
+          <option value="read">Mark read-only</option>
+          <option value="write">Mark write</option>
+        </select>
+      )}
+      {error && <span className="mcp-blocked">{error}</span>}
+    </div>
+  );
+}
+
 function ToolsSection({
+  serverId,
+  isAdmin,
+  onToolChanged,
   tools,
   telemetry,
   telemetryError,
   selectedWindow,
   onWindowChange
 }: {
+  serverId: string;
+  isAdmin: boolean;
+  onToolChanged: (name: string, patch: Partial<McpSnapshotTool>) => void;
   tools: McpSnapshotTool[];
   telemetry: McpTelemetryResponse | null;
   telemetryError: string | null;
@@ -782,10 +898,12 @@ function ToolsSection({
       {rows.length === 0 ? (
         <p className="kb-subtle">No tool snapshot yet. Run a probe to list the server's tools.</p>
       ) : (
+        <div className="mcp-table-scroll">
         <table className="kb-table mcp-tool-table">
           <thead>
             <tr>
               <th>Tool</th>
+              <th>Access</th>
               <th>Inputs</th>
               <th className="num">Calls</th>
               <th className="num">p50</th>
@@ -805,6 +923,18 @@ function ToolsSection({
                     {tool?.description ? <div className="kb-subtle">{tool.description}</div> : null}
                   </td>
                   <td>
+                    {tool ? (
+                      <ClassificationCell
+                        serverId={serverId}
+                        tool={tool}
+                        isAdmin={isAdmin}
+                        onChanged={(patch) => onToolChanged(name, patch)}
+                      />
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td>
                     {tool ? <ToolInputs schema={tool.inputSchema} /> : <span className="kb-subtle">not in current snapshot</span>}
                   </td>
                   <td className="num">{called ? formatCount(called.calls) : "—"}</td>
@@ -820,6 +950,7 @@ function ToolsSection({
             })}
           </tbody>
         </table>
+        </div>
       )}
     </section>
   );

@@ -44,7 +44,8 @@ export class MockMCPServerAdapter implements MCPServerAdapter {
         inputSchema: {
           type: "object",
           properties: { tz: { type: "string", description: "IANA timezone, for example America/Toronto" } }
-        }
+        },
+        annotations: { readOnlyHint: true }
       },
       {
         serverId: this.definition.id,
@@ -66,7 +67,8 @@ export class MockMCPServerAdapter implements MCPServerAdapter {
           type: "object",
           properties: { topic: { type: "string" } },
           required: ["topic"]
-        }
+        },
+        annotations: { readOnlyHint: true }
       }
     ];
   }

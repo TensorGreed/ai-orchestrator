@@ -116,6 +116,29 @@ describe("StudioHud", () => {
     expect(onExport).toHaveBeenCalledTimes(1);
   });
 
+  it("toggles the workflow's No write tools setting from the overflow menu", async () => {
+    const user = userEvent.setup();
+    const onToggleNoWriteTools = vi.fn();
+    const { rerender } = render(<StudioHud {...makeProps({ onToggleNoWriteTools, noWriteTools: false })} />);
+
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    const item = screen.getByRole("menuitemcheckbox", { name: "No write tools" });
+    expect(item).toHaveAttribute("aria-checked", "false");
+    await user.click(item);
+    expect(onToggleNoWriteTools).toHaveBeenCalledTimes(1);
+
+    rerender(<StudioHud {...makeProps({ onToggleNoWriteTools, noWriteTools: true })} />);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "No write tools" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("hides the No write tools toggle when the user cannot edit workflows", async () => {
+    const user = userEvent.setup();
+    render(<StudioHud {...makeProps()} />);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.queryByRole("menuitemcheckbox", { name: "No write tools" })).not.toBeInTheDocument();
+  });
+
   it("offers import from another builder in the overflow and the palette", async () => {
     const user = userEvent.setup();
     const onImportExternal = vi.fn();

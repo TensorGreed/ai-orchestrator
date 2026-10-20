@@ -3,8 +3,11 @@ import vm from "node:vm";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore, AgentSessionToolDataStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
+  evaluateMcpToolAccess,
   invokeDirectMCPTool,
   resolveMCPTools,
+  type McpToolAccessCheck,
+  type McpToolAccessSubjectTool,
   type MCPExecutionContext,
   type MCPRegistry
 } from "@ai-orchestrator/mcp-sdk";
@@ -14,7 +17,13 @@ import type {
   ConnectorDocument,
   LLMProviderConfig,
   MCPServerConfig,
+  McpHiddenTool,
+  McpToolAnnotations,
   McpToolAttribution,
+  McpToolClassificationOverride,
+  McpToolPolicyRule,
+  McpToolPolicySubject,
+  McpToolPolicyTrace,
   NodeExecutionResult,
   SecretReference,
   Workflow,
@@ -91,6 +100,12 @@ export interface WorkflowExecutionDependencies {
    * blocked (for example by an unaccepted breaking tool schema change).
    */
   resolveRegisteredMcpServer?: (registryServerId: string) => MCPServerConfig | Promise<MCPServerConfig>;
+  /**
+   * Phase 10.2 — MCP tool policy rules and admin read-only overrides. Loaded
+   * when an agent or MCP Tool node starts. Without it only the workflow's
+   * "no write tools" setting is enforced.
+   */
+  loadMcpToolPolicy?: () => McpToolPolicySnapshot | Promise<McpToolPolicySnapshot>;
   persistPausedExecution?: (input: {
     executionId: string;
     workflowId: string;
@@ -146,6 +161,11 @@ export interface WorkflowExecutionDependencies {
   }) => Promise<void>;
 }
 
+export interface McpToolPolicySnapshot {
+  rules: McpToolPolicyRule[];
+  classifications: McpToolClassificationOverride[];
+}
+
 export interface AgentSessionArtifactRecord {
   namespace: string;
   sessionId: string;
@@ -186,6 +206,11 @@ export interface ExecuteWorkflowRequest {
   customData?: Record<string, unknown>;
   triggerType?: string;
   triggeredBy?: string;
+  /**
+   * Phase 10.2 — whose role the MCP tool policy is evaluated with. Absent →
+   * the lowest role, `viewer`. A resumed run keeps the subject it paused with.
+   */
+  toolPolicySubject?: McpToolPolicySubject;
   callStack?: string[];
   resumeState?: WorkflowExecutionState;
   approvalDecision?: {
@@ -215,6 +240,8 @@ interface NodeRuntimeContext {
   nodeById: Map<string, WorkflowNode>;
   attachmentsBySource: Map<string, Map<AgentAttachmentHandle, string[]>>;
   callStack: string[];
+  /** Phase 10.2 — subject the MCP tool policy is evaluated with for this run. */
+  toolPolicySubject?: McpToolPolicySubject;
   recordAttachmentUsage?: (usage: {
     attachedNodeId: string;
     usedByNodeId: string;
@@ -512,6 +539,108 @@ function buildMcpToolAttribution(
     };
   }
   return out;
+}
+
+const FALLBACK_POLICY_SUBJECT: McpToolPolicySubject = {
+  role: "viewer",
+  source: "fallback",
+  fallbackReason: "no user or workflow owner was supplied for this run"
+};
+
+interface RunToolPolicy {
+  trace: McpToolPolicyTrace;
+  accessCheck: McpToolAccessCheck;
+  evaluate: (tool: McpToolAccessSubjectTool) => ReturnType<typeof evaluateMcpToolAccess>;
+}
+
+/**
+ * Phase 10.2 — the tool policy for one agent or MCP Tool node. Returns
+ * undefined when nothing can be enforced: no policy store and the workflow
+ * allows write tools.
+ */
+async function buildRunToolPolicy(
+  context: Pick<NodeRuntimeContext, "workflow" | "toolPolicySubject">,
+  dependencies: Pick<WorkflowExecutionDependencies, "loadMcpToolPolicy">
+): Promise<RunToolPolicy | undefined> {
+  const noWriteTools = context.workflow.settings?.noWriteTools === true;
+  if (!dependencies.loadMcpToolPolicy && !noWriteTools) {
+    return undefined;
+  }
+  const snapshot = dependencies.loadMcpToolPolicy
+    ? await dependencies.loadMcpToolPolicy()
+    : { rules: [], classifications: [] };
+  const subject = context.toolPolicySubject ?? FALLBACK_POLICY_SUBJECT;
+  const projectId = context.workflow.projectId;
+  const overrides = new Map<string, boolean>();
+  for (const entry of snapshot.classifications) {
+    overrides.set(`${entry.registryServerId}::${entry.toolName}`, entry.readOnly);
+  }
+  const trace: McpToolPolicyTrace = {
+    subject,
+    ...(projectId ? { projectId } : {}),
+    noWriteTools,
+    hidden: []
+  };
+  const evaluate = (tool: McpToolAccessSubjectTool) =>
+    evaluateMcpToolAccess({
+      rules: snapshot.rules,
+      projectId: projectId ?? null,
+      role: subject.role,
+      adapterId: tool.adapterId,
+      registryServerId: tool.registryServerId,
+      toolName: tool.toolName,
+      annotations: tool.annotations,
+      // Inline servers have no registry entry, so only annotations classify them.
+      manualReadOnly: tool.registryServerId ? overrides.get(`${tool.registryServerId}::${tool.toolName}`) : undefined,
+      noWriteTools
+    });
+  const accessCheck: McpToolAccessCheck = (tool) => {
+    const decision = evaluate(tool);
+    if (decision.allowed) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      message: decision.message ?? `MCP tool '${tool.toolName}' is blocked.`,
+      hidden: {
+        tool: tool.toolName,
+        server: tool.adapterId,
+        ...(tool.registryServerId ? { registryServerId: tool.registryServerId } : {}),
+        reason: decision.reason ?? "policy",
+        ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+        ...(decision.ruleName ? { ruleName: decision.ruleName } : {})
+      }
+    };
+  };
+  return { trace, accessCheck, evaluate };
+}
+
+const MCP_TOOL_BLOCKED_REMEDIATION =
+  "An MCP tool policy or this workflow's \"No write tools\" setting blocks this tool. An admin can review the rules on the MCP servers page (Policies), or pick a different tool.";
+
+function mcpToolBlockedError(message: string, hidden: McpHiddenTool): WorkflowError {
+  return new WorkflowError(message, ErrorCategory.NODE_CONFIG, false, { mcpToolPolicy: hidden }, MCP_TOOL_BLOCKED_REMEDIATION);
+}
+
+/** Policy blocks are decisions, not failures: retrying cannot change them. */
+function isMcpToolPolicyBlock(error: unknown): boolean {
+  return error instanceof WorkflowError && Boolean(error.metadata?.mcpToolPolicy);
+}
+
+/** Annotations for one tool, read with tools/list; only needed when a direct node must classify it. */
+async function discoverToolAnnotations(
+  serverConfig: MCPServerConfig,
+  toolName: string,
+  registry: MCPRegistry,
+  mcpContext: MCPExecutionContext
+): Promise<McpToolAnnotations | undefined> {
+  try {
+    const tools = await registry.get(serverConfig.serverId).discoverTools(serverConfig, mcpContext);
+    return tools.find((tool) => tool.name === toolName)?.annotations;
+  } catch {
+    // Unreadable annotations leave the tool unclassified, which counts as a write tool.
+    return undefined;
+  }
 }
 
 function readRegistryServerId(config: Record<string, unknown>): string | undefined {
@@ -2772,6 +2901,7 @@ async function executeNode(
             input: mappedInput,
             triggerType: "sub_workflow",
             triggeredBy: context.workflow.id,
+            toolPolicySubject: context.toolPolicySubject,
             callStack: [...context.callStack]
           },
           dependencies
@@ -2787,6 +2917,7 @@ async function executeNode(
           input: mappedInput,
           triggerType: "sub_workflow",
           triggeredBy: context.workflow.id,
+          toolPolicySubject: context.toolPolicySubject,
           callStack: [...context.callStack]
         },
         dependencies
@@ -3991,6 +4122,34 @@ async function executeNode(
       dependencies.abortSignal?.addEventListener("abort", releaseDirectMcpSessions.onAbort, { once: true });
       let result: Awaited<ReturnType<typeof invokeDirectMCPTool>>;
       try {
+        // Phase 10.2 — policy first (no server call needed), then the
+        // workflow's "no write tools" switch, which may need the tool's
+        // annotations from tools/list.
+        const toolPolicy = await buildRunToolPolicy(context, dependencies);
+        if (toolPolicy) {
+          const policyTool: McpToolAccessSubjectTool = {
+            adapterId: serverConfig.serverId,
+            ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
+            toolName
+          };
+          let decision = toolPolicy.evaluate(policyTool);
+          if (!decision.allowed && decision.reason === "no_write_tools" && decision.classification.source === "unknown") {
+            const annotations = await discoverToolAnnotations(serverConfig, toolName, dependencies.mcpRegistry, directMcpContext);
+            if (annotations) {
+              decision = toolPolicy.evaluate({ ...policyTool, annotations });
+            }
+          }
+          if (!decision.allowed) {
+            throw mcpToolBlockedError(decision.message ?? `MCP tool '${toolName}' is blocked.`, {
+              tool: toolName,
+              server: serverConfig.serverId,
+              ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
+              reason: decision.reason ?? "policy",
+              ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+              ...(decision.ruleName ? { ruleName: decision.ruleName } : {})
+            });
+          }
+        }
         result = await invokeDirectMCPTool(serverConfig, toolName, args, dependencies.mcpRegistry, directMcpContext);
       } finally {
         dependencies.abortSignal?.removeEventListener("abort", releaseDirectMcpSessions.onAbort);
@@ -4153,7 +4312,16 @@ async function executeNode(
       const releaseMcpSessions = createMcpSessionReleaser(dependencies.mcpRegistry, mcpExecutionContext, node.id);
       dependencies.abortSignal?.addEventListener("abort", releaseMcpSessions.onAbort, { once: true });
       try {
-        const resolvedTools = await resolveMCPTools(serverConfigs, dependencies.mcpRegistry, mcpExecutionContext);
+        // Phase 10.2 — tools denied by policy or by the workflow's "no write
+        // tools" switch are dropped here, before the model sees the tool set.
+        // Workers run through executeNode and apply the same policy to their own tools.
+        const toolPolicy = await buildRunToolPolicy(context, dependencies);
+        const resolvedTools = await resolveMCPTools(
+          serverConfigs,
+          dependencies.mcpRegistry,
+          mcpExecutionContext,
+          toolPolicy ? { accessCheck: toolPolicy.accessCheck } : {}
+        );
 
         for (const attachedToolNode of attachedToolNodes) {
           const attachedConfig = toRecord(attachedToolNode.config);
@@ -4260,6 +4428,7 @@ async function executeNode(
               ...resolvedTools.tools,
               ...workerTools.map(wt => ({ name: wt.name, description: wt.description, inputSchema: wt.inputSchema }))
             ],
+            describeUnavailableTool: (toolName) => resolvedTools.describeBlocked(toolName),
             invokeTool: async (toolName, args) => {
                const matchingWorker = workerTools.find(wt => wt.name === toolName);
                if (matchingWorker) {
@@ -4321,6 +4490,8 @@ async function executeNode(
           // Phase 10.1 — map exposed tool names back to their MCP server so
           // per-tool telemetry can attribute each call in `steps`.
           _mcpTools: buildMcpToolAttribution(resolvedTools.resolved),
+          // Phase 10.2 — whose role the tool policy used and which tools it hid.
+          ...(toolPolicy ? { _toolPolicy: { ...toolPolicy.trace, hidden: resolvedTools.hidden } } : {}),
           // Phase 7.1 — surface cumulative agent telemetry on the node output.
           _telemetry: {
             providerId: provider.providerId,
@@ -5083,7 +5254,7 @@ async function executeNodeWithRetry(
       const output = await executeNode(node, context, dependencies);
       return { output, attempts: attempt };
     } catch (error) {
-      if (isCancellationError(error) || dependencies.abortSignal?.aborted) {
+      if (isCancellationError(error) || dependencies.abortSignal?.aborted || isMcpToolPolicyBlock(error)) {
         throw error;
       }
       if (error instanceof WorkflowError) {
@@ -5250,6 +5421,7 @@ export async function executeWorkflow(
     };
   }
   callStack.push(workflow.id);
+  const toolPolicySubject = request.resumeState?.toolPolicySubject ?? request.toolPolicySubject;
 
   let nodeOrder =
     request.resumeState?.nodeOrder?.length ? request.resumeState.nodeOrder : validation.orderedNodeIds ?? sortWorkflowNodes(workflow);
@@ -5984,6 +6156,7 @@ export async function executeWorkflow(
                   nodeById: graphIndexes.nodeById,
                   attachmentsBySource: graphIndexes.attachmentsBySource,
                   callStack,
+                  toolPolicySubject,
                   recordAttachmentUsage
                 },
                 dependencies
@@ -6126,7 +6299,8 @@ export async function executeWorkflow(
           skippedByBranch: [...skippedByBranch],
           tryCatchScopes: serializeTryCatchScopes(tryCatchScopes),
           hadContinuedErrors,
-          finalOutput
+          finalOutput,
+          ...(toolPolicySubject ? { toolPolicySubject } : {})
         };
 
         if (dependencies.persistPausedExecution) {
@@ -6172,6 +6346,7 @@ export async function executeWorkflow(
           nodeById: graphIndexes.nodeById,
           attachmentsBySource: graphIndexes.attachmentsBySource,
           callStack,
+          toolPolicySubject,
           recordAttachmentUsage
         },
         dependencies

@@ -883,13 +883,19 @@ export const openApiSpec = {
                   label: { type: "string" },
                   connection: { type: "object" },
                   secretRef: { type: "object", properties: { secretId: { type: "string" } } },
-                  allowedTools: { type: "array", items: { type: "string" } }
+                  allowedTools: { type: "array", items: { type: "string" } },
+                  projectId: { type: "string", description: "Project whose tool policy marks the tools (default: default)" }
                 }
               }
             }
           }
         },
-        responses: { "200": { description: "Discovered tools" } }
+        responses: {
+          "200": {
+            description:
+              "Discovered tools. Each carries `classification` (read-only or write, and its source) and `access` (whether the caller's role may use it in the project, and the blocking rule). Blocked tools are marked, not hidden."
+          }
+        }
       }
     },
     "/api/mcp/test-tool": {
@@ -987,9 +993,12 @@ export const openApiSpec = {
     "/api/mcp/servers/{id}/tools": {
       get: {
         tags: ["MCP"],
-        summary: "Tools from the server's current schema snapshot",
-        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Tool list" } }
+        summary: "Tools from the server's current schema snapshot, with read-only classification and the caller's policy access",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "projectId", in: "query", schema: { type: "string" }, description: "Project to evaluate the policy in; defaults to the server's project, else default" }
+        ],
+        responses: { "200": { description: "Tool list; each tool has classification, manualReadOnly and access" } }
       }
     },
     "/api/mcp/servers/{id}/telemetry": {
@@ -1045,6 +1054,100 @@ export const openApiSpec = {
         summary: "Accept the pending breaking tool schema change (admin); unblocks runs",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Accepted" }, "409": { description: "No pending breaking change" } }
+      }
+    },
+    "/api/mcp/servers/{id}/tools/{toolName}/classification": {
+      put: {
+        tags: ["MCP"],
+        summary: "Override a tool's read-only classification (admin). readOnly null clears the override so annotations decide again.",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "toolName", in: "path", required: true, schema: { type: "string" } }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { type: "object", required: ["readOnly"], properties: { readOnly: { type: "boolean", nullable: true } } }
+            }
+          }
+        },
+        responses: { "200": { description: "Override and effective classification" }, "404": { description: "MCP server not found" } }
+      }
+    },
+    "/api/mcp/policies": {
+      get: {
+        tags: ["MCP"],
+        summary: "List MCP tool policy rules in evaluation order (builder)",
+        responses: { "200": { description: "Rules and the roles a rule can target" } }
+      },
+      post: {
+        tags: ["MCP"],
+        summary: "Create a tool policy rule (admin). Deny wins; a strictly narrower allow carves an exception out of a deny.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["effect"],
+                properties: {
+                  name: { type: "string", nullable: true },
+                  description: { type: "string", nullable: true },
+                  effect: { type: "string", enum: ["allow", "deny"] },
+                  projectId: { type: "string", nullable: true, description: "null = every project" },
+                  roles: { type: "array", items: { type: "string", enum: ["admin", "builder", "operator", "viewer"] }, description: "empty = every role" },
+                  serverId: { type: "string", nullable: true, description: "Registry server id, or an adapter id for inline servers; null = any server" },
+                  toolPattern: { type: "string", default: "*", description: "Tool name, or a glob where * matches any characters" },
+                  enabled: { type: "boolean", default: true }
+                }
+              }
+            }
+          }
+        },
+        responses: { "201": { description: "Rule created" }, "400": { description: "Invalid rule, project or server" } }
+      }
+    },
+    "/api/mcp/policies/{id}": {
+      put: {
+        tags: ["MCP"],
+        summary: "Update a tool policy rule (admin); any field from the create payload",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Updated rule" }, "404": { description: "Not found" } }
+      },
+      delete: {
+        tags: ["MCP"],
+        summary: "Delete a tool policy rule (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Deleted" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/policies/evaluate": {
+      post: {
+        tags: ["MCP"],
+        summary: "Dry-run the tool policy for a role, project, server and tool (builder)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["role", "serverId", "toolName"],
+                properties: {
+                  projectId: { type: "string", nullable: true },
+                  role: { type: "string", enum: ["admin", "builder", "operator", "viewer"] },
+                  serverId: { type: "string", description: "Registry server id or adapter id" },
+                  toolName: { type: "string" },
+                  noWriteTools: { type: "boolean", description: "Also apply a workflow's No write tools setting" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Decision, deciding and matching rules, set-aside denies and the tool's classification" },
+          "404": { description: "Unknown server or adapter" }
+        }
       }
     },
 

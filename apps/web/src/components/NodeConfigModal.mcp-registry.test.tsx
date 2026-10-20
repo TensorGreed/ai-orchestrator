@@ -138,6 +138,45 @@ describe("MCP Tool node registry picker", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).not.toHaveAttribute("data-dirty");
   });
 
+  it("notes when the selected tool is blocked for the current user", async () => {
+    vi.mocked(api.fetchMcpServerTools).mockResolvedValue({
+      serverId: "mcp_gh",
+      snapshotId: "snap_1",
+      probedAt: registered.lastProbeAt,
+      policy: { role: "viewer", projectId: "proj_a" },
+      tools: [
+        {
+          name: "create_issue",
+          inputSchema: { type: "object" },
+          classification: { readOnly: false, source: "unknown" },
+          manualReadOnly: null,
+          access: { allowed: false, reason: "policy", ruleId: "r1", ruleName: "Viewers: no GitHub writes", message: "blocked" }
+        },
+        {
+          name: "search_issues",
+          inputSchema: { type: "object" },
+          classification: { readOnly: true, source: "annotation" },
+          manualReadOnly: null,
+          access: { allowed: true }
+        }
+      ]
+    });
+    const props = makeProps(makeToolNode({ registryServerId: "mcp_gh", serverId: "stdio_mcp", toolName: "create_issue" }));
+    render(<NodeInspector {...props} workflowContext={{ ...props.workflowContext, projectId: "proj_a" }} />);
+
+    const note = await screen.findByTestId("mcp-policy-blocked");
+    expect(api.fetchMcpServerTools).toHaveBeenCalledWith("mcp_gh", "proj_a");
+    expect(note).toHaveTextContent("Blocked for you by MCP tool policy");
+    expect(note).toHaveTextContent("create_issue: blocked by Viewers: no GitHub writes");
+    expect(note).not.toHaveTextContent("search_issues");
+  });
+
+  it("shows no policy note when the selected tool is allowed", async () => {
+    render(<NodeInspector {...makeProps(makeToolNode({ registryServerId: "mcp_gh", serverId: "stdio_mcp", toolName: "search_issues" }))} />);
+    await screen.findByText(/Found 1 tools/);
+    expect(screen.queryByTestId("mcp-policy-blocked")).not.toBeInTheDocument();
+  });
+
   it("flags a reference to a server that was deleted", async () => {
     render(<NodeInspector {...makeProps(makeToolNode({ registryServerId: "mcp_gone", serverId: "stdio_mcp", toolName: "__all__" }))} />);
 

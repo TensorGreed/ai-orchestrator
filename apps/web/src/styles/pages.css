@@ -3223,6 +3223,194 @@ button.tag-chip:hover {
   font-weight: 600;
 }
 
+/* Wide tables scroll inside their section, never the page. */
+.mcp-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* ---------------------------------------------------------------------------
+   Phase 10.2 — MCP tool policy
+   --------------------------------------------------------------------------- */
+
+.mcp-access {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 130px;
+}
+
+.mcp-class {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.mcp-class.is-read {
+  background: var(--ok-soft);
+}
+
+.mcp-class.is-write {
+  background: var(--warn-soft);
+}
+
+.mcp-class-source {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+
+.mcp-blocked {
+  font-size: var(--fs-xs);
+  color: var(--err);
+}
+
+.mcp-class-select {
+  max-width: 100%;
+  font-size: var(--fs-xs);
+}
+
+.mcp-policies {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mcp-policies > .kb-section > .mcp-form {
+  padding: 16px 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+
+.mcp-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.mcp-rule.is-disabled {
+  opacity: 0.7;
+}
+
+.mcp-rule-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.mcp-rule-name {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.mcp-rule-desc {
+  margin: 0;
+}
+
+.mcp-rule-scope {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.mcp-rule-scope dt {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.mcp-rule-scope dd {
+  margin: 2px 0 0;
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.mcp-rule-scope code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.mcp-rule-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mcp-role-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.mcp-role-picker legend {
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 0;
+}
+
+.mcp-evaluator-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: end;
+  gap: 10px;
+}
+
+.mcp-evaluator-form .mcp-check {
+  grid-column: span 3;
+}
+
+.mcp-eval-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+
+.mcp-eval-result.is-blocked {
+  border-color: var(--err);
+}
+
+.mcp-eval-facts {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 880px) {
   .mcp-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3230,5 +3418,20 @@ button.tag-chip:hover {
 
   .mcp-strip-axis span:nth-child(2) {
     display: none;
+  }
+
+  .mcp-rule-scope,
+  .mcp-evaluator-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mcp-evaluator-form .mcp-check {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 520px) {
+  .mcp-evaluator-form {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

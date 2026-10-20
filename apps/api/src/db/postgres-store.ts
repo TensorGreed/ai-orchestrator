@@ -207,7 +207,8 @@ export class PostgresStore {
     return parsed;
   }
 
-  async upsertWorkflow(workflow: Workflow): Promise<Workflow> {
+  /** `options.createdBy` (a user id) is stored only when the row is first inserted (Phase 10.2). */
+  async upsertWorkflow(workflow: Workflow, options: { createdBy?: string | null } = {}): Promise<Workflow> {
     const now = new Date().toISOString();
     const existing = await this.getWorkflow(workflow.id);
     const createdAt = existing?.createdAt ?? now;
@@ -221,8 +222,8 @@ export class PostgresStore {
     };
 
     await this.execute(
-      `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          schema_version = EXCLUDED.schema_version,
@@ -242,7 +243,8 @@ export class PostgresStore {
         now,
         JSON.stringify(payload.tags ?? []),
         payload.projectId ?? DEFAULT_PROJECT_ID,
-        payload.folderId ?? null
+        payload.folderId ?? null,
+        options.createdBy ?? null
       ]
     );
     return payload;

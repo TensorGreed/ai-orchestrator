@@ -4,7 +4,7 @@ import { beforeEach, vi } from "vitest";
 import type { Node } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
 import * as api from "../lib/api";
-import { NodeConfigModal, NodeInspector } from "./NodeConfigModal";
+import { NodeConfigModal, NodeInspector, buildNodeTrace } from "./NodeConfigModal";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -269,6 +269,46 @@ describe("NodeInspector", () => {
     await user.click(screen.getByRole("tab", { name: "Trace" }));
     expect(screen.getByTestId("insp-trace-status")).toHaveTextContent("success");
     expect(screen.getByText("Duration").nextElementSibling).toHaveTextContent("120 ms");
+  });
+
+  it("shows the agent's tool policy record on the Trace tab", async () => {
+    const user = userEvent.setup();
+    const executionResult = {
+      workflowId: "wf-1",
+      status: "success" as const,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:00:01.000Z",
+      nodeResults: [
+        {
+          nodeId: "node-1",
+          status: "success" as const,
+          startedAt: "2026-01-01T00:00:00.000Z",
+          durationMs: 120,
+          output: {
+            answer: "hi",
+            _toolPolicy: {
+              subject: { role: "viewer", source: "fallback", fallbackReason: "the workflow has no recorded owner" },
+              projectId: "default",
+              noWriteTools: true,
+              hidden: [
+                { tool: "calculator", server: "mock-mcp", reason: "policy", ruleId: "r1", ruleName: "Viewers: no calculator" },
+                { tool: "create_issue", server: "mcp_gh", reason: "no_write_tools" }
+              ]
+            }
+          }
+        }
+      ]
+    };
+    const trace = buildNodeTrace("node-1", executionResult);
+    expect(trace?.toolPolicy?.subject.role).toBe("viewer");
+    render(<NodeInspector {...makeProps({ trace })} />);
+
+    await user.click(screen.getByRole("tab", { name: "Trace" }));
+    const block = screen.getByTestId("insp-trace-policy");
+    expect(block).toHaveTextContent("Evaluated as viewer — workflow owner unknown");
+    expect(block).toHaveTextContent("calculator hidden by policy Viewers: no calculator");
+    expect(block).toHaveTextContent("create_issue hidden: write tool and this workflow allows no write tools");
+    expect(block).toHaveTextContent("This workflow allows no write tools.");
   });
 
   it("shows the Slots section for agent nodes with attached labels and attach actions", async () => {

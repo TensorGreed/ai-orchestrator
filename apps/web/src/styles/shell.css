@@ -616,6 +616,31 @@ body {
   background: var(--err-soft);
 }
 
+.hud-dropdown-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-check-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.hud-dropdown-check[aria-checked="true"] .hud-check-box {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .hud-save.is-dirty {
   border-color: var(--warn);
 }

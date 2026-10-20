@@ -2,8 +2,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
-import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
-import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
+import type {
+  ChatMessage,
+  Folder,
+  McpPolicyRole,
+  McpToolAnnotations,
+  McpToolClassificationOverride,
+  McpToolPolicyRule,
+  Project,
+  Workflow,
+  WorkflowListItem
+} from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, MCP_POLICY_ROLES } from "@ai-orchestrator/shared";
 
 type BindParams = unknown[];
 
@@ -439,7 +449,7 @@ export interface McpToolSnapshotRecord {
   id: string;
   serverId: string;
   hash: string;
-  tools: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
+  tools: Array<{ name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: McpToolAnnotations }>;
   toolCount: number;
   previousSnapshotId: string | null;
   changes: Array<{ tool: string; kind: string; path?: string; breaking: boolean; detail: string }>;
@@ -487,6 +497,60 @@ interface McpToolCallRow {
   turn_output_tokens: number | null;
   estimated_cost_usd: number | null;
   created_at: string;
+}
+
+// Phase 10.2 — MCP tool policy rows.
+interface McpToolPolicyRow {
+  id: string;
+  name: string | null;
+  description: string | null;
+  effect: string;
+  project_id: string | null;
+  roles_json: string | null;
+  server_id: string | null;
+  tool_pattern: string;
+  enabled: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapMcpToolPolicy(row: McpToolPolicyRow): McpToolPolicyRule {
+  const roles = row.roles_json ? safeJsonParse(toString(row.roles_json)) : [];
+  return {
+    id: toString(row.id),
+    name: row.name ? toString(row.name) : null,
+    description: row.description ? toString(row.description) : null,
+    effect: toString(row.effect) === "allow" ? "allow" : "deny",
+    projectId: row.project_id ? toString(row.project_id) : null,
+    roles: Array.isArray(roles)
+      ? roles.filter((role): role is McpPolicyRole => MCP_POLICY_ROLES.includes(role as McpPolicyRole))
+      : [],
+    serverId: row.server_id ? toString(row.server_id) : null,
+    toolPattern: toString(row.tool_pattern) || "*",
+    enabled: toNumber(row.enabled) === 1,
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
+interface McpToolClassificationRow {
+  server_id: string;
+  tool_name: string;
+  read_only: number;
+  set_by: string | null;
+  set_at: string;
+}
+
+function mapMcpToolClassification(row: McpToolClassificationRow): McpToolClassificationOverride {
+  return {
+    registryServerId: toString(row.server_id),
+    toolName: toString(row.tool_name),
+    readOnly: toNumber(row.read_only) === 1,
+    setBy: row.set_by ? toString(row.set_by) : null,
+    setAt: toString(row.set_at)
+  };
 }
 
 function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
@@ -1539,6 +1603,34 @@ export class SqliteStore {
     // Phase 10.1 — per-tool-call telemetry extracted from execution traces.
     this.ensureMcpToolCallsTable();
 
+    // Phase 10.2 — MCP tool policy rules and admin read-only overrides.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_tool_policies (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        description TEXT,
+        effect TEXT NOT NULL,
+        project_id TEXT,
+        roles_json TEXT NOT NULL DEFAULT '[]',
+        server_id TEXT,
+        tool_pattern TEXT NOT NULL DEFAULT '*',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mcp_tool_classifications (
+        server_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        read_only INTEGER NOT NULL,
+        set_by TEXT,
+        set_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, tool_name)
+      );
+    `);
+    this.ensureWorkflowCreatedByColumn();
+
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
     this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
     this.ensureColumn("workflows", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
@@ -1582,6 +1674,25 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_adapter_tool ON mcp_tool_calls(adapter_id, tool_name, started_at);
       CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_execution ON mcp_tool_calls(execution_id);
     `);
+  }
+
+  /**
+   * Phase 10.2 — workflows.created_by (user id) decides whose role counts for
+   * unattended runs. Added once; existing rows take the author of their
+   * earliest version snapshot, when one was recorded, and stay NULL otherwise.
+   */
+  private ensureWorkflowCreatedByColumn(): void {
+    if (this.columnExists("workflows", "created_by")) return;
+    this.exec(`ALTER TABLE workflows ADD COLUMN created_by TEXT`);
+    this.exec(
+      `UPDATE workflows SET created_by = (
+         SELECT wv.created_by FROM workflow_versions wv
+         WHERE wv.workflow_id = workflows.id AND wv.created_by IS NOT NULL
+         ORDER BY wv.created_at ASC, wv.version ASC
+         LIMIT 1
+       )
+       WHERE created_by IS NULL`
+    );
   }
 
   private columnExists(table: string, column: string): boolean {
@@ -1706,7 +1817,11 @@ export class SqliteStore {
     return parsed;
   }
 
-  upsertWorkflow(workflow: Workflow): Workflow {
+  /**
+   * `options.createdBy` (a user id) is stored only when the row is first
+   * inserted; later saves never change who created a workflow.
+   */
+  upsertWorkflow(workflow: Workflow, options: { createdBy?: string | null } = {}): Workflow {
     const now = new Date().toISOString();
     const existing = this.getWorkflow(workflow.id);
     const createdAt = existing?.createdAt ?? now;
@@ -1722,8 +1837,8 @@ export class SqliteStore {
     };
 
     this.exec(
-      `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO workflows (id, name, schema_version, workflow_version, workflow_json, created_at, updated_at, tags_json, project_id, folder_id, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          schema_version = excluded.schema_version,
@@ -1743,12 +1858,19 @@ export class SqliteStore {
         updatedAt,
         JSON.stringify(payload.tags ?? []),
         payload.projectId ?? DEFAULT_PROJECT_ID,
-        payload.folderId ?? null
+        payload.folderId ?? null,
+        options.createdBy ?? null
       ]
     );
 
     this.persist();
     return payload;
+  }
+
+  /** Phase 10.2 — user id of the workflow's creator, or null when unknown. */
+  getWorkflowCreatedBy(id: string): string | null {
+    const row = this.queryOne<{ created_by: string | null }>(`SELECT created_by FROM workflows WHERE id = ?`, [id]);
+    return row?.created_by ? toString(row.created_by) : null;
   }
 
   deleteWorkflow(id: string): boolean {
@@ -7168,6 +7290,7 @@ export class SqliteStore {
       this.exec(`DELETE FROM mcp_server_probes WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_snapshots WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_tool_calls WHERE registry_server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_servers WHERE id = ?`, [id]);
     })();
     return true;
@@ -7363,6 +7486,120 @@ export class SqliteStore {
           [filter.registryServerId, filter.since]
         );
     return rows.map(mapMcpToolCall);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 10.2 — MCP tool policy
+  // ---------------------------------------------------------------------------
+
+  /** Rules in evaluation order: oldest first. */
+  listMcpToolPolicies(): McpToolPolicyRule[] {
+    return this.queryAll<McpToolPolicyRow>(`SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, rowid ASC`).map(
+      mapMcpToolPolicy
+    );
+  }
+
+  getMcpToolPolicy(id: string): McpToolPolicyRule | null {
+    const row = this.queryOne<McpToolPolicyRow>(`SELECT * FROM mcp_tool_policies WHERE id = ?`, [id]);
+    return row ? mapMcpToolPolicy(row) : null;
+  }
+
+  createMcpToolPolicy(input: Omit<McpToolPolicyRule, "createdAt" | "updatedAt">): McpToolPolicyRule {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO mcp_tool_policies (
+         id, name, description, effect, project_id, roles_json, server_id, tool_pattern, enabled,
+         created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.name,
+        input.description,
+        input.effect,
+        input.projectId,
+        JSON.stringify(input.roles),
+        input.serverId,
+        input.toolPattern,
+        input.enabled ? 1 : 0,
+        input.createdBy ?? null,
+        now,
+        now
+      ]
+    );
+    return this.getMcpToolPolicy(input.id)!;
+  }
+
+  updateMcpToolPolicy(
+    id: string,
+    patch: Partial<Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "enabled">>
+  ): McpToolPolicyRule | null {
+    const fields: string[] = [];
+    const params: Array<string | number | null> = [];
+    if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
+    if (patch.description !== undefined) { fields.push("description = ?"); params.push(patch.description); }
+    if (patch.effect !== undefined) { fields.push("effect = ?"); params.push(patch.effect); }
+    if (patch.projectId !== undefined) { fields.push("project_id = ?"); params.push(patch.projectId); }
+    if (patch.roles !== undefined) { fields.push("roles_json = ?"); params.push(JSON.stringify(patch.roles)); }
+    if (patch.serverId !== undefined) { fields.push("server_id = ?"); params.push(patch.serverId); }
+    if (patch.toolPattern !== undefined) { fields.push("tool_pattern = ?"); params.push(patch.toolPattern); }
+    if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
+    if (fields.length > 0) {
+      fields.push("updated_at = ?");
+      params.push(new Date().toISOString());
+      params.push(id);
+      this.exec(`UPDATE mcp_tool_policies SET ${fields.join(", ")} WHERE id = ?`, params);
+    }
+    return this.getMcpToolPolicy(id);
+  }
+
+  deleteMcpToolPolicy(id: string): boolean {
+    if (!this.getMcpToolPolicy(id)) return false;
+    this.exec(`DELETE FROM mcp_tool_policies WHERE id = ?`, [id]);
+    return true;
+  }
+
+  /** Admin read-only overrides; all of them, or one registry server's. */
+  listMcpToolClassifications(registryServerId?: string): McpToolClassificationOverride[] {
+    const rows = registryServerId
+      ? this.queryAll<McpToolClassificationRow>(
+          `SELECT * FROM mcp_tool_classifications WHERE server_id = ? ORDER BY tool_name`,
+          [registryServerId]
+        )
+      : this.queryAll<McpToolClassificationRow>(`SELECT * FROM mcp_tool_classifications ORDER BY server_id, tool_name`);
+    return rows.map(mapMcpToolClassification);
+  }
+
+  /** `readOnly: null` removes the override, so annotations decide again. */
+  setMcpToolClassification(input: {
+    registryServerId: string;
+    toolName: string;
+    readOnly: boolean | null;
+    setBy: string | null;
+  }): McpToolClassificationOverride | null {
+    if (input.readOnly === null) {
+      this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ? AND tool_name = ?`, [
+        input.registryServerId,
+        input.toolName
+      ]);
+      return null;
+    }
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO mcp_tool_classifications (server_id, tool_name, read_only, set_by, set_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(server_id, tool_name) DO UPDATE SET
+         read_only = excluded.read_only,
+         set_by = excluded.set_by,
+         set_at = excluded.set_at`,
+      [input.registryServerId, input.toolName, input.readOnly ? 1 : 0, input.setBy, now]
+    );
+    return {
+      registryServerId: input.registryServerId,
+      toolName: input.toolName,
+      readOnly: input.readOnly,
+      setBy: input.setBy,
+      setAt: now
+    };
   }
 
   /**

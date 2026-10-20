@@ -432,6 +432,57 @@
   color: var(--fg-muted);
 }
 
+/* Phase 10.2 — MCP tool policy in the Trace tab and the MCP Tool parameters. */
+.insp-trace-policy,
+.cfg-policy-note {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--bg-input);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.cfg-policy-note {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+.insp-trace-policy strong,
+.cfg-policy-note strong {
+  font: 600 var(--fs-xs) / 1.2 var(--font-body);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.cfg-policy-note strong {
+  color: var(--err);
+}
+.insp-trace-policy p {
+  margin: 0;
+}
+.insp-trace-policy ul,
+.cfg-policy-note ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+.insp-trace-policy li {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.cfg-policy-note code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.cfg-policy-note > span {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
 /* ---- Footer -------------------------------------------------------------- */
 .insp-foot {
   display: flex;

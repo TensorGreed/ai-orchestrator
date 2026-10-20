@@ -1063,7 +1063,9 @@ ${effectiveSystemPrompt}`;
                   .filter((name) => !disabledTools.has(name))
                   .slice(0, 20)
                   .join(", ");
-                const errorMsg = `Tool '${call.name}' does not exist. Available tools: ${availableToolNames || "none"}`;
+                const errorMsg =
+                  tools.describeUnavailableTool?.(call.name) ??
+                  `Tool '${call.name}' does not exist. Available tools: ${availableToolNames || "none"}`;
                 toolResults.push({
                   toolCallId: call.id,
                   toolName: call.name,

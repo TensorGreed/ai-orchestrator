@@ -7,6 +7,8 @@ export * from "./types";
 export * from "./registry";
 export * from "./tool-resolution";
 export * from "./schema-diff";
+export * from "./tool-policy";
+export * from "./tool-annotations";
 export * from "./adapters/mock-mcp";
 export * from "./adapters/http-mcp";
 export * from "./adapters/stdio-mcp";
