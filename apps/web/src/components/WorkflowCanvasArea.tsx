@@ -40,6 +40,8 @@ import { NodePalette, type PaletteDefinition, type PaletteSection } from "./Node
 import { RunTape } from "./RunTape";
 import { StageStrip, type StageStripNode } from "./StageStrip";
 import type { PaletteCategoryIconKey } from "./node-icons";
+import { ImportReportPanel, type ImportReportPanelProps } from "./ImportReportPanel";
+import type { ImportChecklistNode } from "../lib/external-import";
 
 type DefinitionNode = PaletteDefinition;
 
@@ -214,7 +216,12 @@ interface WorkflowCanvasAreaProps {
   onSessionIdChange: (value: string) => void;
   /** Called right before Tidy rewrites node positions (e.g. to push an undo snapshot). */
   onBeforeTidy?: () => void;
+  /** Post-import checklist; shown on the canvas while set. */
+  importPanel?: ImportPanelBinding | null;
 }
+
+/** Everything the import checklist needs from the app; the canvas adds focus and Tidy. */
+export type ImportPanelBinding = Omit<ImportReportPanelProps, "nodes" | "onFocusNode" | "onTidy">;
 
 function stringifyPretty(value: unknown) {
   const MAX_PREVIEW_CHARS = 80_000;
@@ -274,8 +281,10 @@ export function WorkflowCanvasArea({
   onToggleLogsPanel,
   executionResult,
   statusColors,
-  onBeforeTidy
+  onBeforeTidy,
+  importPanel
 }: WorkflowCanvasAreaProps) {
+  const [fileDragActive, setFileDragActive] = useState(false);
   const [expandedNodeLogIds, setExpandedNodeLogIds] = useState<string[]>([]);
   const [panelTab, setPanelTab] = useState<PanelTab>(logsTab === "logs" ? "tape" : "logs");
   const [showKey, setShowKey] = useState(false);
@@ -509,6 +518,11 @@ export function WorkflowCanvasArea({
     [nodes, onNodesChange, reactFlowInstance]
   );
 
+  const importPanelNodes = useMemo<ImportChecklistNode[]>(
+    () => nodes.map((node) => ({ id: node.id, type: node.data.nodeType, label: node.data.label, config: node.data.config })),
+    [nodes]
+  );
+
   const paletteTitle = nodeDrawerContext?.title ?? "Add a node";
   const paletteSubtitle = nodeDrawerContext?.description ?? "Search or browse by category. Drag onto the canvas or press Enter.";
 
@@ -524,7 +538,34 @@ export function WorkflowCanvasArea({
     <div className="editor-layout">
       <section className={isLogsPanelCollapsed ? "canvas-and-logs logs-collapsed" : "canvas-and-logs"} style={canvasAndLogsStyle}>
         <div className="canvas-pane">
-          <div className="canvas-stage" ref={flowWrapperRef} onDrop={onDrop} onDragOver={onDragOver} onDoubleClick={onStageDoubleClick}>
+          <div
+            className="canvas-stage"
+            ref={flowWrapperRef}
+            onDrop={(event) => {
+              setFileDragActive(false);
+              onDrop(event);
+            }}
+            onDragOver={(event) => {
+              if (!fileDragActive && Array.from(event.dataTransfer.types).includes("Files")) setFileDragActive(true);
+              onDragOver(event);
+            }}
+            onDragLeave={(event) => {
+              const next = event.relatedTarget as globalThis.Node | null;
+              if (!next || !event.currentTarget.contains(next)) setFileDragActive(false);
+            }}
+            onDoubleClick={onStageDoubleClick}
+          >
+            {fileDragActive && (
+              <div className="canvas-file-drop" aria-hidden="true">
+                <div>
+                  <strong>Drop to import</strong>
+                  <span>L2M exports open directly. Exports from other builders get a conversion preview first.</span>
+                </div>
+              </div>
+            )}
+            {importPanel && (
+              <ImportReportPanel {...importPanel} nodes={importPanelNodes} onFocusNode={selectNodeFromTape} onTidy={applyTidy} />
+            )}
             {showNodeDrawer && (
               <div className="node-palette-overlay" onClick={onCloseNodeDrawer}>
                 <NodePalette

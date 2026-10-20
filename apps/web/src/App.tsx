@@ -19,6 +19,7 @@ import {
   nodeDefinitions,
   type Folder,
   type Project,
+  type ImportReport,
   type Workflow,
   type WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
@@ -46,7 +47,9 @@ import {
   fetchWorkflow,
   fetchWorkflowVariables,
   fetchWorkflows,
+  importExternalWorkflow,
   importWorkflow,
+  validateStoredWorkflow,
   isMfaChallenge,
   loginUser,
   logoutUser,
@@ -102,7 +105,15 @@ import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
-import { WorkflowCanvasArea } from "./components/WorkflowCanvasArea";
+import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
+import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
+import {
+  forgetImportReport,
+  inspectImportText,
+  recallImportReport,
+  rememberImportReport,
+  replaceSecretRefs
+} from "./lib/external-import";
 import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
 
 interface DefinitionNode {
@@ -1197,6 +1208,9 @@ function StudioApp() {
   const latestDebugExecutionIdRef = useRef<string | null>(null);
   const latestExecutionResultRef = useRef<WorkflowExecutionResult | null>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
+  const [externalImportOpen, setExternalImportOpen] = useState(false);
+  const [externalImportSource, setExternalImportSource] = useState<ExternalImportSource | null>(null);
+  const [importReport, setImportReport] = useState<{ workflowId: string; report: ImportReport } | null>(null);
   const pasteCountRef = useRef(0);
   const didAttemptInitialWipRef = useRef(false);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
@@ -2713,6 +2727,70 @@ function StudioApp() {
     }
   }, [handleApiError, persistWorkflow]);
 
+  // The import checklist follows the workflow it belongs to, including across reloads.
+  useEffect(() => {
+    if (!currentWorkflowExists) {
+      setImportReport(null);
+      return;
+    }
+    setImportReport((current) => {
+      if (current?.workflowId === currentWorkflow.id) return current;
+      const stored = recallImportReport(currentWorkflow.id);
+      return stored ? { workflowId: currentWorkflow.id, report: stored } : null;
+    });
+  }, [currentWorkflow.id, currentWorkflowExists]);
+
+  const handleLinkImportedSecret = useCallback(
+    (placeholderId: string, secretId: string) => {
+      pushHistorySnapshot();
+      setNodes((current) =>
+        current.map((node) => {
+          const config = replaceSecretRefs(node.data.config, placeholderId, secretId);
+          return config === node.data.config ? node : { ...node, data: { ...node.data, config } };
+        })
+      );
+    },
+    [pushHistorySnapshot, setNodes]
+  );
+
+  const handleValidateImported = useCallback(async () => {
+    const saved = await persistWorkflow();
+    return validateStoredWorkflow(saved.id);
+  }, [persistWorkflow]);
+
+  const handleDismissImportReport = useCallback(() => {
+    setImportReport((current) => {
+      if (current) forgetImportReport(current.workflowId);
+      return null;
+    });
+  }, []);
+
+  const importVariableValues = useMemo(() => rowsToWorkflowVariables(workflowVariableRows), [workflowVariableRows]);
+
+  const importPanelBinding = useMemo<ImportPanelBinding | null>(() => {
+    if (!importReport || importReport.workflowId !== currentWorkflow.id) return null;
+    return {
+      report: importReport.report,
+      variables: importVariableValues,
+      secrets: secrets.map((secret) => ({ id: secret.id, name: secret.name, provider: secret.provider })),
+      onLinkSecret: handleLinkImportedSecret,
+      onOpenSecrets: canManageSecrets ? () => setActiveMode("secrets") : undefined,
+      onOpenVariables: () => setActiveMode("variables"),
+      onValidate: handleValidateImported,
+      onDismiss: handleDismissImportReport
+    };
+  }, [
+    canManageSecrets,
+    currentWorkflow.id,
+    handleDismissImportReport,
+    handleLinkImportedSecret,
+    handleValidateImported,
+    importReport,
+    importVariableValues,
+    secrets,
+    setActiveMode
+  ]);
+
   const handleAddVariableRow = useCallback(() => {
     setWorkflowVariableRows((current) => [
       ...current,
@@ -3366,30 +3444,95 @@ function StudioApp() {
     URL.revokeObjectURL(href);
   }, [buildCurrentWorkflow]);
 
-  const handleImportFile = useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      if (!file) {
-        return;
-      }
-
+  const importNativeText = useCallback(
+    async (content: string) => {
       try {
         setBusy(true);
         setError(null);
-        const content = await file.text();
         const imported = await importWorkflow({ json: content });
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
         setWorkflowList(workflows);
         hydrateWorkflow(imported);
         storeLocalWipWorkflow(imported);
+        setActiveMode("editor");
       } catch (importError) {
         handleApiError(importError, "Failed to import workflow");
       } finally {
         setBusy(false);
-        event.target.value = "";
       }
     },
-    [handleApiError, hydrateWorkflow]
+    [activeProjectId, handleApiError, hydrateWorkflow, setActiveMode, setWorkflowList]
+  );
+
+  const openExternalImport = useCallback((source: ExternalImportSource | null = null) => {
+    setExternalImportSource(source);
+    setExternalImportOpen(true);
+  }, []);
+
+  /** Routes a JSON file: L2M exports import directly, other builders' exports get a preview first. */
+  const importFromFile = useCallback(
+    async (file: File) => {
+      let content: string;
+      try {
+        content = await file.text();
+      } catch (readError) {
+        setError(`Could not read ${file.name}: ${readError instanceof Error ? readError.message : String(readError)}`);
+        return;
+      }
+      if (!canManageWorkflows) {
+        setError("You do not have permission to import workflows.");
+        return;
+      }
+      if (inspectImportText(content).format === "external") {
+        openExternalImport({ text: content, fileName: file.name });
+        return;
+      }
+      await importNativeText(content);
+    },
+    [canManageWorkflows, importNativeText, openExternalImport]
+  );
+
+  const handleImportFile = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (file) await importFromFile(file);
+    },
+    [importFromFile]
+  );
+
+  const previewExternalImport = useCallback(
+    (sourceText: string) => importExternalWorkflow({ sourceText, dryRun: true, projectId: activeProjectId || undefined }),
+    [activeProjectId]
+  );
+
+  const commitExternalImport = useCallback(
+    async (sourceText: string, name: string) => {
+      const { workflow, report } = await importExternalWorkflow({ sourceText, name, projectId: activeProjectId || undefined });
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
+      setWorkflowList(workflows);
+      hydrateWorkflow(workflow);
+      storeLocalWipWorkflow(workflow);
+      rememberImportReport(workflow.id, report);
+      setImportReport({ workflowId: workflow.id, report });
+      setExternalImportOpen(false);
+      setExternalImportSource(null);
+      setActiveMode("editor");
+    },
+    [activeProjectId, hydrateWorkflow, setActiveMode, setWorkflowList]
+  );
+
+  const closeExternalImport = useCallback(() => {
+    setExternalImportOpen(false);
+    setExternalImportSource(null);
+  }, []);
+
+  const handleNativeFileInImportDialog = useCallback(
+    (source: ExternalImportSource) => {
+      closeExternalImport();
+      void importNativeText(source.text);
+    },
+    [closeExternalImport, importNativeText]
   );
 
   const handleCreateWorkflow = useCallback(async () => {
@@ -4104,6 +4247,15 @@ function StudioApp() {
     (event: React.DragEvent) => {
       event.preventDefault();
       const nodeType = event.dataTransfer.getData("application/reactflow");
+      const droppedFile = event.dataTransfer.files?.[0];
+      if (!nodeType && droppedFile) {
+        if (droppedFile.name.toLowerCase().endsWith(".json") || droppedFile.type === "application/json") {
+          void importFromFile(droppedFile);
+        } else {
+          setError("Drop a workflow exported as a .json file to import it.");
+        }
+        return;
+      }
       if (!nodeType || !reactFlowInstance || !flowWrapperRef.current) {
         return;
       }
@@ -4121,7 +4273,7 @@ function StudioApp() {
 
       createNodeFromDefinition(definition, position);
     },
-    [createNodeFromDefinition, definitions, reactFlowInstance]
+    [createNodeFromDefinition, definitions, importFromFile, reactFlowInstance]
   );
 
   const handleCreateSecret = useCallback(async () => {
@@ -4399,6 +4551,7 @@ function StudioApp() {
           onExport={handleExport}
           onImportClick={() => importFileRef.current?.click()}
           onImportFileChange={handleImportFile}
+          onImportExternal={canManageWorkflows ? () => openExternalImport() : undefined}
           onRefreshSecrets={() => {
             void refreshSecrets();
           }}
@@ -4461,6 +4614,11 @@ function StudioApp() {
                   <button className="pg-btn" onClick={() => void loadData()} disabled={busy}>
                     Refresh
                   </button>
+                  {canManageWorkflows && (
+                    <button className="pg-btn" onClick={() => openExternalImport()} disabled={busy} title="Bring a workflow exported from another builder">
+                      Import…
+                    </button>
+                  )}
                   <button
                     className="pg-btn primary"
                     onClick={() => void handleCreateWorkflow()}
@@ -4756,6 +4914,7 @@ function StudioApp() {
               sessionId={sessionId}
               onSessionIdChange={setSessionId}
               onBeforeTidy={pushHistorySnapshot}
+              importPanel={importPanelBinding}
             />
           )}
 
@@ -5215,6 +5374,16 @@ function StudioApp() {
           )}
         </main>
       </div>
+
+      <ExternalImportDialog
+        open={externalImportOpen}
+        initialSource={externalImportSource}
+        projectName={activeProject?.name}
+        onPreview={previewExternalImport}
+        onImport={commitExternalImport}
+        onNativeFile={handleNativeFileInImportDialog}
+        onClose={closeExternalImport}
+      />
 
       {shareWorkflowTarget && (
         <WorkflowShareModal

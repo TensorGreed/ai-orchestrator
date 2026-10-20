@@ -23,6 +23,8 @@ export interface StudioHudProps {
   onExport: () => void;
   onImportClick: () => void;
   onImportFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  /** Opens the import-from-another-builder dialog; omitted for roles that cannot create workflows. */
+  onImportExternal?: () => void;
   onRefreshSecrets: () => void;
   onLogout: () => void;
   theme: "light" | "dark";
@@ -81,6 +83,7 @@ export function StudioHud({
   onExport,
   onImportClick,
   onImportFileChange,
+  onImportExternal,
   onRefreshSecrets,
   onLogout,
   theme,
@@ -156,6 +159,9 @@ export function StudioHud({
       items.push({ id: "save", label: "Save workflow", group: "Actions", hint: "⌘S", run: onSave });
       items.push({ id: "export", label: "Export workflow JSON", group: "Actions", run: onExport });
       items.push({ id: "import", label: "Import workflow JSON", group: "Actions", run: onImportClick });
+      if (onImportExternal) {
+        items.push({ id: "import-external", label: "Import from another builder", group: "Actions", run: onImportExternal });
+      }
       if (onShare) items.push({ id: "share", label: "Share workflow", group: "Actions", run: onShare });
     }
     if (activeMode === "secrets" && canManageSecrets) {
@@ -195,6 +201,7 @@ export function StudioHud({
     isEditor,
     onExport,
     onImportClick,
+    onImportExternal,
     onLoadWorkflowById,
     onModeChange,
     onOpenShortcuts,
@@ -392,6 +399,19 @@ export function StudioHud({
                 >
                   Import JSON
                 </button>
+                {onImportExternal && (
+                  <button
+                    type="button"
+                    className="hud-dropdown-item"
+                    role="menuitem"
+                    onClick={() => {
+                      setOverflowOpen(false);
+                      onImportExternal();
+                    }}
+                  >
+                    Import from another builder…
+                  </button>
+                )}
                 {onShare && (
                   <button
                     type="button"

@@ -116,6 +116,28 @@ describe("StudioHud", () => {
     expect(onExport).toHaveBeenCalledTimes(1);
   });
 
+  it("offers import from another builder in the overflow and the palette", async () => {
+    const user = userEvent.setup();
+    const onImportExternal = vi.fn();
+    render(<StudioHud {...makeProps({ onImportExternal })} />);
+
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Import from another builder…" }));
+    expect(onImportExternal).toHaveBeenCalledTimes(1);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.keyboard("another builder");
+    expect(screen.getByText("Import from another builder")).toBeInTheDocument();
+  });
+
+  it("hides import from another builder when the handler is absent", async () => {
+    const user = userEvent.setup();
+    render(<StudioHud {...makeProps()} />);
+
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.queryByRole("menuitem", { name: "Import from another builder…" })).not.toBeInTheDocument();
+  });
+
   it("opens the command palette with Ctrl+K and closes it with Escape", async () => {
     const user = userEvent.setup();
     render(<StudioHud {...makeProps()} />);

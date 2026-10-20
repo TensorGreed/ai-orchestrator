@@ -413,8 +413,8 @@ beats replacement; the importer plus "workflow as MCP tool" lets L2M sit next to
 - [ ] Apps with existing Tier 1/2 connectors: Slack, GitHub, Google Sheets, Postgres, Notion, Jira, Airtable, HubSpot, Salesforce, Stripe, S3, Telegram, Discord
 
 ### 9.3 UX
-- [ ] "Import from n8n" in the HUD overflow and the command palette; drag an n8n JSON onto the canvas
-- [ ] Post-import panel: mapping report, secrets to resolve, one-click Tidy layout, "Run a dry validation"
+- [x] "Import from n8n" in the HUD overflow and the command palette; drag an n8n JSON onto the canvas
+- [x] Post-import panel: mapping report, secrets to resolve, one-click Tidy layout, "Run a dry validation"
 - [x] Docs page "Importing a workflow from another builder" with the coverage table generated from the converter's map (`pnpm --filter @ai-orchestrator/workflow-engine gen:import-coverage`)
 - [x] Fixture corpus of real exports under `samples/external-imports/` with golden-file tests
 
