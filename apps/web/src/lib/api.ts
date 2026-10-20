@@ -1,4 +1,11 @@
 import type {
+  McpCatalogEntry,
+  McpCatalogStatus,
+  McpConfigImportResponse,
+  McpImportDecision,
+  McpPlaygroundCallResponse
+} from "@ai-orchestrator/shared";
+import type {
   Folder,
   ImportReport,
   LLMProviderConfig,
@@ -559,10 +566,14 @@ export interface McpPreset {
     description: string;
   };
   notes?: string;
+  /** Phase 10.6 — built-in preset or an approved entry of the deployment catalog. */
+  origin?: "builtin" | "catalog";
+  tags?: string[];
+  requiredSecrets?: Array<{ name: string; description?: string }>;
 }
 
 export async function fetchMcpPresets() {
-  return apiRequest<{ presets: McpPreset[] }>("/api/mcp/presets");
+  return apiRequest<{ presets: McpPreset[]; catalog?: McpCatalogStatus }>("/api/mcp/presets");
 }
 
 export interface SecretListItem {
@@ -2699,4 +2710,45 @@ export async function fetchMcpClientUsage(id: string, window: McpTelemetryWindow
   return apiRequest<McpTelemetryResponse & { clientId: string; lastUsedAt: string | null }>(
     `/api/mcp/clients/${encodeURIComponent(id)}/usage?window=${encodeURIComponent(window)}`
   );
+}
+
+// Phase 10.6 — MCP onboarding: config import, deployment catalog, playground.
+
+export interface McpConfigImportEntryOptions {
+  decision?: McpImportDecision;
+  name?: string;
+  /** Slot values by slot id; sent only with the request, never returned. */
+  values?: Record<string, string>;
+}
+
+export async function importMcpConfig(payload: {
+  content: string;
+  fileName?: string;
+  dryRun?: boolean;
+  projectId?: string | null;
+  entries?: Record<string, McpConfigImportEntryOptions>;
+  probe?: boolean;
+}) {
+  return apiRequest<McpConfigImportResponse & { servers?: McpRegisteredServer[] }>("/api/mcp/servers/import", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchMcpCatalog() {
+  return apiRequest<{ status: McpCatalogStatus; entries: McpCatalogEntry[] }>("/api/mcp/catalog");
+}
+
+export async function reloadMcpCatalog() {
+  return apiRequest<{ status: McpCatalogStatus; entries: McpCatalogEntry[] }>("/api/mcp/catalog/reload", { method: "POST" });
+}
+
+export async function callMcpPlaygroundTool(
+  serverId: string,
+  payload: { toolName: string; args: Record<string, unknown>; projectId?: string | null; confirmWrite?: boolean }
+) {
+  return apiRequest<McpPlaygroundCallResponse>(`/api/mcp/servers/${encodeURIComponent(serverId)}/playground/call`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }

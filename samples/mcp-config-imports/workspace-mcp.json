@@ -1,0 +1,29 @@
+{
+  // Workspace-level config: servers plus prompted inputs.
+  "inputs": [
+    { "type": "promptString", "id": "tracker-key", "description": "Issue tracker API key", "password": true },
+    { "type": "promptString", "id": "tracker-project", "description": "Default project key" },
+    { "type": "promptString", "id": "kb-token", "description": "Knowledge base token", "password": true }
+  ],
+  "servers": {
+    "tracker": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "tracker-mcp@3.2.0", "--root", "${workspaceFolder}"],
+      "env": {
+        "TRACKER_API_KEY": "${input:tracker-key}",
+        "TRACKER_PROJECT": "${input:tracker-project}"
+      },
+      "envFile": "${workspaceFolder}/.env",
+    },
+    "knowledge-base": {
+      "type": "http",
+      "url": "https://kb.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${input:kb-token}" }
+    },
+    "events": {
+      "type": "sse",
+      "url": "https://events.example.com/sse"
+    }
+  }
+}

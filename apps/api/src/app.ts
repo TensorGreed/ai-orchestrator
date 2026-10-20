@@ -61,7 +61,7 @@ import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/
 import { SqliteStore, type McpServerRecord } from "./db/database";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
-import { MCP_PRESETS } from "./services/mcp-presets";
+import { McpCatalogService } from "./services/mcp-catalog.js";
 import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
@@ -111,6 +111,7 @@ import { LogStreamingService } from "./services/log-streaming-service";
 import { NotificationService } from "./services/notification-service";
 import { openApiSpec } from "./openapi.js";
 import { gatewayAllowedOrigins, isGatewayOriginAllowed, registerMcpGatewayRoutes } from "./mcp-gateway-routes.js";
+import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 
 interface Tier1IntegrationSpec {
   id: string;
@@ -2432,6 +2433,21 @@ export function createApp(
       mcpProbeService.stop();
     });
   }
+  // Phase 10.6 — deployment-local MCP catalog. Every instance reads and
+  // watches the file itself (presets and enforcement are served everywhere).
+  const mcpCatalogService = new McpCatalogService({
+    filePath: config.MCP_CATALOG_FILE,
+    mode: config.MCP_CATALOG_MODE,
+    enforce: config.MCP_CATALOG_ENFORCE,
+    logger: {
+      info: (msg, fields) => app.log.info(fields ?? {}, msg),
+      warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+    }
+  });
+  mcpCatalogService.start();
+  app.addHook("onClose", async () => {
+    mcpCatalogService.stop();
+  });
   const logStreamingService = new LogStreamingService(store, config.SECRET_MASTER_KEY_BASE64, {
     enabled: config.LOG_STREAM_ENABLED,
     flushIntervalMs: config.LOG_STREAM_FLUSH_INTERVAL_MS,
@@ -8983,6 +8999,21 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return null;
   };
 
+  /** Phase 10.6 — with MCP_CATALOG_ENFORCE, stdio servers must run an approved, pinned catalog package. */
+  const enforceMcpCatalog = (
+    adapterId: string,
+    connection: Record<string, unknown> | undefined,
+    reply: FastifyReply
+  ): { error: string } | null => {
+    if (adapterId !== "stdio_mcp") return null;
+    const command = typeof connection?.command === "string" ? connection.command : "";
+    const args = Array.isArray(connection?.args) ? connection.args.map(String) : [];
+    const reason = mcpCatalogService.checkStdioCommand(command, args);
+    if (!reason) return null;
+    reply.code(403);
+    return { error: reason };
+  };
+
   const probeInBackground = (serverId: string) => {
     void mcpProbeService.probe(serverId).catch((err) => {
       app.log.warn({ serverId, err: err instanceof Error ? err.message : String(err) }, "Initial MCP probe failed");
@@ -8999,6 +9030,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const invalid = validateMcpServerInput(parsed.data, reply);
     if (invalid) return invalid;
+    const blocked = enforceMcpCatalog(parsed.data.adapterId, parsed.data.connection, reply);
+    if (blocked) return blocked;
 
     const id = `mcp_${crypto.randomUUID()}`;
     store.createMcpServer({
@@ -9048,6 +9081,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const invalid = validateMcpServerInput(parsed.data, reply);
     if (invalid) return invalid;
+    if (parsed.data.adapterId !== undefined || parsed.data.connection !== undefined) {
+      const blocked = enforceMcpCatalog(
+        parsed.data.adapterId ?? existing.adapterId,
+        parsed.data.connection ?? existing.connection,
+        reply
+      );
+      if (blocked) return blocked;
+    }
 
     const { secretRef, ...rest } = parsed.data;
     store.updateMcpServer(existing.id, {
@@ -9390,7 +9431,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) {
       return;
     }
-    return { presets: MCP_PRESETS };
+    return { presets: mcpCatalogService.presets(), catalog: mcpCatalogService.status() };
+  });
+
+  // Phase 10.6 — config import, catalog status and the playground.
+  registerMcpOnboardingRoutes({
+    app,
+    store,
+    mcpRegistry,
+    catalog: mcpCatalogService,
+    createSecret: (input) => secretService.createSecret(input),
+    resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+    redact: (value) => String(secretService.redact(value)),
+    resolveRegisteredMcpServer,
+    withScopedMcpContext,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    auditUser: (request, user, event) => audit(request, user, event),
+    probeInBackground,
+    serverSummary: mcpServerSummary
   });
 
   // -------------------------------------------------------------------------

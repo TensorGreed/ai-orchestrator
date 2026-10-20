@@ -1,0 +1,126 @@
+{
+  "format": "settings_mcp_servers",
+  "warnings": [],
+  "summary": {
+    "total": 1,
+    "mapped": 1,
+    "approximated": 0,
+    "skipped": 0,
+    "create": 0,
+    "update": 0,
+    "copy": 0,
+    "skip": 0,
+    "blocked": 1
+  },
+  "entries": [
+    {
+      "key": "metrics",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "metrics-mcp@2.0.0"
+        ],
+        "secretEnvVars": [
+          "METRICS_TOKEN",
+          "METRICS_SIGNING_KEY"
+        ]
+      },
+      "secretMode": "bundle",
+      "slots": [
+        {
+          "id": "env:METRICS_REGION",
+          "kind": "prompt",
+          "target": "env",
+          "name": "METRICS_REGION",
+          "origin": "input",
+          "inputId": "region",
+          "description": "Region",
+          "options": [
+            "eu",
+            "us"
+          ],
+          "defaultValue": "eu",
+          "needsValue": true,
+          "provided": false
+        },
+        {
+          "id": "env:METRICS_TOKEN",
+          "kind": "secret",
+          "target": "env",
+          "name": "METRICS_TOKEN",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        },
+        {
+          "id": "env:METRICS_SIGNING_KEY",
+          "kind": "secret",
+          "target": "env",
+          "name": "METRICS_SIGNING_KEY",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "npx -y metrics-mcp@2.0.0"
+        },
+        {
+          "field": "env.METRICS_REGION",
+          "status": "mapped",
+          "message": "Prompted value ${input:region} is asked for now and kept in the connection."
+        },
+        {
+          "field": "env.METRICS_TOKEN",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
+        },
+        {
+          "field": "env.METRICS_SIGNING_KEY",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
+        },
+        {
+          "field": "env",
+          "status": "mapped",
+          "message": "2 credentials (METRICS_TOKEN, METRICS_SIGNING_KEY) are stored together as one secret bundle."
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": "Values needed: METRICS_REGION.",
+      "name": "metrics",
+      "duplicate": null,
+      "decision": "create"
+    }
+  ],
+  "materialized": {
+    "metrics": {
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "metrics-mcp@2.0.0"
+        ],
+        "env": {
+          "METRICS_REGION": "value-for-METRICS_REGION"
+        },
+        "secretEnvVars": [
+          "METRICS_TOKEN",
+          "METRICS_SIGNING_KEY"
+        ]
+      },
+      "secretNames": [
+        "METRICS_TOKEN",
+        "METRICS_SIGNING_KEY"
+      ],
+      "missing": []
+    }
+  }
+}

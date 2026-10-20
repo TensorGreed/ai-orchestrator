@@ -5209,7 +5209,12 @@ function StudioApp() {
           )}
 
           {activeMode === "mcp" && (
-            <McpServersPage isAdmin={authUser?.role === "admin"} activeProjectId={activeProjectId} />
+            <McpServersPage
+              isAdmin={authUser?.role === "admin"}
+              canBuild={authUser?.role === "admin" || authUser?.role === "builder"}
+              currentUserId={authUser?.id}
+              activeProjectId={activeProjectId}
+            />
           )}
 
           {activeMode === "templates" && (

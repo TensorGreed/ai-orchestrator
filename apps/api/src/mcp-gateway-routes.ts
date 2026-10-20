@@ -14,7 +14,7 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { MCPExecutionContext, MCPRegistry } from "@ai-orchestrator/mcp-sdk";
+import { secretValuesForScrub, type MCPExecutionContext, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import {
   mcpClientCreateSchema,
   mcpPolicyRoleSchema,
@@ -365,8 +365,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       const invocation = adapter.invokeTool(tool.toolName, args, serverConfig, session.mcpContext);
       invocation.catch(() => undefined);
       const outcome = await Promise.race([invocation, cancelled]);
-      const injected = serverConfig.secretRef ? await deps.resolveSecret(serverConfig.secretRef) : undefined;
-      const scrub = (value: unknown) => (injected && injected.length >= 4 ? scrubValue(value, injected) : value);
+      // Every injected value, including each value of a secret bundle (Phase 10.6).
+      const injected = secretValuesForScrub(serverConfig.secretRef ? await deps.resolveSecret(serverConfig.secretRef) : undefined);
+      const scrub = (value: unknown) => injected.reduce<unknown>((current, secret) => scrubValue(current, secret), value);
       if (outcome.ok) {
         ok = true;
         result = toolSuccess(scrub(outcome.output));

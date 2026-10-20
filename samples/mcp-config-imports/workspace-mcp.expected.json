@@ -1,0 +1,201 @@
+{
+  "format": "servers_inputs",
+  "warnings": [],
+  "summary": {
+    "total": 3,
+    "mapped": 1,
+    "approximated": 2,
+    "skipped": 0,
+    "create": 1,
+    "update": 0,
+    "copy": 0,
+    "skip": 0,
+    "blocked": 2
+  },
+  "entries": [
+    {
+      "key": "tracker",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "tracker-mcp@3.2.0",
+          "--root",
+          "${workspaceFolder}"
+        ],
+        "secretEnvVar": "TRACKER_API_KEY"
+      },
+      "secretMode": "single",
+      "slots": [
+        {
+          "id": "env:TRACKER_API_KEY",
+          "kind": "secret",
+          "target": "env",
+          "name": "TRACKER_API_KEY",
+          "origin": "input",
+          "inputId": "tracker-key",
+          "description": "Issue tracker API key",
+          "needsValue": true,
+          "provided": false
+        },
+        {
+          "id": "env:TRACKER_PROJECT",
+          "kind": "prompt",
+          "target": "env",
+          "name": "TRACKER_PROJECT",
+          "origin": "input",
+          "inputId": "tracker-project",
+          "description": "Default project key",
+          "needsValue": true,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "envFile",
+          "status": "skipped",
+          "message": "Env files are read on the client machine; add the values as env vars or secrets after import."
+        },
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "npx -y tracker-mcp@3.2.0 --root ${workspaceFolder}"
+        },
+        {
+          "field": "args[3]",
+          "status": "approximated",
+          "message": "${workspaceFolder} is expanded by the client on its own machine; kept verbatim, adjust it for the L2M host."
+        },
+        {
+          "field": "env.TRACKER_API_KEY",
+          "status": "mapped",
+          "message": "Prompted value ${input:tracker-key} becomes a secret; enter it below."
+        },
+        {
+          "field": "env.TRACKER_PROJECT",
+          "status": "mapped",
+          "message": "Prompted value ${input:tracker-project} is asked for now and kept in the connection."
+        }
+      ],
+      "status": "approximated",
+      "disabledInSource": false,
+      "blockedReason": "Values needed: TRACKER_API_KEY, TRACKER_PROJECT.",
+      "name": "tracker",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "knowledge-base",
+      "adapterId": "http_mcp",
+      "transport": "http",
+      "connection": {
+        "endpoint": "https://kb.example.com/mcp",
+        "transport": "http_streamable",
+        "authType": "bearer"
+      },
+      "secretMode": "single",
+      "slots": [
+        {
+          "id": "header:Authorization",
+          "kind": "secret",
+          "target": "header",
+          "name": "Authorization",
+          "origin": "input",
+          "inputId": "kb-token",
+          "description": "Knowledge base token",
+          "needsValue": true,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "url",
+          "status": "mapped",
+          "message": "https://kb.example.com/mcp"
+        },
+        {
+          "field": "headers.Authorization",
+          "status": "mapped",
+          "message": "Prompted value ${input:kb-token} becomes a secret; enter it below."
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": "Values needed: Authorization.",
+      "name": "knowledge-base",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "events",
+      "adapterId": "http_mcp",
+      "transport": "sse",
+      "connection": {
+        "endpoint": "https://events.example.com/sse",
+        "transport": "http_streamable"
+      },
+      "secretMode": "none",
+      "slots": [],
+      "report": [
+        {
+          "field": "url",
+          "status": "mapped",
+          "message": "https://events.example.com/sse"
+        },
+        {
+          "field": "type",
+          "status": "approximated",
+          "message": "Registered as Streamable HTTP. A server that only offers the legacy SSE transport fails its first probe; point it at the server's Streamable HTTP endpoint."
+        }
+      ],
+      "status": "approximated",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "events",
+      "duplicate": null,
+      "decision": "create"
+    }
+  ],
+  "materialized": {
+    "tracker": {
+      "connection": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "tracker-mcp@3.2.0",
+          "--root",
+          "${workspaceFolder}"
+        ],
+        "env": {
+          "TRACKER_PROJECT": "value-for-TRACKER_PROJECT"
+        },
+        "secretEnvVar": "TRACKER_API_KEY"
+      },
+      "secretNames": [
+        "TRACKER_API_KEY"
+      ],
+      "missing": []
+    },
+    "knowledge-base": {
+      "connection": {
+        "endpoint": "https://kb.example.com/mcp",
+        "transport": "http_streamable",
+        "authType": "bearer"
+      },
+      "secretNames": [
+        "Authorization"
+      ],
+      "missing": []
+    },
+    "events": {
+      "connection": {
+        "endpoint": "https://events.example.com/sse",
+        "transport": "http_streamable"
+      },
+      "secretNames": [],
+      "missing": []
+    }
+  }
+}

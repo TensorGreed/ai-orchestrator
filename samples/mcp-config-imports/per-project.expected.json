@@ -1,0 +1,144 @@
+{
+  "format": "mcp_servers",
+  "warnings": [],
+  "summary": {
+    "total": 3,
+    "mapped": 3,
+    "approximated": 0,
+    "skipped": 0,
+    "create": 3,
+    "update": 0,
+    "copy": 0,
+    "skip": 0,
+    "blocked": 0
+  },
+  "entries": [
+    {
+      "key": "fetch",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "uvx",
+        "args": [
+          "mcp-server-fetch==2025.4.7"
+        ]
+      },
+      "secretMode": "none",
+      "slots": [],
+      "report": [
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "uvx mcp-server-fetch==2025.4.7"
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "fetch",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "payments",
+      "adapterId": "http_mcp",
+      "transport": "http",
+      "connection": {
+        "endpoint": "https://payments.example.com/mcp",
+        "transport": "http_streamable",
+        "authType": "bearer"
+      },
+      "secretMode": "single",
+      "slots": [
+        {
+          "id": "header:Authorization",
+          "kind": "secret",
+          "target": "header",
+          "name": "Authorization",
+          "origin": "literal",
+          "needsValue": false,
+          "provided": false
+        }
+      ],
+      "report": [
+        {
+          "field": "url",
+          "status": "mapped",
+          "message": "https://payments.example.com/mcp"
+        },
+        {
+          "field": "headers.Authorization",
+          "status": "mapped",
+          "message": "Credential moved to a secret; the value is not kept in the connection."
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "payments",
+      "duplicate": null,
+      "decision": "create"
+    },
+    {
+      "key": "fetch (shop)",
+      "adapterId": "stdio_mcp",
+      "transport": "stdio",
+      "connection": {
+        "command": "uvx",
+        "args": [
+          "mcp-server-fetch==2025.4.7",
+          "--ignore-robots-txt"
+        ]
+      },
+      "secretMode": "none",
+      "slots": [],
+      "report": [
+        {
+          "field": "command",
+          "status": "mapped",
+          "message": "uvx mcp-server-fetch==2025.4.7 --ignore-robots-txt"
+        }
+      ],
+      "status": "mapped",
+      "disabledInSource": false,
+      "blockedReason": null,
+      "name": "fetch (shop)",
+      "duplicate": null,
+      "decision": "create"
+    }
+  ],
+  "materialized": {
+    "fetch": {
+      "connection": {
+        "command": "uvx",
+        "args": [
+          "mcp-server-fetch==2025.4.7"
+        ]
+      },
+      "secretNames": [],
+      "missing": []
+    },
+    "payments": {
+      "connection": {
+        "endpoint": "https://payments.example.com/mcp",
+        "transport": "http_streamable",
+        "authType": "bearer"
+      },
+      "secretNames": [
+        "Authorization"
+      ],
+      "missing": []
+    },
+    "fetch (shop)": {
+      "connection": {
+        "command": "uvx",
+        "args": [
+          "mcp-server-fetch==2025.4.7",
+          "--ignore-robots-txt"
+        ]
+      },
+      "secretNames": [],
+      "missing": []
+    }
+  }
+}

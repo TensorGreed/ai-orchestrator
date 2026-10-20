@@ -459,9 +459,9 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 - [ ] OAuth 2.1 for remote MCP servers (metadata discovery, PKCE, dynamic client registration, token refresh) with tokens held by `SecretService`
 
 ### 10.6 Onboarding and catalog
-- [ ] Import existing MCP client config files (`mcp.json`, `.vscode/mcp.json` and desktop-assistant configs) into the registry in one step, turning env values into secrets
-- [ ] Deployment-local catalog file of approved servers with pinned package versions; presets read from it, no vendor-side registry
-- [ ] MCP playground page: pick a server, call any tool through a schema-driven form, read resources, inspect the raw JSON-RPC exchange
+- [x] Import existing MCP client config files (`mcp.json`, `.vscode/mcp.json` and desktop-assistant configs) into the registry in one step, turning env values into secrets
+- [x] Deployment-local catalog file of approved servers with pinned package versions; presets read from it, no vendor-side registry
+- [x] MCP playground page: pick a server, call any tool through a schema-driven form, read resources, inspect the raw JSON-RPC exchange (resources panel arrives with 10.5 resources support)
 
 ### 10.7 Runtime safety
 - [ ] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default

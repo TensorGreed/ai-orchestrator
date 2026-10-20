@@ -1,0 +1,22 @@
+{
+  "theme": "dark",
+  "mcpServers": {
+    "search": {
+      "httpUrl": "https://search.example.com/mcp",
+      "headers": { "X-Api-Key": "${SEARCH_API_KEY}" },
+      "timeout": 30000,
+      "trust": false
+    },
+    "notes": {
+      "command": "node",
+      "args": ["/opt/notes-mcp/dist/index.js"],
+      "env": { "NOTES_TOKEN": "${env:NOTES_TOKEN}", "NOTES_DIR": "${HOME}/notes" },
+      "cwd": "/opt/notes-mcp",
+      "includeTools": ["read_note"]
+    },
+    "db": {
+      "command": "npx",
+      "args": ["-y", "pg-mcp@1.0.0", "postgresql://report:hunter2-fixture@db.internal:5432/sales"]
+    }
+  }
+}

@@ -13,6 +13,7 @@ vi.mock("../lib/api", async () => {
     fetchMcpServerTools: vi.fn(),
     fetchMcpServerTelemetry: vi.fn(),
     fetchMcpPresets: vi.fn(),
+    fetchMcpCatalog: vi.fn(),
     fetchSecrets: vi.fn(),
     createMcpServer: vi.fn(),
     probeMcpServer: vi.fn(),
@@ -105,6 +106,20 @@ describe("McpServersPage", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(api.fetchMcpPresets).mockResolvedValue({ presets: [] });
+    vi.mocked(api.fetchMcpCatalog).mockResolvedValue({
+      status: {
+        configured: false,
+        fileName: null,
+        mode: "merge",
+        enforce: false,
+        state: "off",
+        loadedAt: null,
+        entryCount: 0,
+        approvedCount: 0,
+        errors: []
+      },
+      entries: []
+    });
     vi.mocked(api.fetchSecrets).mockResolvedValue([]);
     vi.mocked(api.fetchMcpServerTelemetry).mockImplementation(async (_id, window = "7d") => emptyTelemetry(window));
   });
@@ -290,5 +305,46 @@ describe("McpServersPage", () => {
 
     expect(await within(form).findByText("Connection must be a JSON object.")).toBeInTheDocument();
     expect(api.createMcpServer).not.toHaveBeenCalled();
+  });
+
+  it("offers config import and the playground to builders, and shows catalog errors", async () => {
+    const user = userEvent.setup();
+    const server = makeServer();
+    vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [server], adapters: [], defaultProbeIntervalMs: 300000 });
+    mockDetail(server);
+    vi.mocked(api.fetchMcpCatalog).mockResolvedValue({
+      status: {
+        configured: true,
+        fileName: "catalog.json",
+        mode: "exclusive",
+        enforce: true,
+        state: "partial",
+        loadedAt: "2026-10-20T10:00:00.000Z",
+        entryCount: 2,
+        approvedCount: 1,
+        errors: [{ index: 2, entryId: "fs", path: "connection.args", message: "'fs' is not pinned to an exact version" }]
+      },
+      entries: []
+    });
+
+    render(<McpServersPage isAdmin={false} canBuild />);
+    expect(await screen.findByRole("region", { name: "MCP catalog" })).toHaveTextContent("is not pinned");
+    expect(screen.getByText("Enforced for stdio servers")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reload" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Import config" }));
+    expect(screen.getByRole("dialog", { name: "Import MCP client config" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close import dialog" }));
+
+    await user.click(screen.getByRole("tab", { name: "Playground" }));
+    expect(await screen.findByRole("region", { name: "MCP playground" })).toBeInTheDocument();
+  });
+
+  it("hides import and the playground from viewers", async () => {
+    vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [], adapters: [], defaultProbeIntervalMs: 300000 });
+    render(<McpServersPage isAdmin={false} canBuild={false} />);
+    expect(await screen.findByText(/No servers registered yet/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Import config" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Playground" })).not.toBeInTheDocument();
   });
 });
