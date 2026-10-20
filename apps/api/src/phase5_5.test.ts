@@ -468,7 +468,7 @@ describe("Phase 5.5 — audit events fan out to matching destinations", () => {
       });
       expect(createSecret.statusCode).toBe(200);
 
-      // Give the async queue up to 1s to drain.
+      // Give the async queue up to 2s to drain.
       const start = Date.now();
       while (received.length === 0 && Date.now() - start < 2000) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -477,13 +477,19 @@ describe("Phase 5.5 — audit events fan out to matching destinations", () => {
       const parsed = JSON.parse(received[0]!.body) as { category: string };
       expect(parsed.category).toBe("secret");
 
-      const events = await ctx.app.inject({
-        method: "GET",
-        url: `/api/log-streams/${id}/events`,
-        headers: { cookie }
-      });
-      expect(events.statusCode).toBe(200);
-      const eventPayload = events.json() as { events: Array<{ status: string }> };
+      // The delivery row is written after the destination answers, so poll for it too.
+      let eventPayload: { events: Array<{ status: string }> } = { events: [] };
+      const recordStart = Date.now();
+      while (eventPayload.events.length === 0 && Date.now() - recordStart < 2000) {
+        const events = await ctx.app.inject({
+          method: "GET",
+          url: `/api/log-streams/${id}/events`,
+          headers: { cookie }
+        });
+        expect(events.statusCode).toBe(200);
+        eventPayload = events.json() as { events: Array<{ status: string }> };
+        if (eventPayload.events.length === 0) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       expect(eventPayload.events.length).toBeGreaterThanOrEqual(1);
       expect(eventPayload.events[0]!.status).toBe("sent");
     } finally {
@@ -570,5 +576,41 @@ describe("Phase 5.5 — LogStreamingService unit behavior", () => {
     // Public view masks the dsn field.
     const pub = service.getDestination(created.id);
     expect(pub!.config.dsn).toBe("__secret__");
+  });
+
+  it("stop() waits for a send that a timer-driven flush already started", async () => {
+    const ctx = await createTestContext();
+    const service = new LogStreamingService(ctx.store, ctx.config.SECRET_MASTER_KEY_BASE64, { enabled: true });
+    let releaseSend: () => void = () => {};
+    const sendStarted = new Promise<void>((started) => {
+      service.registerAdapter({
+        type: "webhook",
+        send: () =>
+          new Promise<void>((resolve) => {
+            releaseSend = resolve;
+            started();
+          })
+      });
+    });
+    const created = service.createDestination({
+      name: "slow",
+      type: "webhook",
+      config: { url: "http://127.0.0.1:9/ingest" },
+      categories: ["secret"]
+    });
+    service.dispatch({ category: "secret", eventType: "secret.created", level: "info", createdAt: new Date().toISOString() });
+
+    void service.flush();
+    await sendStarted;
+    let stopped = false;
+    const stopping = service.stop().then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(stopped).toBe(false);
+
+    releaseSend();
+    await stopping;
+    expect(ctx.store.listLogStreamEvents({ destinationId: created.id, limit: 10 })).toHaveLength(1);
   });
 });
