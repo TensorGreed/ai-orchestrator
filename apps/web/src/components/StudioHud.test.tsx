@@ -149,6 +149,32 @@ describe("StudioHud", () => {
     expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
   });
 
+  it("renders the navigation menu button only when the drawer is wired up", async () => {
+    const user = userEvent.setup();
+    const onToggleNavDrawer = vi.fn();
+    const { unmount } = render(<StudioHud {...makeProps()} />);
+    expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeInTheDocument();
+    unmount();
+
+    render(<StudioHud {...makeProps({ onToggleNavDrawer, navDrawerOpen: false })} />);
+    const menu = screen.getByRole("button", { name: "Open navigation" });
+    expect(menu).toHaveAttribute("aria-expanded", "false");
+    expect(menu).toHaveAttribute("aria-controls", "app-sidebar");
+    await user.click(menu);
+    expect(onToggleNavDrawer).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers Save in the editor overflow for phone widths where the Save pill is hidden", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<StudioHud {...makeProps({ onSave, isDirty: true })} />);
+
+    expect(screen.getByRole("button", { name: /Save/ })).toHaveClass("hud-secondary");
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Save (unsaved changes)" }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
   it("logs out from the account menu", async () => {
     const user = userEvent.setup();
     const onLogout = vi.fn();

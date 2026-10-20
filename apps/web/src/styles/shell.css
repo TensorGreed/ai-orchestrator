@@ -1115,10 +1115,122 @@ body {
   text-decoration: none;
 }
 
+/* ---- phone layout: sidebar drawer + compact HUD --------------------------
+   At and below 880px (SHELL_DRAWER_MEDIA_QUERY in src/lib/use-media-query.ts)
+   the sidebar leaves the grid and becomes an off-canvas drawer opened from the
+   HUD menu button. Secondary HUD pills stay reachable from the command palette. */
+
+.hud-menu-btn,
+.hud-phone-only {
+  display: none;
+}
+
+.app-sidebar-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--scrim);
+  animation: sidebar-scrim-in var(--dur) var(--ease);
+}
+
+@keyframes sidebar-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.hud-more-btn {
+  position: relative;
+}
+
+.hud-more-dirty {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+}
+
+@media (max-width: 880px) {
+  .studio-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 1001;
+    width: var(--sidebar-w-drawer);
+    border-right: 1px solid var(--line-strong);
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform var(--dur) var(--ease), visibility 0s linear var(--dur);
+  }
+
+  .app-sidebar.is-drawer-open {
+    transform: none;
+    visibility: visible;
+    transition: transform var(--dur) var(--ease), visibility 0s linear 0s;
+  }
+
+  .hud {
+    gap: 6px;
+    padding: 0 12px;
+  }
+
+  .hud-left,
+  .hud-right {
+    gap: 6px;
+  }
+
+  .hud-menu-btn {
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+
+  .hud-secondary {
+    display: none;
+  }
+
+  .hud-phone-only {
+    display: block;
+  }
+
+  .hud-breadcrumb {
+    flex: 1 1 auto;
+    padding-left: 10px;
+  }
+
+  .hud-workflow-name {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+
+  .hud-workflow-select.is-crumb {
+    flex: 1 1 auto;
+    max-width: none;
+  }
+
+  .hud-account {
+    gap: 0;
+    padding-right: 4px;
+  }
+
+  .hud-run {
+    padding: 0 12px;
+  }
+}
+
 /* ---- motion -------------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
-  .hud-run-status.is-running .hud-dot {
+  .hud-run-status.is-running .hud-dot,
+  .app-sidebar-scrim {
     animation: none;
   }
 

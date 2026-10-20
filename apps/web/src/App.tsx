@@ -1166,6 +1166,7 @@ function StudioApp() {
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
   const [nodeDrawerContext, setNodeDrawerContext] = useState<NodeDrawerContext | null>(null);
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
+  const [navDrawerOpen, setNavDrawerOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     try {
       const stored = localStorage.getItem(THEME_STORAGE_KEY);
@@ -4524,6 +4525,8 @@ function StudioApp() {
         onCreateProject={() => {
           void handleCreateProject();
         }}
+        drawerOpen={navDrawerOpen}
+        onDrawerOpenChange={setNavDrawerOpen}
       />
 
       <div className="studio-main">
@@ -4583,6 +4586,8 @@ function StudioApp() {
               : undefined
           }
           docsUrl={docsUrl}
+          navDrawerOpen={navDrawerOpen}
+          onToggleNavDrawer={() => setNavDrawerOpen((open) => !open)}
         />
 
         <main className="main-content">

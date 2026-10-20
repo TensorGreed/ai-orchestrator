@@ -100,6 +100,7 @@
   /* layout */
   --sidebar-w: 232px;
   --sidebar-w-collapsed: 56px;
+  --sidebar-w-drawer: min(288px, calc(100vw - 56px));
   --hud-h: 56px;
   --inspector-w: 380px;
   --strip-h: 112px;

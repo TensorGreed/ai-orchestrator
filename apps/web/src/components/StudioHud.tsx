@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type RefObject } from "react";
 import type { Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import type { AuthUser } from "../lib/api";
+import { SidebarMenuButton } from "./AppSidebar";
 import { CommandPalette } from "./CommandPalette";
 import { DocsIcon, HelpIcon, MoonIcon, MoreIcon, PlayIcon, SunIcon } from "./shell-icons";
 import { STUDIO_MODE_ITEMS, type CommandPaletteItem, type RunStatus, type StudioMode } from "./studio-layout-types";
@@ -46,6 +47,10 @@ export interface StudioHudProps {
   extraItems?: CommandPaletteItem[];
   /** Optional docs URL override; defaults to VITE_DOCS_URL or host:4173. */
   docsUrl?: string;
+  /** Phone layout: state of the sidebar drawer the menu button opens. */
+  navDrawerOpen?: boolean;
+  /** Renders the menu button (shown at phone widths only) that opens the sidebar drawer. */
+  onToggleNavDrawer?: () => void;
 }
 
 const NO_EXTRA_ITEMS: CommandPaletteItem[] = [];
@@ -98,7 +103,9 @@ export function StudioHud({
   isDirty = false,
   onShare,
   extraItems = NO_EXTRA_ITEMS,
-  docsUrl
+  docsUrl,
+  navDrawerOpen = false,
+  onToggleNavDrawer
 }: StudioHudProps) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
@@ -221,6 +228,7 @@ export function StudioHud({
   return (
     <header className="hud" role="banner">
       <div className="hud-left">
+        {onToggleNavDrawer && <SidebarMenuButton open={navDrawerOpen} onToggle={onToggleNavDrawer} />}
         <div className="hud-pill hud-breadcrumb" title={activeProject ? `Project: ${activeProject.name}` : undefined}>
           <span className="hud-crumb hud-crumb-project">{activeProject?.name ?? "Project"}</span>
           <span className="hud-crumb-sep" aria-hidden="true">
@@ -273,7 +281,7 @@ export function StudioHud({
         </button>
         <button
           type="button"
-          className="hud-pill hud-btn hud-icon-btn"
+          className="hud-pill hud-btn hud-icon-btn hud-secondary"
           onClick={onToggleTheme}
           title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           aria-label="Toggle theme"
@@ -282,7 +290,7 @@ export function StudioHud({
         </button>
         <button
           type="button"
-          className="hud-pill hud-btn hud-icon-btn"
+          className="hud-pill hud-btn hud-icon-btn hud-secondary"
           onClick={onOpenShortcuts}
           title="Keyboard shortcuts (?)"
           aria-label="Keyboard shortcuts"
@@ -290,7 +298,7 @@ export function StudioHud({
           <HelpIcon />
         </button>
         <a
-          className="hud-pill hud-btn hud-icon-btn"
+          className="hud-pill hud-btn hud-icon-btn hud-secondary"
           href={resolvedDocsUrl}
           target="_blank"
           rel="noreferrer"
@@ -346,7 +354,7 @@ export function StudioHud({
         {showWorkflowActions && (
           <button
             type="button"
-            className={isDirty ? "hud-pill hud-btn hud-save is-dirty" : "hud-pill hud-btn hud-save"}
+            className={["hud-pill hud-btn hud-save", isDirty && "is-dirty", isEditor && "hud-secondary"].filter(Boolean).join(" ")}
             onClick={onSave}
             disabled={busy}
             title={isDirty ? "Save (unsaved changes)" : "Save"}
@@ -357,7 +365,12 @@ export function StudioHud({
         )}
 
         {activeMode === "secrets" && canManageSecrets && (
-          <button type="button" className="hud-pill hud-btn" onClick={onRefreshSecrets} disabled={secretBusy || busy}>
+          <button
+            type="button"
+            className="hud-pill hud-btn hud-secondary"
+            onClick={onRefreshSecrets}
+            disabled={secretBusy || busy}
+          >
             Refresh secrets
           </button>
         )}
@@ -366,7 +379,7 @@ export function StudioHud({
           <div className="hud-menu" ref={overflowRef}>
             <button
               type="button"
-              className="hud-pill hud-btn hud-icon-btn"
+              className="hud-pill hud-btn hud-icon-btn hud-more-btn"
               onClick={() => setOverflowOpen((value) => !value)}
               aria-haspopup="menu"
               aria-expanded={overflowOpen}
@@ -374,9 +387,22 @@ export function StudioHud({
               title="More actions"
             >
               <MoreIcon />
+              {isDirty && <span className="hud-dirty-dot hud-more-dirty hud-phone-only" aria-hidden="true" />}
             </button>
             {overflowOpen && (
               <div className="hud-dropdown" role="menu">
+                <button
+                  type="button"
+                  className="hud-dropdown-item hud-phone-only"
+                  role="menuitem"
+                  disabled={busy}
+                  onClick={() => {
+                    setOverflowOpen(false);
+                    onSave();
+                  }}
+                >
+                  {isDirty ? "Save (unsaved changes)" : "Save"}
+                </button>
                 <button
                   type="button"
                   className="hud-dropdown-item"
