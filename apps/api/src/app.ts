@@ -12,7 +12,7 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
-import { createDefaultMCPRegistry, invokeDirectMCPTool } from "@ai-orchestrator/mcp-sdk";
+import { createDefaultMCPRegistry, invokeDirectMCPTool, type MCPExecutionContext } from "@ai-orchestrator/mcp-sdk";
 import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
@@ -8576,6 +8576,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return secretService.listSecrets({ projectId });
   });
 
+  // Discover/test requests get their own MCP context, closed when the request
+  // is done, so a stdio server they spawn does not outlive the request in the
+  // adapter's process-wide fallback cache.
+  const withScopedMcpContext = async <T>(run: (mcpContext: MCPExecutionContext) => Promise<T>): Promise<T> => {
+    const mcpContext: MCPExecutionContext = {
+      resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+      runtimeState: new Map<string, unknown>()
+    };
+    try {
+      return await run(mcpContext);
+    } finally {
+      const closeErrors = await mcpRegistry.closeSessions(mcpContext);
+      for (const closeError of closeErrors) {
+        app.log.warn({ err: closeError }, "Failed to close MCP sessions after request");
+      }
+    }
+  };
+
   app.post<{ Body: unknown }>("/api/mcp/discover-tools", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
@@ -8600,9 +8618,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         allowedTools: parsed.data.allowedTools
       };
 
-      const tools = await mcpRegistry.get(parsed.data.serverId).discoverTools(serverConfig, {
-        resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
-      });
+      const tools = await withScopedMcpContext((mcpContext) =>
+        mcpRegistry.get(parsed.data.serverId).discoverTools(serverConfig, mcpContext)
+      );
 
       return {
         serverId: parsed.data.serverId,
@@ -8640,14 +8658,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
     const startedAt = Date.now();
     try {
-      const result = await invokeDirectMCPTool(
-        serverConfig,
-        parsed.data.toolName,
-        parsed.data.args ?? {},
-        mcpRegistry,
-        {
-          resolveSecret: (secretRef) => secretService.resolveSecret(secretRef)
-        }
+      const result = await withScopedMcpContext((mcpContext) =>
+        invokeDirectMCPTool(serverConfig, parsed.data.toolName, parsed.data.args ?? {}, mcpRegistry, mcpContext)
       );
 
       return {

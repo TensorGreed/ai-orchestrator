@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import vm from "node:vm";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore, AgentSessionToolDataStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
-import { invokeDirectMCPTool, resolveMCPTools, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
+import {
+  invokeDirectMCPTool,
+  resolveMCPTools,
+  type MCPExecutionContext,
+  type MCPRegistry
+} from "@ai-orchestrator/mcp-sdk";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type {
   ChatMessage,
@@ -236,6 +241,38 @@ class WorkflowCanceledError extends Error {
     super(message);
     this.name = "WorkflowCanceledError";
   }
+}
+
+/**
+ * Closes the MCP sessions an execution context opened. `onAbort` closes them
+ * early when the run is canceled or times out, so a child process does not
+ * wait for the node to unwind; `close` runs from `finally` and also catches
+ * anything opened after an early close. Failures are logged, never thrown, so
+ * cleanup cannot replace the node's own result or error.
+ */
+function createMcpSessionReleaser(
+  registry: MCPRegistry,
+  mcpContext: MCPExecutionContext,
+  nodeId: string
+): { onAbort: () => void; close: () => Promise<void> } {
+  const close = async () => {
+    try {
+      const errors = await registry.closeSessions(mcpContext);
+      for (const error of errors) {
+        console.warn(`[MCP] Failed to close sessions for node '${nodeId}': ${error.message}`);
+      }
+    } catch (error) {
+      console.warn(
+        `[MCP] Failed to close sessions for node '${nodeId}': ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  };
+  return {
+    onAbort: () => {
+      void close();
+    },
+    close
+  };
 }
 
 function getAbortMessage(signal?: AbortSignal): string {
@@ -3928,15 +3965,22 @@ async function executeNode(
         dependencies
       );
 
-      const result = await invokeDirectMCPTool(
-        serverConfig,
-        toolName,
-        args,
-        dependencies.mcpRegistry,
-        {
-          resolveSecret: dependencies.resolveSecret
-        }
-      );
+      // A per-node context keeps a spawned stdio server scoped to this call
+      // instead of the adapter-wide fallback cache, which would keep it alive
+      // for the life of the process.
+      const directMcpContext = {
+        resolveSecret: dependencies.resolveSecret,
+        runtimeState: new Map<string, unknown>()
+      };
+      const releaseDirectMcpSessions = createMcpSessionReleaser(dependencies.mcpRegistry, directMcpContext, node.id);
+      dependencies.abortSignal?.addEventListener("abort", releaseDirectMcpSessions.onAbort, { once: true });
+      let result: Awaited<ReturnType<typeof invokeDirectMCPTool>>;
+      try {
+        result = await invokeDirectMCPTool(serverConfig, toolName, args, dependencies.mcpRegistry, directMcpContext);
+      } finally {
+        dependencies.abortSignal?.removeEventListener("abort", releaseDirectMcpSessions.onAbort);
+        await releaseDirectMcpSessions.close();
+      }
 
       if (!result.ok) {
         throw new Error(result.error ?? "MCP tool invocation failed");
@@ -4085,187 +4129,199 @@ async function executeNode(
         resolveSecret: dependencies.resolveSecret,
         runtimeState: new Map<string, unknown>()
       };
+      // Stdio MCP servers spawned for this node live in this context only.
+      // Close them once the node is done, however it ends: success, error,
+      // clarification pause, or cancellation/timeout through the abort signal.
+      // Workers reached through delegation run executeNode with their own
+      // context, so closing here never touches a session a worker still uses,
+      // and a worker closing its own sessions leaves this node's alone.
+      const releaseMcpSessions = createMcpSessionReleaser(dependencies.mcpRegistry, mcpExecutionContext, node.id);
+      dependencies.abortSignal?.addEventListener("abort", releaseMcpSessions.onAbort, { once: true });
+      try {
+        const resolvedTools = await resolveMCPTools(serverConfigs, dependencies.mcpRegistry, mcpExecutionContext);
 
-      const resolvedTools = await resolveMCPTools(serverConfigs, dependencies.mcpRegistry, mcpExecutionContext);
+        for (const attachedToolNode of attachedToolNodes) {
+          const attachedConfig = toRecord(attachedToolNode.config);
+          await context.recordAttachmentUsage?.({
+            attachedNodeId: attachedToolNode.id,
+            usedByNodeId: node.id,
+            handle: "tool",
+            input: {
+              serverId: String(attachedConfig.serverId ?? ""),
+              ...(readRegistryServerId(attachedConfig) ? { registryServerId: readRegistryServerId(attachedConfig) } : {}),
+              toolName: String(attachedConfig.toolName ?? "")
+            },
+            output: {
+              resolvedTools: resolvedTools.resolved.length
+            }
+          });
+        }
 
-      for (const attachedToolNode of attachedToolNodes) {
-        const attachedConfig = toRecord(attachedToolNode.config);
-        await context.recordAttachmentUsage?.({
-          attachedNodeId: attachedToolNode.id,
-          usedByNodeId: node.id,
-          handle: "tool",
-          input: {
-            serverId: String(attachedConfig.serverId ?? ""),
-            ...(readRegistryServerId(attachedConfig) ? { registryServerId: readRegistryServerId(attachedConfig) } : {}),
-            toolName: String(attachedConfig.toolName ?? "")
-          },
-          output: {
-            resolvedTools: resolvedTools.resolved.length
-          }
-        });
-      }
-
-      const attachedMemoryNode = getAttachedNodes("memory").find((attached) => attached.type === "local_memory");
-      let memory: { namespace?: string; maxMessages?: number; persistToolMessages?: boolean } | undefined;
-      if (attachedMemoryNode) {
-        const memoryConfig = toRecord(attachedMemoryNode.config);
-        const namespaceTemplate =
-          typeof memoryConfig.namespace === "string" && memoryConfig.namespace.trim()
-            ? memoryConfig.namespace
-            : `${context.workflow.id}:${node.id}`;
-        const namespace = renderTemplate(namespaceTemplate, templateData).trim() || `${context.workflow.id}:${node.id}`;
-        const maxMessages =
-          typeof memoryConfig.maxMessages === "number" && memoryConfig.maxMessages > 0
-            ? Math.floor(memoryConfig.maxMessages)
-            : 20;
-        const persistToolMessages = memoryConfig.persistToolMessages === true;
-        memory = {
-          namespace,
-          maxMessages,
-          persistToolMessages
-        };
-        await context.recordAttachmentUsage?.({
-          attachedNodeId: attachedMemoryNode.id,
-          usedByNodeId: node.id,
-          handle: "memory",
-          input: {
-            sessionId
-          },
-          output: {
+        const attachedMemoryNode = getAttachedNodes("memory").find((attached) => attached.type === "local_memory");
+        let memory: { namespace?: string; maxMessages?: number; persistToolMessages?: boolean } | undefined;
+        if (attachedMemoryNode) {
+          const memoryConfig = toRecord(attachedMemoryNode.config);
+          const namespaceTemplate =
+            typeof memoryConfig.namespace === "string" && memoryConfig.namespace.trim()
+              ? memoryConfig.namespace
+              : `${context.workflow.id}:${node.id}`;
+          const namespace = renderTemplate(namespaceTemplate, templateData).trim() || `${context.workflow.id}:${node.id}`;
+          const maxMessages =
+            typeof memoryConfig.maxMessages === "number" && memoryConfig.maxMessages > 0
+              ? Math.floor(memoryConfig.maxMessages)
+              : 20;
+          const persistToolMessages = memoryConfig.persistToolMessages === true;
+          memory = {
             namespace,
             maxMessages,
             persistToolMessages
-          }
-        });
-      }
-
-      const attachedWorkerNodes = getAttachedNodes("worker");
-      const workerTools = attachedWorkerNodes.map(worker => {
-        const workerConfig = toRecord(worker.config);
-        const descriptionHint = typeof workerConfig.systemPromptTemplate === "string" ? workerConfig.systemPromptTemplate.slice(0, 100) : worker.name;
-        return {
-          serverId: `worker-${worker.id}`,
-          name: `delegate_to_${worker.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
-          description: `Delegate task to ${worker.name}. Hint: ${descriptionHint}`,
-          inputSchema: {
-            type: "object",
-            properties: {
-              task_prompt: { type: "string", description: "The explicit prompt, context, or task instructions to give this worker." }
+          };
+          await context.recordAttachmentUsage?.({
+            attachedNodeId: attachedMemoryNode.id,
+            usedByNodeId: node.id,
+            handle: "memory",
+            input: {
+              sessionId
             },
-            required: ["task_prompt"]
-          }
-        };
-      });
-
-      const allToolsForModel = [
-        ...resolvedTools.resolved.map((entry) => ({
-          serverId: entry.serverId,
-          name: entry.exposedName,
-          description: entry.definition.description,
-          inputSchema: entry.definition.inputSchema
-        })),
-        ...workerTools
-      ];
-
-      const rawImages = Array.isArray(templateData.images) ? templateData.images as Array<{data: string; mimeType: string}> : [];
-      const images = rawImages.filter(img => img && typeof img.data === "string" && img.data && typeof img.mimeType === "string" && img.mimeType.startsWith("image/"));
-
-
-      const modelRunStarted = Date.now();
-      const modelRunStartedAt = nowIso();
-      const agentState = await dependencies.agentRuntime.run(
-        {
-          provider,
-          systemPrompt,
-          userPrompt,
-          maxIterations,
-          toolCallingEnabled,
-          agentType: typeof config.agentType === "string" ? config.agentType as "tools" | "react" | "plan-and-execute" | "sql" : "tools",
-          tools: allToolsForModel,
-          toolOutputLimits: hasCustomToolOutputLimits ? toolOutputLimits : undefined,
-          sessionId,
-          memory,
-          bypassToolFiltering: attachedToolServerConfigs.length > 0,
-          images: images.length > 0 ? images : undefined
-        },
-        {
-          tools: [
-            ...resolvedTools.tools,
-            ...workerTools.map(wt => ({ name: wt.name, description: wt.description, inputSchema: wt.inputSchema }))
-          ],
-          invokeTool: async (toolName, args) => {
-             const matchingWorker = workerTools.find(wt => wt.name === toolName);
-             if (matchingWorker) {
-                const workerId = matchingWorker.serverId.replace("worker-", "");
-                const workerNode = attachedWorkerNodes.find(wn => wn.id === workerId);
-                if (!workerNode) throw new Error(`Worker node ${workerId} not found.`);
-                
-                const workerContext: NodeRuntimeContext = {
-                   ...context,
-                   globals: { ...context.globals, user_prompt: String(args.task_prompt ?? "") },
-                   parentOutputs: { ...context.parentOutputs },
-                   callStack: [...context.callStack, node.id]
-                };
-                
-                const workerResult = await executeNode(workerNode, workerContext, dependencies);
-                return workerResult;
-             }
-             return resolvedTools.invokeByExposedName(toolName, args);
-          }
-        },
-        {
-          providerRegistry: dependencies.providerRegistry,
-          resolveSecret: dependencies.resolveSecret,
-          memoryStore: dependencies.memoryStore,
-          toolDataStore: dependencies.toolDataStore
+            output: {
+              namespace,
+              maxMessages,
+              persistToolMessages
+            }
+          });
         }
-      );
-      const modelRunCompletedAt = nowIso();
-      if (attachedModelNode) {
-        const lastStep = agentState.steps.at(-1);
-        await context.recordAttachmentUsage?.({
-          attachedNodeId: attachedModelNode.id,
-          usedByNodeId: node.id,
-          handle: "chat_model",
-          startedAt: modelRunStartedAt,
-          completedAt: modelRunCompletedAt,
-          durationMs: Math.max(0, Date.now() - modelRunStarted),
-          input: {
-            provider,
-            messages: modelMessages
-          },
-          output: {
-            stopReason: agentState.stopReason,
-            iterations: agentState.iterations,
-            answer: agentState.finalAnswer,
-            model_output: lastStep?.modelOutput ?? agentState.finalAnswer,
-            requested_tool_calls: lastStep?.requestedTools.length ?? 0
-          }
-        });
-      }
 
-      return {
-        answer: agentState.finalAnswer,
-        iterations: agentState.iterations,
-        stopReason: agentState.stopReason,
-        steps: agentState.steps,
-        messages: agentState.messages,
-        _provider: provider,
-        // Phase 7.1 — surface cumulative agent telemetry on the node output.
-        _telemetry: {
-          providerId: provider.providerId,
-          model: provider.model,
-          usage: agentState.usage,
-          latencyMs: agentState.llmLatencyMs,
-          llmCallCount: agentState.llmCallCount
-        },
-        // Phase: agent_clarify — when the agent paused to ask the user a
-        // question, surface the clarification details on the node output
-        // so workflow consumers (chat UI, /executions response, downstream
-        // nodes) can detect the awaiting state. `clarification` is
-        // undefined when the agent finished normally.
-        ...(agentState.clarification ? { clarification: agentState.clarification } : {})
-      };
+        const attachedWorkerNodes = getAttachedNodes("worker");
+        const workerTools = attachedWorkerNodes.map(worker => {
+          const workerConfig = toRecord(worker.config);
+          const descriptionHint = typeof workerConfig.systemPromptTemplate === "string" ? workerConfig.systemPromptTemplate.slice(0, 100) : worker.name;
+          return {
+            serverId: `worker-${worker.id}`,
+            name: `delegate_to_${worker.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+            description: `Delegate task to ${worker.name}. Hint: ${descriptionHint}`,
+            inputSchema: {
+              type: "object",
+              properties: {
+                task_prompt: { type: "string", description: "The explicit prompt, context, or task instructions to give this worker." }
+              },
+              required: ["task_prompt"]
+            }
+          };
+        });
+
+        const allToolsForModel = [
+          ...resolvedTools.resolved.map((entry) => ({
+            serverId: entry.serverId,
+            name: entry.exposedName,
+            description: entry.definition.description,
+            inputSchema: entry.definition.inputSchema
+          })),
+          ...workerTools
+        ];
+
+        const rawImages = Array.isArray(templateData.images) ? templateData.images as Array<{data: string; mimeType: string}> : [];
+        const images = rawImages.filter(img => img && typeof img.data === "string" && img.data && typeof img.mimeType === "string" && img.mimeType.startsWith("image/"));
+
+
+        const modelRunStarted = Date.now();
+        const modelRunStartedAt = nowIso();
+        const agentState = await dependencies.agentRuntime.run(
+          {
+            provider,
+            systemPrompt,
+            userPrompt,
+            maxIterations,
+            toolCallingEnabled,
+            agentType: typeof config.agentType === "string" ? config.agentType as "tools" | "react" | "plan-and-execute" | "sql" : "tools",
+            tools: allToolsForModel,
+            toolOutputLimits: hasCustomToolOutputLimits ? toolOutputLimits : undefined,
+            sessionId,
+            memory,
+            bypassToolFiltering: attachedToolServerConfigs.length > 0,
+            images: images.length > 0 ? images : undefined
+          },
+          {
+            tools: [
+              ...resolvedTools.tools,
+              ...workerTools.map(wt => ({ name: wt.name, description: wt.description, inputSchema: wt.inputSchema }))
+            ],
+            invokeTool: async (toolName, args) => {
+               const matchingWorker = workerTools.find(wt => wt.name === toolName);
+               if (matchingWorker) {
+                  const workerId = matchingWorker.serverId.replace("worker-", "");
+                  const workerNode = attachedWorkerNodes.find(wn => wn.id === workerId);
+                  if (!workerNode) throw new Error(`Worker node ${workerId} not found.`);
+                
+                  const workerContext: NodeRuntimeContext = {
+                     ...context,
+                     globals: { ...context.globals, user_prompt: String(args.task_prompt ?? "") },
+                     parentOutputs: { ...context.parentOutputs },
+                     callStack: [...context.callStack, node.id]
+                  };
+                
+                  const workerResult = await executeNode(workerNode, workerContext, dependencies);
+                  return workerResult;
+               }
+               return resolvedTools.invokeByExposedName(toolName, args);
+            }
+          },
+          {
+            providerRegistry: dependencies.providerRegistry,
+            resolveSecret: dependencies.resolveSecret,
+            memoryStore: dependencies.memoryStore,
+            toolDataStore: dependencies.toolDataStore
+          }
+        );
+        const modelRunCompletedAt = nowIso();
+        if (attachedModelNode) {
+          const lastStep = agentState.steps.at(-1);
+          await context.recordAttachmentUsage?.({
+            attachedNodeId: attachedModelNode.id,
+            usedByNodeId: node.id,
+            handle: "chat_model",
+            startedAt: modelRunStartedAt,
+            completedAt: modelRunCompletedAt,
+            durationMs: Math.max(0, Date.now() - modelRunStarted),
+            input: {
+              provider,
+              messages: modelMessages
+            },
+            output: {
+              stopReason: agentState.stopReason,
+              iterations: agentState.iterations,
+              answer: agentState.finalAnswer,
+              model_output: lastStep?.modelOutput ?? agentState.finalAnswer,
+              requested_tool_calls: lastStep?.requestedTools.length ?? 0
+            }
+          });
+        }
+
+        return {
+          answer: agentState.finalAnswer,
+          iterations: agentState.iterations,
+          stopReason: agentState.stopReason,
+          steps: agentState.steps,
+          messages: agentState.messages,
+          _provider: provider,
+          // Phase 7.1 — surface cumulative agent telemetry on the node output.
+          _telemetry: {
+            providerId: provider.providerId,
+            model: provider.model,
+            usage: agentState.usage,
+            latencyMs: agentState.llmLatencyMs,
+            llmCallCount: agentState.llmCallCount
+          },
+          // Phase: agent_clarify — when the agent paused to ask the user a
+          // question, surface the clarification details on the node output
+          // so workflow consumers (chat UI, /executions response, downstream
+          // nodes) can detect the awaiting state. `clarification` is
+          // undefined when the agent finished normally.
+          ...(agentState.clarification ? { clarification: agentState.clarification } : {})
+        };
+      } finally {
+        dependencies.abortSignal?.removeEventListener("abort", releaseMcpSessions.onAbort);
+        await releaseMcpSessions.close();
+      }
     }
 
     case "output_parser": {

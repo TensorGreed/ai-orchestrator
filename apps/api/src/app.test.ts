@@ -2541,6 +2541,73 @@ describe("Phase 1 MCP probe & inspector", () => {
     expect(response.statusCode).toBe(401);
   });
 
+  // A stdio MCP server that reports its own pid, both in the tool description
+  // (visible to discover-tools) and as the tool result (visible to test-tool).
+  const PID_STDIO_SERVER = `
+process.stdin.setEncoding('utf-8');
+let buf = '';
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let nl = buf.indexOf('\\n');
+  while (nl >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    nl = buf.indexOf('\\n');
+    if (!line) continue;
+    const req = JSON.parse(line);
+    if (req.method === 'initialize') reply(req.id, { protocolVersion: '2024-11-05', capabilities: {} });
+    else if (req.method === 'tools/list') reply(req.id, { tools: [{ name: 'pid', description: 'pid:' + process.pid, inputSchema: { type: 'object' } }] });
+    else if (req.method === 'tools/call') reply(req.id, { structuredContent: { pid: process.pid } });
+  }
+});
+`;
+  const pidStdioConnection = { command: process.execPath, args: ["-e", PID_STDIO_SERVER], timeoutMs: 10_000 };
+  const isProcessAlive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("stops the stdio MCP server /api/mcp/test-tool spawned once the request finishes", async () => {
+    const context = await createTestContext();
+    const cookie = await loginAs(context, "builder");
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/test-tool",
+      headers: { cookie },
+      payload: { serverId: "stdio_mcp", connection: pidStdioConnection, toolName: "pid", args: {} }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ ok: boolean; output: { pid: number } }>();
+    expect(body.ok).toBe(true);
+    expect(typeof body.output.pid).toBe("number");
+    expect(isProcessAlive(body.output.pid)).toBe(false);
+  });
+
+  it("stops the stdio MCP server /api/mcp/discover-tools spawned once the request finishes", async () => {
+    const context = await createTestContext();
+    const cookie = await loginAs(context, "builder");
+
+    const response = await context.app.inject({
+      method: "POST",
+      url: "/api/mcp/discover-tools",
+      headers: { cookie },
+      payload: { serverId: "stdio_mcp", connection: pidStdioConnection }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ tools: Array<{ name: string; description: string }> }>();
+    const pid = Number(body.tools[0]?.description.replace("pid:", ""));
+    expect(pid).toBeGreaterThan(0);
+    expect(isProcessAlive(pid)).toBe(false);
+  });
+
   it("returns the curated MCP preset catalogue from /api/mcp/presets", async () => {
     const context = await createTestContext();
     const cookie = await loginAs(context, "viewer");
