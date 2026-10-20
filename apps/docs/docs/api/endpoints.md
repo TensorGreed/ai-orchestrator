@@ -30,7 +30,7 @@
 
 - `GET /api/definitions`
 - `POST /api/connectors/test`
-- `POST /api/mcp/discover-tools`
+- `POST /api/mcp/discover-tools` (optional `projectId`; each tool carries `classification` and an `access` mark for the caller's role)
 
 ## MCP server registry
 
@@ -42,11 +42,22 @@ See [MCP server registry](../product/mcp-server-registry.md).
 - `PUT /api/mcp/servers/:id`
 - `DELETE /api/mcp/servers/:id`
 - `POST /api/mcp/servers/:id/probe`
-- `GET /api/mcp/servers/:id/tools`
+- `GET /api/mcp/servers/:id/tools?projectId=` (each tool carries `classification`, `manualReadOnly` and an `access` mark for the caller's role)
+- `PUT /api/mcp/servers/:id/tools/:toolName/classification` (admin; `{ readOnly: true | false | null }`)
 - `GET /api/mcp/servers/:id/snapshots/:snapshotId`
 - `POST /api/mcp/servers/:id/accept-change`
 - `GET /api/mcp/servers/:id/telemetry?window=24h|7d|30d`
 - `GET /api/mcp/telemetry?window=24h|7d|30d` (servers configured inline on nodes)
+
+## MCP tool policy
+
+See [MCP tool policy](../product/mcp-tool-policy.md).
+
+- `GET /api/mcp/policies` (builder)
+- `POST /api/mcp/policies` (admin)
+- `PUT /api/mcp/policies/:id` (admin)
+- `DELETE /api/mcp/policies/:id` (admin)
+- `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, noWriteTools? }`)
 
 ## Secrets
 

@@ -29,7 +29,7 @@ process.stdin.on('data', (chunk) => {
         id: req.id,
         result: {
           tools: [
-            { name: 'echo', description: 'echoes the msg argument', inputSchema: { type: 'object', properties: { msg: { type: 'string' } }, required: ['msg'] } },
+            { name: 'echo', description: 'echoes the msg argument', inputSchema: { type: 'object', properties: { msg: { type: 'string' } }, required: ['msg'] }, annotations: { readOnlyHint: true, title: 'Echo', extra: 'dropped' } },
             { name: 'add', description: 'returns a + b as structured content', inputSchema: { type: 'object' } }
           ]
         }
@@ -106,6 +106,14 @@ describe("StdioMCPServerAdapter", () => {
     expect(tools[0].serverId).toBe("stdio_mcp");
     expect(tools[0].serverLabel).toBe("echo test");
     expect(tools[0].inputSchema).toMatchObject({ type: "object" });
+  });
+
+  it("keeps the MCP tool annotations from tools/list and leaves them off tools that send none", async () => {
+    const adapter = new StdioMCPServerAdapter();
+    const tools = await adapter.discoverTools(makeConfig(), makeContext());
+
+    expect(tools[0].annotations).toEqual({ readOnlyHint: true, title: "Echo" });
+    expect(tools[1]).not.toHaveProperty("annotations");
   });
 
   it("invokes a tool and normalizes text content output", async () => {

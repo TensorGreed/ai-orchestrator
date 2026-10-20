@@ -191,6 +191,13 @@ export interface WorkflowSettings {
   saveDataErrorExecution?: "all" | "none";
   /** Phase 7.3 — workflow activation state. */
   active?: boolean;
+  /**
+   * Phase 10.2 — when true, agents and MCP Tool nodes in this workflow can
+   * only use read-only MCP tools. A tool is read-only when an admin marked it
+   * so on the MCP servers page, or when its server annotates it with
+   * `readOnlyHint: true`; every other tool counts as a write tool.
+   */
+  noWriteTools?: boolean;
 }
 
 export const DEFAULT_PROJECT_ID = "default";
@@ -340,6 +347,8 @@ export interface WorkflowExecutionState {
   }>;
   hadContinuedErrors: boolean;
   finalOutput?: unknown;
+  /** Phase 10.2 — the tool policy subject of the paused run, reused on resume. */
+  toolPolicySubject?: McpToolPolicySubject;
 }
 
 export interface WorkflowValidationIssue {
@@ -497,6 +506,21 @@ export interface LLMCallResponse {
 export interface MCPToolDefinition extends ToolDefinition {
   serverId: string;
   serverLabel?: string;
+  /** Phase 10.2 — behaviour hints the server sent with `tools/list`, when it sent any. */
+  annotations?: McpToolAnnotations;
+}
+
+/**
+ * Phase 10.2 — MCP tool annotations (`tools/list` → `tools[].annotations`).
+ * They are hints from the server, not guarantees; L2M uses `readOnlyHint`
+ * to classify tools as read-only unless an admin overrides it.
+ */
+export interface McpToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
 }
 
 export interface MCPServerDefinition {
@@ -626,6 +650,86 @@ export interface McpToolAttribution {
   adapterId: string;
   toolName: string;
   registryServerId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10.2 — MCP tool policy
+// ---------------------------------------------------------------------------
+
+export type McpPolicyRole = "admin" | "builder" | "operator" | "viewer";
+export const MCP_POLICY_ROLES: readonly McpPolicyRole[] = ["admin", "builder", "operator", "viewer"];
+
+/**
+ * One tool policy rule. A rule matches a tool call when every scope field
+ * matches: project (`projectId` null = every project), role (`roles` empty =
+ * every role), server (`serverId` null = any server; otherwise a registry
+ * server id, or an adapter id for servers configured inline on a node) and
+ * tool name (`toolPattern`, exact or a glob where `*` matches any run of
+ * characters).
+ */
+export interface McpToolPolicyRule {
+  id: string;
+  name: string | null;
+  description: string | null;
+  effect: "allow" | "deny";
+  projectId: string | null;
+  roles: McpPolicyRole[];
+  serverId: string | null;
+  toolPattern: string;
+  enabled: boolean;
+  createdBy?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * Whose role a run's tool policy is evaluated with. `user`: the signed-in
+ * user who started the run. `owner`: the workflow's creator, for unattended
+ * runs (webhooks, schedules, queue). `fallback`: no usable user, so the
+ * lowest role (`viewer`) applies.
+ */
+export interface McpToolPolicySubject {
+  role: McpPolicyRole;
+  source: "user" | "owner" | "fallback";
+  userId?: string;
+  email?: string;
+  /** Why the subject fell back to `viewer`, when it did. */
+  fallbackReason?: string;
+}
+
+/** Admin override of a registry tool's read-only classification. */
+export interface McpToolClassificationOverride {
+  registryServerId: string;
+  toolName: string;
+  readOnly: boolean;
+  setBy?: string | null;
+  setAt?: string;
+}
+
+export type McpToolClassificationSource = "manual" | "annotation" | "unknown";
+
+export interface McpToolClassification {
+  readOnly: boolean;
+  source: McpToolClassificationSource;
+}
+
+/** One tool removed from an agent's tool set (or refused at call time). */
+export interface McpHiddenTool {
+  tool: string;
+  /** Adapter id of the server the tool came from. */
+  server: string;
+  registryServerId?: string;
+  reason: "policy" | "no_write_tools";
+  ruleId?: string;
+  ruleName?: string;
+}
+
+/** Policy decisions attached to agent / supervisor node outputs as `_toolPolicy`. */
+export interface McpToolPolicyTrace {
+  subject: McpToolPolicySubject;
+  projectId?: string;
+  noWriteTools: boolean;
+  hidden: McpHiddenTool[];
 }
 
 export interface AgentRunState {

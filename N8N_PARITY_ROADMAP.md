@@ -432,9 +432,9 @@ as a local file or an endpoint on the user's own instance.
 - [x] Per-tool telemetry rollup from execution traces: call count, p50/p95 latency, error rate, token cost of the agent turns that invoked it (`mcp_tool_calls`, migration v21; `GET /api/mcp/servers/:id/telemetry`, `GET /api/mcp/telemetry`; columns on the server page's Tools table)
 
 ### 10.2 Tool policy
-- [ ] Allow/deny policies per role and per project: which servers and which tools an agent may call; enforced in `agent-runtime` tool discovery (filtered out, not just hidden)
-- [ ] Read-only tool classification (from annotations when the server provides them, else manual) and a "no write tools" switch per workflow
-- [ ] Policy evaluation visible in the Trace tab: "tool X hidden by policy Y"
+- [x] Allow/deny policies per role and per project: which servers and which tools an agent may call; enforced in `agent-runtime` tool discovery (filtered out, not just hidden) (`mcp_tool_policies`, migration v22; deny wins, a strictly narrower allow carves an exception; discovery filter plus call-time check; unattended runs use the workflow creator's role, `workflows.created_by`)
+- [x] Read-only tool classification (from annotations when the server provides them, else manual) and a "no write tools" switch per workflow (`mcp_tool_classifications`; `readOnlyHint` kept in tool snapshots; unknown counts as write; `settings.noWriteTools`)
+- [x] Policy evaluation visible in the Trace tab: "tool X hidden by policy Y" (`_toolPolicy` on agent outputs with the evaluated subject; `POST /api/mcp/policies/evaluate` dry-run)
 
 ### 10.3 Control plane UI
 - [ ] "MCP" section in the sidebar: servers, tools, policies, changes feed

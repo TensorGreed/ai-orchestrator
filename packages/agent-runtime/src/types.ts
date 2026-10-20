@@ -4,6 +4,12 @@ import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 export interface AgentToolRuntime {
   tools: ToolDefinition[];
   invokeTool: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Phase 10.2 — explains why a requested tool is not in `tools` (for
+   * example, an MCP tool policy hid it). The text becomes the tool error the
+   * model sees instead of the generic "does not exist" message.
+   */
+  describeUnavailableTool?: (toolName: string) => string | undefined;
 }
 
 export interface AgentRuntimeContext {

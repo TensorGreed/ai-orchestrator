@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import type { LLMProviderConfig, MCPToolDefinition, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import type { LLMProviderConfig, MCPToolDefinition, McpToolPolicyTrace, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import {
@@ -18,6 +19,7 @@ import {
   type McpPreset,
   type McpRegisteredServer,
   type McpTestToolResult,
+  type McpToolAccess,
   type SecretListItem
 } from "../lib/api";
 
@@ -35,6 +37,8 @@ export interface NodeTrace {
   telemetry?: NodeTelemetry;
   error?: string;
   errorRemediation?: string;
+  /** Phase 10.2 — the agent's tool policy record: who it was evaluated as and which tools were hidden. */
+  toolPolicy?: McpToolPolicyTrace;
 }
 
 /** Labels of the nodes attached to each agent port, derived by the caller from the edges. */
@@ -59,6 +63,8 @@ export interface NodeInspectorProps {
     id?: string;
     name?: string;
     vars?: Record<string, unknown>;
+    /** Project whose MCP tool policy marks discovered tools for the current user. */
+    projectId?: string;
   };
   pinnedData?: Record<string, unknown>;
   showRuntimeInspection?: boolean;
@@ -200,6 +206,8 @@ export function buildNodeTrace(
   if (nodeTelemetry) trace.telemetry = nodeTelemetry;
   if (result?.error) trace.error = result.error;
   if (result?.errorRemediation) trace.errorRemediation = result.errorRemediation;
+  const toolPolicy = readToolPolicyTrace(result?.output);
+  if (toolPolicy) trace.toolPolicy = toolPolicy;
   return Object.keys(trace).length > 0 ? trace : undefined;
 }
 
@@ -1064,6 +1072,7 @@ export function NodeInspector({
   }, [resizing]);
   const [selectedInputId, setSelectedInputId] = useState(NODE_INPUT_OPTION_ID);
   const [discoveredTools, setDiscoveredTools] = useState<MCPToolDefinition[]>([]);
+  const [toolAccessByName, setToolAccessByName] = useState<Record<string, McpToolAccess>>({});
   const [discoverBusy, setDiscoverBusy] = useState(false);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
@@ -1704,14 +1713,21 @@ export function NodeInspector({
 
         // A registered server's tools come from its latest probe snapshot, so
         // opening the node never spawns or calls the server.
+        const accessByName: Record<string, McpToolAccess> = {};
         const response = registryServerId
-          ? await fetchMcpServerTools(registryServerId).then((result) => ({
-              tools: result.tools.map((tool) => ({
-                serverId: serverId || registryServerId,
-                name: tool.name,
-                description: tool.description ?? "",
-                inputSchema: tool.inputSchema
-              }))
+          ? await (workflowContext?.projectId
+              ? fetchMcpServerTools(registryServerId, workflowContext.projectId)
+              : fetchMcpServerTools(registryServerId)
+            ).then((result) => ({
+              tools: result.tools.map((tool) => {
+                if (tool.access) accessByName[tool.name] = tool.access;
+                return {
+                  serverId: serverId || registryServerId,
+                  name: tool.name,
+                  description: tool.description ?? "",
+                  inputSchema: tool.inputSchema
+                };
+              })
             }))
           : await discoverMcpTools({
               serverId,
@@ -1719,8 +1735,15 @@ export function NodeInspector({
               secretRef:
                 typeof asRecord(config.secretRef).secretId === "string"
                   ? { secretId: String(asRecord(config.secretRef).secretId) }
-                  : undefined
+                  : undefined,
+              ...(workflowContext?.projectId ? { projectId: workflowContext.projectId } : {})
+            }).then((result) => {
+              for (const tool of result.tools ?? []) {
+                if (tool.access) accessByName[tool.name] = tool.access;
+              }
+              return result;
             });
+        setToolAccessByName(accessByName);
 
         const sourceLabel = registryServerId ? "the registered server's last probe" : `'${serverId}'`;
         setDiscoveredTools(response.tools);
@@ -1750,7 +1773,7 @@ export function NodeInspector({
         setDiscoverBusy(false);
       }
     },
-    [config.connection, config.registryServerId, config.secretRef, config.serverId, config.toolName]
+    [config.connection, config.registryServerId, config.secretRef, config.serverId, config.toolName, workflowContext?.projectId]
   );
 
   useEffect(() => {
@@ -3263,6 +3286,34 @@ export function NodeInspector({
             }
           />
         )}
+
+        {(() => {
+          const candidates = includeAllDiscoveredTools ? discoveredTools.map((tool) => tool.name) : selectedToolNames;
+          const blocked = candidates
+            .map((name) => ({ name, access: toolAccessByName[name] }))
+            .filter((entry) => entry.access && !entry.access.allowed);
+          if (blocked.length === 0) return null;
+          return (
+            <div className="cfg-policy-note" role="note" data-testid="mcp-policy-blocked">
+              <strong>Blocked for you by MCP tool policy</strong>
+              <ul>
+                {blocked.map((entry) => (
+                  <li key={entry.name}>
+                    <code>{entry.name}</code>:{" "}
+                    {entry.access?.reason === "no_write_tools"
+                      ? "write tool, and the policy allows no write tools here"
+                      : `blocked by ${entry.access?.ruleName ?? entry.access?.ruleId ?? "a policy rule"}`}
+                  </li>
+                ))}
+              </ul>
+              <span>
+                {includeAllDiscoveredTools
+                  ? "Agents you run will not see these tools."
+                  : "Runs you start will fail at this node. Unattended runs use the workflow owner's role."}
+              </span>
+            </div>
+          );
+        })()}
 
         {toolSelectionMode === "single" && selectedTool && (
           <div className="cfg-group">
@@ -8603,7 +8654,8 @@ export function NodeInspector({
     const telemetry = trace?.telemetry;
     const error = trace?.error ?? currentNodeResult?.error;
     const errorRemediation = trace?.errorRemediation ?? currentNodeResult?.errorRemediation;
-    const hasRun = Boolean(status || durationMs !== undefined || telemetry || error);
+    const toolPolicy = trace?.toolPolicy ?? readToolPolicyTrace(currentNodeResult?.output);
+    const hasRun = Boolean(status || durationMs !== undefined || telemetry || error || toolPolicy);
     if (!hasRun) {
       return <div className="insp-empty">No run yet. Run the workflow or this node to see its trace.</div>;
     }
@@ -8642,6 +8694,27 @@ export function NodeInspector({
             {errorRemediation ? <p className="insp-trace-remedy">{errorRemediation}</p> : null}
           </div>
         ) : null}
+        {toolPolicy
+          ? (() => {
+              const view = buildToolPolicyTraceView(toolPolicy);
+              return (
+                <div className="insp-trace-policy" data-testid="insp-trace-policy">
+                  <strong>Tool policy</strong>
+                  <p>{view.subject}</p>
+                  {view.noWriteTools ? <p className="insp-trace-remedy">This workflow allows no write tools.</p> : null}
+                  {view.lines.length > 0 ? (
+                    <ul>
+                      {view.lines.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="insp-trace-remedy">No tools were hidden.</p>
+                  )}
+                </div>
+              );
+            })()
+          : null}
       </div>
     );
   };

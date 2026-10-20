@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import type { MCPServerConfig, MCPToolDefinition, MCPToolResult } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter } from "../types";
+import { withToolAnnotations } from "../tool-annotations";
 
 interface JsonRpcResponse {
   jsonrpc?: string;
@@ -187,7 +188,8 @@ function normalizeDiscoveredTools(serverId: string, serverLabel: string, rawTool
       serverLabel,
       name: String(item.name),
       description: typeof item.description === "string" ? item.description : "MCP tool",
-      inputSchema: toRecord(item.inputSchema ?? item.input_schema)
+      inputSchema: toRecord(item.inputSchema ?? item.input_schema),
+      ...withToolAnnotations(item.annotations)
     }));
 }
 

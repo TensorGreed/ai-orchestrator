@@ -1049,6 +1049,50 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP TABLE IF EXISTS mcp_tool_calls;
     `
+  },
+  {
+    version: 22,
+    description: "Phase 10.2 — MCP tool policy (mcp_tool_policies, mcp_tool_classifications, workflows.created_by)",
+    up: `
+      CREATE TABLE IF NOT EXISTS mcp_tool_policies (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        description TEXT,
+        effect TEXT NOT NULL,
+        project_id TEXT,
+        roles_json TEXT NOT NULL DEFAULT '[]',
+        server_id TEXT,
+        tool_pattern TEXT NOT NULL DEFAULT '*',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mcp_tool_classifications (
+        server_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        read_only INTEGER NOT NULL,
+        set_by TEXT,
+        set_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (server_id, tool_name)
+      );
+
+      ALTER TABLE workflows ADD COLUMN IF NOT EXISTS created_by TEXT;
+
+      UPDATE workflows SET created_by = (
+        SELECT wv.created_by FROM workflow_versions wv
+        WHERE wv.workflow_id = workflows.id AND wv.created_by IS NOT NULL
+        ORDER BY wv.created_at ASC, wv.version ASC
+        LIMIT 1
+      )
+      WHERE created_by IS NULL;
+    `,
+    down: `
+      ALTER TABLE workflows DROP COLUMN IF EXISTS created_by;
+      DROP TABLE IF EXISTS mcp_tool_classifications;
+      DROP TABLE IF EXISTS mcp_tool_policies;
+    `
   }
 ];
 

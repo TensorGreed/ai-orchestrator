@@ -43,6 +43,9 @@ export interface StudioHudProps {
   isDirty?: boolean;
   /** Opens the editor's share dialog from the overflow menu. */
   onShare?: () => void;
+  /** Phase 10.2 — the workflow's "No write tools" setting; the menu item shows only when the toggle handler is set. */
+  noWriteTools?: boolean;
+  onToggleNoWriteTools?: () => void;
   /** Additional command palette entries (e.g. "add node" items from the canvas). */
   extraItems?: CommandPaletteItem[];
   /** Optional docs URL override; defaults to VITE_DOCS_URL or host:4173. */
@@ -102,6 +105,8 @@ export function StudioHud({
   onRun,
   isDirty = false,
   onShare,
+  noWriteTools = false,
+  onToggleNoWriteTools,
   extraItems = NO_EXTRA_ITEMS,
   docsUrl,
   navDrawerOpen = false,
@@ -449,6 +454,24 @@ export function StudioHud({
                     }}
                   >
                     Share…
+                  </button>
+                )}
+                {onToggleNoWriteTools && (
+                  <button
+                    type="button"
+                    className="hud-dropdown-item hud-dropdown-check"
+                    role="menuitemcheckbox"
+                    aria-checked={noWriteTools}
+                    title="Block MCP tools that are not marked read-only, for agents and MCP Tool nodes in this workflow"
+                    onClick={() => {
+                      setOverflowOpen(false);
+                      onToggleNoWriteTools();
+                    }}
+                  >
+                    <span className="hud-check-box" aria-hidden="true">
+                      {noWriteTools ? "✓" : ""}
+                    </span>
+                    No write tools
                   </button>
                 )}
                 {canManageSecrets && (

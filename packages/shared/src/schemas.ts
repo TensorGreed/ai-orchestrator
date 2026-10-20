@@ -171,6 +171,18 @@ export const workflowEdgeSchema = z.object({
   label: z.string().optional()
 });
 
+export const workflowSettingsSchema = z
+  .object({
+    errorWorkflowId: z.string().min(1).optional(),
+    executionTimeoutMs: z.number().int().positive().optional(),
+    saveDataSuccessExecution: z.enum(["all", "none"]).optional(),
+    saveDataErrorExecution: z.enum(["all", "none"]).optional(),
+    active: z.boolean().optional(),
+    /** Phase 10.2 — block every MCP write tool for agents and MCP Tool nodes in this workflow. */
+    noWriteTools: z.boolean().optional()
+  })
+  .passthrough();
+
 export const workflowSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -185,7 +197,8 @@ export const workflowSchema = z.object({
   pinnedData: z.record(z.string(), z.unknown()).optional(),
   tags: z.array(z.string().min(1).max(64)).optional(),
   projectId: z.string().min(1).optional(),
-  folderId: z.string().min(1).optional()
+  folderId: z.string().min(1).optional(),
+  settings: workflowSettingsSchema.optional()
 });
 
 export const projectSchema = z.object({
@@ -234,3 +247,43 @@ export const agentWebhookPayloadSchema = z.object({
 });
 
 export type WorkflowSchemaInput = z.input<typeof workflowSchema>;
+
+// Phase 10.2 — MCP tool policy rules.
+export const mcpPolicyRoleSchema = z.enum(["admin", "builder", "operator", "viewer"]);
+
+/** Tool name or glob: letters, digits and the characters MCP servers use in tool names, plus `*`. */
+export const mcpToolPatternSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9_.:\/*-]+$/, "Use a tool name, or a glob where * matches any characters");
+
+export const mcpToolPolicyRuleInputSchema = z.object({
+  name: z.string().trim().max(120).nullable().optional(),
+  description: z.string().max(2000).nullable().optional(),
+  effect: z.enum(["allow", "deny"]),
+  projectId: z.string().trim().min(1).nullable().optional(),
+  roles: z.array(mcpPolicyRoleSchema).max(4).optional(),
+  serverId: z.string().trim().min(1).nullable().optional(),
+  /** Defaults to "*" (every tool) when a rule is created without one. */
+  toolPattern: mcpToolPatternSchema.optional(),
+  enabled: z.boolean().optional()
+});
+
+export const mcpToolPolicyRuleUpdateSchema = mcpToolPolicyRuleInputSchema
+  .partial()
+  .refine((value) => Object.keys(value).length > 0, { message: "Empty update payload" });
+
+export const mcpToolPolicyEvaluateSchema = z.object({
+  projectId: z.string().trim().min(1).nullable().optional(),
+  role: mcpPolicyRoleSchema,
+  serverId: z.string().trim().min(1),
+  toolName: z.string().trim().min(1).max(200),
+  noWriteTools: z.boolean().optional()
+});
+
+export const mcpToolClassificationSchema = z.object({
+  /** true / false sets the manual override; null clears it. */
+  readOnly: z.boolean().nullable()
+});

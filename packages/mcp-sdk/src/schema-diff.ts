@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { McpToolAnnotations } from "@ai-orchestrator/shared";
+import { normalizeToolAnnotations } from "./tool-annotations";
 
 /**
  * Phase 10.1 — tool schema snapshots and diffs for the MCP server registry.
@@ -10,19 +12,24 @@ import { createHash } from "node:crypto";
  *   - a new required property appears, or an optional one becomes required
  *   - an enum loses a value
  * Everything else (new tools, new optional properties, widened types, new enum
- * values, description edits) is recorded but not breaking.
+ * values, description edits, annotation changes) is recorded but not breaking.
+ *
+ * Phase 10.2 — tool annotations are part of the snapshot only when a server
+ * sends them, so the hash of a server without annotations is unchanged.
  */
 
 export interface McpToolSnapshotEntry {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  annotations?: McpToolAnnotations;
 }
 
 export type McpToolChangeKind =
   | "tool_added"
   | "tool_removed"
   | "description_changed"
+  | "annotations_changed"
   | "property_added"
   | "property_removed"
   | "property_type_changed"
@@ -66,14 +73,18 @@ function canonicalize(value: unknown): unknown {
 }
 
 export function normalizeToolSnapshot(
-  tools: Array<{ name: string; description?: string; inputSchema?: unknown }>
+  tools: Array<{ name: string; description?: string; inputSchema?: unknown; annotations?: unknown }>
 ): McpToolSnapshotEntry[] {
   return [...tools]
-    .map((tool) => ({
-      name: tool.name,
-      description: tool.description ?? "",
-      inputSchema: canonicalize(toRecord(tool.inputSchema)) as Record<string, unknown>
-    }))
+    .map((tool) => {
+      const annotations = normalizeToolAnnotations(tool.annotations);
+      return {
+        name: tool.name,
+        description: tool.description ?? "",
+        inputSchema: canonicalize(toRecord(tool.inputSchema)) as Record<string, unknown>,
+        ...(annotations ? { annotations: canonicalize(annotations) as McpToolAnnotations } : {})
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -208,6 +219,16 @@ export function diffToolSnapshots(before: McpToolSnapshotEntry[], after: McpTool
     }
     if ((previous.description ?? "") !== (next.description ?? "")) {
       changes.push({ tool: name, kind: "description_changed", breaking: false, detail: "description changed" });
+    }
+    const beforeAnnotations = JSON.stringify(previous.annotations ?? {});
+    const afterAnnotations = JSON.stringify(next.annotations ?? {});
+    if (beforeAnnotations !== afterAnnotations) {
+      changes.push({
+        tool: name,
+        kind: "annotations_changed",
+        breaking: false,
+        detail: `annotations ${beforeAnnotations} → ${afterAnnotations}`
+      });
     }
     diffSchema(name, undefined, previous.inputSchema, next.inputSchema, changes);
   }

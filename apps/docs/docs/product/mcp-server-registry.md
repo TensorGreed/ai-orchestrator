@@ -65,6 +65,9 @@ The diff compares each tool's input schema with the previous snapshot, including
 | A new required property is added, or an optional one becomes required | A required property becomes optional |
 | An enum loses a value | An enum gains a value, or its restriction is dropped |
 | | A description changes |
+| | A tool's annotations change |
+
+Snapshots keep the MCP tool annotations a server sends with `tools/list` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). A server that sends no annotations keeps the same snapshot hash as before. A change in annotations is recorded as a compatible `annotations_changed` entry and is never breaking.
 
 A breaking snapshot becomes the server's **pending breaking change** and the page shows its diff. If **Block runs on breaking change** is on, every run that uses the server is refused until an admin presses **Accept change**. Acceptance is recorded on the snapshot and in the audit log. The block is off by default.
 
@@ -100,6 +103,10 @@ Cost uses the same pricing table as usage and budgets (`LLM_PRICING_OVERRIDES_JS
 
 Rows live in the `mcp_tool_calls` table and are pruned with execution history: calls older than `EXECUTION_HISTORY_RETENTION_DAYS` are deleted by the same job. Deleting a registry entry deletes its calls. Re-saving the same execution, for example after an approval resumes it, replaces its rows instead of adding to them.
 
+## Tool policy
+
+Admins can restrict which tools of a server each role may use, per project, and mark tools read-only or write. Workflows can also block every write tool. The server page's **Policies** view holds the rules, and the Tools table shows each tool's read-only classification and whether your role may use it. See [MCP tool policy](./mcp-tool-policy.md).
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -127,7 +134,7 @@ Deleting a server that nodes still use is refused with the list of those nodes, 
 - `PUT /api/mcp/servers/:id`: update (admin)
 - `DELETE /api/mcp/servers/:id?force=true`: delete (admin)
 - `POST /api/mcp/servers/:id/probe`: probe now
-- `GET /api/mcp/servers/:id/tools`: tools from the current snapshot
+- `GET /api/mcp/servers/:id/tools?projectId=`: tools from the current snapshot, each with its read-only classification and whether the caller's role may use it in the project
 - `GET /api/mcp/servers/:id/snapshots/:snapshotId`: one snapshot with its tools and diff
 - `POST /api/mcp/servers/:id/accept-change`: accept the pending breaking change (admin)
 - `GET /api/mcp/servers/:id/telemetry?window=24h|7d|30d`: per-tool calls, errors, latency, tokens and cost, plus server totals

@@ -4585,6 +4585,17 @@ function StudioApp() {
                   })
               : undefined
           }
+          noWriteTools={Boolean(currentWorkflow.settings?.noWriteTools)}
+          onToggleNoWriteTools={
+            canManageWorkflows
+              ? () =>
+                  setCurrentWorkflow((current) => {
+                    const { noWriteTools, ...rest } = current.settings ?? {};
+                    const settings = noWriteTools ? rest : { ...rest, noWriteTools: true };
+                    return { ...current, settings };
+                  })
+              : undefined
+          }
           docsUrl={docsUrl}
           navDrawerOpen={navDrawerOpen}
           onToggleNavDrawer={() => setNavDrawerOpen((open) => !open)}
@@ -5419,7 +5430,8 @@ function StudioApp() {
           workflowContext={{
             id: currentWorkflow.id,
             name: currentWorkflow.name,
-            vars: currentWorkflow.variables
+            vars: currentWorkflow.variables,
+            projectId: currentWorkflow.projectId ?? activeProjectId
           }}
           pinnedData={currentWorkflow.pinnedData}
           showRuntimeInspection={isDebugMode}
