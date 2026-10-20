@@ -110,7 +110,7 @@
 - [x] Built-in methods: JS-native string/number/date/array/object access via sandboxed `with` scope
 - [x] `$jmespath()` support for complex JSON querying (dot paths, `[index]`, `[*]`, `[?field=='x']`)
 - [x] `$if()`, `$ifEmpty()` inline conditionals
-- [ ] Expression editor with autocomplete and syntax highlighting in UI (deferred to Phase 4 — UI work)
+- [ ] Expression editor with autocomplete and syntax highlighting in UI (deferred to Phase 4 — UI work) (partial: `NodeConfigModal.tsx` `ExpressionField` suggestions + `POST /api/expressions/preview`, missing: syntax highlighting)
 
 ### 2.3 Python Support in Code Node
 **n8n equivalent:** Code node with JS + Python
@@ -175,12 +175,12 @@
 
 ### 3.4 Connector SDK V2 — Community Node System
 **n8n equivalent:** npm-based community nodes (5800+)
-- [ ] Standardized node package format (`l2m-nodes-*` npm packages)
-- [ ] Node package manifest (name, version, description, node types, credentials)
-- [ ] Install community nodes from UI (Settings > Community Nodes)
+- [x] Standardized node package format (`l2m-nodes-*` npm packages) — `apps/api/src/services/community-package-loader.ts` `l2m-nodes-*` loader
+- [ ] Node package manifest (name, version, description, node types, credentials) (partial: package.json `l2m` field with kind + apiVersion validated, missing: version/description/node types/credentials manifest fields)
+- [x] Install community nodes from UI (Settings > Community Nodes) — `apps/web/src/components/SettingsPage.tsx` `CommunityNodesTab`
 - [ ] Node discovery registry / marketplace
-- [ ] Node sandboxing for untrusted packages
-- [ ] Hot-reload on install (no restart required)
+- [ ] Node sandboxing for untrusted packages (partial: `--ignore-scripts` install + `COMMUNITY_NODES_ALLOWLIST`, missing: runtime isolation of package code)
+- [x] Hot-reload on install (no restart required) — `apps/api/src/app.ts` `POST /api/community-nodes/reload`
 
 ### 3.5 Trigger System Expansion
 **n8n equivalent:** 15 core triggers + 90 app-specific
@@ -299,29 +299,29 @@
 
 ### 6.1 Additional AI Agent Types
 **n8n equivalent:** Conversational, OpenAI Functions, Plan-and-Execute, ReAct, SQL, Tools agents
-- [ ] Plan-and-Execute agent type
-- [ ] ReAct agent type
-- [ ] SQL Agent (natural language to SQL)
-- [ ] Agent type selection in agent_orchestrator config
+- [x] Plan-and-Execute agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `plan-and-execute`
+- [x] ReAct agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `react`
+- [ ] SQL Agent (natural language to SQL) (partial: `sql` agentType adds SQL instructions to the system prompt in `packages/agent-runtime/src/default-agent-runtime.ts`, missing: schema introspection and query tools)
+- [x] Agent type selection in agent_orchestrator config — `apps/web/src/components/NodeConfigModal.tsx` `agentType`
 
 ### 6.2 LangChain-Style Chains
 **n8n equivalent:** Basic LLM Chain, QA Chain, Summarization Chain, extractors, classifiers
-- [ ] `basic_llm_chain` — simple prompt → response
-- [ ] `qa_chain` — RAG question answering (enhance existing rag_retrieve)
-- [ ] `summarization_chain` — document summarization
-- [ ] `information_extractor` — structured extraction from text
-- [ ] `text_classifier` — classify text into categories
-- [ ] `sentiment_analysis` — sentiment scoring
+- [x] `basic_llm_chain` — simple prompt → response — `packages/workflow-engine/src/executor.ts` `basic_llm_chain`
+- [x] `qa_chain` — RAG question answering (enhance existing rag_retrieve) — `packages/workflow-engine/src/executor.ts` `qa_chain`
+- [x] `summarization_chain` — document summarization — `packages/workflow-engine/src/executor.ts` `summarization_chain`
+- [x] `information_extractor` — structured extraction from text — `packages/workflow-engine/src/executor.ts` `information_extractor`
+- [x] `text_classifier` — classify text into categories — `packages/workflow-engine/src/executor.ts` `text_classifier`
+- [x] `sentiment_analysis` — sentiment scoring — `packages/workflow-engine/src/executor.ts` `sentiment_analysis`
 
 ### 6.3 Additional AI Infrastructure
-- [ ] Additional embedding adapters: AWS Bedrock, Cohere, Google Vertex, Mistral, HuggingFace
-- [ ] Additional vector stores: Chroma, Weaviate, Supabase, MongoDB Atlas, Milvus, Redis, Zep
+- [ ] Additional embedding adapters: AWS Bedrock, Cohere, Google Vertex, Mistral, HuggingFace (partial: Cohere, Mistral, Google Vertex, HuggingFace in `packages/workflow-engine/src/rag-adapters.ts`, missing: AWS Bedrock)
+- [ ] Additional vector stores: Chroma, Weaviate, Supabase, MongoDB Atlas, Milvus, Redis, Zep (partial: Chroma, Weaviate, Redis in `rag-adapters.ts`, missing: Supabase, MongoDB Atlas, Milvus, Zep)
 - [ ] Additional memory backends: MongoDB, PostgreSQL, Redis, Zep
-- [ ] Text splitters: Character, Recursive Character, Token
+- [x] Text splitters: Character, Recursive Character, Token — `packages/workflow-engine/src/chunker.ts` character/recursive/token strategies
 - [ ] Retrievers: Contextual Compression, MultiQuery, Workflow Retriever
-- [ ] AI evaluation framework (test/evaluate agent performance)
-- [ ] AI Transform node (natural language to code)
-- [ ] Guardrails node enhancement (validate AI outputs against schemas)
+- [x] AI evaluation framework (test/evaluate agent performance) — `apps/api/src/app.ts` `POST /api/eval/runs`
+- [x] AI Transform node (natural language to code) — `packages/workflow-engine/src/executor.ts` `ai_transform`
+- [x] Guardrails node enhancement (validate AI outputs against schemas) — `packages/workflow-engine/src/executor.ts` `matches_schema` check
 
 ### 6.4 AI Tools Expansion
 - [ ] Wikipedia tool
@@ -329,7 +329,7 @@
 - [ ] Wolfram Alpha tool
 - [ ] Think tool (agent reasoning step)
 - [ ] Workflow-as-tool (call another workflow as an agent tool)
-- [ ] Agent-as-tool (call another agent as a tool)
+- [x] Agent-as-tool (call another agent as a tool) — `supervisor_node` in `packages/shared/src/definitions.ts` (workers as synthetic tools)
 
 ---
 
@@ -344,39 +344,39 @@
 
 ### 7.2 Performance
 - [ ] Parallel node execution within workflows (independent branches)
-- [ ] Execution data pruning (configurable retention)
-- [ ] Large workflow optimization (1000+ nodes)
-- [ ] Binary data handling (file passthrough between nodes)
+- [x] Execution data pruning (configurable retention) — `apps/api/src/app.ts` `pruneExecutionHistory` (`EXECUTION_HISTORY_RETENTION_DAYS`)
+- [ ] Large workflow optimization (1000+ nodes) (partial: `computeDepthLevels` + DescendantCache in `packages/workflow-engine/src/validation.ts` with `performance.test.ts` (500-node sort), missing: 1000+ node executor path)
+- [ ] Binary data handling (file passthrough between nodes) (partial: `packages/workflow-engine/src/binary-store.ts` `FileSystemBinaryStore` + file nodes, missing: executor/API wiring of `binaryDataStore`)
 - [ ] Streaming execution for large datasets (item-level processing)
 
 ### 7.3 API Completeness
 **n8n equivalent:** Full OpenAPI 3.0 REST API
-- [ ] OpenAPI 3.0 spec generation
-- [ ] API key authentication
-- [ ] Workflow activate/deactivate endpoints
-- [ ] Workflow transfer between projects
-- [ ] Execution stop/cancel endpoint
-- [ ] Credential schema endpoint
-- [ ] User invite/management endpoints
-- [ ] Project CRUD endpoints
-- [ ] Tag CRUD endpoints
-- [ ] Variable CRUD endpoints
-- [ ] Source control push/pull endpoints
-- [ ] Audit report endpoint
-- [ ] Pagination on all list endpoints
+- [x] OpenAPI 3.0 spec generation — `apps/api/src/app.ts` `GET /api/openapi.json`
+- [x] API key authentication — `apps/api/src/services/api-key-service.ts`
+- [x] Workflow activate/deactivate endpoints — `apps/api/src/app.ts` `POST /api/workflows/:id/activate`
+- [x] Workflow transfer between projects — `apps/api/src/app.ts` `POST /api/workflows/:id/transfer`
+- [x] Execution stop/cancel endpoint — `apps/api/src/app.ts` `POST /api/executions/:id/cancel`
+- [x] Credential schema endpoint — `apps/api/src/app.ts` `GET /api/secrets/schema`
+- [ ] User invite/management endpoints (partial: `PUT /api/users/:id` and project member invites in `apps/api/src/app.ts`, missing: a deployment-level user invite endpoint)
+- [x] Project CRUD endpoints — `apps/api/src/app.ts` `POST /api/projects`
+- [ ] Tag CRUD endpoints (partial: `GET`/`POST`/`DELETE /api/tags` in `apps/api/src/app.ts`, missing: rename via `PUT`)
+- [x] Variable CRUD endpoints — `apps/api/src/app.ts` `POST /api/variables`
+- [x] Source control push/pull endpoints — `apps/api/src/app.ts` `POST /api/git/push`
+- [x] Audit report endpoint — `apps/api/src/app.ts` `GET /api/audit/export`
+- [ ] Pagination on all list endpoints (partial: `page`/`pageSize` on `GET /api/executions`, missing: other list endpoints)
 
 ### 7.4 Workflow Templates & Sharing
-- [ ] Template library with categories
-- [ ] One-click import from template gallery
-- [ ] Workflow export/share via URL
-- [ ] Community template submissions
-- [ ] Template search and filtering
+- [x] Template library with categories — `apps/api/src/app.ts` `GET /api/templates`
+- [x] One-click import from template gallery — `apps/api/src/app.ts` `POST /api/templates/:id/use`
+- [x] Workflow export/share via URL — `apps/api/src/app.ts` `GET /api/workflows/:id/share-link`
+- [ ] Community template submissions (partial: `POST /api/templates` for admin/builder, missing: moderation/public submission flow)
+- [x] Template search and filtering — `apps/web/src/components/TemplateGallery.tsx`
 
 ### 7.5 Notifications
-- [ ] Error notification framework (via error workflows)
-- [ ] Built-in email notification on workflow failure
-- [ ] Slack/Teams webhook notification presets
-- [ ] Notification preferences in Settings UI
+- [x] Error notification framework (via error workflows) — `apps/api/src/services/notification-service.ts`
+- [x] Built-in email notification on workflow failure — `apps/api/src/services/notification-service.ts` SMTP channel
+- [x] Slack/Teams webhook notification presets — `apps/api/src/services/notification-service.ts` slack/teams channels
+- [x] Notification preferences in Settings UI — `apps/web/src/components/SettingsPage.tsx` `NotificationsTab`
 
 ---
 
@@ -440,6 +440,40 @@ as a local file or an endpoint on the user's own instance.
 - [ ] "MCP" section in the sidebar: servers, tools, policies, changes feed
 - [ ] Orbit canvas integration: tool satellites show probe status and policy state
 
+### 10.4 L2M as an MCP server and gateway
+**Why:** today a workflow exposed with `mcp_server_trigger` is reachable only through a custom
+manifest/invoke REST pair, so standard MCP clients cannot connect. A spec-compliant endpoint makes
+L2M the one governed MCP hub that every AI client in an organisation points at.
+- [ ] Spec-compliant Streamable HTTP MCP endpoint (JSON-RPC `initialize`, `tools/list`, `tools/call`, progress and cancellation) that IDE agents, desktop assistants and other L2M instances connect to directly; the existing REST pair stays for compatibility
+- [ ] Workflows with `mcp_server_trigger` become tools on that endpoint, grouped into named toolsets with one URL each
+- [ ] Gateway mode: re-expose registered servers' tools through the same endpoint so every call gets L2M's secret injection, tool policy (10.2), telemetry (10.1) and audit log; local stdio servers become reachable without exposing the host
+- [ ] Client credentials: per-client tokens hashed at rest, each scoped to toolsets and a role; a "Connect a client" page with copy-paste config snippets and per-client usage
+
+### 10.5 Protocol coverage on the client side
+- [ ] Structured tool output: `outputSchema` and `structuredContent` kept in snapshots, validated, and passed to downstream nodes as typed data
+- [ ] Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) captured, shown on the registry page and used by policy and approvals
+- [ ] Resources and prompts: browse and read resources, use server prompts as templates in agent and LLM nodes; `list_changed` notifications trigger a re-probe
+- [ ] Progress notifications streamed to the run tape; cancelling a run sends `notifications/cancelled` to in-flight tool calls
+- [ ] Elicitation: a server asking for user input pauses the run through the existing wait/resume and clarification plumbing
+- [ ] Sampling: servers may request completions through the agent's attached chat model, gated by policy and counted in cost telemetry
+- [ ] OAuth 2.1 for remote MCP servers (metadata discovery, PKCE, dynamic client registration, token refresh) with tokens held by `SecretService`
+
+### 10.6 Onboarding and catalog
+- [ ] Import existing MCP client config files (`mcp.json`, `.vscode/mcp.json` and desktop-assistant configs) into the registry in one step, turning env values into secrets
+- [ ] Deployment-local catalog file of approved servers with pinned package versions; presets read from it, no vendor-side registry
+- [ ] MCP playground page: pick a server, call any tool through a schema-driven form, read resources, inspect the raw JSON-RPC exchange
+
+### 10.7 Runtime safety
+- [ ] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default
+- [ ] Per-server and per-tool rate limits, concurrency caps and a circuit breaker that opens on repeated failures and shows on the registry page
+- [ ] Tool output guard: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace
+- [ ] Delegated credentials: a tool call can use the triggering user's own token for a server instead of a shared service secret
+
+### 10.8 Testing and reliability
+- [ ] Record and replay: capture a run's tool calls as a cassette and replay runs and evals deterministically against it
+- [ ] Mock server from a snapshot: generate a stub MCP server from a schema snapshot for tests and offline demos
+- [ ] `l2m mcp check` CLI for CI: probe servers and fail on breaking schema changes against the accepted snapshot
+
 ## Phase 11: Audit Bundles & Approvals (after Phase 10)
 
 ### 11.1 Signed run manifests
@@ -458,7 +492,7 @@ Ideas from the positioning discussion, kept for later; each must remain self-hos
 - [ ] Reference deployment bundles: docker compose profiles that ship L2M with a curated set of open-source MCP servers (GitHub, Postgres, filesystem, Slack) and five tested workflows; first bundle: security / key-management reporting
 - [ ] Local eval benchmarks: run one workflow across providers and produce a cost / latency / accuracy report as a workflow output (no central leaderboard; users publish their own if they want)
 - [ ] Swarm depth: worker pools with token budgets, parallel fan-out with merge strategies, checkpoint and resume for long-running agents, delegation trace on the Orbit canvas
-- [ ] Workflow → standalone MCP server exporter (package a workflow so Claude Code, Cursor or another L2M can call it) to keep lock-in low
+- [ ] Workflow → standalone MCP server exporter (package a workflow so Claude Code, Cursor or another L2M can call it) to keep lock-in low (the in-instance endpoint is 10.4; this item is the standalone package)
 - [ ] "MCP agent operations" checklist and maturity model in the docs
 
 ## Implementation Priority Matrix
