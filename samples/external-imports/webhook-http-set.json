@@ -1,0 +1,173 @@
+{
+  "name": "Lead enrichment webhook",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-enrich",
+        "responseMode": "lastNode",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "0a1b2c3d-1111-4a4a-8b8b-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        300
+      ],
+      "webhookId": "7c1e9b1e-lead-enrich"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.example.com/v1/people/{{ $json.body.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "include",
+              "value": "company"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Request-Id",
+              "value": "={{ $execution.id }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "0a1b2c3d-1111-4a4a-8b8b-000000000002",
+      "name": "HTTP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        40,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "cred_41",
+          "name": "Enrichment API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f1",
+              "name": "email",
+              "value": "={{ $node[\"Webhook\"].json.body.email }}",
+              "type": "string"
+            },
+            {
+              "id": "f2",
+              "name": "company",
+              "value": "={{ $json.company.name }}",
+              "type": "string"
+            },
+            {
+              "id": "f3",
+              "name": "enrichedAt",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            },
+            {
+              "id": "f4",
+              "name": "score",
+              "value": 42,
+              "type": "number"
+            },
+            {
+              "id": "f5",
+              "name": "source",
+              "value": "webhook",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "0a1b2c3d-1111-4a4a-8b8b-000000000003",
+      "name": "Edit Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        280,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {
+    "Webhook": [
+      {
+        "json": {
+          "headers": {
+            "content-type": "application/json"
+          },
+          "body": {
+            "userId": "u_123",
+            "email": "ada@example.com"
+          }
+        }
+      }
+    ]
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York"
+  },
+  "active": false,
+  "versionId": "9f1c2a3b",
+  "meta": {
+    "instanceId": "abc123"
+  },
+  "tags": [
+    {
+      "id": "t1",
+      "name": "leads"
+    }
+  ]
+}

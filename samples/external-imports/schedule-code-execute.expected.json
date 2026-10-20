@@ -1,0 +1,267 @@
+{
+  "workflow": {
+    "id": "wf-import-nightly_digest",
+    "name": "Nightly digest",
+    "description": "Imported from an external workflow export (5 mapped, 3 approximated, 0 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "schedule_trigger",
+        "type": "schedule_trigger",
+        "name": "Schedule Trigger",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "config": {
+          "cronExpression": "30 2 * * *",
+          "timezone": "Asia/Kolkata",
+          "active": true
+        }
+      },
+      {
+        "id": "collect",
+        "type": "code_node",
+        "name": "Collect",
+        "position": {
+          "x": 220,
+          "y": 0
+        },
+        "config": {
+          "language": "javascript",
+          "mode": "runOnceForAllItems",
+          "code": "// Compatibility shim added by the external workflow import.\nconst __nodeIds = {\"Schedule Trigger\":\"schedule_trigger\",\"Collect\":\"collect\",\"Wait\":\"wait\",\"Build digest\":\"build_digest\",\"Split Out\":\"split_out\",\"Sort\":\"sort\",\"Limit\":\"limit\",\"Aggregate\":\"aggregate\"};\nconst __results = (input && typeof input === 'object' && input.results && typeof input.results === 'object') ? input.results : {};\nconst __asItems = (value) => (Array.isArray(value) ? value : [value]).map((json) => ({ json }));\nconst __nodeOutput = (name) => __results[__nodeIds[name] ?? name] ?? {};\nconst $json = input;\nconst $input = { all: () => __asItems(input), first: () => ({ json: input }), last: () => ({ json: input }), item: { json: input } };\nconst $ = (name) => ({ item: { json: __nodeOutput(name) }, first: () => ({ json: __nodeOutput(name) }), last: () => ({ json: __nodeOutput(name) }), all: () => __asItems(__nodeOutput(name)) });\nconst $node = new Proxy({}, { get: (_target, name) => ({ json: __nodeOutput(String(name)) }) });\nconst $items = (name) => __asItems(__nodeOutput(name));\nconst $now = new Date();\nconst __userResult = await (async () => {\nconst runs = $input.all();\nconst since = $('Schedule Trigger').item.json.timestamp;\nreturn [{ json: { since, items: runs.map(r => r.json), total: runs.length } }];\n})();\nif (Array.isArray(__userResult)) {\n  const __plain = __userResult.map((item) => (item && typeof item === 'object' && 'json' in item ? item.json : item));\n  return __plain.length === 1 && __plain[0] && typeof __plain[0] === 'object' ? __plain[0] : { items: __plain };\n}\nreturn __userResult && typeof __userResult === 'object' && 'json' in __userResult ? __userResult.json : __userResult;"
+        }
+      },
+      {
+        "id": "wait",
+        "type": "wait_node",
+        "name": "Wait",
+        "position": {
+          "x": 440,
+          "y": 0
+        },
+        "config": {
+          "resumeMode": "timer",
+          "delayMs": 5000,
+          "maxDelayMs": 30000
+        }
+      },
+      {
+        "id": "build_digest",
+        "type": "execute_workflow",
+        "name": "Build digest",
+        "position": {
+          "x": 660,
+          "y": 0
+        },
+        "config": {
+          "workflowId": "wf_child_digest",
+          "mode": "sync",
+          "inputMapping": {
+            "since": "since"
+          }
+        }
+      },
+      {
+        "id": "split_out",
+        "type": "split_out_node",
+        "name": "Split Out",
+        "position": {
+          "x": 880,
+          "y": 0
+        },
+        "config": {
+          "field": "items"
+        }
+      },
+      {
+        "id": "sort",
+        "type": "sort_node",
+        "name": "Sort",
+        "position": {
+          "x": 1100,
+          "y": 0
+        },
+        "config": {
+          "inputKey": "items",
+          "order": "desc",
+          "field": "createdAt"
+        }
+      },
+      {
+        "id": "limit",
+        "type": "limit_node",
+        "name": "Limit",
+        "position": {
+          "x": 1320,
+          "y": 0
+        },
+        "config": {
+          "maxItems": 10,
+          "keep": "first",
+          "inputKey": "items"
+        }
+      },
+      {
+        "id": "aggregate",
+        "type": "aggregate_node",
+        "name": "Aggregate",
+        "position": {
+          "x": 1540,
+          "y": 0
+        },
+        "config": {
+          "operation": "concatenate",
+          "inputKey": "items",
+          "field": "title",
+          "separator": ","
+        }
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 1820,
+          "y": 0
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "schedule_trigger",
+        "target": "collect"
+      },
+      {
+        "id": "edge_2",
+        "source": "collect",
+        "target": "wait"
+      },
+      {
+        "id": "edge_3",
+        "source": "wait",
+        "target": "build_digest"
+      },
+      {
+        "id": "edge_4",
+        "source": "build_digest",
+        "target": "split_out"
+      },
+      {
+        "id": "edge_5",
+        "source": "split_out",
+        "target": "sort"
+      },
+      {
+        "id": "edge_6",
+        "source": "sort",
+        "target": "limit"
+      },
+      {
+        "id": "edge_7",
+        "source": "limit",
+        "target": "aggregate"
+      },
+      {
+        "id": "edge_8",
+        "source": "aggregate",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Nightly digest",
+    "nodes": [
+      {
+        "sourceName": "Schedule Trigger",
+        "sourceType": "n8n-nodes-base.scheduleTrigger",
+        "sourceId": "e-1",
+        "targetNodeId": "schedule_trigger",
+        "targetType": "schedule_trigger",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Collect",
+        "sourceType": "n8n-nodes-base.code",
+        "sourceId": "e-2",
+        "targetNodeId": "collect",
+        "targetType": "code_node",
+        "status": "approximated",
+        "reason": "JavaScript code was wrapped with a compatibility shim for $json, $input, $(...) and item-list return values."
+      },
+      {
+        "sourceName": "Wait",
+        "sourceType": "n8n-nodes-base.wait",
+        "sourceId": "e-3",
+        "targetNodeId": "wait",
+        "targetType": "wait_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Build digest",
+        "sourceType": "n8n-nodes-base.executeWorkflow",
+        "sourceId": "e-4",
+        "targetNodeId": "build_digest",
+        "targetType": "execute_workflow",
+        "status": "approximated",
+        "reason": "Workflow id 'wf_child_digest' refers to the source system; point it at the imported child workflow."
+      },
+      {
+        "sourceName": "Split Out",
+        "sourceType": "n8n-nodes-base.splitOut",
+        "sourceId": "e-5",
+        "targetNodeId": "split_out",
+        "targetType": "split_out_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Sort",
+        "sourceType": "n8n-nodes-base.sort",
+        "sourceId": "e-6",
+        "targetNodeId": "sort",
+        "targetType": "sort_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Limit",
+        "sourceType": "n8n-nodes-base.limit",
+        "sourceId": "e-7",
+        "targetNodeId": "limit",
+        "targetType": "limit_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Aggregate",
+        "sourceType": "n8n-nodes-base.aggregate",
+        "sourceId": "e-8",
+        "targetNodeId": "aggregate",
+        "targetType": "aggregate_node",
+        "status": "approximated",
+        "reason": "Collecting values into an array is approximated with the concatenate operation."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [],
+    "variablesToSet": [],
+    "warnings": [
+      "The source error workflow setting was not imported; configure errorWorkflowId after import."
+    ],
+    "summary": {
+      "total": 8,
+      "mapped": 5,
+      "approximated": 3,
+      "unsupported": 0
+    }
+  }
+}

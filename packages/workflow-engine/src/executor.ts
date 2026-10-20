@@ -197,6 +197,8 @@ interface NodeRuntimeContext {
   globals: Record<string, unknown>;
   merged: Record<string, unknown>;
   parentOutputs: Record<string, unknown>;
+  /** Outputs of every node that has completed so far, keyed by node id (exposed to templates as `results`). */
+  nodeOutputs?: Map<string, unknown>;
   workflow: Workflow;
   nodeById: Map<string, WorkflowNode>;
   attachmentsBySource: Map<string, Map<AgentAttachmentHandle, string[]>>;
@@ -216,6 +218,8 @@ interface NodeRuntimeContext {
 type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
 const AGENT_ATTACHMENT_HANDLES = new Set<AgentAttachmentHandle>(["chat_model", "memory", "tool", "worker"]);
 const ALL_MCP_TOOLS_SENTINEL = "__all__";
+/** Marks the per-node `results` snapshot so passthrough nodes can tell it apart from user data. */
+const DERIVED_RESULTS_MARKER = Symbol("derivedResults");
 
 function nowIso() {
   return new Date().toISOString();
@@ -647,6 +651,14 @@ function buildTemplateData(
     parent_outputs: context.parentOutputs
   };
 
+  // `results.<nodeId>.<key>` addresses any completed node, not just direct parents.
+  // Data that already carries a `results` key keeps it.
+  if (!("results" in base) && context.nodeOutputs) {
+    const snapshot = serializeNodeOutputs(context.nodeOutputs);
+    Object.defineProperty(snapshot, DERIVED_RESULTS_MARKER, { value: true, enumerable: false });
+    base.results = snapshot;
+  }
+
   const inputMapping = nodeConfig
     ? toRecord(nodeConfig.inputMapping) as Record<string, string>
     : undefined;
@@ -1012,7 +1024,15 @@ function getValueByPath(input: Record<string, unknown>, path: string): unknown {
 function branchPassthrough(templateData: Record<string, unknown>): Record<string, unknown> {
   const next = { ...templateData };
   delete next.parent_outputs;
+  // The derived `results` snapshot is rebuilt for every node; copying it forward would nest snapshots.
+  if (isDerivedResultsSnapshot(next.results)) {
+    delete next.results;
+  }
   return next;
+}
+
+function isDerivedResultsSnapshot(value: unknown): boolean {
+  return Boolean(value) && typeof value === "object" && (value as Record<symbol, unknown>)[DERIVED_RESULTS_MARKER] === true;
 }
 
 function normalizePdfFilename(value: string): string {
@@ -5836,6 +5856,7 @@ export async function executeWorkflow(
                   globals: iterationGlobals,
                   merged: childMerged,
                   parentOutputs: childParentOutputs,
+                  nodeOutputs,
                   workflow,
                   nodeById: graphIndexes.nodeById,
                   attachmentsBySource: graphIndexes.attachmentsBySource,
@@ -6023,6 +6044,7 @@ export async function executeWorkflow(
           globals,
           merged,
           parentOutputs,
+          nodeOutputs,
           workflow,
           nodeById: graphIndexes.nodeById,
           attachmentsBySource: graphIndexes.attachmentsBySource,

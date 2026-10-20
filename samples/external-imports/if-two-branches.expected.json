@@ -1,0 +1,216 @@
+{
+  "workflow": {
+    "id": "wf-import-order_approval",
+    "name": "Order approval",
+    "description": "Imported from an external workflow export (6 mapped, 0 approximated, 0 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "when_clicking_test_workflow",
+        "type": "manual_trigger",
+        "name": "When clicking ‘Test workflow’",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "config": {
+          "label": "When clicking ‘Test workflow’"
+        }
+      },
+      {
+        "id": "sample_order",
+        "type": "set_node",
+        "name": "Sample Order",
+        "position": {
+          "x": 220,
+          "y": 0
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "status",
+              "valueTemplate": "active"
+            },
+            {
+              "key": "amount",
+              "valueTemplate": "250"
+            }
+          ]
+        }
+      },
+      {
+        "id": "needs_approval",
+        "type": "if_node",
+        "name": "Needs approval?",
+        "position": {
+          "x": 440,
+          "y": 0
+        },
+        "config": {
+          "condition": "{{ (String(results.sample_order.status ?? \"\") === \"active\") && (Number(results.sample_order.amount) > Number(100)) }}",
+          "trueLabel": "true",
+          "falseLabel": "false"
+        }
+      },
+      {
+        "id": "request_approval",
+        "type": "http_request",
+        "name": "Request approval",
+        "position": {
+          "x": 680,
+          "y": -120
+        },
+        "config": {
+          "method": "POST",
+          "urlTemplate": "https://hooks.example.com/approvals",
+          "responseType": "json",
+          "bodyTemplate": "{\n  \"amount\": {{results.needs_approval.amount}},\n  \"requestedBy\": \"{{results.sample_order.status}}\"\n}"
+        }
+      },
+      {
+        "id": "auto_approve",
+        "type": "noop_node",
+        "name": "Auto approve",
+        "position": {
+          "x": 680,
+          "y": 140
+        },
+        "config": {
+          "label": "Auto approve"
+        }
+      },
+      {
+        "id": "sticky_note",
+        "type": "sticky_note",
+        "name": "Sticky Note",
+        "position": {
+          "x": 380,
+          "y": -220
+        },
+        "config": {
+          "content": "## Approval rule\nOrders above 100 go to a human.",
+          "color": "green",
+          "fontSize": 14,
+          "width": 260,
+          "height": 120
+        }
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 960,
+          "y": 10
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "when_clicking_test_workflow",
+        "target": "sample_order"
+      },
+      {
+        "id": "edge_2",
+        "source": "sample_order",
+        "target": "needs_approval"
+      },
+      {
+        "id": "edge_3",
+        "source": "needs_approval",
+        "target": "request_approval",
+        "sourceHandle": "true"
+      },
+      {
+        "id": "edge_4",
+        "source": "needs_approval",
+        "target": "auto_approve",
+        "sourceHandle": "false"
+      },
+      {
+        "id": "edge_5",
+        "source": "request_approval",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_6",
+        "source": "auto_approve",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Order approval",
+    "nodes": [
+      {
+        "sourceName": "When clicking ‘Test workflow’",
+        "sourceType": "n8n-nodes-base.manualTrigger",
+        "sourceId": "b-1",
+        "targetNodeId": "when_clicking_test_workflow",
+        "targetType": "manual_trigger",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Sample Order",
+        "sourceType": "n8n-nodes-base.set",
+        "sourceId": "b-2",
+        "targetNodeId": "sample_order",
+        "targetType": "set_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Needs approval?",
+        "sourceType": "n8n-nodes-base.if",
+        "sourceId": "b-3",
+        "targetNodeId": "needs_approval",
+        "targetType": "if_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Request approval",
+        "sourceType": "n8n-nodes-base.httpRequest",
+        "sourceId": "b-4",
+        "targetNodeId": "request_approval",
+        "targetType": "http_request",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Auto approve",
+        "sourceType": "n8n-nodes-base.noOp",
+        "sourceId": "b-5",
+        "targetNodeId": "auto_approve",
+        "targetType": "noop_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Sticky Note",
+        "sourceType": "n8n-nodes-base.stickyNote",
+        "sourceId": "b-6",
+        "targetNodeId": "sticky_note",
+        "targetType": "sticky_note",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 6,
+      "mapped": 6,
+      "approximated": 0,
+      "unsupported": 0
+    }
+  }
+}

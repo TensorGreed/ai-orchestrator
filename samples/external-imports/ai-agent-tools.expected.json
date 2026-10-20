@@ -1,0 +1,317 @@
+{
+  "workflow": {
+    "id": "wf-import-support_agent",
+    "name": "Support agent",
+    "description": "Imported from an external workflow export (6 mapped, 2 approximated, 0 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "chat",
+        "type": "chat_trigger",
+        "name": "Chat",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "config": {
+          "path": "chat",
+          "authMode": "public",
+          "persistMessages": true,
+          "sessionNamespace": "support_agent",
+          "welcomeMessage": "Hi! How can I help with your order?"
+        }
+      },
+      {
+        "id": "ai_agent",
+        "type": "agent_orchestrator",
+        "name": "AI Agent",
+        "position": {
+          "x": 260,
+          "y": 0
+        },
+        "config": {
+          "agentType": "tools",
+          "systemPromptTemplate": "You are a support agent for Example Shop. Use the tools to look up orders.",
+          "userPromptTemplate": "{{results.chat.chatInput}}",
+          "sessionIdTemplate": "{{session_id}}",
+          "maxIterations": 8,
+          "toolCallingEnabled": true
+        }
+      },
+      {
+        "id": "openai_chat_model",
+        "type": "openai_chat_model",
+        "name": "OpenAI Chat Model",
+        "position": {
+          "x": 120,
+          "y": 220
+        },
+        "config": {
+          "model": "gpt-4o-mini",
+          "promptKey": "prompt",
+          "systemPromptKey": "system_prompt",
+          "temperature": 0.3,
+          "maxTokens": 2048,
+          "secretRef": {
+            "secretId": "import-openaiapi-openai_account"
+          }
+        }
+      },
+      {
+        "id": "simple_memory",
+        "type": "local_memory",
+        "name": "Simple Memory",
+        "position": {
+          "x": 280,
+          "y": 220
+        },
+        "config": {
+          "namespace": "support_agent",
+          "sessionIdTemplate": "{{ $json.sessionId }}",
+          "maxMessages": 12,
+          "persistToolMessages": false
+        }
+      },
+      {
+        "id": "orders_mcp",
+        "type": "mcp_tool",
+        "name": "Orders MCP",
+        "position": {
+          "x": 440,
+          "y": 220
+        },
+        "config": {
+          "serverId": "orders_mcp",
+          "toolName": "lookup_order",
+          "argsTemplate": "{}",
+          "connection": {
+            "endpoint": "https://mcp.example.com/orders/mcp",
+            "transport": "http_streamable",
+            "authType": "bearer"
+          },
+          "allowedTools": [
+            "lookup_order"
+          ],
+          "secretRef": {
+            "secretId": "import-httpbearerauth-orders_mcp_token"
+          }
+        }
+      },
+      {
+        "id": "shipping_mcp",
+        "type": "mcp_tool",
+        "name": "Shipping MCP",
+        "position": {
+          "x": 600,
+          "y": 220
+        },
+        "config": {
+          "serverId": "shipping_mcp",
+          "toolName": "__all__",
+          "argsTemplate": "{}",
+          "connection": {
+            "endpoint": "https://mcp.example.com/shipping/sse",
+            "transport": "http_streamable",
+            "authType": "none"
+          }
+        }
+      },
+      {
+        "id": "structured_output_parser",
+        "type": "output_parser",
+        "name": "Structured Output Parser",
+        "position": {
+          "x": 760,
+          "y": 220
+        },
+        "config": {
+          "mode": "json_schema",
+          "parsingMode": "lenient",
+          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"orderId\":{\"type\":\"string\"},\"escalate\":{\"type\":\"boolean\"}},\"required\":[\"answer\",\"orderId\",\"escalate\"]}",
+          "inputKey": "answer",
+          "maxRetries": 0
+        }
+      },
+      {
+        "id": "format_reply",
+        "type": "set_node",
+        "name": "Format reply",
+        "position": {
+          "x": 640,
+          "y": 0
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "reply",
+              "valueTemplate": "{{results.ai_agent.output.answer}}"
+            }
+          ]
+        }
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 1040,
+          "y": 0
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "chat",
+        "target": "ai_agent"
+      },
+      {
+        "id": "edge_2",
+        "source": "structured_output_parser",
+        "target": "format_reply"
+      },
+      {
+        "id": "edge_chat_model_3",
+        "source": "ai_agent",
+        "target": "openai_chat_model",
+        "sourceHandle": "chat_model"
+      },
+      {
+        "id": "edge_memory_4",
+        "source": "ai_agent",
+        "target": "simple_memory",
+        "sourceHandle": "memory"
+      },
+      {
+        "id": "edge_tool_5",
+        "source": "ai_agent",
+        "target": "orders_mcp",
+        "sourceHandle": "tool"
+      },
+      {
+        "id": "edge_tool_6",
+        "source": "ai_agent",
+        "target": "shipping_mcp",
+        "sourceHandle": "tool"
+      },
+      {
+        "id": "edge_7",
+        "source": "ai_agent",
+        "target": "structured_output_parser"
+      },
+      {
+        "id": "edge_8",
+        "source": "format_reply",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Support agent",
+    "nodes": [
+      {
+        "sourceName": "Chat",
+        "sourceType": "@n8n/n8n-nodes-langchain.chatTrigger",
+        "sourceId": "d-1",
+        "targetNodeId": "chat",
+        "targetType": "chat_trigger",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "AI Agent",
+        "sourceType": "@n8n/n8n-nodes-langchain.agent",
+        "sourceId": "d-2",
+        "targetNodeId": "ai_agent",
+        "targetType": "agent_orchestrator",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "OpenAI Chat Model",
+        "sourceType": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+        "sourceId": "d-3",
+        "targetNodeId": "openai_chat_model",
+        "targetType": "openai_chat_model",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Simple Memory",
+        "sourceType": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+        "sourceId": "d-4",
+        "targetNodeId": "simple_memory",
+        "targetType": "local_memory",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Orders MCP",
+        "sourceType": "@n8n/n8n-nodes-langchain.mcpClientTool",
+        "sourceId": "d-5",
+        "targetNodeId": "orders_mcp",
+        "targetType": "mcp_tool",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Shipping MCP",
+        "sourceType": "@n8n/n8n-nodes-langchain.mcpClientTool",
+        "sourceId": "d-6",
+        "targetNodeId": "shipping_mcp",
+        "targetType": "mcp_tool",
+        "status": "approximated",
+        "reason": "SSE transport is not supported; the connection was set to HTTP streamable."
+      },
+      {
+        "sourceName": "Structured Output Parser",
+        "sourceType": "@n8n/n8n-nodes-langchain.outputParserStructured",
+        "sourceId": "d-7",
+        "targetNodeId": "structured_output_parser",
+        "targetType": "output_parser",
+        "status": "approximated",
+        "reason": "The JSON schema was inferred from the example output. The parser runs as a step after the agent rather than inside it."
+      },
+      {
+        "sourceName": "Format reply",
+        "sourceType": "n8n-nodes-base.set",
+        "sourceId": "d-8",
+        "targetNodeId": "format_reply",
+        "targetType": "set_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [
+      {
+        "secretId": "import-openaiapi-openai_account",
+        "credentialType": "openAiApi",
+        "credentialName": "OpenAI account",
+        "nodeIds": [
+          "openai_chat_model"
+        ]
+      },
+      {
+        "secretId": "import-httpbearerauth-orders_mcp_token",
+        "credentialType": "httpBearerAuth",
+        "credentialName": "Orders MCP token",
+        "nodeIds": [
+          "orders_mcp"
+        ]
+      }
+    ],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 8,
+      "mapped": 6,
+      "approximated": 2,
+      "unsupported": 0
+    }
+  }
+}
