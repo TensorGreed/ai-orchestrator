@@ -2,6 +2,7 @@ import type { McpHiddenTool, McpPolicyKind, McpToolAnnotations, MCPServerConfig,
 import type { MCPRegistry } from "./registry";
 import { McpToolPolicyError } from "./tool-policy";
 import { toAgentToolOutput } from "./structured-output";
+import { isDelegatedCredentialError } from "./delegated";
 import type { MCPExecutionContext, ResolvedMCPTool } from "./types";
 
 export interface ResolvedToolSet {
@@ -70,6 +71,8 @@ export async function resolveMCPTools(
     try {
       tools = await adapter.discoverTools(serverConfig, context);
     } catch (discoveryError) {
+      // Phase 10.7 — a delegated server the user has not connected fails the node with a link to connect, rather than vanishing.
+      if (isDelegatedCredentialError(discoveryError)) throw discoveryError;
       // Log and continue — don't let one server failure kill the entire workflow
       console.warn(
         `[MCP] Tool discovery failed for server '${serverConfig.serverId}': ${

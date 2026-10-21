@@ -58,6 +58,17 @@ export interface MCPExecutionContext {
   onSampling?: (request: McpSamplingRequest, origin: McpServerRequestOrigin) => Promise<McpSamplingResult>;
   /** Phase 10.5 — receives `notifications/{tools,resources,prompts}/list_changed`. */
   onListChanged?: (event: McpListChangedEvent) => void;
+  /**
+   * Phase 10.7 — timeout for `tools/call` requests made with this context,
+   * overriding the connection's `timeoutMs` (the runtime limits wrapper sets
+   * it from the server's or the tool's limit).
+   */
+  callTimeoutMs?: number;
+  /**
+   * Phase 10.7 — set by health probes: the call skips rate limits and
+   * concurrency caps and is not counted by the circuit breaker.
+   */
+  bypassRuntimeLimits?: boolean;
 }
 
 /** Options for `readResource`. */
@@ -77,7 +88,17 @@ export interface McpOAuthTokenProvider {
    * `forceRefresh` is set (the server answered 401). Throws with an
    * actionable message when the server is not connected.
    */
-  getAccessToken(registryServerId: string, options?: { forceRefresh?: boolean }): Promise<string>;
+  getAccessToken(registryServerId: string, options?: McpAccessTokenOptions): Promise<string>;
+}
+
+export interface McpAccessTokenOptions {
+  forceRefresh?: boolean;
+  /**
+   * Phase 10.7 — for servers with `credentialMode: "delegated"`: the user
+   * whose own connection to use. A delegated server without one fails; the
+   * provider never falls back to the service connection.
+   */
+  userId?: string;
 }
 
 export interface MCPServerAdapter {

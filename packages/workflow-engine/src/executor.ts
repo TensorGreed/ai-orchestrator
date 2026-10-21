@@ -10,7 +10,8 @@ import {
   type McpToolAccessCheck,
   type McpToolAccessSubjectTool,
   type MCPExecutionContext,
-  type MCPRegistry
+  type MCPRegistry,
+  withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type {
@@ -777,13 +778,22 @@ function readRegistryServerId(config: Record<string, unknown>): string | undefin
   return value || undefined;
 }
 
-/** Swap a registry reference for the registered server's adapter, connection and secretRef. */
+/**
+ * Swap a registry reference for the registered server's adapter, connection
+ * and secretRef. Phase 10.7 — a delegated server also gets the user whose
+ * own token the calls use, decided from the run subject (the person who
+ * started the run; for unattended runs the workflow owner, only when the
+ * server allows it).
+ */
 async function applyRegisteredMcpServer(
   server: MCPServerConfig,
-  dependencies: Pick<WorkflowExecutionDependencies, "resolveRegisteredMcpServer">
+  dependencies: Pick<WorkflowExecutionDependencies, "resolveRegisteredMcpServer">,
+  subject?: McpToolPolicySubject
 ): Promise<MCPServerConfig> {
   if (!server.registryServerId) {
-    return server;
+    // Runtime safety settings come only from the registry; an inline node config cannot carry them.
+    const { sandbox: _sandbox, limits: _limits, credentialMode: _mode, delegatedFallback: _fallback, delegatedUser: _user, ...inline } = server;
+    return inline;
   }
   if (!dependencies.resolveRegisteredMcpServer) {
     throw WorkflowError.nodeConfig(
@@ -791,12 +801,16 @@ async function applyRegisteredMcpServer(
     );
   }
   const registered = await dependencies.resolveRegisteredMcpServer(server.registryServerId);
-  return {
-    ...registered,
-    registryServerId: server.registryServerId,
-    allowedTools: server.allowedTools,
-    manualTools: server.manualTools
-  };
+  const { delegatedUser: _ignored, ...resolved } = registered;
+  return withDelegatedUser(
+    {
+      ...resolved,
+      registryServerId: server.registryServerId,
+      allowedTools: server.allowedTools,
+      manualTools: server.manualTools
+    },
+    subject
+  );
 }
 
 function mergeMCPServerConfigs(base: MCPServerConfig[], additional: MCPServerConfig[]): MCPServerConfig[] {
@@ -2253,7 +2267,8 @@ async function applyServerPromptToLlmNode(input: {
   if (!binding) return { systemPrompt: input.systemPrompt, userPrompt: input.userPrompt };
   const serverConfig = await applyRegisteredMcpServer(
     { serverId: "", registryServerId: binding.registryServerId, connection: {} },
-    input.dependencies
+    input.dependencies,
+    input.context.toolPolicySubject
   );
   const toolPolicy = await buildRunToolPolicy(input.context, input.dependencies);
   const scoped = createNodeMcpContext(input.dependencies, input.nodeId, {
@@ -4307,7 +4322,8 @@ async function executeNode(
             ? config.allowedTools.map((tool) => String(tool))
             : undefined
         },
-        dependencies
+        dependencies,
+        context.toolPolicySubject
       );
 
       // Phase 10.2 — policy first (no server call needed), then the
@@ -4545,10 +4561,10 @@ async function executeNode(
       }
 
       const resolvedAttachedConfigs = await Promise.all(
-        attachedToolServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies))
+        attachedToolServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies, context.toolPolicySubject))
       );
       const resolvedInlineConfigs = await Promise.all(
-        inlineServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies))
+        inlineServerConfigs.map((entry) => applyRegisteredMcpServer(entry, dependencies, context.toolPolicySubject))
       );
       const serverConfigs =
         resolvedAttachedConfigs.length > 0
@@ -4562,7 +4578,8 @@ async function executeNode(
       const serverPromptServerConfig = serverPromptBinding
         ? await applyRegisteredMcpServer(
             { serverId: "", registryServerId: serverPromptBinding.registryServerId, connection: {} },
-            dependencies
+            dependencies,
+            context.toolPolicySubject
           )
         : undefined;
       const agentMcp = createNodeMcpContext(dependencies, node.id, {

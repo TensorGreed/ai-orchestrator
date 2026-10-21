@@ -16,6 +16,7 @@ import type {
   McpReadResourceOptions,
   McpServerRequestOrigin
 } from "../types";
+import { McpDelegatedCredentialError, McpJsonRpcError, McpTimeoutError, classifyMcpError } from "../errors";
 import {
   DEFAULT_RESOURCE_MAX_BYTES,
   MAX_LIST_PAGES,
@@ -124,7 +125,23 @@ function toRecord(value: unknown): Record<string, unknown> {
 }
 
 function buildSessionCacheKey(config: MCPServerConfig): string {
-  return `${config.serverId}::${config.registryServerId ?? ""}::${config.secretRef?.secretId ?? ""}::${JSON.stringify(config.connection ?? {})}`;
+  // Phase 10.7 — a delegated server's session carries one user's token, so the user is part of the key.
+  return `${config.serverId}::${config.registryServerId ?? ""}::${config.secretRef?.secretId ?? ""}::${config.delegatedUser?.userId ?? ""}::${JSON.stringify(config.connection ?? {})}`;
+}
+
+/**
+ * Phase 10.7 — token options for a server: a delegated server asks for the
+ * run subject's own token and fails when there is no subject.
+ */
+function tokenOptionsFor(config: MCPServerConfig, options?: { forceRefresh?: boolean }): { forceRefresh?: boolean; userId?: string } {
+  if (config.credentialMode !== "delegated") return { ...(options?.forceRefresh ? { forceRefresh: true } : {}) };
+  const userId = config.delegatedUser?.userId;
+  if (!userId) {
+    throw new McpDelegatedCredentialError(
+      `MCP server '${config.label ?? config.registryServerId ?? config.serverId}' uses each user's own account, and this call has no user to act for.`
+    );
+  }
+  return { ...(options?.forceRefresh ? { forceRefresh: true } : {}), userId };
 }
 
 function normalizeEndpoint(config: MCPServerConfig): string {
@@ -156,6 +173,13 @@ async function buildAuthHeaders(
   const connection = toRecord(config.connection);
   const authType = authTypeOf(config);
 
+  // Phase 10.7 — delegated servers only ever use the user's own OAuth token, never a shared credential.
+  if (config.credentialMode === "delegated" && authType !== "oauth") {
+    throw new McpDelegatedCredentialError(
+      `MCP server '${config.label ?? config.registryServerId ?? config.serverId}' is set to use each user's own account, which needs OAuth authentication.`
+    );
+  }
+
   if (authType === "none") {
     return {};
   }
@@ -169,7 +193,7 @@ async function buildAuthHeaders(
     if (!oauth) {
       throw new Error("OAuth authentication is not available in this runtime.");
     }
-    const token = await oauth.getAccessToken(config.registryServerId, options);
+    const token = await oauth.getAccessToken(config.registryServerId, tokenOptionsFor(config, options));
     return { Authorization: `Bearer ${token}` };
   }
 
@@ -383,7 +407,7 @@ async function postRpc(
         throw new Error("MCP server closed the response stream before answering.");
       }
       if (parsed.error) {
-        throw new Error(parsed.error.message || "MCP JSON-RPC error");
+        throw new McpJsonRpcError(parsed.error.message || "MCP JSON-RPC error", parsed.error.code);
       }
 
       return { response: parsed, sessionId };
@@ -392,7 +416,7 @@ async function postRpc(
         throw new McpRequestCanceledError(`MCP request canceled: ${cancelReason(retryOptions.signal)}`);
       }
       if (error instanceof Error && error.name === "AbortError") {
-        lastError = new Error(`MCP request timed out after ${timeoutMs}ms.`);
+        lastError = new McpTimeoutError(`MCP request timed out after ${timeoutMs}ms.`);
         if (!timedOut) {
           throw new McpRequestCanceledError("MCP request canceled.");
         }
@@ -637,7 +661,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
     payload: { id: string; method: string; params: Record<string, unknown> },
     context: MCPExecutionContext,
     config: MCPServerConfig,
-    options: { toolName?: string; onMessage?: (message: JsonRpcResponse) => void } = {}
+    options: { toolName?: string; onMessage?: (message: JsonRpcResponse) => void; timeoutMs?: number } = {}
   ): Promise<{ response: JsonRpcResponse; sessionId?: string }> {
     const onMessage = this.serverMessageHandler(session, context, config, options);
     const signal = context.signal;
@@ -651,7 +675,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      return await postRpc(session.endpoint, { jsonrpc: "2.0", ...payload }, session.headers, session.timeoutMs, {
+      return await postRpc(session.endpoint, { jsonrpc: "2.0", ...payload }, session.headers, options.timeoutMs ?? session.timeoutMs, {
         ...(signal ? { signal } : {}),
         onMessage,
         track: (controller) => {
@@ -844,7 +868,12 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
       },
       context,
       config,
-      { toolName, ...(onMessage ? { onMessage } : {}) }
+      {
+        toolName,
+        ...(onMessage ? { onMessage } : {}),
+        // Phase 10.7 — a per-call timeout from the server's runtime limits.
+        ...(typeof context.callTimeoutMs === "number" && context.callTimeoutMs >= 1 ? { timeoutMs: Math.floor(context.callTimeoutMs) } : {})
+      }
     );
     return result.response;
   }
@@ -952,7 +981,7 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
         // valid; an OAuth server answering 401 gets a refreshed token first.
         const unauthorized = error instanceof McpHttpError && error.status === 401 && authTypeOf(config) === "oauth";
         if (unauthorized && config.registryServerId && this.oauth) {
-          await this.oauth.getAccessToken(config.registryServerId, { forceRefresh: true });
+          await this.oauth.getAccessToken(config.registryServerId, tokenOptionsFor(config, { forceRefresh: true }));
         }
         session = await this.getOrCreateSession(config, context, { forceNew: true });
         response = await this.callTool(session, toolName, args, config, context);
@@ -963,7 +992,8 @@ export class HttpMCPServerAdapter implements MCPServerAdapter {
       return {
         ok: false,
         output: null,
-        error: error instanceof Error ? error.message : "Remote MCP tool invocation failed"
+        error: error instanceof Error ? error.message : "Remote MCP tool invocation failed",
+        errorKind: classifyMcpError(error, context.signal)
       };
     }
   }

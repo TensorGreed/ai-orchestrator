@@ -12,6 +12,8 @@ import type {
   MCPToolResult
 } from "@ai-orchestrator/shared";
 import type { MCPExecutionContext, MCPServerAdapter, McpReadResourceOptions, McpServerRequestOrigin } from "../types";
+import { McpJsonRpcError, McpTimeoutError, classifyMcpError } from "../errors";
+import type { StdioLaunchPlan, StdioLauncher } from "../sandbox";
 import {
   DEFAULT_RESOURCE_MAX_BYTES,
   MAX_LIST_PAGES,
@@ -98,6 +100,8 @@ interface StdioSession {
   config: MCPServerConfig;
   /** Answers to server requests still being written. */
   serverRequests: Set<Promise<void>>;
+  /** Phase 10.7 — removes what a sandboxed launch left behind; runs once the process is gone. */
+  cleanup?: () => Promise<void>;
 }
 
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -198,7 +202,8 @@ function toRecord(value: unknown): Record<string, unknown> {
 }
 
 function buildSessionKey(config: MCPServerConfig): string {
-  return `stdio_mcp:${config.serverId}::${config.secretRef?.secretId ?? ""}::${JSON.stringify(config.connection ?? {})}`;
+  // Phase 10.7 — the sandbox is part of the identity: a changed sandbox starts a new process.
+  return `stdio_mcp:${config.serverId}::${config.secretRef?.secretId ?? ""}::${JSON.stringify(config.connection ?? {})}::${JSON.stringify(config.sandbox ?? null)}`;
 }
 
 function normalizeCommand(config: MCPServerConfig): string {
@@ -225,8 +230,13 @@ function normalizeTimeoutMs(config: MCPServerConfig): number {
   return Math.floor(raw);
 }
 
-async function buildEnv(config: MCPServerConfig, context: MCPExecutionContext): Promise<NodeJS.ProcessEnv> {
-  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+/**
+ * The variables the server's config defines: custom env plus the resolved
+ * secret. A sandbox gets only these; a host process gets them on top of the
+ * API's environment.
+ */
+async function buildServerEnv(config: MCPServerConfig, context: MCPExecutionContext): Promise<Record<string, string>> {
+  const baseEnv: Record<string, string> = {};
   const customEnv = toRecord(config.connection?.env);
   for (const [key, value] of Object.entries(customEnv)) {
     if (typeof value === "string" && key.trim()) {
@@ -246,6 +256,11 @@ async function buildEnv(config: MCPServerConfig, context: MCPExecutionContext): 
   }
 
   return baseEnv;
+}
+
+function callTimeoutFor(config: MCPServerConfig, context: MCPExecutionContext): number {
+  const override = context.callTimeoutMs;
+  return typeof override === "number" && Number.isFinite(override) && override >= 1 ? Math.floor(override) : normalizeTimeoutMs(config);
 }
 
 function normalizeDiscoveredTools(serverId: string, serverLabel: string, rawTools: unknown): MCPToolDefinition[] {
@@ -278,6 +293,17 @@ function toProgressEventFor(progress: ParsedProgress, toolName: string, config: 
 
 export class StdioMCPServerAdapter implements MCPServerAdapter {
   private readonly fallbackSessionCache = new Map<string, StdioSession>();
+  /** Phase 10.7 — decides how the command starts (on the host, or in a container sandbox). */
+  private launcher?: StdioLauncher;
+
+  constructor(options?: { launcher?: StdioLauncher }) {
+    this.launcher = options?.launcher;
+  }
+
+  /** Phase 10.7 — the launcher sandboxed servers start through. */
+  setLauncher(launcher: StdioLauncher | undefined): void {
+    this.launcher = launcher;
+  }
 
   readonly definition = {
     id: "stdio_mcp",
@@ -354,15 +380,30 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     const cwd = typeof config.connection?.cwd === "string" && config.connection.cwd.trim()
       ? config.connection.cwd
       : undefined;
-    const env = await buildEnv(config, context);
+    const serverEnv = await buildServerEnv(config, context);
+    const plan: StdioLaunchPlan | null = this.launcher
+      ? await this.launcher.prepare({ command, args, env: serverEnv, ...(cwd ? { cwd } : {}), config })
+      : null;
 
-    const resolved = resolveSpawnCommand(command, args);
-    const proc = spawn(resolved.command, resolved.args, {
-      cwd,
-      env,
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: resolved.shell
-    });
+    let proc: ChildProcess;
+    if (plan) {
+      // A sandbox: the container CLI runs on the host, the command runs inside the container.
+      proc = spawn(plan.command, plan.args, {
+        ...(plan.cwd ? { cwd: plan.cwd } : {}),
+        env: plan.env,
+        stdio: ["pipe", "pipe", "pipe"],
+        shell: false,
+        windowsHide: true
+      });
+    } else {
+      const resolved = resolveSpawnCommand(command, args);
+      proc = spawn(resolved.command, resolved.args, {
+        cwd,
+        env: { ...process.env, ...serverEnv },
+        stdio: ["pipe", "pipe", "pipe"],
+        shell: resolved.shell
+      });
+    }
 
     const session: StdioSession = {
       proc,
@@ -378,15 +419,22 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       capabilities: {},
       context,
       config,
-      serverRequests: new Set()
+      serverRequests: new Set(),
+      ...(plan?.cleanup ? { cleanup: plan.cleanup } : {})
     };
 
     proc.stdout?.setEncoding("utf-8");
     proc.stdout?.on("data", (chunk: string) => this.handleStdout(session, chunk));
     proc.stderr?.setEncoding("utf-8");
     proc.stderr?.on("data", (chunk: string) => this.handleStderr(session, chunk));
-    proc.on("exit", () => this.handleClose(session));
-    proc.on("error", (error) => this.handleProcError(session, error));
+    proc.on("exit", () => {
+      this.handleClose(session);
+      this.runCleanup(session);
+    });
+    proc.on("error", (error) => {
+      this.handleProcError(session, error);
+      this.runCleanup(session);
+    });
 
     try {
       const initialized = await this.sendRpc(session, "initialize", {
@@ -520,7 +568,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       session.cancelsSent += 1;
     }
     session.pending.delete(id);
-    pending.reject(new Error(`MCP stdio request '${method}' timed out after ${timeoutMs}ms.`));
+    pending.reject(new McpTimeoutError(`MCP stdio request '${method}' timed out after ${timeoutMs}ms.`));
   }
 
   /** The tool call in flight (the latest one), for server requests made during it. */
@@ -593,6 +641,12 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     session.pending.clear();
   }
 
+  /** Phase 10.7 — remove what a sandboxed launch left behind (idempotent, never throws). */
+  private runCleanup(session: StdioSession): Promise<void> {
+    if (!session.cleanup) return Promise.resolve();
+    return session.cleanup().catch(() => undefined);
+  }
+
   private handleProcError(session: StdioSession, error: Error): void {
     const code = (error as NodeJS.ErrnoException).code;
     const path = (error as NodeJS.ErrnoException).path;
@@ -619,9 +673,11 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
   async closeSessions(context: MCPExecutionContext): Promise<void> {
     const cache = this.getCache(context);
     const exits: Array<Promise<void>> = [];
+    const closing: StdioSession[] = [];
     const reason = context.signal?.aborted ? cancelReason(context.signal) : "MCP session closed.";
     for (const [key, value] of cache) {
       if (value && typeof value === "object" && "proc" in value) {
+        closing.push(value);
         // Phase 10.5 — tell the server about every in-flight request before the process goes away.
         for (const id of [...value.pending.keys()]) {
           this.cancelPending(value, id, reason);
@@ -636,6 +692,8 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       }
     }
     await Promise.all(exits);
+    // Phase 10.7 — sandbox containers are removed before this resolves.
+    await Promise.all(closing.map((session) => this.runCleanup(session)));
   }
 
   /**
@@ -765,7 +823,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       (response) => {
         cleanup();
         if (response.error) {
-          throw new Error(response.error.message || "MCP JSON-RPC error");
+          throw new McpJsonRpcError(response.error.message || "MCP JSON-RPC error", response.error.code);
         }
         return response;
       },
@@ -964,7 +1022,7 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
     config: MCPServerConfig,
     context: MCPExecutionContext
   ): Promise<MCPToolResult> {
-    const timeoutMs = normalizeTimeoutMs(config);
+    const timeoutMs = callTimeoutFor(config, context);
     try {
       let session = await this.getOrCreateSession(config, context);
       let response: JsonRpcResponse;
@@ -983,7 +1041,8 @@ export class StdioMCPServerAdapter implements MCPServerAdapter {
       return {
         ok: false,
         output: null,
-        error: error instanceof Error ? error.message : "Stdio MCP tool invocation failed"
+        error: error instanceof Error ? error.message : "Stdio MCP tool invocation failed",
+        errorKind: classifyMcpError(error, context.signal)
       };
     }
   }
