@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, vi } from "vitest";
 import type { Node } from "reactflow";
@@ -13,7 +13,9 @@ vi.mock("../lib/api", async () => {
     fetchMcpServers: vi.fn(),
     fetchMcpServerTools: vi.fn(),
     fetchMcpPresets: vi.fn(),
-    discoverMcpTools: vi.fn()
+    discoverMcpTools: vi.fn(),
+    fetchMcpServerPrompts: vi.fn(),
+    fetchMcpServerResources: vi.fn()
   };
 });
 
@@ -204,5 +206,135 @@ describe("MCP Tool node registry picker", () => {
     render(<NodeInspector {...makeProps(makeToolNode({ registryServerId: "mcp_gone", serverId: "stdio_mcp", toolName: "__all__" }))} />);
 
     expect(await screen.findByText(/no longer exists/)).toBeInTheDocument();
+  });
+
+  it("switches an MCP Tool node to reading a resource picked from the server's catalog", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    vi.mocked(api.fetchMcpServerResources).mockResolvedValue({
+      serverId: "mcp_gh",
+      capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
+      updatedAt: registered.lastProbeAt,
+      policy: { role: "builder", projectId: "default" },
+      resources: [{ uri: "gh://repo/README.md", name: "readme", title: "Read me", access: { allowed: true } }],
+      resourceTemplates: [{ uriTemplate: "gh://repo/{path}", name: "file", access: { allowed: true } }]
+    });
+    render(<NodeInspector {...makeProps(makeToolNode({ registryServerId: "mcp_gh", serverId: "stdio_mcp", toolName: "search_issues" }), onSave)} />);
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: /^Operation/ }), "read_resource");
+    expect(screen.queryByRole("button", { name: /Discover/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(api.fetchMcpServerResources).toHaveBeenCalledWith("mcp_gh", { projectId: null }));
+    const picker = await screen.findByRole("combobox", { name: /Pick from the server/ });
+    await waitFor(() => expect(within(picker).getByRole("option", { name: /Read me/ })).toBeInTheDocument());
+    await user.selectOptions(picker, "gh://repo/{path}");
+    expect(screen.getByRole("textbox", { name: "Resource URI" })).toHaveValue("gh://repo/{path}");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].config).toMatchObject({ operation: "read_resource", resourceUri: "gh://repo/{path}", registryServerId: "mcp_gh" });
+  });
+
+  it("binds a server prompt as the system message of an agent node", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    vi.mocked(api.fetchMcpServerPrompts).mockResolvedValue({
+      serverId: "mcp_gh",
+      capabilities: { tools: { listChanged: false }, prompts: { listChanged: false } },
+      updatedAt: registered.lastProbeAt,
+      policy: { role: "builder", projectId: "default" },
+      prompts: [
+        {
+          name: "triage",
+          title: "Triage issues",
+          description: "Sorts issues by area",
+          arguments: [{ name: "area", required: true }],
+          access: { allowed: true }
+        }
+      ]
+    });
+    const node: Node<EditorNodeData> = {
+      id: "agent-1",
+      type: "workflowNode",
+      position: { x: 0, y: 0 },
+      data: { label: "Agent", nodeType: "agent_orchestrator", config: { systemPromptTemplate: "{{system_prompt}}" } }
+    };
+    render(<NodeInspector {...makeProps(node, onSave)} />);
+
+    const serverPicker = await screen.findByRole("combobox", { name: /^Server prompt/ });
+    await user.selectOptions(serverPicker, "mcp_gh");
+    await waitFor(() => expect(api.fetchMcpServerPrompts).toHaveBeenCalledWith("mcp_gh", { projectId: null }));
+    const promptPicker = screen.getByRole("combobox", { name: /^Prompt/ });
+    await waitFor(() => expect(within(promptPicker).getByRole("option", { name: "Triage issues" })).toBeInTheDocument());
+    await user.selectOptions(promptPicker, "triage");
+    expect(screen.getByText("Sorts issues by area")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("area (required)"), "billing");
+    await user.selectOptions(screen.getByRole("combobox", { name: /^Use as/ }), "user");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].config).toMatchObject({
+      serverPrompt: { registryServerId: "mcp_gh", name: "triage", arguments: { area: "billing" }, target: "user" }
+    });
+  });
+
+  it("shows sampling, elicitation and server prompt entries on the Trace tab", async () => {
+    const user = userEvent.setup();
+    const node = makeToolNode({ registryServerId: "mcp_gh", serverId: "stdio_mcp", toolName: "search_issues" });
+    const executionResult = {
+      workflowId: "wf-1",
+      status: "success" as const,
+      startedAt: "2026-10-20T10:00:00.000Z",
+      completedAt: "2026-10-20T10:00:01.000Z",
+      nodeResults: [
+        {
+          nodeId: "tool-1",
+          status: "success" as const,
+          output: {
+            result: "ok",
+            _serverPrompt: { registryServerId: "mcp_gh", name: "triage", target: "system", chars: 120, messageCount: 1 },
+            _mcpSampling: [
+              {
+                toolName: "search_issues",
+                call: 1,
+                serverId: "stdio_mcp",
+                requestedModels: ["fast-model"],
+                model: "gpt-test",
+                ok: true,
+                prompt: "Summarise",
+                response: "Two issues.",
+                maxTokens: 200,
+                inputTokens: 11,
+                outputTokens: 5,
+                durationMs: 40,
+                at: "2026-10-20T10:00:00.500Z"
+              }
+            ],
+            _mcpElicitations: [
+              {
+                toolName: "search_issues",
+                serverId: "stdio_mcp",
+                message: "Which repo?",
+                action: "decline",
+                source: "unattended",
+                note: "Unattended run (webhook): nobody can answer, declined automatically.",
+                durationMs: 1,
+                at: "2026-10-20T10:00:00.600Z"
+              }
+            ]
+          }
+        }
+      ]
+    };
+    render(<NodeInspector {...makeProps(node)} executionResult={executionResult as never} />);
+    await user.click(await screen.findByRole("tab", { name: /Trace/ }));
+
+    expect(screen.getByTestId("insp-trace-server-prompt")).toHaveTextContent("triage");
+    const sampling = screen.getByTestId("insp-trace-sampling");
+    expect(sampling).toHaveTextContent("generate 1 time");
+    expect(sampling).toHaveTextContent("gpt-test answered (asked for fast-model)");
+    expect(sampling).toHaveTextContent("Two issues.");
+    const elicitations = screen.getByTestId("insp-trace-elicitations");
+    expect(elicitations).toHaveTextContent("Which repo?");
+    expect(elicitations).toHaveTextContent("declined automatically (unattended run)");
   });
 });

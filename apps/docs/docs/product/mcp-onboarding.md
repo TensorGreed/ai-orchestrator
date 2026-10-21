@@ -253,7 +253,11 @@ The result shows the content blocks (text, images, other blocks as JSON), the st
 
 Your last 20 calls are kept in this browser only (per user); click one to load its arguments again.
 
-The playground is organised as panels per server capability. Tools are the first panel; browsing and reading server resources arrives with resources support in the MCP client.
+### Resources and prompts panels
+
+The playground has a panel per server capability. **Resources** lists what the server published at its last probe: plain resources, resource templates (`notes://{date}` gets an input per placeholder) and **Any URI…** for a URI you type. **Read resource** fetches it through the registry, under the policy's resource rules, and shows text (with a formatted view for JSON) or, for binary contents, an image preview and a download link. **Prompts** lists the server's prompts with their arguments; **Preview prompt** renders the messages the server returns for the values you enter. Both panels have **Refresh list**, which lists again without waiting for a probe, and both mark entries your role may not use. Reads and previews are audited (`mcp_resource.read`, `mcp_prompt.get`) with the URI or prompt name only.
+
+If a tool asks a question while you call it from the playground, the request is declined: the playground does not pause for input. Run the workflow from the editor to answer such questions.
 
 ## Configuration
 
@@ -272,5 +276,9 @@ The playground is organised as panels per server capability. Tools are the first
 | `GET /api/mcp/catalog` | builder | Catalog status and entries. |
 | `POST /api/mcp/catalog/reload` | admin | Re-read the file now. Audit event `mcp_catalog.reloaded`. |
 | `POST /api/mcp/servers/:id/playground/call` | builder | Call a tool: `toolName`, `args`, `projectId`, `confirmWrite`. 403 when policy blocks it, 409 when a write tool needs confirmation. |
+| `GET /api/mcp/servers/:id/resources` | builder | Resources and templates from the catalog; `refresh=true` lists them again. |
+| `POST /api/mcp/servers/:id/resources/read` | builder | Read one resource: `uri`, `projectId`. |
+| `GET /api/mcp/servers/:id/prompts` | builder | Prompts from the catalog. |
+| `POST /api/mcp/servers/:id/prompts/get` | builder | Render one prompt: `name`, `arguments`, `projectId`. |
 
 See also the [endpoint reference](../api/endpoints#mcp-onboarding).

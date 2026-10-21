@@ -13,6 +13,7 @@ export * from "./tool-policy";
 export * from "./tool-annotations";
 export * from "./structured-output";
 export * from "./progress";
+export * from "./client-features";
 export * from "./oauth";
 export * from "./gateway-naming";
 export * from "./secret-bundle";

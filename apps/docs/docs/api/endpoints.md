@@ -54,16 +54,24 @@ See [MCP server registry](../product/mcp-server-registry.md).
 - `DELETE /api/mcp/servers/:id/oauth` (admin)
 - `GET /api/mcp/oauth/callback?code=&state=` (authorization server redirect target; see [OAuth for remote servers](../product/mcp-server-registry.md#oauth-for-remote-servers))
 - `GET /api/mcp/telemetry?window=24h|7d|30d` (servers configured inline on nodes)
+- `GET /api/mcp/servers/:id/resources?projectId=&refresh=` (builder; resources and templates with `access` marks)
+- `POST /api/mcp/servers/:id/resources/read` (builder; `{ uri, projectId? }`; 413 over `MCP_RESOURCE_MAX_BYTES`)
+- `GET /api/mcp/servers/:id/prompts?projectId=&refresh=` (builder)
+- `POST /api/mcp/servers/:id/prompts/get` (builder; `{ name, arguments?, projectId? }`)
+- `GET /api/mcp/elicitations?status=&executionId=` (viewer; own runs below operator)
+- `GET /api/mcp/elicitations/:id` (viewer)
+- `POST /api/mcp/elicitations/:id/answer` (viewer; `{ action: "accept" | "decline" | "cancel", content? }`; 409 once settled)
+- Run stream event `mcp_elicitation` (`{ phase: "created" | "settled", elicitation }`) on `POST /api/workflows/:id/execute/stream`
 
 ## MCP tool policy
 
 See [MCP tool policy](../product/mcp-tool-policy.md).
 
 - `GET /api/mcp/policies` (builder)
-- `POST /api/mcp/policies` (admin; optional `annotationHint`, see [Annotation conditions](../product/mcp-tool-policy.md#annotation-conditions))
+- `POST /api/mcp/policies` (admin; optional `kind` of `tool` | `resource` | `prompt` | `sampling`, see [Rule kinds](../product/mcp-tool-policy.md#rule-kinds); optional `annotationHint`, see [Annotation conditions](../product/mcp-tool-policy.md#annotation-conditions))
 - `PUT /api/mcp/policies/:id` (admin)
 - `DELETE /api/mcp/policies/:id` (admin)
-- `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, noWriteTools? }`)
+- `POST /api/mcp/policies/evaluate` (builder; `{ projectId, role, serverId, toolName, kind?, noWriteTools? }`)
 
 ## MCP gateway
 

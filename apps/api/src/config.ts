@@ -138,6 +138,14 @@ const envSchema = z.object({
   MCP_OAUTH_STATE_TTL_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(600_000),
   /** Access tokens are refreshed this long before they expire. */
   MCP_OAUTH_REFRESH_SKEW_MS: z.coerce.number().int().nonnegative().max(3_600_000).default(60_000),
+  /**
+   * Phase 10.5 — longest an MCP elicitation request waits for a person. The
+   * run's execution timeout keeps counting while it waits, so a wait is also
+   * capped by that.
+   */
+  MCP_ELICITATION_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(86_400_000).default(600_000),
+  /** Phase 10.5 — largest MCP resource a run or the playground reads, in bytes. */
+  MCP_RESOURCE_MAX_BYTES: z.coerce.number().int().min(1_024).max(1_073_741_824).default(5_242_880),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),

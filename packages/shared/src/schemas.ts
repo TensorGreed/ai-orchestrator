@@ -259,6 +259,8 @@ export const mcpToolPatternSchema = z
   .max(200)
   .regex(/^[A-Za-z0-9_.:\/*-]+$/, "Use a tool name, or a glob where * matches any characters");
 
+export const mcpPolicyKindSchema = z.enum(["tool", "resource", "prompt", "sampling"]);
+
 export const mcpToolHintConditionSchema = z.enum([
   "destructive",
   "not_destructive",
@@ -281,6 +283,8 @@ export const mcpToolPolicyRuleInputSchema = z.object({
   toolPattern: mcpToolPatternSchema.optional(),
   /** Phase 10.5 — only tools with this effective annotation hint; null = any tool. */
   annotationHint: mcpToolHintConditionSchema.nullable().optional(),
+  /** Phase 10.5 — what the rule governs; defaults to `tool`. */
+  kind: mcpPolicyKindSchema.optional(),
   enabled: z.boolean().optional()
 });
 
@@ -292,8 +296,58 @@ export const mcpToolPolicyEvaluateSchema = z.object({
   projectId: z.string().trim().min(1).nullable().optional(),
   role: mcpPolicyRoleSchema,
   serverId: z.string().trim().min(1),
-  toolName: z.string().trim().min(1).max(200),
+  /** The tool name, resource URI, prompt name or model name, depending on `kind`. */
+  toolName: z.string().trim().min(1).max(2000),
+  kind: mcpPolicyKindSchema.optional(),
   noWriteTools: z.boolean().optional()
+});
+
+// Phase 10.5 — resources, prompts, elicitation and sampling.
+export const mcpSamplingSettingsSchema = z.object({
+  allow: z.boolean().default(false),
+  maxTokens: z.number().int().min(1).max(200_000).default(1024),
+  allowedModels: z.array(z.string().trim().min(1).max(200)).max(50).default([]),
+  maxRequestsPerCall: z.number().int().min(1).max(100).default(3),
+  defaultModel: z
+    .object({ providerId: z.string().trim().min(1).max(100), model: z.string().trim().min(1).max(200) })
+    .nullable()
+    .optional()
+});
+
+/** A partial update of a server's sampling settings; fields left out keep their value. */
+export const mcpSamplingSettingsPatchSchema = z.object({
+  allow: z.boolean().optional(),
+  maxTokens: z.number().int().min(1).max(200_000).optional(),
+  allowedModels: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+  maxRequestsPerCall: z.number().int().min(1).max(100).optional(),
+  defaultModel: z
+    .object({ providerId: z.string().trim().min(1).max(100), model: z.string().trim().min(1).max(200) })
+    .nullable()
+    .optional()
+});
+
+export const mcpResourceReadSchema = z.object({
+  uri: z.string().trim().min(1).max(4000),
+  projectId: z.string().trim().min(1).nullable().optional()
+});
+
+export const mcpPromptGetSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  arguments: z.record(z.string(), z.string().max(20_000)).default({}),
+  projectId: z.string().trim().min(1).nullable().optional()
+});
+
+export const mcpElicitationAnswerSchema = z.object({
+  action: z.enum(["accept", "decline", "cancel"]),
+  content: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional()
+});
+
+/** A server prompt bound to an LLM or agent node (`config.serverPrompt`). */
+export const mcpServerPromptBindingSchema = z.object({
+  registryServerId: z.string().trim().min(1),
+  name: z.string().trim().min(1).max(200),
+  arguments: z.record(z.string(), z.string()).optional(),
+  target: z.enum(["system", "user"]).optional()
 });
 
 // Phase 10.5 — OAuth connect for remote MCP servers.

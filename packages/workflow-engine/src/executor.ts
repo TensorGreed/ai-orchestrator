@@ -26,6 +26,9 @@ import type {
   McpToolPolicySubject,
   McpToolPolicyTrace,
   McpToolProgressEvent,
+  McpElicitationTraceEntry,
+  McpListChangedEvent,
+  McpSamplingTraceEntry,
   NodeExecutionResult,
   SecretReference,
   Workflow,
@@ -68,6 +71,18 @@ import {
 import { renderChart } from "./chart";
 import { browseUrl, type WebBrowseOptions } from "./web-browse";
 import { renderTemplate, tryParseJson } from "./template";
+import {
+  createMcpElicitationHandler,
+  createMcpSamplingHandler,
+  readMcpResource,
+  readServerPromptBinding,
+  resolveServerPrompt,
+  serverPromptTrace,
+  type McpElicitationHandlerOptions,
+  type McpPolicyEvaluator,
+  type McpSamplingHandler,
+  type ServerPromptTrace
+} from "./mcp-client-features";
 import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
 import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch";
@@ -155,6 +170,16 @@ export interface WorkflowExecutionDependencies {
    * an MCP Tool node or an agent's tool call runs.
    */
   onMcpProgress?: (event: McpToolProgressEvent & { nodeId: string }) => Promise<void> | void;
+  /** Phase 10.5 — a `list_changed` notification from an upstream server; the API re-probes the registry entry. */
+  onMcpListChanged?: (event: McpListChangedEvent & { nodeId: string }) => Promise<void> | void;
+  /**
+   * Phase 10.5 — answers `elicitation/create` for the run: the API pauses the
+   * run, asks a person and resumes with their answer (or declines for
+   * unattended runs). Without it every request is declined.
+   */
+  onMcpElicitation?: McpElicitationHandlerOptions["onElicitation"];
+  /** Phase 10.5 — size limit for `resources/read` in MCP Tool nodes (bytes). */
+  mcpResourceMaxBytes?: number;
   abortSignal?: AbortSignal;
   logger?: (message: string, metadata?: unknown) => void;
   triggerErrorWorkflow?: (input: {
@@ -313,17 +338,49 @@ function createMcpSessionReleaser(
 /** Progress events kept on a node's output (`_mcpProgress`), newest last. */
 const MAX_NODE_PROGRESS_EVENTS = 20;
 
+interface NodeMcpContextOptions {
+  /** The attached chat model, for sampling; absent for direct MCP Tool nodes. */
+  provider?: LLMProviderConfig;
+  /** Servers the node talks to, for their sampling settings. */
+  serverConfigs: MCPServerConfig[];
+  evaluatePolicy?: McpPolicyEvaluator;
+}
+
+interface NodeMcpContext {
+  context: MCPExecutionContext;
+  progress: McpToolProgressEvent[];
+  elicitations: McpElicitationTraceEntry[];
+  sampling: McpSamplingTraceEntry[];
+  samplingHandler: McpSamplingHandler;
+}
+
 /**
  * Phase 10.5 — the MCP execution context for one agent or MCP Tool node: the
- * run's abort signal (adapters cancel in-flight calls with it) and a progress
+ * run's abort signal (adapters cancel in-flight calls with it), a progress
  * sink that forwards to `onMcpProgress` and keeps the last events for the
- * node's output.
+ * node's output, the `list_changed` relay, and the elicitation and sampling
+ * handlers whose outcomes the node output keeps.
  */
 function createNodeMcpContext(
-  dependencies: Pick<WorkflowExecutionDependencies, "resolveSecret" | "abortSignal" | "onMcpProgress">,
-  nodeId: string
-): { context: MCPExecutionContext; progress: McpToolProgressEvent[] } {
+  dependencies: Pick<
+    WorkflowExecutionDependencies,
+    "resolveSecret" | "abortSignal" | "onMcpProgress" | "onMcpListChanged" | "onMcpElicitation" | "providerRegistry"
+  >,
+  nodeId: string,
+  options: NodeMcpContextOptions
+): NodeMcpContext {
   const progress: McpToolProgressEvent[] = [];
+  const elicitations: McpElicitationTraceEntry[] = [];
+  const sampling: McpSamplingTraceEntry[] = [];
+  const samplingHandler = createMcpSamplingHandler({
+    providerRegistry: dependencies.providerRegistry,
+    resolveSecret: dependencies.resolveSecret,
+    ...(options.provider ? { provider: options.provider } : {}),
+    serverConfigs: options.serverConfigs,
+    ...(options.evaluatePolicy ? { evaluatePolicy: options.evaluatePolicy } : {}),
+    trace: sampling,
+    ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {})
+  });
   const context: MCPExecutionContext = {
     resolveSecret: dependencies.resolveSecret,
     runtimeState: new Map<string, unknown>(),
@@ -340,9 +397,35 @@ function createNodeMcpContext(
       } catch {
         // Progress reporting never fails the tool call.
       }
-    }
+    },
+    onListChanged: (event) => {
+      if (!dependencies.onMcpListChanged) return;
+      try {
+        const pending = dependencies.onMcpListChanged({ ...event, nodeId });
+        if (pending && typeof (pending as Promise<void>).catch === "function") {
+          (pending as Promise<void>).catch(() => undefined);
+        }
+      } catch {
+        // A re-probe that cannot be scheduled never fails the tool call.
+      }
+    },
+    onElicitation: createMcpElicitationHandler({
+      nodeId,
+      ...(dependencies.onMcpElicitation ? { onElicitation: dependencies.onMcpElicitation } : {}),
+      trace: elicitations
+    }),
+    onSampling: samplingHandler.onSampling
   };
-  return { context, progress };
+  return { context, progress, elicitations, sampling, samplingHandler };
+}
+
+/** Node-output fields for what the MCP client did during the node (`_mcp*`), only when there is something to show. */
+function mcpTraceFields(nodeContext: Pick<NodeMcpContext, "progress" | "elicitations" | "sampling">): Record<string, unknown> {
+  return {
+    ...(nodeContext.progress.length > 0 ? { _mcpProgress: nodeContext.progress } : {}),
+    ...(nodeContext.elicitations.length > 0 ? { _mcpElicitations: nodeContext.elicitations } : {}),
+    ...(nodeContext.sampling.length > 0 ? { _mcpSampling: nodeContext.sampling } : {})
+  };
 }
 
 function getAbortMessage(signal?: AbortSignal): string {
@@ -633,6 +716,7 @@ async function buildRunToolPolicy(
       adapterId: tool.adapterId,
       registryServerId: tool.registryServerId,
       toolName: tool.toolName,
+      ...(tool.kind ? { kind: tool.kind } : {}),
       annotations: tool.annotations,
       // Inline servers have no registry entry, so only annotations classify them.
       manualReadOnly: tool.registryServerId ? overrides.get(`${tool.registryServerId}::${tool.toolName}`) : undefined,
@@ -2150,6 +2234,51 @@ function validateGuardrailChecks(text: string, checks: string[]): string[] {
   return failures;
 }
 
+/**
+ * Phase 10.5 — when an LLM node binds a registry server prompt, fetch it and
+ * use its text as the system or user prompt. The server session opened for
+ * the fetch is closed before the model is called.
+ */
+async function applyServerPromptToLlmNode(input: {
+  nodeId: string;
+  config: Record<string, unknown>;
+  templateData: Record<string, unknown>;
+  context: Pick<NodeRuntimeContext, "workflow" | "toolPolicySubject">;
+  dependencies: WorkflowExecutionDependencies;
+  systemPrompt: string;
+  userPrompt: string;
+}): Promise<{ systemPrompt: string; userPrompt: string; trace?: ServerPromptTrace }> {
+  const binding = readServerPromptBinding(input.config.serverPrompt);
+  if (!binding) return { systemPrompt: input.systemPrompt, userPrompt: input.userPrompt };
+  const serverConfig = await applyRegisteredMcpServer(
+    { serverId: "", registryServerId: binding.registryServerId, connection: {} },
+    input.dependencies
+  );
+  const toolPolicy = await buildRunToolPolicy(input.context, input.dependencies);
+  const scoped = createNodeMcpContext(input.dependencies, input.nodeId, {
+    serverConfigs: [serverConfig],
+    ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+  });
+  const release = createMcpSessionReleaser(input.dependencies.mcpRegistry, scoped.context, input.nodeId);
+  try {
+    const resolved = await resolveServerPrompt({
+      binding,
+      renderArgument: (template) => renderTemplate(template, input.templateData),
+      serverConfig,
+      registry: input.dependencies.mcpRegistry,
+      context: scoped.context,
+      ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+    });
+    return {
+      systemPrompt: resolved.target === "system" ? resolved.text : input.systemPrompt,
+      userPrompt: resolved.target === "user" ? resolved.text : input.userPrompt,
+      trace: serverPromptTrace(resolved)
+    };
+  } finally {
+    await release.close();
+  }
+}
+
 async function runLlmNode(input: {
   nodeId: string;
   provider: LLMProviderConfig;
@@ -3077,15 +3206,23 @@ async function executeNode(
       const provider = config.provider as LLMProviderConfig;
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
-      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
-      const systemPrompt = String(templateData[systemPromptKey] ?? "");
-      return runLlmNode({
+      const prompts = await applyServerPromptToLlmNode({
+        nodeId: node.id,
+        config,
+        templateData,
+        context,
+        dependencies,
+        userPrompt: String(templateData[promptKey] ?? templateData.user_prompt ?? ""),
+        systemPrompt: String(templateData[systemPromptKey] ?? "")
+      });
+      const output = await runLlmNode({
         nodeId: node.id,
         provider,
-        userPrompt,
-        systemPrompt,
+        userPrompt: prompts.userPrompt,
+        systemPrompt: prompts.systemPrompt,
         dependencies
       });
+      return prompts.trace ? { ...output, _serverPrompt: prompts.trace } : output;
     }
 
     case "openai_chat_model":
@@ -3100,15 +3237,23 @@ async function executeNode(
 
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
-      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
-      const systemPrompt = String(templateData[systemPromptKey] ?? "");
-      return runLlmNode({
+      const prompts = await applyServerPromptToLlmNode({
+        nodeId: node.id,
+        config,
+        templateData,
+        context,
+        dependencies,
+        userPrompt: String(templateData[promptKey] ?? templateData.user_prompt ?? ""),
+        systemPrompt: String(templateData[systemPromptKey] ?? "")
+      });
+      const output = await runLlmNode({
         nodeId: node.id,
         provider,
-        userPrompt,
-        systemPrompt,
+        userPrompt: prompts.userPrompt,
+        systemPrompt: prompts.systemPrompt,
         dependencies
       });
+      return prompts.trace ? { ...output, _serverPrompt: prompts.trace } : output;
     }
 
     case "azure_openai_chat_model": {
@@ -3120,8 +3265,15 @@ async function executeNode(
 
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
-      const userPrompt = String(templateData[promptKey] ?? templateData.user_prompt ?? "");
-      const systemPrompt = String(templateData[systemPromptKey] ?? "");
+      const prompts = await applyServerPromptToLlmNode({
+        nodeId: node.id,
+        config,
+        templateData,
+        context,
+        dependencies,
+        userPrompt: String(templateData[promptKey] ?? templateData.user_prompt ?? ""),
+        systemPrompt: String(templateData[systemPromptKey] ?? "")
+      });
       const provider: LLMProviderConfig = {
         providerId: "azure_openai",
         model: deployment,
@@ -3138,13 +3290,14 @@ async function executeNode(
         }
       };
 
-      return runLlmNode({
+      const output = await runLlmNode({
         nodeId: node.id,
         provider,
-        userPrompt,
-        systemPrompt,
+        userPrompt: prompts.userPrompt,
+        systemPrompt: prompts.systemPrompt,
         dependencies
       });
+      return prompts.trace ? { ...output, _serverPrompt: prompts.trace } : output;
     }
 
     case "google_gemini_chat_model": {
@@ -4137,11 +4290,12 @@ async function executeNode(
     case "mcp_tool": {
       const serverId = String(config.serverId ?? "");
       const toolName = String(config.toolName ?? "");
-      if (toolName.trim() === ALL_MCP_TOOLS_SENTINEL) {
+      const operation = config.operation === "read_resource" ? "read_resource" : "call_tool";
+      if (operation === "call_tool" && toolName.trim() === ALL_MCP_TOOLS_SENTINEL) {
         throw new Error("Direct MCP Tool execution requires a specific tool name (single-tool mode).");
       }
       const argsTemplate = typeof config.argsTemplate === "string" ? config.argsTemplate : "{}";
-      const args = tryParseJson(renderTemplate(argsTemplate, templateData));
+      const args = operation === "call_tool" ? tryParseJson(renderTemplate(argsTemplate, templateData)) : {};
       const serverConfig = await applyRegisteredMcpServer(
         {
           serverId,
@@ -4155,18 +4309,47 @@ async function executeNode(
         dependencies
       );
 
+      // Phase 10.2 — policy first (no server call needed), then the
+      // workflow's "no write tools" switch, which may need the tool's
+      // annotations from tools/list.
+      const toolPolicy = await buildRunToolPolicy(context, dependencies);
       // A per-node context keeps a spawned stdio server scoped to this call
       // instead of the adapter-wide fallback cache, which would keep it alive
-      // for the life of the process.
-      const { context: directMcpContext, progress: directProgress } = createNodeMcpContext(dependencies, node.id);
+      // for the life of the process. Sampling has no attached model here, so
+      // only a server with a default sampling model can use it.
+      const directMcp = createNodeMcpContext(dependencies, node.id, {
+        serverConfigs: [serverConfig],
+        ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+      });
+      const directMcpContext = directMcp.context;
       const releaseDirectMcpSessions = createMcpSessionReleaser(dependencies.mcpRegistry, directMcpContext, node.id);
       dependencies.abortSignal?.addEventListener("abort", releaseDirectMcpSessions.onAbort, { once: true });
+
+      if (operation === "read_resource") {
+        // Phase 10.5 — read one resource into the workflow instead of calling a tool.
+        const uriTemplate = typeof config.resourceUri === "string" ? config.resourceUri : "";
+        const uri = renderTemplate(uriTemplate, templateData).trim();
+        if (!uri) {
+          throw WorkflowError.nodeConfig("MCP Tool node in read-resource mode needs a resource URI.");
+        }
+        try {
+          const read = await readMcpResource({
+            uri,
+            serverConfig,
+            registry: dependencies.mcpRegistry,
+            context: directMcpContext,
+            ...(dependencies.mcpResourceMaxBytes ? { maxBytes: dependencies.mcpResourceMaxBytes } : {}),
+            ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+          });
+          return { ...read, ...mcpTraceFields(directMcp) };
+        } finally {
+          dependencies.abortSignal?.removeEventListener("abort", releaseDirectMcpSessions.onAbort);
+          await releaseDirectMcpSessions.close();
+        }
+      }
+
       let result: Awaited<ReturnType<typeof invokeDirectMCPTool>>;
       try {
-        // Phase 10.2 — policy first (no server call needed), then the
-        // workflow's "no write tools" switch, which may need the tool's
-        // annotations from tools/list.
-        const toolPolicy = await buildRunToolPolicy(context, dependencies);
         if (toolPolicy) {
           const policyTool: McpToolAccessSubjectTool = {
             adapterId: serverConfig.serverId,
@@ -4203,6 +4386,7 @@ async function executeNode(
             });
           }
         }
+        directMcp.samplingHandler.beginCall(toolName);
         result = await invokeDirectMCPTool(serverConfig, toolName, args, dependencies.mcpRegistry, directMcpContext);
       } finally {
         dependencies.abortSignal?.removeEventListener("abort", releaseDirectMcpSessions.onAbort);
@@ -4213,6 +4397,9 @@ async function executeNode(
         throw new Error(result.error ?? "MCP tool invocation failed");
       }
 
+      const samplingUsage = directMcp.samplingHandler.usage();
+      const samplingModel = directMcp.sampling.find((entry) => entry.ok)?.model;
+      const samplingProvider = directMcp.sampling.find((entry) => entry.ok)?.providerId;
       return {
         invocation_request: {
           server_id: serverConfig.serverId,
@@ -4225,7 +4412,19 @@ async function executeNode(
         ...(result.structured ? { structured: result.structured } : {}),
         ...(result.content !== undefined ? { content: result.content } : {}),
         tool_name: toolName,
-        ...(directProgress.length > 0 ? { _mcpProgress: directProgress } : {})
+        ...mcpTraceFields(directMcp),
+        // Phase 10.5 — sampling requests the tool made count in the run's usage like any model call.
+        ...(directMcp.samplingHandler.requestCount() > 0 && samplingModel && samplingProvider
+          ? {
+              _telemetry: {
+                providerId: samplingProvider,
+                model: samplingModel,
+                usage: samplingUsage,
+                llmCallCount: directMcp.samplingHandler.requestCount(),
+                samplingUsage
+              }
+            }
+          : {})
       };
     }
 
@@ -4268,11 +4467,13 @@ async function executeNode(
         typeof config.systemPromptTemplate === "string" ? config.systemPromptTemplate : "{{system_prompt}}";
       const userTemplate = typeof config.userPromptTemplate === "string" ? config.userPromptTemplate : "{{user_prompt}}";
       const sessionTemplate = typeof config.sessionIdTemplate === "string" ? config.sessionIdTemplate : "{{session_id}}";
-      const systemPrompt = renderTemplate(systemTemplate, templateData);
-      const userPrompt = renderTemplate(userTemplate, templateData);
+      let systemPrompt = renderTemplate(systemTemplate, templateData);
+      let userPrompt = renderTemplate(userTemplate, templateData);
+      // Phase 10.5 — a registry server prompt can replace the system or user prompt; it is fetched below.
+      const serverPromptBinding = readServerPromptBinding(config.serverPrompt);
 
       // --- Empty prompt guard ---
-      if (!userPrompt.trim()) {
+      if (!userPrompt.trim() && serverPromptBinding?.target !== "user") {
         const webhookData = toRecord(templateData.webhook);
         const fallbackUserPrompt =
           (typeof templateData.user_prompt === "string" && templateData.user_prompt.trim()) ||
@@ -4288,11 +4489,6 @@ async function executeNode(
       const sessionId =
         resolvedSessionId || (typeof templateData.session_id === "string" ? String(templateData.session_id) : undefined);
       const modelMessages = [] as Array<{ role: "system" | "user"; content: string }>;
-      if (systemPrompt.trim()) {
-        modelMessages.push({ role: "system", content: systemPrompt });
-      }
-      modelMessages.push({ role: "user", content: userPrompt });
-
       const inlineServerConfigs = Array.isArray(config.mcpServers)
         ? config.mcpServers
             .map((entry) => toRecord(entry))
@@ -4356,7 +4552,23 @@ async function executeNode(
         resolvedAttachedConfigs.length > 0
           ? mergeMCPServerConfigs([], resolvedAttachedConfigs)
           : mergeMCPServerConfigs(resolvedInlineConfigs, resolvedAttachedConfigs);
-      const { context: mcpExecutionContext, progress: agentMcpProgress } = createNodeMcpContext(dependencies, node.id);
+      // Phase 10.2 — tools denied by policy or by the workflow's "no write
+      // tools" switch are dropped here, before the model sees the tool set.
+      // Workers run through executeNode and apply the same policy to their own tools.
+      const toolPolicy = await buildRunToolPolicy(context, dependencies);
+      // Phase 10.5 — the server the bound prompt comes from, resolved like a tool server.
+      const serverPromptServerConfig = serverPromptBinding
+        ? await applyRegisteredMcpServer(
+            { serverId: "", registryServerId: serverPromptBinding.registryServerId, connection: {} },
+            dependencies
+          )
+        : undefined;
+      const agentMcp = createNodeMcpContext(dependencies, node.id, {
+        provider,
+        serverConfigs: serverPromptServerConfig ? [...serverConfigs, serverPromptServerConfig] : serverConfigs,
+        ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+      });
+      const mcpExecutionContext = agentMcp.context;
       // Stdio MCP servers spawned for this node live in this context only.
       // Close them once the node is done, however it ends: success, error,
       // clarification pause, or cancellation/timeout through the abort signal.
@@ -4366,10 +4578,25 @@ async function executeNode(
       const releaseMcpSessions = createMcpSessionReleaser(dependencies.mcpRegistry, mcpExecutionContext, node.id);
       dependencies.abortSignal?.addEventListener("abort", releaseMcpSessions.onAbort, { once: true });
       try {
-        // Phase 10.2 — tools denied by policy or by the workflow's "no write
-        // tools" switch are dropped here, before the model sees the tool set.
-        // Workers run through executeNode and apply the same policy to their own tools.
-        const toolPolicy = await buildRunToolPolicy(context, dependencies);
+        let serverPromptUsed: ServerPromptTrace | undefined;
+        if (serverPromptBinding && serverPromptServerConfig) {
+          const resolvedPrompt = await resolveServerPrompt({
+            binding: serverPromptBinding,
+            renderArgument: (template) => renderTemplate(template, templateData),
+            serverConfig: serverPromptServerConfig,
+            registry: dependencies.mcpRegistry,
+            context: mcpExecutionContext,
+            ...(toolPolicy ? { evaluatePolicy: toolPolicy.evaluate } : {})
+          });
+          if (resolvedPrompt.target === "user") userPrompt = resolvedPrompt.text;
+          else systemPrompt = resolvedPrompt.text;
+          serverPromptUsed = serverPromptTrace(resolvedPrompt);
+        }
+        if (systemPrompt.trim()) {
+          modelMessages.push({ role: "system", content: systemPrompt });
+        }
+        modelMessages.push({ role: "user", content: userPrompt });
+
         const resolvedTools = await resolveMCPTools(
           serverConfigs,
           dependencies.mcpRegistry,
@@ -4500,6 +4727,9 @@ async function executeNode(
                   const workerResult = await executeNode(workerNode, workerContext, dependencies);
                   return workerResult;
                }
+               // Phase 10.5 — each tool call gets a fresh sampling budget.
+               const originalName = resolvedTools.resolved.find((entry) => entry.exposedName === toolName)?.originalName ?? toolName;
+               agentMcp.samplingHandler.beginCall(originalName);
                return resolvedTools.invokeByExposedName(toolName, args);
             }
           },
@@ -4534,6 +4764,19 @@ async function executeNode(
           });
         }
 
+        // Phase 10.5 — tokens spent answering the servers' sampling requests
+        // count in the node's usage (and so in the run's cost).
+        const samplingUsage = agentMcp.samplingHandler.usage();
+        const samplingRequests = agentMcp.samplingHandler.requestCount();
+        const usageWithSampling =
+          samplingRequests > 0
+            ? {
+                inputTokens: (agentState.usage?.inputTokens ?? 0) + (samplingUsage.inputTokens ?? 0),
+                outputTokens: (agentState.usage?.outputTokens ?? 0) + (samplingUsage.outputTokens ?? 0),
+                totalTokens: (agentState.usage?.totalTokens ?? 0) + (samplingUsage.totalTokens ?? 0),
+                cachedInputTokens: (agentState.usage?.cachedInputTokens ?? 0) + (samplingUsage.cachedInputTokens ?? 0)
+              }
+            : agentState.usage;
         return {
           answer: agentState.finalAnswer,
           iterations: agentState.iterations,
@@ -4544,16 +4787,18 @@ async function executeNode(
           // Phase 10.1 — map exposed tool names back to their MCP server so
           // per-tool telemetry can attribute each call in `steps`.
           _mcpTools: buildMcpToolAttribution(resolvedTools.resolved),
-          ...(agentMcpProgress.length > 0 ? { _mcpProgress: agentMcpProgress } : {}),
+          ...mcpTraceFields(agentMcp),
+          ...(serverPromptUsed ? { _serverPrompt: serverPromptUsed } : {}),
           // Phase 10.2 — whose role the tool policy used and which tools it hid.
           ...(toolPolicy ? { _toolPolicy: { ...toolPolicy.trace, hidden: resolvedTools.hidden } } : {}),
           // Phase 7.1 — surface cumulative agent telemetry on the node output.
           _telemetry: {
             providerId: provider.providerId,
             model: provider.model,
-            usage: agentState.usage,
+            usage: usageWithSampling,
             latencyMs: agentState.llmLatencyMs,
-            llmCallCount: agentState.llmCallCount
+            llmCallCount: (agentState.llmCallCount ?? 0) + samplingRequests || agentState.llmCallCount,
+            ...(samplingRequests > 0 ? { samplingUsage, samplingRequests } : {})
           },
           // Phase: agent_clarify — when the agent paused to ask the user a
           // question, surface the clarification details on the node output

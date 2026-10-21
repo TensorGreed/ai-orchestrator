@@ -1,4 +1,4 @@
-import type { McpHiddenTool, McpToolAnnotations, MCPServerConfig, ToolDefinition } from "@ai-orchestrator/shared";
+import type { McpHiddenTool, McpPolicyKind, McpToolAnnotations, MCPServerConfig, ToolDefinition } from "@ai-orchestrator/shared";
 import type { MCPRegistry } from "./registry";
 import { McpToolPolicyError } from "./tool-policy";
 import { toAgentToolOutput } from "./structured-output";
@@ -23,8 +23,11 @@ export interface ResolvedToolSet {
 export interface McpToolAccessSubjectTool {
   adapterId: string;
   registryServerId?: string;
+  /** Tool name; for other kinds the resource URI, prompt name or model name. */
   toolName: string;
   annotations?: McpToolAnnotations;
+  /** Phase 10.5 — defaults to `tool`. */
+  kind?: McpPolicyKind;
 }
 
 export type McpToolAccessCheck = (

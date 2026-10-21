@@ -1,5 +1,6 @@
 import type {
   McpHiddenTool,
+  McpPolicyKind,
   McpPolicyRole,
   McpToolAnnotations,
   McpToolClassification,
@@ -13,8 +14,9 @@ import type {
  * (dry-run evaluator, discovery marking).
  *
  * Evaluation order for one tool call:
- *   1. Collect the enabled rules whose scope matches the call: project, role,
- *      server, tool pattern and (Phase 10.5) annotation hint must all match.
+ *   1. Collect the enabled rules whose scope matches the call: kind (tool,
+ *      resource, prompt or sampling), project, role, server, tool pattern and
+ *      (Phase 10.5) annotation hint must all match.
  *   2. No matching rule → allowed (the default; installs without rules behave
  *      as before).
  *   3. No matching deny rule → allowed.
@@ -27,6 +29,12 @@ import type {
  */
 
 export interface McpToolPolicyRequest {
+  /**
+   * Phase 10.5 — what is being asked for. Defaults to `tool`. For
+   * `resource` the `toolName` is the resource URI, for `prompt` the prompt
+   * name and for `sampling` the model name the request resolves to.
+   */
+  kind?: McpPolicyKind;
   projectId?: string | null;
   role: McpPolicyRole;
   /** Adapter id the tool's server runs on (`http_mcp`, `stdio_mcp`, `mock-mcp`, ...). */
@@ -144,8 +152,14 @@ export function matchesPolicyServer(ruleServerId: string | null, request: Pick<M
   return ruleServerId === request.adapterId;
 }
 
+/** A rule's kind; rules written before kinds existed govern tool calls. */
+export function policyRuleKind(rule: Pick<McpToolPolicyRule, "kind">): McpPolicyKind {
+  return rule.kind ?? "tool";
+}
+
 export function ruleMatches(rule: McpToolPolicyRule, request: McpToolPolicyRequest): boolean {
   if (!rule.enabled) return false;
+  if (policyRuleKind(rule) !== (request.kind ?? "tool")) return false;
   if (rule.projectId && rule.projectId !== (request.projectId ?? null)) return false;
   if (rule.roles.length > 0 && !rule.roles.includes(request.role)) return false;
   if (!matchesPolicyServer(rule.serverId, request)) return false;
@@ -186,6 +200,7 @@ function scalarWithin(inner: string | null | undefined, outer: string | null | u
 
 /** True when `inner`'s scope sits inside `outer`'s in every field and is smaller in at least one. */
 export function isStrictlyNarrower(inner: McpToolPolicyRule, outer: McpToolPolicyRule): boolean {
+  if (policyRuleKind(inner) !== policyRuleKind(outer)) return false;
   const within =
     scalarWithin(inner.projectId, outer.projectId) &&
     rolesWithin(inner.roles, outer.roles) &&
@@ -274,7 +289,16 @@ export function describePolicyRule(rule: Pick<McpToolPolicyRule, "id" | "name">)
 export function evaluateMcpToolAccess(input: McpToolAccessInput): McpToolAccessDecision {
   const policy = evaluateMcpToolPolicy(input.rules, input);
   const classification = classifyMcpTool({ manualReadOnly: input.manualReadOnly, annotations: input.annotations });
-  const toolLabel = `MCP tool '${input.toolName}' on server '${input.serverLabel?.trim() || input.registryServerId || input.adapterId}'`;
+  const serverName = input.serverLabel?.trim() || input.registryServerId || input.adapterId;
+  const kind = input.kind ?? "tool";
+  const toolLabel =
+    kind === "resource"
+      ? `MCP resource '${input.toolName}' on server '${serverName}'`
+      : kind === "prompt"
+        ? `MCP prompt '${input.toolName}' on server '${serverName}'`
+        : kind === "sampling"
+          ? `Sampling with model '${input.toolName}' for server '${serverName}'`
+          : `MCP tool '${input.toolName}' on server '${serverName}'`;
   if (!policy.allowed && policy.rule) {
     return {
       allowed: false,
@@ -288,7 +312,8 @@ export function evaluateMcpToolAccess(input: McpToolAccessInput): McpToolAccessD
       }.`
     };
   }
-  if (input.noWriteTools && !classification.readOnly) {
+  // Reading a resource and fetching a prompt never write; sampling is governed by its own rules.
+  if (kind === "tool" && input.noWriteTools && !classification.readOnly) {
     const why =
       classification.source === "unknown"
         ? "it has no read-only annotation, so it counts as a write tool"

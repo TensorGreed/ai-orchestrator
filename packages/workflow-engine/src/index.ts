@@ -16,3 +16,4 @@ export {
   isPhase35TriggerNode
 } from "./connectors/triggers-dispatch";
 export { FileSystemBinaryStore } from "./binary-store";
+export * from "./mcp-client-features";

@@ -27,13 +27,17 @@ import {
   type McpToolPolicySubject,
   type McpToolset,
   type McpToolsetMemberSpec,
+  type McpSamplingTraceEntry,
   type Workflow
 } from "@ai-orchestrator/shared";
+import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import { createMcpSamplingHandler } from "@ai-orchestrator/workflow-engine";
 import type { z } from "zod";
 import type { AppConfig } from "./config.js";
 import type { SqliteStore } from "./db/database.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
+import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
 import {
   buildGatewayCatalog,
   toMcpToolDescriptor,
@@ -88,6 +92,8 @@ export interface McpGatewayDeps {
   config: AppConfig;
   store: SqliteStore;
   mcpRegistry: MCPRegistry;
+  /** Phase 10.5 — answers `sampling/createMessage` with a server's default model; absent means sampling is refused. */
+  providerRegistry?: ProviderRegistry;
   resolveSecret: MCPExecutionContext["resolveSecret"];
   redact: (value: string) => string;
   resolveRegisteredMcpServer: (registryServerId: string) => MCPServerConfig;
@@ -355,6 +361,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     let ok = false;
     let errorText: string | null = null;
     let result: McpCallToolResult;
+    let samplingUsage: { requests: number; inputTokens: number; outputTokens: number } | null = null;
     try {
       const serverConfig = deps.resolveRegisteredMcpServer(tool.serverId);
       const adapter = mcpRegistry.get(serverConfig.serverId);
@@ -362,9 +369,49 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         if (signal.aborted) reject(new Error("Cancelled by the client."));
         signal.addEventListener("abort", () => reject(new Error("Cancelled by the client.")), { once: true });
       });
-      const invocation = adapter.invokeTool(tool.toolName, args, serverConfig, session.mcpContext);
+      // Phase 10.5 — a gateway call has no person behind it and no attached
+      // chat model: elicitation is declined, sampling runs only through the
+      // server's default model and is counted on this call's telemetry row.
+      const samplingTrace: McpSamplingTraceEntry[] = [];
+      const sampling = deps.providerRegistry
+        ? createMcpSamplingHandler({
+            providerRegistry: deps.providerRegistry,
+            resolveSecret: deps.resolveSecret,
+            serverConfigs: [serverConfig],
+            evaluatePolicy: (subject) =>
+              evaluateToolForContext(
+                {
+                  rules: store.listMcpToolPolicies(),
+                  classifications: [],
+                  role: auth.subject.role,
+                  projectId: toolset.projectId ?? null,
+                  adapterId: serverConfig.serverId,
+                  registryServerId: tool.serverId,
+                  serverLabel: tool.serverName
+                },
+                { name: subject.toolName },
+                "sampling"
+              ),
+            trace: samplingTrace,
+            signal
+          })
+        : undefined;
+      sampling?.beginCall(tool.toolName);
+      const callContext: MCPExecutionContext = {
+        ...session.mcpContext,
+        onElicitation: async () => ({ action: "decline" }),
+        ...(sampling ? { onSampling: sampling.onSampling } : {})
+      };
+      const invocation = adapter.invokeTool(tool.toolName, args, serverConfig, callContext);
       invocation.catch(() => undefined);
       const outcome = await Promise.race([invocation, cancelled]);
+      if (samplingTrace.length > 0) {
+        samplingUsage = {
+          requests: samplingTrace.length,
+          inputTokens: samplingTrace.reduce((sum, entry) => sum + (entry.inputTokens ?? 0), 0),
+          outputTokens: samplingTrace.reduce((sum, entry) => sum + (entry.outputTokens ?? 0), 0)
+        };
+      }
       // Every injected value, including each value of a secret bundle (Phase 10.6).
       const injected = secretValuesForScrub(serverConfig.secretRef ? await deps.resolveSecret(serverConfig.secretRef) : undefined);
       const scrub = (value: unknown) => injected.reduce<unknown>((current, secret) => scrubValue(current, secret), value);
@@ -396,6 +443,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         turnInputTokens: null,
         turnOutputTokens: null,
         estimatedCostUsd: null,
+        samplingRequests: samplingUsage?.requests ?? null,
+        samplingInputTokens: samplingUsage?.inputTokens ?? null,
+        samplingOutputTokens: samplingUsage?.outputTokens ?? null,
         source: "gateway",
         clientId: auth.client.id
       });
@@ -411,7 +461,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       readOnly: tool.readOnly,
       ok,
       durationMs,
-      details: { serverId: tool.serverId, upstreamTool: tool.toolName, ...(errorText ? { error: errorText } : {}) }
+      details: {
+        serverId: tool.serverId,
+        upstreamTool: tool.toolName,
+        ...(samplingUsage ? { sampling: samplingUsage } : {}),
+        ...(errorText ? { error: errorText } : {})
+      }
     });
     return result;
   };

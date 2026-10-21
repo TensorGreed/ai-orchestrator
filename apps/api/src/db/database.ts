@@ -7,7 +7,17 @@ import type {
   Folder,
   McpPolicyRole,
   McpClient,
+  McpElicitationSchema,
+  McpElicitationStatus,
+  McpElicitationView,
   McpOAuthConnectionState,
+  McpPolicyKind,
+  McpPrompt,
+  McpResource,
+  McpResourceTemplate,
+  McpSamplingSettings,
+  McpServerCapabilities,
+  McpServerCatalog,
   McpToolAnnotations,
   McpToolClassificationOverride,
   McpToolHintCondition,
@@ -19,7 +29,7 @@ import type {
   Workflow,
   WorkflowListItem
 } from "@ai-orchestrator/shared";
-import { DEFAULT_PROJECT_ID, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS } from "@ai-orchestrator/shared";
+import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS } from "@ai-orchestrator/shared";
 
 type BindParams = unknown[];
 
@@ -435,9 +445,23 @@ export interface McpServerRecord {
   currentSnapshotId: string | null;
   /** Set while a breaking schema change is waiting to be accepted. */
   pendingBreakingSnapshotId: string | null;
+  /** Phase 10.5 — whether and how the server may ask the client to sample a model. */
+  sampling: McpSamplingSettings;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Phase 10.5 — what a server advertises beyond tools, captured by the last probe. */
+export interface McpServerCatalogRecord extends McpServerCatalog {
+  serverId: string;
+}
+
+/** Phase 10.5 — one `elicitation/create` request a tool call made during a run. */
+export interface McpElicitationRecord extends McpElicitationView {
+  /** User the run belongs to; only they (and operators) may answer. */
+  createdBy: string | null;
+  triggerType: string | null;
 }
 
 export interface McpServerProbeRecord {
@@ -491,6 +515,10 @@ export interface McpToolCallRecord {
   turnOutputTokens: number | null;
   /** null when no model price is known (or no model turn was involved). */
   estimatedCostUsd: number | null;
+  /** Phase 10.5 — `sampling/createMessage` requests the server made during this call, and the tokens they used. */
+  samplingRequests: number | null;
+  samplingInputTokens: number | null;
+  samplingOutputTokens: number | null;
   /**
    * Phase 10.4 — `workflow`: a call made by a node during a run.
    * `gateway`: a `tools/call` an MCP client sent to `/mcp/<toolset>`.
@@ -505,9 +533,15 @@ export interface McpToolCallRecord {
 export type McpToolCallSource = "workflow" | "gateway" | "playground";
 
 /** What callers write; `source` defaults to `workflow`. */
-export type McpToolCallWrite = Omit<McpToolCallRecord, "createdAt" | "source" | "clientId"> & {
+export type McpToolCallWrite = Omit<
+  McpToolCallRecord,
+  "createdAt" | "source" | "clientId" | "samplingRequests" | "samplingInputTokens" | "samplingOutputTokens"
+> & {
   source?: McpToolCallSource;
   clientId?: string | null;
+  samplingRequests?: number | null;
+  samplingInputTokens?: number | null;
+  samplingOutputTokens?: number | null;
 };
 
 /** Phase 10.4 — per-client usage rolled up from gateway telemetry rows. */
@@ -625,6 +659,9 @@ interface McpToolCallRow {
   turn_input_tokens: number | null;
   turn_output_tokens: number | null;
   estimated_cost_usd: number | null;
+  sampling_requests?: number | null;
+  sampling_input_tokens?: number | null;
+  sampling_output_tokens?: number | null;
   source: string | null;
   client_id: string | null;
   created_at: string;
@@ -641,6 +678,7 @@ interface McpToolPolicyRow {
   server_id: string | null;
   tool_pattern: string;
   annotation_hint?: string | null;
+  kind?: string | null;
   enabled: number;
   created_by: string | null;
   created_at: string;
@@ -649,6 +687,7 @@ interface McpToolPolicyRow {
 
 function mapMcpToolPolicy(row: McpToolPolicyRow): McpToolPolicyRule {
   const hint = row.annotation_hint ? toString(row.annotation_hint) : null;
+  const kind = row.kind ? toString(row.kind) : "tool";
   const roles = row.roles_json ? safeJsonParse(toString(row.roles_json)) : [];
   return {
     id: toString(row.id),
@@ -663,6 +702,7 @@ function mapMcpToolPolicy(row: McpToolPolicyRow): McpToolPolicyRule {
     toolPattern: toString(row.tool_pattern) || "*",
     annotationHint:
       hint && MCP_TOOL_HINT_CONDITIONS.includes(hint as McpToolHintCondition) ? (hint as McpToolHintCondition) : null,
+    kind: MCP_POLICY_KINDS.includes(kind as McpPolicyKind) ? (kind as McpPolicyKind) : "tool",
     enabled: toNumber(row.enabled) === 1,
     createdBy: row.created_by ? toString(row.created_by) : null,
     createdAt: toString(row.created_at),
@@ -766,6 +806,11 @@ function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
     turnInputTokens: row.turn_input_tokens === null ? null : toNumber(row.turn_input_tokens),
     turnOutputTokens: row.turn_output_tokens === null ? null : toNumber(row.turn_output_tokens),
     estimatedCostUsd: row.estimated_cost_usd === null ? null : Number(row.estimated_cost_usd),
+    samplingRequests: row.sampling_requests === null || row.sampling_requests === undefined ? null : toNumber(row.sampling_requests),
+    samplingInputTokens:
+      row.sampling_input_tokens === null || row.sampling_input_tokens === undefined ? null : toNumber(row.sampling_input_tokens),
+    samplingOutputTokens:
+      row.sampling_output_tokens === null || row.sampling_output_tokens === undefined ? null : toNumber(row.sampling_output_tokens),
     source: row.source === "gateway" || row.source === "playground" ? row.source : "workflow",
     clientId: row.client_id ? toString(row.client_id) : null,
     createdAt: toString(row.created_at)
@@ -792,9 +837,108 @@ interface McpServerRow {
   tool_count: number;
   current_snapshot_id: string | null;
   pending_breaking_snapshot_id: string | null;
+  sampling_json?: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface McpServerCatalogRow {
+  server_id: string;
+  capabilities_json: string | null;
+  resources_json: string | null;
+  resource_templates_json: string | null;
+  prompts_json: string | null;
+  updated_at: string;
+}
+
+interface McpElicitationRow {
+  id: string;
+  execution_id: string;
+  workflow_id: string;
+  workflow_name: string | null;
+  node_id: string;
+  server_id: string;
+  registry_server_id: string | null;
+  server_name: string | null;
+  tool_name: string;
+  message: string;
+  schema_json: string;
+  status: string;
+  created_at: string;
+  expires_at: string;
+  answered_at: string | null;
+  answered_by: string | null;
+  reason: string | null;
+  created_by: string | null;
+  trigger_type: string | null;
+}
+
+const MCP_ELICITATION_STATUSES = new Set<McpElicitationStatus>(["pending", "accepted", "declined", "cancelled", "expired", "auto_declined"]);
+
+/** Phase 10.5 — sampling settings as stored; unknown or partial JSON falls back to the defaults (off). */
+export function normalizeMcpSamplingSettings(value: unknown): McpSamplingSettings {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const defaultModel =
+    raw.defaultModel && typeof raw.defaultModel === "object" && !Array.isArray(raw.defaultModel)
+      ? (raw.defaultModel as Record<string, unknown>)
+      : null;
+  const providerId = typeof defaultModel?.providerId === "string" ? defaultModel.providerId.trim() : "";
+  const model = typeof defaultModel?.model === "string" ? defaultModel.model.trim() : "";
+  const maxTokens = Number(raw.maxTokens);
+  const maxRequests = Number(raw.maxRequestsPerCall);
+  return {
+    allow: raw.allow === true,
+    maxTokens: Number.isFinite(maxTokens) && maxTokens >= 1 ? Math.floor(maxTokens) : DEFAULT_MCP_SAMPLING_SETTINGS.maxTokens,
+    allowedModels: Array.isArray(raw.allowedModels)
+      ? raw.allowedModels.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim())
+      : [],
+    maxRequestsPerCall:
+      Number.isFinite(maxRequests) && maxRequests >= 0 ? Math.floor(maxRequests) : DEFAULT_MCP_SAMPLING_SETTINGS.maxRequestsPerCall,
+    defaultModel: providerId && model ? { providerId, model } : null
+  };
+}
+
+function mapMcpServerCatalog(row: McpServerCatalogRow): McpServerCatalogRecord {
+  const parse = <T>(value: string | null, fallback: T): T => {
+    if (!value) return fallback;
+    const parsed = safeJsonParse(toString(value));
+    return (parsed ?? fallback) as T;
+  };
+  return {
+    serverId: toString(row.server_id),
+    capabilities: parse<McpServerCapabilities>(row.capabilities_json, {}),
+    resources: parse<McpResource[]>(row.resources_json, []),
+    resourceTemplates: parse<McpResourceTemplate[]>(row.resource_templates_json, []),
+    prompts: parse<McpPrompt[]>(row.prompts_json, []),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
+function mapMcpElicitation(row: McpElicitationRow): McpElicitationRecord {
+  const status = toString(row.status) as McpElicitationStatus;
+  const schema = safeJsonParse(toString(row.schema_json)) as McpElicitationSchema | null;
+  return {
+    id: toString(row.id),
+    executionId: toString(row.execution_id),
+    workflowId: toString(row.workflow_id),
+    ...(row.workflow_name ? { workflowName: toString(row.workflow_name) } : {}),
+    nodeId: toString(row.node_id),
+    serverId: toString(row.server_id),
+    ...(row.registry_server_id ? { registryServerId: toString(row.registry_server_id) } : {}),
+    ...(row.server_name ? { serverName: toString(row.server_name) } : {}),
+    toolName: toString(row.tool_name),
+    message: toString(row.message),
+    requestedSchema: schema ?? { type: "object", properties: {} },
+    status: MCP_ELICITATION_STATUSES.has(status) ? status : "pending",
+    createdAt: toString(row.created_at),
+    expiresAt: toString(row.expires_at),
+    ...(row.answered_at ? { answeredAt: toString(row.answered_at) } : {}),
+    ...(row.answered_by ? { answeredBy: toString(row.answered_by) } : {}),
+    ...(row.reason ? { reason: toString(row.reason) } : {}),
+    createdBy: row.created_by ? toString(row.created_by) : null,
+    triggerType: row.trigger_type ? toString(row.trigger_type) : null
+  };
 }
 
 interface McpServerProbeRow {
@@ -848,6 +992,7 @@ function mapMcpServer(row: McpServerRow): McpServerRecord {
     toolCount: toNumber(row.tool_count),
     currentSnapshotId: row.current_snapshot_id ? toString(row.current_snapshot_id) : null,
     pendingBreakingSnapshotId: row.pending_breaking_snapshot_id ? toString(row.pending_breaking_snapshot_id) : null,
+    sampling: normalizeMcpSamplingSettings(row.sampling_json ? safeJsonParse(toString(row.sampling_json)) : null),
     createdBy: row.created_by ? toString(row.created_by) : null,
     createdAt: toString(row.created_at),
     updatedAt: toString(row.updated_at)
@@ -1831,6 +1976,48 @@ export class SqliteStore {
     this.ensureWorkflowCreatedByColumn();
     // Phase 10.5 — rules can require an annotation hint (destructive, read-only, ...).
     this.ensureColumn("mcp_tool_policies", "annotation_hint", "TEXT");
+    // Phase 10.5 — rules target tools, resources, prompts or sampling.
+    this.ensureColumn("mcp_tool_policies", "kind", "TEXT NOT NULL", "'tool'");
+    // Phase 10.5 — per-server sampling settings (off unless an admin turns it on).
+    this.ensureColumn("mcp_servers", "sampling_json", "TEXT");
+
+    // Phase 10.5 — resources, resource templates and prompts a server
+    // advertises (captured by probes, informational: not part of the tool hash),
+    // and elicitation requests waiting for a person.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_server_catalogs (
+        server_id TEXT PRIMARY KEY,
+        capabilities_json TEXT,
+        resources_json TEXT,
+        resource_templates_json TEXT,
+        prompts_json TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS mcp_elicitations (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        node_id TEXT NOT NULL,
+        server_id TEXT NOT NULL,
+        registry_server_id TEXT,
+        server_name TEXT,
+        tool_name TEXT NOT NULL,
+        message TEXT NOT NULL,
+        schema_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        answered_at TEXT,
+        answered_by TEXT,
+        reason TEXT,
+        created_by TEXT,
+        trigger_type TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_elicitations_status ON mcp_elicitations(status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_mcp_elicitations_execution ON mcp_elicitations(execution_id);
+    `);
 
     // Phase 10.5 — OAuth connections to remote MCP servers. Tokens and client
     // secrets live only in the SecretService secret `secret_id` names; this
@@ -1898,6 +2085,10 @@ export class SqliteStore {
     `);
     this.ensureColumn("mcp_tool_calls", "source", "TEXT NOT NULL", "'workflow'");
     this.ensureColumn("mcp_tool_calls", "client_id", "TEXT");
+    // Phase 10.5 — sampling requests a tool call triggered, and their tokens.
+    this.ensureColumn("mcp_tool_calls", "sampling_requests", "INTEGER");
+    this.ensureColumn("mcp_tool_calls", "sampling_input_tokens", "INTEGER");
+    this.ensureColumn("mcp_tool_calls", "sampling_output_tokens", "INTEGER");
     this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_client ON mcp_tool_calls(client_id, started_at)`);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -7489,6 +7680,7 @@ export class SqliteStore {
     probeEnabled?: boolean;
     probeIntervalMs?: number | null;
     blockOnBreakingChange?: boolean;
+    sampling?: Partial<McpSamplingSettings> | null;
     createdBy?: string | null;
   }): void {
     const now = new Date().toISOString();
@@ -7496,8 +7688,8 @@ export class SqliteStore {
       `INSERT INTO mcp_servers (
          id, name, description, adapter_id, connection_json, secret_id, owner, project_id,
          probe_enabled, probe_interval_ms, block_on_breaking_change, status, tool_count,
-         created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', 0, ?, ?, ?)`,
+         sampling_json, created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', 0, ?, ?, ?, ?)`,
       [
         input.id,
         input.name,
@@ -7510,6 +7702,7 @@ export class SqliteStore {
         input.probeEnabled === false ? 0 : 1,
         input.probeIntervalMs ?? null,
         input.blockOnBreakingChange ? 1 : 0,
+        input.sampling ? JSON.stringify(normalizeMcpSamplingSettings(input.sampling)) : null,
         input.createdBy ?? null,
         now,
         now
@@ -7528,9 +7721,14 @@ export class SqliteStore {
     probeEnabled?: boolean;
     probeIntervalMs?: number | null;
     blockOnBreakingChange?: boolean;
+    sampling?: Partial<McpSamplingSettings> | null;
   }): boolean {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
+    if (patch.sampling !== undefined) {
+      fields.push("sampling_json = ?");
+      params.push(patch.sampling ? JSON.stringify(normalizeMcpSamplingSettings(patch.sampling)) : null);
+    }
     if (patch.name !== undefined) { fields.push("name = ?"); params.push(patch.name); }
     if (patch.description !== undefined) { fields.push("description = ?"); params.push(patch.description); }
     if (patch.adapterId !== undefined) { fields.push("adapter_id = ?"); params.push(patch.adapterId); }
@@ -7562,6 +7760,7 @@ export class SqliteStore {
       this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_oauth_connections WHERE server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_server_catalogs WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_servers WHERE id = ?`, [id]);
     })();
     return true;
@@ -7729,8 +7928,9 @@ export class SqliteStore {
       `INSERT INTO mcp_tool_calls (
          id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
          started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
-         estimated_cost_usd, source, client_id, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
+         source, client_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         call.id,
         call.executionId,
@@ -7746,6 +7946,9 @@ export class SqliteStore {
         call.turnInputTokens,
         call.turnOutputTokens,
         call.estimatedCostUsd,
+        call.samplingRequests ?? null,
+        call.samplingInputTokens ?? null,
+        call.samplingOutputTokens ?? null,
         call.source ?? "workflow",
         call.clientId ?? null,
         new Date().toISOString()
@@ -7856,6 +8059,113 @@ export class SqliteStore {
     return true;
   }
 
+  // ---------------------------------------------------------------------------
+  // Phase 10.5 — server catalogs (resources, templates, prompts) and elicitations
+  // ---------------------------------------------------------------------------
+
+  getMcpServerCatalog(serverId: string): McpServerCatalogRecord | null {
+    const row = this.queryOne<McpServerCatalogRow>(`SELECT * FROM mcp_server_catalogs WHERE server_id = ?`, [serverId]);
+    return row ? mapMcpServerCatalog(row) : null;
+  }
+
+  upsertMcpServerCatalog(serverId: string, catalog: Omit<McpServerCatalog, "updatedAt">): McpServerCatalogRecord {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO mcp_server_catalogs (server_id, capabilities_json, resources_json, resource_templates_json, prompts_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(server_id) DO UPDATE SET
+         capabilities_json = excluded.capabilities_json,
+         resources_json = excluded.resources_json,
+         resource_templates_json = excluded.resource_templates_json,
+         prompts_json = excluded.prompts_json,
+         updated_at = excluded.updated_at`,
+      [
+        serverId,
+        JSON.stringify(catalog.capabilities ?? {}),
+        JSON.stringify(catalog.resources ?? []),
+        JSON.stringify(catalog.resourceTemplates ?? []),
+        JSON.stringify(catalog.prompts ?? []),
+        now
+      ]
+    );
+    return this.getMcpServerCatalog(serverId)!;
+  }
+
+  createMcpElicitation(input: Omit<McpElicitationRecord, "status" | "createdAt" | "answeredAt" | "answeredBy" | "reason">): McpElicitationRecord {
+    this.exec(
+      `INSERT INTO mcp_elicitations (
+         id, execution_id, workflow_id, workflow_name, node_id, server_id, registry_server_id, server_name,
+         tool_name, message, schema_json, status, created_at, expires_at, created_by, trigger_type
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.executionId,
+        input.workflowId,
+        input.workflowName ?? null,
+        input.nodeId,
+        input.serverId,
+        input.registryServerId ?? null,
+        input.serverName ?? null,
+        input.toolName,
+        input.message,
+        JSON.stringify(input.requestedSchema),
+        new Date().toISOString(),
+        input.expiresAt,
+        input.createdBy ?? null,
+        input.triggerType ?? null
+      ]
+    );
+    return this.getMcpElicitation(input.id)!;
+  }
+
+  getMcpElicitation(id: string): McpElicitationRecord | null {
+    const row = this.queryOne<McpElicitationRow>(`SELECT * FROM mcp_elicitations WHERE id = ?`, [id]);
+    return row ? mapMcpElicitation(row) : null;
+  }
+
+  listMcpElicitations(filter: { status?: McpElicitationStatus; executionId?: string; limit?: number } = {}): McpElicitationRecord[] {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.status) { where.push("status = ?"); params.push(filter.status); }
+    if (filter.executionId) { where.push("execution_id = ?"); params.push(filter.executionId); }
+    const limit = Math.max(1, Math.min(500, Math.floor(filter.limit ?? 100)));
+    params.push(limit);
+    return this.queryAll<McpElicitationRow>(
+      `SELECT * FROM mcp_elicitations ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT ?`,
+      params
+    ).map(mapMcpElicitation);
+  }
+
+  /** Settle an elicitation; returns false when it was already settled (first answer wins). */
+  settleMcpElicitation(
+    id: string,
+    outcome: { status: Exclude<McpElicitationStatus, "pending">; answeredBy?: string | null; reason?: string | null }
+  ): boolean {
+    const current = this.getMcpElicitation(id);
+    if (!current || current.status !== "pending") return false;
+    this.exec(
+      `UPDATE mcp_elicitations SET status = ?, answered_at = ?, answered_by = ?, reason = ? WHERE id = ? AND status = 'pending'`,
+      [outcome.status, new Date().toISOString(), outcome.answeredBy ?? null, outcome.reason ?? null, id]
+    );
+    return true;
+  }
+
+  /** Mark every pending elicitation of an execution as expired (the run ended or the API restarted). */
+  expireMcpElicitationsForExecution(executionId: string, reason: string): number {
+    const pending = this.listMcpElicitations({ status: "pending", executionId, limit: 500 });
+    for (const entry of pending) {
+      this.settleMcpElicitation(entry.id, { status: "expired", reason });
+    }
+    return pending.length;
+  }
+
+  /** Pending elicitations whose deadline passed; the elicitation service expires them. */
+  listExpiredMcpElicitations(now: string): McpElicitationRecord[] {
+    return this.queryAll<McpElicitationRow>(`SELECT * FROM mcp_elicitations WHERE status = 'pending' AND expires_at <= ?`, [now]).map(
+      mapMcpElicitation
+    );
+  }
+
   /** Rules in evaluation order: oldest first. */
   listMcpToolPolicies(): McpToolPolicyRule[] {
     return this.queryAll<McpToolPolicyRow>(`SELECT * FROM mcp_tool_policies ORDER BY created_at ASC, rowid ASC`).map(
@@ -7872,9 +8182,9 @@ export class SqliteStore {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO mcp_tool_policies (
-         id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, enabled,
+         id, name, description, effect, project_id, roles_json, server_id, tool_pattern, annotation_hint, kind, enabled,
          created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.name,
@@ -7885,6 +8195,7 @@ export class SqliteStore {
         input.serverId,
         input.toolPattern,
         input.annotationHint ?? null,
+        input.kind ?? "tool",
         input.enabled ? 1 : 0,
         input.createdBy ?? null,
         now,
@@ -7897,7 +8208,7 @@ export class SqliteStore {
   updateMcpToolPolicy(
     id: string,
     patch: Partial<
-      Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "annotationHint" | "enabled">
+      Pick<McpToolPolicyRule, "name" | "description" | "effect" | "projectId" | "roles" | "serverId" | "toolPattern" | "annotationHint" | "kind" | "enabled">
     >
   ): McpToolPolicyRule | null {
     const fields: string[] = [];
@@ -7910,6 +8221,7 @@ export class SqliteStore {
     if (patch.serverId !== undefined) { fields.push("server_id = ?"); params.push(patch.serverId); }
     if (patch.toolPattern !== undefined) { fields.push("tool_pattern = ?"); params.push(patch.toolPattern); }
     if (patch.annotationHint !== undefined) { fields.push("annotation_hint = ?"); params.push(patch.annotationHint ?? null); }
+    if (patch.kind !== undefined) { fields.push("kind = ?"); params.push(patch.kind ?? "tool"); }
     if (patch.enabled !== undefined) { fields.push("enabled = ?"); params.push(patch.enabled ? 1 : 0); }
     if (fields.length > 0) {
       fields.push("updated_at = ?");

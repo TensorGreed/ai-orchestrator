@@ -21,6 +21,8 @@ Directly invokes an MCP tool outside the agent loop.
 |---|---|---|---|
 | `serverId` | `string` | no | — |
 | `registryServerId` | `string` | no | — |
+| `operation` | `string` | no | `call_tool` \| `read_resource` |
+| `resourceUri` | `string` | no | — |
 | `toolName` | `string` | yes | — |
 | `argsTemplate` | `string` | no | — |
 | `connection` | `object` | no | — |

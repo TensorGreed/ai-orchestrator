@@ -452,16 +452,16 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 ### 10.5 Protocol coverage on the client side
 - [x] Structured tool output: `outputSchema` and `structuredContent` kept in snapshots, validated, and passed to downstream nodes as typed data
 - [x] Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) captured, shown on the registry page and used by policy (approval gates use them with 11.2)
-- [ ] Resources and prompts: browse and read resources, use server prompts as templates in agent and LLM nodes; `list_changed` notifications trigger a re-probe
+- [x] Resources and prompts: browse and read resources, use server prompts as templates in agent and LLM nodes; `list_changed` notifications trigger a re-probe
 - [x] Progress notifications streamed to the run tape; cancelling a run sends `notifications/cancelled` to in-flight tool calls
-- [ ] Elicitation: a server asking for user input pauses the run through the existing wait/resume and clarification plumbing
-- [ ] Sampling: servers may request completions through the agent's attached chat model, gated by policy and counted in cost telemetry
+- [x] Elicitation: a server asking for user input pauses the run through the existing wait/resume and clarification plumbing
+- [x] Sampling: servers may request completions through the agent's attached chat model, gated by policy and counted in cost telemetry
 - [x] OAuth 2.1 for remote MCP servers (metadata discovery, PKCE, dynamic client registration, token refresh) with tokens held by `SecretService`
 
 ### 10.6 Onboarding and catalog
 - [x] Import existing MCP client config files (`mcp.json`, `.vscode/mcp.json` and desktop-assistant configs) into the registry in one step, turning env values into secrets
 - [x] Deployment-local catalog file of approved servers with pinned package versions; presets read from it, no vendor-side registry
-- [x] MCP playground page: pick a server, call any tool through a schema-driven form, read resources, inspect the raw JSON-RPC exchange (resources panel arrives with 10.5 resources support)
+- [x] MCP playground page: pick a server, call any tool through a schema-driven form, read resources and preview prompts, inspect the raw JSON-RPC exchange
 
 ### 10.7 Runtime safety
 - [ ] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default

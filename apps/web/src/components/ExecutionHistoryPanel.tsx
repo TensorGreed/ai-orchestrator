@@ -1,6 +1,64 @@
-import { useState, useCallback } from "react";
-import type { ExecutionHistoryDetail, ExecutionHistorySummary } from "../lib/api";
-import type { WorkflowListItem } from "@ai-orchestrator/shared";
+import { useState, useCallback, useEffect } from "react";
+import { fetchMcpElicitations, type ExecutionHistoryDetail, type ExecutionHistorySummary } from "../lib/api";
+import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
+import { McpElicitationForm } from "./McpElicitationForm";
+
+/** Phase 10.5 — how often the Runs page looks for server questions waiting on a person. */
+const ELICITATION_POLL_MS = 5000;
+
+/**
+ * Pending `elicitation/create` requests across running workflows. The run
+ * stays `running` while a question waits, so the list is fetched on its own
+ * and refreshed while anything is pending.
+ */
+function PendingElicitations({ onAnswered }: { onAnswered?: () => void }) {
+  const [items, setItems] = useState<McpElicitationView[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetchMcpElicitations({ status: "pending" })
+        .then((response) => {
+          if (cancelled) return;
+          setItems(response.items);
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) setError(err instanceof Error ? err.message : "Could not load server questions");
+        });
+    };
+    load();
+    const timer = window.setInterval(load, ELICITATION_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  if (error) return <div className="error-banner">{error}</div>;
+  if (items.length === 0) return null;
+  return (
+    <section className="mcp-elicit-list" aria-label="Server questions waiting for you">
+      <h3 className="mcp-elicit-list-title">
+        Waiting for you <span className="mono-cell">{items.length}</span>
+      </h3>
+      <p className="kb-subtle">
+        An MCP server asked a question during a run. The run continues as soon as you answer, decline, or the deadline passes.
+      </p>
+      {items.map((item) => (
+        <McpElicitationForm
+          key={item.id}
+          elicitation={item}
+          onAnswered={(settled) => {
+            setItems((current) => current.filter((entry) => entry.id !== settled.id));
+            onAnswered?.();
+          }}
+        />
+      ))}
+    </section>
+  );
+}
 
 interface ExecutionHistoryFilters {
   status: string;
@@ -211,6 +269,8 @@ export function ExecutionHistoryPanel({
       </form>
 
       {executionsError && <div className="error-banner">{executionsError}</div>}
+
+      <PendingElicitations onAnswered={onRefresh} />
 
       {!executionsLoading && executionHistoryItems.length === 0 && (
         <div className="page-empty">No executions yet. Run a workflow from the editor to populate history.</div>

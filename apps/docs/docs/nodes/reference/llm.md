@@ -221,6 +221,7 @@ Executes a model completion call.
 | `provider` | `object` | yes | — |
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
+| `serverPrompt` | `object` | no | — |
 
 **Example config**
 

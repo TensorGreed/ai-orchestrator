@@ -16,6 +16,7 @@
  * connection lists only their names (`secretEnvVars` / `secretHeaders`).
  */
 
+import { CREDENTIAL_NAME_PATTERN } from "@ai-orchestrator/mcp-sdk";
 import type {
   McpConfigImportFormat,
   McpImportDecision,
@@ -252,7 +253,8 @@ export function parseMcpClientConfig(content: string | Record<string, unknown>):
 // Values, placeholders and credentials
 // ---------------------------------------------------------------------------
 
-const SECRET_NAME_PATTERN = /(token|key|secret|passw|pwd|auth|credential|cookie|(^|[-_])pat($|[-_]))/i;
+// The same heuristic refuses elicitation schemas that ask for credentials (mcp-sdk client-features).
+const SECRET_NAME_PATTERN = CREDENTIAL_NAME_PATTERN;
 const SECRET_HEADER_PATTERN = /^(authorization|proxy-authorization|cookie)$/i;
 
 /** Env var or header names whose values are treated as credentials. */

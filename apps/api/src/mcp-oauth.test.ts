@@ -695,7 +695,7 @@ describe("Phase 10.5 schema", () => {
   it("ships Postgres migration v24 with the annotation column, the OAuth table and a reversing down", () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 24);
     expect(migration).toBeDefined();
-    expect(Math.max(...MIGRATIONS.map((entry) => entry.version))).toBe(24);
+    expect(Math.max(...MIGRATIONS.map((entry) => entry.version))).toBeGreaterThanOrEqual(24);
     expect(migration!.up).toContain("ALTER TABLE mcp_tool_policies ADD COLUMN IF NOT EXISTS annotation_hint TEXT");
     expect(migration!.up).toContain("CREATE TABLE IF NOT EXISTS mcp_oauth_connections");
     expect(migration!.up).not.toMatch(/\baccess_token\b|\brefresh_token\b|\bclient_secret\b/);

@@ -1,6 +1,7 @@
 import { evaluateMcpToolAccess, type McpToolAccessDecision } from "@ai-orchestrator/mcp-sdk";
 import {
   MCP_POLICY_ROLES,
+  type McpPolicyKind,
   type McpPolicyRole,
   type McpToolAnnotations,
   type McpToolClassification,
@@ -97,7 +98,9 @@ export function manualReadOnlyFor(
 
 export function evaluateToolForContext(
   context: McpToolMarkingContext,
-  tool: { name: string; annotations?: McpToolAnnotations }
+  tool: { name: string; annotations?: McpToolAnnotations },
+  /** Phase 10.5 — what `tool.name` is: a tool (default), a resource URI, a prompt name or a sampling model. */
+  kind: McpPolicyKind = "tool"
 ): McpToolAccessDecision {
   return evaluateMcpToolAccess({
     rules: context.rules,
@@ -106,6 +109,7 @@ export function evaluateToolForContext(
     adapterId: context.adapterId,
     registryServerId: context.registryServerId,
     toolName: tool.name,
+    kind,
     annotations: tool.annotations,
     manualReadOnly: manualReadOnlyFor(context.classifications, context.registryServerId, tool.name),
     noWriteTools: context.noWriteTools,

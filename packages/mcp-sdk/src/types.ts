@@ -1,4 +1,15 @@
 import type {
+  McpElicitationRequest,
+  McpElicitationResult,
+  McpListChangedEvent,
+  McpPrompt,
+  McpPromptGetResult,
+  McpResource,
+  McpResourceReadResult,
+  McpResourceTemplate,
+  McpSamplingRequest,
+  McpSamplingResult,
+  McpServerCapabilities,
   McpToolAnnotations,
   McpToolProgressEvent,
   MCPServerConfig,
@@ -8,6 +19,14 @@ import type {
   SecretReference,
   ToolDefinition
 } from "@ai-orchestrator/shared";
+
+/** Where a server-initiated request came from, for the handlers in `MCPExecutionContext`. */
+export interface McpServerRequestOrigin {
+  serverId: string;
+  registryServerId?: string;
+  /** The tool whose `tools/call` was in flight, when the request arrived during one. */
+  toolName?: string;
+}
 
 export interface MCPExecutionContext {
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
@@ -23,6 +42,28 @@ export interface MCPExecutionContext {
    * Setting it makes adapters send a `progressToken` with each call.
    */
   onProgress?: (event: McpToolProgressEvent) => void;
+  /**
+   * Phase 10.5 — answers `elicitation/create`. Without a handler every
+   * request is declined, which is what unattended runs, probes and gateway
+   * calls want. The handler may take as long as a person needs; adapters do
+   * not time it out (the run's own timeout and abort signal still apply).
+   */
+  onElicitation?: (request: McpElicitationRequest, origin: McpServerRequestOrigin) => Promise<McpElicitationResult>;
+  /**
+   * Phase 10.5 — answers `sampling/createMessage`. Without a handler the
+   * request fails with a JSON-RPC error telling the server that sampling is
+   * not available for this call. The `sampling` client capability is only
+   * advertised when a handler is set.
+   */
+  onSampling?: (request: McpSamplingRequest, origin: McpServerRequestOrigin) => Promise<McpSamplingResult>;
+  /** Phase 10.5 — receives `notifications/{tools,resources,prompts}/list_changed`. */
+  onListChanged?: (event: McpListChangedEvent) => void;
+}
+
+/** Options for `readResource`. */
+export interface McpReadResourceOptions {
+  /** Decoded size limit across every content item; larger reads fail. */
+  maxBytes?: number;
 }
 
 /**
@@ -54,6 +95,28 @@ export interface MCPServerAdapter {
    * the registry health probe, call this when they are done with it.
    */
   closeSessions?(context: MCPExecutionContext): Promise<void> | void;
+  /** Phase 10.5 — the capabilities the server declared in `initialize`. */
+  describeServer?(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpServerCapabilities>;
+  /** Phase 10.5 — `resources/list`, every page. Empty when the server has no resources capability. */
+  listResources?(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpResource[]>;
+  /** Phase 10.5 — `resources/templates/list`, every page. */
+  listResourceTemplates?(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpResourceTemplate[]>;
+  /** Phase 10.5 — `resources/read` for one URI, with a size limit. */
+  readResource?(
+    uri: string,
+    config: MCPServerConfig,
+    context: MCPExecutionContext,
+    options?: McpReadResourceOptions
+  ): Promise<McpResourceReadResult>;
+  /** Phase 10.5 — `prompts/list`, every page. Empty when the server has no prompts capability. */
+  listPrompts?(config: MCPServerConfig, context: MCPExecutionContext): Promise<McpPrompt[]>;
+  /** Phase 10.5 — `prompts/get` with arguments. */
+  getPrompt?(
+    name: string,
+    args: Record<string, string>,
+    config: MCPServerConfig,
+    context: MCPExecutionContext
+  ): Promise<McpPromptGetResult>;
 }
 
 export interface ResolvedMCPTool {

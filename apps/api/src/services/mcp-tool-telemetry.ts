@@ -77,6 +77,40 @@ export function splitEvenly(total: number, parts: number, index: number): number
   return base + (index < total % parts ? 1 : 0);
 }
 
+interface SamplingShare {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/**
+ * Phase 10.5 — sampling requests a node's tool calls triggered, keyed by
+ * tool name and the 1-based number of that tool's call within the node, as
+ * the engine records them under `_mcpSampling`.
+ */
+function readSamplingShares(output: Record<string, unknown>): Map<string, SamplingShare> {
+  const shares = new Map<string, SamplingShare>();
+  const raw = Array.isArray(output._mcpSampling) ? output._mcpSampling : [];
+  for (const value of raw) {
+    const entry = asRecord(value);
+    const toolName = asString(entry?.toolName);
+    if (!toolName) continue;
+    const call = asNumber(entry?.call) ?? 1;
+    const key = `${toolName}\u0000${call}`;
+    const share = shares.get(key) ?? { requests: 0, inputTokens: 0, outputTokens: 0 };
+    share.requests += 1;
+    share.inputTokens += asNumber(entry?.inputTokens) ?? 0;
+    share.outputTokens += asNumber(entry?.outputTokens) ?? 0;
+    shares.set(key, share);
+  }
+  return shares;
+}
+
+function samplingColumns(share: SamplingShare | undefined): Pick<McpToolCallInput, "samplingRequests" | "samplingInputTokens" | "samplingOutputTokens"> {
+  if (!share) return { samplingRequests: null, samplingInputTokens: null, samplingOutputTokens: null };
+  return { samplingRequests: share.requests, samplingInputTokens: share.inputTokens, samplingOutputTokens: share.outputTokens };
+}
+
 function readAttributionMap(output: Record<string, unknown>): Map<string, Attribution> {
   const map = new Map<string, Attribution>();
   const raw = asRecord(output._mcpTools);
@@ -107,6 +141,8 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
     const steps = Array.isArray(output.steps) ? output.steps : [];
     if (steps.length === 0) return;
     const attribution = readAttributionMap(output);
+    const samplingShares = readSamplingShares(output);
+    const callsByTool = new Map<string, number>();
     const telemetry = asRecord(output._telemetry);
     const providerId = asString(telemetry?.providerId);
     const model = asString(telemetry?.model);
@@ -138,6 +174,8 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
               ? input.priceTurn(providerId, model, inputShare, outputShare, cachedShare)
               : null;
           const error = truncateError(result.error);
+          const callNumber = (callsByTool.get(target.toolName) ?? 0) + 1;
+          callsByTool.set(target.toolName, callNumber);
           rows.push({
             id: nextId(),
             executionId: input.executionId,
@@ -152,7 +190,8 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
             error,
             turnInputTokens: inputShare,
             turnOutputTokens: outputShare,
-            estimatedCostUsd: cost
+            estimatedCostUsd: cost,
+            ...samplingColumns(samplingShares.get(`${target.toolName}\u0000${callNumber}`))
           });
         }
         // A delegated worker agent returns its own output as the tool result.
@@ -188,6 +227,18 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
       const toolName = asString(request?.tool_name) ?? asString(output?.tool_name) ?? asString(config.toolName);
       if (!adapterId || !toolName) continue;
       const error = status === "error" ? truncateError(result.error ?? "MCP tool invocation failed") : null;
+      // A direct node makes one call, so every sampling request it saw belongs to it.
+      const sampling = output ? [...readSamplingShares(output).values()] : [];
+      const samplingTotal = sampling.length
+        ? sampling.reduce(
+            (sum, share) => ({
+              requests: sum.requests + share.requests,
+              inputTokens: sum.inputTokens + share.inputTokens,
+              outputTokens: sum.outputTokens + share.outputTokens
+            }),
+            { requests: 0, inputTokens: 0, outputTokens: 0 }
+          )
+        : undefined;
       rows.push({
         id: nextId(),
         executionId: input.executionId,
@@ -202,7 +253,8 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
         error,
         turnInputTokens: null,
         turnOutputTokens: null,
-        estimatedCostUsd: null
+        estimatedCostUsd: null,
+        ...samplingColumns(samplingTotal)
       });
       continue;
     }
@@ -229,6 +281,10 @@ export interface McpToolTelemetry {
   outputTokens: number;
   /** Sum of priced calls; null when no call in the group could be priced. */
   costUsd: number | null;
+  /** Phase 10.5 — `sampling/createMessage` requests the calls triggered, and the tokens those used. */
+  samplingRequests: number;
+  samplingInputTokens: number;
+  samplingOutputTokens: number;
   lastCalledAt: string | null;
 }
 
@@ -244,11 +300,17 @@ function summarize(calls: McpToolCallRecord[]): McpTelemetryTotals {
   let outputTokens = 0;
   let cost = 0;
   let priced = false;
+  let samplingRequests = 0;
+  let samplingInputTokens = 0;
+  let samplingOutputTokens = 0;
   let lastCalledAt: string | null = null;
   for (const call of calls) {
     if (!call.ok) errors += 1;
     inputTokens += call.turnInputTokens ?? 0;
     outputTokens += call.turnOutputTokens ?? 0;
+    samplingRequests += call.samplingRequests ?? 0;
+    samplingInputTokens += call.samplingInputTokens ?? 0;
+    samplingOutputTokens += call.samplingOutputTokens ?? 0;
     if (call.estimatedCostUsd !== null) {
       cost += call.estimatedCostUsd;
       priced = true;
@@ -264,6 +326,9 @@ function summarize(calls: McpToolCallRecord[]): McpTelemetryTotals {
     inputTokens,
     outputTokens,
     costUsd: priced ? Math.round(cost * 1_000_000) / 1_000_000 : null,
+    samplingRequests,
+    samplingInputTokens,
+    samplingOutputTokens,
     lastCalledAt
   };
 }

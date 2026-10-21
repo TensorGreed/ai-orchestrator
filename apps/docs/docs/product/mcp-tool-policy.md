@@ -17,15 +17,29 @@ Rules live on the **MCP servers** page, in the **Policies** view.
 | Field | Meaning |
 |---|---|
 | Effect | `allow` or `deny`. |
+| Applies to | What the rule governs: `tool` (the default), `resource`, `prompt` or `sampling`. See [Rule kinds](#rule-kinds). |
 | Project | One project, or all projects. |
 | Roles | Any subset of `admin`, `builder`, `operator`, `viewer`. Empty means every role. |
 | Server | A registry server id, or an adapter id (`mock-mcp`, `http_mcp`, `stdio_mcp`, ...) for servers configured inline on a node. Empty means any server. |
-| Tool pattern | An exact tool name, or a glob where `*` matches any run of characters (including none). Other characters, such as `.`, are matched literally. Defaults to `*`. |
+| Pattern | An exact name, or a glob where `*` matches any run of characters (including none). Other characters, such as `.`, are matched literally. Defaults to `*`. For tools it is the tool name; for the other kinds see [Rule kinds](#rule-kinds). |
 | Annotation condition | Optional. Only tools whose annotation hints meet the condition match, for example **destructive** tools. See [Annotation conditions](#annotation-conditions). |
 | Name, description | Optional. The name is what traces and error messages show. |
 | Enabled | Disabled rules are ignored. |
 
 An adapter id never matches a registered server. A rule on `http_mcp` reaches HTTP servers configured inline on nodes, not every registered HTTP server. To target a registered server, pick it by its registry id.
+
+### Rule kinds
+
+A rule applies to one kind of request. Rules of another kind are ignored, so a deny on tools never hides a resource and a resource rule never hides a tool.
+
+| Kind | Pattern matches | Where it is enforced |
+|---|---|---|
+| `tool` | The tool name. Annotation conditions apply. | Tool discovery and every call: agents, MCP Tool nodes, the playground and the gateway. |
+| `resource` | The resource URI, for example `gh://repo/*` or `*.pdf`. | Resource lists (blocked entries are marked), reads from the playground and from MCP Tool nodes in read mode. |
+| `prompt` | The prompt name. | Prompt lists, previews in the playground and server prompts bound to agent, LLM and chat model nodes. |
+| `sampling` | The model name the server's request resolves to. | A server's `sampling/createMessage` request, after the server's own sampling settings allowed it. |
+
+The same evaluation order applies within a kind: no rule means allowed, deny wins, and an allow strictly inside a deny carves an exception.
 
 ### Evaluation order
 
@@ -179,12 +193,12 @@ Changes are written to the audit log with resource type `mcp_policy` and events 
 ## Endpoints
 
 - `GET /api/mcp/policies`: rules in evaluation order, plus the roles a rule can target (builder)
-- `POST /api/mcp/policies`: create a rule; `annotationHint` is one of the conditions above, or `null` (admin)
+- `POST /api/mcp/policies`: create a rule; `kind` is `tool` (default), `resource`, `prompt` or `sampling`; `annotationHint` is one of the conditions above, or `null`, and only applies to tool rules (admin)
 - `PUT /api/mcp/policies/:id`: update any field of a rule (admin)
 - `DELETE /api/mcp/policies/:id`: delete a rule (admin)
-- `POST /api/mcp/policies/evaluate`: dry-run `{ projectId, role, serverId, toolName, noWriteTools? }`. Returns the decision, the deciding rule, the matching rules, the denies a narrower allow set aside, and the tool's classification (builder)
+- `POST /api/mcp/policies/evaluate`: dry-run `{ projectId, role, serverId, toolName, kind?, noWriteTools? }`; `toolName` is the URI, prompt or model name for the other kinds. Returns the decision, the deciding rule, the matching rules, the denies a narrower allow set aside, and the tool's classification (builder)
 - `PUT /api/mcp/servers/:id/tools/:toolName/classification`: `{ readOnly: true | false | null }`. `null` clears the override (admin)
 
 ## Storage
 
-Rules are kept in `mcp_tool_policies` and overrides in `mcp_tool_classifications`. SQLite creates both at startup. On Postgres, migration v22 creates them and adds `workflows.created_by`; migration v24 adds the `annotation_hint` column.
+Rules are kept in `mcp_tool_policies` and overrides in `mcp_tool_classifications`. SQLite creates both at startup. On Postgres, migration v22 creates them and adds `workflows.created_by`; migration v24 adds the `annotation_hint` column; migration v25 adds `kind`.

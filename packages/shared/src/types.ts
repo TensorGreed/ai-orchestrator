@@ -551,6 +551,11 @@ export interface MCPServerConfig {
   secretRef?: SecretReference;
   allowedTools?: string[];
   manualTools?: MCPToolDefinition[];
+  /**
+   * Phase 10.5 — the registry server's sampling settings, resolved from the
+   * registry at run time. Absent (inline servers) means sampling is off.
+   */
+  sampling?: McpSamplingSettings;
 }
 
 export interface MCPToolInvocation {
@@ -717,6 +722,10 @@ export const MCP_TOOL_HINT_CONDITIONS: readonly McpToolHintCondition[] = [
 ];
 export const MCP_POLICY_ROLES: readonly McpPolicyRole[] = ["admin", "builder", "operator", "viewer"];
 
+/** Phase 10.5 — the kinds of MCP request a policy rule can govern. */
+export type McpPolicyKind = "tool" | "resource" | "prompt" | "sampling";
+export const MCP_POLICY_KINDS: readonly McpPolicyKind[] = ["tool", "resource", "prompt", "sampling"];
+
 /**
  * One tool policy rule. A rule matches a tool call when every scope field
  * matches: project (`projectId` null = every project), role (`roles` empty =
@@ -740,6 +749,14 @@ export interface McpToolPolicyRule {
    * for the `not_` forms. Null = any tool. See `effectiveToolHints`.
    */
   annotationHint?: McpToolHintCondition | null;
+  /**
+   * Phase 10.5 — what the rule governs: tool calls (default), resource reads
+   * (`toolPattern` matches the resource URI), prompt fetches (`toolPattern`
+   * matches the prompt name) or sampling requests (`toolPattern` matches the
+   * model name the request resolves to). Rules without a kind keep their
+   * meaning: they only govern tool calls.
+   */
+  kind?: McpPolicyKind;
   enabled: boolean;
   createdBy?: string | null;
   createdAt?: string;
@@ -942,6 +959,296 @@ export interface ImportReport {
     approximated: number;
     unsupported: number;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10.5 — MCP resources, prompts, elicitation and sampling
+// ---------------------------------------------------------------------------
+
+/** The capabilities an MCP server declared in its `initialize` result. */
+export interface McpServerCapabilities {
+  tools?: { listChanged?: boolean };
+  resources?: { subscribe?: boolean; listChanged?: boolean };
+  prompts?: { listChanged?: boolean };
+  logging?: Record<string, never>;
+  completions?: Record<string, never>;
+}
+
+export interface McpResourceAnnotations {
+  audience?: Array<"user" | "assistant">;
+  priority?: number;
+  lastModified?: string;
+}
+
+/** One entry of `resources/list`. */
+export interface McpResource {
+  uri: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  /** Size in bytes, when the server reports it. */
+  size?: number;
+  annotations?: McpResourceAnnotations;
+}
+
+/** One entry of `resources/templates/list`. */
+export interface McpResourceTemplate {
+  uriTemplate: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  annotations?: McpResourceAnnotations;
+}
+
+/** One item of a `resources/read` result: text, or a base64 blob. */
+export type McpResourceContent =
+  | { uri: string; mimeType?: string; text: string }
+  | { uri: string; mimeType?: string; blob: string };
+
+export interface McpResourceReadResult {
+  uri: string;
+  contents: McpResourceContent[];
+  /** Total decoded size of every content item, in bytes. */
+  bytes: number;
+}
+
+export interface McpPromptArgument {
+  name: string;
+  title?: string;
+  description?: string;
+  required?: boolean;
+}
+
+/** One entry of `prompts/list`. */
+export interface McpPrompt {
+  name: string;
+  title?: string;
+  description?: string;
+  arguments?: McpPromptArgument[];
+}
+
+export type McpPromptContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "audio"; data: string; mimeType: string }
+  | { type: "resource"; resource: McpResourceContent }
+  | { type: "resource_link"; uri: string; name?: string; mimeType?: string };
+
+export interface McpPromptMessage {
+  role: "user" | "assistant";
+  content: McpPromptContent;
+}
+
+export interface McpPromptGetResult {
+  name: string;
+  description?: string;
+  messages: McpPromptMessage[];
+}
+
+/**
+ * What a probe captured besides the tool snapshot: the server's declared
+ * capabilities and, when it advertises them, its resources, resource
+ * templates and prompts. Informational; changes here are never breaking.
+ */
+export interface McpServerCatalog {
+  capabilities: McpServerCapabilities;
+  resources: McpResource[];
+  resourceTemplates: McpResourceTemplate[];
+  prompts: McpPrompt[];
+  updatedAt: string;
+}
+
+/**
+ * The kind of `notifications/<kind>/list_changed` an upstream server sent on
+ * a session. Any kind triggers a (debounced) re-probe of the registry server.
+ */
+export type McpListChangedKind = "tools" | "resources" | "prompts";
+
+export interface McpListChangedEvent {
+  kind: McpListChangedKind;
+  serverId: string;
+  registryServerId?: string;
+  at: string;
+}
+
+/**
+ * Where a server prompt is used on an LLM or agent node: it is fetched with
+ * `prompts/get` at run time (arguments are templates rendered like the
+ * node's own prompt) and its text replaces the system or the user prompt.
+ */
+export interface McpServerPromptBinding {
+  registryServerId: string;
+  name: string;
+  arguments?: Record<string, string>;
+  target?: "system" | "user";
+}
+
+// Elicitation ---------------------------------------------------------------
+
+/** The flat primitive schemas the elicitation spec allows per property. */
+export interface McpElicitationPropertySchema {
+  type: "string" | "number" | "integer" | "boolean";
+  title?: string;
+  description?: string;
+  format?: "email" | "uri" | "date" | "date-time";
+  enum?: string[];
+  enumNames?: string[];
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  default?: string | number | boolean;
+}
+
+export interface McpElicitationSchema {
+  type: "object";
+  properties: Record<string, McpElicitationPropertySchema>;
+  required?: string[];
+}
+
+export type McpElicitationAction = "accept" | "decline" | "cancel";
+
+/** `elicitation/create` params, after validation against the flat schema the spec allows. */
+export interface McpElicitationRequest {
+  message: string;
+  requestedSchema: McpElicitationSchema;
+}
+
+/** The `elicitation/create` result sent back to the server. */
+export interface McpElicitationResult {
+  action: McpElicitationAction;
+  content?: Record<string, string | number | boolean>;
+}
+
+export type McpElicitationStatus = "pending" | "accepted" | "declined" | "cancelled" | "expired" | "auto_declined";
+
+/** A pending or answered elicitation, as the Runs page and the Chat UI see it. */
+export interface McpElicitationView {
+  id: string;
+  executionId: string;
+  workflowId: string;
+  workflowName?: string | null;
+  nodeId: string;
+  /** Adapter id of the server that asked. */
+  serverId: string;
+  registryServerId?: string | null;
+  serverName?: string | null;
+  toolName: string;
+  message: string;
+  requestedSchema: McpElicitationSchema;
+  status: McpElicitationStatus;
+  createdAt: string;
+  expiresAt: string;
+  answeredAt?: string | null;
+  answeredBy?: string | null;
+  /** Why the run did not wait for a person (unattended runs, refused schemas). */
+  reason?: string | null;
+}
+
+/** How an elicitation was settled, as recorded on the node output (`_mcpElicitations`). */
+export type McpElicitationOutcomeSource = "user" | "unattended" | "refused" | "timeout" | "unavailable";
+
+export interface McpElicitationTraceEntry {
+  id?: string;
+  toolName: string;
+  serverId: string;
+  registryServerId?: string;
+  message: string;
+  requestedSchema: McpElicitationSchema;
+  action: McpElicitationAction;
+  source: McpElicitationOutcomeSource;
+  note?: string;
+  at: string;
+  settledAt: string;
+}
+
+// Sampling ------------------------------------------------------------------
+
+/** Per registry server limits for `sampling/createMessage`. */
+export interface McpSamplingSettings {
+  /** Off by default: a server can steer the model through sampling. */
+  allow: boolean;
+  /** Upper bound for `maxTokens`; larger requests are clamped. */
+  maxTokens: number;
+  /** Model names the server may ask for; empty = only the attached model. */
+  allowedModels: string[];
+  /** Requests one tool call may make; more are refused. */
+  maxRequestsPerCall: number;
+  /** Model for direct MCP Tool nodes and gateway calls, which have no attached chat model. */
+  defaultModel?: { providerId: string; model: string } | null;
+}
+
+export const DEFAULT_MCP_SAMPLING_SETTINGS: McpSamplingSettings = {
+  allow: false,
+  maxTokens: 1024,
+  allowedModels: [],
+  maxRequestsPerCall: 3,
+  defaultModel: null
+};
+
+export type McpSamplingContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "audio"; data: string; mimeType: string };
+
+export interface McpSamplingMessage {
+  role: "user" | "assistant";
+  content: McpSamplingContent;
+}
+
+export interface McpSamplingModelPreferences {
+  hints?: Array<{ name?: string }>;
+  costPriority?: number;
+  speedPriority?: number;
+  intelligencePriority?: number;
+}
+
+/** `sampling/createMessage` params as received from a server. */
+export interface McpSamplingRequest {
+  messages: McpSamplingMessage[];
+  modelPreferences?: McpSamplingModelPreferences;
+  systemPrompt?: string;
+  maxTokens: number;
+  temperature?: number;
+  stopSequences?: string[];
+  includeContext?: "none" | "thisServer" | "allServers";
+  metadata?: Record<string, unknown>;
+}
+
+/** The `sampling/createMessage` result sent back to the server. */
+export interface McpSamplingResult {
+  role: "assistant";
+  content: { type: "text"; text: string };
+  model: string;
+  stopReason?: "endTurn" | "stopSequence" | "maxTokens" | string;
+}
+
+/** One sampling request and its outcome, as recorded on the node output (`_mcpSampling`). */
+export interface McpSamplingTraceEntry {
+  toolName: string;
+  /** 1-based number of the `toolName` call within the node that this request belongs to. */
+  call: number;
+  serverId: string;
+  registryServerId?: string;
+  /** Model names the server asked for through `modelPreferences.hints`. */
+  requestedModels: string[];
+  /** Model that answered, or null when the request was refused. */
+  model: string | null;
+  providerId?: string;
+  ok: boolean;
+  /** Why the request was refused. */
+  error?: string;
+  /** Prompt the server sent, truncated. */
+  prompt: string;
+  /** Answer the model gave, truncated. */
+  response?: string;
+  maxTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  durationMs: number;
+  at: string;
 }
 
 // ---------------------------------------------------------------------------

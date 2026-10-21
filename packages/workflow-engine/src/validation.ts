@@ -528,7 +528,16 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       const hasServer =
         typeof config.serverId === "string" ||
         (typeof config.registryServerId === "string" && config.registryServerId.trim().length > 0);
-      if (!hasServer || typeof config.toolName !== "string") {
+      const readsResource = config.operation === "read_resource";
+      if (readsResource) {
+        if (!hasServer || typeof config.resourceUri !== "string" || config.resourceUri.trim().length === 0) {
+          issues.push({
+            code: "missing_mcp_resource_config",
+            message: "MCP Tool node in read-resource mode requires a registered server (registryServerId) or serverId, and a resourceUri.",
+            nodeId: node.id
+          });
+        }
+      } else if (!hasServer || typeof config.toolName !== "string") {
         issues.push({
           code: "missing_mcp_tool_config",
           message: "MCP Tool node requires a registered server (registryServerId) or serverId, and a toolName.",

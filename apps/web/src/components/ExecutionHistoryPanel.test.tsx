@@ -1,9 +1,21 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { WorkflowListItem } from "@ai-orchestrator/shared";
-import { vi } from "vitest";
+import { beforeEach, vi } from "vitest";
+import type { McpElicitationView } from "@ai-orchestrator/shared";
+import * as api from "../lib/api";
 import type { ExecutionHistoryDetail, ExecutionHistorySummary } from "../lib/api";
 import { ExecutionHistoryPanel } from "./ExecutionHistoryPanel";
+
+vi.mock("../lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+  return { ...actual, fetchMcpElicitations: vi.fn(), answerMcpElicitation: vi.fn() };
+});
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(api.fetchMcpElicitations).mockResolvedValue({ items: [] });
+});
 
 function makeWorkflowList(): WorkflowListItem[] {
   return [
@@ -156,5 +168,38 @@ describe("ExecutionHistoryPanel", () => {
     const pill = document.querySelector(".status-pill") as HTMLElement;
     expect(pill).toHaveAttribute("data-status", "unknown");
     expect(pill.style.color).toBe("rgb(18, 52, 86)");
+  });
+
+  it("lists server questions waiting for an answer and refreshes once one is answered", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn();
+    const pending: McpElicitationView = {
+      id: "elc_1",
+      executionId: "ex-1",
+      workflowId: "wf-1",
+      workflowName: "Workflow 1",
+      nodeId: "agent",
+      serverId: "mock-mcp",
+      serverName: "Mock",
+      toolName: "ask_user",
+      message: "Approve the refund?",
+      requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve" } }, required: ["approve"] },
+      status: "pending",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    };
+    vi.mocked(api.fetchMcpElicitations).mockResolvedValue({ items: [pending] });
+    vi.mocked(api.answerMcpElicitation).mockResolvedValue({ elicitation: { ...pending, status: "accepted" } });
+
+    render(<ExecutionHistoryPanel {...makeProps({ onRefresh })} />);
+    const section = await screen.findByRole("region", { name: "Server questions waiting for you" });
+    expect(api.fetchMcpElicitations).toHaveBeenCalledWith({ status: "pending" });
+    expect(within(section).getByText("Approve the refund?")).toBeInTheDocument();
+
+    await user.click(within(section).getByLabelText("Approve"));
+    await user.click(within(section).getByRole("button", { name: "Send answer" }));
+    expect(api.answerMcpElicitation).toHaveBeenCalledWith("elc_1", { action: "accept", content: { approve: true } });
+    await waitFor(() => expect(onRefresh).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Server questions waiting for you" })).not.toBeInTheDocument());
   });
 });

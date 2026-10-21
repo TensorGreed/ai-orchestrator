@@ -355,6 +355,13 @@ function McpServerForm({
     initial?.probeIntervalMs ? String(initial.probeIntervalMs / 60_000) : ""
   );
   const [blockOnBreakingChange, setBlockOnBreakingChange] = useState(initial?.blockOnBreakingChange ?? false);
+  // Phase 10.5 — sampling: off unless an admin turns it on for this server.
+  const [samplingAllow, setSamplingAllow] = useState(initial?.sampling?.allow ?? false);
+  const [samplingMaxTokens, setSamplingMaxTokens] = useState(String(initial?.sampling?.maxTokens ?? 1024));
+  const [samplingAllowedModels, setSamplingAllowedModels] = useState((initial?.sampling?.allowedModels ?? []).join(", "));
+  const [samplingMaxRequests, setSamplingMaxRequests] = useState(String(initial?.sampling?.maxRequestsPerCall ?? 3));
+  const [samplingDefaultProvider, setSamplingDefaultProvider] = useState(initial?.sampling?.defaultModel?.providerId ?? "");
+  const [samplingDefaultModel, setSamplingDefaultModel] = useState(initial?.sampling?.defaultModel?.model ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -404,6 +411,16 @@ function McpServerForm({
       setError("Probe interval must be at least 10 seconds (0.17 min).");
       return;
     }
+    const maxTokens = Number(samplingMaxTokens);
+    const maxRequests = Number(samplingMaxRequests);
+    if (samplingAllow && (!Number.isInteger(maxTokens) || maxTokens < 1 || !Number.isInteger(maxRequests) || maxRequests < 1)) {
+      setError("Sampling limits must be whole numbers of at least 1.");
+      return;
+    }
+    if ((samplingDefaultProvider.trim() === "") !== (samplingDefaultModel.trim() === "")) {
+      setError("A default sampling model needs both a provider id and a model name.");
+      return;
+    }
     const payload: McpServerInput = {
       name: name.trim(),
       description: description.trim() || null,
@@ -413,7 +430,19 @@ function McpServerForm({
       owner: owner.trim() || null,
       probeEnabled,
       probeIntervalMs: minutes === null ? null : Math.round(minutes * 60_000),
-      blockOnBreakingChange
+      blockOnBreakingChange,
+      sampling: {
+        allow: samplingAllow,
+        maxTokens: Number.isInteger(maxTokens) && maxTokens >= 1 ? maxTokens : 1024,
+        allowedModels: samplingAllowedModels
+          .split(/[,\n]/)
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0),
+        maxRequestsPerCall: Number.isInteger(maxRequests) && maxRequests >= 1 ? maxRequests : 3,
+        defaultModel: samplingDefaultProvider.trim() && samplingDefaultModel.trim()
+          ? { providerId: samplingDefaultProvider.trim(), model: samplingDefaultModel.trim() }
+          : null
+      }
     };
     setBusy(true);
     try {
@@ -527,6 +556,41 @@ function McpServerForm({
           Block runs when a probe sees a breaking tool schema change, until an admin accepts it
         </label>
       </div>
+      <fieldset className="mcp-sampling-fields">
+        <legend>Sampling</legend>
+        <label className="mcp-check">
+          <input type="checkbox" checked={samplingAllow} onChange={(e) => setSamplingAllow(e.target.checked)} />
+          Let this server ask the attached chat model to generate text during a tool call
+        </label>
+        <p className="kb-subtle">
+          Off by default. A server that samples can steer the model and spend tokens with your keys; every request is
+          limited below, checked against sampling policy rules, and counted on the tool call's telemetry.
+        </p>
+        <div className="kb-form-row kb-form-row-2">
+          <label>
+            Max tokens per request
+            <input type="number" min="1" step="1" value={samplingMaxTokens} onChange={(e) => setSamplingMaxTokens(e.target.value)} disabled={!samplingAllow} />
+          </label>
+          <label>
+            Max requests per tool call
+            <input type="number" min="1" step="1" value={samplingMaxRequests} onChange={(e) => setSamplingMaxRequests(e.target.value)} disabled={!samplingAllow} />
+          </label>
+        </div>
+        <label>
+          Models the server may ask for (comma-separated; empty = only the attached model)
+          <input type="text" value={samplingAllowedModels} onChange={(e) => setSamplingAllowedModels(e.target.value)} disabled={!samplingAllow} placeholder="gpt-4o-mini, llama3" spellCheck={false} />
+        </label>
+        <div className="kb-form-row kb-form-row-2">
+          <label>
+            Default model provider (direct MCP Tool nodes and gateway calls)
+            <input type="text" value={samplingDefaultProvider} onChange={(e) => setSamplingDefaultProvider(e.target.value)} disabled={!samplingAllow} placeholder="ollama" spellCheck={false} />
+          </label>
+          <label>
+            Default model
+            <input type="text" value={samplingDefaultModel} onChange={(e) => setSamplingDefaultModel(e.target.value)} disabled={!samplingAllow} placeholder="llama3" spellCheck={false} />
+          </label>
+        </div>
+      </fieldset>
       <div className="kb-form-row mcp-form-actions">
         <button type="submit" className="pg-btn primary" disabled={busy || !name.trim()}>
           {busy ? "Saving…" : initial ? "Save changes" : "Register server"}
@@ -693,6 +757,12 @@ function McpServerDetail({
                 <span>blocks runs on breaking changes</span>
               </>
             )}
+            <span>·</span>
+            <span>
+              {server.sampling?.allow
+                ? `sampling on (≤ ${server.sampling.maxTokens} tokens, ≤ ${server.sampling.maxRequestsPerCall} per call${server.sampling.defaultModel ? `, default ${server.sampling.defaultModel.model}` : ""})`
+                : "sampling off"}
+            </span>
           </div>
         </div>
         <div className="page-actions">

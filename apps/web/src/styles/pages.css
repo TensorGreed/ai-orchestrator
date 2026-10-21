@@ -4314,3 +4314,157 @@ img.mcp-pg-block {
   flex-direction: column;
   gap: 8px;
 }
+
+/* ---------------------------------------------------------------------------
+   Phase 10.5 — MCP resources, prompts and elicitation
+   --------------------------------------------------------------------------- */
+
+.mcp-pg-uri {
+  display: block;
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.mcp-pg-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.mcp-pg-resource-blob {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.mcp-pg-resource-text {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+.mcp-pg-resource-text .mcp-pg-block {
+  width: 100%;
+}
+
+.mcp-pg-prompt-message {
+  display: grid;
+  gap: 4px;
+}
+
+.mcp-pg-prompt-role {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+
+.mcp-sampling-fields {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+}
+
+.mcp-sampling-fields legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.mcp-elicit {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--accent, #6b7cff);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+
+.mcp-elicit.is-compact {
+  padding: 10px 12px;
+  margin-top: 8px;
+}
+
+.mcp-elicit-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.mcp-elicit-badge {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  background: var(--accent, #6b7cff);
+  color: #fff;
+  font-weight: 700;
+  font-size: var(--fs-sm);
+}
+
+.mcp-elicit-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mcp-elicit-message {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mcp-elicit-warning {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--r-md, 8px);
+  background: color-mix(in srgb, var(--warn, #d9a400) 14%, transparent);
+  color: var(--fg);
+  font-size: var(--fs-xs);
+}
+
+.mcp-elicit-list {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+}
+
+.mcp-elicit-list-title {
+  margin: 0;
+  font-size: var(--fs-md, 1rem);
+}
+
+.chat-elicitations {
+  display: grid;
+  gap: 8px;
+}
+
+.insp-trace-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+
+.insp-trace-list ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.insp-trace-list li {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .mcp-elicit .mcp-form-actions {
+    flex-wrap: wrap;
+  }
+}
