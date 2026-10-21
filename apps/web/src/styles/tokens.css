@@ -43,6 +43,11 @@
   --port-memory-soft: rgba(126, 226, 184, 0.14);
   --port-tool-soft: rgba(255, 180, 84, 0.14);
   --port-worker-soft: rgba(198, 162, 255, 0.14);
+  /* Phase 12.1 — guard port on agents and protection port on guard nodes */
+  --port-guard: #ff8fab;
+  --port-guard-soft: rgba(255, 143, 171, 0.14);
+  --port-protect: #c3e88d;
+  --port-protect-soft: rgba(195, 232, 141, 0.14);
 
   /* agent hub */
   --agent: #c6a2ff;
@@ -137,6 +142,10 @@
   --port-memory-soft: rgba(14, 143, 94, 0.12);
   --port-tool-soft: rgba(184, 110, 0, 0.12);
   --port-worker-soft: rgba(111, 66, 193, 0.12);
+  --port-guard: #c22a5a;
+  --port-guard-soft: rgba(194, 42, 90, 0.10);
+  --port-protect: #5b7f0e;
+  --port-protect-soft: rgba(91, 127, 14, 0.12);
 
   --agent: #6f42c1;
   --agent-soft: rgba(111, 66, 193, 0.10);

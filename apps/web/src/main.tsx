@@ -10,6 +10,7 @@ import "./styles/inspector.css";
 import "./styles/pages.css";
 import "./styles/mcp-testing.css";
 import "./styles/mcp-runtime-safety.css";
+import "./styles/guard.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

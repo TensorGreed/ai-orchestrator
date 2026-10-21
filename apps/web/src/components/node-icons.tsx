@@ -38,6 +38,8 @@ export type NodePaletteIconKey =
   | "agent_orchestrator"
   | "supervisor"
   | "output_guardrail"
+  | "guard"
+  | "guard_protection"
   | "input_validator"
   | "output_parser"
   | "rag_retrieve"
@@ -272,6 +274,23 @@ export function PaletteIcon({ icon }: { icon: NodePaletteIconKey }): JSX.Element
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M12 3l8 4v6c0 4.4-3.2 8.2-8 9.6C7.2 21.2 4 17.4 4 13V7l8-4z" fill="none" stroke="#EF4444" strokeWidth="1.6" strokeLinejoin="round" />
         <path d="M9 12l2 2 4-4" fill="none" stroke="#22C55E" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (icon === "guard") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3l8 3.2v5.6c0 4.6-3.3 8.4-8 9.9-4.7-1.5-8-5.3-8-9.9V6.2L12 3z" fill="none" stroke="#E11D63" strokeWidth="1.6" strokeLinejoin="round" />
+        <path d="M12 7.5v9M8.5 10.5h7" fill="none" stroke="#E11D63" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (icon === "guard_protection") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="5" y="10.5" width="14" height="10" rx="2" fill="none" stroke="#65A30D" strokeWidth="1.6" />
+        <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3" fill="none" stroke="#65A30D" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M9 15.5h1.5M11.75 15.5h1.5M14.5 15.5H16" fill="none" stroke="#65A30D" strokeWidth="1.8" strokeLinecap="round" />
       </svg>
     );
   }
@@ -1140,6 +1159,8 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   agent_orchestrator: "agent_orchestrator",
   supervisor_node: "supervisor",
   output_guardrail: "output_guardrail",
+  guard: "guard",
+  guard_protection: "guard_protection",
   input_validator: "input_validator",
   output_parser: "output_parser",
   rag_retrieve: "rag_retrieve",

@@ -532,6 +532,7 @@ export class GuardNotFoundError extends Error {
 function toEventView(record: GuardEventRecord): GuardEventView {
   return {
     id: record.id,
+    verdictId: record.verdictId,
     executionId: record.executionId,
     workflowId: record.workflowId,
     projectId: record.projectId,

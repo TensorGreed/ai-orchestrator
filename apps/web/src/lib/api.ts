@@ -1,4 +1,9 @@
 import type {
+  GuardBindingMode,
+  GuardEventView,
+  GuardProfileSummary,
+  GuardProfileVersionView,
+  GuardResolutionView,
   McpBreakerSettings,
   McpCredentialMode,
   McpDelegatedFallback,
@@ -3255,4 +3260,164 @@ export interface McpOverview {
 
 export async function fetchMcpOverview(window: McpTelemetryWindow = "7d") {
   return apiRequest<McpOverview>(`/api/mcp/overview?window=${encodeURIComponent(window)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12.1 — Guard: profiles, bindings, verdict events and Security counts.
+// ---------------------------------------------------------------------------
+
+export interface GuardFieldIssue {
+  path: string;
+  message: string;
+}
+
+export interface GuardBindingView {
+  mode: GuardBindingMode;
+  profileId: string | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface GuardProjectBindingView extends GuardBindingView {
+  projectId: string;
+  locked: boolean;
+}
+
+export interface GuardWorkflowBindingResponse {
+  binding: GuardBindingView & { workflowId: string };
+  project: GuardProjectBindingView;
+  effective: GuardResolutionView;
+}
+
+export interface GuardProfileChange {
+  path: string;
+  kind: "added" | "removed" | "changed";
+  before?: unknown;
+  after?: unknown;
+}
+
+export interface GuardDetectorInfo {
+  id: string;
+  tier: string;
+  description: string;
+  channels: string[];
+  categories: string[];
+}
+
+export interface GuardStats {
+  verdicts: Array<{ key: string; count: number }>;
+  actions: Array<{ key: string; count: number }>;
+  categories: Array<{ key: string; count: number }>;
+  channels: Array<{ key: string; count: number }>;
+  detectors: Array<{ key: string; count: number }>;
+  shadowWouldBlock: number;
+  shadowFindings: number;
+  budgetExceeded: number;
+  daily: Array<{ day: string; action: string; count: number }>;
+}
+
+export interface GuardEventFilter {
+  projectId?: string;
+  workflowId?: string;
+  profileId?: string;
+  channel?: string;
+  action?: string;
+  days?: number;
+  findings?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+function guardQuery(filter: GuardEventFilter): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filter)) {
+    if (value === undefined || value === null || value === "") continue;
+    params.set(key, String(value));
+  }
+  const q = params.toString();
+  return q ? `?${q}` : "";
+}
+
+export async function fetchGuardProfiles() {
+  return apiRequest<{ profiles: GuardProfileSummary[]; autoApply: boolean; builtInId: string }>("/api/guard/profiles");
+}
+
+export async function fetchGuardProfile(id: string) {
+  return apiRequest<{ profile: GuardProfileSummary; latest: GuardProfileVersionView; bindings: Array<{ scope: string; scopeId: string; mode: GuardBindingMode; profileId: string | null }> }>(
+    `/api/guard/profiles/${encodeURIComponent(id)}`
+  );
+}
+
+export async function createGuardProfile(payload: { id?: string; document: Record<string, unknown>; note?: string }) {
+  return apiRequest<{ profile: GuardProfileSummary }>("/api/guard/profiles", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function updateGuardProfile(id: string, payload: { document: Record<string, unknown>; note?: string }) {
+  return apiRequest<{ version: GuardProfileVersionView; changed: boolean }>(`/api/guard/profiles/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteGuardProfile(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/guard/profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchGuardProfileVersions(id: string) {
+  return apiRequest<{ versions: GuardProfileVersionView[] }>(`/api/guard/profiles/${encodeURIComponent(id)}/versions`);
+}
+
+export async function fetchGuardProfileDiff(id: string, from: number, to: number) {
+  return apiRequest<{ from: GuardProfileVersionView; to: GuardProfileVersionView; changes: GuardProfileChange[] }>(
+    `/api/guard/profiles/${encodeURIComponent(id)}/diff?from=${from}&to=${to}`
+  );
+}
+
+export function guardProfileExportUrl(id: string, version?: number): string {
+  return `${API_BASE}/api/guard/profiles/${encodeURIComponent(id)}/export${version ? `?version=${version}` : ""}`;
+}
+
+export async function importGuardProfile(payload: { text: string; note?: string }) {
+  return apiRequest<{ profile: GuardProfileSummary; created: boolean; changed: boolean }>("/api/guard/profiles/import", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchGuardDetectors() {
+  return apiRequest<{ channels: string[]; detectors: GuardDetectorInfo[] }>("/api/guard/detectors");
+}
+
+export async function fetchGuardProjectBinding(projectId: string) {
+  return apiRequest<{ binding: GuardProjectBindingView; effective: GuardResolutionView }>(`/api/guard/bindings/projects/${encodeURIComponent(projectId)}`);
+}
+
+export async function updateGuardProjectBinding(projectId: string, payload: { mode: GuardBindingMode; profileId?: string | null }) {
+  return apiRequest<{ binding: GuardProjectBindingView; effective: GuardResolutionView }>(`/api/guard/bindings/projects/${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchGuardWorkflowBinding(workflowId: string) {
+  return apiRequest<GuardWorkflowBindingResponse>(`/api/guard/bindings/workflows/${encodeURIComponent(workflowId)}`);
+}
+
+export async function updateGuardWorkflowBinding(workflowId: string, payload: { mode: "inherit" | "override"; profileId?: string | null }) {
+  return apiRequest<GuardWorkflowBindingResponse>(`/api/guard/bindings/workflows/${encodeURIComponent(workflowId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchExecutionGuardEvents(executionId: string) {
+  return apiRequest<{ events: GuardEventView[] }>(`/api/executions/${encodeURIComponent(executionId)}/guard-events`);
+}
+
+export async function fetchGuardEvents(filter: GuardEventFilter = {}) {
+  return apiRequest<{ events: Array<GuardEventView & { workflowName?: string }>; total: number }>(`/api/guard/events${guardQuery(filter)}`);
+}
+
+export async function fetchGuardStats(filter: GuardEventFilter = {}) {
+  return apiRequest<{ since: string | null; stats: GuardStats }>(`/api/guard/stats${guardQuery(filter)}`);
 }

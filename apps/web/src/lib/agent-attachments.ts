@@ -4,7 +4,10 @@
 // drift. Colours are the `--port-*` tokens from src/styles/tokens.css so both
 // themes resolve them.
 
-export type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
+export type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection";
+
+/** Ports that sit on an agent hub. `protection` hangs off a Guard node instead. */
+export type HubAttachmentHandle = Exclude<AgentAttachmentHandle, "protection">;
 
 export interface AttachmentStyle {
   stroke: string;
@@ -42,6 +45,21 @@ export const AGENT_ATTACHMENT_STYLES: Record<AgentAttachmentHandle, AttachmentSt
     bg: "var(--port-worker-soft)",
     border: "var(--port-worker)",
     description: "Subordinate Agent or Supervisor exposed to the parent Supervisor as a synthetic tool (recursive Swarm delegation)."
+  },
+  guard: {
+    stroke: "var(--port-guard)",
+    label: "Guard",
+    bg: "var(--port-guard-soft)",
+    border: "var(--port-guard)",
+    description:
+      "Guard node checking this agent's prompts, tool arguments, tool results and final answer. Without one, the project's effective guard profile applies."
+  },
+  protection: {
+    stroke: "var(--port-protect)",
+    label: "Protection",
+    bg: "var(--port-protect-soft)",
+    border: "var(--port-protect)",
+    description: "Protection provider (token vault, encryption, keyed hash or masking) a Guard node uses for sensitive data. Keys come from secrets."
   }
 };
 

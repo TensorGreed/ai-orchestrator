@@ -31,6 +31,7 @@ import {
   computeAttachmentSlots,
   computeStages,
   findHubOf,
+  isHubEntry,
   isHubType,
   orbitPositions,
   tidyLayout,
@@ -108,6 +109,8 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
         "rag_retrieve",
         "local_memory",
         "output_guardrail",
+        "guard",
+        "guard_protection",
         "output_parser",
         "basic_llm_chain",
         "qa_chain",
@@ -346,7 +349,7 @@ export function WorkflowCanvasArea({
   const slots = useMemo(() => computeAttachmentSlots(nodes, edges), [nodes, edges]);
   const attached = useMemo(() => attachedNodeIds(slots), [slots]);
   const stageInfo = useMemo(() => computeStages(nodes, edges), [nodes, edges]);
-  const hubCount = useMemo(() => Object.keys(slots).length, [slots]);
+  const hubCount = useMemo(() => Object.values(slots).filter((entry) => isHubEntry(entry)).length, [slots]);
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
 
   const renderEdges = useMemo(
@@ -366,9 +369,11 @@ export function WorkflowCanvasArea({
       nodes.map((node) => {
         const nodeType = node.data.nodeType;
         const hub = isHubType(nodeType);
+        // Phase 12.1 — a Guard node carries protection providers like a hub carries its ports.
+        const guardCarrier = nodeType === "guard";
         const attachment = attached.has(node.id) ? findHubOf(node.id, slots) : null;
         const mcpMarker = mcpMarkers?.[node.id];
-        if (!hub && !attachment && !mcpMarker) {
+        if (!hub && !guardCarrier && !attachment && !mcpMarker) {
           return node;
         }
         const data: EditorNodeData = { ...node.data };
@@ -376,8 +381,8 @@ export function WorkflowCanvasArea({
           data.mcpMarker = mcpMarker;
           data.onOpenMcpTarget = onOpenMcpTarget;
         }
-        if (hub) {
-          data.slots = slots[node.id];
+        if (hub || guardCarrier) {
+          if (slots[node.id]) data.slots = slots[node.id];
           if (onOpenAgentAttachmentDrawer) {
             data.onOpenAgentAttachmentDrawer = (sourceHandle: AgentAttachmentHandle) => onOpenAgentAttachmentDrawer(node.id, sourceHandle);
           }
@@ -387,8 +392,15 @@ export function WorkflowCanvasArea({
           data.attachedAs = attachment.port;
           const hubNode = nodeById.get(attachment.hubId);
           if (hubNode) {
-            const dx = node.position.x + ORBIT.satelliteSize / 2 - (hubNode.position.x + ORBIT.hubSize / 2);
-            const dy = node.position.y + ORBIT.satelliteSize / 2 - (hubNode.position.y + ORBIT.hubSize / 2);
+            const carrierIsHub = isHubType(hubNode.data.nodeType);
+            const carrierAttached = attached.has(hubNode.id);
+            const carrierHalf = carrierIsHub
+              ? { x: ORBIT.hubSize / 2, y: ORBIT.hubSize / 2 }
+              : carrierAttached
+                ? { x: ORBIT.satelliteSize / 2, y: ORBIT.satelliteSize / 2 }
+                : { x: ORBIT.cardWidth / 2, y: ORBIT.cardHeight / 2 };
+            const dx = node.position.x + ORBIT.satelliteSize / 2 - (hubNode.position.x + carrierHalf.x);
+            const dy = node.position.y + ORBIT.satelliteSize / 2 - (hubNode.position.y + carrierHalf.y);
             data.labelSide = Math.abs(dy) >= Math.abs(dx) * 1.2 ? (dy < 0 ? "top" : "bottom") : dx < 0 ? "left" : "right";
           }
         }

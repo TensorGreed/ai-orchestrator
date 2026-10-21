@@ -171,6 +171,8 @@ export interface GuardFindingView {
 }
 
 export interface GuardEventView {
+  /** Rows of one verdict share this id (one row per applied action; one row for a clean verdict). */
+  verdictId: string;
   id: string;
   executionId: string;
   workflowId?: string | null;
