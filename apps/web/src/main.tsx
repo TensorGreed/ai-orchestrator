@@ -8,6 +8,7 @@ import "./styles/shell.css";
 import "./styles/canvas.css";
 import "./styles/inspector.css";
 import "./styles/pages.css";
+import "./styles/mcp-testing.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

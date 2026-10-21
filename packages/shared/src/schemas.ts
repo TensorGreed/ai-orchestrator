@@ -230,7 +230,9 @@ export const workflowExecuteRequestSchema = z.object({
   system_prompt: z.string().optional(),
   user_prompt: z.string().optional(),
   variables: z.record(z.string(), z.unknown()).optional(),
-  input: z.record(z.string(), z.unknown()).optional()
+  input: z.record(z.string(), z.unknown()).optional(),
+  /** Phase 10.8 — record every MCP call of this run into a cassette. */
+  record: z.boolean().optional()
 });
 
 export const agentWebhookPayloadSchema = z.object({

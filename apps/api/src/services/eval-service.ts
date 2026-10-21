@@ -23,6 +23,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { SqliteStore } from "../db/database.js";
+import type { McpReplayMode } from "@ai-orchestrator/shared";
 
 export type ScorerSpec =
   | { type: "exact_match"; path?: string; ignoreCase?: boolean }
@@ -93,6 +94,20 @@ export interface EvalRunRequest {
    */
   scorers?: ScorerSpec[];
   triggeredBy?: string;
+  /** Phase 10.8 — record each fixture's MCP calls into a cassette. */
+  recordMcp?: boolean;
+  /**
+   * Phase 10.8 — answer MCP calls from cassettes instead of live servers:
+   * one cassette for every fixture, or the cassette a past eval run recorded
+   * for each fixture.
+   */
+  replayMcp?: EvalMcpReplay;
+}
+
+export interface EvalMcpReplay {
+  cassetteId?: string;
+  evalRunId?: string;
+  mode?: McpReplayMode;
 }
 
 export interface EvalScoreDetail {
@@ -131,8 +146,11 @@ export interface EvalWorkflowExecutor {
     workflowId: string;
     fixtureInput: unknown;
     fixtureName: string;
+    /** Phase 10.8 — matches a fixture to the cassette a past eval run recorded for it. */
+    fixtureId: string;
     runId: string;
     triggeredBy?: string;
+    mcp?: { record?: boolean; replay?: EvalMcpReplay };
   }): Promise<{
     executionId?: string;
     output: unknown;
@@ -252,8 +270,12 @@ export class EvalService {
           workflowId: request.workflowId,
           fixtureInput: fixture.input,
           fixtureName: fixture.name,
+          fixtureId: fixture.id,
           runId,
-          triggeredBy: request.triggeredBy
+          triggeredBy: request.triggeredBy,
+          ...(request.recordMcp || request.replayMcp
+            ? { mcp: { ...(request.recordMcp ? { record: true } : {}), ...(request.replayMcp ? { replay: request.replayMcp } : {}) } }
+            : {})
         });
 
         if (exec.error) {

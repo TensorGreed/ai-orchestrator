@@ -1,0 +1,241 @@
+/* Phase 10.8 — MCP testing: cassette badge on the Runs page, the cassette viewer and the eval run MCP options. */
+
+.mcp-cassette-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+button.mcp-cassette-badge {
+  cursor: pointer;
+}
+
+button.mcp-cassette-badge:hover {
+  border-color: var(--accent);
+}
+
+button.mcp-cassette-badge:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mcp-cassette-modal {
+  width: min(860px, 100%);
+}
+
+.mcp-cassette-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+
+.mcp-cassette-notes {
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-cassette-note {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+
+.mcp-cassette-note.is-warn {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+  color: var(--fg);
+}
+
+.mcp-cassette-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-cassette-toolbar a.pg-btn {
+  text-decoration: none;
+}
+
+.mcp-cassette-lists {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+
+.mcp-cassette-entries {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-cassette-entry {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+  overflow: hidden;
+}
+
+.mcp-cassette-entry.is-error {
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+}
+
+.mcp-cassette-entry-head {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mcp-cassette-entry-head:hover {
+  background: var(--bg-elev-3);
+}
+
+.mcp-cassette-entry-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.mcp-cassette-method {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.mcp-cassette-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-cassette-server {
+  overflow: hidden;
+  max-width: 180px;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-cassette-tag {
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.mcp-cassette-tag.is-error {
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.mcp-cassette-entry-body {
+  display: grid;
+  gap: 10px;
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.mcp-cassette-entry-body pre {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.eval-mcp-fieldset {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.eval-mcp-fieldset legend {
+  padding: 0 6px;
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.eval-mcp-options,
+.eval-mcp-replay {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  font-size: 0.84rem;
+}
+
+.eval-mcp-replay {
+  margin-top: 8px;
+}
+
+.eval-mcp-replay select {
+  width: auto;
+  max-width: min(100%, 420px);
+}
+
+.eval-mcp-help {
+  display: block;
+  margin-top: 8px;
+  color: var(--fg-muted);
+}
+
+.eval-run-cassettes {
+  color: var(--accent-strong);
+}
+
+@media (max-width: 640px) {
+  .mcp-cassette-entry-head {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 4px 8px;
+  }
+
+  .mcp-cassette-method {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .mcp-cassette-server {
+    display: none;
+  }
+
+  .mcp-cassette-lists {
+    margin-left: 0;
+  }
+}

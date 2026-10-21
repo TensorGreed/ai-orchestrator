@@ -71,7 +71,7 @@ import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
-import { EvalService, type ScorerSpec } from "./services/eval-service";
+import { EvalService, type EvalWorkflowExecutor, type ScorerSpec } from "./services/eval-service";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { QueueService } from "./services/queue-service";
@@ -100,6 +100,14 @@ import { McpProbeService, serverConfigFromRecord } from "./services/mcp-probe-se
 import { McpElicitationService } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
 import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
+import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
+import {
+  McpCassetteService,
+  applyReplayOutcome,
+  buildSnapshotFile,
+  type McpCassetteRunPlan
+} from "./services/mcp-cassette-service.js";
+import type { McpCassetteRecord, McpCassetteSource, McpReplayMode } from "@ai-orchestrator/shared";
 import {
   evaluateToolForContext,
   manualReadOnlyFor,
@@ -1181,7 +1189,30 @@ export function createApp(
       });
     }
   });
-  const mcpRegistry = createDefaultMCPRegistry({ oauth: mcpOAuthService });
+  const mcpRegistry = createDefaultMCPRegistry({
+    oauth: mcpOAuthService,
+    // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
+    snapshots: {
+      loadSnapshot: (sourceServerId) => {
+        const server = store.getMcpServer(sourceServerId);
+        const file = server ? buildSnapshotFile(store, server) : null;
+        if (!file) {
+          throw new Error(`MCP server '${sourceServerId}' has no accepted schema snapshot yet. Probe it first.`);
+        }
+        return file;
+      },
+      loadCassette: (cassetteId) => store.getMcpCassette(cassetteId)?.cassette ?? null
+    }
+  });
+  // Phase 10.8 — record and replay of MCP calls.
+  const mcpCassetteService = new McpCassetteService(store, {
+    maxBytes: config.MCP_CASSETTE_MAX_BYTES,
+    maxCalls: config.MCP_CASSETTE_MAX_CALLS,
+    redact: (value) => {
+      const redacted = secretService.redact(value);
+      return typeof redacted === "string" ? redacted : value;
+    }
+  });
   const agentRuntime = createDefaultAgentRuntime();
 
   // Phase 6 — community-package loader. Constructed eagerly so admin routes
@@ -1426,6 +1457,8 @@ export function createApp(
       reason?: string;
     };
     hooks?: WorkflowExecutionEventHooks;
+    /** Phase 10.8 — record this run's MCP calls, or answer them from a cassette. */
+    mcpPlan?: McpCassetteRunPlan;
   }) => {
     const controller = input.executionId
       ? registerActiveExecution({
@@ -1468,7 +1501,7 @@ export function createApp(
         {
           providerRegistry,
           connectorRegistry,
-          mcpRegistry,
+          mcpRegistry: input.mcpPlan?.registry ?? mcpRegistry,
           agentRuntime,
           memoryStore: {
             loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
@@ -1536,7 +1569,7 @@ export function createApp(
             }
           },
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
-          resolveRegisteredMcpServer,
+          resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer ?? resolveRegisteredMcpServer,
           loadMcpToolPolicy,
           // Phase 10.5 — resources, elicitation and list_changed notifications.
           mcpResourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
@@ -1667,6 +1700,84 @@ export function createApp(
       }
       releaseActiveExecution(input.executionId, controller);
     }
+  };
+
+  /**
+   * Phase 10.8 — after a recorded run, store its cassette; after a replay,
+   * attach the replay report and fail a strict replay that diverged.
+   */
+  const finishMcpCassettePlan = <T extends Awaited<ReturnType<typeof runWorkflowExecution>>>(
+    plan: McpCassetteRunPlan | undefined,
+    result: T,
+    meta: {
+      executionId: string;
+      workflow: Workflow;
+      source: McpCassetteSource;
+      createdBy: string | null;
+      evalRunId?: string | null;
+      fixtureId?: string | null;
+    }
+  ): T => {
+    if (!plan) return result;
+    let next: T = result;
+    if (plan.recorder) {
+      try {
+        const summary = mcpCassetteService.persist({
+          plan,
+          executionId: meta.executionId,
+          workflow: meta.workflow,
+          source: meta.source,
+          evalRunId: meta.evalRunId ?? null,
+          fixtureId: meta.fixtureId ?? null,
+          createdBy: meta.createdBy
+        });
+        if (summary) next = { ...next, mcpCassette: summary };
+      } catch (error) {
+        app.log.warn(
+          { executionId: meta.executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
+          "Failed to store the MCP cassette"
+        );
+      }
+    }
+    const report = mcpCassetteService.report(plan);
+    if (report) next = applyReplayOutcome({ ...next, mcpReplay: report }, report);
+    return next;
+  };
+
+  /** Phase 10.8 — what a replay feeds the workflow, rebuilt from the source run's stored request input. */
+  const replayRunInputFor = (
+    triggerType: string | null,
+    stored: Record<string, unknown>
+  ): Pick<
+    Parameters<typeof runWorkflowExecution>[0],
+    "directInput" | "webhookPayload" | "variables" | "systemPrompt" | "userPrompt" | "sessionId" | "usePinnedData"
+  > => {
+    if (triggerType === "eval") {
+      return { directInput: { trigger_type: "eval", ...stored } };
+    }
+    if (triggerType && ["manual", "manual_stream", "manual_retry", "mcp_replay"].includes(triggerType)) {
+      const directInput = asRecord(stored.input);
+      const variables = asRecord(stored.variables);
+      return {
+        ...(Object.keys(directInput).length > 0 ? { directInput } : {}),
+        ...(Object.keys(variables).length > 0 ? { variables } : {}),
+        ...(typeof stored.system_prompt === "string" ? { systemPrompt: stored.system_prompt } : {}),
+        ...(typeof stored.user_prompt === "string" ? { userPrompt: stored.user_prompt } : {}),
+        sessionId: normalizeSessionId(
+          typeof stored.sessionId === "string" ? stored.sessionId : undefined,
+          typeof stored.session_id === "string" ? stored.session_id : undefined
+        ),
+        usePinnedData: stored.usePinnedData !== false
+      };
+    }
+    const parsed = parseWebhookRunInput(stored);
+    return {
+      webhookPayload: parsed.body,
+      ...(parsed.variables ? { variables: parsed.variables } : {}),
+      ...(parsed.systemPrompt ? { systemPrompt: parsed.systemPrompt } : {}),
+      ...(parsed.userPrompt ? { userPrompt: parsed.userPrompt } : {}),
+      sessionId: parsed.sessionId
+    };
   };
 
   const parseWebhookRunInput = (payload: unknown) => {
@@ -2325,6 +2436,31 @@ export function createApp(
     return { id: found.id, email: found.email, role: found.role as UserRole };
   };
 
+  /**
+   * Phase 10.8 — the MCP plan for one eval fixture: record, replay one
+   * cassette, or replay the cassette a past eval run recorded for the same fixture.
+   */
+  const planEvalMcp = (input: Parameters<EvalWorkflowExecutor>[0]): McpCassetteRunPlan | undefined => {
+    const replay = input.mcp?.replay;
+    if (replay) {
+      let record: McpCassetteRecord | null = null;
+      if (replay.cassetteId) {
+        record = store.getMcpCassette(replay.cassetteId);
+        if (!record) throw new Error(`Cassette not found: ${replay.cassetteId}`);
+      } else if (replay.evalRunId) {
+        const match = store
+          .listMcpCassettesForEvalRun(replay.evalRunId)
+          .filter((entry) => entry.fixtureId === input.fixtureId)
+          .at(-1);
+        record = match ? store.getMcpCassette(match.id) : null;
+        if (!record) throw new Error(`Eval run ${replay.evalRunId} recorded no cassette for fixture '${input.fixtureName}'.`);
+      }
+      if (!record) throw new Error("Replay needs a cassetteId or an evalRunId.");
+      return mcpCassetteService.planReplay(record, replay.mode ?? "strict", mcpRegistry, resolveRegisteredMcpServer);
+    }
+    return input.mcp?.record ? mcpCassetteService.planRecording(mcpRegistry) : undefined;
+  };
+
   const evalService = new EvalService(store, async (input) => {
     const workflow = store.getWorkflow(input.workflowId);
     if (!workflow) {
@@ -2336,15 +2472,31 @@ export function createApp(
         ? (input.fixtureInput as Record<string, unknown>)
         : { input: input.fixtureInput };
     const startedAt = Date.now();
+    // Phase 10.8 — record this fixture's MCP calls, or answer them from a cassette.
+    let mcpPlan: McpCassetteRunPlan | undefined;
     try {
-      const result = await runWorkflowExecution({
+      mcpPlan = planEvalMcp(input);
+    } catch (err) {
+      return { output: null, error: err instanceof Error ? err.message : String(err) };
+    }
+    try {
+      const executed = await runWorkflowExecution({
         workflow,
         executionId,
         directInput: { trigger_type: "eval", eval_run_id: input.runId, eval_fixture_name: input.fixtureName, ...fixtureRecord },
         triggerType: "eval",
         triggeredBy: input.triggeredBy,
         // Eval runs are started by a signed-in builder; their email is recorded server-side.
-        policyActor: evalPolicyActor(input.triggeredBy)
+        policyActor: evalPolicyActor(input.triggeredBy),
+        mcpPlan
+      });
+      const result = finishMcpCassettePlan(mcpPlan, executed, {
+        executionId,
+        workflow,
+        source: "eval",
+        createdBy: input.triggeredBy ?? null,
+        evalRunId: input.runId,
+        fixtureId: input.fixtureId
       });
       persistExecutionHistory({
         executionId,
@@ -4121,7 +4273,24 @@ export function createApp(
     return { ok: true };
   });
 
-  app.post<{ Body: { datasetId?: string; workflowId?: string; scorers?: ScorerSpec[] } }>("/api/eval/runs", async (request, reply) => {
+  // Phase 10.8 — eval runs can record their MCP calls, or replay them from cassettes.
+  const evalMcpOptionsSchema = z.object({
+    record: z.boolean().optional(),
+    replay: z
+      .object({
+        cassetteId: z.string().trim().min(1).optional(),
+        evalRunId: z.string().trim().min(1).optional(),
+        mode: z.enum(["strict", "lenient"]).optional()
+      })
+      .refine((value) => Boolean(value.cassetteId) !== Boolean(value.evalRunId), {
+        message: "replay needs exactly one of cassetteId or evalRunId"
+      })
+      .optional()
+  });
+
+  app.post<{
+    Body: { datasetId?: string; workflowId?: string; scorers?: ScorerSpec[]; record?: boolean; replay?: unknown };
+  }>("/api/eval/runs", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
     const datasetId = String(request.body?.datasetId ?? "").trim();
@@ -4130,12 +4299,27 @@ export function createApp(
       reply.code(400);
       return { error: "datasetId and workflowId are required" };
     }
+    const mcpOptions = evalMcpOptionsSchema.safeParse({ record: request.body?.record, replay: request.body?.replay });
+    if (!mcpOptions.success) {
+      reply.code(400);
+      return { error: "Invalid MCP record or replay options", details: mcpOptions.error.issues };
+    }
+    if (mcpOptions.data.record && mcpOptions.data.replay) {
+      reply.code(400);
+      return { error: "An eval run can record MCP calls or replay them, not both." };
+    }
+    if (mcpOptions.data.replay?.cassetteId && !store.getMcpCassetteSummary(mcpOptions.data.replay.cassetteId)) {
+      reply.code(404);
+      return { error: "Cassette not found" };
+    }
     try {
       const result = await evalService.startRun({
         datasetId,
         workflowId,
         scorers: request.body?.scorers,
-        triggeredBy: user.email
+        triggeredBy: user.email,
+        ...(mcpOptions.data.record ? { recordMcp: true } : {}),
+        ...(mcpOptions.data.replay ? { replayMcp: mcpOptions.data.replay } : {})
       });
       return { ok: true, ...result };
     } catch (err) {
@@ -4148,12 +4332,14 @@ export function createApp(
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const query = request.query as { datasetId?: string; workflowId?: string; limit?: string } | undefined;
+    const runs = evalService.listRuns({
+      datasetId: query?.datasetId,
+      workflowId: query?.workflowId,
+      limit: query?.limit ? Math.max(1, Math.min(500, parseInt(query.limit, 10) || 100)) : undefined
+    });
+    // Phase 10.8 — how many fixture cassettes each run recorded, for "replay from eval run".
     return {
-      runs: evalService.listRuns({
-        datasetId: query?.datasetId,
-        workflowId: query?.workflowId,
-        limit: query?.limit ? Math.max(1, Math.min(500, parseInt(query.limit, 10) || 100)) : undefined
-      })
+      runs: runs.map((run) => ({ ...run, mcpCassettes: store.listMcpCassettesForEvalRun(run.id).length }))
     };
   });
 
@@ -6663,7 +6849,10 @@ export function createApp(
       requestInput: prepared.requestInput,
       customData: executionPayload.customData
     });
-    const result = await runWorkflowExecution({
+    // Phase 10.8 — "Record MCP calls": every MCP call of the run goes into a cassette.
+    const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry) : undefined;
+    const executed = await runWorkflowExecution({
+      mcpPlan,
       policyActor: user,
       workflow,
       startNodeId: executionPayload.startNodeId,
@@ -6687,6 +6876,7 @@ export function createApp(
       triggeredBy: user.email,
       hooks: progressHooks
     });
+    const result = finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
 
     persistExecutionHistory({
       executionId,
@@ -6793,7 +6983,9 @@ export function createApp(
           }
         }
       });
-      const result = await runWorkflowExecution({
+      const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry) : undefined;
+      const executed = await runWorkflowExecution({
+        mcpPlan,
         policyActor: user,
         workflow,
         startNodeId: executionPayload.startNodeId,
@@ -6817,6 +7009,7 @@ export function createApp(
         triggeredBy: user.email,
         hooks: progressHooks
       });
+      const result = finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
 
       persistExecutionHistory({
         executionId,
@@ -7139,7 +7332,7 @@ export function createApp(
     const page = Number(query.page);
     const pageSize = Number(query.pageSize);
 
-    return store.listExecutionHistory({
+    const history = store.listExecutionHistory({
       page: Number.isFinite(page) ? page : 1,
       pageSize: Number.isFinite(pageSize) ? pageSize : 20,
       status: typeof query.status === "string" && query.status.trim() ? query.status.trim() : undefined,
@@ -7149,6 +7342,15 @@ export function createApp(
       startedFrom: normalizeIsoDateFilter(query.startedFrom),
       startedTo: normalizeIsoDateFilter(query.startedTo)
     });
+    // Phase 10.8 — runs recorded with "Record MCP calls" carry a cassette badge.
+    const badges = store.mcpCassetteBadgesForExecutions(history.items.map((item) => item.id));
+    return {
+      ...history,
+      items: history.items.map((item) => {
+        const badge = badges.get(item.id);
+        return badge ? { ...item, mcpCassette: badge } : item;
+      })
+    };
   });
 
   app.get<{ Params: { id: string } }>("/api/executions/:id", async (request, reply) => {
@@ -7258,6 +7460,80 @@ export function createApp(
     }
 
     return result;
+  });
+
+  // Phase 10.8 — run a past execution again with its MCP calls answered from its cassette.
+  const executionReplaySchema = z.object({
+    mode: z.enum(["strict", "lenient"]).optional(),
+    cassetteId: z.string().trim().min(1).optional()
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/replay", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) {
+      return;
+    }
+    const parsed = executionReplaySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid replay payload", details: parsed.error.issues };
+    }
+    const source = store.getExecutionHistory(request.params.id);
+    if (!source) {
+      reply.code(404);
+      return { error: "Execution not found" };
+    }
+    const cassette = parsed.data.cassetteId ? store.getMcpCassette(parsed.data.cassetteId) : store.getMcpCassetteForExecution(source.id);
+    if (!cassette) {
+      reply.code(404);
+      return { error: "No cassette was recorded for this execution. Run it with Record MCP calls turned on first." };
+    }
+    if (cassette.workflowId && cassette.workflowId !== source.workflowId) {
+      reply.code(409);
+      return { error: "That cassette was recorded for a different workflow." };
+    }
+    const workflow = store.getWorkflow(source.workflowId);
+    if (!workflow) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    const mode: McpReplayMode = parsed.data.mode ?? "strict";
+    const mcpPlan = mcpCassetteService.planReplay(cassette, mode, mcpRegistry, resolveRegisteredMcpServer);
+    const executionId = crypto.randomUUID();
+    const storedInput = asRecord(source.input);
+    const customData = {
+      ...asRecord(source.customData),
+      mcpReplay: { sourceExecutionId: source.id, cassetteId: cassette.id, mode }
+    };
+    const executed = await runWorkflowExecution({
+      ...replayRunInputFor(source.triggerType, storedInput),
+      mcpPlan,
+      policyActor: user,
+      workflow,
+      customData,
+      executionId,
+      triggerType: "mcp_replay",
+      triggeredBy: user.email,
+      hooks: createProgressTrackingHooks({
+        executionId,
+        workflow,
+        triggerType: "mcp_replay",
+        triggeredBy: user.email,
+        requestInput: storedInput,
+        customData
+      })
+    });
+    const result = finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "replay", createdBy: user.email });
+    persistExecutionHistory({
+      executionId,
+      workflow,
+      result,
+      triggerType: "mcp_replay",
+      triggeredBy: user.email,
+      requestInput: storedInput,
+      customData
+    });
+    return { ...result, executionId };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/cancel", async (request, reply) => {
@@ -9768,6 +10044,22 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     usesOAuth: (server) => McpOAuthService.usesOAuth(server),
     latency: (serverId) => mcpProbeService.latency(serverId),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
+  });
+
+  registerMcpTestingRoutes({
+    app,
+    store,
+    mcpRegistry,
+    resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+    probeTimeoutMs: config.MCP_PROBE_TIMEOUT_MS,
+    loadMcpToolPolicy,
+    resolveToolPolicySubject: (workflowId) => resolveToolPolicySubject(workflowId),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: (event) => auditService.record(event),
+    redact: (value) => {
+      const redacted = secretService.redact(value);
+      return typeof redacted === "string" ? redacted : value;
+    }
   });
 
   // -------------------------------------------------------------------------

@@ -1231,6 +1231,35 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_servers DROP COLUMN IF EXISTS sampling_json;
       ALTER TABLE mcp_tool_policies DROP COLUMN IF EXISTS kind;
     `
+  },
+  {
+    version: 26,
+    description: "Phase 10.8 — MCP cassettes for record and replay (mcp_cassettes)",
+    up: `
+      CREATE TABLE IF NOT EXISTS mcp_cassettes (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT,
+        workflow_id TEXT,
+        workflow_name TEXT,
+        project_id TEXT,
+        source TEXT NOT NULL DEFAULT 'manual',
+        eval_run_id TEXT,
+        fixture_id TEXT,
+        call_count INTEGER NOT NULL DEFAULT 0,
+        server_count INTEGER NOT NULL DEFAULT 0,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        cassette_json TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        created_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_cassettes_execution ON mcp_cassettes(execution_id);
+      CREATE INDEX IF NOT EXISTS idx_mcp_cassettes_eval ON mcp_cassettes(eval_run_id, fixture_id);
+      CREATE INDEX IF NOT EXISTS idx_mcp_cassettes_created ON mcp_cassettes(created_at DESC);
+    `,
+    down: `
+      DROP TABLE IF EXISTS mcp_cassettes;
+    `
   }
 ];
 

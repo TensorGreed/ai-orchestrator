@@ -139,6 +139,36 @@ describe("StudioHud", () => {
     expect(screen.queryByRole("menuitemcheckbox", { name: "No write tools" })).not.toBeInTheDocument();
   });
 
+  it("toggles Record MCP calls from the overflow menu and marks the Run button while recording", async () => {
+    const user = userEvent.setup();
+    const onToggleRecordMcp = vi.fn();
+    const onRun = vi.fn();
+    const { rerender } = render(<StudioHud {...makeProps({ onToggleRecordMcp, recordMcp: false, onRun })} />);
+
+    expect(screen.getByRole("button", { name: "Run workflow" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    const item = screen.getByRole("menuitemcheckbox", { name: "Record MCP calls" });
+    expect(item).toHaveAttribute("aria-checked", "false");
+    await user.click(item);
+    expect(onToggleRecordMcp).toHaveBeenCalledTimes(1);
+
+    rerender(<StudioHud {...makeProps({ onToggleRecordMcp, recordMcp: true, onRun })} />);
+    const run = screen.getByRole("button", { name: "Run workflow, recording MCP calls" });
+    expect(run).toHaveClass("is-recording");
+    await user.click(run);
+    expect(onRun).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "Record MCP calls" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("hides Record MCP calls when the user cannot record", async () => {
+    const user = userEvent.setup();
+    render(<StudioHud {...makeProps({ recordMcp: true, onRun: vi.fn() })} />);
+    expect(screen.getByRole("button", { name: "Run workflow" })).not.toHaveClass("is-recording");
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Record MCP calls" })).not.toBeInTheDocument();
+  });
+
   it("offers import from another builder in the overflow and the palette", async () => {
     const user = userEvent.setup();
     const onImportExternal = vi.fn();

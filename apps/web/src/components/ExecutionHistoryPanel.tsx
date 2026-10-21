@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
-import { fetchMcpElicitations, type ExecutionHistoryDetail, type ExecutionHistorySummary } from "../lib/api";
+import { fetchMcpElicitations, type ExecutionHistoryDetail, type ExecutionHistorySummary, type McpReplayMode } from "../lib/api";
 import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
+import { McpCassetteViewer } from "./McpCassetteViewer";
 import { McpElicitationForm } from "./McpElicitationForm";
 
 /** Phase 10.5 — how often the Runs page looks for server questions waiting on a person. */
@@ -95,6 +96,14 @@ interface ExecutionHistoryPanelProps {
    * for this; we just trigger it from here.
    */
   onReplayFromNode?: (executionId: string, nodeId: string) => Promise<void> | void;
+  /**
+   * Phase 10.8 — run a recorded execution again with its MCP calls answered
+   * from its cassette. Omitted for roles that cannot read cassettes, which
+   * also hides the cassette viewer.
+   */
+  onReplayCassette?: (executionId: string, mode: McpReplayMode) => Promise<void> | void;
+  /** Admins may delete cassettes from the viewer. */
+  canDeleteCassettes?: boolean;
 }
 
 const TOKENISED_STATUSES = new Set([
@@ -138,6 +147,17 @@ function hasCustomData(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length > 0);
 }
 
+function CassetteIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false">
+      <rect x="1.5" y="3.5" width="13" height="9" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="5.5" cy="7.5" r="1.4" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="10.5" cy="7.5" r="1.4" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M4.5 12.5 5.5 10.5h5l1 2" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
 function StatusPill({ status, statusColors }: { status: string; statusColors: Record<string, string> }) {
   const known = TOKENISED_STATUSES.has(status);
   return (
@@ -167,9 +187,12 @@ export function ExecutionHistoryPanel({
   onDebugExecution,
   onRerunExecution,
   onCancelExecution,
-  onReplayFromNode
+  onReplayFromNode,
+  onReplayCassette,
+  canDeleteCassettes = false
 }: ExecutionHistoryPanelProps) {
   const [expandedTraceKey, setExpandedTraceKey] = useState<string | null>(null);
+  const [viewer, setViewer] = useState<{ cassetteId: string; executionId: string } | null>(null);
   const toggleTraceRow = useCallback((key: string) => {
     setExpandedTraceKey((current) => (current === key ? null : key));
   }, []);
@@ -325,7 +348,32 @@ export function ExecutionHistoryPanel({
                       </span>
                       {item.id.slice(0, 8)}
                     </td>
-                    <td className="execution-row-workflow">{item.workflowName ?? item.workflowId}</td>
+                    <td className="execution-row-workflow">
+                      {item.workflowName ?? item.workflowId}
+                      {item.mcpCassette &&
+                        (onReplayCassette ? (
+                          <button
+                            type="button"
+                            className="mcp-cassette-badge"
+                            title={`MCP calls recorded into a cassette${item.mcpCassette.truncated ? " (truncated)" : ""}. Open it.`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setViewer({ cassetteId: item.mcpCassette!.id, executionId: item.id });
+                            }}
+                          >
+                            <CassetteIcon />
+                            {item.mcpCassette.callCount}
+                            {item.mcpCassette.truncated ? "+" : ""}
+                            <span className="sr-only"> MCP calls recorded</span>
+                          </button>
+                        ) : (
+                          <span className="mcp-cassette-badge" title="MCP calls recorded into a cassette">
+                            <CassetteIcon />
+                            {item.mcpCassette.callCount}
+                            <span className="sr-only"> MCP calls recorded</span>
+                          </span>
+                        ))}
+                    </td>
                     <td>
                       <StatusPill status={item.status} statusColors={statusColors} />
                     </td>
@@ -352,6 +400,18 @@ export function ExecutionHistoryPanel({
                       >
                         Retry
                       </button>
+                      {item.mcpCassette && onReplayCassette && (
+                        <button
+                          className="pg-btn small"
+                          title="Run again with MCP calls answered from the recorded cassette"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onReplayCassette(item.id, "strict");
+                          }}
+                        >
+                          Replay
+                        </button>
+                      )}
                       {canCancel && (
                         <button
                           className="pg-btn small ghost danger"
@@ -475,6 +535,23 @@ export function ExecutionHistoryPanel({
             </tbody>
           </table>
         </div>
+      )}
+      {viewer && (
+        <McpCassetteViewer
+          cassetteId={viewer.cassetteId}
+          canDelete={canDeleteCassettes}
+          onClose={() => setViewer(null)}
+          onDeleted={onRefresh}
+          {...(onReplayCassette
+            ? {
+                onReplay: (mode: McpReplayMode) => {
+                  const executionId = viewer.executionId;
+                  setViewer(null);
+                  void onReplayCassette(executionId, mode);
+                }
+              }
+            : {})}
+        />
       )}
     </section>
   );

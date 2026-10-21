@@ -375,7 +375,8 @@ export const openApiSpec = {
                   startNodeId: { type: "string" },
                   runMode: { type: "string", enum: ["full", "single_node"] },
                   usePinnedData: { type: "boolean" },
-                  executionTimeoutMs: { type: "integer" }
+                  executionTimeoutMs: { type: "integer" },
+                  record: { type: "boolean", description: "Record every MCP call of the run into a cassette (returned as mcpCassette)" }
                 }
               }
             }
@@ -1254,6 +1255,107 @@ export const openApiSpec = {
         summary: "Accept the pending breaking tool schema change (admin); unblocks runs",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Accepted" }, "409": { description: "No pending breaking change" } }
+      }
+    },
+    "/api/mcp/servers/{id}/snapshot/export": {
+      get: {
+        tags: ["MCP"],
+        summary: "The server's accepted schema snapshot as an l2m.mcp-snapshot file, with its resources and prompts (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Snapshot file" },
+          "404": { description: "Server not found" },
+          "409": { description: "No accepted snapshot yet" }
+        }
+      }
+    },
+    "/api/mcp/cassettes": {
+      get: {
+        tags: ["MCP"],
+        summary: "Cassettes recorded from runs and eval runs, newest first (builders)",
+        parameters: [
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "projectId", in: "query", required: false, schema: { type: "string" } },
+          { name: "evalRunId", in: "query", required: false, schema: { type: "string" } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", default: 50, maximum: 500 } },
+          { name: "offset", in: "query", required: false, schema: { type: "integer", default: 0 } }
+        ],
+        responses: { "200": { description: "{ items, total }" } }
+      }
+    },
+    "/api/mcp/cassettes/{id}": {
+      get: {
+        tags: ["MCP"],
+        summary: "One cassette with every recorded call, scrubbed of secrets (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ cassette }" }, "404": { description: "Not found" } }
+      },
+      delete: {
+        tags: ["MCP"],
+        summary: "Delete a cassette (admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Deleted" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/cassettes/{id}/export": {
+      get: {
+        tags: ["MCP"],
+        summary: "The cassette as an l2m.mcp-cassette file, for l2m mcp mock --cassette (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Cassette file" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/mcp/check": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "CI check behind l2m mcp check: probe servers without recording, diff against the accepted snapshot, list policy-blocked tools workflows depend on (builders, API keys)",
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  serverIds: { type: "array", items: { type: "string" } },
+                  toolsetId: { type: "string" },
+                  workflowIds: { type: "array", items: { type: "string" } },
+                  failOnUnreachable: { type: "boolean", default: true },
+                  failOnPolicyBlocked: { type: "boolean", default: true }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Check report; ok is false when any failure applies" },
+          "404": { description: "Unknown server or toolset" }
+        }
+      }
+    },
+    "/api/executions/{id}/replay": {
+      post: {
+        tags: ["Executions"],
+        summary: "Run a past execution again with its MCP calls answered from its cassette (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  mode: { type: "string", enum: ["strict", "lenient"], default: "strict" },
+                  cassetteId: { type: "string" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Run result with mcpReplay; a strict replay that diverged has status error" },
+          "404": { description: "Execution or cassette not found" }
+        }
       }
     },
     "/api/mcp/servers/{id}/tools/{toolName}/classification": {

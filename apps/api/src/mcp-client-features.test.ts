@@ -147,7 +147,7 @@ describe("migration 25", () => {
   it("adds the catalog and elicitation tables and the sampling columns, with a rollback", () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 25);
     expect(migration).toBeDefined();
-    expect(Math.max(...MIGRATIONS.map((entry) => entry.version))).toBe(25);
+    expect(Math.max(...MIGRATIONS.map((entry) => entry.version))).toBeGreaterThanOrEqual(25);
     for (const fragment of [
       "mcp_server_catalogs",
       "mcp_elicitations",

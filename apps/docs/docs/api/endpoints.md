@@ -19,13 +19,14 @@
 - `POST /api/workflows/import/external` — convert an export from another builder; see [Importing from another builder](../product/importing-from-another-builder.md)
 - `GET /api/workflows/:id/export`
 - `POST /api/workflows/:id/validate`
-- `POST /api/workflows/:id/execute`
+- `POST /api/workflows/:id/execute` (`record: true` records the run's MCP calls into a cassette; the result carries `mcpCassette`)
 - `POST /api/workflows/:id/execute/stream` — SSE: `node_start`, `node_complete`, `llm_delta`, `node_progress` (MCP progress: `nodeId`, `toolName`, `serverId`, `registryServerId`, `progress`, `total`, `percent`, `message`, `at`), `result`
 
 ## Execution history
 
-- `GET /api/executions`
+- `GET /api/executions` (recorded runs carry `mcpCassette: { id, callCount, truncated }`)
 - `GET /api/executions/:id`
+- `POST /api/executions/:id/replay` (builder; `{ mode?: "strict" | "lenient", cassetteId? }`; 404 without a cassette; see [MCP testing](#mcp-testing))
 
 ## Definitions and integrations
 
@@ -116,6 +117,20 @@ See [MCP onboarding and catalog](../product/mcp-onboarding.md).
 - `GET /api/mcp/catalog` (builder; catalog status, validation errors and entries)
 - `POST /api/mcp/catalog/reload` (admin)
 - `POST /api/mcp/servers/:id/playground/call` (builder; `{ toolName, args, projectId?, confirmWrite? }`)
+
+## MCP testing
+
+See [Testing MCP workflows](../product/testing-mcp-workflows.md).
+
+- `GET /api/mcp/cassettes?workflowId=&projectId=&evalRunId=&limit=&offset=` (builder; `{ items, total }`, newest first)
+- `GET /api/mcp/cassettes/:id` (builder; `{ cassette }` with every recorded call, scrubbed of secrets)
+- `GET /api/mcp/cassettes/:id/export` (builder; the `l2m.mcp-cassette` file)
+- `DELETE /api/mcp/cassettes/:id` (admin; audit event `mcp_cassette.deleted`)
+- `POST /api/executions/:id/replay` (builder; `{ mode?, cassetteId? }` → run result with `executionId` and `mcpReplay: { cassetteId, mode, matched, reused, live, unmatched[] }`; a strict replay with unmatched calls has status `error`)
+- `POST /api/eval/runs` gains `record: true` (one cassette per fixture) and `replay: { evalRunId? | cassetteId?, mode? }` (400 when combined with `record`, 404 for an unknown cassette); `GET /api/eval/runs` adds `mcpCassettes`
+- `GET /api/mcp/servers/:id/snapshot/export` (builder; the accepted snapshot as an `l2m.mcp-snapshot` file with resources and prompts; 409 before the first snapshot)
+- `POST /api/mcp/check` (builder, API keys; `{ serverIds?, toolsetId?, workflowIds?, failOnUnreachable?, failOnPolicyBlocked? }` → `{ ok, checkedAt, servers[], blockedTools[], failures[] }`; probes without storing anything; 404 for unknown servers or toolsets)
+- MCP adapter `snapshot_mock` (connection `{ sourceServerId | snapshot, cassetteId?, fixedText? }`) for registry servers that serve a snapshot offline
 
 ## Secrets
 

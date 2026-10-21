@@ -146,6 +146,10 @@ const envSchema = z.object({
   MCP_ELICITATION_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(86_400_000).default(600_000),
   /** Phase 10.5 — largest MCP resource a run or the playground reads, in bytes. */
   MCP_RESOURCE_MAX_BYTES: z.coerce.number().int().min(1_024).max(1_073_741_824).default(5_242_880),
+  /** Phase 10.8 — largest MCP cassette (serialized calls) a recorded run keeps, in bytes. */
+  MCP_CASSETTE_MAX_BYTES: z.coerce.number().int().min(1_024).max(268_435_456).default(5_242_880),
+  /** Phase 10.8 — most MCP calls one cassette keeps. */
+  MCP_CASSETTE_MAX_CALLS: z.coerce.number().int().min(1).max(100_000).default(5_000),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),
