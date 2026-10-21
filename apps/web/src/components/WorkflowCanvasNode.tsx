@@ -417,7 +417,7 @@ function McpMarker({
           disabled={!onOpen}
           onClick={open(serverTarget)}
         >
-          {variant === "card" ? "Breaking change" : "!"}
+          {variant === "card" ? "Breaking change" : "Breaking"}
         </button>
       )}
       {policy &&
@@ -430,7 +430,7 @@ function McpMarker({
             disabled={!onOpen}
             onClick={open(blockedTarget)}
           >
-            {variant === "card" ? policy.short : "⊘"}
+            {policy.short}
           </button>
         ) : (
           <span
@@ -439,7 +439,7 @@ function McpMarker({
             aria-label={marker.toolCount > 1 ? `Uses ${policy.short.toLowerCase()} tools` : policy.label}
             title={marker.toolCount > 1 ? `Uses ${policy.short.toLowerCase()} tools` : policy.label}
           >
-            {variant === "card" ? policy.short : policy.short.charAt(0)}
+            {policy.short}
           </span>
         ))}
       {partialBlock && (
@@ -451,7 +451,7 @@ function McpMarker({
           disabled={!onOpen}
           onClick={open(blockedTarget)}
         >
-          {variant === "card" ? `${marker.blockedCount} blocked` : "⊘"}
+          {variant === "card" ? `${marker.blockedCount} blocked` : `${marker.blockedCount}/${marker.toolCount} blocked`}
         </button>
       )}
     </div>

@@ -5091,3 +5091,43 @@ img.mcp-pg-block {
     transition: none;
   }
 }
+
+/* Phones: the Tools catalogue keeps tool, server, calls, errors and policy; p95 and cost stay in the drawer. */
+@media (max-width: 520px) {
+  .mcp-catalog-table .mcp-col-secondary {
+    display: none;
+  }
+
+  .mcp-catalog-table th,
+  .mcp-catalog-table td {
+    padding-inline: 6px;
+  }
+
+  .mcp-catalog-table td:first-child {
+    min-width: 9em;
+  }
+
+  .mcp-catalog-table .mcp-pstate {
+    white-space: normal;
+    text-align: center;
+  }
+
+  .page-pane .mcp-catalog-table .mcp-ov-link {
+    overflow-wrap: normal;
+  }
+
+  .mcp-catalog-table .mcp-tool-server-inline {
+    display: flex;
+  }
+
+  .mcp-catalog-table .mcp-col-pct {
+    display: none;
+  }
+}
+
+.mcp-tool-server-inline {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}

@@ -8,7 +8,7 @@
  * that use the tool.
  */
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { McpPolicyRole, Project } from "@ai-orchestrator/shared";
 import {
   ApiError,
@@ -59,14 +59,26 @@ function formatError(err: unknown): string {
   return "Unexpected error";
 }
 
-const COLUMNS: Array<{ key: McpToolSortKey; label: string; numeric?: boolean }> = [
+/** `secondary` columns drop out on phones; the server moves under the tool name and the drawer shows the rest. */
+const COLUMNS: Array<{ key: McpToolSortKey; label: string; numeric?: boolean; secondary?: boolean }> = [
   { key: "name", label: "Tool" },
-  { key: "server", label: "Server" },
+  { key: "server", label: "Server", secondary: true },
   { key: "calls", label: "Calls", numeric: true },
   { key: "errors", label: "Errors", numeric: true },
-  { key: "p95", label: "p95", numeric: true },
-  { key: "cost", label: "Cost", numeric: true }
+  { key: "p95", label: "p95", numeric: true, secondary: true },
+  { key: "cost", label: "Cost", numeric: true, secondary: true }
 ];
+
+/** Lets long snake_case and dotted tool names wrap at their separators instead of mid-word. */
+function breakableName(name: string): ReactNode {
+  const parts = name.split(/(?<=[_.\-/])/);
+  return parts.length < 2 ? name : parts.map((part, index) => (
+    <Fragment key={index}>
+      {index > 0 && <wbr />}
+      {part}
+    </Fragment>
+  ));
+}
 
 export interface McpToolsPageProps {
   activeProjectId?: string | null;
@@ -224,7 +236,7 @@ export function McpToolsPage({ activeProjectId, focus, onNavigate, onOpenWorkflo
                   return (
                     <th
                       key={column.key}
-                      className={column.numeric ? "num" : undefined}
+                      className={[column.numeric ? "num" : "", column.secondary ? "mcp-col-secondary" : ""].filter(Boolean).join(" ") || undefined}
                       aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}
                     >
                       <button type="button" className="mcp-sort-btn" onClick={() => toggleSort(column.key)}>
@@ -254,12 +266,17 @@ export function McpToolsPage({ activeProjectId, focus, onNavigate, onOpenWorkflo
                           setOpenKey(key);
                         }}
                         aria-haspopup="dialog"
+                        aria-label={tool.name}
                       >
-                        {tool.name}
+                        {breakableName(tool.name)}
                       </button>
                       {tool.annotations?.title && <div className="kb-subtle">{tool.annotations.title}</div>}
+                      <div className="kb-subtle mcp-tool-server-inline">
+                        <span className={`mcp-dot mcp-status-${tool.serverStatus}`} aria-hidden="true" />
+                        {tool.serverName}
+                      </div>
                     </td>
-                    <td>
+                    <td className="mcp-col-secondary">
                       <span className="mcp-server-cell">
                         <span className={`mcp-dot mcp-status-${tool.serverStatus}`} aria-hidden="true" />
                         <span>{tool.serverName}</span>
@@ -268,12 +285,17 @@ export function McpToolsPage({ activeProjectId, focus, onNavigate, onOpenWorkflo
                     </td>
                     <td className="num">{tool.telemetry ? formatCount(tool.telemetry.calls) : "—"}</td>
                     <td className="num">
-                      {tool.telemetry && tool.telemetry.calls > 0
-                        ? `${tool.telemetry.errors} (${formatPercent(tool.telemetry.errorRate)})`
-                        : "—"}
+                      {tool.telemetry && tool.telemetry.calls > 0 ? (
+                        <>
+                          {tool.telemetry.errors}
+                          <span className="mcp-col-pct"> ({formatPercent(tool.telemetry.errorRate)})</span>
+                        </>
+                      ) : (
+                        "—"
+                      )}
                     </td>
-                    <td className="num">{formatMs(tool.telemetry?.p95Ms)}</td>
-                    <td className="num">{formatCost(tool.telemetry?.costUsd)}</td>
+                    <td className="num mcp-col-secondary">{formatMs(tool.telemetry?.p95Ms)}</td>
+                    <td className="num mcp-col-secondary">{formatCost(tool.telemetry?.costUsd)}</td>
                     <td>
                       <span className={`mcp-pstate mcp-pstate-${state}`}>{POLICY_LABEL[state]}</span>
                     </td>
@@ -380,10 +402,12 @@ function ToolDrawer({
           <McpAnnotationChips annotations={tool.annotations} />
           {!tool.access.allowed && (
             <p className="mcp-blocked">
-              {tool.access.message ?? "Blocked by policy."}{" "}
+              {tool.access.ruleName
+                ? `Blocked for you by rule “${tool.access.ruleName}”.`
+                : (tool.access.message ?? "Blocked for you by policy.")}{" "}
               {tool.access.ruleId && (
                 <button type="button" className="kb-link-btn" onClick={() => onNavigate({ page: "policies", policyId: tool.access.ruleId })}>
-                  Open rule{tool.access.ruleName ? ` “${tool.access.ruleName}”` : ""}
+                  Open rule
                 </button>
               )}
             </p>
@@ -544,7 +568,9 @@ function PolicyEvaluator({
             ? "No rule matches; tools are allowed by default."
             : result.allowed
               ? `Allowed by rule “${result.ruleName ?? result.decidingRuleId ?? "unnamed"}”.`
-              : result.message ?? `Denied by rule “${result.ruleName ?? "unnamed"}”.`}{" "}
+              : result.ruleName
+                ? `Denied by rule “${result.ruleName}”.`
+                : (result.message ?? "Denied by policy.")}{" "}
           {result.decidingRuleId && (
             <button type="button" className="kb-link-btn" onClick={() => onNavigate({ page: "policies", policyId: result.decidingRuleId ?? undefined })}>
               Open rule

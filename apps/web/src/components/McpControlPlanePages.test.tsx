@@ -312,8 +312,12 @@ describe("McpToolsPage", () => {
     await waitFor(() =>
       expect(api.evaluateMcpToolPolicy).toHaveBeenCalledWith({ role: "builder", projectId: "default", serverId: "mcp_a", toolName: "delete_repo" })
     );
+    // The block is stated once in plain words, with the rule's name, not the raw policy message.
+    expect(within(drawer).getByText(/^Blocked for you by rule “No deletes”\./)).toBeInTheDocument();
     const decision = within(drawer).getByRole("region", { name: "Policy decision" });
     expect(await within(decision).findByText("Blocked")).toBeInTheDocument();
+    expect(decision).toHaveTextContent("Denied by rule “No deletes”.");
+    expect(drawer).not.toHaveTextContent("Denied by rule No deletes");
     await user.selectOptions(within(decision).getByRole("combobox", { name: "Role" }), "admin");
     expect(await within(decision).findByText("Allowed")).toBeInTheDocument();
     expect(within(decision).getByText(/allowed by default/)).toBeInTheDocument();

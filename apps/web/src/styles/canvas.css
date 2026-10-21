@@ -2744,9 +2744,9 @@
 
 .wf-mcp-marker-satellite {
   position: absolute;
-  top: -10px;
-  left: -16px;
-  gap: 2px;
+  top: -28px;
+  left: -18px;
+  gap: 3px;
   z-index: 3;
   flex-wrap: nowrap;
 }
@@ -2791,10 +2791,15 @@ button.wf-mcp-chip:focus-visible {
 }
 
 .wf-mcp-marker-satellite .wf-mcp-status {
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   justify-content: center;
+}
+
+.wf-mcp-marker-satellite .wf-mcp-status .mcp-dot {
+  width: 9px;
+  height: 9px;
 }
 
 .wf-mcp-status.mcp-status-healthy {
@@ -2825,8 +2830,9 @@ button.wf-mcp-chip:focus-visible {
 }
 
 .wf-mcp-marker-satellite .wf-mcp-chip {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
   justify-content: center;
+  font-size: 11px;
 }

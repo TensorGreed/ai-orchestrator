@@ -336,6 +336,7 @@ describe("MCP tool policy — call-time check", () => {
     const toolResult = steps[0].toolResults[0];
     expect(toolResult.toolName).toBe("mock-mcp__calculator");
     expect(toolResult.error).toContain("blocked by policy 'No calculator' (r-calc)");
+    expect(toolResult.error).toContain("on server 'Mock'");
     expect(toolResult.output).toBeNull();
   });
 });
@@ -353,6 +354,8 @@ describe("MCP tool policy — direct MCP Tool nodes", () => {
     const error = result.nodeResults.find((entry) => entry.nodeId === "tool")?.error;
     expect(error).toContain("blocked by policy 'Viewers cannot calculate' (r-calc)");
     expect(error).toContain("role viewer");
+    // The registry server's name, not its id, so run history reads naturally.
+    expect(error).toContain("MCP tool 'calculator' on server 'Mock'");
   });
 
   it("runs the direct call when an allow rule carves an exception out of a broader deny", async () => {
