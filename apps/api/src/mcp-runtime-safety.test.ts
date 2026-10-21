@@ -282,7 +282,17 @@ describe("sandbox settings", () => {
     const created = await call(context, "POST", "/api/mcp/servers", admin.cookie, stdioServer({ sandbox: { mode: "container", image: "node:22-alpine" } }));
     expect(created.statusCode).toBe(201);
     const serverId = created.json<{ server: { id: string } }>().server.id;
-    const probe = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin.cookie);
+    // CI runners ship podman, so hide every runtime CLI: the probe must report "not installed" on any host.
+    const emptyBin = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-no-runtime-"));
+    const savedPath = process.env.PATH;
+    process.env.PATH = emptyBin;
+    let probe: Awaited<ReturnType<typeof call>>;
+    try {
+      probe = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin.cookie);
+    } finally {
+      process.env.PATH = savedPath;
+      fs.rmSync(emptyBin, { recursive: true, force: true });
+    }
     expect(probe.statusCode).toBe(200);
     expect(probe.json<{ probe: { ok: boolean; error: string } }>().probe.ok).toBe(false);
     const status = probe.json<{ server: { sandboxStatus: McpSandboxStatus } }>().server.sandboxStatus;
