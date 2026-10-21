@@ -49,7 +49,8 @@ export default defineConfig({
           { text: "MCP control plane", link: "/product/mcp-control-plane" },
           { text: "MCP tool policy", link: "/product/mcp-tool-policy" },
           { text: "MCP gateway", link: "/product/mcp-gateway" },
-          { text: "MCP onboarding and catalog", link: "/product/mcp-onboarding" }
+          { text: "MCP onboarding and catalog", link: "/product/mcp-onboarding" },
+          { text: "Guard engine", link: "/product/guard-engine" }
         ]
       },
       {
