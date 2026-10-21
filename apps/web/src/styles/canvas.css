@@ -2820,6 +2820,17 @@ button.wf-mcp-chip:focus-visible {
   background: var(--err-soft);
 }
 
+/* Phase 10.7 — a paused (open) or probing (half-open) circuit breaker. */
+.wf-mcp-chip-circuit-open {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+
+.wf-mcp-chip-circuit-half_open {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
 .wf-mcp-chip-destructive {
   border-color: var(--warn);
   background: var(--warn-soft);

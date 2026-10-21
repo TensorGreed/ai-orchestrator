@@ -11,10 +11,17 @@
  * The background loop only probes on the leader instance (HA deployments) and
  * is off entirely when MCP_PROBE_INTERVAL_MS is 0. "Probe now" from the API
  * works regardless.
+ *
+ * Phase 10.7 — probes bypass rate limits and the circuit breaker (they are
+ * how an admin finds out whether a paused server is back), record what the
+ * sandbox check found, and probe a delegated server with one user's own
+ * connection: the user who pressed "Probe now", or for background probes the
+ * user who registered the server. Without such a connection a background
+ * probe is skipped rather than recorded as down.
  */
 
 import { randomUUID } from "node:crypto";
-import type { McpListChangedEvent, MCPServerConfig, McpServerCatalog, SecretReference } from "@ai-orchestrator/shared";
+import type { McpListChangedEvent, MCPServerConfig, McpSandboxStatus, McpServerCatalog, SecretReference } from "@ai-orchestrator/shared";
 import {
   diffToolSnapshots,
   hashToolSnapshot,
@@ -65,8 +72,18 @@ export function serverConfigFromRecord(server: McpServerRecord): MCPServerConfig
     label: server.name,
     connection: server.connection,
     sampling: server.sampling,
-    secretRef: server.secretId ? ({ secretId: server.secretId } satisfies SecretReference) : undefined
+    secretRef: server.secretId ? ({ secretId: server.secretId } satisfies SecretReference) : undefined,
+    // Phase 10.7 — runtime safety.
+    ...(server.adapterId === "stdio_mcp" && server.sandbox ? { sandbox: server.sandbox } : {}),
+    limits: server.limits,
+    credentialMode: server.credentialMode,
+    delegatedFallback: server.delegatedFallback
   };
+}
+
+/** Phase 10.7 — a probe that could not run (a delegated server nobody can probe as). */
+export class McpProbeSkippedError extends Error {
+  readonly statusCode = 409;
 }
 
 export function percentile(sorted: number[], p: number): number | null {
@@ -125,6 +142,10 @@ export class McpProbeService {
     private readonly deps: {
       resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
       isLeader: () => boolean;
+      /** Phase 10.7 — what the sandbox launcher thinks of a stdio server (no process is started). */
+      checkSandbox?: (config: MCPServerConfig) => McpSandboxStatus;
+      /** Phase 10.7 — whose own connection probes a delegated server; null when nobody usable. */
+      delegatedProbeUser?: (server: McpServerRecord, requestedBy?: string | null) => string | null;
     },
     private readonly options: {
       /** Default interval for servers without an override; 0 disables the background loop. */
@@ -198,6 +219,7 @@ export class McpProbeService {
     if (!this.deps.isLeader()) return;
     for (const server of this.store.listMcpServers()) {
       if (!server.probeEnabled || this.inFlight.has(server.id)) continue;
+      if (server.credentialMode === "delegated" && !this.deps.delegatedProbeUser?.(server)) continue;
       const intervalMs = server.probeIntervalMs ?? this.options.defaultIntervalMs;
       if (intervalMs <= 0) continue;
       const lastMs = server.lastProbeAt ? Date.parse(server.lastProbeAt) : 0;
@@ -213,11 +235,14 @@ export class McpProbeService {
     }
   }
 
-  /** Probe one server now. Concurrent calls for the same server share one probe. */
-  probe(serverId: string): Promise<McpProbeOutcome> {
+  /**
+   * Probe one server now. Concurrent calls for the same server share one probe.
+   * `requestedBy` (a user id) probes a delegated server with that user's own connection.
+   */
+  probe(serverId: string, requestedBy?: string | null): Promise<McpProbeOutcome> {
     const running = this.inFlight.get(serverId);
     if (running) return running;
-    const pending = this.runProbe(serverId).finally(() => {
+    const pending = this.runProbe(serverId, requestedBy ?? null).finally(() => {
       this.inFlight.delete(serverId);
     });
     this.inFlight.set(serverId, pending);
@@ -228,15 +253,36 @@ export class McpProbeService {
     return latencyStats(this.store.listMcpServerProbes(serverId, samples));
   }
 
-  private async runProbe(serverId: string): Promise<McpProbeOutcome> {
+  private async runProbe(serverId: string, requestedBy: string | null): Promise<McpProbeOutcome> {
     const server = this.store.getMcpServer(serverId);
     if (!server) {
       throw new Error(`MCP server not found: ${serverId}`);
     }
+    let serverConfig: MCPServerConfig = serverConfigFromRecord(server);
+    if (server.credentialMode === "delegated") {
+      const userId = this.deps.delegatedProbeUser?.(server, requestedBy) ?? null;
+      if (!userId) {
+        throw new McpProbeSkippedError(
+          `MCP server '${server.name}' uses each user's own account. Connect yours under My connections, then probe again.`
+        );
+      }
+      serverConfig = { ...serverConfig, delegatedUser: { userId, source: "user" } };
+    }
+    if (server.adapterId === "stdio_mcp" && this.deps.checkSandbox) {
+      try {
+        this.store.setMcpServerSandboxStatus(server.id, this.deps.checkSandbox(serverConfig));
+      } catch (err) {
+        this.logger?.warn("MCP sandbox check failed", { serverId, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
 
     const startedAt = new Date();
     const started = performance.now();
-    const context: MCPExecutionContext = { resolveSecret: this.deps.resolveSecret, runtimeState: new Map<string, unknown>() };
+    const context: MCPExecutionContext = {
+      resolveSecret: this.deps.resolveSecret,
+      runtimeState: new Map<string, unknown>(),
+      bypassRuntimeLimits: true
+    };
     const adapter = this.mcpRegistry.tryGet(server.adapterId);
     let tools: Array<{ name: string; description?: string; inputSchema?: unknown }> | null = null;
     let error: string | null = null;
@@ -255,7 +301,6 @@ export class McpProbeService {
           });
         }
       };
-      const serverConfig = serverConfigFromRecord(server);
       const timeoutMs = this.options.probeTimeoutMs ?? 30_000;
       const discovery = adapter.discoverTools(serverConfig, context);
       try {

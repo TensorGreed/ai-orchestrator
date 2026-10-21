@@ -16,7 +16,7 @@ interface EncryptedSecret {
  * refuses them, the secrets list hides them and the generic delete route
  * leaves them alone. Only `resolveInternalSecret` reads them.
  */
-export const INTERNAL_SECRET_PROVIDERS: ReadonlySet<string> = new Set(["mcp_oauth"]);
+export const INTERNAL_SECRET_PROVIDERS: ReadonlySet<string> = new Set(["mcp_oauth", "mcp_oauth_user"]);
 
 export function isInternalSecretProvider(provider: string | null | undefined): boolean {
   return typeof provider === "string" && INTERNAL_SECRET_PROVIDERS.has(provider);

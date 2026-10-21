@@ -1,3 +1,12 @@
+import type {
+  McpCredentialMode,
+  McpDelegatedFallback,
+  McpDelegatedUser,
+  McpRuntimeLimits,
+  McpRuntimeRejection,
+  McpSandboxSettings
+} from "./mcp-runtime-safety";
+
 export const WORKFLOW_SCHEMA_VERSION = "1.0.0";
 export const MAX_SUB_WORKFLOW_DEPTH = 10;
 
@@ -556,6 +565,20 @@ export interface MCPServerConfig {
    * registry at run time. Absent (inline servers) means sampling is off.
    */
   sampling?: McpSamplingSettings;
+  /**
+   * Phase 10.7 — how a registry stdio server runs (resolved from the
+   * registry; inline servers never carry one). Absent means the deployment
+   * default applies.
+   */
+  sandbox?: McpSandboxSettings | null;
+  /** Phase 10.7 — rate limits, concurrency caps, timeouts and breaker settings of a registry server. */
+  limits?: McpRuntimeLimits;
+  /** Phase 10.7 — `delegated` servers call with the run subject's own OAuth token. */
+  credentialMode?: McpCredentialMode;
+  /** Phase 10.7 — what unattended runs of a delegated server use. */
+  delegatedFallback?: McpDelegatedFallback;
+  /** Phase 10.7 — whose token a delegated call uses; set by the engine or the API, never by node configs. */
+  delegatedUser?: McpDelegatedUser;
 }
 
 export interface MCPToolInvocation {
@@ -576,7 +599,37 @@ export interface MCPToolResult {
   structured?: Record<string, unknown>;
   /** Phase 10.5 — the content blocks normalized to text (one string, or an array for several blocks). */
   content?: unknown;
+  /**
+   * Phase 10.7 — what kind of failure an `ok: false` result is. The circuit
+   * breaker counts only `transport`, `protocol` and `timeout` as server
+   * failures.
+   */
+  errorKind?: McpToolErrorKind;
+  /** Phase 10.7 — for rate-limited, queued-out and breaker-rejected calls: when retrying makes sense. */
+  retryAfterMs?: number;
 }
+
+/** Phase 10.7 — failure classes of an MCP tool call. */
+export type McpToolErrorKind =
+  /** The server could not be reached, crashed, or the session broke. */
+  | "transport"
+  /** The server answered with a JSON-RPC error other than invalid params. */
+  | "protocol"
+  /** The call ran past its timeout. */
+  | "timeout"
+  /** The tool ran and reported an error (`isError`). */
+  | "tool"
+  /** The server rejected the arguments (JSON-RPC invalid params). */
+  | "invalid_arguments"
+  /** The structured output did not match the tool's outputSchema. */
+  | "output_validation"
+  /** The run was cancelled. */
+  | "canceled"
+  /** No usable credential (for example a delegated server the user has not connected). */
+  | "credentials"
+  /** Refused by the sandbox policy before anything started. */
+  | "sandbox"
+  | McpRuntimeRejection;
 
 /**
  * Phase 10.5 — one `notifications/progress` message an upstream MCP server

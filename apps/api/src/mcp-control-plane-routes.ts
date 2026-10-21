@@ -16,7 +16,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { McpPolicyRole, McpToolAnnotations } from "@ai-orchestrator/shared";
+import type { McpPolicyRole, McpRuntimeStateView, McpToolAnnotations } from "@ai-orchestrator/shared";
 import type { McpServerProbeRecord, McpServerRecord, McpServerStatus, SqliteStore } from "./db/database.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { McpOAuthService } from "./services/mcp-oauth-service.js";
@@ -35,6 +35,8 @@ export interface McpControlPlaneDeps {
   oauth: Pick<McpOAuthService, "status">;
   usesOAuth: (server: McpServerRecord) => boolean;
   latency: (serverId: string) => { samples: number; p50Ms: number | null; p95Ms: number | null; errorRate: number | null };
+  /** Phase 10.7 — breaker and limit state on this API instance (the last error only for admins). */
+  runtime: (serverId: string, user: SafeUser) => McpRuntimeStateView;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
 }
 
@@ -49,6 +51,7 @@ export type McpChangeKind =
   | "oauth"
   | "sampling"
   | "catalog"
+  | "breaker"
   | "server";
 
 export const MCP_CHANGE_KINDS: readonly McpChangeKind[] = [
@@ -62,6 +65,7 @@ export const MCP_CHANGE_KINDS: readonly McpChangeKind[] = [
   "oauth",
   "sampling",
   "catalog",
+  "breaker",
   "server"
 ];
 
@@ -216,6 +220,23 @@ function auditTitle(eventType: string, metadata: Record<string, unknown>, server
       return { kind: "oauth", title: `OAuth disconnected on ${server}`, severity: "warning" };
     case "mcp_server.oauth_refresh_failed":
       return { kind: "oauth", title: `OAuth token refresh failed on ${server}`, severity: "warning" };
+    // Phase 10.7 — delegated credentials and the circuit breaker.
+    case "mcp_server.user_oauth_connected":
+      return { kind: "oauth", title: `A user connected their own account on ${server}`, severity: "info" };
+    case "mcp_server.user_oauth_disconnected":
+      return { kind: "oauth", title: `A user disconnected their own account on ${server}`, severity: "info" };
+    case "mcp_server.user_oauth_revoked":
+      return { kind: "oauth", title: `A user's connection was revoked on ${server}`, severity: "warning" };
+    case "mcp_server.user_oauth_refresh_failed":
+      return { kind: "oauth", title: `A user's token refresh failed on ${server}`, severity: "warning" };
+    case "mcp_server.breaker_opened":
+      return { kind: "breaker", title: `Circuit opened on ${server}: calls are paused`, severity: "breaking" };
+    case "mcp_server.breaker_half_open":
+      return { kind: "breaker", title: `Circuit half-open on ${server}: trying one call`, severity: "info" };
+    case "mcp_server.breaker_closed":
+      return { kind: "breaker", title: `Circuit closed on ${server}: calls resumed`, severity: "change" };
+    case "mcp_server.breaker_reset":
+      return { kind: "breaker", title: `Circuit reset by hand on ${server}`, severity: "change" };
     case "mcp_policy.created":
       return { kind: "policy", title: `Policy rule added: ${name ?? `${str(metadata.effect) ?? "rule"} ${str(metadata.toolPattern) ?? "*"}`}`, severity: "change" };
     case "mcp_policy.updated":
@@ -439,7 +460,10 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
         lastProbeAt: server.lastProbeAt,
         pendingBreakingSnapshotId: server.pendingBreakingSnapshotId,
         toolCount: server.toolCount,
-        policyProjectId: projectId
+        policyProjectId: projectId,
+        // Phase 10.7 — the canvas shows "Circuit open" on nodes of a paused server.
+        breakerState: deps.runtime(server.id, user).breaker.state,
+        breakerRetryAt: deps.runtime(server.id, user).breaker.retryAt
       });
       for (const tool of marked) {
         const annotations: McpToolAnnotations | undefined = tool.annotations;
@@ -513,6 +537,8 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     const pendingBreaking: unknown[] = [];
     const oauthAttention: unknown[] = [];
     const sampling: unknown[] = [];
+    const breakers: unknown[] = [];
+    const sandboxAttention: unknown[] = [];
     let totalCalls = 0;
     let totalErrors = 0;
 
@@ -529,7 +555,30 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
           blocksRuns: server.blockOnBreakingChange
         });
       }
-      if (deps.usesOAuth(server)) {
+      // Phase 10.7 — open or half-open breakers on this instance, and sandboxes that cannot start.
+      const runtime = deps.runtime(server.id, user);
+      if (runtime.breaker.state !== "closed") {
+        breakers.push({
+          serverId: server.id,
+          serverName: server.name,
+          state: runtime.breaker.state,
+          since: runtime.breaker.since,
+          retryAt: runtime.breaker.retryAt,
+          consecutiveFailures: runtime.breaker.consecutiveFailures,
+          ...(isAdmin ? { lastError: runtime.breaker.lastError } : {})
+        });
+      }
+      if (server.adapterId === "stdio_mcp" && server.sandboxStatus && !server.sandboxStatus.ok) {
+        sandboxAttention.push({
+          serverId: server.id,
+          serverName: server.name,
+          mode: server.sandboxStatus.mode,
+          problems: server.sandboxStatus.problems,
+          checkedAt: server.sandboxStatus.checkedAt
+        });
+      }
+      // A delegated server has no shared connection to watch; each user connects their own.
+      if (deps.usesOAuth(server) && server.credentialMode !== "delegated") {
         const status = deps.oauth.status(server.id);
         if (status.state !== "connected") {
           oauthAttention.push({
@@ -606,6 +655,8 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       },
       pendingBreaking,
       oauthAttention,
+      breakers,
+      sandboxAttention,
       elicitations: {
         pending: openQuestions.length,
         oldestAt: openQuestions.reduce<string | null>((oldest, record) => (!oldest || record.createdAt < oldest ? record.createdAt : oldest), null)

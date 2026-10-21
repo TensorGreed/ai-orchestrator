@@ -235,26 +235,38 @@ export function parseMcpCatalog(text: string): LoadedCatalog {
   return { entries, errors, fatal: false };
 }
 
-/** Why `command args` may not be registered under enforcement, or null when an approved entry allows it. */
-export function checkCommandAgainstCatalog(command: string, args: string[], entries: McpCatalogEntry[]): string | null {
+/** The approved stdio entry `command args` matches (a pinned package spec, or the command and first argument). */
+export function findCatalogEntryForCommand(command: string, args: string[], entries: McpCatalogEntry[]): McpCatalogEntry | null {
   const approved = entries.filter((entry) => entry.approved && entry.adapter === "stdio_mcp");
   const spec = packageSpecOf(command, args);
   if (spec) {
-    if (!spec.pinned) {
-      return `'${[command, ...args].join(" ")}' does not pin its package to an exact version; MCP_CATALOG_ENFORCE allows only approved, pinned catalog packages.`;
-    }
-    const match = approved.find((entry) => {
-      const entrySpec = packageSpecOf(String(entry.connection.command), (entry.connection.args as unknown[] | undefined)?.map(String) ?? []);
-      return entrySpec?.runner === spec.runner && entrySpec.spec === spec.spec;
-    });
-    return match ? null : `Package '${spec.spec}' is not an approved entry in the MCP catalog (MCP_CATALOG_ENFORCE is on).`;
+    if (!spec.pinned) return null;
+    return (
+      approved.find((entry) => {
+        const entrySpec = packageSpecOf(String(entry.connection.command), (entry.connection.args as unknown[] | undefined)?.map(String) ?? []);
+        return entrySpec?.runner === spec.runner && entrySpec.spec === spec.spec;
+      }) ?? null
+    );
   }
-  const match = approved.find((entry) => {
-    if (String(entry.connection.command).trim() !== command.trim()) return false;
-    const entryArgs = Array.isArray(entry.connection.args) ? entry.connection.args.map(String) : [];
-    return entryArgs.length === 0 || entryArgs[0] === args[0];
-  });
-  return match ? null : `Command '${command}' is not an approved entry in the MCP catalog (MCP_CATALOG_ENFORCE is on).`;
+  return (
+    approved.find((entry) => {
+      if (String(entry.connection.command).trim() !== command.trim()) return false;
+      const entryArgs = Array.isArray(entry.connection.args) ? entry.connection.args.map(String) : [];
+      return entryArgs.length === 0 || entryArgs[0] === args[0];
+    }) ?? null
+  );
+}
+
+/** Why `command args` may not be registered under enforcement, or null when an approved entry allows it. */
+export function checkCommandAgainstCatalog(command: string, args: string[], entries: McpCatalogEntry[]): string | null {
+  const spec = packageSpecOf(command, args);
+  if (spec && !spec.pinned) {
+    return `'${[command, ...args].join(" ")}' does not pin its package to an exact version; MCP_CATALOG_ENFORCE allows only approved, pinned catalog packages.`;
+  }
+  if (findCatalogEntryForCommand(command, args, entries)) return null;
+  return spec
+    ? `Package '${spec.spec}' is not an approved entry in the MCP catalog (MCP_CATALOG_ENFORCE is on).`
+    : `Command '${command}' is not an approved entry in the MCP catalog (MCP_CATALOG_ENFORCE is on).`;
 }
 
 function toPreset(entry: McpCatalogEntry): McpListedPreset {
@@ -277,6 +289,7 @@ function toPreset(entry: McpCatalogEntry): McpListedPreset {
         }
       : {}),
     ...(entry.notes ? { notes: entry.notes } : {}),
+    ...(entry.sandbox ? { sandbox: entry.sandbox } : {}),
     origin: "catalog",
     tags: entry.tags,
     requiredSecrets: entry.requiredSecrets
@@ -392,6 +405,11 @@ export class McpCatalogService {
       return "MCP_CATALOG_ENFORCE is on but no approved catalog is loaded, so stdio servers cannot be registered.";
     }
     return checkCommandAgainstCatalog(command, args, this.entries);
+  }
+
+  /** Phase 10.7 — the sandbox an approved catalog entry gives `command args`, if it carries one. */
+  sandboxFor(command: string, args: string[]): McpCatalogEntry["sandbox"] | null {
+    return findCatalogEntryForCommand(command, args, this.entries)?.sandbox ?? null;
   }
 
   /** Presets for the registration form: catalog entries (approved only) and, in merge mode, the built-ins. */

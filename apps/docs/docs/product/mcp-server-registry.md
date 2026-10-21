@@ -211,6 +211,87 @@ Tokens used by sampling are counted on the tool call that triggered them: the ro
 
 **Risk notes.** Turn sampling on only for servers you trust: the server chooses the prompt and reads the answer, and each request costs tokens on your provider account. Keep **Max requests per call** small, restrict **Allowed models** to cheap models where possible, and use a sampling policy rule to keep it away from unattended roles. L2M never forwards sampling to another instance or service; the model is always one configured in this deployment.
 
+## Sandboxed stdio servers
+
+A stdio server is a program L2M starts on the API host. By default it runs with the API's own permissions. To contain it, an admin sets the server's **Sandbox** to **Container**. L2M then starts the command inside a throwaway container with docker or podman, whichever the host has (`MCP_SANDBOX_RUNTIME` picks one).
+
+Every sandbox gets these settings, and none of them can be turned off:
+
+- a read-only root filesystem, with a small writable `/tmp` (tmpfs, 64 MB by default);
+- a numeric non-root user (`65534:65534` by default; uid 0 is refused);
+- all Linux capabilities dropped and `no-new-privileges` set;
+- CPU, memory and process limits (1 CPU, 512 MB and 256 processes by default, each adjustable);
+- no network, unless the admin turns networking on for that server;
+- the container is removed when the session closes, when a run is cancelled and when the API shuts down.
+
+**Image.** A container sandbox needs an image pinned to a version. `latest` and untagged images are refused. A tag alone is accepted with a warning: pin by digest (`image:1.2.3@sha256:…`) so the image cannot change under you.
+
+**Host folders.** A sandbox can mount host folders only under the roots listed in `MCP_SANDBOX_ALLOWED_MOUNT_ROOTS`. When that list is empty, which is the default, no mounts are allowed. L2M resolves each host path, symlinks included, when you save and again when it starts the container. A path that escapes the allowed roots through a symlink or `..` is refused. Mounts are read-only unless you tick **Writable**.
+
+**Secrets.** The server's secret and secret bundle reach the container as environment variables passed by name (`--env NAME`). The values are never written on the command line, in logs, in audit rows or in the UI.
+
+**Deployment policy.**
+
+- `MCP_SANDBOX_DEFAULT=container` sandboxes every stdio server that does not choose a mode. Such a server needs an image of its own. Without one it cannot start, and the probe says why.
+- `MCP_SANDBOX_REQUIRED=true` refuses to save, import or run any stdio server outside a container, including stdio servers configured inline on nodes.
+- `MCP_CATALOG_ENFORCE` still applies. A sandboxed server must also be an approved, pinned catalog package, and a catalog entry may carry a `sandbox` block that registrations and imports inherit.
+
+Each probe checks the sandbox and records whether it can start, which container CLI it found, and any problems or warnings. The server page shows the result under **Runtime safety**. A sandbox that cannot start also appears under **Needs attention** on the MCP overview.
+
+Only admins can change a server's sandbox. Containers carry an `l2m.mcp.*` label naming this API instance and process. On start, L2M removes leftover containers from its own earlier processes on the same host and leaves every other container alone.
+
+## Rate limits, concurrency and the circuit breaker
+
+Each registered server can have limits. Workflow runs, the gateway and the playground all share them, so a server gets the same budget whoever calls it:
+
+- **Calls per minute** with an optional **burst** (token bucket). A call over the limit waits for the next token when one comes within the **queue wait** (10 s by default). Otherwise it fails as *rate limited*.
+- **Concurrent calls**. Calls over the cap queue for up to the queue wait, then fail as *over the concurrency cap*.
+- **Call timeout**, which overrides the connection's own timeout.
+- **Per-tool limits**. Rules match tool names with `*` (for example `write_*`) and add their own rate, concurrency and timeout on top of the server's. The first matching rule applies.
+
+Empty fields mean unlimited.
+
+**Circuit breaker.** The breaker opens after 5 failures in a row, or when at least 50% of calls fail over a 60-second window once there have been at least 10 calls. All of these numbers are adjustable per server. While the breaker is open, calls fail at once without reaching the server. After the cooldown (30 s by default), the breaker is half-open: one trial call goes through. A success closes it, and a failure opens it again.
+
+Only transport, protocol and timeout failures count. A tool that returns an error, rejected arguments and output that fails its schema all mean the server answered, so they count as successes. Cancelled calls, missing credentials and sandbox refusals are not counted. Calls that policy blocks never reach the breaker.
+
+**What callers see.**
+
+- **Workflow nodes and agents.** An agent receives a tool error saying why the call was refused and when to retry. A direct MCP Tool node fails with the same message. Refused calls are not retried by the node's retry setting.
+- **The gateway.** The gateway answers with JSON-RPC error `-32029` and `data: { reason, retryAfterMs, retryAfterSeconds }`.
+- **Telemetry.** Refused calls are recorded with their reason. The telemetry totals count them as *rate limited*, *concurrency limited* and *breaker rejected*, separate from errors, so they do not inflate a tool's error rate.
+
+**Where it shows.**
+
+- The server list flags **Circuit open** or **Half-open**.
+- The server page's **Runtime safety** panel shows the state, recent failures, calls in flight and waiting, and counts of refused calls. Admins also see the last failure and a **Reset breaker** button.
+- The MCP overview lists open breakers under **Needs attention**.
+- The canvas marks MCP Tool nodes that use the server with **Circuit open**.
+- Transitions are audited as `mcp_server.breaker_opened`, `breaker_half_open`, `breaker_closed` and `breaker_reset` and appear in the Changes feed. Audit rows never include the error text.
+
+Limit and breaker state is kept in memory on each API instance and is keyed by registry server. Servers never share state, so one project's failures cannot pause another project's server. Probes bypass the limits and the breaker so that health checks keep working.
+
+## Delegated credentials
+
+By default, every call to a server uses one shared credential: the server's secret or its OAuth connection. For an HTTP server with auth type **OAuth**, an admin can instead set **Credentials** to **Each user's own account**. Each person then connects their own account under **My connections** in the Studio. Tokens are stored per server and user as internal SecretService secrets. They are never shown or logged.
+
+**Whose token a call uses.**
+
+- **Runs started by a signed-in user** (the editor, Chat, retries) use that user's connection.
+- **Gateway calls** use the connection of the MCP client's owner.
+- **The playground and Probe now** use the connection of the person clicking. Scheduled probes use the server creator's connection and are skipped when there is none.
+- **Unattended runs** (webhooks, schedules, the queue) have no person to act for, so they fail. An admin can set **Unattended runs** to **Use the workflow owner's connection** (`delegatedFallback: "owner"`).
+- **No fallback to a shared credential.** A call that needs a user's connection never falls back to the server's shared credential. When the user has not connected, the node fails with a message that links to My connections.
+
+**Managing connections.**
+
+- On the server page, admins see who has connected, with state and expiry but no token, and can revoke a connection.
+- Switching a server between modes deletes the connections of the mode it leaves.
+- Deleting a server or a user deletes their connections.
+- Connect, disconnect, revoke and refresh failures are audited as `mcp_server.user_oauth_*` events without tokens.
+
+The OAuth callback stores a user's connection only for the person who started it. An admin cannot finish another user's authorization, and a user cannot finish the service connection.
+
 ## Tool policy
 
 Admins can restrict which tools of a server each role may use, per project, and mark tools read-only or write. Workflows can also block every write tool. The **MCP → Policies** page holds the rules, and the Tools table shows each tool's read-only classification and whether your role may use it. See [MCP tool policy](./mcp-tool-policy.md).
@@ -227,6 +308,10 @@ Admins can restrict which tools of a server each role may use, per project, and 
 | `MCP_OAUTH_REFRESH_SKEW_MS` | `60000` | Refresh OAuth access tokens this long before they expire. |
 | `MCP_ELICITATION_TIMEOUT_MS` | `600000` | How long a server's question waits for an answer (10 seconds to 24 hours), capped by the run's execution timeout. |
 | `MCP_RESOURCE_MAX_BYTES` | `5242880` | Largest resource a run or the playground reads. |
+| `MCP_SANDBOX_DEFAULT` | `none` | Sandbox for stdio servers that do not choose one: `none` or `container`. |
+| `MCP_SANDBOX_REQUIRED` | `false` | Refuse every stdio server, inline ones included, that would run outside a container. |
+| `MCP_SANDBOX_ALLOWED_MOUNT_ROOTS` | empty | Comma-separated absolute host directories that sandbox mounts must resolve into. Empty means no mounts. |
+| `MCP_SANDBOX_RUNTIME` | `auto` | Container CLI: `auto` (docker, then podman), `docker` or `podman`. |
 
 Servers can override the interval (at least 10 seconds) or opt out of scheduled probing. In an HA deployment only the leader instance runs scheduled probes. stdio servers start a short-lived process for each probe, which is closed when the probe ends.
 
@@ -241,6 +326,9 @@ Servers can override the interval (at least 10 seconds) or opt out of scheduled 
 | Read a resource, fetch a prompt | builder and above, with permission to run workflows in the project |
 | Answer a server's question | the user whose run asked, or operator and above |
 | Sampling settings | admin (edit the server) |
+| Sandbox, limits, breaker settings and credential mode | admin (edit the server) |
+| Reset a breaker, list and revoke users' connections | admin |
+| Connect and disconnect your own account (My connections) | operator and above, for servers in projects where you may run workflows |
 
 Deleting a server that nodes still use is refused with the list of those nodes, unless the delete is forced. Register, update, delete and accept are written to the audit log as `mcp_server.*` events, and so are the OAuth steps (`mcp_server.oauth_connect_started`, `oauth_connected`, `oauth_refreshed`, `oauth_refresh_failed`, `oauth_disconnected`), without any token.
 
@@ -269,4 +357,12 @@ Deleting a server that nodes still use is refused with the list of those nodes, 
 - `GET /api/mcp/elicitations?status=pending|accepted|declined|cancelled|expired|auto_declined|all&executionId=`: a server's questions; users below operator see their own runs only
 - `GET /api/mcp/elicitations/:id`: one question
 - `POST /api/mcp/elicitations/:id/answer`: `{ action: "accept" | "decline" | "cancel", content? }`; 403 for someone else's run below operator, 409 when already settled
+- `GET /api/mcp/servers/:id/runtime`: breaker state, calls in flight and queued, refused-call counts on this instance (the last failure for admins only)
+- `POST /api/mcp/servers/:id/breaker/reset`: close the breaker now (admin)
+- `GET /api/mcp/servers/:id/connections`: who has connected their own account to a delegated server; never tokens (admin)
+- `DELETE /api/mcp/servers/:id/connections/:userId`: revoke one user's connection (admin)
+- `GET /api/mcp/connections`: the caller's connections to delegated servers they may use
+- `POST /api/mcp/connections/:serverId/connect`: start the caller's own authorization; returns `{ authorizationUrl, expiresAt, redirectUri }`
+- `DELETE /api/mcp/connections/:serverId`: disconnect the caller's own account
+- `POST` and `PUT /api/mcp/servers` accept `sandbox` (stdio only), `limits`, `credentialMode` (`service` | `delegated`) and `delegatedFallback` (`none` | `owner`); `GET /api/mcp/servers` and the detail return them with `sandboxStatus`, `runtime` and the deployment's `sandboxPolicy`
 - The run stream (`POST /api/workflows/:id/execute/stream`) emits `mcp_elicitation` events with `{ phase: "created" | "settled", elicitation }`

@@ -37,7 +37,8 @@ export interface McpClientFeatureDeps {
   resourceMaxBytes: number;
   resolveSecret: MCPExecutionContext["resolveSecret"];
   redact: (value: string) => string;
-  resolveRegisteredMcpServer: (registryServerId: string) => MCPServerConfig;
+  /** Phase 10.7 — with an actor, a delegated server acts with that user's own account. */
+  resolveRegisteredMcpServer: (registryServerId: string, actor?: SafeUser | null) => MCPServerConfig;
   withScopedMcpContext: <T>(run: (context: MCPExecutionContext) => Promise<T>) => Promise<T>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   canExecuteInProject: (user: SafeUser, projectId: string) => boolean;
@@ -111,9 +112,9 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     return { server, projectId };
   };
 
-  const catalogFor = async (server: McpServerRecord, refresh: boolean): Promise<McpServerCatalog> => {
+  const catalogFor = async (server: McpServerRecord, refresh: boolean, user: SafeUser): Promise<McpServerCatalog> => {
     if (refresh) {
-      const serverConfig = deps.resolveRegisteredMcpServer(server.id);
+      const serverConfig = deps.resolveRegisteredMcpServer(server.id, user);
       const adapter = deps.mcpRegistry.get(serverConfig.serverId);
       const live = await deps.withScopedMcpContext((context) => captureCatalog(adapter, serverConfig, context));
       return store.upsertMcpServerCatalog(server.id, live);
@@ -166,7 +167,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     if (!loaded) return;
     const { server, projectId } = loaded;
     try {
-      const catalog = await catalogFor(server, query.refresh);
+      const catalog = await catalogFor(server, query.refresh, user);
       return {
         serverId: server.id,
         capabilities: catalog.capabilities,
@@ -213,7 +214,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     }
     let serverConfig: MCPServerConfig;
     try {
-      serverConfig = deps.resolveRegisteredMcpServer(server.id);
+      serverConfig = deps.resolveRegisteredMcpServer(server.id, user);
     } catch (error) {
       reply.code(409);
       return { error: error instanceof Error ? error.message : String(error) };
@@ -282,7 +283,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     if (!loaded) return;
     const { server, projectId } = loaded;
     try {
-      const catalog = await catalogFor(server, query.refresh);
+      const catalog = await catalogFor(server, query.refresh, user);
       return {
         serverId: server.id,
         capabilities: catalog.capabilities,
@@ -328,7 +329,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     }
     let serverConfig: MCPServerConfig;
     try {
-      serverConfig = deps.resolveRegisteredMcpServer(server.id);
+      serverConfig = deps.resolveRegisteredMcpServer(server.id, user);
     } catch (error) {
       reply.code(409);
       return { error: error instanceof Error ? error.message : String(error) };

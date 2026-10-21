@@ -1,0 +1,199 @@
+/* Phase 10.7 — MCP runtime safety: sandbox and limits fields, the runtime panel, connected users and My connections. */
+
+.mcp-safety-fields > label,
+.mcp-safety-fields .mcp-safety-grid label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcp-safety-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.mcp-safety-grid input,
+.mcp-safety-mount input,
+.mcp-safety-rule input {
+  min-width: 0;
+  width: 100%;
+}
+
+.mcp-safety-label {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.mcp-safety-mounts {
+  display: grid;
+  gap: 8px;
+}
+
+.mcp-safety-mounts > p {
+  margin: 0;
+}
+
+.mcp-safety-mount {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.mcp-safety-rule {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 0.8fr)) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.mcp-safety-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcp-safety-cell > span {
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+
+.mcp-safety-mount .mcp-check,
+.mcp-safety-rule > button,
+.mcp-safety-mount > button {
+  min-height: 36px;
+}
+
+.mcp-safety-mount .mcp-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcp-safety-warnings {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 8px 10px 8px 26px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-md, 8px);
+  background: var(--warn-soft);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.mcp-safety-warnings.is-problem {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+
+.mcp-breaker-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.mcp-breaker-state::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.mcp-breaker-state.is-open::before {
+  background: var(--err);
+}
+
+.mcp-breaker-state.is-half_open::before {
+  background: var(--warn);
+}
+
+.mcp-runtime-alert {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-radius: var(--r-md, 8px);
+  background: var(--err-soft);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.mcp-runtime > .kb-subtle {
+  margin: 0;
+}
+
+.mcp-flag-circuit.is-half_open {
+  background: var(--warn-soft);
+}
+
+.mcp-title-row .mcp-flag-circuit {
+  align-self: center;
+}
+
+.mcp-connection-list,
+.mcp-my-connections {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-connection-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.mcp-connection-list li:first-child {
+  border-top: 0;
+}
+
+.mcp-connection-list li > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mcp-connection-list .mcp-oauth-state {
+  margin-left: 8px;
+}
+
+.mcp-my-connections .mcp-oauth-head h4 {
+  margin: 0 0 4px;
+}
+
+.mcp-my-connections > li > p {
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .mcp-safety-mount {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .mcp-safety-rule {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .mcp-safety-rule > .mcp-safety-cell:first-child,
+  .mcp-safety-mount > .mcp-safety-cell:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .mcp-safety-mount .mcp-check {
+    justify-self: start;
+  }
+
+  .mcp-connection-list li {
+    flex-direction: column;
+  }
+}

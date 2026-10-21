@@ -6,7 +6,7 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { secretValuesForScrub, type MCPExecutionContext, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
+import { parseMcpRuntimeRejection, secretValuesForScrub, type MCPExecutionContext, type MCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import {
   mcpConfigImportRequestSchema,
   mcpPlaygroundCallSchema,
@@ -16,6 +16,7 @@ import {
   type McpPlaygroundCallResponse,
   type McpPlaygroundExchange,
   type McpPolicyRole,
+  type McpSandboxSettings,
   type SecretReference
 } from "@ai-orchestrator/shared";
 import type { McpServerRecord, SqliteStore } from "./db/database.js";
@@ -45,7 +46,10 @@ export interface McpOnboardingDeps {
   createSecret: (input: { name: string; provider: string; value: string; projectId?: string }) => SecretReference;
   resolveSecret: MCPExecutionContext["resolveSecret"];
   redact: (value: string) => string;
-  resolveRegisteredMcpServer: (registryServerId: string) => MCPServerConfig;
+  /** Phase 10.7 — with an actor, a delegated server acts with that user's own account. */
+  resolveRegisteredMcpServer: (registryServerId: string, actor?: SafeUser | null) => MCPServerConfig;
+  /** Phase 10.7 — why a server with this sandbox may not be saved (MCP_SANDBOX_REQUIRED, mounts), or null. */
+  sandboxSaveProblem: (adapterId: string, sandbox: McpSandboxSettings | null | undefined) => string | null;
   withScopedMcpContext: <T>(run: (context: MCPExecutionContext) => Promise<T>) => Promise<T>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** Whether the user may run workflows in the project; the playground runs tools under the same permission. */
@@ -159,7 +163,23 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       warnings: plan.warnings
     });
 
-    if (dryRun) return respond(plan.entries.map((entry) => entry.view));
+    // Phase 10.7 — a stdio server's sandbox: the admin's choice, else the catalog entry's.
+    const sandboxFor = (view: McpImportEntryView, connection: Record<string, unknown>): McpSandboxSettings | null => {
+      if (view.adapterId !== "stdio_mcp") return null;
+      const command = typeof connection.command === "string" ? connection.command : "";
+      const args = Array.isArray(connection.args) ? connection.args.map(String) : [];
+      const chosen = parsed.data.entries?.[view.key]?.sandbox;
+      return chosen !== undefined ? chosen : catalog.sandboxFor(command, args) ?? null;
+    };
+
+    if (dryRun) {
+      return respond(
+        plan.entries.map((entry) => {
+          const problem = entry.view.blockedReason ? null : deps.sandboxSaveProblem(entry.view.adapterId, sandboxFor(entry.view, entry.view.connection));
+          return problem ? { ...entry.view, blockedReason: problem } : entry.view;
+        })
+      );
+    }
 
     const results: McpImportEntryView[] = [];
     const created: string[] = [];
@@ -200,12 +220,19 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
           metadata: { name: `MCP ${view.name}`, provider: "mcp", source: "local", importedFor: view.name, names: materialized.secret.names }
         });
       }
+      const sandbox = sandboxFor(view, materialized.connection);
+      const sandboxProblem = deps.sandboxSaveProblem(view.adapterId, sandbox);
+      if (sandboxProblem) {
+        results.push({ ...view, result: { action: "skipped", reason: sandboxProblem } });
+        continue;
+      }
       const probeEnabled = !view.disabledInSource;
       if (view.decision === "update" && view.duplicate) {
         store.updateMcpServer(view.duplicate.serverId, {
           adapterId: view.adapterId,
           connection: materialized.connection,
-          secretId
+          secretId,
+          ...(sandbox ? { sandbox } : {})
         });
         updated.push(view.duplicate.serverId);
         if (probe && store.getMcpServer(view.duplicate.serverId)?.probeEnabled) deps.probeInBackground(view.duplicate.serverId);
@@ -223,6 +250,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
         owner: user.email,
         projectId,
         probeEnabled,
+        sandbox,
         createdBy: user.email
       });
       created.push(id);
@@ -381,7 +409,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
 
     let serverConfig: MCPServerConfig;
     try {
-      serverConfig = deps.resolveRegisteredMcpServer(server.id);
+      serverConfig = deps.resolveRegisteredMcpServer(server.id, user);
     } catch (error) {
       reply.code(409);
       return { error: error instanceof Error ? error.message : String(error) };
@@ -432,7 +460,8 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
         turnOutputTokens: null,
         estimatedCostUsd: null,
         source: "playground",
-        clientId: null
+        clientId: null,
+        rejection: parseMcpRuntimeRejection(errorText)
       });
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP playground telemetry");

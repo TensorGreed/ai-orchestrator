@@ -21,7 +21,7 @@ The overview reads `GET /api/mcp/overview` once per visit (and on **Refresh**), 
 
 - **Totals**: servers, tool calls, failed calls and active gateway clients for the window.
 - **Server health**: one bar split by status (down, degraded, healthy, not probed). Every segment has a tooltip with its count, and the legend repeats each status with its label; status colour is never the only cue. **Show table** lists every server with its status, last probe and p95 latency. Servers that are not healthy are listed underneath with a link to their page.
-- **Needs attention**: breaking schema changes waiting for review (and whether they block runs), OAuth connections that are not connected, expired or failing, and open elicitation questions from MCP servers waiting for an answer. OAuth error details are shown to admins only.
+- **Needs attention**: breaking schema changes waiting for review (and whether they block runs), servers whose circuit breaker is open or half-open (with the next trial time), sandboxed stdio servers whose last check says the container cannot start, OAuth connections that are not connected, expired or failing, and open elicitation questions from MCP servers waiting for an answer. OAuth error details and a breaker's last failure are shown to admins only. Servers that use each user's own account are not listed for OAuth; each person sees their own connection under **My connections**.
 - **Sampling enabled**: the servers allowed to request model completions, with their token and request limits.
 - **Busiest tools** and **Most error-prone tools**: ranked bars with a per-row tooltip and a table view; a row opens the tool in the catalogue.
 - **Active gateway clients** and **Latest changes**, each with a link to the full page.
@@ -53,8 +53,9 @@ Escape or the close button returns focus to the tool you opened.
 | Status | Transitions such as Healthy → Down, replayed from the probe history. |
 | Policy, Classification | Rule edits and read-only overrides. |
 | Toolset, Client | Toolset edits and members, client tokens created or revoked. |
-| OAuth | Connections made, removed, or failing to refresh. |
+| OAuth | Connections made, removed, or failing to refresh, including users connecting, disconnecting or being revoked from servers that use each user's own account. |
 | Sampling | Changes to a server's sampling settings. |
+| Circuit breaker | A breaker opened (marked **Breaking**), went half-open, closed, or was reset by an admin. |
 | Server | Registrations, imports, removals and other settings changes. |
 | Resources & prompts | What a server lists as of its last probe (informational). |
 
@@ -66,6 +67,7 @@ On the editor canvas, MCP Tool nodes that use a registered server, including too
 
 - the server's **probe status** as a dot (with the status written out on cards); its tooltip and accessible name read "MCP server *name*: *status*";
 - **Breaking change** when the server has a schema change waiting for review;
+- **Circuit open** or **Half-open** when the server's circuit breaker is pausing calls; it opens the server;
 - your **policy state** for the tools the node uses: **Blocked**, **Destructive** or **Write** (read-only tools show nothing extra). A node that offers every tool of a server shows the worst state among the tools you may still use, plus how many are blocked.
 
 Clicking the status dot or the breaking-change marker opens the server; clicking **Blocked** opens the rule that blocks the tool. The editor makes one request per workflow for the servers its nodes reference (`GET /api/mcp/tools?detail=false&serverIds=…`), caches it, and refreshes it when the browser window regains focus. Markers need builder access; for operators and viewers the canvas shows none.
@@ -75,7 +77,7 @@ Clicking the status dot or the breaking-change marker opens the server; clicking
 | Method | Path | Who | Purpose |
 | --- | --- | --- | --- |
 | GET | `/api/mcp/overview?window=` | builder | Fleet health, attention items, ranked tools, clients and the latest changes. |
-| GET | `/api/mcp/tools?projectId=&window=&serverIds=&detail=` | builder | Tool catalogue with annotations, classification, your access, telemetry, recent calls and usages. `detail=false` returns only status and access. |
+| GET | `/api/mcp/tools?projectId=&window=&serverIds=&detail=` | builder | Tool catalogue with annotations, classification, your access, telemetry, recent calls and usages. `detail=false` returns only status, breaker state and access. |
 | GET | `/api/mcp/changes?serverId=&kind=&limit=` | builder | Changes feed, newest first; `kind` takes a comma-separated list. Actors and raw audit metadata are included for admins only. |
 
 All three only read existing tables (`mcp_servers`, probes, snapshots, catalogs, telemetry, policies, clients, elicitations and the audit log); nothing leaves your deployment.

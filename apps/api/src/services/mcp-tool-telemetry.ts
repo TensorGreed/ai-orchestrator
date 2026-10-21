@@ -14,9 +14,15 @@
  *
  * Rollups are computed from those rows: call count, error rate, nearest-rank
  * p50/p95 latency over successful calls, tokens and cost.
+ *
+ * Phase 10.7 — calls the runtime guard refused before they reached the server
+ * (rate limit, concurrency cap, open breaker) are recorded with a `rejection`
+ * and counted apart: they are not errors of the tool, so they stay out of the
+ * error rate.
  */
 
 import { randomUUID } from "node:crypto";
+import { parseMcpRuntimeRejection } from "@ai-orchestrator/mcp-sdk";
 import type { McpToolCallRecord, McpToolCallWrite } from "../db/database.js";
 import { percentile } from "./mcp-probe-service.js";
 
@@ -174,6 +180,7 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
               ? input.priceTurn(providerId, model, inputShare, outputShare, cachedShare)
               : null;
           const error = truncateError(result.error);
+          const rejection = parseMcpRuntimeRejection(result.error);
           const callNumber = (callsByTool.get(target.toolName) ?? 0) + 1;
           callsByTool.set(target.toolName, callNumber);
           rows.push({
@@ -191,7 +198,8 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
             turnInputTokens: inputShare,
             turnOutputTokens: outputShare,
             estimatedCostUsd: cost,
-            ...samplingColumns(samplingShares.get(`${target.toolName}\u0000${callNumber}`))
+            ...samplingColumns(samplingShares.get(`${target.toolName}\u0000${callNumber}`)),
+            ...(rejection ? { rejection } : {})
           });
         }
         // A delegated worker agent returns its own output as the tool result.
@@ -227,6 +235,7 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
       const toolName = asString(request?.tool_name) ?? asString(output?.tool_name) ?? asString(config.toolName);
       if (!adapterId || !toolName) continue;
       const error = status === "error" ? truncateError(result.error ?? "MCP tool invocation failed") : null;
+      const rejection = status === "error" ? parseMcpRuntimeRejection(result.error) : null;
       // A direct node makes one call, so every sampling request it saw belongs to it.
       const sampling = output ? [...readSamplingShares(output).values()] : [];
       const samplingTotal = sampling.length
@@ -254,7 +263,8 @@ export function extractMcpToolCalls(input: ExtractMcpToolCallsInput): McpToolCal
         turnInputTokens: null,
         turnOutputTokens: null,
         estimatedCostUsd: null,
-        ...samplingColumns(samplingTotal)
+        ...samplingColumns(samplingTotal),
+        ...(rejection ? { rejection } : {})
       });
       continue;
     }
@@ -271,9 +281,14 @@ export interface McpToolTelemetry {
   toolName: string;
   adapterId?: string;
   calls: number;
+  /** Failed calls that reached the server (refused calls are counted below instead). */
   errors: number;
-  /** Failed calls / calls, 0..1. */
+  /** Failed calls / calls that reached the server, 0..1. */
   errorRate: number;
+  /** Phase 10.7 — calls refused before reaching the server, by reason. */
+  rateLimited: number;
+  concurrencyLimited: number;
+  breakerRejected: number;
   /** Nearest-rank percentiles over successful calls; null when none. */
   p50Ms: number | null;
   p95Ms: number | null;
@@ -304,8 +319,14 @@ function summarize(calls: McpToolCallRecord[]): McpTelemetryTotals {
   let samplingInputTokens = 0;
   let samplingOutputTokens = 0;
   let lastCalledAt: string | null = null;
+  let rateLimited = 0;
+  let concurrencyLimited = 0;
+  let breakerRejected = 0;
   for (const call of calls) {
-    if (!call.ok) errors += 1;
+    if (call.rejection === "rate_limited") rateLimited += 1;
+    else if (call.rejection === "concurrency_limited") concurrencyLimited += 1;
+    else if (call.rejection === "circuit_open") breakerRejected += 1;
+    else if (!call.ok) errors += 1;
     inputTokens += call.turnInputTokens ?? 0;
     outputTokens += call.turnOutputTokens ?? 0;
     samplingRequests += call.samplingRequests ?? 0;
@@ -317,10 +338,14 @@ function summarize(calls: McpToolCallRecord[]): McpTelemetryTotals {
     }
     if (!lastCalledAt || call.startedAt > lastCalledAt) lastCalledAt = call.startedAt;
   }
+  const reached = calls.length - rateLimited - concurrencyLimited - breakerRejected;
   return {
     calls: calls.length,
     errors,
-    errorRate: calls.length ? errors / calls.length : 0,
+    errorRate: reached > 0 ? errors / reached : 0,
+    rateLimited,
+    concurrencyLimited,
+    breakerRejected,
     p50Ms: percentile(durations, 50),
     p95Ms: percentile(durations, 95),
     inputTokens,

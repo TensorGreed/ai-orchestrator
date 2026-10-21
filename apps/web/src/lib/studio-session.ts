@@ -21,6 +21,7 @@ const STUDIO_MODES: StudioMode[] = [
   "mcp-clients",
   "mcp-playground",
   "mcp-changes",
+  "connections",
   "secrets",
   "settings"
 ];

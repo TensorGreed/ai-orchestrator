@@ -108,6 +108,7 @@ import { SettingsPage } from "./components/SettingsPage";
 import { KnowledgeBasePage } from "./components/KnowledgeBasePage";
 import { McpServersPage } from "./components/McpServersPage";
 import { McpOverviewPage } from "./components/McpOverviewPage";
+import { McpMyConnectionsPage } from "./components/McpRuntimeSafety";
 import { McpToolsPage } from "./components/McpToolsPage";
 import { McpChangesPage } from "./components/McpChangesPage";
 import type { McpNavTarget } from "./lib/mcp-control-plane";
@@ -5364,6 +5365,8 @@ function StudioApp() {
           )}
 
           {activeMode === "mcp" && <McpOverviewPage onNavigate={navigateMcp} />}
+
+          {activeMode === "connections" && <McpMyConnectionsPage />}
 
           {(activeMode === "mcp-servers" ||
             activeMode === "mcp-policies" ||

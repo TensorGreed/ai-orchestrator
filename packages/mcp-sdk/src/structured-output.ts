@@ -133,12 +133,13 @@ export function buildToolCallResult(
       ok: false,
       output,
       ...(content !== undefined ? { content } : {}),
-      error: typeof content === "string" && content.trim() ? content : `MCP tool '${toolName}' reported an error.`
+      error: typeof content === "string" && content.trim() ? content : `MCP tool '${toolName}' reported an error.`,
+      errorKind: "tool"
     };
   }
   const check = checkStructuredContent(toolName, outputSchema, rawStructured);
   if (!check.ok) {
-    return { ok: false, output: fallbackOutput, ...(content !== undefined ? { content } : {}), error: check.error };
+    return { ok: false, output: fallbackOutput, ...(content !== undefined ? { content } : {}), error: check.error, errorKind: "output_validation" };
   }
   return {
     ok: true,

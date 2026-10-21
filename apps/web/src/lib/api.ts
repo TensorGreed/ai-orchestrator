@@ -1,4 +1,17 @@
 import type {
+  McpBreakerSettings,
+  McpCredentialMode,
+  McpDelegatedFallback,
+  McpMyConnection,
+  McpRuntimeLimits,
+  McpRuntimeStateView,
+  McpSandboxPolicyView,
+  McpSandboxSettings,
+  McpSandboxStatus,
+  McpToolLimitRule,
+  McpUserConnectionView
+} from "@ai-orchestrator/shared";
+import type {
   McpCatalogEntry,
   McpCatalogStatus,
   McpConfigImportResponse,
@@ -608,6 +621,20 @@ export async function testMcpTool(payload: {
   });
 }
 
+export type {
+  McpBreakerSettings,
+  McpCredentialMode,
+  McpDelegatedFallback,
+  McpMyConnection,
+  McpRuntimeLimits,
+  McpRuntimeStateView,
+  McpSandboxPolicyView,
+  McpSandboxSettings,
+  McpSandboxStatus,
+  McpToolLimitRule,
+  McpUserConnectionView
+};
+
 export interface McpPreset {
   id: string;
   name: string;
@@ -622,6 +649,8 @@ export interface McpPreset {
     description: string;
   };
   notes?: string;
+  /** Phase 10.7 — sandbox the form starts with (catalog entries may carry one). */
+  sandbox?: McpSandboxSettings;
   /** Phase 10.6 — built-in preset or an approved entry of the deployment catalog. */
   origin?: "builtin" | "catalog";
   tags?: string[];
@@ -2452,6 +2481,14 @@ export interface McpRegisteredServer {
   pendingBreakingSnapshotId: string | null;
   /** Phase 10.5 — whether and how the server may sample a model through the client. */
   sampling: McpSamplingSettings;
+  /** Phase 10.7 — stdio sandbox (null: the deployment default), the last sandbox check, limits and credential mode. */
+  sandbox?: McpSandboxSettings | null;
+  sandboxStatus?: McpSandboxStatus | null;
+  limits?: McpRuntimeLimits;
+  credentialMode?: McpCredentialMode;
+  delegatedFallback?: McpDelegatedFallback;
+  /** Phase 10.7 — breaker and limit state on the API instance that answered. */
+  runtime?: McpRuntimeStateView;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -2613,6 +2650,11 @@ export interface McpServerInput {
   blockOnBreakingChange?: boolean;
   /** Phase 10.5 — partial sampling settings; fields left out keep their value. */
   sampling?: Partial<McpSamplingSettings> | null;
+  /** Phase 10.7 — admin-only runtime safety settings. */
+  sandbox?: McpSandboxSettings | null;
+  limits?: McpRuntimeLimits | null;
+  credentialMode?: McpCredentialMode;
+  delegatedFallback?: McpDelegatedFallback;
 }
 
 export async function fetchMcpServers(projectId?: string) {
@@ -2621,16 +2663,53 @@ export async function fetchMcpServers(projectId?: string) {
     servers: McpRegisteredServer[];
     adapters: Array<{ id: string; label: string }>;
     defaultProbeIntervalMs: number;
+    sandboxPolicy?: McpSandboxPolicyView;
   }>(`/api/mcp/servers${qs}`);
 }
 
 export async function fetchMcpServer(id: string) {
   return apiRequest<{
     server: McpRegisteredServer;
+    sandboxPolicy?: McpSandboxPolicyView;
     probes: McpServerProbe[];
     snapshots: McpToolSnapshotSummary[];
     usages: McpServerUsage[];
   }>(`/api/mcp/servers/${encodeURIComponent(id)}`);
+}
+
+// Phase 10.7 — runtime state, breaker reset and delegated credentials (never a token).
+export async function resetMcpServerBreaker(id: string) {
+  return apiRequest<{ runtime: McpRuntimeStateView }>(`/api/mcp/servers/${encodeURIComponent(id)}/breaker/reset`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export async function fetchMcpServerUserConnections(id: string) {
+  return apiRequest<{ credentialMode: McpCredentialMode; delegatedFallback: McpDelegatedFallback; connections: McpUserConnectionView[] }>(
+    `/api/mcp/servers/${encodeURIComponent(id)}/connections`
+  );
+}
+
+export async function revokeMcpServerUserConnection(id: string, userId: string) {
+  return apiRequest<{ ok: true }>(`/api/mcp/servers/${encodeURIComponent(id)}/connections/${encodeURIComponent(userId)}`, {
+    method: "DELETE"
+  });
+}
+
+export async function fetchMyMcpConnections() {
+  return apiRequest<{ connections: McpMyConnection[] }>("/api/mcp/connections");
+}
+
+export async function connectMyMcpConnection(serverId: string, payload: { scope?: string } = {}) {
+  return apiRequest<{ authorizationUrl: string; expiresAt: string; redirectUri: string }>(
+    `/api/mcp/connections/${encodeURIComponent(serverId)}/connect`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+export async function disconnectMyMcpConnection(serverId: string) {
+  return apiRequest<{ connection: McpMyConnection }>(`/api/mcp/connections/${encodeURIComponent(serverId)}`, { method: "DELETE" });
 }
 
 export async function fetchMcpServerTools(id: string, projectId?: string) {
@@ -2686,6 +2765,10 @@ export interface McpTelemetryTotals {
   samplingRequests: number;
   samplingInputTokens: number;
   samplingOutputTokens: number;
+  /** Phase 10.7 — calls refused before reaching the server (not counted as errors). */
+  rateLimited?: number;
+  concurrencyLimited?: number;
+  breakerRejected?: number;
   lastCalledAt: string | null;
 }
 
@@ -3012,6 +3095,9 @@ export interface McpCatalogServer {
   toolCount: number;
   /** Project the access marks were evaluated in. */
   policyProjectId: string;
+  /** Phase 10.7 — circuit breaker state on the API instance that answered. */
+  breakerState?: "closed" | "open" | "half_open";
+  breakerRetryAt?: string | null;
 }
 
 export interface McpCatalogTool extends McpToolPolicyMarks {
@@ -3071,6 +3157,7 @@ export type McpChangeKind =
   | "oauth"
   | "sampling"
   | "catalog"
+  | "breaker"
   | "server";
 
 export interface McpChangeLink {
@@ -3142,6 +3229,19 @@ export interface McpOverview {
     /** Admin only. */
     lastError?: string | null;
   }>;
+  /** Phase 10.7 — open or half-open circuit breakers on this API instance. */
+  breakers?: Array<{
+    serverId: string;
+    serverName: string;
+    state: McpRuntimeStateView["breaker"]["state"];
+    since: string | null;
+    retryAt: string | null;
+    consecutiveFailures: number;
+    /** Admin only. */
+    lastError?: string | null;
+  }>;
+  /** Phase 10.7 — stdio servers whose sandbox cannot start. */
+  sandboxAttention?: Array<{ serverId: string; serverName: string; mode: string; problems: string[]; checkedAt: string }>;
   elicitations: { pending: number; oldestAt: string | null };
   sampling: Array<{ serverId: string; serverName: string; maxTokens: number; maxRequestsPerCall: number; allowedModels: number }>;
   tools: { calls: number; errors: number; busiest: McpOverviewToolRow[]; errorProne: McpOverviewToolRow[] };

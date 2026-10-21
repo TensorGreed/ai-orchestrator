@@ -32,7 +32,13 @@ export const JSON_RPC_ERRORS = {
   invalidParams: -32602,
   internalError: -32603,
   /** Implementation-defined server error used for "request cancelled". */
-  requestCancelled: -32800
+  requestCancelled: -32800,
+  /**
+   * Phase 10.7 — implementation-defined server error: the call was refused
+   * before it reached the upstream server (rate limit, concurrency cap or an
+   * open circuit breaker). `data.retryAfterMs` says when to try again.
+   */
+  retryLater: -32029
 } as const;
 
 export type JsonRpcId = string | number;

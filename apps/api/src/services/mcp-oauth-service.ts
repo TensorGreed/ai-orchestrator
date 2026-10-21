@@ -15,10 +15,19 @@
  * to hand to node configs. The `mcp_oauth_connections` row keeps what the UI
  * may show. Pending authorizations (state, PKCE verifier) stay in memory:
  * single-use, bound to the admin's session and the server, short-lived.
+ *
+ * Phase 10.7 — delegated credentials. A server with `credentialMode:
+ * "delegated"` has no service connection; every user connects their own
+ * account through the same flow (discovery, client registration, PKCE,
+ * state bound to their session), and the tokens go into an internal secret
+ * of their own (provider `mcp_oauth_user`) with a row in
+ * `mcp_user_oauth_connections`. `getAccessToken` with a `userId` reads only
+ * that user's connection, and never the service one.
  */
 
 import { createHash, randomUUID } from "node:crypto";
 import {
+  McpDelegatedCredentialError,
   McpOAuthError,
   buildAuthorizationUrl,
   createOAuthState,
@@ -28,17 +37,26 @@ import {
   refreshOAuthToken,
   registerOAuthClient,
   type FetchLike,
+  type McpAccessTokenOptions,
   type McpOAuthTokenProvider,
   type OAuthTokenSet
 } from "@ai-orchestrator/mcp-sdk";
-import type { McpOAuthConnectionStatus } from "@ai-orchestrator/shared";
-import type { McpOAuthConnectionRecord, McpServerRecord, SqliteStore } from "../db/database.js";
+import type { McpOAuthConnectionStatus, McpUserConnectionView } from "@ai-orchestrator/shared";
+import type { McpOAuthConnectionRecord, McpServerRecord, McpUserOAuthConnectionRecord, SqliteStore } from "../db/database.js";
 import type { SecretService } from "./secret-service.js";
 
 export const MCP_OAUTH_CALLBACK_PATH = "/api/mcp/oauth/callback";
 export const MCP_OAUTH_SECRET_PROVIDER = "mcp_oauth";
+/** Phase 10.7 — internal secrets holding one user's tokens for a delegated server. */
+export const MCP_OAUTH_USER_SECRET_PROVIDER = "mcp_oauth_user";
 
 /** Where the authorization server sends the browser back: MCP_OAUTH_REDIRECT_BASE_URL, else MCP_GATEWAY_PUBLIC_URL, else the first WEB_ORIGIN. */
+/** Phase 10.7 — the web page where users connect their own accounts to delegated servers. */
+export function resolveMcpConnectionsUrl(config: { WEB_ORIGIN: string }): string {
+  const base = config.WEB_ORIGIN.split(",").map((entry) => entry.trim()).find(Boolean) || "http://localhost:5173";
+  return `${base.replace(/\/+$/, "")}/?mode=connections`;
+}
+
 export function resolveMcpOAuthRedirectUri(config: {
   MCP_OAUTH_REDIRECT_BASE_URL: string;
   MCP_GATEWAY_PUBLIC_URL: string;
@@ -74,6 +92,8 @@ interface StoredOAuthSecret {
 
 interface PendingAuthorization {
   serverId: string;
+  /** Phase 10.7 — set for a user's own connection to a delegated server. */
+  userId?: string;
   /** sha256 of the admin's session id; the callback must come from the same session. */
   sessionHash: string;
   userEmail: string;
@@ -95,6 +115,8 @@ export interface McpOAuthServiceOptions {
   fetchImpl?: FetchLike;
   /** Audit hook for events without a request (background refresh failures). */
   onAudit?: (event: { eventType: string; serverId: string; outcome: "success" | "failure"; metadata: Record<string, unknown> }) => void;
+  /** Phase 10.7 — where a user connects their own account; named in "not connected" errors. */
+  connectionsUrl?: string;
 }
 
 export class McpOAuthUserError extends Error {
@@ -111,6 +133,8 @@ export interface OAuthCallbackOutcome {
   serverId: string | null;
   ok: boolean;
   error?: string;
+  /** Phase 10.7 — the user whose own connection this was, for delegated servers. */
+  userId?: string;
 }
 
 function hashSession(sessionId: string): string {
@@ -140,6 +164,21 @@ export class McpOAuthService implements McpOAuthTokenProvider {
   /** True when the server's connection is set up for OAuth. */
   static usesOAuth(server: Pick<McpServerRecord, "adapterId" | "connection">): boolean {
     return server.adapterId === "http_mcp" && String(server.connection.authType ?? "").trim().toLowerCase() === "oauth";
+  }
+
+  /** Phase 10.7 — true when every user connects their own account to the server. */
+  static isDelegated(server: Pick<McpServerRecord, "adapterId" | "connection" | "credentialMode">): boolean {
+    return server.credentialMode === "delegated" && McpOAuthService.usesOAuth(server);
+  }
+
+  private connectHint(): string {
+    return this.options.connectionsUrl ? ` Connect it under My connections: ${this.options.connectionsUrl}` : " Connect it under My connections.";
+  }
+
+  /** Phase 10.7 — one user's connection to a delegated server, as the UI may show it (never a token). */
+  userStatus(server: Pick<McpServerRecord, "id" | "name">, userId: string, userEmail: string | null = null): McpUserConnectionView {
+    const row = this.store.getMcpUserOAuthConnection(server.id, userId);
+    return userConnectionView(server, row, userId, userEmail);
   }
 
   status(serverId: string): McpOAuthConnectionStatus {
@@ -184,7 +223,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     };
   }
 
-  private readSecret(row: McpOAuthConnectionRecord | null): StoredOAuthSecret | null {
+  private readSecret(row: Pick<McpOAuthConnectionRecord, "secretId"> | null): StoredOAuthSecret | null {
     if (!row?.secretId) return null;
     const raw = this.secretService.resolveInternalSecret(row.secretId);
     if (!raw) return null;
@@ -196,14 +235,14 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     }
   }
 
-  private writeSecret(server: McpServerRecord, existingSecretId: string | null, value: StoredOAuthSecret): string {
+  private writeSecret(server: McpServerRecord, existingSecretId: string | null, value: StoredOAuthSecret, owner?: { userId: string; email?: string }): string {
     const json = JSON.stringify(value);
     if (existingSecretId && this.secretService.updateInternalSecret(existingSecretId, json)) {
       return existingSecretId;
     }
     return this.secretService.createSecret({
-      name: `MCP OAuth · ${server.name}`.slice(0, 120),
-      provider: MCP_OAUTH_SECRET_PROVIDER,
+      name: (owner ? `MCP OAuth · ${server.name} · ${owner.email ?? owner.userId}` : `MCP OAuth · ${server.name}`).slice(0, 120),
+      provider: owner ? MCP_OAUTH_USER_SECRET_PROVIDER : MCP_OAUTH_SECRET_PROVIDER,
       value: json,
       projectId: server.projectId ?? undefined
     }).secretId;
@@ -230,10 +269,18 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     sessionId: string;
     userEmail: string;
     scope?: string;
+    /** Phase 10.7 — connect this user's own account to a delegated server. */
+    userId?: string;
   }): Promise<{ authorizationUrl: string; expiresAt: string; redirectUri: string }> {
     const { server } = input;
     if (!McpOAuthService.usesOAuth(server)) {
       throw new McpOAuthUserError(`MCP server '${server.name}' does not use OAuth. Set its auth type to OAuth first.`);
+    }
+    if (input.userId && server.credentialMode !== "delegated") {
+      throw new McpOAuthUserError(`MCP server '${server.name}' uses one shared connection; an admin connects it on the MCP servers page.`);
+    }
+    if (!input.userId && server.credentialMode === "delegated") {
+      throw new McpOAuthUserError(`MCP server '${server.name}' uses each user's own account. Users connect under My connections.`);
     }
     const endpoint = String(server.connection.endpoint ?? "").trim();
     if (!endpoint) {
@@ -280,7 +327,9 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       };
     } else {
       // Reuse an earlier dynamic registration for the same authorization server and redirect URL.
-      const previous = this.readSecret(this.store.getMcpOAuthConnection(server.id));
+      const previous = input.userId
+        ? this.readSecret(this.store.getMcpUserOAuthConnection(server.id, input.userId))
+        : this.readSecret(this.store.getMcpOAuthConnection(server.id));
       if (
         previous?.client.registration === "dynamic" &&
         previous.issuer === metadata.issuer &&
@@ -313,6 +362,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     this.prunePending();
     this.pending.set(state, {
       serverId: server.id,
+      ...(input.userId ? { userId: input.userId } : {}),
       sessionHash: hashSession(input.sessionId),
       userEmail: input.userEmail,
       codeVerifier: pkce.verifier,
@@ -346,6 +396,12 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     error?: string;
     errorDescription?: string;
     sessionId: string | null;
+    /**
+     * Phase 10.7 — who is signed in to the browser finishing the flow. A
+     * user's own connection completes only for that same user; the shared
+     * service connection only for an admin.
+     */
+    actor?: { userId: string; isAdmin: boolean } | null;
   }): Promise<OAuthCallbackOutcome> {
     const state = typeof input.state === "string" ? input.state : "";
     const pending = state ? this.pending.get(state) : undefined;
@@ -363,17 +419,37 @@ export class McpOAuthService implements McpOAuthTokenProvider {
         error: "This authorization was started from a different session. Start again from the MCP servers page."
       };
     }
+    if (input.actor !== undefined) {
+      if (pending.userId ? input.actor?.userId !== pending.userId : !input.actor?.isAdmin) {
+        return {
+          serverId: pending.serverId,
+          ok: false,
+          error: pending.userId
+            ? "This authorization belongs to a different user. Sign in as the user who started it and connect again."
+            : "Sign in to L2M as an admin in this browser, then connect the server again."
+        };
+      }
+    }
     const server = this.store.getMcpServer(pending.serverId);
     if (!server) {
       return { serverId: pending.serverId, ok: false, error: "The MCP server no longer exists." };
     }
+    const userId = pending.userId;
+    if (!userId && server.credentialMode === "delegated") {
+      return { serverId: server.id, ok: false, error: "The MCP server now uses each user's own account; users connect under My connections." };
+    }
+    const recordError = (message: string) => (userId ? this.recordUserError(server.id, userId, message) : this.recordError(server.id, message));
+    const failed = (message: string): OAuthCallbackOutcome => ({ serverId: server.id, ok: false, error: message, ...(userId ? { userId } : {}) });
+    if (userId && server.credentialMode !== "delegated") {
+      return failed("The MCP server no longer uses each user's own account.");
+    }
     if (input.error) {
       const message = `The authorization server refused: ${(input.errorDescription || input.error).slice(0, 300)}`;
-      this.recordError(server.id, message);
-      return { serverId: server.id, ok: false, error: message };
+      recordError(message);
+      return failed(message);
     }
     if (!input.code) {
-      return { serverId: server.id, ok: false, error: "The authorization server sent no code." };
+      return failed("The authorization server sent no code.");
     }
 
     let tokens: OAuthTokenSet;
@@ -393,11 +469,10 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       );
     } catch (error) {
       const message = error instanceof McpOAuthError ? error.message : "Token exchange failed.";
-      this.recordError(server.id, message);
-      return { serverId: server.id, ok: false, error: message };
+      recordError(message);
+      return failed(message);
     }
 
-    const existing = this.store.getMcpOAuthConnection(server.id);
     const secret: StoredOAuthSecret = {
       version: 1,
       accessToken: tokens.accessToken,
@@ -410,8 +485,30 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       resource: pending.resource,
       client: pending.client
     };
-    const secretId = this.writeSecret(server, existing?.secretId ?? null, secret);
     const now = new Date().toISOString();
+    if (userId) {
+      const existingUser = this.store.getMcpUserOAuthConnection(server.id, userId);
+      const userSecretId = this.writeSecret(server, existingUser?.secretId ?? null, secret, { userId, email: pending.userEmail });
+      this.store.upsertMcpUserOAuthConnection({
+        serverId: server.id,
+        userId,
+        secretId: userSecretId,
+        state: "connected",
+        subject: tokens.subject ?? null,
+        scope: secret.scope ?? null,
+        authorizationServer: pending.issuer,
+        clientRegistration: pending.client.registration,
+        clientId: pending.client.clientId,
+        expiresAt: tokens.expiresAt ?? null,
+        hasRefreshToken: Boolean(tokens.refreshToken),
+        lastRefreshAt: null,
+        connectedAt: now,
+        lastError: null
+      });
+      return { serverId: server.id, ok: true, userId };
+    }
+    const existing = this.store.getMcpOAuthConnection(server.id);
+    const secretId = this.writeSecret(server, existing?.secretId ?? null, secret);
     this.store.upsertMcpOAuthConnection({
       serverId: server.id,
       secretId,
@@ -429,6 +526,26 @@ export class McpOAuthService implements McpOAuthTokenProvider {
       lastError: null
     });
     return { serverId: server.id, ok: true };
+  }
+
+  private recordUserError(serverId: string, userId: string, message: string): void {
+    const row = this.store.getMcpUserOAuthConnection(serverId, userId);
+    this.store.upsertMcpUserOAuthConnection({
+      serverId,
+      userId,
+      secretId: row?.secretId ?? null,
+      state: row?.secretId ? "error" : "not_connected",
+      subject: row?.subject ?? null,
+      scope: row?.scope ?? null,
+      authorizationServer: row?.authorizationServer ?? null,
+      clientRegistration: row?.clientRegistration ?? null,
+      clientId: row?.clientId ?? null,
+      expiresAt: row?.expiresAt ?? null,
+      hasRefreshToken: row?.hasRefreshToken ?? false,
+      lastRefreshAt: row?.lastRefreshAt ?? null,
+      connectedAt: row?.connectedAt ?? null,
+      lastError: message.slice(0, 500)
+    });
   }
 
   private recordError(serverId: string, message: string): void {
@@ -451,10 +568,21 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     });
   }
 
-  /** McpOAuthTokenProvider: the access token for a registry server, refreshed when due or when forced. */
-  async getAccessToken(registryServerId: string, options?: { forceRefresh?: boolean }): Promise<string> {
+  /**
+   * McpOAuthTokenProvider: the access token for a registry server, refreshed
+   * when due or when forced. Phase 10.7 — a delegated server answers only
+   * with the given user's own token; without a user, or for a user who has
+   * not connected, it fails with a message that links to My connections.
+   */
+  async getAccessToken(registryServerId: string, options?: McpAccessTokenOptions): Promise<string> {
     const server = this.store.getMcpServer(registryServerId);
     const label = server?.name ?? registryServerId;
+    if (server?.credentialMode === "delegated") {
+      if (!options?.userId) {
+        throw new McpDelegatedCredentialError(`MCP server '${label}' uses each user's own account, and this call has no user to act for.`);
+      }
+      return this.getUserAccessToken(server, options.userId, options.forceRefresh === true);
+    }
     const row = this.store.getMcpOAuthConnection(registryServerId);
     const secret = this.readSecret(row);
     if (!row || !secret) {
@@ -540,6 +668,120 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     return next.accessToken;
   }
 
+  private async getUserAccessToken(server: McpServerRecord, userId: string, forceRefresh: boolean): Promise<string> {
+    const label = server.name;
+    const row = this.store.getMcpUserOAuthConnection(server.id, userId);
+    const secret = this.readSecret(row);
+    if (!row || !secret) {
+      throw new McpDelegatedCredentialError(
+        `MCP server '${label}' uses each user's own account, and the user this run acts for has not connected theirs.${this.connectHint()}`,
+        this.options.connectionsUrl
+      );
+    }
+    const expiresAtMs = secret.expiresAt ? Date.parse(secret.expiresAt) : Number.POSITIVE_INFINITY;
+    const due = expiresAtMs - Date.now() <= this.options.refreshSkewMs;
+    if (!forceRefresh && !due) return secret.accessToken;
+    if (!secret.refreshToken) {
+      this.store.upsertMcpUserOAuthConnection({
+        ...row,
+        state: "expired",
+        lastError: `The access token for '${label}' expired and the server issued no refresh token. Reconnect it.`
+      });
+      throw new McpDelegatedCredentialError(
+        `MCP server '${label}': the user's access token expired and cannot be refreshed.${this.connectHint()}`,
+        this.options.connectionsUrl
+      );
+    }
+    const key = `${server.id}::${userId}`;
+    const running = this.refreshing.get(key);
+    if (running) return running;
+    const refresh = this.refreshUser(server, userId).finally(() => {
+      this.refreshing.delete(key);
+    });
+    this.refreshing.set(key, refresh);
+    return refresh;
+  }
+
+  private async refreshUser(server: McpServerRecord, userId: string): Promise<string> {
+    const row = this.store.getMcpUserOAuthConnection(server.id, userId);
+    const secret = this.readSecret(row);
+    if (!row || !secret?.refreshToken) {
+      throw new McpDelegatedCredentialError(`MCP server '${server.name}': the user's account is not connected.${this.connectHint()}`, this.options.connectionsUrl);
+    }
+    let tokens: OAuthTokenSet;
+    try {
+      tokens = await refreshOAuthToken(
+        {
+          tokenEndpoint: secret.tokenEndpoint,
+          clientId: secret.client.clientId,
+          ...(secret.client.clientSecret ? { clientSecret: secret.client.clientSecret } : {}),
+          tokenEndpointAuthMethod: secret.client.tokenEndpointAuthMethod,
+          refreshToken: secret.refreshToken,
+          resource: secret.resource
+        },
+        this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}
+      );
+    } catch (error) {
+      const message = `Token refresh failed: ${error instanceof Error ? error.message : "unknown error"}`;
+      this.store.upsertMcpUserOAuthConnection({ ...row, state: "error", lastError: message.slice(0, 500) });
+      this.options.onAudit?.({
+        eventType: "mcp_server.user_oauth_refresh_failed",
+        serverId: server.id,
+        outcome: "failure",
+        metadata: { userId, error: message.slice(0, 300) }
+      });
+      throw new McpDelegatedCredentialError(`MCP server '${server.name}': ${message}.${this.connectHint()}`, this.options.connectionsUrl);
+    }
+    const next: StoredOAuthSecret = {
+      ...secret,
+      accessToken: tokens.accessToken,
+      tokenType: tokens.tokenType,
+      ...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
+      expiresAt: tokens.expiresAt,
+      ...(tokens.scope ? { scope: tokens.scope } : {})
+    };
+    if (!tokens.expiresAt) delete next.expiresAt;
+    const secretId = this.writeSecret(server, row.secretId, next, { userId });
+    this.store.upsertMcpUserOAuthConnection({
+      ...row,
+      secretId,
+      state: "connected",
+      scope: next.scope ?? row.scope,
+      expiresAt: next.expiresAt ?? null,
+      hasRefreshToken: Boolean(next.refreshToken),
+      lastRefreshAt: new Date().toISOString(),
+      lastError: null
+    });
+    return next.accessToken;
+  }
+
+  /** Phase 10.7 — forget one user's tokens for a delegated server. Returns false when they had none. */
+  disconnectUser(serverId: string, userId: string): boolean {
+    const row = this.store.getMcpUserOAuthConnection(serverId, userId);
+    if (row?.secretId) {
+      this.secretService.deleteSecret(row.secretId);
+    }
+    const removed = this.store.deleteMcpUserOAuthConnection(serverId, userId);
+    for (const [state, entry] of this.pending) {
+      if (entry.serverId === serverId && entry.userId === userId) this.pending.delete(state);
+    }
+    return removed || Boolean(row);
+  }
+
+  /** Phase 10.7 — forget every user's tokens for a server (it was deleted or left delegated mode). */
+  disconnectAllUsers(serverId: string): number {
+    const rows = this.store.listMcpUserOAuthConnections({ serverId });
+    for (const row of rows) this.disconnectUser(serverId, row.userId);
+    return rows.length;
+  }
+
+  /** Phase 10.7 — forget a user's tokens for every server (the user was deleted). */
+  disconnectUserEverywhere(userId: string): number {
+    const rows = this.store.listMcpUserOAuthConnections({ userId });
+    for (const row of rows) this.disconnectUser(row.serverId, userId);
+    return rows.length;
+  }
+
   /** Manual refresh from the UI. */
   async refreshNow(serverId: string): Promise<McpOAuthConnectionStatus> {
     await this.getAccessToken(serverId, { forceRefresh: true });
@@ -554,7 +796,7 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     }
     this.store.deleteMcpOAuthConnection(serverId);
     for (const [state, entry] of this.pending) {
-      if (entry.serverId === serverId) this.pending.delete(state);
+      if (entry.serverId === serverId && !entry.userId) this.pending.delete(state);
     }
     return this.status(serverId);
   }
@@ -564,6 +806,33 @@ export class McpOAuthService implements McpOAuthTokenProvider {
     this.prunePending();
     return this.pending.size;
   }
+}
+
+/** Phase 10.7 — the shape the UI sees for one user's connection (never a token or secret id). */
+export function userConnectionView(
+  server: Pick<McpServerRecord, "id" | "name">,
+  row: McpUserOAuthConnectionRecord | null,
+  userId: string,
+  userEmail: string | null
+): McpUserConnectionView {
+  let state: McpUserConnectionView["state"] = row?.state ?? "not_connected";
+  if (row && state === "connected" && row.expiresAt && Date.parse(row.expiresAt) <= Date.now() && !row.hasRefreshToken) {
+    state = "expired";
+  }
+  return {
+    serverId: server.id,
+    serverName: server.name,
+    userId,
+    userEmail,
+    state,
+    subject: row?.subject ?? null,
+    scope: row?.scope ?? null,
+    expiresAt: row?.expiresAt ?? null,
+    hasRefreshToken: row?.hasRefreshToken ?? false,
+    connectedAt: row?.connectedAt ?? null,
+    lastRefreshAt: row?.lastRefreshAt ?? null,
+    lastError: row?.lastError ?? null
+  };
 }
 
 /** Escape text for the callback page. */
