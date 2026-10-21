@@ -1,7 +1,13 @@
-import { Parser, type AST } from "node-sql-parser";
+import * as sqlParserModule from "node-sql-parser";
+import type { AST } from "node-sql-parser";
 import { excerptEvidence } from "../masking";
 import type { DetectorContext, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 import { clampScore } from "../types";
+
+type SqlParserModule = typeof sqlParserModule;
+// node-sql-parser is CommonJS whose exports Node's ESM loader cannot detect: under
+// Node the classes sit on the default export, under bundlers and vitest on the namespace.
+const { Parser } = ((sqlParserModule as SqlParserModule & { default?: SqlParserModule }).default ?? sqlParserModule) as SqlParserModule;
 
 export const SQL_GUARD_DETECTOR_ID = "tool.sql";
 
