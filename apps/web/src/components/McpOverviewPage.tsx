@@ -321,7 +321,14 @@ function FleetHealth({ overview, onNavigate }: { overview: McpOverview; onNaviga
 }
 
 function Attention({ overview, onNavigate }: { overview: McpOverview; onNavigate: (target: McpNavTarget) => void }) {
-  const items = overview.pendingBreaking.length + overview.oauthAttention.length + (overview.elicitations.pending > 0 ? 1 : 0);
+  const breakers = overview.breakers ?? [];
+  const sandboxes = overview.sandboxAttention ?? [];
+  const items =
+    overview.pendingBreaking.length +
+    breakers.length +
+    sandboxes.length +
+    overview.oauthAttention.length +
+    (overview.elicitations.pending > 0 ? 1 : 0);
   return (
     <section className="kb-section" aria-labelledby="mcp-ov-attention">
       <div className="mcp-section-head">
@@ -340,6 +347,30 @@ function Attention({ overview, onNavigate }: { overview: McpOverview; onNavigate
               {entry.blocksRuns ? " · runs blocked until accepted" : ""}
               {entry.detectedAt ? ` · ${formatWhen(entry.detectedAt)}` : ""}
             </span>
+          </li>
+        ))}
+        {breakers.map((entry) => (
+          <li key={`breaker-${entry.serverId}`}>
+            <span className={`mcp-sev ${entry.state === "open" ? "mcp-sev-breaking" : "mcp-sev-warning"}`}>
+              {entry.state === "open" ? "Circuit open" : "Half-open"}
+            </span>
+            <button type="button" className="mcp-ov-link" onClick={() => onNavigate({ page: "servers", serverId: entry.serverId })}>
+              {entry.state === "open" ? `Calls to ${entry.serverName} are paused after repeated failures` : `${entry.serverName} is trying one call`}
+            </button>
+            <span className="kb-subtle">
+              {entry.consecutiveFailures} failure{entry.consecutiveFailures === 1 ? "" : "s"} in a row
+              {entry.retryAt ? ` · next try ${formatWhen(entry.retryAt)}` : ""}
+              {entry.lastError ? ` · ${entry.lastError}` : ""}
+            </span>
+          </li>
+        ))}
+        {sandboxes.map((entry) => (
+          <li key={`sandbox-${entry.serverId}`}>
+            <span className="mcp-sev mcp-sev-warning">Sandbox</span>
+            <button type="button" className="mcp-ov-link" onClick={() => onNavigate({ page: "servers", serverId: entry.serverId })}>
+              {entry.serverName}: the sandbox cannot start
+            </button>
+            <span className="kb-subtle">{entry.problems.join(" ")}</span>
           </li>
         ))}
         {overview.oauthAttention.map((entry) => (
@@ -363,7 +394,7 @@ function Attention({ overview, onNavigate }: { overview: McpOverview; onNavigate
             </span>
           </li>
         )}
-        {items === 0 && <li className="kb-subtle">No pending breaking changes, OAuth problems or open questions.</li>}
+        {items === 0 && <li className="kb-subtle">No pending breaking changes, open circuits, sandbox problems, OAuth problems or open questions.</li>}
       </ul>
 
       <div className="mcp-section-head">

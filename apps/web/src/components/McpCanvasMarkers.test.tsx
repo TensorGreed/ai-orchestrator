@@ -20,6 +20,7 @@ function marker(overrides: Partial<McpCanvasMarker> = {}): McpCanvasMarker {
     status: "healthy",
     statusLabel: "Healthy",
     breakingPending: false,
+    circuit: null,
     policy: "read_only",
     blockingRuleId: null,
     blockingRuleName: null,
@@ -77,6 +78,22 @@ describe("MCP markers on canvas nodes", () => {
     const onOpen = renderNode({ mcpMarker: marker({ breakingPending: true }) });
     await user.click(screen.getByRole("button", { name: "Breaking change pending on GitHub tools. Open server to review" }));
     expect(onOpen).toHaveBeenCalledWith({ page: "servers", serverId: "mcp_a" });
+  });
+
+  it("shows Circuit open when the server's breaker is open and opens the server", async () => {
+    const user = userEvent.setup();
+    const onOpen = renderNode({ mcpMarker: marker({ circuit: "open" }) });
+    const chip = screen.getByRole("button", { name: "Circuit open on GitHub tools. Open server" });
+    expect(chip).toHaveTextContent("Circuit open");
+    expect(chip).toHaveAttribute("title", expect.stringMatching(/calls are paused/));
+    await user.click(chip);
+    expect(onOpen).toHaveBeenCalledWith({ page: "servers", serverId: "mcp_a" });
+    document.body.innerHTML = "";
+    renderNode({ mcpMarker: marker({ circuit: "half_open" }) });
+    expect(screen.getByRole("button", { name: "Circuit half-open on GitHub tools. Open server" })).toHaveTextContent("Half-open");
+    document.body.innerHTML = "";
+    renderNode({ mcpMarker: marker() });
+    expect(screen.queryByRole("button", { name: /Circuit/ })).not.toBeInTheDocument();
   });
 
   it("opens the blocking rule from a blocked marker", async () => {
@@ -178,6 +195,17 @@ describe("deriveCanvasMarker", () => {
     expect(deriveCanvasMarker({ registryServerId: "mcp_a", toolName: "__all__", allowedTools: ["drop"] }, servers, tools)).toMatchObject({
       policy: "blocked"
     });
+  });
+
+  it("carries the breaker state into the marker", () => {
+    const open = new Map([
+      ["mcp_a", { id: "mcp_a", name: "GitHub tools", status: "healthy" as const, pendingBreakingSnapshotId: null, breakerState: "open" as const }]
+    ]);
+    expect(deriveCanvasMarker({ registryServerId: "mcp_a", toolName: "search" }, open, tools)).toMatchObject({
+      circuit: "open",
+      description: "GitHub tools: Healthy · circuit open: calls are paused after repeated failures · read-only"
+    });
+    expect(deriveCanvasMarker({ registryServerId: "mcp_a", toolName: "search" }, servers, tools)?.circuit).toBeNull();
   });
 
   it("ignores inline servers and unknown registry ids", () => {

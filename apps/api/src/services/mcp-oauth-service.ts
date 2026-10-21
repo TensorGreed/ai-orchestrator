@@ -54,7 +54,7 @@ export const MCP_OAUTH_USER_SECRET_PROVIDER = "mcp_oauth_user";
 /** Phase 10.7 — the web page where users connect their own accounts to delegated servers. */
 export function resolveMcpConnectionsUrl(config: { WEB_ORIGIN: string }): string {
   const base = config.WEB_ORIGIN.split(",").map((entry) => entry.trim()).find(Boolean) || "http://localhost:5173";
-  return `${base.replace(/\/+$/, "")}/?mode=mcp-connections`;
+  return `${base.replace(/\/+$/, "")}/?mode=connections`;
 }
 
 export function resolveMcpOAuthRedirectUri(config: {

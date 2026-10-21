@@ -718,7 +718,7 @@ describe("delegated MCP credentials", () => {
     expect(unconnected.status).toBe("error");
     const failure = JSON.stringify(unconnected);
     expect(failure).toMatch(/has not connected theirs/);
-    expect(failure).toContain("http://studio.example.test/?mode=mcp-connections");
+    expect(failure).toContain("http://studio.example.test/?mode=connections");
     expect(fake.mcpAuthHeaders).toEqual([]);
 
     const aliceToken = await connectOwn(context, alice, serverId);

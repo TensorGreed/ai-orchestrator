@@ -460,7 +460,10 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
         lastProbeAt: server.lastProbeAt,
         pendingBreakingSnapshotId: server.pendingBreakingSnapshotId,
         toolCount: server.toolCount,
-        policyProjectId: projectId
+        policyProjectId: projectId,
+        // Phase 10.7 — the canvas shows "Circuit open" on nodes of a paused server.
+        breakerState: deps.runtime(server.id, user).breaker.state,
+        breakerRetryAt: deps.runtime(server.id, user).breaker.retryAt
       });
       for (const tool of marked) {
         const annotations: McpToolAnnotations | undefined = tool.annotations;

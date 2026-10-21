@@ -17,6 +17,7 @@ export type StudioMode =
   | "mcp-clients"
   | "mcp-playground"
   | "mcp-changes"
+  | "connections"
   | "secrets"
   | "settings";
 
@@ -56,6 +57,8 @@ export const STUDIO_MODE_ITEMS: ReadonlyArray<StudioModeItem> = [
   { mode: "evaluations", label: "Evaluations" },
   { mode: "knowledge", label: "Knowledge" },
   ...MCP_MODE_ITEMS,
+  // Phase 10.7 — every user connects their own accounts to MCP servers that act per person.
+  { mode: "connections", label: "My connections" },
   { mode: "secrets", label: "Secrets", adminOnly: true },
   { mode: "settings", label: "Settings" }
 ];

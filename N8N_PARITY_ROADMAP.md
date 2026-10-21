@@ -464,10 +464,10 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 - [x] MCP playground page: pick a server, call any tool through a schema-driven form, read resources and preview prompts, inspect the raw JSON-RPC exchange
 
 ### 10.7 Runtime safety
-- [ ] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default
-- [ ] Per-server and per-tool rate limits, concurrency caps and a circuit breaker that opens on repeated failures and shows on the registry page
+- [x] Sandboxed stdio servers: optional container runner (docker or podman) with CPU and memory limits, read-only root, an allowlist of mounted roots and networking off by default
+- [x] Per-server and per-tool rate limits, concurrency caps and a circuit breaker that opens on repeated failures and shows on the registry page
 - [ ] Tool output guard: secret and PII redaction plus prompt-injection heuristics on tool results before they reach the model, with findings in the trace (delivered by Phase 12, L2M Guard)
-- [ ] Delegated credentials: a tool call can use the triggering user's own token for a server instead of a shared service secret
+- [x] Delegated credentials: a tool call can use the triggering user's own token for a server instead of a shared service secret
 
 ### 10.8 Testing and reliability
 - [x] Record and replay: capture a run's tool calls as a cassette and replay runs and evals deterministically against it

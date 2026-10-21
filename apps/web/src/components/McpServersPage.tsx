@@ -16,13 +16,21 @@
  * Phase 10.6 — "Import config" brings servers in from client config files,
  * the catalog banner reports the deployment catalog, and the Playground view
  * calls one tool through a schema-driven form.
+ *
+ * Phase 10.7 — admins set a stdio server's sandbox, rate limits, concurrency
+ * caps and circuit breaker, and whether calls use one shared credential or
+ * each user's own account; the detail shows the breaker state, refused calls,
+ * the last sandbox check and (for delegated servers) who has connected.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  type McpCredentialMode,
+  type McpDelegatedFallback,
   type McpPreset,
   type McpRegisteredServer,
+  type McpSandboxPolicyView,
   type McpServerInput,
   type McpServerProbe,
   type McpServerUsage,
@@ -54,6 +62,18 @@ import { McpOAuthPanel, usesOAuth } from "./McpOAuthPanel";
 import { McpPlaygroundPage } from "./McpPlaygroundPage";
 import { McpPoliciesView } from "./McpPoliciesView";
 import { McpToolsetsView } from "./McpToolsetsView";
+import {
+  BREAKER_LABEL,
+  McpCredentialFields,
+  McpLimitsFields,
+  McpRuntimePanel,
+  McpSandboxFields,
+  McpUserConnectionsPanel,
+  limitsDraftFrom,
+  limitsFromDraft,
+  sandboxDraftFrom,
+  sandboxFromDraft
+} from "./McpRuntimeSafety";
 
 const STATUS_LABEL: Record<McpRegisteredServer["status"], string> = {
   unknown: "Not probed",
@@ -149,6 +169,7 @@ export function McpServersPage({
   const [servers, setServers] = useState<McpRegisteredServer[]>([]);
   const [adapters, setAdapters] = useState<Array<{ id: string; label: string }>>([]);
   const [defaultIntervalMs, setDefaultIntervalMs] = useState(0);
+  const [sandboxPolicy, setSandboxPolicy] = useState<McpSandboxPolicyView | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -164,6 +185,7 @@ export function McpServersPage({
       setServers(r.servers);
       setAdapters(r.adapters);
       setDefaultIntervalMs(r.defaultProbeIntervalMs);
+      setSandboxPolicy(r.sandboxPolicy ?? null);
       setSelectedId((current) =>
         current && r.servers.some((server) => server.id === current) ? current : r.servers[0]?.id ?? null
       );
@@ -266,6 +288,7 @@ export function McpServersPage({
           adapters={adapters}
           projectId={activeProjectId ?? null}
           defaultIntervalMs={defaultIntervalMs}
+          sandboxPolicy={sandboxPolicy}
           onSaved={async (server) => {
             setShowCreate(false);
             await refreshList();
@@ -302,6 +325,9 @@ export function McpServersPage({
                   {server.latency.p95Ms !== null && <> · p95 {formatMs(server.latency.p95Ms)}</>}
                 </div>
                 {server.pendingBreakingSnapshotId && <span className="mcp-flag">Breaking change</span>}
+                {server.runtime && server.runtime.breaker.state !== "closed" && (
+                  <span className={`mcp-flag mcp-flag-circuit is-${server.runtime.breaker.state}`}>{BREAKER_LABEL[server.runtime.breaker.state]}</span>
+                )}
               </button>
             ))
           )}
@@ -316,6 +342,7 @@ export function McpServersPage({
               projectId={activeProjectId ?? undefined}
               adapters={adapters}
               defaultIntervalMs={defaultIntervalMs}
+              sandboxPolicy={sandboxPolicy}
               onChanged={onServerChanged}
               onDeleted={async () => {
                 setSelectedId(null);
@@ -336,6 +363,7 @@ function McpServerForm({
   adapters,
   projectId,
   defaultIntervalMs,
+  sandboxPolicy,
   initial,
   onSaved,
   onCancel
@@ -343,6 +371,7 @@ function McpServerForm({
   adapters: Array<{ id: string; label: string }>;
   projectId: string | null;
   defaultIntervalMs: number;
+  sandboxPolicy?: McpSandboxPolicyView | null;
   initial?: McpRegisteredServer;
   onSaved: (server: McpRegisteredServer) => Promise<void>;
   onCancel: () => void;
@@ -370,8 +399,22 @@ function McpServerForm({
   const [samplingMaxRequests, setSamplingMaxRequests] = useState(String(initial?.sampling?.maxRequestsPerCall ?? 3));
   const [samplingDefaultProvider, setSamplingDefaultProvider] = useState(initial?.sampling?.defaultModel?.providerId ?? "");
   const [samplingDefaultModel, setSamplingDefaultModel] = useState(initial?.sampling?.defaultModel?.model ?? "");
+  // Phase 10.7 — runtime safety.
+  const [sandboxDraft, setSandboxDraft] = useState(() => sandboxDraftFrom(initial?.sandbox));
+  const [limitsDraft, setLimitsDraft] = useState(() => limitsDraftFrom(initial?.limits));
+  const [credentialMode, setCredentialMode] = useState<McpCredentialMode>(initial?.credentialMode ?? "service");
+  const [delegatedFallback, setDelegatedFallback] = useState<McpDelegatedFallback>(initial?.delegatedFallback ?? "none");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const oauthConnection = useMemo(() => {
+    try {
+      const parsed = JSON.parse(connectionJson) as Record<string, unknown>;
+      return adapterId === "http_mcp" && String(parsed?.authType ?? "").toLowerCase() === "oauth";
+    } catch {
+      return false;
+    }
+  }, [adapterId, connectionJson]);
 
   useEffect(() => {
     let cancelled = false;
@@ -399,6 +442,7 @@ function McpServerForm({
     setDescription(preset.description);
     setAdapterId(preset.serverAdapter);
     setConnectionJson(JSON.stringify(preset.connection, null, 2));
+    if (preset.sandbox) setSandboxDraft(sandboxDraftFrom(preset.sandbox));
     setPresetNote([preset.notes, preset.credentialHint?.description].filter(Boolean).join(" ") || null);
   };
 
@@ -429,6 +473,20 @@ function McpServerForm({
       setError("A default sampling model needs both a provider id and a model name.");
       return;
     }
+    const sandbox = adapterId === "stdio_mcp" ? sandboxFromDraft(sandboxDraft) : { value: null, error: null };
+    if (sandbox.error) {
+      setError(sandbox.error);
+      return;
+    }
+    const limits = limitsFromDraft(limitsDraft);
+    if (limits.error) {
+      setError(limits.error);
+      return;
+    }
+    if (credentialMode === "delegated" && !oauthConnection) {
+      setError("Each user's own account needs an http server whose auth type is OAuth.");
+      return;
+    }
     const payload: McpServerInput = {
       name: name.trim(),
       description: description.trim() || null,
@@ -450,7 +508,11 @@ function McpServerForm({
         defaultModel: samplingDefaultProvider.trim() && samplingDefaultModel.trim()
           ? { providerId: samplingDefaultProvider.trim(), model: samplingDefaultModel.trim() }
           : null
-      }
+      },
+      ...(adapterId === "stdio_mcp" ? { sandbox: sandbox.value } : initial?.sandbox ? { sandbox: null } : {}),
+      limits: limits.value,
+      credentialMode,
+      delegatedFallback
     };
     setBusy(true);
     try {
@@ -599,6 +661,17 @@ function McpServerForm({
           </label>
         </div>
       </fieldset>
+      {adapterId === "stdio_mcp" && <McpSandboxFields draft={sandboxDraft} onChange={setSandboxDraft} policy={sandboxPolicy} />}
+      <McpLimitsFields draft={limitsDraft} onChange={setLimitsDraft} />
+      {adapterId === "http_mcp" && (
+        <McpCredentialFields
+          mode={credentialMode}
+          fallback={delegatedFallback}
+          onModeChange={setCredentialMode}
+          onFallbackChange={setDelegatedFallback}
+          oauth={oauthConnection}
+        />
+      )}
       <div className="kb-form-row mcp-form-actions">
         <button type="submit" className="pg-btn primary" disabled={busy || !name.trim()}>
           {busy ? "Saving…" : initial ? "Save changes" : "Register server"}
@@ -617,6 +690,7 @@ function McpServerDetail({
   projectId,
   adapters,
   defaultIntervalMs,
+  sandboxPolicy,
   onChanged,
   onDeleted
 }: {
@@ -626,6 +700,7 @@ function McpServerDetail({
   projectId?: string;
   adapters: Array<{ id: string; label: string }>;
   defaultIntervalMs: number;
+  sandboxPolicy?: McpSandboxPolicyView | null;
   onChanged: () => Promise<void>;
   onDeleted: () => Promise<void>;
 }) {
@@ -724,6 +799,7 @@ function McpServerDetail({
         adapters={adapters}
         projectId={server.projectId}
         defaultIntervalMs={defaultIntervalMs}
+        sandboxPolicy={sandboxPolicy}
         initial={server}
         onSaved={async () => {
           setEditing(false);
@@ -747,6 +823,9 @@ function McpServerDetail({
           <div className="mcp-title-row">
             <h3>{server.name}</h3>
             <StatusBadge status={server.status} />
+            {server.runtime && server.runtime.breaker.state !== "closed" && (
+              <span className={`mcp-flag mcp-flag-circuit is-${server.runtime.breaker.state}`}>{BREAKER_LABEL[server.runtime.breaker.state]}</span>
+            )}
           </div>
           {server.description && <p className="kb-subtle">{server.description}</p>}
           <div className="kb-detail-meta">
@@ -832,7 +911,18 @@ function McpServerDetail({
         />
       </div>
 
-      {usesOAuth(server.adapterId, server.connection) && <McpOAuthPanel serverId={server.id} isAdmin={isAdmin} />}
+      <McpRuntimePanel server={server} isAdmin={isAdmin} onChanged={onChanged} />
+
+      {usesOAuth(server.adapterId, server.connection) &&
+        (server.credentialMode === "delegated" ? (
+          isAdmin ? (
+            <McpUserConnectionsPanel serverId={server.id} />
+          ) : (
+            <p className="kb-subtle">This server uses each user's own account. Connect yours under My connections.</p>
+          )
+        ) : (
+          <McpOAuthPanel serverId={server.id} isAdmin={isAdmin} />
+        ))}
 
       <ProbeStrip probes={probes} />
 

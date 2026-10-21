@@ -35,6 +35,7 @@ export const MCP_CHANGE_KIND_LABEL: Record<McpChangeKind, string> = {
   oauth: "OAuth",
   sampling: "Sampling",
   catalog: "Resources & prompts",
+  breaker: "Circuit breaker",
   server: "Server"
 };
 
@@ -49,6 +50,7 @@ export const MCP_CHANGE_KINDS: readonly McpChangeKind[] = [
   "oauth",
   "sampling",
   "catalog",
+  "breaker",
   "server"
 ];
 
@@ -228,6 +230,8 @@ export interface McpCanvasMarker {
   status: McpServerStatus;
   statusLabel: string;
   breakingPending: boolean;
+  /** Phase 10.7 — the server's circuit breaker is open (calls refused) or half-open (one trial call). */
+  circuit: "open" | "half_open" | null;
   /** Worst policy state for the current user across the tools the node uses; null when unknown (no snapshot yet). */
   policy: McpPolicyState | null;
   /** Rule that blocks the tool (single tool) or the first blocking rule (all tools). */
@@ -270,7 +274,7 @@ export function policyStateOf(tool: Pick<McpCatalogTool, "access" | "classificat
 
 export function deriveCanvasMarker(
   config: Record<string, unknown> | undefined,
-  servers: ReadonlyMap<string, Pick<McpCatalogServer, "id" | "name" | "status" | "pendingBreakingSnapshotId">>,
+  servers: ReadonlyMap<string, Pick<McpCatalogServer, "id" | "name" | "status" | "pendingBreakingSnapshotId" | "breakerState">>,
   toolsByServer: ReadonlyMap<string, readonly McpCatalogTool[]>
 ): McpCanvasMarker | null {
   const serverId = registryServerIdOf(config);
@@ -303,6 +307,9 @@ export function deriveCanvasMarker(
   const statusLabel = MCP_STATUS_LABEL[server.status];
   const parts = [`${server.name}: ${statusLabel}`];
   if (server.pendingBreakingSnapshotId) parts.push("breaking change pending");
+  const circuit = server.breakerState === "open" || server.breakerState === "half_open" ? server.breakerState : null;
+  if (circuit === "open") parts.push("circuit open: calls are paused after repeated failures");
+  if (circuit === "half_open") parts.push("circuit half-open: trying one call");
   if (policy) {
     if (policy === "blocked") {
       parts.push(names && names.length === 1 ? POLICY_TEXT.blocked : `all ${used.length} tools blocked for you by policy`);
@@ -317,6 +324,7 @@ export function deriveCanvasMarker(
     status: server.status,
     statusLabel,
     breakingPending: Boolean(server.pendingBreakingSnapshotId),
+    circuit,
     policy,
     blockingRuleId: blocking?.access.ruleId ?? null,
     blockingRuleName: blocking?.access.ruleName ?? null,

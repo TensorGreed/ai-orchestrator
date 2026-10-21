@@ -420,6 +420,22 @@ function McpMarker({
           {variant === "card" ? "Breaking change" : "Breaking"}
         </button>
       )}
+      {marker.circuit && (
+        <button
+          type="button"
+          className={`wf-mcp-chip wf-mcp-chip-circuit wf-mcp-chip-circuit-${marker.circuit}`}
+          aria-label={`${marker.circuit === "open" ? "Circuit open" : "Circuit half-open"} on ${marker.serverName}. Open server`}
+          title={
+            marker.circuit === "open"
+              ? `Circuit open on ${marker.serverName}: calls are paused after repeated failures`
+              : `Circuit half-open on ${marker.serverName}: one trial call is let through`
+          }
+          disabled={!onOpen}
+          onClick={open(serverTarget)}
+        >
+          {marker.circuit === "open" ? "Circuit open" : "Half-open"}
+        </button>
+      )}
       {policy &&
         (marker.policy === "blocked" ? (
           <button

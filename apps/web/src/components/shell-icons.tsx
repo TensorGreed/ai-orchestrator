@@ -243,6 +243,14 @@ export const SearchIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** Phase 10.7 — My connections: a key joined to a link. */
+export const ConnectionsIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="7.5" cy="12" r="3.5" />
+    <path d="M11 12h10M17 12v3M20 12v2" />
+  </Svg>
+);
+
 export const MODE_ICONS: Record<StudioMode, (p: IconProps) => ReactElement> = {
   dashboard: HomeIcon,
   editor: EditorIcon,
@@ -260,6 +268,7 @@ export const MODE_ICONS: Record<StudioMode, (p: IconProps) => ReactElement> = {
   "mcp-clients": McpClientsIcon,
   "mcp-playground": McpPlaygroundIcon,
   "mcp-changes": McpChangesIcon,
+  connections: ConnectionsIcon,
   secrets: SecretsIcon,
   settings: SettingsIcon
 };
