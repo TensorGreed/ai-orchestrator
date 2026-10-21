@@ -433,7 +433,12 @@ function McpMarker({
             {variant === "card" ? policy.short : "⊘"}
           </button>
         ) : (
-          <span className={`wf-mcp-chip wf-mcp-chip-${marker.policy}`} role="img" aria-label={policy.label} title={policy.label}>
+          <span
+            className={`wf-mcp-chip wf-mcp-chip-${marker.policy}`}
+            role="img"
+            aria-label={marker.toolCount > 1 ? `Uses ${policy.short.toLowerCase()} tools` : policy.label}
+            title={marker.toolCount > 1 ? `Uses ${policy.short.toLowerCase()} tools` : policy.label}
+          >
             {variant === "card" ? policy.short : policy.short.charAt(0)}
           </span>
         ))}

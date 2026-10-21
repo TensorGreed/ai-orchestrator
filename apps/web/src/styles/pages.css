@@ -4842,9 +4842,23 @@ img.mcp-pg-block {
 }
 
 .mcp-call-error {
-  max-width: 36ch;
-  white-space: normal;
+  flex: 1 1 100%;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
   overflow-wrap: anywhere;
+}
+
+.mcp-recent-calls > li {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.mcp-recent-calls > li:last-child {
+  border-bottom: 0;
+}
+
+.mcp-recent-calls > li > .kb-subtle {
+  flex: 0 1 auto;
 }
 
 .mcp-drawer-scrim {

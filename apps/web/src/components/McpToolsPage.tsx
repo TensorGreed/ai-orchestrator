@@ -368,7 +368,11 @@ function ToolDrawer({
             <StatusBadge status={tool.serverStatus} />
             <span className={`mcp-pstate mcp-pstate-${state}`}>{POLICY_LABEL[state]}</span>
             <span className="kb-subtle">
-              {tool.classification.readOnly ? "Read-only" : "Write"} ({tool.classification.source === "manual" ? "set by an admin" : tool.classification.source === "annotation" ? "from the server's annotation" : "unknown counts as write"})
+              {tool.classification.source === "manual"
+                ? `${tool.classification.readOnly ? "Read-only" : "Write"}, set by an admin`
+                : tool.classification.source === "annotation"
+                  ? `${tool.classification.readOnly ? "Read-only" : "Write"}, from the server's annotation`
+                  : "No annotation, so it counts as a write tool"}
             </span>
           </div>
           {tool.annotations?.title && <p className="mcp-drawer-lead">{tool.annotations.title}</p>}
@@ -406,31 +410,17 @@ function ToolDrawer({
               </p>
             )}
             {tool.recentCalls && tool.recentCalls.length > 0 ? (
-              <div className="mcp-table-scroll">
-                <table className="kb-table">
-                  <thead>
-                    <tr>
-                      <th>When</th>
-                      <th>Result</th>
-                      <th className="num">Duration</th>
-                      <th>Source</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tool.recentCalls.map((call, index) => (
-                      <tr key={`${call.startedAt}:${index}`}>
-                        <td>{formatWhen(call.startedAt)}</td>
-                        <td>
-                          <span className={call.ok ? "mcp-result is-ok" : "mcp-result is-err"}>{call.ok ? "ok" : "failed"}</span>
-                          {call.error && <div className="kb-subtle mcp-call-error">{call.error}</div>}
-                        </td>
-                        <td className="num">{formatMs(call.durationMs)}</td>
-                        <td>{call.source}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <ul className="mcp-ov-list mcp-recent-calls">
+                {tool.recentCalls.map((call, index) => (
+                  <li key={`${call.startedAt}:${index}`}>
+                    <span className={call.ok ? "mcp-result is-ok" : "mcp-result is-err"}>{call.ok ? "ok" : "failed"}</span>
+                    <span className="kb-subtle">
+                      {formatMs(call.durationMs)} · {call.source} · {formatWhen(call.startedAt)}
+                    </span>
+                    {call.error && <span className="mcp-call-error">{call.error}</span>}
+                  </li>
+                ))}
+              </ul>
             ) : (
               <p className="kb-subtle">No calls in this window.</p>
             )}

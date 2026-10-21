@@ -378,7 +378,7 @@ function Attention({ overview, onNavigate }: { overview: McpOverview; onNavigate
                 {entry.serverName}
               </button>
               <span className="kb-subtle">
-                up to {formatCount(entry.maxTokens)} tokens · {entry.maxRequestsPerCall} request{entry.maxRequestsPerCall === 1 ? "" : "s"} per call
+                up to {entry.maxTokens.toLocaleString("en-US")} tokens · {entry.maxRequestsPerCall} request{entry.maxRequestsPerCall === 1 ? "" : "s"} per call
                 {entry.allowedModels > 0 ? ` · ${entry.allowedModels} allowed model${entry.allowedModels === 1 ? "" : "s"}` : ""}
               </span>
             </li>

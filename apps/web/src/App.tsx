@@ -2238,10 +2238,12 @@ function StudioApp() {
   }, [activeMode, activeProjectId, authUser, canManageSecrets]);
 
   useEffect(() => {
+    // Wait for the signed-in user: on a reload the role is unknown until the session check returns.
+    if (!authUser) return;
     if ((activeMode === "secrets" || isMcpMode(activeMode)) && !canManageSecrets) {
       setActiveMode("editor");
     }
-  }, [activeMode, canManageSecrets]);
+  }, [activeMode, authUser, canManageSecrets]);
 
   // Phase 10.3 — links between MCP pages and from canvas markers carry a focus (server, rule, tool).
   const [mcpFocus, setMcpFocus] = useState<McpNavTarget | null>(null);
