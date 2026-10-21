@@ -65,6 +65,8 @@ export const workflowNodeSchema = z.object({
     "human_approval",
     "input_validator",
     "output_guardrail",
+    "guard",
+    "guard_protection",
     "basic_llm_chain",
     "qa_chain",
     "summarization_chain",

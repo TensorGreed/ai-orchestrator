@@ -1,6 +1,7 @@
 import type { WorkflowEdge } from "@ai-orchestrator/shared";
 
-export const AGENT_ATTACHMENT_HANDLES = ["chat_model", "memory", "tool", "worker"] as const;
+/** Attachment ports: consumed by the node they hang off, never walked as DAG steps. `guard` and `protection` are Phase 12.1. */
+export const AGENT_ATTACHMENT_HANDLES = ["chat_model", "memory", "tool", "worker", "guard", "protection"] as const;
 const AGENT_ATTACHMENT_SET = new Set<string>(AGENT_ATTACHMENT_HANDLES);
 
 export const BRANCH_HANDLES_IF = new Set(["true", "false"]);

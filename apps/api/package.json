@@ -17,6 +17,7 @@
     "@ai-orchestrator/agent-runtime": "workspace:*",
     "@ai-orchestrator/community-sdk": "workspace:*",
     "@ai-orchestrator/connector-sdk": "workspace:*",
+    "@ai-orchestrator/guard-sdk": "workspace:*",
     "@ai-orchestrator/mcp-sdk": "workspace:*",
     "@ai-orchestrator/provider-sdk": "workspace:*",
     "@ai-orchestrator/shared": "workspace:*",

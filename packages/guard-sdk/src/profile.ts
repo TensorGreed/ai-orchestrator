@@ -73,7 +73,21 @@ export const guardProfileSchema = z.object({
       fallback: guardActionSchema.default("block")
     })
     .default({ dataClasses: {}, fallback: "block" }),
-  dictionaries: z.array(dictionarySchema).default([])
+  dictionaries: z.array(dictionarySchema).default([]),
+  /**
+   * Spotlighting of untrusted content inside the agent loop: tool results are
+   * wrapped in delimiters or datamarked, and the matching system-prompt text
+   * is added. Absent means off, so existing profiles keep their hash.
+   */
+  spotlighting: z
+    .object({
+      mode: z.enum(["off", "delimiters", "datamark"]).default("delimiters"),
+      /** Also add the general prompt-hardening text to the system prompt. */
+      hardenSystemPrompt: z.boolean().default(true)
+    })
+    .optional(),
+  /** Plant a canary token in each agent's system prompt and look for it in tool arguments and the final answer. */
+  canaries: z.object({ enabled: z.boolean().default(true) }).optional()
 });
 
 export type GuardProfileInput = z.input<typeof guardProfileSchema>;

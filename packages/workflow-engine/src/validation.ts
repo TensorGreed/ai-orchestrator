@@ -1,4 +1,12 @@
-import { workflowSchema, type Workflow, type WorkflowValidationIssue, type WorkflowValidationResult } from "@ai-orchestrator/shared";
+import { createDefaultGuardProfile, mergeGuardProfileOverride } from "@ai-orchestrator/guard-sdk";
+import {
+  guardNodeConfigSchema,
+  guardProtectionNodeConfigSchema,
+  workflowSchema,
+  type Workflow,
+  type WorkflowValidationIssue,
+  type WorkflowValidationResult
+} from "@ai-orchestrator/shared";
 import { isAgentAttachmentEdge, isExecutionEdge } from "./graph";
 
 interface GraphMetadata {
@@ -1049,6 +1057,24 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       continue;
     }
 
+    // Phase 12.1 — the protection port belongs to guard nodes, not agents.
+    if (edge.sourceHandle === "protection") {
+      if (sourceNode.type !== "guard") {
+        issues.push({
+          code: "invalid_protection_source",
+          message: "The protection port is only valid on a Guard node.",
+          edgeId: edge.id
+        });
+      } else if (targetNode.type !== "guard_protection") {
+        issues.push({
+          code: "invalid_protection_attachment",
+          message: "Guard protection attachment must target a Protection Provider node.",
+          edgeId: edge.id
+        });
+      }
+      continue;
+    }
+
     if (sourceNode.type !== "agent_orchestrator" && sourceNode.type !== "supervisor_node") {
       issues.push({
         code: "invalid_attachment_source",
@@ -1093,8 +1119,75 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         edgeId: edge.id
       });
     }
+
+    if (edge.sourceHandle === "guard" && targetNode.type !== "guard") {
+      issues.push({
+        code: "invalid_guard_attachment",
+        message: "Agent guard attachment must target a Guard node.",
+        edgeId: edge.id
+      });
+    }
   }
 
+  issues.push(...validateGuardPlacement(workflow));
+  return issues;
+}
+
+/**
+ * Phase 12.1 — guard nodes and protection providers: config, at most one
+ * guard per agent, and a guard on an agent's port is not also a DAG step.
+ */
+function validateGuardPlacement(workflow: Workflow): WorkflowValidationIssue[] {
+  const issues: WorkflowValidationIssue[] = [];
+  const guardPortTargets = new Map<string, string[]>();
+  for (const edge of workflow.edges) {
+    if (edge.sourceHandle !== "guard") continue;
+    const list = guardPortTargets.get(edge.source) ?? [];
+    list.push(edge.target);
+    guardPortTargets.set(edge.source, list);
+  }
+  for (const [agentId, targets] of guardPortTargets) {
+    if (targets.length > 1) {
+      issues.push({ code: "multiple_guard_attachments", message: "An agent takes at most one Guard node on its guard port.", nodeId: agentId });
+    }
+  }
+  const portGuards = new Set([...guardPortTargets.values()].flat());
+  for (const node of workflow.nodes) {
+    if (node.type === "guard") {
+      const parsed = guardNodeConfigSchema.safeParse(node.config ?? {});
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) {
+          issues.push({ code: "invalid_guard_config", message: `Guard ${issue.path.join(".") || "config"}: ${issue.message}`, nodeId: node.id });
+        }
+      } else if (parsed.data.profileOverride) {
+        try {
+          mergeGuardProfileOverride(createDefaultGuardProfile(), parsed.data.profileOverride);
+        } catch (error) {
+          issues.push({ code: "invalid_guard_profile_override", message: error instanceof Error ? error.message : String(error), nodeId: node.id });
+        }
+      }
+      if (portGuards.has(node.id)) {
+        const onDag = workflow.edges.some(
+          (edge) => (edge.target === node.id && edge.sourceHandle !== "guard") || (edge.source === node.id && edge.sourceHandle !== "protection")
+        );
+        if (onDag) {
+          issues.push({
+            code: "guard_port_on_dag",
+            message: "A Guard node on an agent's guard port cannot also sit on DAG edges. Use a second Guard node for the DAG.",
+            nodeId: node.id
+          });
+        }
+      }
+    }
+    if (node.type === "guard_protection") {
+      const parsed = guardProtectionNodeConfigSchema.safeParse(node.config ?? {});
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) {
+          issues.push({ code: "invalid_guard_protection_config", message: `Protection Provider ${issue.path.join(".") || "config"}: ${issue.message}`, nodeId: node.id });
+        }
+      }
+    }
+  }
   return issues;
 }
 

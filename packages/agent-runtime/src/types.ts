@@ -17,6 +17,69 @@ export interface AgentRuntimeContext {
   resolveSecret: (secretRef?: { secretId: string }) => Promise<string | undefined>;
   memoryStore?: AgentSessionMemoryStore;
   toolDataStore?: AgentSessionToolDataStore;
+  /** Phase 12.1 — guard hooks run inside the loop when the agent is guarded. */
+  guard?: AgentGuardHooks;
+}
+
+/**
+ * Phase 12.1 — the narrow hook interface the agent loop calls at each trust
+ * boundary. The runtime knows nothing about detectors or profiles: the
+ * caller (the workflow engine) evaluates the content and answers with a
+ * decision. Hook points:
+ * - `prompt`: before each model call, for user input added since the last call;
+ * - `tool_arguments`: before each external tool call, with the tool's schema;
+ * - `tool_result`: after each external tool result, before the model sees it
+ *   (labelled `untrusted_external`; `spotlight` then marks the text);
+ * - `final_output`: before the final answer is returned.
+ */
+export type AgentGuardChannel = "prompt" | "tool_arguments" | "tool_result" | "final_output";
+export type AgentGuardLabel = "trusted" | "user" | "untrusted_external" | "sensitive";
+
+export interface AgentGuardCheck {
+  channel: AgentGuardChannel;
+  content: unknown;
+  labels: AgentGuardLabel[];
+  iteration: number;
+  tool?: { name: string; inputSchema?: Record<string, unknown>; toolCallId?: string };
+}
+
+export type AgentGuardDecision =
+  | { outcome: "allow" }
+  /** Content was redacted, masked, protected or transformed: continue with this instead. */
+  | { outcome: "rewrite"; content: unknown }
+  /** Tool calls become tool errors, tool results become a notice, prompts and final answers stop the node. */
+  | { outcome: "block"; message: string }
+  /** A person must decide: the node pauses through the approval hand-off. */
+  | { outcome: "pause"; message: string };
+
+export interface AgentGuardHooks {
+  /** Text placed at the start of the system prompt: hardening, spotlighting instructions, a canary line. */
+  systemPromptAddition?(): string | undefined;
+  check(input: AgentGuardCheck): Promise<AgentGuardDecision>;
+  /** Mark a serialized untrusted tool result before the model sees it. */
+  spotlight?(text: string, context: { toolName: string; iteration: number }): string;
+}
+
+/**
+ * Thrown out of `run()` when a guard decision stops the agent: a block on the
+ * prompt or the final answer, or a pause for approval on any channel. Unlike
+ * other failures it is not turned into an `error` stop reason.
+ */
+export class AgentGuardInterrupt extends Error {
+  readonly reason: "blocked" | "approval_required";
+  readonly channel: AgentGuardChannel;
+  readonly iteration: number;
+  constructor(reason: "blocked" | "approval_required", channel: AgentGuardChannel, iteration: number, message: string) {
+    super(message);
+    this.name = "AgentGuardInterrupt";
+    this.reason = reason;
+    this.channel = channel;
+    this.iteration = iteration;
+  }
+}
+
+export function isAgentGuardInterrupt(error: unknown): error is AgentGuardInterrupt {
+  return error instanceof AgentGuardInterrupt || (error instanceof Error && error.name === "AgentGuardInterrupt" && "reason" in error);
 }
 
 export interface AgentRuntimeAdapter {
