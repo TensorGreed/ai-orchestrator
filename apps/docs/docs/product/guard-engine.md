@@ -2,7 +2,7 @@
 
 L2M Guard is a security proxy for AI traffic. It inspects what flows between users, models and tools, decides what to do with it, and records why. The engine lives in `@ai-orchestrator/guard-sdk` as a standalone library: it knows nothing about workflows, nodes or HTTP, and it never makes a network call of its own.
 
-This page describes the engine. For what is not yet connected to the rest of L2M, see [What is not wired yet](#what-is-not-wired-yet).
+This page describes the engine. [Guard in workflows](./guard.md) covers the Guard node, the agent guard port, stored profiles and bindings, the protection port and guard events. What is still to come is listed under [Not yet available](#not-yet-available).
 
 ## Concepts
 
@@ -84,7 +84,7 @@ A protection provider turns a sensitive value into a token (`protect`) and, when
 | `aes_gcm` | yes | no | AES-256-GCM, random nonce, key id in the token, data class bound as authenticated data |
 | `token_vault` | yes | optional | tokens kept in an injected store; random, deterministic, or format-preserving (card tokens stay Luhn-valid) |
 
-Key material arrives through an injected key resolver. The library never reads environment variables or files; the wiring step will supply a resolver backed by `SecretService`. The vault's storage is an interface too, with an in-memory implementation for tests and single-process use.
+Key material arrives through an injected key resolver. The library never reads environment variables or files; in L2M the resolver reads stored secrets through `SecretService`. The vault's storage is an interface too, with an in-memory implementation for tests and single-process use; L2M stores it encrypted in the database.
 
 ### Fallback
 
@@ -259,13 +259,11 @@ What this release of the engine covers, as a library:
 | LLM09 Misinformation | not covered; a grounding check is planned |
 | LLM10 Unbounded consumption | argument size and depth limits; the row cap in the SQL guard |
 
-## What is not wired yet
+## Not yet available
 
-This release is the engine only. Nothing in the workflow engine, the agent runtime, the API or the Studio calls it yet. A later release adds:
+The engine is wired into the Guard node, the agent guard port, automatic profiles, the protection port and guard events; see [Guard in workflows](./guard.md). Still to come:
 
-- the `guard` node with `pass`, `blocked` and `review` outputs, and the `guard` attachment port on Agent and Supervisor nodes;
-- automatic boundary profiles per project and workflow, profile storage, versioning and git sync, and the profile editor;
-- the `protection` port, a `SecretService`-backed key resolver and a database-backed token vault;
-- `guard_events` storage, the Trace tab, run tape and Security page;
+- git sync for profiles (export and import JSON in the meantime);
 - local classifier models and the LLM judge;
-- the provenance tracking that carries labels through templates and the agent context.
+- the provenance tracking that carries labels through templates and the agent context;
+- automatic checks on HTTP Request and SQL connector nodes, and on the MCP and AI gateways.
