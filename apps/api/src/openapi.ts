@@ -1120,6 +1120,59 @@ export const openApiSpec = {
         }
       }
     },
+    "/api/mcp/tools": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "Tool catalogue across every registered server: annotations, classification, the caller's access, telemetry and the workflow nodes that use each tool (builders)",
+        parameters: [
+          { name: "projectId", in: "query", required: false, schema: { type: "string" } },
+          { name: "window", in: "query", required: false, schema: { type: "string", enum: ["24h", "7d", "30d"], default: "7d" } },
+          { name: "serverIds", in: "query", required: false, description: "Comma-separated registry server ids", schema: { type: "string" } },
+          { name: "detail", in: "query", required: false, description: "false skips telemetry and usages", schema: { type: "boolean", default: true } }
+        ],
+        responses: {
+          "200": { description: "Servers and one row per tool" },
+          "400": { description: "Unknown window" }
+        }
+      }
+    },
+    "/api/mcp/changes": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "Chronological MCP changes feed: schema snapshots, breaking-change acceptances, status transitions, policy, classification, toolset, client, OAuth and sampling events (builders; actors and audit metadata for admins only)",
+        parameters: [
+          { name: "serverId", in: "query", required: false, schema: { type: "string" } },
+          {
+            name: "kind",
+            in: "query",
+            required: false,
+            description: "Comma-separated kinds: schema, acceptance, status, policy, classification, toolset, client, oauth, sampling, catalog, server",
+            schema: { type: "string" }
+          },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", default: 100, maximum: 500 } }
+        ],
+        responses: {
+          "200": { description: "Newest first" },
+          "400": { description: "Unknown kind" }
+        }
+      }
+    },
+    "/api/mcp/overview": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "MCP fleet health: servers by status, pending breaking changes, OAuth connections needing attention, open elicitation questions, sampling, busiest and most error-prone tools, active gateway clients and the latest changes (builders)",
+        parameters: [
+          { name: "window", in: "query", required: false, schema: { type: "string", enum: ["24h", "7d", "30d"], default: "7d" } }
+        ],
+        responses: {
+          "200": { description: "Overview" },
+          "400": { description: "Unknown window" }
+        }
+      }
+    },
     "/api/mcp/servers/{id}/probe": {
       post: {
         tags: ["MCP"],
