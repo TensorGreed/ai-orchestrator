@@ -1,5 +1,6 @@
 import { WORKFLOW_SCHEMA_VERSION, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeType } from "@ai-orchestrator/shared";
 import type { Edge, Node } from "reactflow";
+import type { McpCanvasMarker, McpNavTarget } from "./mcp-control-plane";
 import {
   computeAttachmentSlots,
   findHubOf,
@@ -58,6 +59,13 @@ export interface EditorNodeData {
   attachedAs?: "chat_model" | "memory" | "tool" | "worker";
   /** Which side of a satellite its label sits on (away from the hub). */
   labelSide?: "top" | "bottom" | "left" | "right";
+  /**
+   * Phase 10.3 — render-time only: the registered server's probe status, a pending
+   * breaking change and the current user's policy state for an MCP Tool node, and
+   * where clicking a marker goes.
+   */
+  mcpMarker?: McpCanvasMarker;
+  onOpenMcpTarget?: (target: McpNavTarget) => void;
 }
 
 export type EditorNode = Node<EditorNodeData>;

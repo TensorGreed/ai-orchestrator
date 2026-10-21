@@ -90,6 +90,58 @@ export const McpServersIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const McpOverviewIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 17a8 8 0 1 1 16 0" />
+    <path d="m12 17 4-5" />
+    <path d="M4 20h16" />
+  </Svg>
+);
+
+export const McpToolsIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M14.5 5.5a4 4 0 0 0 4.9 4.9L21 12l-3 3-1.6-1.6a4 4 0 0 0-4.9-4.9" />
+    <path d="M12.5 8.5 4 17a2.1 2.1 0 0 0 3 3l8.5-8.5" />
+  </Svg>
+);
+
+export const McpPoliciesIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3 4 6v6c0 4.5 3.4 8.2 8 9 4.6-.8 8-4.5 8-9V6z" />
+    <path d="m9 12 2 2 4-4" />
+  </Svg>
+);
+
+export const McpToolsetsIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m12 3 9 5-9 5-9-5z" />
+    <path d="m3 13 9 5 9-5" />
+  </Svg>
+);
+
+export const McpClientsIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 3v4M15 3v4" />
+    <path d="M6 7h12v4a6 6 0 0 1-12 0z" />
+    <path d="M12 17v4" />
+  </Svg>
+);
+
+export const McpPlaygroundIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3" />
+    <path d="M7.5 14h9" />
+  </Svg>
+);
+
+export const McpChangesIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3 12a9 9 0 1 0 3-6.7" />
+    <path d="M3 4v4h4" />
+    <path d="M12 8v4l3 2" />
+  </Svg>
+);
+
 export const SecretsIcon = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="8" cy="14" r="4" />
@@ -200,7 +252,14 @@ export const MODE_ICONS: Record<StudioMode, (p: IconProps) => ReactElement> = {
   chat: ChatIcon,
   evaluations: EvaluationsIcon,
   knowledge: KnowledgeIcon,
-  mcp: McpServersIcon,
+  mcp: McpOverviewIcon,
+  "mcp-servers": McpServersIcon,
+  "mcp-tools": McpToolsIcon,
+  "mcp-policies": McpPoliciesIcon,
+  "mcp-toolsets": McpToolsetsIcon,
+  "mcp-clients": McpClientsIcon,
+  "mcp-playground": McpPlaygroundIcon,
+  "mcp-changes": McpChangesIcon,
   secrets: SecretsIcon,
   settings: SettingsIcon
 };

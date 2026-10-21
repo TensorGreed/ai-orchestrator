@@ -10,11 +10,43 @@ export type StudioMode =
   | "evaluations"
   | "knowledge"
   | "mcp"
+  | "mcp-servers"
+  | "mcp-tools"
+  | "mcp-policies"
+  | "mcp-toolsets"
+  | "mcp-clients"
+  | "mcp-playground"
+  | "mcp-changes"
   | "secrets"
   | "settings";
 
-/** Ordered workspace navigation. `adminOnly` items render only for builders and admins (the users who can manage secrets). */
-export const STUDIO_MODE_ITEMS: ReadonlyArray<{ mode: StudioMode; label: string; adminOnly?: boolean }> = [
+export interface StudioModeItem {
+  mode: StudioMode;
+  label: string;
+  /** Renders only for builders and admins (the users who can manage secrets). */
+  adminOnly?: boolean;
+  /** Sidebar group; items without one sit in the Workspace list. */
+  section?: "mcp";
+}
+
+/** Phase 10.3 — the MCP control plane section. Builders and admins see it; admin-only actions stay inside the pages. */
+export const MCP_MODE_ITEMS: ReadonlyArray<StudioModeItem> = [
+  { mode: "mcp", label: "Overview", adminOnly: true, section: "mcp" },
+  { mode: "mcp-servers", label: "Servers", adminOnly: true, section: "mcp" },
+  { mode: "mcp-tools", label: "Tools", adminOnly: true, section: "mcp" },
+  { mode: "mcp-policies", label: "Policies", adminOnly: true, section: "mcp" },
+  { mode: "mcp-toolsets", label: "Toolsets", adminOnly: true, section: "mcp" },
+  { mode: "mcp-clients", label: "Clients", adminOnly: true, section: "mcp" },
+  { mode: "mcp-playground", label: "Playground", adminOnly: true, section: "mcp" },
+  { mode: "mcp-changes", label: "Changes", adminOnly: true, section: "mcp" }
+];
+
+export function isMcpMode(mode: StudioMode): boolean {
+  return mode === "mcp" || mode.startsWith("mcp-");
+}
+
+/** Ordered navigation: the Workspace list, then the MCP section, then Secrets and Settings. */
+export const STUDIO_MODE_ITEMS: ReadonlyArray<StudioModeItem> = [
   { mode: "dashboard", label: "Home" },
   { mode: "editor", label: "Editor" },
   { mode: "templates", label: "Templates" },
@@ -23,10 +55,15 @@ export const STUDIO_MODE_ITEMS: ReadonlyArray<{ mode: StudioMode; label: string;
   { mode: "chat", label: "Chat" },
   { mode: "evaluations", label: "Evaluations" },
   { mode: "knowledge", label: "Knowledge" },
-  { mode: "mcp", label: "MCP servers", adminOnly: true },
+  ...MCP_MODE_ITEMS,
   { mode: "secrets", label: "Secrets", adminOnly: true },
   { mode: "settings", label: "Settings" }
 ];
+
+/** Label used outside the sidebar group (command palette, page titles): "MCP · Tools". */
+export function studioModeLabel(item: StudioModeItem): string {
+  return item.section === "mcp" ? `MCP · ${item.label}` : item.label;
+}
 
 export type RunStatusState = "idle" | "running" | "ok" | "error";
 

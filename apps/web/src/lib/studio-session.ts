@@ -13,6 +13,14 @@ const STUDIO_MODES: StudioMode[] = [
   "executions",
   "chat",
   "evaluations",
+  "mcp",
+  "mcp-servers",
+  "mcp-tools",
+  "mcp-policies",
+  "mcp-toolsets",
+  "mcp-clients",
+  "mcp-playground",
+  "mcp-changes",
   "secrets",
   "settings"
 ];

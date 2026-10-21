@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Project } from "@ai-orchestrator/shared";
 import { SHELL_DRAWER_MEDIA_QUERY, useMediaQuery } from "../lib/use-media-query";
 import { CloseIcon, CollapseIcon, ExpandIcon, MenuIcon, MODE_ICONS, PlusIcon, ProductMark } from "./shell-icons";
-import { STUDIO_MODE_ITEMS, type StudioMode } from "./studio-layout-types";
+import { STUDIO_MODE_ITEMS, type StudioMode, type StudioModeItem } from "./studio-layout-types";
 
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "l2m:sidebar-collapsed";
 
@@ -162,7 +162,9 @@ export function AppSidebar({
     if (!isDrawer && requestedOpen) setDrawerOpen(false);
   }, [isDrawer, requestedOpen, setDrawerOpen]);
 
-  const items = STUDIO_MODE_ITEMS.filter((item) => !item.adminOnly || canManageSecrets);
+  const visible = STUDIO_MODE_ITEMS.filter((item) => !item.adminOnly || canManageSecrets);
+  const items = visible.filter((item) => !item.section);
+  const mcpItems = visible.filter((item) => item.section === "mcp");
   const activeProject = projects?.find((project) => project.id === activeProjectId);
   const showProjects = Boolean(projects && onChangeActiveProject);
 
@@ -172,6 +174,33 @@ export function AppSidebar({
   const asideClassName = ["app-sidebar", showCollapsed && "is-collapsed", isDrawer && "is-drawer", open && "is-drawer-open"]
     .filter(Boolean)
     .join(" ");
+
+  const renderItem = (item: StudioModeItem) => {
+    const Icon = MODE_ICONS[item.mode];
+    const active = item.mode === activeMode;
+    // The collapsed rail shows icons only, so the tooltip (which names the section) is the accessible name there.
+    const tooltip = item.section === "mcp" ? `MCP ${item.label.toLowerCase()}` : item.label;
+    return (
+      <li key={item.mode}>
+        <button
+          type="button"
+          className={active ? "sidebar-item is-active" : "sidebar-item"}
+          onClick={() => {
+            onModeChange(item.mode);
+            if (isDrawer) setDrawerOpen(false);
+          }}
+          aria-current={active ? "page" : undefined}
+          aria-label={showCollapsed ? tooltip : undefined}
+          title={tooltip}
+        >
+          <span className="sidebar-item-icon">
+            <Icon />
+          </span>
+          <span className="sidebar-item-label">{item.label}</span>
+        </button>
+      </li>
+    );
+  };
 
   return (
     <>
@@ -238,31 +267,15 @@ export function AppSidebar({
 
         <nav className="sidebar-nav" aria-label="Workspace">
           <div className="sidebar-section-title">Workspace</div>
-          <ul className="sidebar-list">
-            {items.map((item) => {
-              const Icon = MODE_ICONS[item.mode];
-              const active = item.mode === activeMode;
-              return (
-                <li key={item.mode}>
-                  <button
-                    type="button"
-                    className={active ? "sidebar-item is-active" : "sidebar-item"}
-                    onClick={() => {
-                      onModeChange(item.mode);
-                      if (isDrawer) setDrawerOpen(false);
-                    }}
-                    aria-current={active ? "page" : undefined}
-                    title={item.label}
-                  >
-                    <span className="sidebar-item-icon">
-                      <Icon />
-                    </span>
-                    <span className="sidebar-item-label">{item.label}</span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+          <ul className="sidebar-list">{items.map(renderItem)}</ul>
+          {mcpItems.length > 0 && (
+            <div className="sidebar-group" role="group" aria-labelledby="sidebar-section-mcp">
+              <div className="sidebar-section-title" id="sidebar-section-mcp">
+                MCP
+              </div>
+              <ul className="sidebar-list">{mcpItems.map(renderItem)}</ul>
+            </div>
+          )}
         </nav>
 
         <div className="sidebar-foot">

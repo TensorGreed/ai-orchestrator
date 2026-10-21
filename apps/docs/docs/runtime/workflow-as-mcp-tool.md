@@ -17,7 +17,7 @@ L2M agents call MCP tools, and L2M workflows can **be** MCP tools. That unlocks:
 Workflows with an `mcp_server_trigger` are served through the [MCP gateway](../product/mcp-gateway):
 
 1. Add an **Expose as MCP Tool** trigger to the workflow and set its `toolName`, `toolDescription` and `inputSchema`. Save.
-2. On the **MCP servers** page, open **Toolsets**, create a toolset (or edit one) and add the workflow. The toolset's endpoint is `/mcp/<toolset-slug>`.
+2. In the sidebar's **MCP** section, open **Toolsets**, create a toolset (or edit one) and add the workflow. The toolset's endpoint is `/mcp/<toolset-slug>`.
 3. Open **Clients**, create a client scoped to the toolset, and copy its token and the config snippet into your MCP client.
 
 The client connects to `POST /mcp/<toolset-slug>` over the MCP Streamable HTTP transport, lists the tools and calls them. Each call runs the workflow with the tool arguments as its input, records the run in execution history (trigger type `mcp_gateway`), reports a progress step per completed node, and returns the workflow output as the tool result. A canceled call cancels the run. The same toolset can also re-expose tools of registered MCP servers next to your workflows.

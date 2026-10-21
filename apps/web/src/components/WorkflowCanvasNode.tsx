@@ -2,6 +2,7 @@ import { Handle, Position, type NodeProps } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
 import { AGENT_ATTACHMENT_STYLES, type AgentAttachmentHandle } from "../lib/agent-attachments";
 import { ORBIT, emptySlots, isHubType, ringGeometry, summarizeNode } from "../lib/stages";
+import type { McpCanvasMarker, McpNavTarget } from "../lib/mcp-control-plane";
 import { NodeTypeIcon } from "./node-icons";
 
 const TERMINAL_TYPES = new Set([
@@ -158,6 +159,7 @@ function CardNode({ data, selected }: VariantProps) {
         <div className="wf-card-summary" title={summary}>
           {summary}
         </div>
+        {data.mcpMarker && <McpMarker marker={data.mcpMarker} onOpen={data.onOpenMcpTarget} variant="card" />}
       </div>
       <span className={`wf-status-ring wf-status-${status ?? "idle"}`} title={statusTitle(status)} aria-label={statusTitle(status)} />
       <StructuralPorts data={data} />
@@ -345,6 +347,7 @@ function SatelliteNode({ data, selected }: VariantProps) {
         <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="ai" />
       </div>
       <span className={`wf-status-ring wf-status-${status ?? "idle"} wf-satellite-status`} title={statusTitle(status)} aria-label={statusTitle(status)} />
+      {data.mcpMarker && <McpMarker marker={data.mcpMarker} onOpen={data.onOpenMcpTarget} variant="satellite" />}
       <div className={`wf-satellite-label wf-satellite-label-${data.labelSide ?? "bottom"}`}>
         <span className="wf-satellite-port">{AGENT_ATTACHMENT_STYLES[port].label}</span>
         <span className="wf-satellite-name" title={data.label}>
@@ -355,6 +358,102 @@ function SatelliteNode({ data, selected }: VariantProps) {
         </span>
       </div>
       <Telemetry data={data} />
+    </div>
+  );
+}
+
+const POLICY_CHIP: Record<NonNullable<McpCanvasMarker["policy"]>, { short: string; label: string }> = {
+  blocked: { short: "Blocked", label: "Blocked for you by policy" },
+  destructive: { short: "Destructive", label: "Destructive tool" },
+  write: { short: "Write", label: "Write tool" },
+  read_only: { short: "Read-only", label: "Read-only tool" }
+};
+
+/**
+ * Phase 10.3 — registered server status, pending breaking change and policy state on an
+ * MCP Tool node. Colour always comes with text: the dot's accessible name and tooltip
+ * carry the status, and chips are labelled.
+ */
+function McpMarker({
+  marker,
+  onOpen,
+  variant
+}: {
+  marker: McpCanvasMarker;
+  onOpen?: (target: McpNavTarget) => void;
+  variant: "card" | "satellite";
+}) {
+  const stop = (event: { stopPropagation: () => void }) => event.stopPropagation();
+  const open = (target: McpNavTarget) => (event: { stopPropagation: () => void }) => {
+    event.stopPropagation();
+    onOpen?.(target);
+  };
+  const serverTarget: McpNavTarget = { page: "servers", serverId: marker.serverId };
+  const blockedTarget: McpNavTarget = marker.blockingRuleId
+    ? { page: "policies", policyId: marker.blockingRuleId }
+    : { page: "tools", serverId: marker.serverId };
+  const statusName = `MCP server ${marker.serverName}: ${marker.statusLabel}`;
+  const policy = marker.policy && marker.policy !== "read_only" ? POLICY_CHIP[marker.policy] : null;
+  const partialBlock = marker.policy !== "blocked" && marker.blockedCount > 0;
+  return (
+    <div className={`wf-mcp-marker wf-mcp-marker-${variant} nodrag nopan`} title={marker.description} onMouseDown={stop}>
+      <button
+        type="button"
+        className={`wf-mcp-status mcp-status-${marker.status}`}
+        aria-label={`${statusName}. Open server`}
+        title={marker.description}
+        disabled={!onOpen}
+        onClick={open(serverTarget)}
+      >
+        <span className={`mcp-dot mcp-status-${marker.status}`} aria-hidden="true" />
+        {variant === "card" && <span className="wf-mcp-status-text">{marker.statusLabel}</span>}
+      </button>
+      {marker.breakingPending && (
+        <button
+          type="button"
+          className="wf-mcp-chip wf-mcp-chip-breaking"
+          aria-label={`Breaking change pending on ${marker.serverName}. Open server to review`}
+          title={`Breaking change pending on ${marker.serverName} — open the server to review it`}
+          disabled={!onOpen}
+          onClick={open(serverTarget)}
+        >
+          {variant === "card" ? "Breaking change" : "!"}
+        </button>
+      )}
+      {policy &&
+        (marker.policy === "blocked" ? (
+          <button
+            type="button"
+            className="wf-mcp-chip wf-mcp-chip-blocked"
+            aria-label={`${policy.label}${marker.blockingRuleName ? ` (rule ${marker.blockingRuleName})` : ""}. Open ${marker.blockingRuleId ? "the rule" : "the tool"}`}
+            title={`${policy.label}${marker.blockingRuleName ? ` by rule “${marker.blockingRuleName}”` : ""}`}
+            disabled={!onOpen}
+            onClick={open(blockedTarget)}
+          >
+            {variant === "card" ? policy.short : "⊘"}
+          </button>
+        ) : (
+          <span
+            className={`wf-mcp-chip wf-mcp-chip-${marker.policy}`}
+            role="img"
+            aria-label={marker.toolCount > 1 ? `Uses ${policy.short.toLowerCase()} tools` : policy.label}
+            title={marker.toolCount > 1 ? `Uses ${policy.short.toLowerCase()} tools` : policy.label}
+          >
+            {variant === "card" ? policy.short : policy.short.charAt(0)}
+          </span>
+        ))}
+      {partialBlock && (
+        <button
+          type="button"
+          className="wf-mcp-chip wf-mcp-chip-blocked"
+          aria-label={`${marker.blockedCount} of ${marker.toolCount} tools blocked for you. Open ${marker.blockingRuleId ? "the rule" : "the tools"}`}
+          title={`${marker.blockedCount} of ${marker.toolCount} tools blocked for you by policy`}
+          disabled={!onOpen}
+          onClick={open(blockedTarget)}
+        >
+          {variant === "card" ? `${marker.blockedCount} blocked` : "⊘"}
+        </button>
+      )}
     </div>
   );
 }

@@ -437,8 +437,8 @@ as a local file or an endpoint on the user's own instance.
 - [x] Policy evaluation visible in the Trace tab: "tool X hidden by policy Y" (`_toolPolicy` on agent outputs with the evaluated subject; `POST /api/mcp/policies/evaluate` dry-run)
 
 ### 10.3 Control plane UI
-- [ ] "MCP" section in the sidebar: servers, tools, policies, changes feed
-- [ ] Orbit canvas integration: tool satellites show probe status and policy state
+- [x] "MCP" section in the sidebar: servers, tools, policies, changes feed (Overview, Servers, Tools, Policies, Toolsets, Clients, Playground and Changes pages; `GET /api/mcp/overview`, `/api/mcp/tools`, `/api/mcp/changes`)
+- [x] Orbit canvas integration: tool satellites show probe status and policy state (plus a pending breaking-change marker; one cached request per workflow, refreshed on focus)
 
 ### 10.4 L2M as an MCP server and gateway
 **Why:** today a workflow exposed with `mcp_server_trigger` is reachable only through a custom

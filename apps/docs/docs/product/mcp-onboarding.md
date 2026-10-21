@@ -10,7 +10,7 @@ Everything runs on your own instance. L2M never fetches a catalog or a config fr
 
 ## Import client config files
 
-On the **MCP servers** page, choose **Import config**, then drop a file, choose one, or paste its JSON. L2M shows a preview of every server entry before anything is saved:
+Under **MCP → Servers**, choose **Import config**, then drop a file, choose one, or paste its JSON. L2M shows a preview of every server entry before anything is saved:
 
 - the adapter and connection it maps to (`stdio_mcp` for local commands, `http_mcp` for remote URLs);
 - which values become **secrets** and which values you still need to enter;
@@ -225,7 +225,7 @@ Why: a stdio server is a process L2M starts on its own host, with the host's net
 
 ## Playground
 
-The **Playground** tab on the MCP servers page is for builders and admins. Pick a registered server and one of the tools from its current snapshot (probe the server first if it has none). The tool list shows each tool's read-only or write classification and whether tool policy blocks it for you.
+The **MCP → Playground** page is for builders and admins. Pick a registered server and one of the tools from its current snapshot (probe the server first if it has none). The tool list shows each tool's read-only or write classification and whether tool policy blocks it for you.
 
 Arguments are entered through a form generated from the tool's input schema:
 

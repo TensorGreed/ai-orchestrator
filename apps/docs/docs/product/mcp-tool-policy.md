@@ -12,7 +12,7 @@ Policy is enforced in the runtime, not only in the UI. Blocked tools are removed
 
 ## Rules
 
-Rules live on the **MCP servers** page, in the **Policies** view.
+Rules live under **MCP → Policies** in the sidebar.
 
 | Field | Meaning |
 |---|---|

@@ -99,6 +99,7 @@ import { AuditExportService } from "./services/audit-export-service";
 import { McpProbeService, serverConfigFromRecord } from "./services/mcp-probe-service";
 import { McpElicitationService } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
+import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import {
   evaluateToolForContext,
   manualReadOnlyFor,
@@ -9757,6 +9758,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     canExecuteInProject: (user, projectId) => rbacService.can(user, projectId, "workflow:execute"),
     auditUser: (request, user, event) => audit(request, user, event)
+  });
+
+  // Phase 10.3 — read-only routes behind the MCP control plane pages.
+  registerMcpControlPlaneRoutes({
+    app,
+    store,
+    oauth: mcpOAuthService,
+    usesOAuth: (server) => McpOAuthService.usesOAuth(server),
+    latency: (serverId) => mcpProbeService.latency(serverId),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 
   // -------------------------------------------------------------------------

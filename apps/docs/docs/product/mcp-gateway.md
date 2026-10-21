@@ -15,7 +15,7 @@ MCP client ──Bearer token──▶ POST /mcp/<toolset>
 
 ## Toolsets
 
-Toolsets live on the **MCP servers** page, in the **Toolsets** view. Admins create and edit them; builders can read them.
+Toolsets live under **MCP → Toolsets** in the sidebar. Admins create and edit them; builders can read them.
 
 | Field | Meaning |
 |---|---|
@@ -42,7 +42,7 @@ The toolset detail shows the endpoint URL with a copy button and a live preview 
 
 ## Clients
 
-Clients live in the **Clients** view. Admins create and revoke them; builders can list them and see their usage.
+Clients live under **MCP → Clients**. Admins create and revoke them; builders can list them and see their usage.
 
 | Field | Meaning |
 |---|---|

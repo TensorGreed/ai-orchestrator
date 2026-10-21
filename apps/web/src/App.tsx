@@ -99,12 +99,17 @@ import { AttachmentSpokeEdge, WorkflowCanvasEdge } from "./components/WorkflowCa
 import { NodeInspector, buildNodeSlots, buildNodeTrace, type NodeInputOption } from "./components/NodeConfigModal";
 import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
-import { deriveRunStatus } from "./components/studio-layout-types";
+import { deriveRunStatus, isMcpMode, type StudioMode } from "./components/studio-layout-types";
 import { ExecutionHistoryPanel } from "./components/ExecutionHistoryPanel";
 import { McpElicitationForm } from "./components/McpElicitationForm";
 import { SettingsPage } from "./components/SettingsPage";
 import { KnowledgeBasePage } from "./components/KnowledgeBasePage";
 import { McpServersPage } from "./components/McpServersPage";
+import { McpOverviewPage } from "./components/McpOverviewPage";
+import { McpToolsPage } from "./components/McpToolsPage";
+import { McpChangesPage } from "./components/McpChangesPage";
+import type { McpNavTarget } from "./lib/mcp-control-plane";
+import { useMcpCanvasStatus } from "./lib/use-mcp-canvas-status";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
@@ -1098,6 +1103,17 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
   return Boolean(target.closest(".node-modal-shell"));
 }
+
+const MCP_MODE_BY_PAGE: Record<McpNavTarget["page"], StudioMode> = {
+  overview: "mcp",
+  servers: "mcp-servers",
+  tools: "mcp-tools",
+  policies: "mcp-policies",
+  toolsets: "mcp-toolsets",
+  clients: "mcp-clients",
+  playground: "mcp-playground",
+  changes: "mcp-changes"
+};
 
 function StudioApp() {
   const {
@@ -2222,10 +2238,30 @@ function StudioApp() {
   }, [activeMode, activeProjectId, authUser, canManageSecrets]);
 
   useEffect(() => {
-    if (activeMode === "secrets" && !canManageSecrets) {
+    // Wait for the signed-in user: on a reload the role is unknown until the session check returns.
+    if (!authUser) return;
+    if ((activeMode === "secrets" || isMcpMode(activeMode)) && !canManageSecrets) {
       setActiveMode("editor");
     }
-  }, [activeMode, canManageSecrets]);
+  }, [activeMode, authUser, canManageSecrets]);
+
+  // Phase 10.3 — links between MCP pages and from canvas markers carry a focus (server, rule, tool).
+  const [mcpFocus, setMcpFocus] = useState<McpNavTarget | null>(null);
+  const navigateMcp = useCallback(
+    (target: McpNavTarget) => {
+      setMcpFocus(target);
+      setActiveMode(MCP_MODE_BY_PAGE[target.page]);
+    },
+    [setActiveMode]
+  );
+  // A focus belongs to the page it was opened for; leaving that page drops it.
+  useEffect(() => {
+    if (mcpFocus && MCP_MODE_BY_PAGE[mcpFocus.page] !== activeMode) setMcpFocus(null);
+  }, [activeMode, mcpFocus]);
+  const mcpCanvasMarkers = useMcpCanvasStatus(nodes, {
+    projectId: currentWorkflow.projectId ?? activeProjectId,
+    enabled: activeMode === "editor" && canManageSecrets
+  });
 
   useEffect(() => {
     if (activeMode !== "executions" || !authUser) {
@@ -4993,6 +5029,8 @@ function StudioApp() {
               onSessionIdChange={setSessionId}
               onBeforeTidy={pushHistorySnapshot}
               importPanel={importPanelBinding}
+              mcpMarkers={mcpCanvasMarkers}
+              onOpenMcpTarget={navigateMcp}
             />
           )}
 
@@ -5281,12 +5319,53 @@ function StudioApp() {
             />
           )}
 
-          {activeMode === "mcp" && (
+          {activeMode === "mcp" && <McpOverviewPage onNavigate={navigateMcp} />}
+
+          {(activeMode === "mcp-servers" ||
+            activeMode === "mcp-policies" ||
+            activeMode === "mcp-toolsets" ||
+            activeMode === "mcp-clients" ||
+            activeMode === "mcp-playground") && (
             <McpServersPage
+              key={activeMode}
+              view={
+                activeMode === "mcp-policies"
+                  ? "policies"
+                  : activeMode === "mcp-toolsets"
+                    ? "toolsets"
+                    : activeMode === "mcp-clients"
+                      ? "clients"
+                      : activeMode === "mcp-playground"
+                        ? "playground"
+                        : "servers"
+              }
+              focusServerId={mcpFocus?.page === "servers" ? mcpFocus.serverId : null}
+              focusPolicyId={mcpFocus?.page === "policies" ? mcpFocus.policyId : null}
               isAdmin={authUser?.role === "admin"}
               canBuild={authUser?.role === "admin" || authUser?.role === "builder"}
               currentUserId={authUser?.id}
               activeProjectId={activeProjectId}
+            />
+          )}
+
+          {activeMode === "mcp-tools" && (
+            <McpToolsPage
+              key={mcpFocus?.page === "tools" ? `${mcpFocus.serverId ?? ""}:${mcpFocus.toolName ?? ""}` : "tools"}
+              activeProjectId={activeProjectId}
+              focus={mcpFocus?.page === "tools" ? mcpFocus : null}
+              onNavigate={navigateMcp}
+              onOpenWorkflow={(workflowId) => {
+                void loadWorkflowById(workflowId).then(() => setActiveMode("editor"));
+              }}
+            />
+          )}
+
+          {activeMode === "mcp-changes" && (
+            <McpChangesPage
+              isAdmin={authUser?.role === "admin"}
+              activeProjectId={activeProjectId}
+              initialServerId={mcpFocus?.page === "changes" ? mcpFocus.serverId : null}
+              onNavigate={navigateMcp}
             />
           )}
 
