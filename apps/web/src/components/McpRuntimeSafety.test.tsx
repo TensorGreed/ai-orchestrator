@@ -163,6 +163,9 @@ describe("sandbox and limits drafts", () => {
     expect(sandboxWarnings(sandboxDraftFrom({ mode: "container", image: DIGEST }), { ...policy, detectedRuntime: null }).join(" ")).toMatch(
       /No docker or podman/
     );
+    expect(
+      sandboxWarnings(sandboxDraftFrom({ mode: "container", image: DIGEST }), { ...policy, runtime: "podman", detectedRuntime: null }).join(" ")
+    ).toMatch(/podman CLI set by MCP_SANDBOX_RUNTIME/);
   });
 
   it("turns seconds into milliseconds and keeps tool rules", () => {

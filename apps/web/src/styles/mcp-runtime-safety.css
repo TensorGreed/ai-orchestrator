@@ -38,14 +38,37 @@
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto;
   gap: 8px;
-  align-items: center;
+  align-items: end;
 }
 
 .mcp-safety-rule {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 0.8fr)) auto;
   gap: 8px;
+  align-items: end;
+}
+
+.mcp-safety-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mcp-safety-cell > span {
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+
+.mcp-safety-mount .mcp-check,
+.mcp-safety-rule > button,
+.mcp-safety-mount > button {
+  min-height: 36px;
+}
+
+.mcp-safety-mount .mcp-check {
+  display: inline-flex;
   align-items: center;
+  gap: 6px;
 }
 
 .mcp-safety-warnings {
@@ -161,8 +184,13 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
-  .mcp-safety-rule input:first-child {
+  .mcp-safety-rule > .mcp-safety-cell:first-child,
+  .mcp-safety-mount > .mcp-safety-cell:first-child {
     grid-column: 1 / -1;
+  }
+
+  .mcp-safety-mount .mcp-check {
+    justify-self: start;
   }
 
   .mcp-connection-list li {

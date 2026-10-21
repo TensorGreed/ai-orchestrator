@@ -167,7 +167,13 @@ export function sandboxWarnings(draft: SandboxDraft, policy: McpSandboxPolicyVie
   if (draft.mounts.some((mount) => mount.source.trim()) && (policy?.allowedMountRoots.length ?? 0) === 0) {
     warnings.push("No mount roots are allowed on this deployment (MCP_SANDBOX_ALLOWED_MOUNT_ROOTS), so mounts are refused.");
   }
-  if (policy && !policy.detectedRuntime) warnings.push("No docker or podman CLI was found on the API host; the server cannot start until one is installed.");
+  if (policy && !policy.detectedRuntime) {
+    warnings.push(
+      policy.runtime === "auto"
+        ? "No docker or podman CLI was found on the API host; the server cannot start until one is installed."
+        : `The ${policy.runtime} CLI set by MCP_SANDBOX_RUNTIME was not found on the API host; the server cannot start until it is installed.`
+    );
+  }
   return warnings;
 }
 
@@ -270,22 +276,29 @@ export function McpSandboxFields({
             )}
             {draft.mounts.map((mount, index) => (
               <div className="mcp-safety-mount" key={index}>
-                <input
-                  type="text"
-                  aria-label={`Host path ${index + 1}`}
-                  value={mount.source}
-                  onChange={(e) => setMount(index, { source: e.target.value })}
-                  placeholder="/srv/l2m/data"
-                  spellCheck={false}
-                />
-                <input
-                  type="text"
-                  aria-label={`Container path ${index + 1}`}
-                  value={mount.target}
-                  onChange={(e) => setMount(index, { target: e.target.value })}
-                  placeholder="/data"
-                  spellCheck={false}
-                />
+                <label className="mcp-safety-cell">
+                  <span>Host path</span>
+                  <input
+                    type="text"
+                    aria-label={`Host path ${index + 1}`}
+                    value={mount.source}
+                    onChange={(e) => setMount(index, { source: e.target.value })}
+                    placeholder="/srv/l2m/data"
+                    spellCheck={false}
+                    title={mount.source}
+                  />
+                </label>
+                <label className="mcp-safety-cell">
+                  <span>In the container</span>
+                  <input
+                    type="text"
+                    aria-label={`Container path ${index + 1}`}
+                    value={mount.target}
+                    onChange={(e) => setMount(index, { target: e.target.value })}
+                    placeholder="/data"
+                    spellCheck={false}
+                  />
+                </label>
                 <label className="mcp-check">
                   <input type="checkbox" checked={mount.writable} onChange={(e) => setMount(index, { writable: e.target.checked })} />
                   Writable
@@ -473,17 +486,29 @@ export function McpLimitsFields({ draft, onChange }: { draft: LimitsDraft; onCha
         {draft.tools.length === 0 && <p className="kb-subtle">None. Tool patterns may use * (for example write_*).</p>}
         {draft.tools.map((rule, index) => (
           <div className="mcp-safety-rule" key={index}>
-            <input
-              type="text"
-              aria-label={`Tool pattern ${index + 1}`}
-              value={rule.pattern}
-              onChange={(e) => setRule(index, { pattern: e.target.value })}
-              placeholder="search_*"
-              spellCheck={false}
-            />
-            <input type="number" min="1" aria-label={`Calls per minute ${index + 1}`} value={rule.requestsPerMinute} onChange={(e) => setRule(index, { requestsPerMinute: e.target.value })} placeholder="/min" />
-            <input type="number" min="1" aria-label={`Concurrent calls ${index + 1}`} value={rule.maxConcurrent} onChange={(e) => setRule(index, { maxConcurrent: e.target.value })} placeholder="at once" />
-            <input type="number" min="1" step="any" aria-label={`Timeout seconds ${index + 1}`} value={rule.timeoutSec} onChange={(e) => setRule(index, { timeoutSec: e.target.value })} placeholder="timeout s" />
+            <label className="mcp-safety-cell">
+              <span>Tool pattern</span>
+              <input
+                type="text"
+                aria-label={`Tool pattern ${index + 1}`}
+                value={rule.pattern}
+                onChange={(e) => setRule(index, { pattern: e.target.value })}
+                placeholder="search_*"
+                spellCheck={false}
+              />
+            </label>
+            <label className="mcp-safety-cell">
+              <span>Per minute</span>
+              <input type="number" min="1" aria-label={`Calls per minute ${index + 1}`} value={rule.requestsPerMinute} onChange={(e) => setRule(index, { requestsPerMinute: e.target.value })} placeholder="Unlimited" />
+            </label>
+            <label className="mcp-safety-cell">
+              <span>At once</span>
+              <input type="number" min="1" aria-label={`Concurrent calls ${index + 1}`} value={rule.maxConcurrent} onChange={(e) => setRule(index, { maxConcurrent: e.target.value })} placeholder="Unlimited" />
+            </label>
+            <label className="mcp-safety-cell">
+              <span>Timeout (s)</span>
+              <input type="number" min="1" step="any" aria-label={`Timeout seconds ${index + 1}`} value={rule.timeoutSec} onChange={(e) => setRule(index, { timeoutSec: e.target.value })} placeholder="Server's" />
+            </label>
             <button type="button" className="pg-btn ghost" aria-label={`Remove tool limit ${index + 1}`} onClick={() => set("tools", draft.tools.filter((_, i) => i !== index))}>
               Remove
             </button>
