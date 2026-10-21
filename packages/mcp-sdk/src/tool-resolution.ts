@@ -28,6 +28,8 @@ export interface McpToolAccessSubjectTool {
   annotations?: McpToolAnnotations;
   /** Phase 10.5 — defaults to `tool`. */
   kind?: McpPolicyKind;
+  /** Server name for block messages; falls back to the registry id. */
+  serverLabel?: string;
 }
 
 export type McpToolAccessCheck = (
@@ -93,6 +95,7 @@ export async function resolveMCPTools(
           adapterId: serverConfig.serverId,
           ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
           toolName: tool.name,
+          ...(serverConfig.label ? { serverLabel: serverConfig.label } : {}),
           ...(tool.annotations ? { annotations: tool.annotations } : {})
         });
         if (!verdict.allowed) {
@@ -147,6 +150,7 @@ export async function resolveMCPTools(
           adapterId: target.serverConfig.serverId,
           ...(target.serverConfig.registryServerId ? { registryServerId: target.serverConfig.registryServerId } : {}),
           toolName: target.originalName,
+          ...(target.serverConfig.label ? { serverLabel: target.serverConfig.label } : {}),
           ...(target.annotations ? { annotations: target.annotations } : {})
         });
         if (!verdict.allowed) {

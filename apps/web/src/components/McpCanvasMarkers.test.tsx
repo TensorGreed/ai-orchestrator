@@ -110,8 +110,10 @@ describe("MCP markers on canvas nodes", () => {
     });
     const status = screen.getByRole("button", { name: "MCP server GitHub tools: Down. Open server" });
     expect(status).not.toHaveTextContent("Down");
-    expect(screen.getByRole("img", { name: "Uses write tools" })).toHaveTextContent("W");
-    await user.click(screen.getByRole("button", { name: "2 of 5 tools blocked for you. Open the tools" }));
+    expect(screen.getByRole("img", { name: "Uses write tools" })).toHaveTextContent("Write");
+    const partial = screen.getByRole("button", { name: "2 of 5 tools blocked for you. Open the tools" });
+    expect(partial).toHaveTextContent("2/5 blocked");
+    await user.click(partial);
     expect(onOpen).toHaveBeenCalledWith({ page: "tools", serverId: "mcp_a" });
   });
 

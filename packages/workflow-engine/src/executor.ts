@@ -720,7 +720,8 @@ async function buildRunToolPolicy(
       annotations: tool.annotations,
       // Inline servers have no registry entry, so only annotations classify them.
       manualReadOnly: tool.registryServerId ? overrides.get(`${tool.registryServerId}::${tool.toolName}`) : undefined,
-      noWriteTools
+      noWriteTools,
+      ...(tool.serverLabel ? { serverLabel: tool.serverLabel } : {})
     });
   const accessCheck: McpToolAccessCheck = (tool) => {
     const decision = evaluate(tool);
@@ -4354,6 +4355,7 @@ async function executeNode(
           const policyTool: McpToolAccessSubjectTool = {
             adapterId: serverConfig.serverId,
             ...(serverConfig.registryServerId ? { registryServerId: serverConfig.registryServerId } : {}),
+            ...(serverConfig.label ? { serverLabel: serverConfig.label } : {}),
             toolName
           };
           // Phase 10.5 — rules with an annotation condition need the tool's hints up front.
