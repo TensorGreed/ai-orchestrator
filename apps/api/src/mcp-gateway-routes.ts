@@ -38,6 +38,8 @@ import type { SqliteStore } from "./db/database.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
+import { withDelegatedUser } from "@ai-orchestrator/mcp-sdk";
+import type { McpRuntimeRejection } from "@ai-orchestrator/shared";
 import {
   buildGatewayCatalog,
   toMcpToolDescriptor,
@@ -68,6 +70,18 @@ import {
   type JsonRpcResponse,
   type McpCallToolResult
 } from "./services/mcp-gateway-protocol.js";
+
+/** Phase 10.7 — a server tool call the runtime guard refused before it reached the server. */
+interface GatewayRetryLater {
+  retryLater: true;
+  reason: McpRuntimeRejection;
+  retryAfterMs: number;
+  message: string;
+}
+
+function isRetryLater(value: unknown): value is GatewayRetryLater {
+  return Boolean(value && typeof value === "object" && (value as { retryLater?: unknown }).retryLater === true);
+}
 import {
   GatewaySessionLimitError,
   GatewaySessionManager,
@@ -354,8 +368,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     args: Record<string, unknown>;
     signal: AbortSignal;
     progress: (progress: number, total: number | undefined, message: string) => void;
-  }): Promise<McpCallToolResult> => {
+  }): Promise<McpCallToolResult | GatewayRetryLater> => {
     const { session, auth, toolset, tool, args, signal } = input;
+    let refused: GatewayRetryLater | null = null;
     const startedAt = new Date();
     input.progress(0, 1, `Calling ${tool.toolName} on ${tool.serverName}`);
     let ok = false;
@@ -363,7 +378,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     let result: McpCallToolResult;
     let samplingUsage: { requests: number; inputTokens: number; outputTokens: number } | null = null;
     try {
-      const serverConfig = deps.resolveRegisteredMcpServer(tool.serverId);
+      // Phase 10.7 — a delegated server acts with the client's owner's own account.
+      const serverConfig = withDelegatedUser(deps.resolveRegisteredMcpServer(tool.serverId), auth.subject);
       const adapter = mcpRegistry.get(serverConfig.serverId);
       const cancelled = new Promise<never>((_resolve, reject) => {
         if (signal.aborted) reject(new Error("Cancelled by the client."));
@@ -421,6 +437,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
       } else {
         errorText = truncate(deps.redact(String(scrub(outcome.error ?? `MCP tool '${tool.toolName}' failed.`))));
         result = toolError(errorText);
+        if (outcome.errorKind === "rate_limited" || outcome.errorKind === "concurrency_limited" || outcome.errorKind === "circuit_open") {
+          refused = { retryLater: true, reason: outcome.errorKind, retryAfterMs: outcome.retryAfterMs ?? 0, message: errorText };
+        }
       }
     } catch (error) {
       errorText = truncate(deps.redact(error instanceof Error ? error.message : String(error)));
@@ -447,7 +466,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         samplingInputTokens: samplingUsage?.inputTokens ?? null,
         samplingOutputTokens: samplingUsage?.outputTokens ?? null,
         source: "gateway",
-        clientId: auth.client.id
+        clientId: auth.client.id,
+        ...(refused ? { rejection: refused.reason } : {})
       });
     } catch (error) {
       app.log.warn({ err: deps.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record MCP gateway telemetry");
@@ -465,9 +485,11 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         serverId: tool.serverId,
         upstreamTool: tool.toolName,
         ...(samplingUsage ? { sampling: samplingUsage } : {}),
+        ...(refused ? { rejection: refused.reason } : {}),
         ...(errorText ? { error: errorText } : {})
       }
     });
+    if (refused) return refused;
     return result;
   };
 
@@ -644,6 +666,14 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           ? await callWorkflowTool({ session, auth, toolset, tool, args, executionId, progress })
           : await callServerTool({ session, auth, toolset, tool, args, signal: controller.signal, progress });
       if (controller.signal.aborted) return SUPPRESSED;
+      if (isRetryLater(result)) {
+        // Phase 10.7 — refused before reaching the server: a JSON-RPC error with a retry hint.
+        return rpcError(request.id, JSON_RPC_ERRORS.retryLater, result.message, {
+          reason: result.reason,
+          retryAfterMs: result.retryAfterMs,
+          retryAfterSeconds: Math.max(1, Math.ceil(result.retryAfterMs / 1000))
+        });
+      }
       return rpcResult(request.id, result);
     } finally {
       session.inFlight.delete(key);

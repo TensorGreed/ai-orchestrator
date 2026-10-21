@@ -35,6 +35,16 @@ import type {
   WorkflowListItem
 } from "@ai-orchestrator/shared";
 import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS } from "@ai-orchestrator/shared";
+import {
+  normalizeMcpRuntimeLimits,
+  normalizeMcpSandboxSettings,
+  type McpCredentialMode,
+  type McpDelegatedFallback,
+  type McpRuntimeLimits,
+  type McpRuntimeRejection,
+  type McpSandboxSettings,
+  type McpSandboxStatus
+} from "@ai-orchestrator/shared";
 
 type BindParams = unknown[];
 
@@ -452,8 +462,38 @@ export interface McpServerRecord {
   pendingBreakingSnapshotId: string | null;
   /** Phase 10.5 — whether and how the server may ask the client to sample a model. */
   sampling: McpSamplingSettings;
+  /** Phase 10.7 — the stdio sandbox; null means the deployment default (MCP_SANDBOX_DEFAULT). */
+  sandbox: McpSandboxSettings | null;
+  /** Phase 10.7 — what the last probe found out about the sandbox. */
+  sandboxStatus: McpSandboxStatus | null;
+  /** Phase 10.7 — rate limits, concurrency caps, timeouts and breaker settings (defaults filled in). */
+  limits: McpRuntimeLimits;
+  /** Phase 10.7 — `delegated`: each user connects their own OAuth account. */
+  credentialMode: McpCredentialMode;
+  /** Phase 10.7 — what unattended runs of a delegated server use. */
+  delegatedFallback: McpDelegatedFallback;
   createdBy: string | null;
   createdAt: string;
+  updatedAt: string;
+}
+
+/** Phase 10.7 — one user's OAuth connection to a delegated MCP server (no tokens). */
+export interface McpUserOAuthConnectionRecord {
+  serverId: string;
+  userId: string;
+  /** SecretService secret holding this user's tokens; never returned by the API. */
+  secretId: string | null;
+  state: McpOAuthConnectionState;
+  subject: string | null;
+  scope: string | null;
+  authorizationServer: string | null;
+  clientRegistration: "dynamic" | "pre_registered" | null;
+  clientId: string | null;
+  expiresAt: string | null;
+  hasRefreshToken: boolean;
+  lastRefreshAt: string | null;
+  connectedAt: string | null;
+  lastError: string | null;
   updatedAt: string;
 }
 
@@ -532,6 +572,8 @@ export interface McpToolCallRecord {
   source: McpToolCallSource;
   /** MCP client credential that made a gateway call. */
   clientId: string | null;
+  /** Phase 10.7 — set when the call was refused before reaching the server (rate limit, concurrency cap, open breaker). */
+  rejection?: McpRuntimeRejection | null;
   createdAt: string;
 }
 
@@ -540,8 +582,9 @@ export type McpToolCallSource = "workflow" | "gateway" | "playground";
 /** What callers write; `source` defaults to `workflow`. */
 export type McpToolCallWrite = Omit<
   McpToolCallRecord,
-  "createdAt" | "source" | "clientId" | "samplingRequests" | "samplingInputTokens" | "samplingOutputTokens"
+  "createdAt" | "source" | "clientId" | "samplingRequests" | "samplingInputTokens" | "samplingOutputTokens" | "rejection"
 > & {
+  rejection?: McpRuntimeRejection | null;
   source?: McpToolCallSource;
   clientId?: string | null;
   samplingRequests?: number | null;
@@ -669,6 +712,7 @@ interface McpToolCallRow {
   sampling_output_tokens?: number | null;
   source: string | null;
   client_id: string | null;
+  rejection?: string | null;
   created_at: string;
 }
 
@@ -754,6 +798,44 @@ interface McpOAuthConnectionRow {
 
 const MCP_OAUTH_STATES: readonly McpOAuthConnectionState[] = ["not_connected", "connected", "expired", "error"];
 
+/**
+ * Phase 10.7 — a stored sandbox block. One that no longer validates is kept
+ * as a container sandbox with what it had, so the launcher refuses it rather
+ * than running the server unsandboxed.
+ */
+function readStoredSandbox(raw: string | null | undefined): McpSandboxSettings | null {
+  if (!raw) return null;
+  const parsed = safeJsonParse(toString(raw));
+  if (!parsed || typeof parsed !== "object") return null;
+  const normalized = normalizeMcpSandboxSettings(parsed);
+  if (normalized) return normalized;
+  const record = parsed as Record<string, unknown>;
+  return record.mode === "none" ? { mode: "none" } : ({ ...record, mode: "container" } as McpSandboxSettings);
+}
+
+function mapMcpUserOAuthConnection(row: McpUserOAuthConnectionRow): McpUserOAuthConnectionRecord {
+  const state = toString(row.state) as McpOAuthConnectionState;
+  const registration = row.client_registration ? toString(row.client_registration) : null;
+  const optional = (value: unknown) => (value === null || value === undefined || value === "" ? null : toString(value));
+  return {
+    serverId: toString(row.server_id),
+    userId: toString(row.user_id),
+    secretId: optional(row.secret_id),
+    state: MCP_OAUTH_STATES.includes(state) ? state : "not_connected",
+    subject: optional(row.subject),
+    scope: optional(row.scope),
+    authorizationServer: optional(row.authorization_server),
+    clientRegistration: registration === "dynamic" || registration === "pre_registered" ? registration : null,
+    clientId: optional(row.client_id),
+    expiresAt: optional(row.expires_at),
+    hasRefreshToken: toNumber(row.has_refresh_token) === 1,
+    lastRefreshAt: optional(row.last_refresh_at),
+    connectedAt: optional(row.connected_at),
+    lastError: optional(row.last_error),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
 function mapMcpOAuthConnection(row: McpOAuthConnectionRow): McpOAuthConnectionRecord {
   const state = toString(row.state) as McpOAuthConnectionState;
   const registration = row.client_registration ? toString(row.client_registration) : null;
@@ -818,6 +900,8 @@ function mapMcpToolCall(row: McpToolCallRow): McpToolCallRecord {
       row.sampling_output_tokens === null || row.sampling_output_tokens === undefined ? null : toNumber(row.sampling_output_tokens),
     source: row.source === "gateway" || row.source === "playground" ? row.source : "workflow",
     clientId: row.client_id ? toString(row.client_id) : null,
+    rejection:
+      row.rejection === "rate_limited" || row.rejection === "concurrency_limited" || row.rejection === "circuit_open" ? row.rejection : null,
     createdAt: toString(row.created_at)
   };
 }
@@ -843,8 +927,31 @@ interface McpServerRow {
   current_snapshot_id: string | null;
   pending_breaking_snapshot_id: string | null;
   sampling_json?: string | null;
+  sandbox_json?: string | null;
+  sandbox_status_json?: string | null;
+  limits_json?: string | null;
+  credential_mode?: string | null;
+  delegated_fallback?: string | null;
   created_by: string | null;
   created_at: string;
+  updated_at: string;
+}
+
+interface McpUserOAuthConnectionRow {
+  server_id: string;
+  user_id: string;
+  secret_id: string | null;
+  state: string;
+  subject: string | null;
+  scope: string | null;
+  authorization_server: string | null;
+  client_registration: string | null;
+  client_id: string | null;
+  expires_at: string | null;
+  has_refresh_token: number;
+  last_refresh_at: string | null;
+  connected_at: string | null;
+  last_error: string | null;
   updated_at: string;
 }
 
@@ -998,6 +1105,11 @@ function mapMcpServer(row: McpServerRow): McpServerRecord {
     currentSnapshotId: row.current_snapshot_id ? toString(row.current_snapshot_id) : null,
     pendingBreakingSnapshotId: row.pending_breaking_snapshot_id ? toString(row.pending_breaking_snapshot_id) : null,
     sampling: normalizeMcpSamplingSettings(row.sampling_json ? safeJsonParse(toString(row.sampling_json)) : null),
+    sandbox: readStoredSandbox(row.sandbox_json),
+    sandboxStatus: row.sandbox_status_json ? ((safeJsonParse(toString(row.sandbox_status_json)) as McpSandboxStatus | null) ?? null) : null,
+    limits: normalizeMcpRuntimeLimits(row.limits_json ? safeJsonParse(toString(row.limits_json)) : null),
+    credentialMode: row.credential_mode === "delegated" ? "delegated" : "service",
+    delegatedFallback: row.delegated_fallback === "owner" ? "owner" : "none",
     createdBy: row.created_by ? toString(row.created_by) : null,
     createdAt: toString(row.created_at),
     updatedAt: toString(row.updated_at)
@@ -1226,6 +1338,11 @@ export class SqliteStore {
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
     this.migrate();
+  }
+
+  /** Phase 10.7 — where the database lives (a file path, or ":memory:"); names this deployment's sandbox containers. */
+  storageLocation(): string {
+    return this.db.name;
   }
 
   static async create(dbFilePath: string): Promise<SqliteStore> {
@@ -2029,6 +2146,12 @@ export class SqliteStore {
     this.ensureColumn("mcp_tool_policies", "kind", "TEXT NOT NULL", "'tool'");
     // Phase 10.5 — per-server sampling settings (off unless an admin turns it on).
     this.ensureColumn("mcp_servers", "sampling_json", "TEXT");
+    // Phase 10.7 — runtime safety: sandbox, limits, credential mode.
+    this.ensureColumn("mcp_servers", "sandbox_json", "TEXT");
+    this.ensureColumn("mcp_servers", "sandbox_status_json", "TEXT");
+    this.ensureColumn("mcp_servers", "limits_json", "TEXT");
+    this.ensureColumn("mcp_servers", "credential_mode", "TEXT NOT NULL", "'service'");
+    this.ensureColumn("mcp_servers", "delegated_fallback", "TEXT NOT NULL", "'none'");
 
     // Phase 10.5 — resources, resource templates and prompts a server
     // advertises (captured by probes, informational: not part of the tool hash),
@@ -2139,6 +2262,30 @@ export class SqliteStore {
     this.ensureColumn("mcp_tool_calls", "sampling_input_tokens", "INTEGER");
     this.ensureColumn("mcp_tool_calls", "sampling_output_tokens", "INTEGER");
     this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_client ON mcp_tool_calls(client_id, started_at)`);
+    // Phase 10.7 — calls refused before reaching the server, and per-user OAuth connections
+    // to delegated servers (tokens only in the SecretService secret `secret_id` names).
+    this.ensureColumn("mcp_tool_calls", "rejection", "TEXT");
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_user_oauth_connections (
+        server_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        secret_id TEXT,
+        state TEXT NOT NULL DEFAULT 'not_connected',
+        subject TEXT,
+        scope TEXT,
+        authorization_server TEXT,
+        client_registration TEXT,
+        client_id TEXT,
+        expires_at TEXT,
+        has_refresh_token INTEGER NOT NULL DEFAULT 0,
+        last_refresh_at TEXT,
+        connected_at TEXT,
+        last_error TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_user_oauth_user ON mcp_user_oauth_connections(user_id);
+    `);
 
     // Phase 10.8 — MCP cassettes: every MCP call of a recorded run, scrubbed
     // of secrets before it is written, linked to the execution.
@@ -7761,6 +7908,11 @@ export class SqliteStore {
     probeIntervalMs?: number | null;
     blockOnBreakingChange?: boolean;
     sampling?: Partial<McpSamplingSettings> | null;
+    sandbox?: McpSandboxSettings | null;
+    /** Normalized (defaults filled in) before it is stored. */
+    limits?: object | null;
+    credentialMode?: McpCredentialMode;
+    delegatedFallback?: McpDelegatedFallback;
     createdBy?: string | null;
   }): void {
     const now = new Date().toISOString();
@@ -7768,8 +7920,9 @@ export class SqliteStore {
       `INSERT INTO mcp_servers (
          id, name, description, adapter_id, connection_json, secret_id, owner, project_id,
          probe_enabled, probe_interval_ms, block_on_breaking_change, status, tool_count,
-         sampling_json, created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', 0, ?, ?, ?, ?)`,
+         sampling_json, sandbox_json, limits_json, credential_mode, delegated_fallback,
+         created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.name,
@@ -7783,6 +7936,10 @@ export class SqliteStore {
         input.probeIntervalMs ?? null,
         input.blockOnBreakingChange ? 1 : 0,
         input.sampling ? JSON.stringify(normalizeMcpSamplingSettings(input.sampling)) : null,
+        input.sandbox ? JSON.stringify(input.sandbox) : null,
+        input.limits ? JSON.stringify(normalizeMcpRuntimeLimits(input.limits)) : null,
+        input.credentialMode ?? "service",
+        input.delegatedFallback ?? "none",
         input.createdBy ?? null,
         now,
         now
@@ -7802,9 +7959,24 @@ export class SqliteStore {
     probeIntervalMs?: number | null;
     blockOnBreakingChange?: boolean;
     sampling?: Partial<McpSamplingSettings> | null;
+    sandbox?: McpSandboxSettings | null;
+    /** Normalized (defaults filled in) before it is stored. */
+    limits?: object | null;
+    credentialMode?: McpCredentialMode;
+    delegatedFallback?: McpDelegatedFallback;
   }): boolean {
     const fields: string[] = [];
     const params: Array<string | number | null> = [];
+    if (patch.sandbox !== undefined) {
+      fields.push("sandbox_json = ?");
+      params.push(patch.sandbox ? JSON.stringify(patch.sandbox) : null);
+    }
+    if (patch.limits !== undefined) {
+      fields.push("limits_json = ?");
+      params.push(patch.limits ? JSON.stringify(normalizeMcpRuntimeLimits(patch.limits)) : null);
+    }
+    if (patch.credentialMode !== undefined) { fields.push("credential_mode = ?"); params.push(patch.credentialMode); }
+    if (patch.delegatedFallback !== undefined) { fields.push("delegated_fallback = ?"); params.push(patch.delegatedFallback); }
     if (patch.sampling !== undefined) {
       fields.push("sampling_json = ?");
       params.push(patch.sampling ? JSON.stringify(normalizeMcpSamplingSettings(patch.sampling)) : null);
@@ -7840,10 +8012,16 @@ export class SqliteStore {
       this.exec(`DELETE FROM mcp_tool_classifications WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_toolset_members WHERE kind = 'server' AND server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_oauth_connections WHERE server_id = ?`, [id]);
+      this.exec(`DELETE FROM mcp_user_oauth_connections WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_server_catalogs WHERE server_id = ?`, [id]);
       this.exec(`DELETE FROM mcp_servers WHERE id = ?`, [id]);
     })();
     return true;
+  }
+
+  /** Phase 10.7 — what the last probe found out about the server's sandbox. */
+  setMcpServerSandboxStatus(id: string, status: McpSandboxStatus | null): void {
+    this.exec(`UPDATE mcp_servers SET sandbox_status_json = ? WHERE id = ?`, [status ? JSON.stringify(status) : null, id]);
   }
 
   getMcpServer(id: string): McpServerRecord | null {
@@ -8009,8 +8187,8 @@ export class SqliteStore {
          id, execution_id, workflow_id, node_id, registry_server_id, adapter_id, tool_name,
          started_at, duration_ms, ok, error, turn_input_tokens, turn_output_tokens,
          estimated_cost_usd, sampling_requests, sampling_input_tokens, sampling_output_tokens,
-         source, client_id, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         source, client_id, rejection, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         call.id,
         call.executionId,
@@ -8031,6 +8209,7 @@ export class SqliteStore {
         call.samplingOutputTokens ?? null,
         call.source ?? "workflow",
         call.clientId ?? null,
+        call.rejection ?? null,
         new Date().toISOString()
       ]
     );
@@ -8131,6 +8310,82 @@ export class SqliteStore {
       ]
     );
     return this.getMcpOAuthConnection(record.serverId)!;
+  }
+
+  // Phase 10.7 — per-user OAuth connections to delegated servers (no tokens).
+
+  getMcpUserOAuthConnection(serverId: string, userId: string): McpUserOAuthConnectionRecord | null {
+    const row = this.queryOne<McpUserOAuthConnectionRow>(
+      `SELECT * FROM mcp_user_oauth_connections WHERE server_id = ? AND user_id = ?`,
+      [serverId, userId]
+    );
+    return row ? mapMcpUserOAuthConnection(row) : null;
+  }
+
+  listMcpUserOAuthConnections(filter: { serverId?: string; userId?: string } = {}): McpUserOAuthConnectionRecord[] {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (filter.serverId) {
+      clauses.push("server_id = ?");
+      params.push(filter.serverId);
+    }
+    if (filter.userId) {
+      clauses.push("user_id = ?");
+      params.push(filter.userId);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    return this.queryAll<McpUserOAuthConnectionRow>(
+      `SELECT * FROM mcp_user_oauth_connections ${where} ORDER BY server_id, user_id`,
+      params
+    ).map(mapMcpUserOAuthConnection);
+  }
+
+  upsertMcpUserOAuthConnection(record: Omit<McpUserOAuthConnectionRecord, "updatedAt">): McpUserOAuthConnectionRecord {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO mcp_user_oauth_connections (
+         server_id, user_id, secret_id, state, subject, scope, authorization_server, client_registration,
+         client_id, expires_at, has_refresh_token, last_refresh_at, connected_at, last_error, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(server_id, user_id) DO UPDATE SET
+         secret_id = excluded.secret_id,
+         state = excluded.state,
+         subject = excluded.subject,
+         scope = excluded.scope,
+         authorization_server = excluded.authorization_server,
+         client_registration = excluded.client_registration,
+         client_id = excluded.client_id,
+         expires_at = excluded.expires_at,
+         has_refresh_token = excluded.has_refresh_token,
+         last_refresh_at = excluded.last_refresh_at,
+         connected_at = excluded.connected_at,
+         last_error = excluded.last_error,
+         updated_at = excluded.updated_at`,
+      [
+        record.serverId,
+        record.userId,
+        record.secretId,
+        record.state,
+        record.subject,
+        record.scope,
+        record.authorizationServer,
+        record.clientRegistration,
+        record.clientId,
+        record.expiresAt,
+        record.hasRefreshToken ? 1 : 0,
+        record.lastRefreshAt,
+        record.connectedAt,
+        record.lastError,
+        now
+      ]
+    );
+    return this.getMcpUserOAuthConnection(record.serverId, record.userId)!;
+  }
+
+  deleteMcpUserOAuthConnection(serverId: string, userId: string): boolean {
+    if (!this.getMcpUserOAuthConnection(serverId, userId)) return false;
+    this.exec(`DELETE FROM mcp_user_oauth_connections WHERE server_id = ? AND user_id = ?`, [serverId, userId]);
+    return true;
   }
 
   deleteMcpOAuthConnection(serverId: string): boolean {

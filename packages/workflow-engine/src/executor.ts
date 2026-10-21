@@ -11,6 +11,8 @@ import {
   type McpToolAccessSubjectTool,
   type MCPExecutionContext,
   type MCPRegistry,
+  isDelegatedCredentialError,
+  parseMcpRuntimeRejection,
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
@@ -5580,6 +5582,11 @@ async function executeNodeWithRetry(
         lastError = error;
       } else {
         lastError = error instanceof Error ? error : new Error("Node execution failed");
+      }
+      // Phase 10.7 — a missing delegated connection, an open breaker or a spent rate
+      // limit will not change within the retry delays; fail with the actionable message.
+      if (isDelegatedCredentialError(error) || /uses each user's own account/.test(lastError.message) || parseMcpRuntimeRejection(lastError.message)) {
+        throw lastError;
       }
       const errMsg = lastError.message.toLowerCase();
       if (errMsg.includes("quota") || errMsg.includes("billing") || errMsg.includes("limit: 0") || errMsg.includes("rate_limit_exceeded")) {

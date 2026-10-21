@@ -400,17 +400,46 @@ describe("sandboxed stdio sessions (fake runtime)", () => {
     expect(readLog()).toEqual([]);
   });
 
-  it("sweeps leftover containers by this deployment's label only", async () => {
-    fs.rmSync(logPath, { force: true });
-    process.env.FAKE_RUNTIME_PS = "abc123\ndef456\n";
-    try {
-      const swept = await sweepSandboxContainers({ policy: { ...policy(), runtime: "docker" }, locator: { locate: () => runtimePath } });
-      expect(swept).toEqual({ runtime: "docker", removed: 2 });
-      const log = readLog();
-      expect(log[0]?.argv).toEqual(["ps", "-aq", "--filter", "label=l2m.mcp.sandbox=test-instance"]);
-      expect(log[1]?.argv).toEqual(["rm", "-f", "abc123", "def456"]);
-    } finally {
-      delete process.env.FAKE_RUNTIME_PS;
-    }
+  it("sweeps only this deployment's containers whose owner process on this host is gone", async () => {
+    const calls: string[][] = [];
+    const owners: Record<string, string> = {
+      abc123: "host-a:111", // this host, process gone: removed
+      def456: "host-a:222", // this host, process alive (another API or worker): kept
+      ghi789: "host-b:111", // another host sharing the daemon: kept
+      jkl000: "" // no owner label: kept
+    };
+    const execFile = async (_file: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] === "ps") return { stdout: "abc123\ndef456\nghi789\njkl000\n" };
+      if (args[0] === "inspect") return { stdout: `${owners[args[3] ?? ""] ?? ""}\n` };
+      return { stdout: "" };
+    };
+    const swept = await sweepSandboxContainers({
+      policy: { ...policy(), runtime: "docker" },
+      locator: { locate: () => runtimePath },
+      execFile,
+      host: "host-a",
+      isAlive: (pid) => pid === 222
+    });
+    expect(swept).toEqual({ runtime: "docker", removed: 1 });
+    expect(calls[0]).toEqual(["ps", "-aq", "--filter", "label=l2m.mcp.sandbox=test-instance"]);
+    expect(calls.filter((args) => args[0] === "inspect").map((args) => args[2])).toEqual(
+      Array(4).fill('{{index .Config.Labels "l2m.mcp.owner"}}')
+    );
+    expect(calls.at(-1)).toEqual(["rm", "-f", "abc123"]);
+  });
+
+  it("labels each container with its owner process", () => {
+    const args = buildContainerRunArgs({
+      settings: containerSettings(),
+      command: "node",
+      args: [],
+      envNames: [],
+      containerName: "l2m-mcp-x",
+      instanceLabel: "i",
+      owner: "host-a:42",
+      mounts: []
+    });
+    expect(args.join(" ")).toContain("--label l2m.mcp.owner=host-a:42");
   });
 });

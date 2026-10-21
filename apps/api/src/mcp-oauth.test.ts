@@ -573,10 +573,10 @@ describe("MCP OAuth connect flow", () => {
     expect(expired.statusCode).toBe(400);
     expect(expired.body).toContain("expired");
 
-    // Without a signed-in admin the callback does nothing.
+    // Without a signed-in user the callback does nothing.
     const anonymous = await context.app.inject({ method: "GET", url: `${location2.pathname}${location2.search}` });
     expect(anonymous.statusCode).toBe(400);
-    expect(anonymous.body).toContain("Sign in to L2M as an admin");
+    expect(anonymous.body).toContain("Sign in to L2M in this browser");
     expect((await oauthStatus(context, admin, serverId)).state).toBe("not_connected");
     expect(fake.tokenRequests).toHaveLength(0);
   });
@@ -634,6 +634,221 @@ describe("MCP OAuth connect flow", () => {
     // client_secret_basic by default when a secret is configured.
     expect(fake.tokenRequests[0].get("client_id")).toBeNull();
     expect((await oauthStatus(context, admin, serverId)).clientRegistration).toBe("pre_registered");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 10.7 — delegated credentials
+// ---------------------------------------------------------------------------
+
+async function registerDelegatedServer(context: TestContext, adminCookie: string, extra: Record<string, unknown> = {}) {
+  const response = await call(context, "POST", "/api/mcp/servers", adminCookie, {
+    name: "Mail (delegated)",
+    adapterId: "http_mcp",
+    connection: { endpoint: `${fake.base}/mcp`, transport: "http_streamable", authType: "oauth" },
+    credentialMode: "delegated",
+    probeEnabled: false,
+    ...extra
+  });
+  expect(response.statusCode).toBe(201);
+  return response.json<{ server: { id: string } }>().server.id;
+}
+
+/** A user connects their own account; returns the prefix of the access token issued to them. */
+async function connectOwn(context: TestContext, cookie: string, serverId: string): Promise<string> {
+  const started = await call(context, "POST", `/api/mcp/connections/${serverId}/connect`, cookie, {});
+  expect(started.statusCode).toBe(200);
+  const consent = await fetch(started.json<{ authorizationUrl: string }>().authorizationUrl, { redirect: "manual" });
+  const location = new URL(consent.headers.get("location") ?? "");
+  const callback = await call(context, "GET", `${location.pathname}${location.search}`, cookie);
+  expect(callback.statusCode).toBe(200);
+  return `Bearer at-${fake.tokenCounter}-`;
+}
+
+async function runAs(context: TestContext, cookie: string, workflowId: string) {
+  const run = await call(context, "POST", `/api/workflows/${workflowId}/execute`, cookie, { input: {} });
+  return run.json<{ status: string; error?: string; nodeResults: Array<{ nodeId: string; status: string; error?: string }> }>();
+}
+
+describe("delegated MCP credentials", () => {
+  it("validates the mode, keeps each user's token to themselves and never falls back to a shared credential", async () => {
+    const logs: string[] = [];
+    const stdoutWrite = process.stdout.write.bind(process.stdout);
+    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown, ...rest: unknown[]) => {
+      logs.push(String(chunk));
+      return (stdoutWrite as (...args: unknown[]) => boolean)(chunk, ...rest);
+    }) as typeof process.stdout.write);
+
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const alice = await login(context, "builder", "alice");
+    const bob = await login(context, "builder", "bob");
+    const carol = await login(context, "operator", "carol");
+    expect((await call(context, "GET", "/api/mcp/connections", carol)).statusCode).toBe(200);
+    const aliceId = context.store.getUserByEmail("alice@example.com")!.id;
+    const bobId = context.store.getUserByEmail("bob@example.com")!.id;
+
+    // Delegated credentials need an OAuth http server.
+    const bearer = await call(context, "POST", "/api/mcp/servers", admin, {
+      name: "Bearer",
+      adapterId: "http_mcp",
+      connection: { endpoint: `${fake.base}/mcp`, authType: "bearer" },
+      credentialMode: "delegated",
+      probeEnabled: false
+    });
+    expect(bearer.statusCode).toBe(400);
+    expect(bearer.json<{ error: string }>().error).toMatch(/OAuth/);
+
+    const serverId = await registerDelegatedServer(context, admin);
+    // The shared admin connect is refused for a delegated server.
+    const shared = await call(context, "POST", `/api/mcp/servers/${serverId}/oauth/connect`, admin, {});
+    expect(shared.statusCode).toBe(400);
+    expect(shared.json<{ error: string }>().error).toMatch(/My connections/);
+
+    // Both users see the server under My connections, not connected yet.
+    const before = await call(context, "GET", "/api/mcp/connections", bob);
+    expect(before.json<{ connections: Array<{ serverId: string; connection: unknown }> }>().connections).toEqual([
+      expect.objectContaining({ serverId, connection: null })
+    ]);
+
+    await call(context, "POST", "/api/workflows", admin, workflowWithTool(serverId, "weather"));
+
+    // Not connected: the node fails with a message that links to My connections.
+    const unconnected = await runAs(context, alice, "wf-oauth-weather");
+    expect(unconnected.status).toBe("error");
+    const failure = JSON.stringify(unconnected);
+    expect(failure).toMatch(/has not connected theirs/);
+    expect(failure).toContain("http://studio.example.test/?mode=mcp-connections");
+    expect(fake.mcpAuthHeaders).toEqual([]);
+
+    const aliceToken = await connectOwn(context, alice, serverId);
+    const bobToken = await connectOwn(context, bob, serverId);
+    expect(aliceToken).not.toBe(bobToken);
+
+    // Each run uses the token of the person who started it.
+    expect((await runAs(context, alice, "wf-oauth-weather")).status).toBe("success");
+    const aliceHeaders = fake.mcpAuthHeaders.filter((header) => header.startsWith("Bearer "));
+    expect(aliceHeaders.length).toBeGreaterThan(0);
+    expect(aliceHeaders.every((header) => header.startsWith(aliceToken))).toBe(true);
+    fake.mcpAuthHeaders = [];
+    const bobRun = await runAs(context, bob, "wf-oauth-weather");
+    expect(bobRun.status, JSON.stringify(bobRun)).toBe("success");
+    expect(fake.mcpAuthHeaders.filter((header) => header.startsWith("Bearer ")).every((header) => header.startsWith(bobToken))).toBe(true);
+    fake.mcpAuthHeaders = [];
+
+    // The admin has not connected: no fallback to anybody else's token.
+    const adminRun = await runAs(context, admin, "wf-oauth-weather");
+    expect(adminRun.status).toBe("error");
+    expect(fake.mcpAuthHeaders.filter((header) => header.startsWith("Bearer "))).toEqual([]);
+
+    // Admins see who is connected (no tokens, no secret ids); others cannot.
+    expect((await call(context, "GET", `/api/mcp/servers/${serverId}/connections`, alice)).statusCode).toBe(403);
+    const listed = await call(context, "GET", `/api/mcp/servers/${serverId}/connections`, admin);
+    const connections = listed.json<{ connections: Array<Record<string, unknown>> }>().connections;
+    expect(connections.map((entry) => entry.userEmail).sort()).toEqual(["alice@example.com", "bob@example.com"]);
+    expect(connections.every((entry) => entry.state === "connected" && !("secretId" in entry))).toBe(true);
+
+    // The per-user secrets are internal: never listed by the secrets API.
+    const secretsList = await call(context, "GET", "/api/secrets", admin);
+    expect(secretsList.json<Array<{ provider: string }>>().some((secret) => secret.provider.startsWith("mcp_oauth"))).toBe(false);
+
+    // Admin revokes Bob: his token is gone and his runs fail again.
+    const bobSecret = context.store.getMcpUserOAuthConnection(serverId, bobId)?.secretId;
+    expect(bobSecret).toBeTruthy();
+    expect((await call(context, "DELETE", `/api/mcp/servers/${serverId}/connections/${bobId}`, alice)).statusCode).toBe(403);
+    expect((await call(context, "DELETE", `/api/mcp/servers/${serverId}/connections/${bobId}`, admin)).statusCode).toBe(200);
+    expect(context.store.getMcpUserOAuthConnection(serverId, bobId)).toBeNull();
+    expect(context.store.getSecret(bobSecret!)).toBeNull();
+    expect((await runAs(context, bob, "wf-oauth-weather")).status).toBe("error");
+
+    // Alice disconnects herself.
+    const disconnected = await call(context, "DELETE", `/api/mcp/connections/${serverId}`, alice);
+    expect(disconnected.json<{ connection: { connection: unknown } }>().connection.connection).toBeNull();
+    expect(context.store.getMcpUserOAuthConnection(serverId, aliceId)).toBeNull();
+
+    const events = context.store.listAuditLogs({ resourceType: "mcp_server", pageSize: 200 }).items.map((item) => item.eventType);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        "mcp_server.user_oauth_connect_started",
+        "mcp_server.user_oauth_connected",
+        "mcp_server.user_oauth_revoked",
+        "mcp_server.user_oauth_disconnected"
+      ])
+    );
+    const changes = await call(context, "GET", "/api/mcp/changes?kind=oauth", admin);
+    expect(changes.json<{ items: Array<{ title: string }> }>().items.map((item) => item.title)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/connection was revoked/)])
+    );
+
+    // No token in any response, audit row or log line.
+    const audit = context.store.listAuditLogs({ pageSize: 500 });
+    const haystacks = [...seenBodies, JSON.stringify(audit.items), ...logs];
+    for (const secret of issuedSecrets) {
+      for (const haystack of haystacks) {
+        expect(haystack.includes(secret)).toBe(false);
+      }
+    }
+  }, 30_000);
+
+  it("refuses a callback finished by a different user", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const alice = await login(context, "builder", "alice");
+    const serverId = await registerDelegatedServer(context, admin);
+    const started = await call(context, "POST", `/api/mcp/connections/${serverId}/connect`, alice, {});
+    const consent = await fetch(started.json<{ authorizationUrl: string }>().authorizationUrl, { redirect: "manual" });
+    const location = new URL(consent.headers.get("location") ?? "");
+    const hijack = await call(context, "GET", `${location.pathname}${location.search}`, admin);
+    expect(hijack.statusCode).toBe(400);
+    expect(fake.tokenRequests).toHaveLength(0);
+    expect(context.store.listMcpUserOAuthConnections({ serverId })).toEqual([]);
+  });
+
+  it("probes with the requesting user's connection and calls through the gateway as the client's owner", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const alice = await login(context, "builder", "alice");
+    const serverId = await registerDelegatedServer(context, admin);
+
+    // Nobody to probe as yet.
+    const unprobed = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin);
+    expect(unprobed.statusCode).toBe(409);
+    expect(unprobed.json<{ error: string }>().error).toMatch(/My connections/);
+
+    const aliceToken = await connectOwn(context, alice, serverId);
+    const adminToken = await connectOwn(context, admin, serverId);
+    fake.mcpAuthHeaders = [];
+    const probed = await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, alice);
+    expect(probed.json<{ probe: { ok: boolean } }>().probe.ok).toBe(true);
+    expect(fake.mcpAuthHeaders.filter((header) => header.startsWith("Bearer ")).every((header) => header.startsWith(aliceToken))).toBe(true);
+
+    const toolset = await call(context, "POST", "/api/mcp/toolsets", admin, {
+      name: "Mail",
+      projectId: "default",
+      members: [{ kind: "server", serverId, toolGlob: "weather" }]
+    });
+    expect(toolset.statusCode).toBe(201);
+    const { slug, id: toolsetId } = toolset.json<{ toolset: { slug: string; id: string } }>().toolset;
+    const client = await call(context, "POST", "/api/mcp/clients", admin, { name: "IDE", toolsetIds: [toolsetId], role: "builder" });
+    const token = client.json<{ token: string }>().token;
+    const rpc = (body: unknown, headers: Record<string, string> = {}) =>
+      context.app.inject({
+        method: "POST",
+        url: `/mcp/${slug}`,
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...headers },
+        payload: JSON.stringify(body)
+      });
+    const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "raw", version: "1" } } });
+    const session = init.headers["mcp-session-id"] as string;
+    const tools = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, { "mcp-session-id": session });
+    const name = tools.json<{ result: { tools: Array<{ name: string }> } }>().result.tools[0]!.name;
+    fake.mcpAuthHeaders = [];
+    const called = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: { city: "Oslo" } } }, { "mcp-session-id": session });
+    expect(called.json<{ result: { isError?: boolean } }>().result.isError).not.toBe(true);
+    const used = fake.mcpAuthHeaders.filter((header) => header.startsWith("Bearer "));
+    expect(used.length).toBeGreaterThan(0);
+    // The client was created by the admin, so the admin's own account is used.
+    expect(used.every((header) => header.startsWith(adminToken))).toBe(true);
   });
 });
 

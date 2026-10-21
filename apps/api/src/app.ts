@@ -12,12 +12,31 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
-import { createDefaultMCPRegistry, invokeDirectMCPTool, type MCPExecutionContext } from "@ai-orchestrator/mcp-sdk";
+import {
+  ContainerSandboxLauncher,
+  McpRuntimeGuard,
+  createDefaultMCPRegistry,
+  detectContainerRuntime,
+  invokeDirectMCPTool,
+  sweepSandboxContainers,
+  validateSandboxMounts,
+  withDelegatedUser,
+  type MCPExecutionContext,
+  type McpSandboxPolicy
+} from "@ai-orchestrator/mcp-sdk";
 import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
   MCP_POLICY_ROLES,
   mcpOAuthConnectSchema,
+  DEFAULT_PROJECT_ID,
+  mcpRuntimeLimitsSchema,
+  mcpSandboxSettingsSchema,
+  type McpBreakerTransition,
+  type McpMyConnection,
+  type McpRuntimeStateView,
+  type McpSandboxPolicyView,
+  type McpSandboxSettings,
   mcpToolClassificationSchema,
   mcpSamplingSettingsPatchSchema,
   mcpToolPolicyEvaluateSchema,
@@ -96,7 +115,7 @@ import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
 import { UsageService } from "./services/usage-service";
 import { BudgetService } from "./services/budget-service";
 import { AuditExportService } from "./services/audit-export-service";
-import { McpProbeService, serverConfigFromRecord } from "./services/mcp-probe-service";
+import { McpProbeService, McpProbeSkippedError, serverConfigFromRecord } from "./services/mcp-probe-service";
 import { McpElicitationService } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
 import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
@@ -132,6 +151,7 @@ import {
   McpOAuthService,
   McpOAuthUserError,
   renderOAuthCallbackPage,
+  resolveMcpConnectionsUrl,
   resolveMcpOAuthRedirectUri
 } from "./services/mcp-oauth-service.js";
 import { isInternalSecretProvider } from "./services/secret-service.js";
@@ -284,7 +304,12 @@ const mcpServerCreateSchema = z.object({
   probeIntervalMs: mcpProbeIntervalSchema.optional(),
   blockOnBreakingChange: z.boolean().optional(),
   // Phase 10.5 — whether and how the server may sample a model through the client.
-  sampling: mcpSamplingSettingsPatchSchema.nullable().optional()
+  sampling: mcpSamplingSettingsPatchSchema.nullable().optional(),
+  // Phase 10.7 — runtime safety. A null sandbox follows MCP_SANDBOX_DEFAULT.
+  sandbox: mcpSandboxSettingsSchema.nullable().optional(),
+  limits: mcpRuntimeLimitsSchema.nullable().optional(),
+  credentialMode: z.enum(["service", "delegated"]).optional(),
+  delegatedFallback: z.enum(["none", "owner"]).optional()
 });
 
 const mcpServerUpdateSchema = mcpServerCreateSchema.partial().refine((value) => Object.keys(value).length > 0, {
@@ -1170,9 +1195,96 @@ export function createApp(
   });
   const providerRegistry = createDefaultProviderRegistry();
   const connectorRegistry = createDefaultConnectorRegistry();
+  // Phase 10.7 — stdio sandboxes. The instance label is derived from the
+  // database location so the startup sweep only ever sees this deployment's
+  // containers (and of those only the ones whose API process is gone).
+  const mcpSandboxPolicy: McpSandboxPolicy = {
+    defaultMode: config.MCP_SANDBOX_DEFAULT,
+    required: config.MCP_SANDBOX_REQUIRED,
+    runtime: config.MCP_SANDBOX_RUNTIME,
+    allowedMountRoots: config.MCP_SANDBOX_ALLOWED_MOUNT_ROOTS.split(",").map((entry) => entry.trim()).filter(Boolean),
+    instanceLabel: crypto.createHash("sha256").update(`l2m-sandbox:${store.storageLocation()}`).digest("hex").slice(0, 16)
+  };
+  const mcpSandboxLauncher = new ContainerSandboxLauncher(mcpSandboxPolicy, {
+    onWarning: (message, fields) => app.log.warn(fields ?? {}, message)
+  });
+  // Phase 10.7 — rate limits, concurrency caps and circuit breakers. State is
+  // in memory, per API instance, keyed by registry server id; it is shared by
+  // workflow runs, the gateway and the playground of this process.
+  const recordBreakerTransition = (transition: McpBreakerTransition) => {
+    const server = store.getMcpServer(transition.serverId);
+    const eventType =
+      transition.to === "open" ? "mcp_server.breaker_opened" : transition.to === "half_open" ? "mcp_server.breaker_half_open" : "mcp_server.breaker_closed";
+    auditService.record({
+      category: "system",
+      eventType,
+      action: "update",
+      outcome: transition.to === "open" ? "failure" : "success",
+      actor: { type: "system" },
+      resourceType: "mcp_server",
+      resourceId: transition.serverId,
+      projectId: server?.projectId ?? null,
+      // The last error stays out of the audit log; admins see it on the server page.
+      metadata: {
+        name: server?.name ?? null,
+        from: transition.from,
+        to: transition.to,
+        reason: transition.reason,
+        consecutiveFailures: transition.consecutiveFailures,
+        retryAt: transition.retryAt
+      }
+    });
+    app.log.warn({ serverId: transition.serverId, from: transition.from, to: transition.to }, "MCP circuit breaker changed state");
+  };
+  const mcpRuntimeGuard = new McpRuntimeGuard({ onBreakerTransition: recordBreakerTransition });
+  const runtimeStateView = (serverId: string, user?: SafeUser | null): McpRuntimeStateView => {
+    const view = mcpRuntimeGuard.snapshot(serverId);
+    const lastError =
+      user?.role === "admin" && view.breaker.lastError ? String(secretService.redact(view.breaker.lastError)) : null;
+    return { ...view, breaker: { ...view.breaker, lastError } };
+  };
+  const sandboxPolicyView = (): McpSandboxPolicyView => ({
+    defaultMode: mcpSandboxPolicy.defaultMode,
+    required: mcpSandboxPolicy.required,
+    runtime: mcpSandboxPolicy.runtime,
+    detectedRuntime: detectContainerRuntime(mcpSandboxPolicy.runtime)?.runtime ?? null,
+    allowedMountRoots: mcpSandboxPolicy.allowedMountRoots
+  });
+  /** Why a server with this adapter and sandbox may not be saved, or null. */
+  const sandboxSaveProblem = (adapterId: string, sandbox: McpSandboxSettings | null | undefined): string | null => {
+    if (adapterId !== "stdio_mcp") {
+      return sandbox && sandbox.mode === "container" ? "Container sandboxes apply to stdio MCP servers only." : null;
+    }
+    const mode = sandbox?.mode ?? mcpSandboxPolicy.defaultMode;
+    if (mode === "none" && mcpSandboxPolicy.required) {
+      return "MCP_SANDBOX_REQUIRED is on: stdio MCP servers must run in a container sandbox.";
+    }
+    if (sandbox?.mode === "container" && sandbox.mounts?.length) {
+      const checked = validateSandboxMounts(sandbox.mounts, mcpSandboxPolicy.allowedMountRoots);
+      if (checked.problems.length > 0) return checked.problems.join(" ");
+    }
+    return null;
+  };
+  const sandboxInUse = () =>
+    mcpSandboxPolicy.defaultMode === "container" ||
+    store.listMcpServers().some((server) => server.adapterId === "stdio_mcp" && server.sandbox?.mode === "container");
+  if (sandboxInUse()) {
+    void sweepSandboxContainers({ policy: mcpSandboxPolicy })
+      .then((swept) => {
+        if (swept.removed > 0) app.log.info({ removed: swept.removed, runtime: swept.runtime }, "Removed leftover MCP sandbox containers");
+      })
+      .catch((error) => {
+        app.log.warn({ err: error instanceof Error ? error.message : String(error) }, "MCP sandbox sweep failed");
+      });
+  }
+  app.addHook("onClose", async () => {
+    await mcpSandboxLauncher.shutdown();
+  });
+
   // Phase 10.5 — OAuth connections for remote MCP servers. The http adapter
   // asks this service for access tokens; tokens stay in SecretService.
   const mcpOAuthService = new McpOAuthService(store, secretService, {
+    connectionsUrl: resolveMcpConnectionsUrl(config),
     redirectUri: resolveMcpOAuthRedirectUri(config),
     stateTtlMs: config.MCP_OAUTH_STATE_TTL_MS,
     refreshSkewMs: config.MCP_OAUTH_REFRESH_SKEW_MS,
@@ -1191,6 +1303,8 @@ export function createApp(
   });
   const mcpRegistry = createDefaultMCPRegistry({
     oauth: mcpOAuthService,
+    sandbox: mcpSandboxLauncher,
+    runtimeGuard: mcpRuntimeGuard,
     // Phase 10.8 — snapshot mock servers read accepted snapshots and cassettes from the store.
     snapshots: {
       loadSnapshot: (sourceServerId) => {
@@ -1236,7 +1350,7 @@ export function createApp(
     : null;
   // Phase 10.1 — nodes that reference the MCP server registry resolve here at
   // run time, so a registry edit applies to every workflow using the server.
-  const resolveRegisteredMcpServer = (registryServerId: string): MCPServerConfig => {
+  const resolveRegisteredMcpServer = (registryServerId: string, actor?: SafeUser | null): MCPServerConfig => {
     const server = store.getMcpServer(registryServerId);
     if (!server) {
       throw new Error(`MCP server '${registryServerId}' is not in the server registry. Pick a registered server on the node.`);
@@ -1246,7 +1360,9 @@ export function createApp(
         `MCP server '${server.name}' changed its tool schemas in a breaking way and is set to block runs. Review and accept the change on the MCP servers page.`
       );
     }
-    return serverConfigFromRecord(server);
+    const serverConfig = serverConfigFromRecord(server);
+    // Phase 10.7 — calls made from the API on a user's behalf (playground, resources, prompts) use their own account.
+    return actor ? withDelegatedUser(serverConfig, { role: actor.role, source: "user", userId: actor.id, email: actor.email }) : serverConfig;
   };
   // Phase 10.2 — MCP tool policy. Rules and overrides are read when an agent
   // or MCP Tool node starts, so an admin's change applies to the next node.
@@ -2664,7 +2780,16 @@ export function createApp(
     mcpRegistry,
     {
       resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
-      isLeader: () => leaderElection.isLeader()
+      isLeader: () => leaderElection.isLeader(),
+      checkSandbox: (serverConfig) => mcpSandboxLauncher.check(serverConfig),
+      // Phase 10.7 — delegated servers are probed with one user's own connection.
+      delegatedProbeUser: (server, requestedBy) => {
+        const connected = (userId: string | null | undefined) =>
+          userId && store.getMcpUserOAuthConnection(server.id, userId)?.secretId ? userId : null;
+        if (requestedBy) return connected(requestedBy);
+        const creator = server.createdBy ? store.getUserByEmail(server.createdBy) : null;
+        return connected(creator?.id);
+      }
     },
     {
       defaultIntervalMs: config.MCP_PROBE_INTERVAL_MS,
@@ -9272,9 +9397,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // Phase 10.1 — MCP server registry. Reads are open to builders (they pick
   // servers on nodes); changing the registry is admin-only because every
   // workflow that references a server follows the change.
-  const mcpServerSummary = (server: McpServerRecord) => ({
+  const mcpServerSummary = (server: McpServerRecord, user?: SafeUser | null) => ({
     ...server,
-    latency: mcpProbeService.latency(server.id)
+    latency: mcpProbeService.latency(server.id),
+    // Phase 10.7 — breaker and limit state on this API instance (the last error only for admins).
+    runtime: runtimeStateView(server.id, user)
   });
 
   app.get("/api/mcp/servers", async (request, reply) => {
@@ -9282,9 +9409,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) return;
     const query = request.query as { projectId?: string } | undefined;
     return {
-      servers: store.listMcpServers({ projectId: query?.projectId }).map(mcpServerSummary),
+      servers: store.listMcpServers({ projectId: query?.projectId }).map((server) => mcpServerSummary(server, user)),
       adapters: mcpRegistry.listDefinitions().map((definition) => ({ id: definition.id, label: definition.label })),
-      defaultProbeIntervalMs: mcpProbeService.defaultIntervalMs
+      defaultProbeIntervalMs: mcpProbeService.defaultIntervalMs,
+      sandboxPolicy: sandboxPolicyView()
     };
   });
 
@@ -9297,7 +9425,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return { error: "MCP server not found" };
     }
     return {
-      server: mcpServerSummary(server),
+      server: mcpServerSummary(server, user),
+      sandboxPolicy: sandboxPolicyView(),
       probes: store.listMcpServerProbes(server.id, 50),
       // Snapshot list without the tool bodies; fetch one snapshot for those.
       snapshots: store.listMcpToolSnapshots(server.id, 20).map(({ tools: _tools, ...snapshot }) => snapshot),
@@ -9416,6 +9545,28 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return { error: reason };
   };
 
+  /** Phase 10.7 — sandbox and credential-mode rules for a server as it will be saved. */
+  const validateMcpRuntimeSafety = (
+    next: {
+      adapterId: string;
+      connection: Record<string, unknown>;
+      sandbox: McpSandboxSettings | null | undefined;
+      credentialMode: "service" | "delegated";
+    },
+    reply: FastifyReply
+  ): { error: string } | null => {
+    const sandboxProblem = sandboxSaveProblem(next.adapterId, next.sandbox);
+    if (sandboxProblem) {
+      reply.code(400);
+      return { error: sandboxProblem };
+    }
+    if (next.credentialMode === "delegated" && !McpOAuthService.usesOAuth({ adapterId: next.adapterId, connection: next.connection })) {
+      reply.code(400);
+      return { error: "Delegated credentials need a remote (http) MCP server whose auth type is OAuth." };
+    }
+    return null;
+  };
+
   const probeInBackground = (serverId: string) => {
     void mcpProbeService.probe(serverId).catch((err) => {
       app.log.warn({ serverId, err: err instanceof Error ? err.message : String(err) }, "Initial MCP probe failed");
@@ -9434,6 +9585,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (invalid) return invalid;
     const blocked = enforceMcpCatalog(parsed.data.adapterId, parsed.data.connection, reply);
     if (blocked) return blocked;
+    const unsafe = validateMcpRuntimeSafety(
+      {
+        adapterId: parsed.data.adapterId,
+        connection: parsed.data.connection ?? {},
+        sandbox: parsed.data.sandbox,
+        credentialMode: parsed.data.credentialMode ?? "service"
+      },
+      reply
+    );
+    if (unsafe) return unsafe;
 
     const id = `mcp_${crypto.randomUUID()}`;
     store.createMcpServer({
@@ -9449,6 +9610,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       probeIntervalMs: parsed.data.probeIntervalMs ?? null,
       blockOnBreakingChange: parsed.data.blockOnBreakingChange,
       sampling: parsed.data.sampling ?? null,
+      sandbox: parsed.data.adapterId === "stdio_mcp" ? parsed.data.sandbox ?? null : null,
+      limits: parsed.data.limits ?? null,
+      credentialMode: parsed.data.credentialMode ?? "service",
+      delegatedFallback: parsed.data.delegatedFallback ?? "none",
       createdBy: user.email
     });
     auditService.record({
@@ -9460,13 +9625,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       resourceType: "mcp_server",
       resourceId: id,
       projectId: parsed.data.projectId ?? null,
-      metadata: { name: parsed.data.name, adapterId: parsed.data.adapterId }
+      metadata: {
+        name: parsed.data.name,
+        adapterId: parsed.data.adapterId,
+        sandbox: parsed.data.sandbox?.mode ?? null,
+        credentialMode: parsed.data.credentialMode ?? "service"
+      }
     });
     if (parsed.data.probeEnabled !== false) {
       probeInBackground(id);
     }
     reply.code(201);
-    return { server: mcpServerSummary(store.getMcpServer(id)!) };
+    return { server: mcpServerSummary(store.getMcpServer(id)!, user) };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/mcp/servers/:id", async (request, reply) => {
@@ -9492,10 +9662,29 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       );
       if (blocked) return blocked;
     }
+    const nextAdapterId = parsed.data.adapterId ?? existing.adapterId;
+    const nextCredentialMode = parsed.data.credentialMode ?? existing.credentialMode;
+    const unsafe = validateMcpRuntimeSafety(
+      {
+        adapterId: nextAdapterId,
+        connection: parsed.data.connection ?? existing.connection,
+        sandbox: parsed.data.sandbox !== undefined ? parsed.data.sandbox : existing.sandbox,
+        credentialMode: nextCredentialMode
+      },
+      reply
+    );
+    if (unsafe) return unsafe;
 
-    const { secretRef, sampling, ...rest } = parsed.data;
+    const { secretRef, sampling, sandbox, ...rest } = parsed.data;
+    // Switching how credentials work drops the connections of the other mode.
+    if (nextCredentialMode !== existing.credentialMode) {
+      if (nextCredentialMode === "delegated") mcpOAuthService.disconnect(existing.id);
+      else mcpOAuthService.disconnectAllUsers(existing.id);
+    }
     store.updateMcpServer(existing.id, {
       ...rest,
+      ...(sandbox !== undefined ? { sandbox: nextAdapterId === "stdio_mcp" ? sandbox : null } : {}),
+      ...(nextAdapterId !== "stdio_mcp" && existing.sandbox ? { sandbox: null } : {}),
       ...(secretRef !== undefined ? { secretId: secretRef?.secretId ?? null } : {}),
       // A partial sampling patch keeps what it does not mention.
       ...(sampling !== undefined ? { sampling: sampling ? { ...existing.sampling, ...sampling } : null } : {})
@@ -9511,11 +9700,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       metadata: { fields: Object.keys(parsed.data) }
     });
     const connectionChanged =
-      parsed.data.adapterId !== undefined || parsed.data.connection !== undefined || secretRef !== undefined;
+      parsed.data.adapterId !== undefined ||
+      parsed.data.connection !== undefined ||
+      secretRef !== undefined ||
+      sandbox !== undefined ||
+      parsed.data.credentialMode !== undefined;
     if (connectionChanged && store.getMcpServer(existing.id)?.probeEnabled) {
       probeInBackground(existing.id);
     }
-    return { server: mcpServerSummary(store.getMcpServer(existing.id)!) };
+    return { server: mcpServerSummary(store.getMcpServer(existing.id)!, user) };
   });
 
   app.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
@@ -9538,6 +9731,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       }
       // Phase 10.5 — the OAuth tokens and client registration go with the server.
       mcpOAuthService.disconnect(existing.id);
+      // Phase 10.7 — and every user's own tokens, and its breaker state.
+      mcpOAuthService.disconnectAllUsers(existing.id);
+      mcpRuntimeGuard.forget(existing.id);
       store.deleteMcpServer(existing.id);
       auditService.record({
         category: "system",
@@ -9560,9 +9756,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(404);
       return { error: "MCP server not found" };
     }
-    const outcome = await mcpProbeService.probe(request.params.id);
+    let outcome: Awaited<ReturnType<typeof mcpProbeService.probe>>;
+    try {
+      outcome = await mcpProbeService.probe(request.params.id, user.id);
+    } catch (error) {
+      if (error instanceof McpProbeSkippedError) {
+        reply.code(error.statusCode);
+        return { error: error.message };
+      }
+      throw error;
+    }
     return {
-      server: mcpServerSummary(outcome.server),
+      server: mcpServerSummary(outcome.server, user),
       probe: outcome.probe,
       snapshot: outcome.snapshot ? (({ tools: _tools, ...snapshot }) => snapshot)(outcome.snapshot) : null
     };
@@ -9591,7 +9796,44 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       resourceId: existing.id,
       metadata: { snapshotId: snapshot.id, breakingChanges: snapshot.changes.filter((change) => change.breaking).length }
     });
-    return { server: mcpServerSummary(store.getMcpServer(existing.id)!) };
+    return { server: mcpServerSummary(store.getMcpServer(existing.id)!, user) };
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 10.7 — runtime state (breaker, limits) and the breaker reset.
+  // -------------------------------------------------------------------------
+
+  app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/runtime", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    const server = store.getMcpServer(request.params.id);
+    if (!server) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    return { runtime: runtimeStateView(server.id, user), limits: server.limits, sandboxStatus: server.sandboxStatus };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/mcp/servers/:id/breaker/reset", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const server = store.getMcpServer(request.params.id);
+    if (!server) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const wasOpen = mcpRuntimeGuard.resetBreaker(server.id, `Reset by ${user.email}.`);
+    audit(request, user, {
+      category: "system",
+      eventType: "mcp_server.breaker_reset",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_server",
+      resourceId: server.id,
+      projectId: server.projectId,
+      metadata: { name: server.name, wasOpen }
+    });
+    return { runtime: runtimeStateView(server.id, user) };
   });
 
   // -------------------------------------------------------------------------
@@ -9724,29 +9966,33 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const query = request.query ?? {};
     const sessionId = getSessionIdFromRequest(request);
     const sessionUser = sessionId ? authService.getSessionUser(sessionId) : null;
-    const outcome =
-      sessionUser && sessionUser.role === "admin"
-        ? await mcpOAuthService.completeAuthorization({
-            state: query.state,
-            code: query.code,
-            ...(query.error ? { error: query.error } : {}),
-            ...(query.error_description ? { errorDescription: query.error_description } : {}),
-            sessionId
-          })
-        : {
-            serverId: null,
-            ok: false,
-            error: "Sign in to L2M as an admin in this browser, then connect the server again."
-          };
+    // Phase 10.7 — a user's own connection completes for that user; the shared one only for an admin.
+    const outcome = sessionUser
+      ? await mcpOAuthService.completeAuthorization({
+          state: query.state,
+          code: query.code,
+          ...(query.error ? { error: query.error } : {}),
+          ...(query.error_description ? { errorDescription: query.error_description } : {}),
+          sessionId,
+          actor: { userId: sessionUser.id, isAdmin: sessionUser.role === "admin" }
+        })
+      : {
+          serverId: null,
+          ok: false,
+          error: "Sign in to L2M in this browser, then connect again."
+        };
     if (outcome.serverId) {
       audit(request, sessionUser ?? null, {
         category: "system",
-        eventType: "mcp_server.oauth_connected",
+        eventType: outcome.userId ? "mcp_server.user_oauth_connected" : "mcp_server.oauth_connected",
         action: "update",
         outcome: outcome.ok ? "success" : "failure",
         resourceType: "mcp_server",
         resourceId: outcome.serverId,
-        metadata: outcome.ok ? {} : { error: (outcome.error ?? "").slice(0, 300) }
+        metadata: {
+          ...(outcome.userId ? { userId: outcome.userId } : {}),
+          ...(outcome.ok ? {} : { error: (outcome.error ?? "").slice(0, 300) })
+        }
       });
     }
     const webOrigin = config.WEB_ORIGIN.split(",").map((entry) => entry.trim()).find(Boolean) ?? "/";
@@ -9803,6 +10049,157 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       metadata: { name: server.name }
     });
     return { status };
+  });
+
+  // Phase 10.7 — delegated credentials. Every user who can run workflows
+  // connects their own account to delegated servers under My connections;
+  // admins see who is connected (never a token) and can revoke.
+  const canUseServer = (user: SafeUser, server: McpServerRecord) =>
+    rbacService.can(user, server.projectId ?? DEFAULT_PROJECT_ID, "workflow:execute");
+  const myConnection = (server: McpServerRecord, user: SafeUser): McpMyConnection => {
+    const row = store.getMcpUserOAuthConnection(server.id, user.id);
+    return {
+      serverId: server.id,
+      serverName: server.name,
+      description: server.description,
+      delegatedFallback: server.delegatedFallback,
+      connection: row ? mcpOAuthService.userStatus(server, user.id, user.email) : null
+    };
+  };
+  const findDelegatedServer = (serverId: string, reply: FastifyReply) => {
+    const server = store.getMcpServer(serverId);
+    if (!server || !McpOAuthService.isDelegated(server)) {
+      reply.code(404);
+      return null;
+    }
+    return server;
+  };
+
+  app.get("/api/mcp/connections", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator"]);
+    if (!user) return;
+    const servers = store
+      .listMcpServers()
+      .filter((server) => McpOAuthService.isDelegated(server) && canUseServer(user, server));
+    return { connections: servers.map((server) => myConnection(server, user)) };
+  });
+
+  app.post<{ Params: { serverId: string }; Body: unknown }>("/api/mcp/connections/:serverId/connect", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator"]);
+    if (!user) return;
+    const server = findDelegatedServer(request.params.serverId, reply);
+    if (!server || !canUseServer(user, server)) {
+      reply.code(404);
+      return { error: "No MCP server with your own account by that id." };
+    }
+    const parsed = mcpOAuthConnectSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid OAuth connect payload", details: parsed.error.issues };
+    }
+    const sessionId = getSessionIdFromRequest(request);
+    if (!sessionId) {
+      reply.code(400);
+      return { error: "Connecting an account needs a signed-in browser session." };
+    }
+    try {
+      const started = await mcpOAuthService.startAuthorization({
+        server,
+        sessionId,
+        userEmail: user.email,
+        userId: user.id,
+        ...(parsed.data.scope ? { scope: parsed.data.scope } : {})
+      });
+      audit(request, user, {
+        category: "system",
+        eventType: "mcp_server.user_oauth_connect_started",
+        action: "update",
+        outcome: "success",
+        resourceType: "mcp_server",
+        resourceId: server.id,
+        projectId: server.projectId,
+        metadata: { name: server.name, userId: user.id }
+      });
+      return started;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "OAuth connect failed";
+      audit(request, user, {
+        category: "system",
+        eventType: "mcp_server.user_oauth_connect_started",
+        action: "update",
+        outcome: "failure",
+        resourceType: "mcp_server",
+        resourceId: server.id,
+        projectId: server.projectId,
+        metadata: { name: server.name, userId: user.id, error: message.slice(0, 300) }
+      });
+      reply.code(error instanceof McpOAuthUserError ? error.statusCode : 500);
+      return { error: message };
+    }
+  });
+
+  app.delete<{ Params: { serverId: string } }>("/api/mcp/connections/:serverId", async (request, reply) => {
+    const user = await requireRole(request, reply, ["operator"]);
+    if (!user) return;
+    const server = store.getMcpServer(request.params.serverId);
+    if (!server) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const removed = mcpOAuthService.disconnectUser(server.id, user.id);
+    if (removed) {
+      audit(request, user, {
+        category: "system",
+        eventType: "mcp_server.user_oauth_disconnected",
+        action: "update",
+        outcome: "success",
+        resourceType: "mcp_server",
+        resourceId: server.id,
+        projectId: server.projectId,
+        metadata: { name: server.name, userId: user.id }
+      });
+    }
+    return { connection: myConnection(server, user) };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/connections", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const server = store.getMcpServer(request.params.id);
+    if (!server) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    const connections = store.listMcpUserOAuthConnections({ serverId: server.id }).map((row) => {
+      const owner = store.getUserById(row.userId);
+      return mcpOAuthService.userStatus(server, row.userId, owner?.email ?? null);
+    });
+    return { credentialMode: server.credentialMode, delegatedFallback: server.delegatedFallback, connections };
+  });
+
+  app.delete<{ Params: { id: string; userId: string } }>("/api/mcp/servers/:id/connections/:userId", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return;
+    const server = store.getMcpServer(request.params.id);
+    if (!server) {
+      reply.code(404);
+      return { error: "MCP server not found" };
+    }
+    if (!mcpOAuthService.disconnectUser(server.id, request.params.userId)) {
+      reply.code(404);
+      return { error: "That user has no connection to this server." };
+    }
+    audit(request, user, {
+      category: "system",
+      eventType: "mcp_server.user_oauth_revoked",
+      action: "update",
+      outcome: "success",
+      resourceType: "mcp_server",
+      resourceId: server.id,
+      projectId: server.projectId,
+      metadata: { name: server.name, userId: request.params.userId }
+    });
+    return { ok: true };
   });
 
   app.get("/api/mcp/policies", async (request, reply) => {
@@ -10017,7 +10414,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     canExecuteInProject: (user, projectId) => rbacService.can(user, projectId, "workflow:execute"),
     auditUser: (request, user, event) => audit(request, user, event),
     probeInBackground,
-    serverSummary: mcpServerSummary
+    sandboxSaveProblem,
+    serverSummary: (server) => mcpServerSummary(server)
   });
 
   // Phase 10.5 — resources, prompts and elicitation requests.
@@ -10043,6 +10441,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     oauth: mcpOAuthService,
     usesOAuth: (server) => McpOAuthService.usesOAuth(server),
     latency: (serverId) => mcpProbeService.latency(serverId),
+    runtime: (serverId, user) => runtimeStateView(serverId, user),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 
@@ -10282,6 +10681,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(404);
       return { error: "User not found" };
     }
+    // Phase 10.7 — a deleted user's own MCP connections (and their tokens) go with them.
+    mcpOAuthService.disconnectUserEverywhere(request.params.id);
     const deleted = store.deleteUser(request.params.id);
     if (!deleted) {
       reply.code(500);

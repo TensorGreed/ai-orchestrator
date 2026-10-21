@@ -1260,6 +1260,49 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP TABLE IF EXISTS mcp_cassettes;
     `
+  },
+  {
+    version: 27,
+    description:
+      "Phase 10.7 — MCP runtime safety (mcp_servers sandbox, limits and credential mode; mcp_tool_calls.rejection; mcp_user_oauth_connections)",
+    up: `
+      ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS sandbox_json TEXT;
+      ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS sandbox_status_json TEXT;
+      ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS limits_json TEXT;
+      ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS credential_mode TEXT NOT NULL DEFAULT 'service';
+      ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS delegated_fallback TEXT NOT NULL DEFAULT 'none';
+      ALTER TABLE mcp_tool_calls ADD COLUMN IF NOT EXISTS rejection TEXT;
+
+      CREATE TABLE IF NOT EXISTS mcp_user_oauth_connections (
+        server_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        secret_id TEXT,
+        state TEXT NOT NULL DEFAULT 'not_connected',
+        subject TEXT,
+        scope TEXT,
+        authorization_server TEXT,
+        client_registration TEXT,
+        client_id TEXT,
+        expires_at TIMESTAMPTZ,
+        has_refresh_token INTEGER NOT NULL DEFAULT 0,
+        last_refresh_at TIMESTAMPTZ,
+        connected_at TIMESTAMPTZ,
+        last_error TEXT,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (server_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_user_oauth_user ON mcp_user_oauth_connections(user_id);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_mcp_user_oauth_user;
+      DROP TABLE IF EXISTS mcp_user_oauth_connections;
+      ALTER TABLE mcp_tool_calls DROP COLUMN IF EXISTS rejection;
+      ALTER TABLE mcp_servers DROP COLUMN IF EXISTS delegated_fallback;
+      ALTER TABLE mcp_servers DROP COLUMN IF EXISTS credential_mode;
+      ALTER TABLE mcp_servers DROP COLUMN IF EXISTS limits_json;
+      ALTER TABLE mcp_servers DROP COLUMN IF EXISTS sandbox_status_json;
+      ALTER TABLE mcp_servers DROP COLUMN IF EXISTS sandbox_json;
+    `
   }
 ];
 

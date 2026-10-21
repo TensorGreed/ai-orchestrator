@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   DEFAULT_MCP_SANDBOX_LIMITS,
@@ -46,6 +47,27 @@ import { McpSandboxPolicyError } from "./errors";
 
 export const MCP_SANDBOX_LABEL = "l2m.mcp.sandbox";
 export const MCP_SANDBOX_SERVER_LABEL = "l2m.mcp.server";
+/** `<host>:<pid>` of the API process that started the container; the sweep only removes containers whose process is gone. */
+export const MCP_SANDBOX_OWNER_LABEL = "l2m.mcp.owner";
+
+function sanitizeHost(host: string): string {
+  return host.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 120) || "host";
+}
+
+/** This process as an owner label value. */
+export function currentSandboxOwner(): string {
+  return `${sanitizeHost(os.hostname())}:${process.pid}`;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 const CONTAINER_NAME_PREFIX = "l2m-mcp-";
 const CLI_TIMEOUT_MS = 20_000;
 
@@ -287,6 +309,8 @@ export interface ContainerRunInput {
   envNames: string[];
   containerName: string;
   instanceLabel: string;
+  /** Owner label value (`<host>:<pid>`). */
+  owner?: string;
   registryServerId?: string;
   mounts: ResolvedSandboxMount[];
 }
@@ -314,6 +338,7 @@ export function buildContainerRunArgs(input: ContainerRunInput): string[] {
     input.containerName,
     "--label",
     `${MCP_SANDBOX_LABEL}=${input.instanceLabel}`,
+    ...(input.owner ? ["--label", `${MCP_SANDBOX_OWNER_LABEL}=${input.owner}`] : []),
     ...(input.registryServerId ? ["--label", `${MCP_SANDBOX_SERVER_LABEL}=${input.registryServerId}`] : []),
     "--network",
     network,
@@ -368,6 +393,8 @@ export interface ContainerSandboxLauncherOptions {
   execFile?: ExecFileLike;
   /** Warnings about cleanup failures; never receives env values. */
   onWarning?: (message: string, fields?: Record<string, unknown>) => void;
+  /** Owner label value; defaults to this process (`<host>:<pid>`). */
+  owner?: string;
 }
 
 /** Problems that keep a sandbox from starting, plus warnings, without starting anything. */
@@ -502,6 +529,7 @@ export class ContainerSandboxLauncher implements StdioLauncher {
       envNames,
       containerName,
       instanceLabel: this.policy.instanceLabel,
+      owner: this.options.owner ?? currentSandboxOwner(),
       ...(request.config.registryServerId ? { registryServerId: request.config.registryServerId } : {}),
       mounts: status.mounts
     });
@@ -546,13 +574,20 @@ export class ContainerSandboxLauncher implements StdioLauncher {
 /**
  * Remove leftover containers of this deployment (for example after the API
  * process was killed). Only containers carrying this deployment's sandbox
- * label are touched. Returns how many were removed.
+ * label are looked at, and of those only the ones whose owner process ran on
+ * this host and is gone: a second API or worker process sharing the database
+ * keeps its live containers. Returns how many were removed.
  */
 export async function sweepSandboxContainers(input: {
   policy: McpSandboxPolicy;
   locator?: RuntimeLocator;
   execFile?: ExecFileLike;
+  /** This host's name as owner labels spell it; defaults to the OS host name. */
+  host?: string;
+  isAlive?: (pid: number) => boolean;
 }): Promise<{ runtime: McpContainerRuntime | null; removed: number }> {
+  const host = sanitizeHost(input.host ?? os.hostname());
+  const isAlive = input.isAlive ?? processIsAlive;
   const exec = input.execFile ?? defaultExecFile;
   const runtimes: McpContainerRuntime[] = input.policy.runtime === "auto" ? ["docker", "podman"] : [input.policy.runtime];
   let removed = 0;
@@ -571,6 +606,24 @@ export async function sweepSandboxContainers(input: {
       // The daemon is not reachable; nothing to sweep.
       continue;
     }
+    const orphaned: string[] = [];
+    for (const id of ids) {
+      let owner = "";
+      try {
+        const inspected = await exec(runtimePath, ["inspect", "--format", `{{index .Config.Labels "${MCP_SANDBOX_OWNER_LABEL}"}}`, id], {
+          timeout: CLI_TIMEOUT_MS
+        });
+        owner = inspected.stdout.trim();
+      } catch {
+        continue;
+      }
+      const match = /^(.+):(\d+)$/.exec(owner);
+      if (!match || match[1] !== host) continue;
+      const pid = Number(match[2]);
+      if (pid === process.pid || isAlive(pid)) continue;
+      orphaned.push(id);
+    }
+    ids = orphaned;
     if (ids.length === 0) continue;
     try {
       await exec(runtimePath, ["rm", "-f", ...ids], { timeout: CLI_TIMEOUT_MS });

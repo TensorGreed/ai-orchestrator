@@ -1225,6 +1225,68 @@ export const openApiSpec = {
         responses: { "200": { description: "{ status }" }, "403": { description: "Not an admin" }, "409": { description: "Refresh failed or not connected" } }
       }
     },
+    "/api/mcp/servers/{id}/runtime": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "Phase 10.7 — circuit breaker and limit state of a registry server on this API instance (in memory, per instance), its limits and the last sandbox check. The breaker's last error is shown to admins only.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ runtime, limits, sandboxStatus }" }, "404": { description: "Unknown server" } }
+      }
+    },
+    "/api/mcp/servers/{id}/breaker/reset": {
+      post: {
+        tags: ["MCP"],
+        summary: "Phase 10.7 — close a server's circuit breaker by hand (admin). Audited as mcp_server.breaker_reset.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ runtime }" }, "403": { description: "Not an admin" }, "404": { description: "Unknown server" } }
+      }
+    },
+    "/api/mcp/servers/{id}/connections": {
+      get: {
+        tags: ["MCP"],
+        summary: "Phase 10.7 — who has connected their own account to a delegated server (admin). Never returns a token.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ credentialMode, delegatedFallback, connections: McpUserConnectionView[] }" }, "403": { description: "Not an admin" } }
+      }
+    },
+    "/api/mcp/servers/{id}/connections/{userId}": {
+      delete: {
+        tags: ["MCP"],
+        summary: "Phase 10.7 — revoke one user's connection to a delegated server (admin). Deletes their tokens; audited as mcp_server.user_oauth_revoked.",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "userId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "{ ok: true }" }, "403": { description: "Not an admin" }, "404": { description: "No such connection" } }
+      }
+    },
+    "/api/mcp/connections": {
+      get: {
+        tags: ["MCP"],
+        summary:
+          "Phase 10.7 — My connections: the delegated servers the signed-in user may use (operator and up, with run rights in the server's project) and the state of their own connection to each.",
+        responses: { "200": { description: "{ connections: McpMyConnection[] }" } }
+      }
+    },
+    "/api/mcp/connections/{serverId}/connect": {
+      post: {
+        tags: ["MCP"],
+        summary:
+          "Phase 10.7 — start connecting the signed-in user's own account to a delegated server (OAuth 2.1 with PKCE; needs a browser session). The callback completes only for the same user.",
+        parameters: [{ name: "serverId", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { scope: { type: "string" } } } } } },
+        responses: { "200": { description: "{ authorizationUrl, expiresAt, redirectUri }" }, "404": { description: "Not a delegated server you can use" } }
+      }
+    },
+    "/api/mcp/connections/{serverId}": {
+      delete: {
+        tags: ["MCP"],
+        summary: "Phase 10.7 — disconnect the signed-in user's own account from a delegated server (deletes their tokens).",
+        parameters: [{ name: "serverId", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ connection: McpMyConnection }" } }
+      }
+    },
     "/api/mcp/oauth/callback": {
       get: {
         tags: ["MCP"],

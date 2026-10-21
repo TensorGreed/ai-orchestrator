@@ -150,6 +150,29 @@ const envSchema = z.object({
   MCP_CASSETTE_MAX_BYTES: z.coerce.number().int().min(1_024).max(268_435_456).default(5_242_880),
   /** Phase 10.8 — most MCP calls one cassette keeps. */
   MCP_CASSETTE_MAX_CALLS: z.coerce.number().int().min(1).max(100_000).default(5_000),
+  // Phase 10.7 — MCP runtime safety.
+  /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
+  MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),
+  /** When true, stdio servers cannot run without a container sandbox (registry, inline nodes, tests). */
+  MCP_SANDBOX_REQUIRED: booleanFromEnv.default(false),
+  /**
+   * Comma-separated absolute host directories that sandbox mounts must resolve
+   * into (after symlinks). Empty = sandboxes cannot mount host paths.
+   */
+  MCP_SANDBOX_ALLOWED_MOUNT_ROOTS: z
+    .string()
+    .default("")
+    .refine(
+      (value) =>
+        value
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+          .every((entry) => entry.startsWith("/") && !entry.split("/").includes("..")),
+      { message: "MCP_SANDBOX_ALLOWED_MOUNT_ROOTS must be a comma-separated list of absolute paths without '..'" }
+    ),
+  /** Container runtime for sandboxes: `auto` prefers docker, then podman. */
+  MCP_SANDBOX_RUNTIME: z.enum(["auto", "docker", "podman"]).default("auto"),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),

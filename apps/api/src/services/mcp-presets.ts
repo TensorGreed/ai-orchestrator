@@ -1,3 +1,5 @@
+import type { McpSandboxSettings } from "@ai-orchestrator/shared";
+
 export interface McpPreset {
   id: string;
   name: string;
@@ -12,6 +14,8 @@ export interface McpPreset {
     description: string;
   };
   notes?: string;
+  /** Phase 10.7 — sandbox the registration form starts with (catalog entries may carry one). */
+  sandbox?: McpSandboxSettings;
 }
 
 export const MCP_PRESETS: McpPreset[] = [

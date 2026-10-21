@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpToolAnnotations, McpToolClassification } from "./types";
+import { mcpSandboxSettingsSchema } from "./mcp-runtime-safety";
 
 // ---------------------------------------------------------------------------
 // Phase 10.6 — MCP onboarding: config import, deployment catalog, playground.
@@ -108,7 +109,9 @@ export const mcpConfigImportEntryOptionsSchema = z.object({
   decision: z.enum(["create", "update", "copy", "skip"]).optional(),
   name: z.string().trim().min(1).max(120).optional(),
   /** Values for slots, keyed by slot id. Never echoed back. */
-  values: z.record(z.string(), z.string().max(16_384)).optional()
+  values: z.record(z.string(), z.string().max(16_384)).optional(),
+  /** Phase 10.7 — sandbox for an imported stdio server (admins); overrides the catalog's. */
+  sandbox: mcpSandboxSettingsSchema.nullable().optional()
 });
 
 export const mcpConfigImportRequestSchema = z.object({
@@ -144,7 +147,9 @@ export const mcpCatalogEntrySchema = z.object({
   tags: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
   approved: z.boolean().default(false),
   notes: z.string().max(2000).optional(),
-  source: z.string().max(500).optional()
+  source: z.string().max(500).optional(),
+  /** Phase 10.7 — how servers registered from this stdio entry run (a container sandbox, usually). */
+  sandbox: mcpSandboxSettingsSchema.optional()
 });
 export type McpCatalogEntry = z.infer<typeof mcpCatalogEntrySchema>;
 
