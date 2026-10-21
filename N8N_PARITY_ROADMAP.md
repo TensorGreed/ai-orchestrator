@@ -470,9 +470,9 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 - [ ] Delegated credentials: a tool call can use the triggering user's own token for a server instead of a shared service secret
 
 ### 10.8 Testing and reliability
-- [ ] Record and replay: capture a run's tool calls as a cassette and replay runs and evals deterministically against it
-- [ ] Mock server from a snapshot: generate a stub MCP server from a schema snapshot for tests and offline demos
-- [ ] `l2m mcp check` CLI for CI: probe servers and fail on breaking schema changes against the accepted snapshot
+- [x] Record and replay: capture a run's tool calls as a cassette and replay runs and evals deterministically against it
+- [x] Mock server from a snapshot: generate a stub MCP server from a schema snapshot for tests and offline demos
+- [x] `l2m mcp check` CLI for CI: probe servers and fail on breaking schema changes against the accepted snapshot
 
 ## Phase 11: Audit Bundles & Approvals (after Phase 10)
 

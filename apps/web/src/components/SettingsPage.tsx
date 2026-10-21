@@ -3884,6 +3884,10 @@ function EvalDatasetDetail({
   const [scorerContextRecall, setScorerContextRecall] = useState(false);
   const [scorerFaithfulness, setScorerFaithfulness] = useState(false);
   const [scorerAnswerRelevance, setScorerAnswerRelevance] = useState(false);
+  // Phase 10.8 — answer the run's MCP calls live, record them, or replay an earlier run's cassettes.
+  const [mcpMode, setMcpMode] = useState<"live" | "record" | "replay">("live");
+  const [replayRunId, setReplayRunId] = useState("");
+  const [replayLenient, setReplayLenient] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -3947,7 +3951,11 @@ function EvalDatasetDetail({
       const result = await startEvalRun({
         datasetId,
         workflowId: selectedWorkflow,
-        scorers: scorers.length > 0 ? scorers : undefined
+        scorers: scorers.length > 0 ? scorers : undefined,
+        ...(mcpMode === "record" ? { record: true } : {}),
+        ...(mcpMode === "replay" && replayRunId
+          ? { replay: { evalRunId: replayRunId, mode: replayLenient ? ("lenient" as const) : ("strict" as const) } }
+          : {})
       });
       await refresh();
       onOpenRun(result.runId);
@@ -3956,7 +3964,9 @@ function EvalDatasetDetail({
     } finally {
       setBusy(false);
     }
-  }, [datasetId, selectedWorkflow, refresh, onOpenRun, scorerExact, scorerContextPrecision, scorerContextRecall, scorerFaithfulness, scorerAnswerRelevance]);
+  }, [datasetId, selectedWorkflow, refresh, onOpenRun, scorerExact, scorerContextPrecision, scorerContextRecall, scorerFaithfulness, scorerAnswerRelevance, mcpMode, replayRunId, replayLenient]);
+
+  const recordedRuns = (runs ?? []).filter((run) => (run.mcpCassettes ?? 0) > 0);
 
   return (
     <div className="settings-section">
@@ -4009,7 +4019,7 @@ function EvalDatasetDetail({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={busy || !selectedWorkflow || !fixtures || fixtures.length === 0}
+            disabled={busy || !selectedWorkflow || !fixtures || fixtures.length === 0 || (mcpMode === "replay" && !replayRunId)}
             onClick={handleStartRun}
           >
             {busy ? "Running…" : `Run ${fixtures?.length ?? 0} fixtures`}
@@ -4036,6 +4046,50 @@ function EvalDatasetDetail({
             Pick context_precision + context_recall for RAG runs. faithfulness + answer_relevance call your configured judge LLM (one call per fixture each) — set <code>EVAL_JUDGE_ENABLED=true</code> in apps/api before enabling.
           </small>
         </fieldset>
+        <fieldset className="eval-mcp-fieldset">
+          <legend>MCP calls</legend>
+          <div className="eval-mcp-options" role="radiogroup" aria-label="MCP calls">
+            <label>
+              <input type="radio" name={`eval-mcp-${datasetId}`} checked={mcpMode === "live"} onChange={() => setMcpMode("live")} /> Live servers
+            </label>
+            <label title="Save each fixture's MCP calls into a cassette, so later runs can replay them offline">
+              <input type="radio" name={`eval-mcp-${datasetId}`} checked={mcpMode === "record"} onChange={() => setMcpMode("record")} /> Record MCP calls
+            </label>
+            <label title="Answer MCP calls from the cassettes an earlier recorded run saved">
+              <input
+                type="radio"
+                name={`eval-mcp-${datasetId}`}
+                checked={mcpMode === "replay"}
+                disabled={recordedRuns.length === 0}
+                onChange={() => {
+                  setMcpMode("replay");
+                  if (!replayRunId && recordedRuns[0]) setReplayRunId(recordedRuns[0].id);
+                }}
+              />{" "}
+              Replay a recorded run
+            </label>
+          </div>
+          {mcpMode === "replay" && (
+            <div className="eval-mcp-replay">
+              <select aria-label="Recorded run to replay" value={replayRunId} onChange={(event) => setReplayRunId(event.target.value)}>
+                {recordedRuns.map((run) => (
+                  <option key={run.id} value={run.id}>
+                    {new Date(run.startedAt).toLocaleString()} · {run.mcpCassettes} cassette{run.mcpCassettes === 1 ? "" : "s"}
+                  </option>
+                ))}
+              </select>
+              <label title="Calls a cassette does not hold go to the live server instead of failing the fixture">
+                <input type="checkbox" checked={replayLenient} onChange={(event) => setReplayLenient(event.target.checked)} /> Live fallback
+              </label>
+            </div>
+          )}
+          <small className="eval-mcp-help">
+            {recordedRuns.length === 0 && mcpMode !== "record"
+              ? "Record a run first to replay it. "
+              : ""}
+            Model calls are not recorded, so replayed runs still call your model.
+          </small>
+        </fieldset>
         {error && <div className="error-banner">{error}</div>}
       </div>
 
@@ -4051,6 +4105,7 @@ function EvalDatasetDetail({
                   <div style={{ fontSize: "0.88rem" }}>{new Date(r.startedAt).toLocaleString()}</div>
                   {r.summary && <div style={{ fontSize: "0.76rem", color: "var(--muted)", marginTop: 2, fontFamily: "JetBrains Mono, Fira Code, monospace" }}>
                     {r.summary.pass} pass · {r.summary.fail} fail · {r.summary.error} error · {Math.round(r.summary.passRate * 100)}% pass rate
+                    {(r.mcpCassettes ?? 0) > 0 && <span className="eval-run-cassettes"> · {r.mcpCassettes} recorded</span>}
                   </div>}
                 </div>
                 <span style={{ fontSize: "0.76rem", color: r.status === "completed" ? "var(--run-success)" : "var(--accent)" }}>{r.status}</span>

@@ -7,6 +7,11 @@ import type {
   Folder,
   McpPolicyRole,
   McpClient,
+  McpCassette,
+  McpCassetteBadge,
+  McpCassetteRecord,
+  McpCassetteSource,
+  McpCassetteSummary,
   McpElicitationSchema,
   McpElicitationStatus,
   McpElicitationView,
@@ -1165,6 +1170,50 @@ function parseTagsJson(value: unknown): string[] | undefined {
 
 const MAX_SESSION_TOOL_CACHE_RECORDS = 400;
 
+// Phase 10.8 — MCP cassettes
+interface McpCassetteRow {
+  id: string;
+  execution_id: string | null;
+  workflow_id: string | null;
+  workflow_name: string | null;
+  project_id: string | null;
+  source: string;
+  eval_run_id: string | null;
+  fixture_id: string | null;
+  call_count: number;
+  server_count: number;
+  bytes: number;
+  truncated: number;
+  cassette_json?: string;
+  created_at: string;
+  created_by: string | null;
+}
+
+const MCP_CASSETTE_SOURCES: readonly McpCassetteSource[] = ["manual", "eval", "replay", "import"];
+
+function mapMcpCassetteSummary(row: McpCassetteRow): McpCassetteSummary {
+  const source = MCP_CASSETTE_SOURCES.includes(row.source as McpCassetteSource) ? (row.source as McpCassetteSource) : "manual";
+  return {
+    id: toString(row.id),
+    executionId: row.execution_id ? toString(row.execution_id) : null,
+    workflowId: row.workflow_id ? toString(row.workflow_id) : null,
+    workflowName: row.workflow_name ? toString(row.workflow_name) : null,
+    projectId: row.project_id ? toString(row.project_id) : null,
+    source,
+    evalRunId: row.eval_run_id ? toString(row.eval_run_id) : null,
+    fixtureId: row.fixture_id ? toString(row.fixture_id) : null,
+    callCount: toNumber(row.call_count),
+    serverCount: toNumber(row.server_count),
+    bytes: toNumber(row.bytes),
+    truncated: toNumber(row.truncated) === 1,
+    createdAt: toString(row.created_at),
+    createdBy: row.created_by ? toString(row.created_by) : null
+  };
+}
+
+const MCP_CASSETTE_SUMMARY_COLUMNS =
+  "id, execution_id, workflow_id, workflow_name, project_id, source, eval_run_id, fixture_id, call_count, server_count, bytes, truncated, created_at, created_by";
+
 export class SqliteStore {
   private closed = false;
 
@@ -2091,6 +2140,31 @@ export class SqliteStore {
     this.ensureColumn("mcp_tool_calls", "sampling_output_tokens", "INTEGER");
     this.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_client ON mcp_tool_calls(client_id, started_at)`);
 
+    // Phase 10.8 — MCP cassettes: every MCP call of a recorded run, scrubbed
+    // of secrets before it is written, linked to the execution.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_cassettes (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT,
+        workflow_id TEXT,
+        workflow_name TEXT,
+        project_id TEXT,
+        source TEXT NOT NULL DEFAULT 'manual',
+        eval_run_id TEXT,
+        fixture_id TEXT,
+        call_count INTEGER NOT NULL DEFAULT 0,
+        server_count INTEGER NOT NULL DEFAULT 0,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        cassette_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_cassettes_execution ON mcp_cassettes(execution_id);
+      CREATE INDEX IF NOT EXISTS idx_mcp_cassettes_eval ON mcp_cassettes(eval_run_id, fixture_id);
+      CREATE INDEX IF NOT EXISTS idx_mcp_cassettes_created ON mcp_cassettes(created_at DESC);
+    `);
+
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
     this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
     this.ensureColumn("workflows", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
@@ -2357,6 +2431,10 @@ export class SqliteStore {
 
       if (hasTable("workflow_executions")) {
         this.exec("DELETE FROM workflow_executions WHERE workflow_id = ?", [id]);
+      }
+
+      if (hasTable("mcp_cassettes")) {
+        this.exec("DELETE FROM mcp_cassettes WHERE workflow_id = ?", [id]);
       }
 
       this.exec("DELETE FROM workflows WHERE id = ?", [id]);
@@ -3436,6 +3514,8 @@ export class SqliteStore {
     this.exec(`DELETE FROM execution_history WHERE started_at < ?`, [input.before]);
     // Phase 10.1 — tool-call telemetry follows the execution-history retention.
     this.exec(`DELETE FROM mcp_tool_calls WHERE started_at < ?`, [input.before]);
+    // Phase 10.8 — so do cassettes recorded from those runs.
+    this.exec(`DELETE FROM mcp_cassettes WHERE created_at < ?`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -8463,6 +8543,130 @@ export class SqliteStore {
 
   touchMcpClient(id: string, at: string): void {
     this.exec(`UPDATE mcp_clients SET last_used_at = ? WHERE id = ?`, [at, id]);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 10.8 — MCP cassettes
+  // ---------------------------------------------------------------------------
+
+  saveMcpCassette(input: {
+    id: string;
+    executionId: string | null;
+    workflowId: string | null;
+    workflowName: string | null;
+    projectId: string | null;
+    source: McpCassetteSource;
+    evalRunId?: string | null;
+    fixtureId?: string | null;
+    cassette: McpCassette;
+    createdBy: string | null;
+  }): McpCassetteSummary {
+    const createdAt = new Date().toISOString();
+    this.exec(
+      `INSERT INTO mcp_cassettes (
+         id, execution_id, workflow_id, workflow_name, project_id, source, eval_run_id, fixture_id,
+         call_count, server_count, bytes, truncated, cassette_json, created_at, created_by
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.executionId,
+        input.workflowId,
+        input.workflowName,
+        input.projectId,
+        input.source,
+        input.evalRunId ?? null,
+        input.fixtureId ?? null,
+        input.cassette.entries.length,
+        input.cassette.servers.length,
+        input.cassette.bytes,
+        input.cassette.truncated ? 1 : 0,
+        JSON.stringify(input.cassette),
+        createdAt,
+        input.createdBy
+      ]
+    );
+    return this.getMcpCassetteSummary(input.id)!;
+  }
+
+  getMcpCassetteSummary(id: string): McpCassetteSummary | null {
+    const row = this.queryOne<McpCassetteRow>(`SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes WHERE id = ?`, [id]);
+    return row ? mapMcpCassetteSummary(row) : null;
+  }
+
+  getMcpCassette(id: string): McpCassetteRecord | null {
+    const row = this.queryOne<McpCassetteRow>(`SELECT * FROM mcp_cassettes WHERE id = ?`, [id]);
+    if (!row) return null;
+    return { ...mapMcpCassetteSummary(row), cassette: safeJsonParse(toString(row.cassette_json)) as McpCassette };
+  }
+
+  /** The newest cassette recorded for an execution. */
+  getMcpCassetteForExecution(executionId: string): McpCassetteRecord | null {
+    const row = this.queryOne<{ id: string }>(
+      `SELECT id FROM mcp_cassettes WHERE execution_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      [executionId]
+    );
+    return row ? this.getMcpCassette(toString(row.id)) : null;
+  }
+
+  /** Cassettes an eval run recorded, keyed by fixture id. */
+  listMcpCassettesForEvalRun(evalRunId: string): McpCassetteSummary[] {
+    return this.queryAll<McpCassetteRow>(
+      `SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes WHERE eval_run_id = ? ORDER BY created_at ASC, rowid ASC`,
+      [evalRunId]
+    ).map(mapMcpCassetteSummary);
+  }
+
+  listMcpCassettes(options: { workflowId?: string; projectId?: string; evalRunId?: string; limit?: number; offset?: number } = {}): {
+    items: McpCassetteSummary[];
+    total: number;
+  } {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (options.workflowId) {
+      where.push("workflow_id = ?");
+      params.push(options.workflowId);
+    }
+    if (options.projectId) {
+      where.push("project_id = ?");
+      params.push(options.projectId);
+    }
+    if (options.evalRunId) {
+      where.push("eval_run_id = ?");
+      params.push(options.evalRunId);
+    }
+    const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const total = this.queryOne<{ count: number }>(`SELECT COUNT(*) as count FROM mcp_cassettes ${clause}`, params);
+    const limit = Math.max(1, Math.min(500, Math.floor(options.limit ?? 50)));
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const items = this.queryAll<McpCassetteRow>(
+      `SELECT ${MCP_CASSETTE_SUMMARY_COLUMNS} FROM mcp_cassettes ${clause} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    ).map(mapMcpCassetteSummary);
+    return { items, total: total ? toNumber(total.count) : 0 };
+  }
+
+  /** Runs-page badges: the newest cassette per execution id. */
+  mcpCassetteBadgesForExecutions(executionIds: string[]): Map<string, McpCassetteBadge> {
+    const out = new Map<string, McpCassetteBadge>();
+    const ids = [...new Set(executionIds.filter(Boolean))].slice(0, 500);
+    if (ids.length === 0) return out;
+    const rows = this.queryAll<{ id: string; execution_id: string; call_count: number; truncated: number }>(
+      `SELECT id, execution_id, call_count, truncated FROM mcp_cassettes
+       WHERE execution_id IN (${ids.map(() => "?").join(", ")})
+       ORDER BY created_at ASC, rowid ASC`,
+      ids
+    );
+    for (const row of rows) {
+      out.set(toString(row.execution_id), { id: toString(row.id), callCount: toNumber(row.call_count), truncated: toNumber(row.truncated) === 1 });
+    }
+    return out;
+  }
+
+  deleteMcpCassette(id: string): boolean {
+    const existing = this.getMcpCassetteSummary(id);
+    if (!existing) return false;
+    this.exec(`DELETE FROM mcp_cassettes WHERE id = ?`, [id]);
+    return true;
   }
 
   /**

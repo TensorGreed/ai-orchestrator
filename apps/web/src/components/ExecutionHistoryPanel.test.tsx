@@ -9,7 +9,7 @@ import { ExecutionHistoryPanel } from "./ExecutionHistoryPanel";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, fetchMcpElicitations: vi.fn(), answerMcpElicitation: vi.fn() };
+  return { ...actual, fetchMcpElicitations: vi.fn(), answerMcpElicitation: vi.fn(), fetchMcpCassette: vi.fn(), deleteMcpCassette: vi.fn() };
 });
 
 beforeEach(() => {
@@ -201,5 +201,85 @@ describe("ExecutionHistoryPanel", () => {
     expect(api.answerMcpElicitation).toHaveBeenCalledWith("elc_1", { action: "accept", content: { approve: true } });
     await waitFor(() => expect(onRefresh).toHaveBeenCalled());
     await waitFor(() => expect(screen.queryByRole("region", { name: "Server questions waiting for you" })).not.toBeInTheDocument());
+  });
+
+  it("shows a cassette badge on recorded runs, replays them and opens the cassette viewer", async () => {
+    const user = userEvent.setup();
+    const onReplayCassette = vi.fn();
+    vi.mocked(api.fetchMcpCassette).mockResolvedValue({
+      cassette: {
+        id: "cas_1",
+        executionId: "ex-1",
+        workflowId: "wf-1",
+        workflowName: "Workflow 1",
+        projectId: "default",
+        source: "manual",
+        evalRunId: null,
+        fixtureId: null,
+        callCount: 1,
+        serverCount: 1,
+        bytes: 400,
+        truncated: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        createdBy: "builder@example.com",
+        cassette: {
+          format: "l2m.mcp-cassette",
+          version: 1,
+          recordedAt: "2026-01-01T00:00:00.000Z",
+          servers: [{ key: "registry:mcp_1", adapterId: "mock-mcp", registryServerId: "mcp_1", label: "Docs" }],
+          entries: [
+            { seq: 1, server: "registry:mcp_1", method: "tools/call", name: "lookup_kb", args: { topic: "mcp" }, argsHash: "h", result: { ok: true, output: "found" }, at: 0, durationMs: 4 }
+          ],
+          truncated: false,
+          bytes: 400,
+          llm: "not_recorded"
+        }
+      }
+    });
+    render(
+      <ExecutionHistoryPanel
+        {...makeProps({
+          executionHistoryTotal: 2,
+          executionHistoryItems: [
+            makeSummary({ id: "ex-1", status: "success", mcpCassette: { id: "cas_1", callCount: 3, truncated: false } }),
+            makeSummary({ id: "ex-2", status: "success" })
+          ],
+          onReplayCassette
+        })}
+      />
+    );
+
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(within(rows[1]).queryByRole("button", { name: /MCP calls recorded/ })).not.toBeInTheDocument();
+    expect(within(rows[1]).queryByRole("button", { name: "Replay" })).not.toBeInTheDocument();
+
+    await user.click(within(rows[0]).getByRole("button", { name: "Replay" }));
+    expect(onReplayCassette).toHaveBeenCalledWith("ex-1", "strict");
+
+    await user.click(within(rows[0]).getByRole("button", { name: "3 MCP calls recorded" }));
+    const dialog = await screen.findByRole("dialog", { name: "MCP cassette" });
+    expect(api.fetchMcpCassette).toHaveBeenCalledWith("cas_1");
+    expect(await within(dialog).findByText("lookup_kb")).toBeInTheDocument();
+    expect(within(dialog).getByText("Docs")).toBeInTheDocument();
+    expect(within(dialog).getByText(/Model calls are not recorded/)).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Replay, live fallback" }));
+    expect(onReplayCassette).toHaveBeenLastCalledWith("ex-1", "lenient");
+    expect(screen.queryByRole("dialog", { name: "MCP cassette" })).not.toBeInTheDocument();
+  });
+
+  it("shows a static badge and no replay for roles that cannot read cassettes", () => {
+    render(
+      <ExecutionHistoryPanel
+        {...makeProps({
+          executionHistoryTotal: 1,
+          executionHistoryItems: [makeSummary({ id: "ex-1", status: "success", mcpCassette: { id: "cas_1", callCount: 2, truncated: false } })]
+        })}
+      />
+    );
+    expect(screen.getByText(/MCP calls recorded/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /MCP calls recorded/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Replay" })).not.toBeInTheDocument();
   });
 });

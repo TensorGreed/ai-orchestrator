@@ -50,6 +50,7 @@ export default defineConfig({
           { text: "MCP tool policy", link: "/product/mcp-tool-policy" },
           { text: "MCP gateway", link: "/product/mcp-gateway" },
           { text: "MCP onboarding and catalog", link: "/product/mcp-onboarding" },
+          { text: "Testing MCP workflows", link: "/product/testing-mcp-workflows" },
           { text: "Guard engine", link: "/product/guard-engine" }
         ]
       },

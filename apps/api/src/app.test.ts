@@ -284,6 +284,8 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     MCP_OAUTH_REFRESH_SKEW_MS: 60000,
     MCP_ELICITATION_TIMEOUT_MS: 600000,
     MCP_RESOURCE_MAX_BYTES: 5242880,
+    MCP_CASSETTE_MAX_BYTES: 5242880,
+    MCP_CASSETTE_MAX_CALLS: 5000,
     AUDIT_EXPORT_FILE_ROOT: "apps/api/data",
     EVAL_JUDGE_ENABLED: false,
     EVAL_JUDGE_PROVIDER_ID: "openai",

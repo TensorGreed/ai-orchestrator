@@ -6,6 +6,16 @@ import type {
   McpPlaygroundCallResponse
 } from "@ai-orchestrator/shared";
 import type {
+  McpCassette,
+  McpCassetteBadge,
+  McpCassetteEntry,
+  McpCassetteExchange,
+  McpCassetteRecord,
+  McpCassetteSummary,
+  McpReplayMode,
+  McpReplayReport
+} from "@ai-orchestrator/shared";
+import type {
   Folder,
   ImportReport,
   LLMProviderConfig,
@@ -236,6 +246,8 @@ export async function executeWorkflow(
     executionTimeoutMs?: number;
     execution_timeout_ms?: number;
     customData?: Record<string, unknown>;
+    /** Phase 10.8 — record every MCP call of the run into a cassette. */
+    record?: boolean;
   }
 ) {
   return apiRequest<WorkflowExecutionResult>(`/api/workflows/${workflowId}/execute`, {
@@ -468,6 +480,7 @@ export async function executeWorkflowStream(
     executionTimeoutMs?: number;
     execution_timeout_ms?: number;
     customData?: Record<string, unknown>;
+    record?: boolean;
   },
   handlers: WorkflowExecuteStreamHandlers = {}
 ): Promise<WorkflowExecutionResult> {
@@ -812,6 +825,8 @@ export interface ExecutionHistorySummary {
   customData: unknown;
   error: string | null;
   createdAt: string;
+  /** Phase 10.8 — present when the run was recorded into a cassette. */
+  mcpCassette?: McpCassetteBadge;
 }
 
 export interface ExecutionHistoryDetail extends ExecutionHistorySummary {
@@ -870,6 +885,47 @@ export async function retryExecution(id: string, payload: Record<string, unknown
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+// --- Phase 10.8: MCP cassettes -------------------------------------------------
+
+export type {
+  McpCassette as McpCassetteFile,
+  McpCassetteBadge,
+  McpCassetteEntry,
+  McpCassetteExchange,
+  McpCassetteRecord,
+  McpCassetteSummary,
+  McpReplayMode,
+  McpReplayReport
+};
+
+export async function fetchMcpCassettes(filter: { workflowId?: string; evalRunId?: string; limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (filter.workflowId) params.set("workflowId", filter.workflowId);
+  if (filter.evalRunId) params.set("evalRunId", filter.evalRunId);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{ items: McpCassetteSummary[]; total: number }>(`/api/mcp/cassettes${q}`);
+}
+
+export async function fetchMcpCassette(id: string) {
+  return apiRequest<{ cassette: McpCassetteRecord }>(`/api/mcp/cassettes/${encodeURIComponent(id)}`);
+}
+
+export function mcpCassetteExportUrl(id: string): string {
+  return `${API_BASE}/api/mcp/cassettes/${encodeURIComponent(id)}/export`;
+}
+
+export async function deleteMcpCassette(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/mcp/cassettes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function replayExecution(id: string, payload: { mode?: McpReplayMode; cassetteId?: string } = {}) {
+  return apiRequest<WorkflowExecutionResult & { executionId?: string; mcpReplay?: McpReplayReport }>(
+    `/api/executions/${encodeURIComponent(id)}/replay`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
 }
 
 export async function cancelExecution(id: string, reason?: string) {
@@ -2282,6 +2338,8 @@ export interface EvalRun {
   triggeredBy: string | null;
   summary: EvalRunSummary | null;
   error: string | null;
+  /** Phase 10.8 — how many cassettes the run recorded. */
+  mcpCassettes?: number;
 }
 
 export interface EvalResult {
@@ -2331,7 +2389,15 @@ export async function deleteEvalFixture(id: string) {
   return apiRequest<{ ok: boolean }>(`/api/eval/fixtures/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function startEvalRun(payload: { datasetId: string; workflowId: string; scorers?: EvalScorerSpec[] }) {
+export async function startEvalRun(payload: {
+  datasetId: string;
+  workflowId: string;
+  scorers?: EvalScorerSpec[];
+  /** Phase 10.8 — record each fixture's MCP calls into a cassette. */
+  record?: boolean;
+  /** Phase 10.8 — answer MCP calls from an earlier run's cassettes, or from one cassette. */
+  replay?: { evalRunId?: string; cassetteId?: string; mode?: McpReplayMode };
+}) {
   return apiRequest<{ ok: boolean; runId: string; summary: EvalRunSummary }>("/api/eval/runs", {
     method: "POST",
     body: JSON.stringify(payload)

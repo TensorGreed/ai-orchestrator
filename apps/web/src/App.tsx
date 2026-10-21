@@ -55,6 +55,7 @@ import {
   loginUser,
   logoutUser,
   moveWorkflow,
+  replayExecution,
   retryExecution,
   runWebhookStream,
   saveWorkflow,
@@ -62,6 +63,7 @@ import {
   updateWorkflowVariables,
   type AuthUser,
   type ExecutionHistoryDetail,
+  type McpReplayMode,
   type SecretListItem,
   type StreamExecutionStartedEvent,
   type StreamNodeCompleteEvent,
@@ -1172,6 +1174,8 @@ function StudioApp() {
   const [systemPrompt, setSystemPrompt] = useState("You are a precise tool-using AI assistant.");
   const [userPrompt, setUserPrompt] = useState("What time is it in America/Toronto? Use tools when needed.");
   const [sessionId, setSessionId] = useState("session-local-dev");
+  // Phase 10.8 — "Record MCP calls" for manual editor runs; off again on reload.
+  const [recordMcp, setRecordMcp] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatPendingImages, setChatPendingImages] = useState<Array<{ data: string; mimeType: string }>>([]);
   const [chatSystemPrompt, setChatSystemPrompt] = useState("You are a precise tool-using AI assistant.");
@@ -2384,6 +2388,37 @@ function StudioApp() {
     [currentWorkflow.id, handleApiError, hydrateWorkflow, refreshExecutionHistory]
   );
 
+  // Phase 10.8 — run a recorded execution again, answering its MCP calls from
+  // its cassette. Opens the result in the editor the way Retry does.
+  const handleReplayCassette = useCallback(
+    async (executionId: string, mode: McpReplayMode) => {
+      let targetWorkflowId = currentWorkflow.id;
+      try {
+        setBusy(true);
+        setError(null);
+        const detail = await fetchExecutionById(executionId);
+        targetWorkflowId = detail.workflowId;
+        const workflow = await fetchWorkflow(detail.workflowId);
+        hydrateWorkflow(workflow);
+        setIsDebugMode(true);
+        setLogsTab("logs");
+        setActiveMode("editor");
+        const result = await replayExecution(executionId, { mode });
+        setExecutionResult(result);
+        if (result.executionId) {
+          latestDebugExecutionIdRef.current = result.executionId;
+        }
+        void refreshExecutionHistory();
+      } catch (replayError) {
+        const message = handleApiError(replayError, "Failed to replay execution from its cassette");
+        setExecutionResult(buildExecutionErrorResult(targetWorkflowId, message));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [currentWorkflow.id, handleApiError, hydrateWorkflow, refreshExecutionHistory]
+  );
+
   // Phase 7.2 — replay an existing execution starting from a chosen node.
   // Loads the source execution's workflow, switches the editor into debug
   // mode, and triggers /execute with startNodeId + sourceExecutionId so the
@@ -3042,10 +3077,15 @@ function StudioApp() {
       nodeOutputs?: Record<string, unknown>;
       system_prompt?: string;
       user_prompt?: string;
+      record?: boolean;
     } = {
       sessionId,
       usePinnedData: true
     };
+
+    if (recordMcp) {
+      payload.record = true;
+    }
 
     if (typeof startNodeId === "string" && startNodeId.trim()) {
       payload.startNodeId = startNodeId.trim();
@@ -3065,7 +3105,7 @@ function StudioApp() {
     }
 
     return payload;
-  }, [executionResult, promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
+  }, [executionResult, promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, recordMcp, sessionId, systemPrompt, userPrompt]);
 
   const buildWebhookExecutionPayload = useCallback(() => {
     const payload: {
@@ -4693,6 +4733,8 @@ function StudioApp() {
                   })
               : undefined
           }
+          recordMcp={recordMcp}
+          onToggleRecordMcp={canManageWorkflows ? () => setRecordMcp((value) => !value) : undefined}
           docsUrl={docsUrl}
           navDrawerOpen={navDrawerOpen}
           onToggleNavDrawer={() => setNavDrawerOpen((open) => !open)}
@@ -5134,6 +5176,8 @@ function StudioApp() {
               onRerunExecution={(executionId) => handleRerunExecution(executionId)}
               onReplayFromNode={(executionId, nodeId) => handleReplayFromNode(executionId, nodeId)}
               onCancelExecution={(executionId) => handleCancelExecution(executionId)}
+              onReplayCassette={canManageWorkflows ? (executionId, mode) => handleReplayCassette(executionId, mode) : undefined}
+              canDeleteCassettes={authUser?.role === "admin"}
             />
           )}
 

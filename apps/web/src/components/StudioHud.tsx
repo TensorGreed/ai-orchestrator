@@ -46,6 +46,9 @@ export interface StudioHudProps {
   /** Phase 10.2 — the workflow's "No write tools" setting; the menu item shows only when the toggle handler is set. */
   noWriteTools?: boolean;
   onToggleNoWriteTools?: () => void;
+  /** Phase 10.8 — record the MCP calls of manual runs into a cassette; the menu item shows only when the toggle handler is set. */
+  recordMcp?: boolean;
+  onToggleRecordMcp?: () => void;
   /** Additional command palette entries (e.g. "add node" items from the canvas). */
   extraItems?: CommandPaletteItem[];
   /** Optional docs URL override; defaults to VITE_DOCS_URL or host:4173. */
@@ -107,6 +110,8 @@ export function StudioHud({
   onShare,
   noWriteTools = false,
   onToggleNoWriteTools,
+  recordMcp = false,
+  onToggleRecordMcp,
   extraItems = NO_EXTRA_ITEMS,
   docsUrl,
   navDrawerOpen = false,
@@ -474,6 +479,24 @@ export function StudioHud({
                     No write tools
                   </button>
                 )}
+                {onToggleRecordMcp && (
+                  <button
+                    type="button"
+                    className="hud-dropdown-item hud-dropdown-check"
+                    role="menuitemcheckbox"
+                    aria-checked={recordMcp}
+                    title="Save every MCP call of the next runs into a cassette you can replay offline. Model calls are not recorded."
+                    onClick={() => {
+                      setOverflowOpen(false);
+                      onToggleRecordMcp();
+                    }}
+                  >
+                    <span className="hud-check-box" aria-hidden="true">
+                      {recordMcp ? "✓" : ""}
+                    </span>
+                    Record MCP calls
+                  </button>
+                )}
                 {canManageSecrets && (
                   <button
                     type="button"
@@ -496,12 +519,13 @@ export function StudioHud({
         {isEditor && onRun && (
           <button
             type="button"
-            className="hud-pill hud-run"
+            className={["hud-pill hud-run", recordMcp && onToggleRecordMcp && "is-recording"].filter(Boolean).join(" ")}
             onClick={onRun}
             disabled={busy}
-            title="Run workflow"
-            aria-label="Run workflow"
+            title={recordMcp && onToggleRecordMcp ? "Run workflow, recording MCP calls" : "Run workflow"}
+            aria-label={recordMcp && onToggleRecordMcp ? "Run workflow, recording MCP calls" : "Run workflow"}
           >
+            {recordMcp && onToggleRecordMcp && <span className="hud-rec-dot" aria-hidden="true" />}
             <span>Run</span>
             <PlayIcon />
           </button>

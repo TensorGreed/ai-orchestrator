@@ -11,5 +11,8 @@
   "dependencies": {
     "@ai-orchestrator/shared": "workspace:*",
     "ajv": "8.18.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5"
   }
 }

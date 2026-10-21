@@ -20,6 +20,11 @@ export class MCPRegistry {
     return this.adapters.get(serverId);
   }
 
+  /** Phase 10.8 — every registered adapter, for wrappers that build a derived registry. */
+  list(): MCPServerAdapter[] {
+    return [...this.adapters.values()];
+  }
+
   listDefinitions(): MCPServerDefinition[] {
     return [...this.adapters.values()].map((adapter) => adapter.definition);
   }
