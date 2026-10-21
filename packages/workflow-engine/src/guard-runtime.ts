@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import type { AgentGuardCheck, AgentGuardDecision, AgentGuardHooks } from "@ai-orchestrator/agent-runtime";
 import {
   applyProtectionBindings,
@@ -120,6 +121,12 @@ export function isGuardBlockedError(error: unknown): error is GuardBlockedError 
 }
 
 let defaultRegistry: GuardRegistry | undefined;
+
+/** The egress guard resolves hostnames through the system resolver, so public hosts pass and names that resolve to private or metadata addresses are refused. */
+export const systemDnsResolver = async (hostname: string): Promise<string[]> => {
+  const results = await lookup(hostname, { all: true, verbatim: true });
+  return results.map((entry) => entry.address);
+};
 const resolutionCache = new WeakMap<GuardRuntimeDependencies, Promise<GuardRunResolution>>();
 
 /** The run's resolution, computed once per dependencies object (one per run). */
@@ -236,7 +243,7 @@ export async function runGuardCheck(
   input: GuardInput,
   meta: { iteration?: number; toolName?: string } = {}
 ): Promise<GuardCheckResult> {
-  const registry = scope.guard.registry ?? (defaultRegistry ??= createDefaultGuardRegistry());
+  const registry = scope.guard.registry ?? (defaultRegistry ??= createDefaultGuardRegistry({ resolver: systemDnsResolver }));
   const protection = createDefaultProtectionRegistry({ keys: keyResolverFor(scope), ...(scope.guard.vault ? { vault: scope.guard.vault } : {}) });
   const subject = scope.subject ? { role: scope.subject.role, ...(scope.subject.userId ? { userId: scope.subject.userId } : {}) } : undefined;
   const stack = await evaluateGuardStack(

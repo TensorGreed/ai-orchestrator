@@ -1303,6 +1303,101 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE mcp_servers DROP COLUMN IF EXISTS sandbox_status_json;
       ALTER TABLE mcp_servers DROP COLUMN IF EXISTS sandbox_json;
     `
+  },
+  {
+    version: 28,
+    description:
+      "Phase 12.1 — Guard wiring (guard_profiles, guard_profile_versions, guard_bindings, guard_events, guard_token_vault)",
+    up: `
+      CREATE TABLE IF NOT EXISTS guard_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        built_in INTEGER NOT NULL DEFAULT 0,
+        latest_version INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMPTZ NOT NULL,
+        created_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL,
+        updated_by TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS guard_profile_versions (
+        profile_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        document_json TEXT NOT NULL,
+        note TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        created_by TEXT,
+        PRIMARY KEY (profile_id, version)
+      );
+
+      CREATE TABLE IF NOT EXISTS guard_bindings (
+        scope TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'inherit',
+        profile_id TEXT,
+        updated_at TIMESTAMPTZ NOT NULL,
+        updated_by TEXT,
+        PRIMARY KEY (scope, scope_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_bindings_profile ON guard_bindings(profile_id);
+
+      CREATE TABLE IF NOT EXISTS guard_events (
+        id TEXT PRIMARY KEY,
+        verdict_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT,
+        project_id TEXT,
+        node_id TEXT NOT NULL,
+        placement TEXT NOT NULL,
+        iteration INTEGER,
+        tool_name TEXT,
+        channel TEXT NOT NULL,
+        detector_id TEXT,
+        category TEXT,
+        data_class TEXT,
+        score DOUBLE PRECISION,
+        requested_action TEXT NOT NULL,
+        effective_action TEXT NOT NULL,
+        verdict_action TEXT NOT NULL,
+        shadow INTEGER NOT NULL DEFAULT 0,
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        profile_id TEXT NOT NULL,
+        profile_version INTEGER NOT NULL,
+        profile_hash TEXT NOT NULL,
+        latency_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+        budget_exceeded INTEGER NOT NULL DEFAULT 0,
+        skipped_detectors_json TEXT NOT NULL DEFAULT '[]',
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_events_execution ON guard_events(execution_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_created ON guard_events(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_scope ON guard_events(project_id, workflow_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_profile ON guard_events(profile_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS guard_token_vault (
+        token TEXT PRIMARY KEY,
+        data_class TEXT NOT NULL,
+        value_hash TEXT,
+        value_sealed TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_guard_token_vault_hash ON guard_token_vault(value_hash);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_guard_token_vault_hash;
+      DROP TABLE IF EXISTS guard_token_vault;
+      DROP INDEX IF EXISTS idx_guard_events_profile;
+      DROP INDEX IF EXISTS idx_guard_events_scope;
+      DROP INDEX IF EXISTS idx_guard_events_created;
+      DROP INDEX IF EXISTS idx_guard_events_execution;
+      DROP TABLE IF EXISTS guard_events;
+      DROP INDEX IF EXISTS idx_guard_bindings_profile;
+      DROP TABLE IF EXISTS guard_bindings;
+      DROP TABLE IF EXISTS guard_profile_versions;
+      DROP TABLE IF EXISTS guard_profiles;
+    `
   }
 ];
 

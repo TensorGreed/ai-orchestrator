@@ -286,6 +286,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     MCP_RESOURCE_MAX_BYTES: 5242880,
     MCP_CASSETTE_MAX_BYTES: 5242880,
     MCP_CASSETTE_MAX_CALLS: 5000,
+    GUARD_AUTO_APPLY: true,
     MCP_SANDBOX_DEFAULT: "none",
     MCP_SANDBOX_REQUIRED: false,
     MCP_SANDBOX_ALLOWED_MOUNT_ROOTS: "",

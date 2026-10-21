@@ -1147,6 +1147,232 @@ function mapMcpToolSnapshot(row: McpToolSnapshotRow): McpToolSnapshotRecord {
   };
 }
 
+// Phase 12.1 — Guard store records.
+export type GuardBindingScope = "project" | "workflow";
+
+export interface GuardProfileRecord {
+  id: string;
+  name: string;
+  description: string | null;
+  builtIn: boolean;
+  latestVersion: number;
+  latestHash: string;
+  createdAt: string;
+  createdBy: string | null;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+export interface GuardProfileVersionRecord {
+  profileId: string;
+  version: number;
+  hash: string;
+  document: Record<string, unknown>;
+  note: string | null;
+  createdAt: string;
+  createdBy: string | null;
+}
+
+export interface GuardBindingRecord {
+  scope: GuardBindingScope;
+  scopeId: string;
+  mode: string;
+  profileId: string | null;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+export interface GuardEvidenceRecord {
+  evidence: string;
+  spans: Array<{ start: number; end: number }>;
+  message: string;
+}
+
+export interface GuardEventInsert {
+  id: string;
+  verdictId: string;
+  executionId: string;
+  workflowId: string | null;
+  projectId: string | null;
+  nodeId: string;
+  placement: string;
+  iteration: number | null;
+  toolName: string | null;
+  channel: string;
+  detectorId: string | null;
+  category: string | null;
+  dataClass: string | null;
+  score: number | null;
+  requestedAction: string;
+  effectiveAction: string;
+  verdictAction: string;
+  shadow: boolean;
+  evidence: GuardEvidenceRecord[];
+  profileId: string;
+  profileVersion: number;
+  profileHash: string;
+  latencyMs: number;
+  budgetExceeded: boolean;
+  skippedDetectors: string[];
+  createdAt: string;
+}
+
+export type GuardEventRecord = GuardEventInsert;
+
+export interface GuardEventFilters {
+  executionId?: string;
+  projectId?: string;
+  workflowId?: string;
+  profileId?: string;
+  channel?: string;
+  action?: string;
+  since?: string;
+  onlyFindings?: boolean;
+}
+
+export interface GuardEventStats {
+  verdicts: Array<{ key: string; count: number }>;
+  actions: Array<{ key: string; count: number }>;
+  categories: Array<{ key: string; count: number }>;
+  channels: Array<{ key: string; count: number }>;
+  detectors: Array<{ key: string; count: number }>;
+  shadowWouldBlock: number;
+  shadowFindings: number;
+  budgetExceeded: number;
+  daily: Array<{ day: string; action: string; count: number }>;
+}
+
+export interface GuardVaultRow {
+  token: string;
+  data_class: string;
+  value_hash: string | null;
+  value_sealed: string;
+  created_at: string;
+}
+
+interface GuardProfileRow {
+  id: unknown;
+  name: unknown;
+  description: unknown;
+  built_in: unknown;
+  latest_version: unknown;
+  latest_hash: unknown;
+  created_at: unknown;
+  created_by: unknown;
+  updated_at: unknown;
+  updated_by: unknown;
+}
+
+interface GuardProfileVersionRow {
+  profile_id: unknown;
+  version: unknown;
+  hash: unknown;
+  document_json: unknown;
+  note: unknown;
+  created_at: unknown;
+  created_by: unknown;
+}
+
+interface GuardBindingRow {
+  scope: unknown;
+  scope_id: unknown;
+  mode: unknown;
+  profile_id: unknown;
+  updated_at: unknown;
+  updated_by: unknown;
+}
+
+interface GuardEventRow {
+  [column: string]: unknown;
+}
+
+const nullableText = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
+
+function mapGuardProfileRow(row: GuardProfileRow): GuardProfileRecord {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    description: nullableText(row.description),
+    builtIn: Number(row.built_in) === 1,
+    latestVersion: Number(row.latest_version),
+    latestHash: String(row.latest_hash ?? ""),
+    createdAt: String(row.created_at),
+    createdBy: nullableText(row.created_by),
+    updatedAt: String(row.updated_at),
+    updatedBy: nullableText(row.updated_by)
+  };
+}
+
+function mapGuardProfileVersionRow(row: GuardProfileVersionRow): GuardProfileVersionRecord {
+  let document: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(String(row.document_json));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) document = parsed as Record<string, unknown>;
+  } catch {
+    document = {};
+  }
+  return {
+    profileId: String(row.profile_id),
+    version: Number(row.version),
+    hash: String(row.hash),
+    document,
+    note: nullableText(row.note),
+    createdAt: String(row.created_at),
+    createdBy: nullableText(row.created_by)
+  };
+}
+
+function mapGuardBindingRow(row: GuardBindingRow): GuardBindingRecord {
+  return {
+    scope: String(row.scope) === "workflow" ? "workflow" : "project",
+    scopeId: String(row.scope_id),
+    mode: String(row.mode),
+    profileId: nullableText(row.profile_id),
+    updatedAt: String(row.updated_at),
+    updatedBy: nullableText(row.updated_by)
+  };
+}
+
+function parseJsonList<T>(raw: unknown): T[] {
+  try {
+    const parsed = JSON.parse(String(raw ?? "[]"));
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function mapGuardEventRow(row: GuardEventRow): GuardEventRecord {
+  return {
+    id: String(row.id),
+    verdictId: String(row.verdict_id),
+    executionId: String(row.execution_id),
+    workflowId: nullableText(row.workflow_id),
+    projectId: nullableText(row.project_id),
+    nodeId: String(row.node_id),
+    placement: String(row.placement),
+    iteration: row.iteration === null || row.iteration === undefined ? null : Number(row.iteration),
+    toolName: nullableText(row.tool_name),
+    channel: String(row.channel),
+    detectorId: nullableText(row.detector_id),
+    category: nullableText(row.category),
+    dataClass: nullableText(row.data_class),
+    score: row.score === null || row.score === undefined ? null : Number(row.score),
+    requestedAction: String(row.requested_action),
+    effectiveAction: String(row.effective_action),
+    verdictAction: String(row.verdict_action),
+    shadow: Number(row.shadow) === 1,
+    evidence: parseJsonList<GuardEvidenceRecord>(row.evidence_json),
+    profileId: String(row.profile_id),
+    profileVersion: Number(row.profile_version),
+    profileHash: String(row.profile_hash),
+    latencyMs: Number(row.latency_ms ?? 0),
+    budgetExceeded: Number(row.budget_exceeded) === 1,
+    skippedDetectors: parseJsonList<string>(row.skipped_detectors_json),
+    createdAt: String(row.created_at)
+  };
+}
+
 function toString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
@@ -2312,6 +2538,83 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_mcp_cassettes_created ON mcp_cassettes(created_at DESC);
     `);
 
+    // Phase 12.1 — Guard wiring: versioned profiles, project and workflow
+    // bindings, verdict events (masked evidence only) and the token vault
+    // (values sealed with the master key).
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS guard_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        built_in INTEGER NOT NULL DEFAULT 0,
+        latest_version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT
+      );
+      CREATE TABLE IF NOT EXISTS guard_profile_versions (
+        profile_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        hash TEXT NOT NULL,
+        document_json TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        PRIMARY KEY (profile_id, version)
+      );
+      CREATE TABLE IF NOT EXISTS guard_bindings (
+        scope TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'inherit',
+        profile_id TEXT,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT,
+        PRIMARY KEY (scope, scope_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_bindings_profile ON guard_bindings(profile_id);
+      CREATE TABLE IF NOT EXISTS guard_events (
+        id TEXT PRIMARY KEY,
+        verdict_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT,
+        project_id TEXT,
+        node_id TEXT NOT NULL,
+        placement TEXT NOT NULL,
+        iteration INTEGER,
+        tool_name TEXT,
+        channel TEXT NOT NULL,
+        detector_id TEXT,
+        category TEXT,
+        data_class TEXT,
+        score REAL,
+        requested_action TEXT NOT NULL,
+        effective_action TEXT NOT NULL,
+        verdict_action TEXT NOT NULL,
+        shadow INTEGER NOT NULL DEFAULT 0,
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        profile_id TEXT NOT NULL,
+        profile_version INTEGER NOT NULL,
+        profile_hash TEXT NOT NULL,
+        latency_ms REAL NOT NULL DEFAULT 0,
+        budget_exceeded INTEGER NOT NULL DEFAULT 0,
+        skipped_detectors_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_events_execution ON guard_events(execution_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_created ON guard_events(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_scope ON guard_events(project_id, workflow_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_guard_events_profile ON guard_events(profile_id, created_at);
+      CREATE TABLE IF NOT EXISTS guard_token_vault (
+        token TEXT PRIMARY KEY,
+        data_class TEXT NOT NULL,
+        value_hash TEXT,
+        value_sealed TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_guard_token_vault_hash ON guard_token_vault(value_hash);
+    `);
+
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
     this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
     this.ensureColumn("workflows", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
@@ -2582,6 +2885,11 @@ export class SqliteStore {
 
       if (hasTable("mcp_cassettes")) {
         this.exec("DELETE FROM mcp_cassettes WHERE workflow_id = ?", [id]);
+      }
+
+      if (hasTable("guard_events")) {
+        this.exec("DELETE FROM guard_events WHERE workflow_id = ?", [id]);
+        this.exec("DELETE FROM guard_bindings WHERE scope = 'workflow' AND scope_id = ?", [id]);
       }
 
       this.exec("DELETE FROM workflows WHERE id = ?", [id]);
@@ -3663,6 +3971,8 @@ export class SqliteStore {
     this.exec(`DELETE FROM mcp_tool_calls WHERE started_at < ?`, [input.before]);
     // Phase 10.8 — so do cassettes recorded from those runs.
     this.exec(`DELETE FROM mcp_cassettes WHERE created_at < ?`, [input.before]);
+    // Phase 12.1 — and so do guard events.
+    this.exec(`DELETE FROM guard_events WHERE created_at < ?`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -4196,6 +4506,7 @@ export class SqliteStore {
     ]);
     this.exec(`UPDATE secrets SET project_id = ? WHERE project_id = ?`, [DEFAULT_PROJECT_ID, id]);
     this.exec(`DELETE FROM folders WHERE project_id = ?`, [id]);
+    this.exec(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = ?`, [id]);
     this.exec(`DELETE FROM projects WHERE id = ?`, [id]);
     this.persist();
     return true;
@@ -8922,6 +9233,262 @@ export class SqliteStore {
     if (!existing) return false;
     this.exec(`DELETE FROM mcp_cassettes WHERE id = ?`, [id]);
     return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 12.1 — Guard profiles, bindings, events and the token vault.
+  // -------------------------------------------------------------------------
+
+  listGuardProfiles(): GuardProfileRecord[] {
+    return this.queryAll<GuardProfileRow>(
+      `SELECT p.*, v.hash AS latest_hash FROM guard_profiles p
+         LEFT JOIN guard_profile_versions v ON v.profile_id = p.id AND v.version = p.latest_version
+       ORDER BY p.built_in DESC, p.name COLLATE NOCASE ASC`
+    ).map(mapGuardProfileRow);
+  }
+
+  getGuardProfile(id: string): GuardProfileRecord | null {
+    const row = this.queryOne<GuardProfileRow>(
+      `SELECT p.*, v.hash AS latest_hash FROM guard_profiles p
+         LEFT JOIN guard_profile_versions v ON v.profile_id = p.id AND v.version = p.latest_version
+       WHERE p.id = ?`,
+      [id]
+    );
+    return row ? mapGuardProfileRow(row) : null;
+  }
+
+  /** One version of a profile; the latest when `version` is omitted. */
+  getGuardProfileVersion(profileId: string, version?: number): GuardProfileVersionRecord | null {
+    const row =
+      version === undefined
+        ? this.queryOne<GuardProfileVersionRow>(
+            `SELECT v.* FROM guard_profile_versions v JOIN guard_profiles p ON p.id = v.profile_id AND p.latest_version = v.version WHERE v.profile_id = ?`,
+            [profileId]
+          )
+        : this.queryOne<GuardProfileVersionRow>(`SELECT * FROM guard_profile_versions WHERE profile_id = ? AND version = ?`, [profileId, version]);
+    return row ? mapGuardProfileVersionRow(row) : null;
+  }
+
+  listGuardProfileVersions(profileId: string): GuardProfileVersionRecord[] {
+    return this.queryAll<GuardProfileVersionRow>(`SELECT * FROM guard_profile_versions WHERE profile_id = ? ORDER BY version DESC`, [profileId]).map(
+      mapGuardProfileVersionRow
+    );
+  }
+
+  /** Creates a profile with its first version. */
+  insertGuardProfile(input: {
+    id: string;
+    name: string;
+    description?: string | null;
+    builtIn?: boolean;
+    document: Record<string, unknown>;
+    hash: string;
+    note?: string | null;
+    createdBy: string | null;
+  }): GuardProfileRecord {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO guard_profiles (id, name, description, built_in, latest_version, created_at, created_by, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+      [input.id, input.name, input.description ?? null, input.builtIn ? 1 : 0, now, input.createdBy, now, input.createdBy]
+    );
+    this.exec(
+      `INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, 1, ?, ?, ?, ?, ?)`,
+      [input.id, input.hash, JSON.stringify(input.document), input.note ?? null, now, input.createdBy]
+    );
+    this.persist();
+    return this.getGuardProfile(input.id)!;
+  }
+
+  /** Appends an immutable version and makes it the latest. */
+  addGuardProfileVersion(input: {
+    profileId: string;
+    name: string;
+    description?: string | null;
+    document: Record<string, unknown>;
+    hash: string;
+    note?: string | null;
+    createdBy: string | null;
+  }): GuardProfileVersionRecord {
+    const current = this.getGuardProfile(input.profileId);
+    if (!current) throw new Error(`Guard profile '${input.profileId}' not found`);
+    const version = current.latestVersion + 1;
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO guard_profile_versions (profile_id, version, hash, document_json, note, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [input.profileId, version, input.hash, JSON.stringify(input.document), input.note ?? null, now, input.createdBy]
+    );
+    this.exec(`UPDATE guard_profiles SET name = ?, description = ?, latest_version = ?, updated_at = ?, updated_by = ? WHERE id = ?`, [
+      input.name,
+      input.description ?? null,
+      version,
+      now,
+      input.createdBy,
+      input.profileId
+    ]);
+    this.persist();
+    return this.getGuardProfileVersion(input.profileId, version)!;
+  }
+
+  deleteGuardProfile(id: string): boolean {
+    if (!this.getGuardProfile(id)) return false;
+    this.exec(`DELETE FROM guard_profile_versions WHERE profile_id = ?`, [id]);
+    this.exec(`DELETE FROM guard_profiles WHERE id = ?`, [id]);
+    this.persist();
+    return true;
+  }
+
+  getGuardBinding(scope: GuardBindingScope, scopeId: string): GuardBindingRecord | null {
+    const row = this.queryOne<GuardBindingRow>(`SELECT * FROM guard_bindings WHERE scope = ? AND scope_id = ?`, [scope, scopeId]);
+    return row ? mapGuardBindingRow(row) : null;
+  }
+
+  listGuardBindingsForProfile(profileId: string): GuardBindingRecord[] {
+    return this.queryAll<GuardBindingRow>(`SELECT * FROM guard_bindings WHERE profile_id = ? ORDER BY scope, scope_id`, [profileId]).map(mapGuardBindingRow);
+  }
+
+  setGuardBinding(input: { scope: GuardBindingScope; scopeId: string; mode: string; profileId: string | null; updatedBy: string | null }): GuardBindingRecord {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO guard_bindings (scope, scope_id, mode, profile_id, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(scope, scope_id) DO UPDATE SET mode = excluded.mode, profile_id = excluded.profile_id, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      [input.scope, input.scopeId, input.mode, input.profileId, now, input.updatedBy]
+    );
+    this.persist();
+    return this.getGuardBinding(input.scope, input.scopeId)!;
+  }
+
+  insertGuardEvents(rows: GuardEventInsert[]): void {
+    for (const row of rows) {
+      this.exec(
+        `INSERT INTO guard_events (
+           id, verdict_id, execution_id, workflow_id, project_id, node_id, placement, iteration, tool_name, channel,
+           detector_id, category, data_class, score, requested_action, effective_action, verdict_action, shadow,
+           evidence_json, profile_id, profile_version, profile_hash, latency_ms, budget_exceeded, skipped_detectors_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.id,
+          row.verdictId,
+          row.executionId,
+          row.workflowId,
+          row.projectId,
+          row.nodeId,
+          row.placement,
+          row.iteration,
+          row.toolName,
+          row.channel,
+          row.detectorId,
+          row.category,
+          row.dataClass,
+          row.score,
+          row.requestedAction,
+          row.effectiveAction,
+          row.verdictAction,
+          row.shadow ? 1 : 0,
+          JSON.stringify(row.evidence),
+          row.profileId,
+          row.profileVersion,
+          row.profileHash,
+          row.latencyMs,
+          row.budgetExceeded ? 1 : 0,
+          JSON.stringify(row.skippedDetectors),
+          row.createdAt
+        ]
+      );
+    }
+    if (rows.length > 0) this.persist();
+  }
+
+  private guardEventWhere(filters: GuardEventFilters): { where: string; params: unknown[] } {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    const add = (sql: string, value: unknown) => {
+      clauses.push(sql);
+      params.push(value);
+    };
+    if (filters.executionId) add("execution_id = ?", filters.executionId);
+    if (filters.projectId) add("project_id = ?", filters.projectId);
+    if (filters.workflowId) add("workflow_id = ?", filters.workflowId);
+    if (filters.profileId) add("profile_id = ?", filters.profileId);
+    if (filters.channel) add("channel = ?", filters.channel);
+    if (filters.action) add("effective_action = ?", filters.action);
+    if (filters.since) add("created_at >= ?", filters.since);
+    if (filters.onlyFindings) clauses.push("detector_id IS NOT NULL");
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  listGuardEvents(filters: GuardEventFilters & { limit?: number; offset?: number } = {}): { events: GuardEventRecord[]; total: number } {
+    const { where, params } = this.guardEventWhere(filters);
+    const limit = Math.min(Math.max(filters.limit ?? 50, 1), 500);
+    const offset = Math.max(filters.offset ?? 0, 0);
+    const total = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM guard_events ${where}`, params);
+    const rows = this.queryAll<GuardEventRow>(`SELECT * FROM guard_events ${where} ORDER BY created_at DESC, id ASC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    return { events: rows.map(mapGuardEventRow), total: total ? toNumber(total.count) : 0 };
+  }
+
+  /** Events of one execution in the order they were recorded. */
+  listGuardEventsForExecution(executionId: string): GuardEventRecord[] {
+    return this.queryAll<GuardEventRow>(`SELECT * FROM guard_events WHERE execution_id = ? ORDER BY created_at ASC, id ASC`, [executionId]).map(mapGuardEventRow);
+  }
+
+  /** Grouped counts for the Security page. */
+  guardEventStats(filters: GuardEventFilters = {}): GuardEventStats {
+    const { where, params } = this.guardEventWhere(filters);
+    const and = (extra: string) => (where ? `${where} AND ${extra}` : `WHERE ${extra}`);
+    const group = (column: string, extraWhere?: string) =>
+      this.queryAll<{ key: unknown; count: number }>(
+        `SELECT ${column} AS key, COUNT(*) AS count FROM guard_events ${extraWhere ? and(extraWhere) : where} GROUP BY ${column} ORDER BY count DESC`,
+        params
+      ).map((row) => ({ key: row.key === null || row.key === undefined ? "" : toString(row.key), count: toNumber(row.count) }));
+    const verdicts = this.queryAll<{ key: unknown; count: number }>(
+      `SELECT verdict_action AS key, COUNT(DISTINCT verdict_id) AS count FROM guard_events ${where} GROUP BY verdict_action ORDER BY count DESC`,
+      params
+    ).map((row) => ({ key: toString(row.key), count: toNumber(row.count) }));
+    const shadowBlocks = this.queryOne<{ count: number }>(
+      `SELECT COUNT(DISTINCT verdict_id) AS count FROM guard_events ${and("shadow = 1 AND effective_action = 'block'")}`,
+      params
+    );
+    const shadowFindings = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM guard_events ${and("shadow = 1")}`, params);
+    const budget = this.queryOne<{ count: number }>(`SELECT COUNT(DISTINCT verdict_id) AS count FROM guard_events ${and("budget_exceeded = 1")}`, params);
+    const daily = this.queryAll<{ day: unknown; action: unknown; count: number }>(
+      `SELECT substr(created_at, 1, 10) AS day, verdict_action AS action, COUNT(DISTINCT verdict_id) AS count FROM guard_events ${where}
+       GROUP BY day, verdict_action ORDER BY day ASC`,
+      params
+    ).map((row) => ({ day: toString(row.day), action: toString(row.action), count: toNumber(row.count) }));
+    return {
+      verdicts,
+      actions: group("effective_action", "detector_id IS NOT NULL"),
+      categories: group("category", "detector_id IS NOT NULL"),
+      channels: this.queryAll<{ key: unknown; count: number }>(
+        `SELECT channel AS key, COUNT(DISTINCT verdict_id) AS count FROM guard_events ${where} GROUP BY channel ORDER BY count DESC`,
+        params
+      ).map((row) => ({ key: toString(row.key), count: toNumber(row.count) })),
+      detectors: group("detector_id", "detector_id IS NOT NULL").slice(0, 10),
+      shadowWouldBlock: shadowBlocks ? toNumber(shadowBlocks.count) : 0,
+      shadowFindings: shadowFindings ? toNumber(shadowFindings.count) : 0,
+      budgetExceeded: budget ? toNumber(budget.count) : 0,
+      daily
+    };
+  }
+
+  getGuardVaultByToken(token: string): GuardVaultRow | null {
+    return this.queryOne<GuardVaultRow>(`SELECT * FROM guard_token_vault WHERE token = ?`, [token]);
+  }
+
+  getGuardVaultByHash(valueHash: string): GuardVaultRow | null {
+    return this.queryOne<GuardVaultRow>(`SELECT * FROM guard_token_vault WHERE value_hash = ?`, [valueHash]);
+  }
+
+  /** Stores a token; a concurrent deterministic insert for the same value keeps the first one. */
+  putGuardVault(input: { token: string; dataClass: string; valueHash: string | null; valueSealed: string; createdAt: string }): void {
+    this.exec(`INSERT OR IGNORE INTO guard_token_vault (token, data_class, value_hash, value_sealed, created_at) VALUES (?, ?, ?, ?, ?)`, [
+      input.token,
+      input.dataClass,
+      input.valueHash,
+      input.valueSealed,
+      input.createdAt
+    ]);
+    this.persist();
   }
 
   /**

@@ -133,7 +133,7 @@ describe("migration 27", () => {
     }
     expect(migration!.down).toContain("DROP TABLE IF EXISTS mcp_user_oauth_connections");
     expect(migration!.down).toContain("DROP COLUMN IF EXISTS sandbox_json");
-    expect(Math.max(...MIGRATIONS.map((entry) => entry.version))).toBe(27);
+    expect(Math.max(...MIGRATIONS.map((entry) => entry.version))).toBeGreaterThanOrEqual(27);
   });
 
   it("creates the SQLite columns and table", async () => {

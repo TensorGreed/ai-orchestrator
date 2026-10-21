@@ -120,6 +120,8 @@ import { McpElicitationService } from "./services/mcp-elicitation-service.js";
 import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js";
 import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
+import { registerGuardRoutes } from "./guard-routes.js";
+import { GuardService } from "./services/guard-service.js";
 import {
   McpCassetteService,
   applyReplayOutcome,
@@ -1194,6 +1196,12 @@ export function createApp(
     genReqId: () => nanoid()
   });
   const providerRegistry = createDefaultProviderRegistry();
+  // Phase 12.1 — guard profiles, bindings, events and the token vault.
+  const guardService = new GuardService(store, secretService, {
+    autoApply: config.GUARD_AUTO_APPLY,
+    logger: (message, metadata) => app.log.warn(metadata ?? {}, message)
+  });
+  guardService.ensureBuiltIns();
   const connectorRegistry = createDefaultConnectorRegistry();
   // Phase 10.7 — stdio sandboxes. The instance label is derived from the
   // database location so the startup sweep only ever sees this deployment's
@@ -1685,6 +1693,7 @@ export function createApp(
             }
           },
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+          guard: guardService.runtimeFor({ executionId: input.executionId, workflowId: mergedWorkflow.id, projectId: mergedWorkflow.projectId ?? "default" }),
           resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer ?? resolveRegisteredMcpServer,
           loadMcpToolPolicy,
           // Phase 10.5 — resources, elicitation and list_changed notifications.
@@ -10444,6 +10453,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runtime: (serverId, user) => runtimeStateView(serverId, user),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
+
+  registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), audit: (request, user, event) => audit(request, user, event) });
 
   registerMcpTestingRoutes({
     app,

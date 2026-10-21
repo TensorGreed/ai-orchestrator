@@ -24,6 +24,7 @@ export const openApiSpec = {
     { name: "Variables", description: "Project-scoped variable management" },
     { name: "Providers", description: "LLM provider testing and model discovery" },
     { name: "MCP", description: "MCP tool discovery" },
+    { name: "Guard", description: "Guard profiles, bindings, verdict events and Security page counts" },
     { name: "Git", description: "Git source control sync" },
     { name: "Audit", description: "Audit log and export" },
     { name: "Observability", description: "Health, metrics, traces, SLOs" },
@@ -1329,6 +1330,173 @@ export const openApiSpec = {
           "404": { description: "Server not found" },
           "409": { description: "No accepted snapshot yet" }
         }
+      }
+    },
+    "/api/guard/profiles": {
+      get: {
+        tags: ["Guard"],
+        summary: "Guard profiles with their latest version and hash (viewers)",
+        responses: { "200": { description: "{ profiles, autoApply, builtInId }" } }
+      },
+      post: {
+        tags: ["Guard"],
+        summary: "Create a profile from a guard profile document; version 1 (builders)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["document"], properties: { id: { type: "string" }, document: { type: "object" }, note: { type: "string" } } } } } },
+        responses: { "201": { description: "{ profile }" }, "400": { description: "{ error, issues: [{ path, message }] }" }, "409": { description: "Id already in use" } }
+      }
+    },
+    "/api/guard/profiles/import": {
+      post: {
+        tags: ["Guard"],
+        summary: "Import an exported profile document: creates it, or adds a version when the id exists (builders)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { document: { type: "object" }, text: { type: "string" }, note: { type: "string" } } } } } },
+        responses: { "200": { description: "{ profile, created: false, changed }" }, "201": { description: "{ profile, created: true }" }, "400": { description: "{ error, issues }" } }
+      }
+    },
+    "/api/guard/profiles/{id}": {
+      get: {
+        tags: ["Guard"],
+        summary: "A profile, its latest version and the bindings that use it (viewers)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ profile, latest, bindings }" }, "404": { description: "Not found" } }
+      },
+      put: {
+        tags: ["Guard"],
+        summary: "Save an edit as a new immutable version; an unchanged document adds none (builders; built-in is read-only)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["document"], properties: { document: { type: "object" }, note: { type: "string" } } } } } },
+        responses: { "200": { description: "{ version, changed }" }, "400": { description: "{ error, issues }" }, "409": { description: "Built-in profile" } }
+      },
+      delete: {
+        tags: ["Guard"],
+        summary: "Delete a profile and its versions; refused while bound (builders; built-in cannot be deleted)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Deleted" }, "409": { description: "Built-in or still bound" } }
+      }
+    },
+    "/api/guard/profiles/{id}/versions": {
+      get: {
+        tags: ["Guard"],
+        summary: "Every version of a profile, newest first (viewers)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ versions }" } }
+      }
+    },
+    "/api/guard/profiles/{id}/versions/{version}": {
+      get: {
+        tags: ["Guard"],
+        summary: "One version's document, hash, author and note (viewers)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "version", in: "path", required: true, schema: { type: "integer" } }
+        ],
+        responses: { "200": { description: "{ version }" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/guard/profiles/{id}/diff": {
+      get: {
+        tags: ["Guard"],
+        summary: "Changes between two versions as { path, kind, before, after } entries (viewers)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "from", in: "query", required: true, schema: { type: "integer" } },
+          { name: "to", in: "query", required: true, schema: { type: "integer" } }
+        ],
+        responses: { "200": { description: "{ from, to, changes }" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/guard/profiles/{id}/export": {
+      get: {
+        tags: ["Guard"],
+        summary: "Stable JSON of a version (latest by default) for policy-as-code (viewers)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "version", in: "query", required: false, schema: { type: "integer" } }
+        ],
+        responses: { "200": { description: "Profile document; x-guard-profile-version and x-guard-profile-hash headers" } }
+      }
+    },
+    "/api/guard/detectors": {
+      get: { tags: ["Guard"], summary: "Detector catalogue with the channels each one checks (viewers)", responses: { "200": { description: "{ channels, detectors }" } } }
+    },
+    "/api/guard/bindings/projects/{projectId}": {
+      get: {
+        tags: ["Guard"],
+        summary: "A project's binding and the profiles that apply (viewers)",
+        parameters: [{ name: "projectId", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ binding, effective }" } }
+      },
+      put: {
+        tags: ["Guard"],
+        summary: "Set inherit, override or enforced; enforced, and any change to an enforced binding, is admin-only",
+        parameters: [{ name: "projectId", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["mode"], properties: { mode: { type: "string", enum: ["inherit", "override", "enforced"] }, profileId: { type: "string" } } } } } },
+        responses: { "200": { description: "{ binding, effective }" }, "400": { description: "{ error, issues }" }, "403": { description: "Enforced binding needs an admin" } }
+      }
+    },
+    "/api/guard/bindings/workflows/{workflowId}": {
+      get: {
+        tags: ["Guard"],
+        summary: "A workflow's binding, its project's binding and the effective profiles (viewers with workflow read)",
+        parameters: [{ name: "workflowId", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ binding, project, effective }" } }
+      },
+      put: {
+        tags: ["Guard"],
+        summary: "Set inherit or override; an enforced project profile still runs first (builders with workflow write)",
+        parameters: [{ name: "workflowId", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["mode"], properties: { mode: { type: "string", enum: ["inherit", "override"] }, profileId: { type: "string" } } } } } },
+        responses: { "200": { description: "{ binding, project, effective }" }, "400": { description: "{ error, issues }" } }
+      }
+    },
+    "/api/guard/effective": {
+      get: {
+        tags: ["Guard"],
+        summary: "Profiles applied to agent traffic, in evaluation order, with the binding chain (viewers)",
+        parameters: [
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "projectId", in: "query", required: false, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "{ effective, project, binding? }" } }
+      }
+    },
+    "/api/executions/{id}/guard-events": {
+      get: {
+        tags: ["Guard"],
+        summary: "Guard events of one run, in order; masked evidence only (viewers)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ events }" }, "404": { description: "Execution not found" } }
+      }
+    },
+    "/api/guard/events": {
+      get: {
+        tags: ["Guard"],
+        summary: "Latest guard events across runs, newest first (viewers)",
+        parameters: [
+          { name: "projectId", in: "query", required: false, schema: { type: "string" } },
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "profileId", in: "query", required: false, schema: { type: "string" } },
+          { name: "channel", in: "query", required: false, schema: { type: "string" } },
+          { name: "action", in: "query", required: false, schema: { type: "string" } },
+          { name: "findings", in: "query", required: false, schema: { type: "boolean" } },
+          { name: "days", in: "query", required: false, schema: { type: "integer" } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", default: 50, maximum: 500 } },
+          { name: "offset", in: "query", required: false, schema: { type: "integer", default: 0 } }
+        ],
+        responses: { "200": { description: "{ events, total }" } }
+      }
+    },
+    "/api/guard/stats": {
+      get: {
+        tags: ["Guard"],
+        summary: "Counts by verdict, action, category, channel and day, top detectors and shadow-mode would-have-blocked counts (viewers)",
+        parameters: [
+          { name: "projectId", in: "query", required: false, schema: { type: "string" } },
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "profileId", in: "query", required: false, schema: { type: "string" } },
+          { name: "days", in: "query", required: false, schema: { type: "integer", default: 14 } }
+        ],
+        responses: { "200": { description: "{ since, stats }" } }
       }
     },
     "/api/mcp/cassettes": {
