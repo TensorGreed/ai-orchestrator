@@ -172,8 +172,7 @@ describe("MCP tool policy UI", () => {
     vi.mocked(api.deleteMcpToolPolicy).mockResolvedValue({ ok: true });
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    render(<McpServersPage isAdmin activeProjectId="default" />);
-    await user.click(await screen.findByRole("tab", { name: "Policies" }));
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
 
     const list = await screen.findByRole("list", { name: "Tool policy rules" });
     expect(within(list).getByText("Viewers: no calculator")).toBeInTheDocument();
@@ -241,8 +240,7 @@ describe("MCP tool policy UI", () => {
       })
     }));
 
-    render(<McpServersPage isAdmin activeProjectId="default" />);
-    await user.click(await screen.findByRole("tab", { name: "Policies" }));
+    render(<McpServersPage view="policies" isAdmin activeProjectId="default" />);
     await user.click(await screen.findByRole("button", { name: "+ Add rule" }));
     const form = screen.getByRole("form", { name: "Add tool policy rule" });
     await user.type(within(form).getByLabelText("Name"), "Operators: no destructive tools");
@@ -260,8 +258,7 @@ describe("MCP tool policy UI", () => {
   it("is read-only for builders", async () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchMcpToolPolicies).mockResolvedValue({ rules: [makeRule()], roles: ["admin", "builder", "operator", "viewer"] });
-    render(<McpServersPage isAdmin={false} />);
-    await user.click(await screen.findByRole("tab", { name: "Policies" }));
+    render(<McpServersPage view="policies" isAdmin={false} />);
     await screen.findByText("Viewers: no calculator");
     expect(screen.queryByRole("button", { name: "+ Add rule" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
@@ -286,8 +283,7 @@ describe("MCP tool policy UI", () => {
       server: { kind: "registry", id: "mcp_1", name: "Demo tools", adapterId: "mock-mcp" }
     });
 
-    render(<McpServersPage isAdmin={false} activeProjectId="default" />);
-    await user.click(await screen.findByRole("tab", { name: "Policies" }));
+    render(<McpServersPage view="policies" isAdmin={false} activeProjectId="default" />);
     const form = await screen.findByRole("form", { name: "Test a tool against the policy" });
     await user.type(within(form).getByLabelText("Tool"), "calculator");
     await user.click(within(form).getByRole("button", { name: "Check" }));

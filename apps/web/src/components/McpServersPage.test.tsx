@@ -327,7 +327,7 @@ describe("McpServersPage", () => {
       entries: []
     });
 
-    render(<McpServersPage isAdmin={false} canBuild />);
+    const { unmount } = render(<McpServersPage isAdmin={false} canBuild />);
     expect(await screen.findByRole("region", { name: "MCP catalog" })).toHaveTextContent("is not pinned");
     expect(screen.getByText("Enforced for stdio servers")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Reload" })).not.toBeInTheDocument();
@@ -336,7 +336,9 @@ describe("McpServersPage", () => {
     expect(screen.getByRole("dialog", { name: "Import MCP client config" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Close import dialog" }));
 
-    await user.click(screen.getByRole("tab", { name: "Playground" }));
+    unmount();
+    render(<McpServersPage view="playground" isAdmin={false} canBuild />);
+    expect(await screen.findByRole("heading", { name: "MCP playground" })).toBeInTheDocument();
     expect(await screen.findByRole("region", { name: "MCP playground" })).toBeInTheDocument();
   });
 
@@ -345,6 +347,24 @@ describe("McpServersPage", () => {
     render(<McpServersPage isAdmin={false} canBuild={false} />);
     expect(await screen.findByText(/No servers registered yet/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Import config" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: "Playground" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "MCP playground" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the playground closed to viewers when they open its page", async () => {
+    vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [], adapters: [], defaultProbeIntervalMs: 300000 });
+    render(<McpServersPage view="playground" isAdmin={false} canBuild={false} />);
+    expect(await screen.findByRole("heading", { name: "MCP playground" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "MCP playground" })).not.toBeInTheDocument();
+  });
+
+  it("selects the focused server when opened from another page", async () => {
+    vi.mocked(api.fetchMcpServers).mockResolvedValue({
+      servers: [makeServer(), makeServer({ id: "mcp_2", name: "Search tools" })],
+      adapters: [],
+      defaultProbeIntervalMs: 300000
+    });
+    render(<McpServersPage isAdmin={false} focusServerId="mcp_2" />);
+    await waitFor(() => expect(api.fetchMcpServer).toHaveBeenCalledWith("mcp_2"));
+    expect(screen.getByRole("button", { name: /Search tools/ })).toHaveClass("active");
   });
 });

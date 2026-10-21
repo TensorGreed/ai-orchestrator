@@ -244,6 +244,7 @@ describe("MCP control plane routes", () => {
         classification: { readOnly: boolean };
         access: { allowed: boolean; ruleName?: string };
         telemetry?: { calls: number; errors: number } | null;
+        recentCalls?: Array<{ ok: boolean; error: string | null; source: string }>;
         usages?: Array<{ nodeId: string; allTools: boolean }>;
         annotations?: { readOnlyHint?: boolean };
       }>;
@@ -257,6 +258,8 @@ describe("MCP control plane routes", () => {
     expect(calculator.access).toMatchObject({ allowed: false, ruleName: "No calculator for builders" });
     expect(calculator.classification.readOnly).toBe(false);
     expect(calculator.telemetry).toMatchObject({ calls: 3, errors: 1 });
+    expect(calculator.recentCalls?.map((entry) => entry.ok)).toEqual([true, false, true]);
+    expect(calculator.recentCalls?.[1]).toMatchObject({ error: "boom", source: "workflow" });
     expect(calculator.usages?.map((usage) => [usage.nodeId, usage.allTools]).sort()).toEqual([
       ["all", true],
       ["calc", false]
@@ -275,6 +278,7 @@ describe("MCP control plane routes", () => {
     expect(light.body.servers).toHaveLength(1);
     expect(light.body.tools[0]).not.toHaveProperty("telemetry");
     expect(light.body.tools[0]).not.toHaveProperty("usages");
+    expect(light.body.tools[0]).not.toHaveProperty("recentCalls");
 
     expect((await call(context, "GET", "/api/mcp/tools?window=1y", builder)).status).toBe(400);
   });

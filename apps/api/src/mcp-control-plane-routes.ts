@@ -107,6 +107,12 @@ const DEFAULT_CHANGES = 100;
 const PROBES_PER_SERVER = 200;
 const SNAPSHOTS_PER_SERVER = 50;
 const AUDIT_PAGE_SIZE = 500;
+const RECENT_CALLS = 10;
+const MAX_ERROR_CHARS = 300;
+
+function truncate(text: string): string {
+  return text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS - 1)}…` : text;
+}
 
 const STATUS_LABEL: Record<McpServerStatus, string> = {
   unknown: "Not probed",
@@ -407,11 +413,22 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
         registryServerId: server.id,
         serverLabel: server.name
       });
-      const telemetry = detail
-        ? new Map(
-            rollupMcpToolCalls(store.listMcpToolCalls({ registryServerId: server.id, since })).tools.map((entry) => [entry.toolName, entry])
-          )
-        : null;
+      const calls = detail ? store.listMcpToolCalls({ registryServerId: server.id, since }) : [];
+      const telemetry = detail ? new Map(rollupMcpToolCalls(calls).tools.map((entry) => [entry.toolName, entry])) : null;
+      const recentByTool = new Map<string, unknown[]>();
+      for (const call of [...calls].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))) {
+        const list = recentByTool.get(call.toolName) ?? [];
+        if (list.length >= RECENT_CALLS) continue;
+        list.push({
+          startedAt: call.startedAt,
+          ok: call.ok,
+          durationMs: call.durationMs,
+          source: call.source,
+          workflowId: call.workflowId || null,
+          error: call.error ? truncate(call.error) : null
+        });
+        recentByTool.set(call.toolName, list);
+      }
       const serverUsages = usages.get(server.id) ?? [];
       serverViews.push({
         id: server.id,
@@ -439,7 +456,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
           classification: tool.classification,
           manualReadOnly: tool.manualReadOnly,
           access: tool.access,
-          ...(telemetry ? { telemetry: telemetry.get(tool.name) ?? null } : {}),
+          ...(telemetry ? { telemetry: telemetry.get(tool.name) ?? null, recentCalls: recentByTool.get(tool.name) ?? [] } : {}),
           ...(detail
             ? {
                 usages: serverUsages

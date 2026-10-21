@@ -2728,3 +2728,104 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- Phase 10.3: MCP server status and policy markers ------------------ */
+
+.wf-mcp-marker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.wf-mcp-marker-card {
+  margin-top: 6px;
+}
+
+.wf-mcp-marker-satellite {
+  position: absolute;
+  top: -8px;
+  left: -10px;
+  z-index: 3;
+  flex-wrap: nowrap;
+}
+
+.wf-mcp-status,
+.wf-mcp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  min-height: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+button.wf-mcp-status,
+button.wf-mcp-chip {
+  cursor: pointer;
+}
+
+button.wf-mcp-status:disabled,
+button.wf-mcp-chip:disabled {
+  cursor: default;
+}
+
+button.wf-mcp-status:hover:not(:disabled),
+button.wf-mcp-chip:hover:not(:disabled) {
+  border-color: var(--fg-muted);
+}
+
+button.wf-mcp-status:focus-visible,
+button.wf-mcp-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.wf-mcp-marker-satellite .wf-mcp-status {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  justify-content: center;
+}
+
+.wf-mcp-status.mcp-status-healthy {
+  background: var(--ok-soft);
+}
+
+.wf-mcp-status.mcp-status-degraded {
+  background: var(--warn-soft);
+}
+
+.wf-mcp-status.mcp-status-down {
+  background: var(--err-soft);
+}
+
+.wf-mcp-chip-breaking,
+.wf-mcp-chip-blocked {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+
+.wf-mcp-chip-destructive {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.wf-mcp-chip-write {
+  background: var(--bg-elev-3);
+}
+
+.wf-mcp-marker-satellite .wf-mcp-chip {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  justify-content: center;
+}

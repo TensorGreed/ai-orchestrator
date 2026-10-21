@@ -2920,3 +2920,173 @@ export async function answerMcpElicitation(
     body: JSON.stringify(payload)
   });
 }
+
+// ---------------------------------------------------------------------------
+// Phase 10.3 — MCP control plane: tools catalogue, changes feed, overview
+// ---------------------------------------------------------------------------
+
+export interface McpCatalogToolUsage {
+  workflowId: string;
+  workflowName: string;
+  nodeId: string;
+  nodeName: string;
+  nodeType: string;
+  /** The node offers every tool of the server rather than naming this one. */
+  allTools: boolean;
+}
+
+export interface McpCatalogServer {
+  id: string;
+  name: string;
+  status: McpServerStatus;
+  adapterId: string;
+  projectId: string | null;
+  lastProbeAt: string | null;
+  pendingBreakingSnapshotId: string | null;
+  toolCount: number;
+  /** Project the access marks were evaluated in. */
+  policyProjectId: string;
+}
+
+export interface McpCatalogTool extends McpToolPolicyMarks {
+  serverId: string;
+  serverName: string;
+  serverStatus: McpServerStatus;
+  adapterId: string;
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  annotations?: McpToolAnnotations;
+  /** Present unless the catalogue was fetched with `detail: false`. */
+  telemetry?: McpToolTelemetry | null;
+  /** Newest first, within the window; at most ten. */
+  recentCalls?: McpCatalogRecentCall[];
+  usages?: McpCatalogToolUsage[];
+}
+
+export interface McpCatalogRecentCall {
+  startedAt: string;
+  ok: boolean;
+  durationMs: number | null;
+  source: "workflow" | "gateway" | "playground";
+  workflowId: string | null;
+  error: string | null;
+}
+
+export interface McpToolCatalogResponse {
+  window: McpTelemetryWindow;
+  since: string;
+  policy: { role: McpPolicyRole; projectId: string };
+  servers: McpCatalogServer[];
+  tools: McpCatalogTool[];
+}
+
+export async function fetchMcpToolCatalog(
+  options: { projectId?: string | null; window?: McpTelemetryWindow; serverIds?: string[]; detail?: boolean } = {}
+) {
+  const params = new URLSearchParams();
+  if (options.projectId) params.set("projectId", options.projectId);
+  if (options.window) params.set("window", options.window);
+  if (options.serverIds && options.serverIds.length > 0) params.set("serverIds", options.serverIds.join(","));
+  if (options.detail === false) params.set("detail", "false");
+  const qs = params.size > 0 ? `?${params.toString()}` : "";
+  return apiRequest<McpToolCatalogResponse>(`/api/mcp/tools${qs}`);
+}
+
+export type McpChangeKind =
+  | "schema"
+  | "acceptance"
+  | "status"
+  | "policy"
+  | "classification"
+  | "toolset"
+  | "client"
+  | "oauth"
+  | "sampling"
+  | "catalog"
+  | "server";
+
+export interface McpChangeLink {
+  page: "servers" | "policies" | "toolsets" | "clients" | "tools";
+  serverId?: string;
+  policyId?: string;
+  toolName?: string;
+}
+
+export interface McpChangeItem {
+  id: string;
+  at: string;
+  kind: McpChangeKind;
+  severity: "breaking" | "warning" | "change" | "info";
+  serverId: string | null;
+  serverName: string | null;
+  title: string;
+  detail: string | null;
+  link: McpChangeLink | null;
+  changes?: Array<{ tool: string; kind: string; breaking: boolean; detail: string }>;
+  transition?: { from: McpServerStatus; to: McpServerStatus };
+  /** Admin only. */
+  actor?: string | null;
+  metadata?: unknown;
+}
+
+export async function fetchMcpChanges(options: { serverId?: string | null; kinds?: McpChangeKind[]; limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (options.serverId) params.set("serverId", options.serverId);
+  if (options.kinds && options.kinds.length > 0) params.set("kind", options.kinds.join(","));
+  if (options.limit) params.set("limit", String(options.limit));
+  const qs = params.size > 0 ? `?${params.toString()}` : "";
+  return apiRequest<{ kinds: McpChangeKind[]; total: number; items: McpChangeItem[] }>(`/api/mcp/changes${qs}`);
+}
+
+export interface McpOverviewToolRow {
+  serverId: string;
+  serverName: string;
+  toolName: string;
+  calls: number;
+  errors: number;
+  /** 0..1 */
+  errorRate: number;
+  p95Ms: number | null;
+  costUsd: number | null;
+}
+
+export interface McpOverview {
+  window: McpTelemetryWindow;
+  since: string;
+  servers: {
+    total: number;
+    byStatus: Record<McpServerStatus, number>;
+    list: Array<{ id: string; name: string; status: McpServerStatus; lastProbeAt: string | null; latency: McpLatencyStats }>;
+  };
+  pendingBreaking: Array<{
+    serverId: string;
+    serverName: string;
+    snapshotId: string;
+    detectedAt: string | null;
+    breakingChanges: number;
+    blocksRuns: boolean;
+  }>;
+  oauthAttention: Array<{
+    serverId: string;
+    serverName: string;
+    state: McpOAuthConnectionStatus["state"];
+    expiresAt: string | null;
+    /** Admin only. */
+    lastError?: string | null;
+  }>;
+  elicitations: { pending: number; oldestAt: string | null };
+  sampling: Array<{ serverId: string; serverName: string; maxTokens: number; maxRequestsPerCall: number; allowedModels: number }>;
+  tools: { calls: number; errors: number; busiest: McpOverviewToolRow[]; errorProne: McpOverviewToolRow[] };
+  clients: {
+    total: number;
+    active: number;
+    top: Array<{ id: string; name: string; calls: number; errors: number; lastCalledAt: string | null }>;
+  };
+  changes: McpChangeItem[];
+}
+
+export async function fetchMcpOverview(window: McpTelemetryWindow = "7d") {
+  return apiRequest<McpOverview>(`/api/mcp/overview?window=${encodeURIComponent(window)}`);
+}

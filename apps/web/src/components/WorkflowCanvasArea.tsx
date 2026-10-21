@@ -42,6 +42,7 @@ import { StageStrip, type StageStripNode } from "./StageStrip";
 import type { PaletteCategoryIconKey } from "./node-icons";
 import { ImportReportPanel, type ImportReportPanelProps } from "./ImportReportPanel";
 import type { ImportChecklistNode } from "../lib/external-import";
+import type { McpCanvasMarker, McpNavTarget } from "../lib/mcp-control-plane";
 
 type DefinitionNode = PaletteDefinition;
 
@@ -218,6 +219,9 @@ interface WorkflowCanvasAreaProps {
   onBeforeTidy?: () => void;
   /** Post-import checklist; shown on the canvas while set. */
   importPanel?: ImportPanelBinding | null;
+  /** Phase 10.3 — MCP server status and policy markers by node id, and where clicking one goes. */
+  mcpMarkers?: Record<string, McpCanvasMarker>;
+  onOpenMcpTarget?: (target: McpNavTarget) => void;
 }
 
 /** Everything the import checklist needs from the app; the canvas adds focus and Tidy. */
@@ -282,7 +286,9 @@ export function WorkflowCanvasArea({
   executionResult,
   statusColors,
   onBeforeTidy,
-  importPanel
+  importPanel,
+  mcpMarkers,
+  onOpenMcpTarget
 }: WorkflowCanvasAreaProps) {
   const [fileDragActive, setFileDragActive] = useState(false);
   const [expandedNodeLogIds, setExpandedNodeLogIds] = useState<string[]>([]);
@@ -361,10 +367,15 @@ export function WorkflowCanvasArea({
         const nodeType = node.data.nodeType;
         const hub = isHubType(nodeType);
         const attachment = attached.has(node.id) ? findHubOf(node.id, slots) : null;
-        if (!hub && !attachment) {
+        const mcpMarker = mcpMarkers?.[node.id];
+        if (!hub && !attachment && !mcpMarker) {
           return node;
         }
         const data: EditorNodeData = { ...node.data };
+        if (mcpMarker) {
+          data.mcpMarker = mcpMarker;
+          data.onOpenMcpTarget = onOpenMcpTarget;
+        }
         if (hub) {
           data.slots = slots[node.id];
           if (onOpenAgentAttachmentDrawer) {
@@ -387,7 +398,7 @@ export function WorkflowCanvasArea({
           draggable: attachment ? false : node.draggable
         };
       }),
-    [attached, nodeById, nodes, onOpenAgentAttachmentDrawer, slots]
+    [attached, mcpMarkers, nodeById, nodes, onOpenAgentAttachmentDrawer, onOpenMcpTarget, slots]
   );
 
   /** Position changes for every node attached (recursively) to `hubId`. */

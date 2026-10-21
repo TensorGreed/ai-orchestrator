@@ -1267,3 +1267,15 @@ body {
     transition: none;
   }
 }
+
+/* Phase 10.3 — the MCP section of the sidebar. */
+.sidebar-group {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.is-collapsed .sidebar-group {
+  padding-top: 6px;
+}

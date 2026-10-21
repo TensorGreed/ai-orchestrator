@@ -181,8 +181,7 @@ describe("MCP gateway views", () => {
   it("lists toolsets with their endpoint, copies it, and previews tools per role", async () => {
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-    render(<McpServersPage isAdmin activeProjectId={null} />);
-    await user.click(screen.getByRole("tab", { name: "Toolsets" }));
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
 
     expect(await screen.findByTestId("toolset-endpoint")).toHaveTextContent("https://l2m.example.com/mcp/support");
     expect(screen.getByText("lookup_*")).toBeInTheDocument();
@@ -205,8 +204,7 @@ describe("MCP gateway views", () => {
     const user = userEvent.setup();
     vi.mocked(api.fetchMcpToolsets).mockResolvedValue({ toolsets: [], gatewayBaseUrl: null, protocolVersions: [] });
     vi.mocked(api.createMcpToolset).mockResolvedValue({ toolset });
-    render(<McpServersPage isAdmin activeProjectId={null} />);
-    await user.click(screen.getByRole("tab", { name: "Toolsets" }));
+    render(<McpServersPage view="toolsets" isAdmin activeProjectId={null} />);
     await user.click(await screen.findByRole("button", { name: "+ New toolset" }));
 
     const form = screen.getByRole("form", { name: "New toolset" });
@@ -233,8 +231,7 @@ describe("MCP gateway views", () => {
 
   it("hides toolset admin actions from builders", async () => {
     const user = userEvent.setup();
-    render(<McpServersPage isAdmin={false} activeProjectId={null} />);
-    await user.click(screen.getByRole("tab", { name: "Toolsets" }));
+    render(<McpServersPage view="toolsets" isAdmin={false} activeProjectId={null} />);
     await screen.findByTestId("toolset-endpoint");
     expect(screen.queryByRole("button", { name: "+ New toolset" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
@@ -248,8 +245,7 @@ describe("MCP gateway views", () => {
       client: { ...activeClient, id: "mcc_2", name: "Laptop agent", activeSessions: 0, usage: { calls: 0, errors: 0, lastCalledAt: null } },
       token
     });
-    render(<McpServersPage isAdmin activeProjectId={null} />);
-    await user.click(screen.getByRole("tab", { name: "Clients" }));
+    render(<McpServersPage view="clients" isAdmin activeProjectId={null} />);
     await user.click(await screen.findByRole("button", { name: "+ New client" }));
 
     const form = screen.getByRole("form", { name: "New MCP client" });
@@ -292,8 +288,7 @@ describe("MCP gateway views", () => {
       totals: { calls: 3, errors: 1, errorRate: 1 / 3, p50Ms: 20, p95Ms: 40, inputTokens: 0, outputTokens: 0, costUsd: null, lastCalledAt: null },
       tools: [{ toolName: "lookup_ticket", adapterId: "workflow", calls: 3, errors: 1, errorRate: 1 / 3, p50Ms: 20, p95Ms: 40, inputTokens: 0, outputTokens: 0, costUsd: null, lastCalledAt: null }]
     }));
-    render(<McpServersPage isAdmin activeProjectId={null} />);
-    await user.click(screen.getByRole("tab", { name: "Clients" }));
+    render(<McpServersPage view="clients" isAdmin activeProjectId={null} />);
 
     const list = await screen.findByRole("list", { name: "MCP clients" });
     expect(within(list).getByText("Active")).toBeInTheDocument();

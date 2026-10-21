@@ -18,7 +18,7 @@
  * calls one tool through a schema-driven form.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   type McpPreset,
@@ -99,7 +99,36 @@ export function StatusBadge({ status }: { status: McpRegisteredServer["status"] 
   );
 }
 
+/** Phase 10.3 — the MCP sidebar section opens one of these views as its own page. */
+export type McpServersPageView = "servers" | "policies" | "toolsets" | "clients" | "playground";
+
+const VIEW_HEAD: Record<McpServersPageView, { title: string; sub?: string }> = {
+  servers: { title: "MCP servers" },
+  policies: {
+    title: "MCP policies",
+    sub: "Allow and deny rules that decide which servers, tools, resources and prompts each role may use, per project."
+  },
+  toolsets: {
+    title: "MCP toolsets",
+    sub: "Named groups of tools that L2M serves on its own MCP endpoint, one URL per toolset."
+  },
+  clients: {
+    title: "MCP clients",
+    sub: "Tokens that let MCP clients call toolsets through the gateway, with each client's recent usage."
+  },
+  playground: {
+    title: "MCP playground",
+    sub: "Call a tool through a schema-driven form, read resources and preview prompts on a registered server."
+  }
+};
+
 interface McpServersPageProps {
+  /** Which view to show; each is its own page in the MCP sidebar section. Defaults to servers. */
+  view?: McpServersPageView;
+  /** Server to select when the servers view opens (e.g. from the overview or a canvas marker). */
+  focusServerId?: string | null;
+  /** Policy rule to highlight when the policies view opens. */
+  focusPolicyId?: string | null;
   isAdmin: boolean;
   /** Builder or above: may preview imports and use the playground. Defaults to isAdmin. */
   canBuild?: boolean;
@@ -108,7 +137,15 @@ interface McpServersPageProps {
   activeProjectId?: string | null;
 }
 
-export function McpServersPage({ isAdmin, canBuild = isAdmin, currentUserId, activeProjectId }: McpServersPageProps) {
+export function McpServersPage({
+  view = "servers",
+  focusServerId,
+  focusPolicyId,
+  isAdmin,
+  canBuild = isAdmin,
+  currentUserId,
+  activeProjectId
+}: McpServersPageProps) {
   const [servers, setServers] = useState<McpRegisteredServer[]>([]);
   const [adapters, setAdapters] = useState<Array<{ id: string; label: string }>>([]);
   const [defaultIntervalMs, setDefaultIntervalMs] = useState(0);
@@ -117,7 +154,6 @@ export function McpServersPage({ isAdmin, canBuild = isAdmin, currentUserId, act
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [detailVersion, setDetailVersion] = useState(0);
-  const [view, setView] = useState<"servers" | "policies" | "toolsets" | "clients" | "playground">("servers");
   const [showImport, setShowImport] = useState(false);
 
   const refreshList = useCallback(async () => {
@@ -142,6 +178,17 @@ export function McpServersPage({ isAdmin, canBuild = isAdmin, currentUserId, act
     void refreshList();
   }, [refreshList]);
 
+  // Select the focused server once it is listed; later refreshes keep whatever the user picked.
+  const appliedFocusRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusServerId || appliedFocusRef.current === focusServerId) return;
+    if (!servers.some((server) => server.id === focusServerId)) return;
+    appliedFocusRef.current = focusServerId;
+    setSelectedId(focusServerId);
+  }, [focusServerId, servers]);
+
+  const head = VIEW_HEAD[view];
+
   const onServerChanged = useCallback(async () => {
     await refreshList();
     setDetailVersion((v) => v + 1);
@@ -151,62 +198,17 @@ export function McpServersPage({ isAdmin, canBuild = isAdmin, currentUserId, act
     <section className="kb-page mcp-page page-pane">
       <header className="kb-header page-head">
         <div className="page-head-copy">
-          <h2 className="page-title">MCP servers</h2>
+          <h2 className="page-title">{head.title}</h2>
           <p className="page-sub">
-            Every MCP server your agents call, probed on a schedule ({formatInterval(defaultIntervalMs)} by default) with
-            its tool schemas kept as history. Nodes that pick a registered server follow edits made here.
+            {head.sub ?? (
+              <>
+                Every MCP server your agents call, probed on a schedule ({formatInterval(defaultIntervalMs)} by default)
+                with its tool schemas kept as history. Nodes that pick a registered server follow edits made here.
+              </>
+            )}
           </p>
         </div>
         <div className="page-actions">
-          <div className="finops-range" role="tablist" aria-label="MCP view">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "servers"}
-              className={view === "servers" ? "finops-range-btn active" : "finops-range-btn"}
-              onClick={() => setView("servers")}
-            >
-              Servers
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "policies"}
-              className={view === "policies" ? "finops-range-btn active" : "finops-range-btn"}
-              onClick={() => setView("policies")}
-            >
-              Policies
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "toolsets"}
-              className={view === "toolsets" ? "finops-range-btn active" : "finops-range-btn"}
-              onClick={() => setView("toolsets")}
-            >
-              Toolsets
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === "clients"}
-              className={view === "clients" ? "finops-range-btn active" : "finops-range-btn"}
-              onClick={() => setView("clients")}
-            >
-              Clients
-            </button>
-            {canBuild && (
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "playground"}
-                className={view === "playground" ? "finops-range-btn active" : "finops-range-btn"}
-                onClick={() => setView("playground")}
-              >
-                Playground
-              </button>
-            )}
-          </div>
           {view === "servers" && (
             <button type="button" className="pg-btn" onClick={() => void onServerChanged()} disabled={loading}>
               Refresh
@@ -228,7 +230,13 @@ export function McpServersPage({ isAdmin, canBuild = isAdmin, currentUserId, act
       {error && <div className="settings-error">{error}</div>}
 
       {view === "policies" && (
-        <McpPoliciesView isAdmin={isAdmin} servers={servers} adapters={adapters} activeProjectId={activeProjectId} />
+        <McpPoliciesView
+          isAdmin={isAdmin}
+          servers={servers}
+          adapters={adapters}
+          activeProjectId={activeProjectId}
+          focusRuleId={focusPolicyId}
+        />
       )}
 
       {view === "toolsets" && <McpToolsetsView isAdmin={isAdmin} servers={servers} activeProjectId={activeProjectId} />}

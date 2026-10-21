@@ -127,12 +127,15 @@ export function McpPoliciesView({
   isAdmin,
   servers,
   adapters,
-  activeProjectId
+  activeProjectId,
+  focusRuleId
 }: {
   isAdmin: boolean;
   servers: McpRegisteredServer[];
   adapters: Array<{ id: string; label: string }>;
   activeProjectId?: string | null;
+  /** Phase 10.3 — rule to highlight and scroll to (opened from a canvas marker or the changes feed). */
+  focusRuleId?: string | null;
 }) {
   const [rules, setRules] = useState<McpToolPolicyRule[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -164,6 +167,12 @@ export function McpPoliciesView({
         // Project names only label rules; ids still show without them.
       });
   }, [refresh]);
+
+  useEffect(() => {
+    if (!focusRuleId || loading) return;
+    const element = document.getElementById(`mcp-rule-${focusRuleId}`);
+    if (element && typeof element.scrollIntoView === "function") element.scrollIntoView({ block: "center" });
+  }, [focusRuleId, loading]);
 
   const toggleEnabled = async (rule: McpToolPolicyRule) => {
     setBusyId(rule.id);
@@ -240,7 +249,12 @@ export function McpPoliciesView({
         ) : (
           <ul className="mcp-rules" aria-label="Tool policy rules">
             {rules.map((rule) => (
-              <li key={rule.id} className={rule.enabled ? "mcp-rule" : "mcp-rule is-disabled"}>
+              <li
+                key={rule.id}
+                id={`mcp-rule-${rule.id}`}
+                className={["mcp-rule", !rule.enabled && "is-disabled", rule.id === focusRuleId && "is-focused"].filter(Boolean).join(" ")}
+                aria-current={rule.id === focusRuleId ? "true" : undefined}
+              >
                 <div className="mcp-rule-head">
                   <EffectBadge effect={rule.effect} />
                   <span className="mcp-rule-name">{rule.name ?? "Unnamed rule"}</span>

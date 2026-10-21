@@ -4,7 +4,7 @@ import type { AuthUser } from "../lib/api";
 import { SidebarMenuButton } from "./AppSidebar";
 import { CommandPalette } from "./CommandPalette";
 import { DocsIcon, HelpIcon, MoonIcon, MoreIcon, PlayIcon, SunIcon } from "./shell-icons";
-import { STUDIO_MODE_ITEMS, type CommandPaletteItem, type RunStatus, type StudioMode } from "./studio-layout-types";
+import { STUDIO_MODE_ITEMS, studioModeLabel, type CommandPaletteItem, type RunStatus, type StudioMode } from "./studio-layout-types";
 
 export interface StudioHudProps {
   activeMode: StudioMode;
@@ -183,7 +183,7 @@ export function StudioHud({
       if (item.adminOnly && !canManageSecrets) continue;
       items.push({
         id: `mode-${item.mode}`,
-        label: `Go to ${item.label}`,
+        label: `Go to ${studioModeLabel(item)}`,
         group: "Navigate",
         run: () => onModeChange(item.mode)
       });
