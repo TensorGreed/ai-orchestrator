@@ -508,28 +508,28 @@ to run agents.
 - Measured: every verdict is recorded and every profile is benchmarked against an attack corpus.
 
 ### 12.1 Guard engine and placement
-- [ ] `packages/guard-sdk`: detector interface (content, channel — prompt, model output, tool arguments, tool result, final output —, provenance labels and run subject in; findings with score, span and evidence out) and `createDefaultGuardRegistry()`; community detectors through the node SDK
-- [ ] Guard profiles: named, versioned bundles of detectors, thresholds and actions per channel, stored as policy-as-code and synced through git
+- [ ] `packages/guard-sdk`: detector interface (content, channel — prompt, model output, tool arguments, tool result, final output —, provenance labels and run subject in; findings with score, span and evidence out) and `createDefaultGuardRegistry()`; community detectors through the node SDK — *partial:* detector interface, channels, provenance labels, run subject, findings with score, spans and masked evidence, and `createDefaultGuardRegistry()` are delivered; community detectors through the node SDK remain
+- [ ] Guard profiles: named, versioned bundles of detectors, thresholds and actions per channel, stored as policy-as-code and synced through git — *partial:* the zod-validated profile document, stable serialisation and hash are delivered; storage and git sync remain
 - [ ] `guard` node for DAG edges with `pass`, `blocked` and `review` outputs, so flagged items can be routed instead of failing the run
 - [ ] `guard` attachment port on Agent and Supervisor nodes: hooks before each model call, before each tool call, after each tool result and before the final answer, also applied to worker delegation
 - [ ] Automatic boundary profiles per project and per workflow (inherit, override, or enforced by an admin so builders cannot remove them)
-- [ ] Actions: allow, block, redact or mask, tokenise or encrypt through an attached protection provider (12.5), transform, require approval (11.2), route to review; per-action shadow mode
-- [ ] Latency tiers: rules and parsers inline, local classifiers next, LLM judge only for uncertain scores; per-profile latency budget with an explicit fail-open or fail-closed choice
+- [ ] Actions: allow, block, redact or mask, tokenise or encrypt through an attached protection provider (12.5), transform, require approval (11.2), route to review; per-action shadow mode — *partial:* every action and per-action shadow mode are delivered in `evaluateGuard`; the `protection` port and the approval-flow hand-off remain
+- [ ] Latency tiers: rules and parsers inline, local classifiers next, LLM judge only for uncertain scores; per-profile latency budget with an explicit fail-open or fail-closed choice — *partial:* tiers, cheapest-first evaluation, the per-profile budget and fail-open / fail-closed are delivered; local classifier models and the LLM judge remain (interfaces only)
 
 ### 12.2 Prompt-injection and jailbreak defence
-- [ ] Direct injection and jailbreak detection on user input: rule pack plus a local classifier model, with scores and highlighted spans
-- [ ] Indirect injection scanning of tool results, retrieved documents, web pages, emails and webhook payloads before the model sees them
-- [ ] Spotlighting: untrusted content wrapped with delimiters or datamarking, with matching system-prompt hardening applied automatically
-- [ ] Provenance (taint) tracking: values carry labels (trusted, user, untrusted external, sensitive) through templates, nodes and the agent context; policies such as "once untrusted content is in context, write tools need approval" and "sensitive data may not flow to open-world tools"
-- [ ] Exfiltration channels blocked: markdown images and links that encode data in URLs, unexpected outbound URLs in tool arguments, hidden-unicode and ASCII-smuggling payloads
-- [ ] Canary tokens in system prompts to detect prompt leakage in outputs
+- [ ] Direct injection and jailbreak detection on user input: rule pack plus a local classifier model, with scores and highlighted spans — *partial:* rule pack with scores and spans, leetspeak and base64 decoding delivered; the local classifier model remains (interface with a rule-based stand-in)
+- [ ] Indirect injection scanning of tool results, retrieved documents, web pages, emails and webhook payloads before the model sees them — *partial:* indirect rule pack delivered as a library; scanning before the model sees the content is wiring
+- [ ] Spotlighting: untrusted content wrapped with delimiters or datamarking, with matching system-prompt hardening applied automatically — *partial:* delimiter wrapping, datamarking and the matching system-prompt text delivered as helpers; automatic application is wiring
+- [ ] Provenance (taint) tracking: values carry labels (trusted, user, untrusted external, sensitive) through templates, nodes and the agent context; policies such as "once untrusted content is in context, write tools need approval" and "sensitive data may not flow to open-world tools" — *partial:* detector input carries the labels and the indirect pack keys on `untrusted_external`; carrying labels through templates, nodes and the agent context, and the label-based policies, remain
+- [x] Exfiltration channels blocked: markdown images and links that encode data in URLs, unexpected outbound URLs in tool arguments, hidden-unicode and ASCII-smuggling payloads — library in `packages/guard-sdk`; wiring into nodes, runtime and API in the guard node PR
+- [x] Canary tokens in system prompts to detect prompt leakage in outputs — library in `packages/guard-sdk`; wiring into nodes, runtime and API in the guard node PR
 
 ### 12.3 Tool-argument security
-- [ ] SQL guard: statements parsed to an AST per dialect; read, write and DDL classified; stacked queries, tautologies and comment tricks blocked; table and column allowlists; mutations require WHERE and a row cap; applied to SQL connector nodes and SQL-shaped MCP arguments
-- [ ] Command guard: shell metacharacter and argument-injection checks for tools that run commands; static checks on code-node source
-- [ ] Path guard: path arguments resolved against allowed roots; traversal and symlink escapes blocked
-- [ ] Egress guard: URL arguments and HTTP nodes checked against an allowlist after DNS resolution; private ranges, link-local and cloud metadata addresses blocked
-- [ ] Strict argument validation against the tool's input schema with size and depth limits before every call
+- [x] SQL guard: statements parsed to an AST per dialect; read, write and DDL classified; stacked queries, tautologies and comment tricks blocked; table and column allowlists; mutations require WHERE and a row cap; applied to SQL connector nodes and SQL-shaped MCP arguments — library in `packages/guard-sdk` (postgres, mysql, mariadb, sqlite, mssql); applying it to SQL connector nodes and MCP arguments is wiring
+- [x] Command guard: shell metacharacter and argument-injection checks for tools that run commands; static checks on code-node source — library in `packages/guard-sdk`; wiring into nodes, runtime and API in the guard node PR
+- [x] Path guard: path arguments resolved against allowed roots; traversal and symlink escapes blocked — library in `packages/guard-sdk`; wiring into nodes, runtime and API in the guard node PR
+- [x] Egress guard: URL arguments and HTTP nodes checked against an allowlist after DNS resolution; private ranges, link-local and cloud metadata addresses blocked — library in `packages/guard-sdk` with an injectable resolver; HTTP nodes and tool calls are wired in the guard node PR
+- [x] Strict argument validation against the tool's input schema with size and depth limits before every call — library in `packages/guard-sdk`; wiring into nodes, runtime and API in the guard node PR
 
 ### 12.4 Fine-grained access control for agents
 - [ ] Attribute-based policies on tool calls written in Cedar (embedded, open source): principal is the run subject (10.2) or gateway client, action is the server and tool, resource and context come from the arguments and data labels — e.g. "operators may create issues only in org X's repositories", "refunds above 500 need a manager's approval"
@@ -538,14 +538,14 @@ to run agents.
 - [ ] Policy simulation: replay recent runs against a draft policy and show what would have been blocked before enforcing it
 
 ### 12.5 Data protection and output safety
-- [ ] DLP detectors: PII, PHI and card data (patterns with checksums plus a local NER model), credentials and keys, custom dictionaries and patterns
-- [ ] Pluggable protection providers: a provider interface (`protect` / `reveal`) in `packages/guard-sdk` with `createDefaultProtectionRegistry()`; providers attach to a guard node or profile through a `protection` port (0..N), so an external tokeniser or encrypter can be plugged in without changing the guard
-- [ ] Built-in providers: local token vault (random or deterministic, format-preserving tokens), format-preserving encryption and AES-GCM encryption with keys held by `SecretService` or a customer KMS (13.3), keyed hashing for irreversible pseudonyms, and masking
+- [ ] DLP detectors: PII, PHI and card data (patterns with checksums plus a local NER model), credentials and keys, custom dictionaries and patterns — *partial:* pattern detectors with checksums, credentials and keys, custom dictionaries and patterns delivered; the local NER model remains
+- [ ] Pluggable protection providers: a provider interface (`protect` / `reveal`) in `packages/guard-sdk` with `createDefaultProtectionRegistry()`; providers attach to a guard node or profile through a `protection` port (0..N), so an external tokeniser or encrypter can be plugged in without changing the guard — *partial:* interface and `createDefaultProtectionRegistry()` delivered; the `protection` port remains
+- [ ] Built-in providers: local token vault (random or deterministic, format-preserving tokens), format-preserving encryption and AES-GCM encryption with keys held by `SecretService` or a customer KMS (13.3), keyed hashing for irreversible pseudonyms, and masking — *partial:* token vault (random, deterministic, format-preserving tokens), AES-GCM, keyed hashing and masking delivered with an injected key resolver; format-preserving encryption and the `SecretService` / KMS key wiring remain
 - [ ] External providers: a generic HTTP adapter for an organisation's own tokenisation or encryption service (auth through `secretRef`), plus adapters for vault transform/transit engines and cloud de-identification APIs; community providers through the node SDK
-- [ ] Per data-class mapping in the profile: each detected class (card number, email, national id, credential, custom class) maps to a provider and a mode (reversible token, encryption, pseudonym, mask); deterministic modes keep joins and lookups working across runs
+- [x] Per data-class mapping in the profile: each detected class (card number, email, national id, credential, custom class) maps to a provider and a mode (reversible token, encryption, pseudonym, mask); deterministic modes keep joins and lookups working across runs — library in `packages/guard-sdk`; wiring into nodes, runtime and API in the guard node PR
 - [ ] Applied on every channel where data can leak: MCP tool responses (after each tool result, before the model sees them), workflow and node outputs, webhook and chat responses, and both gateways
-- [ ] Controlled reveal: a `reveal` step (node or output-side action) restores original values only for destinations and subjects a policy allows; every reveal is audited
-- [ ] Fallback policy: when sensitive data is found and no provider covers its class, or the provider is unavailable or errors, the profile's fallback applies, which defaults to deny (block the response or fail the step); prompt-injection findings are never tokenised and always follow their own block or review action
+- [ ] Controlled reveal: a `reveal` step (node or output-side action) restores original values only for destinations and subjects a policy allows; every reveal is audited — *partial:* providers implement `reveal`; the reveal step, destination policy and audit remain
+- [x] Fallback policy: when sensitive data is found and no provider covers its class, or the provider is unavailable or errors, the profile's fallback applies, which defaults to deny (block the response or fail the step); prompt-injection findings are never tokenised and always follow their own block or review action — library in `packages/guard-sdk`; wiring into nodes, runtime and API in the guard node PR
 - [ ] Output checks: content-safety classifier, topic restrictions, schema conformance (extends `output_guardrail`), grounding check against retrieved citations
 - [ ] Guarded data also redacted in execution history, logs, traces and telemetry
 
@@ -557,8 +557,8 @@ to run agents.
 ### 12.7 Visibility and assurance
 - [ ] Every verdict stored (`guard_events`: channel, detector, score, action, masked evidence spans, profile version) and shown in the Trace tab, run tape and a Security page with trends
 - [ ] Guard events streamed to SIEM destinations through log streaming and included in signed run manifests (11.1)
-- [ ] Red-team corpus and benchmark: attack suites (direct and indirect injection, SQL injection, exfiltration, jailbreaks) run through the eval framework, reporting detection and false-positive rates per profile; CI gate on regressions
-- [ ] Framework mapping in the docs: OWASP Top 10 for LLM applications and for agentic applications, MITRE ATLAS, NIST AI RMF
+- [ ] Red-team corpus and benchmark: attack suites (direct and indirect injection, SQL injection, exfiltration, jailbreaks) run through the eval framework, reporting detection and false-positive rates per profile; CI gate on regressions — *partial:* a labelled corpus and a vitest gate on detection and false-positive rates for the default profile are delivered; running suites through the eval framework per profile and the CI report remain
+- [ ] Framework mapping in the docs: OWASP Top 10 for LLM applications and for agentic applications, MITRE ATLAS, NIST AI RMF — *partial:* the OWASP Top 10 for LLM applications table is in the guard engine docs; agentic applications, MITRE ATLAS and NIST AI RMF remain
 
 ## Phase 13: Enterprise readiness
 
