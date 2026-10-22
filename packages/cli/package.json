@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The l2m command line: MCP checks for CI, snapshot mock servers and snapshot export.",
+  "description": "The l2m command line: MCP checks for CI, snapshot mock servers, snapshot export and offline audit bundle verification.",
   "main": "src/main.ts",
   "bin": {
     "l2m": "bin/l2m.mjs"
