@@ -12,14 +12,21 @@
  *   l2m audit verify  Phase 11.1 — verify an audit bundle offline: signature,
  *                     signed file index and manifest digest.
  *
+ *   l2m replay run    Phase 15.1 — replay a golden run against the draft or a
+ *                     saved version (side effects stubbed) and gate on the diff.
+ *
  * Exit codes: 0 clean, 1 the check found problems (or a request failed),
  * 2 usage errors, 3 an audit bundle is internally consistent but its signer
- * was not verified (no --public-key).
+ * was not verified (no --public-key), 4 a replay could not complete (the
+ * recording could not answer the candidate, or the request failed).
  */
 import fs from "node:fs";
 import {
   DEFAULT_ZIP_MAX_TOTAL_BYTES,
   judgeMcpCheck,
+  judgeReplayDiff,
+  REPLAY_MCP_MODES,
+  type ReplayRunResponse,
   type McpCheckReport,
   type McpCheckServerResult,
   type McpSnapshotFile
@@ -53,6 +60,8 @@ export const EXIT_FAILED = 1;
 export const EXIT_USAGE = 2;
 /** `l2m audit verify` without a trusted public key: consistent, but not proven to come from the deployment. */
 export const EXIT_SIGNER_UNVERIFIED = 3;
+/** `l2m replay run`: the replay could not complete, so it proves nothing either way. */
+export const EXIT_INCOMPLETE = 4;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -66,10 +75,15 @@ const USAGE = `Usage:
   l2m mcp snapshot export --server <id> [--out <file>] [--api-url <url>] [--api-key <key>]
   l2m audit verify <bundle.zip> [--public-key <file|base64>] [--trust-embedded-key]
                    [--max-bytes <n>] [--json]
+  l2m replay run --recording <id> [--draft | --version <n>] [--mcp strict|lenient]
+                 [--ignore-path <glob>]... [--number-tolerance <n>]
+                 [--api-url <url>] [--api-key <key>] [--json]
 
 The API URL and key default to L2M_API_URL and L2M_API_KEY.
-Exit codes: 0 clean, 1 problems found or a request failed, 2 usage error,
-3 audit bundle signer not verified (no --public-key; see --trust-embedded-key).
+Exit codes: 0 clean (replay: pass), 1 problems found or a request failed
+(replay: the candidate differs from the golden run), 2 usage error,
+3 audit bundle signer not verified (no --public-key; see --trust-embedded-key),
+4 a replay could not complete.
 `;
 
 function write(stream: NodeJS.WritableStream, text: string): void {
@@ -366,9 +380,82 @@ function runAuditVerify(args: ParsedArgs, io: CliIo): number {
   return EXIT_OK;
 }
 
+// --- replay run --------------------------------------------------------------
+
+function formatReplay(result: ReplayRunResponse, verdict: string, reasons: string[]): string {
+  const lines: string[] = [];
+  const candidate = result.candidate.kind === "version" ? `version ${result.candidate.version}` : "draft";
+  lines.push(`Replay of ${result.recordingId} against the ${candidate}: ${verdict.toUpperCase()}`);
+  lines.push(`  execution ${result.executionId}, status ${result.diff.status.baseline} -> ${result.diff.status.candidate}`);
+  for (const reason of reasons) lines.push(`  - ${reason}`);
+  if (!result.diff.output.equal) {
+    for (const change of result.diff.output.changes.slice(0, 20)) {
+      lines.push(`  output ${change.kind} ${change.path || "(root)"}: ${JSON.stringify(change.baseline ?? null)} -> ${JSON.stringify(change.candidate ?? null)}`);
+    }
+    if (result.diff.output.changes.length > 20) lines.push(`  ... ${result.diff.output.changes.length - 20} more output changes`);
+  }
+  for (const step of result.diff.toolCalls.steps) {
+    if (step.kind === "matched" && !step.argsChanged && !step.outcomeChanged) continue;
+    const call = step.candidate ?? step.baseline;
+    lines.push(`  tool ${step.kind}${step.argsChanged ? " (arguments changed)" : ""}${step.outcomeChanged ? " (outcome changed)" : ""}: ${call?.server ?? ""}/${call?.tool ?? ""}`);
+  }
+  for (const warning of result.diff.health) lines.push(`  ${warning.blocking ? "blocking" : "warning"} ${warning.kind}: ${warning.message}`);
+  return lines.join("\n");
+}
+
+async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
+  const recording = oneFlag(args, "recording");
+  if (!recording) throw new UsageError("l2m replay run needs --recording <id>");
+  const versionFlag = oneFlag(args, "version");
+  const draft = args.booleans.has("draft");
+  if (draft && versionFlag !== undefined) throw new UsageError("Choose --draft or --version, not both");
+  let version: number | undefined;
+  if (versionFlag !== undefined) {
+    if (!/^\d+$/.test(versionFlag.trim()) || Number(versionFlag) <= 0) throw new UsageError("--version must be a positive whole number");
+    version = Number(versionFlag);
+  }
+  const mcpMode = oneFlag(args, "mcp");
+  if (mcpMode !== undefined && !(REPLAY_MCP_MODES as readonly string[]).includes(mcpMode)) throw new UsageError("--mcp must be strict or lenient");
+  const toleranceFlag = oneFlag(args, "number-tolerance");
+  let numberTolerance: number | undefined;
+  if (toleranceFlag !== undefined) {
+    numberTolerance = Number(toleranceFlag);
+    if (!Number.isFinite(numberTolerance) || numberTolerance < 0) throw new UsageError("--number-tolerance must be a number of at least 0");
+  }
+  const ignorePaths = listFlag(args, "ignore-path");
+  const target = apiTarget(args, io);
+
+  let result: ReplayRunResponse;
+  try {
+    result = await apiRequest<ReplayRunResponse>(target, "POST", `/api/replay/recordings/${encodeURIComponent(recording)}/replay`, {
+      ...(version !== undefined ? { version } : { draft: true }),
+      ...(mcpMode ? { mcpMode } : {}),
+      ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
+      ...(numberTolerance !== undefined ? { numberTolerance } : {})
+    });
+  } catch (error) {
+    if (error instanceof RequestError) {
+      write(io.stderr, `l2m: replay could not complete: ${error.message}`);
+      return EXIT_INCOMPLETE;
+    }
+    throw error;
+  }
+  if (!result || typeof result !== "object" || !result.diff) {
+    write(io.stderr, "l2m: replay could not complete: the API returned no diff");
+    return EXIT_INCOMPLETE;
+  }
+  // The verdict is judged again here from the diff, so a gate never trusts a summary field alone.
+  const judged = judgeReplayDiff(result.diff);
+  if (args.booleans.has("json")) io.stdout.write(`${JSON.stringify({ ...result, verdict: judged.verdict, reasons: judged.reasons }, null, 2)}\n`);
+  else write(io.stdout, formatReplay(result, judged.verdict, judged.reasons));
+  if (judged.verdict === "pass") return EXIT_OK;
+  if (judged.verdict === "fail") return EXIT_FAILED;
+  return EXIT_INCOMPLETE;
+}
+
 // --- entry -------------------------------------------------------------------
 
-const BOOLEAN_FLAGS = ["json", "allow-unreachable", "allow-policy-blocked", "verbose", "help", "trust-embedded-key"];
+const BOOLEAN_FLAGS = ["json", "allow-unreachable", "allow-policy-blocked", "verbose", "help", "trust-embedded-key", "draft"];
 
 export async function main(argv: string[], io: CliIo): Promise<number> {
   try {
@@ -382,6 +469,7 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
     if (group === "mcp" && command === "mock" && !sub) return await runMock(args, io);
     if (group === "mcp" && command === "snapshot" && sub === "export") return await runSnapshotExport(args, io);
     if (group === "audit" && command === "verify") return runAuditVerify(args, io);
+    if (group === "replay" && command === "run" && !sub) return await runReplay(args, io);
     throw new UsageError(`Unknown command: ${args.positionals.join(" ")}`);
   } catch (error) {
     if (error instanceof UsageError) {
