@@ -138,6 +138,7 @@ import { WorkflowShareModal } from "./components/WorkflowShareModal";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
+import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import {
   forgetImportReport,
   inspectImportText,
@@ -1104,6 +1105,7 @@ function StudioApp() {
   const [secretBusy, setSecretBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [secretMessage, setSecretMessage] = useState<string | null>(null);
+  const [secretWarnings, setSecretWarnings] = useState<string[]>([]);
   const [executionResult, setExecutionResult] = useState<WorkflowExecutionResult | null>(null);
   const [executionsLoading, setExecutionsLoading] = useState(false);
   const [executionsError, setExecutionsError] = useState<string | null>(null);
@@ -4337,11 +4339,13 @@ function StudioApp() {
       setSecretBusy(true);
       setError(null);
       setSecretMessage(null);
-      await createSecret({
+      setSecretWarnings([]);
+      const created = await createSecret({
         name: secretName.trim(),
         provider: secretPayload.provider,
         value: secretPayload.value
       });
+      setSecretWarnings(created.warnings ?? []);
       await refreshSecrets();
       setSecretGenericValue("");
       setSecretConnectionString("");
@@ -5456,6 +5460,7 @@ function StudioApp() {
                       {secretBusy ? "Creating…" : "Create secret"}
                     </button>
                   </div>
+                  <SecretSaveWarnings warnings={secretWarnings} />
                 </article>
 
                 <article className="secrets-card pg-card">
