@@ -136,7 +136,7 @@ export function SaveGoldenRunDialog({ executionId, workflowName, hasCassette, on
           <p className="golden-note">
             Copies this run's input, every node's result and its recorded MCP calls, scrubbed of secrets. A golden run is kept until you delete it; run history
             retention does not remove it. In a replay, nodes that reach outside (Slack, email, HTTP, databases, sub-workflows) and code nodes are answered from it
-            instead of running. Expressions inside the nodes that do run are still evaluated, as in any run, until expression sandboxing lands.
+            instead of running. Expressions inside the nodes that do run are still evaluated and can make network calls until expression sandboxing lands.
           </p>
           {!hasCassette && (
             <p className="golden-note is-warn" role="status">
@@ -440,7 +440,11 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
                 <p className="golden-note">
                   A replay runs the candidate on this input. Slack, email, HTTP calls, databases, queues, sub-workflows and code nodes are answered from the recording
                   instead of running; knowledge-base writes are refused; approvals and waits are skipped; session memory starts empty and is thrown away. Models
-                  run live. Expressions inside the nodes that do run are still evaluated, as in any run, until expression sandboxing lands.
+                  run live. Expressions inside the nodes that do run are still evaluated and can make network calls until expression sandboxing lands.
+                </p>
+                <p className="golden-note">
+                  A replay could not complete if it reaches a node the golden run never saw, or a code node whose code changed: neither is run, so neither can be
+                  judged.
                 </p>
                 {recording.capabilities.mcp === "none" && (
                   <p className="golden-note is-warn" role="status">

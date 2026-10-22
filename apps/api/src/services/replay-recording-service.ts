@@ -24,6 +24,7 @@ import {
   REPLAY_TRUNCATED_MARKER,
   type McpCassette,
   type ReplayRecordedNode,
+  type ReplayRecordedRun,
   type ReplayRecordingCapabilities,
   type ReplayRecordingDetail,
   type ReplayRecordingSummary,
@@ -34,7 +35,7 @@ import {
 import { scrubForCassette } from "@ai-orchestrator/mcp-sdk";
 import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import { SecretScrubber } from "./audit-scrub.js";
-import { sha256Hex, workflowForHash } from "./audit-bundle-service.js";
+import { sanitizeConfig, sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import type { SecretService } from "./secret-service.js";
 
@@ -146,6 +147,17 @@ export class ReplayRecordingService {
     };
   }
 
+  /**
+   * A node configuration in the form a golden run stores it: sanitised as in
+   * the captured workflow (where a node's config sits three levels down) and
+   * scrubbed of secret values. A replay compares candidate and recorded
+   * configurations in this form, so scrubbing alone never reads as a change.
+   */
+  storedConfig(config: unknown, scrubber: SecretScrubber = this.scrubber()): unknown {
+    const sanitised = JSON.parse(canonicalJson(sanitizeConfig(config ?? {}, 3))) as unknown;
+    return JSON.parse(scrubber.text(JSON.stringify(scrubber.tree(sanitised)) ?? "null")) as unknown;
+  }
+
   private serialise(value: unknown, scrubber: SecretScrubber): string {
     return scrubber.text(JSON.stringify(value) ?? "null");
   }
@@ -198,17 +210,21 @@ export class ReplayRecordingService {
       .map((node) => ({ id: node.id as string, type: node.type as string, config: node.config }));
     const typeById = new Map(capturedNodes.map((node) => [node.id, node.type]));
 
-    // Each node's last result (a loop body node keeps its last iteration).
+    // Each node's last result, plus every finished result in order when it ran more than once (a loop body).
     const nodes: Record<string, ReplayRecordedNode> = {};
+    const finished = new Map<string, ReplayRecordedRun[]>();
     for (const result of nodeResultRecords(history.nodeResults)) {
       const nodeId = result.nodeId as string;
-      nodes[nodeId] = {
-        nodeId,
-        nodeType: typeById.get(nodeId) ?? (typeof result.nodeType === "string" ? result.nodeType : "unknown"),
+      const run: ReplayRecordedRun = {
         status: typeof result.status === "string" ? result.status : "unknown",
         ...(result.output !== undefined ? { output: result.output } : {}),
         ...(typeof result.error === "string" ? { error: result.error } : {})
       };
+      nodes[nodeId] = { nodeId, nodeType: typeById.get(nodeId) ?? (typeof result.nodeType === "string" ? result.nodeType : "unknown"), ...run };
+      if (run.status === "success" || run.status === "error") finished.set(nodeId, [...(finished.get(nodeId) ?? []), run]);
+    }
+    for (const [nodeId, runs] of finished) {
+      if (runs.length > 1) nodes[nodeId]!.runs = runs;
     }
 
     const facts: RunFacts = buildRunFacts({
@@ -234,7 +250,7 @@ export class ReplayRecordingService {
       nodes: Object.keys(nodes).filter((nodeId) => {
         const before = nodes[nodeId]!;
         const after = scrubbedNodes[nodeId];
-        return !after || altered(before.output, after.output) || altered(before.error, after.error);
+        return !after || altered(before.output, after.output) || altered(before.error, after.error) || altered(before.runs, after.runs);
       })
     };
     const workflowJson = this.serialise(scrubber.tree(captured), scrubber);
@@ -247,11 +263,13 @@ export class ReplayRecordingService {
     if (fixedBytes + byteLength(nodesJson) > this.options.maxBytes) {
       // Cut the largest node outputs first until the recording fits.
       const sized = Object.values(scrubbedNodes)
-        .map((node) => ({ node, bytes: byteLength(JSON.stringify(node.output ?? null)) }))
+        .map((node) => ({ node, bytes: byteLength(JSON.stringify(node.output ?? null)) + (node.runs ? byteLength(JSON.stringify(node.runs)) : 0) }))
         .sort((a, b) => b.bytes - a.bytes);
       for (const entry of sized) {
         if (fixedBytes + byteLength(nodesJson) <= this.options.maxBytes) break;
         if (entry.bytes < 256) break;
+        // A cut node keeps no per-iteration results: a replay that reaches it is inconclusive either way.
+        delete entry.node.runs;
         entry.node.output = { [REPLAY_TRUNCATED_MARKER]: true, bytes: entry.bytes };
         truncated = true;
         nodesJson = this.serialise(scrubbedNodes, scrubber);

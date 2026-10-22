@@ -12,7 +12,7 @@ Saving copies, into separate storage:
 
 - the workflow as it ran (captured when the run finished; for older runs, the workflow as it is saved now);
 - the trigger input;
-- every node's last result (for a loop, its last iteration);
+- every node's result (for a node in a loop, the result of each iteration, in order);
 - the run facts used for comparison: status, output, path, tool calls, model calls, tokens, cost and guard verdicts;
 - the run's MCP cassette, if the run was recorded with **Record MCP calls**.
 
@@ -49,9 +49,11 @@ The candidate runs on the golden run's input. Each node is classified by type:
 | Approval, wait | Human Approval, Wait | Skipped: approvals take the recorded decision, waits pass through |
 | Unknown | A node type this version does not know | Treated as an external write |
 
-A node that has to be answered from the recording but has no recorded result (you added it after the golden run was saved) gets a stub output marked `_replayStub` and a warning in **Replay health**. It never runs live.
+A node that has to be answered from the recording but has no recorded result (you added it after the golden run was saved, or a changed branch now reaches it) gets a stub output marked `_replayStub`. It never runs live, and the replay reports **could not complete** (CLI exit code 4): whatever the output says, that node was never tested. Save a golden run that goes through it.
 
-Code nodes are answered from the recording because neither runtime is cut off from the network: the JavaScript sandbox is a `vm` context, not an isolate, and Python runs as a subprocess. A change to a code node's script therefore does not show up in a replay; change the logic in other nodes, or save a new golden run after the change.
+A node answered from the recording inside a loop gets the recorded result of the same iteration. If the candidate calls it more often than the golden run did, the extra calls reuse the last recorded result; for a code node that makes the replay **could not complete**, for other nodes it is a warning.
+
+Code nodes are answered from the recording because neither runtime is cut off from the network: the JavaScript sandbox is a `vm` context, not an isolate, and Python runs as a subprocess. A replay therefore cannot test a change to a code node: when a code node's code or settings differ from the golden run's, the replay reports **could not complete** and names the node ("code changed since the golden run; code nodes are not executed in replay"). Save a new golden run after the change. A changed external read or write is answered from the recording too, with a warning that the change is untested.
 
 ### What a replay does not stop yet
 
@@ -70,8 +72,8 @@ A call the cassette cannot answer fails in the replay and makes the verdict **co
 
 The replay result shows:
 
-- **Verdict**: pass when the status did not get worse and the output is the same; fail when the candidate's status regressed or its output changed; could not complete when the recording could not answer the candidate or the comparison would not mean anything (an unanswered MCP call, a cut recorded output, a chart that needs a data URL, an approval pause, an error before the run started).
-- **Replay health**: stubbed nodes without a recording, unknown node types, unanswered MCP calls, charts that tried to load a data URL, cut recorded outputs, recorded values changed by scrubbing, and an output diff with more changes than it lists.
+- **Verdict**: pass when the status did not get worse and the output is the same; fail when the candidate's status regressed or its output changed; could not complete when the recording could not answer the candidate or the comparison would not mean anything (an unanswered MCP call, a node the golden run never saw, a code node whose code changed or that ran more often than recorded, a cut recorded output, a chart that needs a data URL, an approval pause, an error before the run started).
+- **Replay health**: stubbed nodes without a recording, recorded nodes whose configuration changed, recorded nodes called more often than recorded, unknown node types, unanswered MCP calls, charts that tried to load a data URL, cut recorded outputs, recorded values changed by scrubbing, and an output diff with more changes than it lists.
 - **Output**: each changed path with the golden run's and the replay's value. Whitespace differences are ignored, as are timing and id fields (`**._telemetry`, `**.durationMs`, `**.latencyMs`, `**.startedAt`, `**.completedAt`, `**.executionId`).
 - **Tool calls**: the two runs' tool calls side by side, aligned in order: same, arguments changed, outcome changed, new or missing.
 - **Totals**: token, cost, model call and path changes.

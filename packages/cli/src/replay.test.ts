@@ -81,6 +81,13 @@ describe("l2m replay run", () => {
       health: [{ kind: "truncated_recording", nodeId: "big", message: "The recorded output of node big was cut to fit the size limit.", blocking: true }]
     });
     expect(await main(["replay", "run", "--recording", "rec_1"], io(replyWith(200, response(truncated, "fail"))))).toBe(EXIT_INCOMPLETE);
+    // A node the golden run never saw, or a code node whose code changed, was never tested: inconclusive, not pass.
+    for (const kind of ["unrecorded_stub", "config_changed"] as const) {
+      const untested = diff({ health: [{ kind, nodeId: "side", message: `Node side: ${kind}`, blocking: true }] });
+      const cli = io(replyWith(200, response(untested, "pass")));
+      expect(await main(["replay", "run", "--recording", "rec_1"], cli)).toBe(EXIT_INCOMPLETE);
+      expect(cli.out()).toContain(`Node side: ${kind}`);
+    }
   });
 
   it("exits 4 when the request fails or the API is unreachable", async () => {

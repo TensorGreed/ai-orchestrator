@@ -18,7 +18,11 @@
  *   - model calls live, guard live under the workflow's bindings.
  *
  * The run is stored like any other (trigger type `replay`), its facts are
- * scrubbed the same way as the golden run's and diffed against them.
+ * scrubbed the same way as the golden run's and diffed against them. The
+ * verdict is inconclusive (`error`) when the replay fed the candidate
+ * something the golden run never produced: a placeholder for a node it never
+ * saw, the old output of a code node whose code changed, or a code node's
+ * answer for more calls than were recorded.
  */
 
 import { randomUUID } from "node:crypto";
@@ -39,7 +43,7 @@ import { sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import type { McpCassetteRunPlan, McpCassetteService } from "./mcp-cassette-service.js";
 import { diffRunFacts } from "./run-diff.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
-import type { ReplayRecordingService } from "./replay-recording-service.js";
+import { ReplayRecordingService } from "./replay-recording-service.js";
 import type { SafeUser } from "./auth-service.js";
 
 export class ReplayRunError extends Error {
@@ -128,7 +132,11 @@ export class ReplayService {
     const candidate = this.resolveCandidate(recording, request);
     const workflowHash = sha256Hex(canonicalJson(workflowForHash(candidate.workflow)));
     const mcpMode: ReplayMcpMode = request.mcpMode ?? "strict";
-    const plan = buildReplayPlan(candidate.workflow, recording.nodes);
+    const scrubber = this.options.recordings.scrubber();
+    const plan = buildReplayPlan(candidate.workflow, recording.nodes, {
+      recordedWorkflow: ReplayRecordingService.capturedWorkflow(recording),
+      normaliseConfig: (config) => this.options.recordings.storedConfig(config, scrubber)
+    });
     const mcpPlan = this.options.cassettes.planOfflineReplay(recording.mcpCassette, mcpMode, `${recording.id}:cassette`);
     const executionId = randomUUID();
     const customData = {
@@ -194,16 +202,35 @@ export class ReplayService {
     for (const hit of plan.hits) {
       if (hit.recorded || hit.stub !== "output" || seen.has(hit.nodeId)) continue;
       seen.add(hit.nodeId);
+      // The node is not in the golden run, so it got a placeholder: whatever the output says, the new node was never tested.
       warnings.push({
         kind: "unrecorded_stub",
         nodeId: hit.nodeId,
-        message: `Node ${hit.nodeId} (${hit.nodeType}) has no recorded output; it was given a stub output instead of running.`,
-        blocking: false
+        message: `Node ${hit.nodeId} (${hit.nodeType}) is not in the golden run, so the replay gave it a placeholder instead of running it and cannot judge it. Save a golden run that goes through this node.`,
+        blocking: true
       });
     }
+    const overrun = new Set<string>();
+    for (const hit of plan.hits) {
+      if (!hit.overrun || overrun.has(hit.nodeId)) continue;
+      overrun.add(hit.nodeId);
+      const code = hit.nodeClass === "code";
+      warnings.push({
+        kind: "recording_overrun",
+        nodeId: hit.nodeId,
+        message: code
+          ? `Code node ${hit.nodeId} ran more times than the golden run recorded; code nodes are not executed in replay, so the extra calls cannot be judged.`
+          : `Node ${hit.nodeId} (${hit.nodeType}) ran more times than the golden run recorded; the extra calls reused its last recorded answer.`,
+        blocking: code
+      });
+    }
+    const changedHits = new Set(plan.hits.filter((hit) => hit.configChanged).map((hit) => hit.nodeId));
     for (const warning of plan.warnings) {
       if (warning.kind === "unknown_node_type") {
         warnings.push({ kind: warning.kind, nodeId: warning.nodeId, message: warning.message, blocking: false });
+      } else if (warning.kind === "config_changed" && changedHits.has(warning.nodeId)) {
+        // A code node's recorded output says nothing about its new code; a changed write or read is reported, not judged.
+        warnings.push({ kind: warning.kind, nodeId: warning.nodeId, message: warning.message, blocking: warning.nodeClass === "code" });
       } else if (warning.kind === "truncated_recording" && plan.hits.some((hit) => hit.nodeId === warning.nodeId)) {
         // The candidate was fed a placeholder instead of the recorded data, so neither pass nor fail would mean anything.
         warnings.push({

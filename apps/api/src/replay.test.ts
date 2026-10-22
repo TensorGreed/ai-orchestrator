@@ -364,10 +364,13 @@ describe("golden runs with side effects stubbed", () => {
     expect(lenient.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "mcp_unmatched", blocking: true })]));
     expect(counter.count("/slack")).toBe(1);
 
-    // A code node is answered from the recording: a candidate script that escapes the JavaScript sandbox never runs.
+    // A code node is answered from the recording: a candidate script that escapes the JavaScript sandbox never runs,
+    // and since its code changed, the replay says it could not judge it instead of passing on the old output.
     context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, escape: true }));
     const escaped = await replay(context, builder.cookie, golden.id);
-    expect(escaped.verdict, JSON.stringify(escaped.reasons)).toBe("pass");
+    expect(escaped.verdict, JSON.stringify(escaped.reasons)).toBe("error");
+    expect(escaped.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "config_changed", nodeId: "shape", blocking: true })]));
+    expect(escaped.reasons.join(" ")).toContain("code changed since the golden run; code nodes are not executed in replay");
     await sleep(200);
     expect(counter.count("/code")).toBe(0);
 
@@ -650,6 +653,89 @@ describe("golden runs with side effects stubbed", () => {
     const warnings = result.diff.health.filter((warning) => warning.kind === "scrubbed_recording");
     expect(warnings).toEqual([expect.objectContaining({ nodeId: "page", blocking: false })]);
     expect(warnings[0]!.message).toContain("[REDACTED]");
+  });
+
+  it("calls a replay inconclusive when it reaches a side effect or code node the golden run never saw", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    const branchWorkflow = (extra: "none" | "write" | "code"): Workflow => {
+      const nodes: Workflow["nodes"] = [
+        { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+        { id: "label", type: "set_node", name: "Label", position: { x: 150, y: 0 }, config: { assignments: [{ key: "answer", valueTemplate: "v1" }] } },
+        { id: "output", type: "output", name: "Output", position: { x: 300, y: 0 }, config: { responseTemplate: "{{results.label.answer}}" } }
+      ] as Workflow["nodes"];
+      const edges: Workflow["edges"] = [
+        { id: "e1", source: "start", target: "label" },
+        { id: "e2", source: "label", target: "output" }
+      ];
+      if (extra === "write") {
+        nodes.push({ id: "side", type: "http_request", name: "Side", position: { x: 150, y: 150 }, config: { method: "POST", urlTemplate: `${counter.base}/side`, retry: { enabled: false } } } as Workflow["nodes"][number]);
+        edges.push({ id: "e3", source: "start", target: "side" });
+      } else if (extra === "code") {
+        nodes.push({ id: "side", type: "code_node", name: "Side", position: { x: 150, y: 150 }, config: { code: "return { ran: true };" } } as Workflow["nodes"][number]);
+        edges.push({ id: "e3", source: "start", target: "side" });
+      }
+      return { id: "wf-branch", name: "Branch", schemaVersion: "1.0.0", workflowVersion: 1, projectId: "default", nodes, edges } as Workflow;
+    };
+    context.store.upsertWorkflow(branchWorkflow("none"));
+    const run = (await call(context, "POST", "/api/workflows/wf-branch/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
+    expect(run.status).toBe("success");
+    const golden = await saveGolden(context, builder.cookie, run.executionId);
+    expect((await replay(context, builder.cookie, golden.id)).verdict).toBe("pass");
+
+    for (const extra of ["write", "code"] as const) {
+      context.store.upsertWorkflow(branchWorkflow(extra));
+      const result = await replay(context, builder.cookie, golden.id);
+      // The output is unchanged, so this used to pass while the new node went untested.
+      expect(result.diff.output.equal).toBe(true);
+      expect(result.verdict, extra).toBe("error");
+      expect(result.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "unrecorded_stub", nodeId: "side", blocking: true })]));
+    }
+    expect(counter.count("/side")).toBe(0);
+  });
+
+  it("replays a code node in a loop iteration by iteration, and calls a changed one inconclusive", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const loopWorkflow = (code: string): Workflow =>
+      ({
+        id: "wf-loop",
+        name: "Loop",
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        projectId: "default",
+        nodes: [
+          { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+          { id: "items", type: "code_node", name: "Items", position: { x: 150, y: 0 }, config: { code: "return { list: ['a', 'b', 'c'] };" } },
+          { id: "loop", type: "loop_node", name: "Loop", position: { x: 300, y: 0 }, config: { inputKey: "list", itemVariable: "item" } },
+          { id: "shout", type: "code_node", name: "Shout", position: { x: 450, y: 0 }, config: { code } },
+          { id: "output", type: "output", name: "Output", position: { x: 600, y: 0 }, config: { responseTemplate: "{{results.loop}}" } }
+        ],
+        edges: [
+          { id: "e1", source: "start", target: "items" },
+          { id: "e2", source: "items", target: "loop" },
+          { id: "e3", source: "loop", target: "shout" },
+          { id: "e4", source: "shout", target: "output" }
+        ]
+      }) as Workflow;
+    context.store.upsertWorkflow(loopWorkflow("return { up: String(input.item).toUpperCase() };"));
+    const run = (await call(context, "POST", "/api/workflows/wf-loop/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
+    expect(run.status, JSON.stringify(run)).toBe("success");
+    const golden = await saveGolden(context, builder.cookie, run.executionId);
+    const detail = (await call(context, "GET", `/api/replay/recordings/${golden.id}`, builder.cookie)).json<{ recording: ReplayRecordingDetail }>().recording;
+    expect(detail.nodes.shout!.runs?.map((entry) => (entry.output as { up?: string }).up)).toEqual(["A", "B", "C"]);
+
+    const same = await replay(context, builder.cookie, golden.id);
+    expect(same.verdict, JSON.stringify(same.reasons)).toBe("pass");
+    const replayed = context.store.getExecutionHistory(same.executionId)!;
+    const shoutOutputs = (replayed.nodeResults as Array<{ nodeId: string; output?: unknown }>).filter((entry) => entry.nodeId === "shout").map((entry) => (entry.output as { up?: string }).up);
+    expect(shoutOutputs).toEqual(["A", "B", "C"]);
+
+    context.store.upsertWorkflow(loopWorkflow("return { up: String(input.item).toLowerCase() };"));
+    const changed = await replay(context, builder.cookie, golden.id);
+    expect(changed.verdict).toBe("error");
+    expect(changed.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "config_changed", nodeId: "shout", blocking: true })]));
   });
 
   it("truncates the largest node outputs to fit REPLAY_RECORDING_MAX_BYTES", async () => {

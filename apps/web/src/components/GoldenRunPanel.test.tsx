@@ -178,7 +178,7 @@ describe("Save as golden run on the Runs page", () => {
     expect(within(dialog).getByRole("status")).toHaveTextContent(/did not record its MCP calls/);
     // The promise is honest: code nodes are answered from the recording, expressions in other nodes still run.
     expect(dialog).toHaveTextContent(/code nodes are answered from it/i);
-    expect(dialog).toHaveTextContent(/expressions inside the nodes that do run are still evaluated/i);
+    expect(dialog).toHaveTextContent(/expressions inside the nodes that do run are still evaluated and can make network calls/i);
     expect(dialog).not.toHaveTextContent(/never touched/i);
     const name = within(dialog).getByLabelText("Name");
     await user.clear(name);
@@ -214,7 +214,9 @@ describe("GoldenRunViewer", () => {
     render(<GoldenRunViewer recordingId="rec_123456789abc" canReplay onClose={vi.fn()} onChanged={onChanged} />);
     const viewer = await screen.findByRole("dialog", { name: /Refund baseline/ });
     expect(viewer).toHaveTextContent(/code nodes are answered from the recording/i);
-    expect(viewer).toHaveTextContent(/expressions inside the nodes that do run are still evaluated/i);
+    expect(viewer).toHaveTextContent(/expressions inside the nodes that do run are still evaluated and can make network calls/i);
+    // A pass never hides an untested node: new nodes and changed code make the replay inconclusive.
+    expect(viewer).toHaveTextContent(/could not complete if it reaches a node the golden run never saw, or a code node whose code changed/i);
     await waitFor(() => expect(screen.getByRole("option", { name: /Version 2/ })).toBeInTheDocument());
     await user.selectOptions(screen.getByLabelText("Candidate"), "2");
     await user.selectOptions(screen.getByLabelText("MCP calls"), "lenient");
