@@ -89,8 +89,13 @@ function GuardTraceNodeCard({ node }: { node: GuardTraceNode }) {
         <span className="guard-chip guard-chip-muted">{node.placement === "agent" ? "agent" : "guard node"}</span>
         {source && <span className="guard-chip guard-chip-muted">{source}</span>}
         {node.profiles.map((profile) => (
-          <span key={`${profile.profileId}@${profile.version}`} className="guard-chip guard-chip-profile" title={profile.hash ? `hash ${profile.hash}` : undefined}>
+          <span
+            key={`${profile.profileId}@${profile.version}`}
+            className="guard-chip guard-chip-profile"
+            title={profile.tightened ? "Evaluated as is and again with this node's overrides or protection" : profile.hash ? `hash ${profile.hash}` : undefined}
+          >
             {profile.name ?? profile.profileId} v{profile.version}
+            {profile.tightened ? " + tightened" : ""}
           </span>
         ))}
         {node.spotlighting && <span className="guard-chip guard-chip-muted">spotlighting: {node.spotlighting}</span>}

@@ -44,6 +44,19 @@ describe("guard and protection ports on the canvas", () => {
     expect(positions.p1).not.toEqual(positions.p2);
   });
 
+  it("keeps the guard slot off the model axis and away from the first seven tool bearings", () => {
+    const tools = Array.from({ length: 7 }, (_, index) => `t${index}`);
+    const ring = ringGeometry({ chat_model: ["m"], memory: [], tool: tools, worker: [] });
+    const guard = ring.find((slot) => slot.port === "guard")!;
+    const model = ring.find((slot) => slot.port === "chat_model")!;
+    const degrees = (angle: number) => ((((angle * 180) / Math.PI) % 360) + 360) % 360;
+    const apart = (a: number, b: number) => Math.min(Math.abs(degrees(a) - degrees(b)), 360 - Math.abs(degrees(a) - degrees(b)));
+    expect(apart(guard.angle, model.angle)).toBeGreaterThanOrEqual(45);
+    for (const tool of ring.filter((slot) => slot.port === "tool" && slot.nodeId)) {
+      expect(apart(guard.angle, tool.angle)).toBeGreaterThanOrEqual(15);
+    }
+  });
+
   it("hangs protection providers below a guard card on DAG edges", () => {
     const nodes = [node("in", "text_input"), node("g", "guard"), node("p", "guard_protection"), node("out", "output")];
     const slots = computeAttachmentSlots(nodes, [edge("in", "g"), edge("g", "p", "protection"), edge("g", "out", "pass")]);

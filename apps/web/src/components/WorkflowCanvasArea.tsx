@@ -401,7 +401,10 @@ export function WorkflowCanvasArea({
                 : { x: ORBIT.cardWidth / 2, y: ORBIT.cardHeight / 2 };
             const dx = node.position.x + ORBIT.satelliteSize / 2 - (hubNode.position.x + carrierHalf.x);
             const dy = node.position.y + ORBIT.satelliteSize / 2 - (hubNode.position.y + carrierHalf.y);
-            data.labelSide = Math.abs(dy) >= Math.abs(dx) * 1.2 ? (dy < 0 ? "top" : "bottom") : dx < 0 ? "left" : "right";
+            // Guard and protection satellites sit on the diagonal next to the model slot:
+            // their labels go sideways so they never stack on the model's label.
+            const sideways = (attachment.port === "guard" || attachment.port === "protection") && Math.abs(dx) > ORBIT.satelliteSize / 2;
+            data.labelSide = sideways ? (dx < 0 ? "left" : "right") : Math.abs(dy) >= Math.abs(dx) * 1.2 ? (dy < 0 ? "top" : "bottom") : dx < 0 ? "left" : "right";
           }
         }
         return {

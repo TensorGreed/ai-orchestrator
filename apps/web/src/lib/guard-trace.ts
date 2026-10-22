@@ -62,7 +62,7 @@ export interface GuardTraceVerdict {
   /** What shadow-mode rules would have done. */
   shadowAction: GuardActionName;
   approved?: boolean;
-  profiles: Array<{ profileId: string; version: number; hash?: string }>;
+  profiles: GuardTraceProfile[];
   findings: GuardTraceFinding[];
   timings: Array<{ detectorId: string; durationMs: number; status: string }>;
   latencyMs: number;
@@ -70,12 +70,24 @@ export interface GuardTraceVerdict {
   skippedDetectors: string[];
 }
 
+export interface GuardTraceProfile {
+  profileId: string;
+  version: number;
+  hash?: string;
+  name?: string;
+  /**
+   * More than one evaluation of this profile version ran, e.g. an enforced
+   * profile plus the node's tightened copy of it (overrides or protection).
+   */
+  tightened?: boolean;
+}
+
 export interface GuardTraceNode {
   nodeId: string;
   placement: "node" | "agent";
   /** Where the profiles came from: port, enforced, workflow, project, instance or a guard node's own choice. */
   source?: string;
-  profiles: Array<{ profileId: string; version: number; hash?: string; name?: string }>;
+  profiles: GuardTraceProfile[];
   chain?: Array<{ level: string; mode: string; profileId?: string | null; version?: number | null }>;
   spotlighting?: string;
   canary?: boolean;
@@ -88,6 +100,73 @@ const rec = (value: unknown): Rec | null => (value && typeof value === "object" 
 const arr = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const num = (value: unknown, fallback = 0): number => (typeof value === "number" && Number.isFinite(value) ? value : fallback);
 const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+
+/**
+ * One entry per profile version. A stacked check can evaluate the same
+ * version twice (the enforced original and a tightened copy, each with its
+ * own hash); that shows as one profile marked as tightened.
+ */
+export function mergeProfiles(profiles: GuardTraceProfile[]): GuardTraceProfile[] {
+  const byKey = new Map<string, GuardTraceProfile>();
+  for (const profile of profiles) {
+    const key = `${profile.profileId}@${profile.version}`;
+    const seen = byKey.get(key);
+    if (!seen) {
+      byKey.set(key, { ...profile });
+      continue;
+    }
+    if (profile.hash !== seen.hash) seen.tightened = true;
+    if (!seen.name && profile.name) seen.name = profile.name;
+  }
+  return [...byKey.values()];
+}
+
+/**
+ * The same finding reported by more than one stacked evaluation (an enforced
+ * profile and its tightened copy both see the same email address) is listed
+ * once, with the most severe action any of them took.
+ */
+export function mergeFindings(findings: GuardTraceFinding[]): GuardTraceFinding[] {
+  const byKey = new Map<string, GuardTraceFinding>();
+  for (const finding of findings) {
+    const key = [finding.detectorId, finding.category, finding.dataClass ?? "", finding.evidence, finding.message ?? ""].join("\u0000");
+    const seen = byKey.get(key);
+    if (!seen) {
+      byKey.set(key, { ...finding });
+      continue;
+    }
+    seen.score = Math.max(seen.score, finding.score);
+    if (finding.effective && (!seen.effective || mostSevere([seen.effective, finding.effective]) !== seen.effective)) {
+      seen.effective = finding.effective;
+      seen.requested = finding.requested;
+      seen.shadow = finding.shadow;
+    } else if (seen.shadow && finding.effective === seen.effective && finding.shadow === false) {
+      seen.shadow = false;
+    }
+  }
+  return [...byKey.values()];
+}
+
+const TIMING_STATUS_RANK = ["ran", "skipped_short_circuit", "skipped_budget", "missing", "timed_out", "error"];
+
+/** One timing per detector: stacked evaluations add up; the worst status wins. */
+export function mergeTimings(timings: GuardTraceVerdict["timings"]): GuardTraceVerdict["timings"] {
+  const byDetector = new Map<string, GuardTraceVerdict["timings"][number]>();
+  for (const timing of timings) {
+    const seen = byDetector.get(timing.detectorId);
+    if (!seen) {
+      byDetector.set(timing.detectorId, { ...timing });
+      continue;
+    }
+    seen.durationMs = Math.round((seen.durationMs + timing.durationMs) * 1000) / 1000;
+    const rank = (status: string) => {
+      const index = TIMING_STATUS_RANK.indexOf(status);
+      return index === -1 ? TIMING_STATUS_RANK.length : index;
+    };
+    if (rank(timing.status) > rank(seen.status)) seen.status = timing.status;
+  }
+  return [...byDetector.values()];
+}
 
 /** One stacked check (one or more profiles) from the summaries the engine puts in node outputs. */
 function verdictFromSummaries(input: {
@@ -152,13 +231,25 @@ function verdictFromSummaries(input: {
     action: (input.action as GuardActionName | undefined) ?? mostSevere(actions),
     shadowAction: mostSevere(shadow),
     ...(input.approved !== undefined ? { approved: input.approved } : {}),
-    profiles,
-    findings,
-    timings,
+    profiles: mergeProfiles(profiles),
+    findings: mergeFindings(findings),
+    timings: mergeTimings(timings),
     latencyMs: Math.round(latencyMs * 10) / 10,
     budgetExceeded,
     skippedDetectors: [...skipped]
   };
+}
+
+function profileList(value: unknown): GuardTraceProfile[] {
+  return arr(value)
+    .map(rec)
+    .filter((p): p is Rec => Boolean(p))
+    .map((p) => ({
+      profileId: text(p.profileId) ?? "?",
+      version: num(p.version, 1),
+      ...(text(p.hash) ? { hash: text(p.hash) } : {}),
+      ...(text(p.name) ? { name: text(p.name) } : {})
+    }));
 }
 
 /** Guard nodes (`output.guard`) and agents (`output._guard`) in a run's node results. */
@@ -175,7 +266,7 @@ export function extractGuardTrace(nodeResults: unknown[]): GuardTraceNode[] {
         nodeId,
         placement: "agent",
         ...(text(agent.source) ? { source: text(agent.source) } : {}),
-        profiles: arr(agent.profiles).map(rec).filter((p): p is Rec => Boolean(p)).map((p) => ({ profileId: text(p.profileId) ?? "?", version: num(p.version, 1), ...(text(p.name) ? { name: text(p.name) } : {}) })),
+        profiles: mergeProfiles(profileList(agent.profiles)),
         chain: arr(agent.chain).map(rec).filter((c): c is Rec => Boolean(c)).map((c) => ({ level: text(c.level) ?? "", mode: text(c.mode) ?? "", profileId: text(c.profileId) ?? null, version: typeof c.version === "number" ? c.version : null })),
         ...(text(agent.spotlighting) ? { spotlighting: text(agent.spotlighting) } : {}),
         canary: agent.canary === true,
@@ -204,7 +295,7 @@ export function extractGuardTrace(nodeResults: unknown[]): GuardTraceNode[] {
         nodeId,
         placement: "node",
         ...(text(node.source) ? { source: text(node.source) } : {}),
-        profiles: arr(node.profiles).map(rec).filter((p): p is Rec => Boolean(p)).map((p) => ({ profileId: text(p.profileId) ?? "?", version: num(p.version, 1) })),
+        profiles: mergeProfiles(profileList(node.profiles)),
         ...(text(node.route) ? { route: text(node.route) } : {}),
         verdicts: [
           verdictFromSummaries({
@@ -240,10 +331,10 @@ export function traceFromEvents(events: GuardEventView[], known: Set<string>): G
   const out: GuardTraceNode[] = [];
   for (const [nodeId, verdicts] of byNode) {
     const nodeVerdicts: GuardTraceVerdict[] = [];
-    const profiles = new Map<string, { profileId: string; version: number; hash: string }>();
+    const profiles: GuardTraceProfile[] = [];
     for (const [verdictId, rows] of verdicts) {
       const first = rows[0]!;
-      profiles.set(`${first.profileId}@${first.profileVersion}`, { profileId: first.profileId, version: first.profileVersion, hash: first.profileHash });
+      profiles.push({ profileId: first.profileId, version: first.profileVersion, hash: first.profileHash });
       nodeVerdicts.push({
         key: verdictId,
         nodeId,
@@ -254,7 +345,7 @@ export function traceFromEvents(events: GuardEventView[], known: Set<string>): G
         action: first.verdictAction as GuardActionName,
         shadowAction: mostSevere(rows.filter((row) => row.shadow).map((row) => row.effectiveAction)),
         profiles: [{ profileId: first.profileId, version: first.profileVersion, hash: first.profileHash }],
-        findings: rows
+        findings: mergeFindings(rows
           .filter((row) => row.detectorId)
           .map((row) => ({
             detectorId: row.detectorId ?? "",
@@ -266,14 +357,14 @@ export function traceFromEvents(events: GuardEventView[], known: Set<string>): G
             requested: row.requestedAction,
             effective: row.effectiveAction,
             shadow: row.shadow
-          })),
+          }))),
         timings: [],
         latencyMs: first.latencyMs,
         budgetExceeded: first.budgetExceeded,
         skippedDetectors: first.skippedDetectors
       });
     }
-    out.push({ nodeId, placement: nodeVerdicts[0]?.placement ?? "node", profiles: [...profiles.values()], verdicts: nodeVerdicts });
+    out.push({ nodeId, placement: nodeVerdicts[0]?.placement ?? "node", profiles: mergeProfiles(profiles), verdicts: nodeVerdicts });
   }
   return out;
 }

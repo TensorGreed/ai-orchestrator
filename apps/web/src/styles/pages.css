@@ -2901,6 +2901,81 @@ button.tag-chip:hover {
   }
 }
 
+/* Runs on a phone: each run is a small card (id, workflow and status on top,
+   trigger, start and duration under them, then the actions) so the expanded
+   trace gets the full width instead of the width of a seven-column table. */
+@media (max-width: 640px) {
+  .executions-table,
+  .executions-table tbody,
+  .execution-detail-row,
+  .execution-detail-row td {
+    display: block;
+  }
+
+  .executions-table thead {
+    display: none;
+  }
+
+  .execution-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .executions-table .execution-row td {
+    padding: 0;
+    border-bottom: 0;
+    min-width: 0;
+  }
+
+  .execution-row td:nth-child(1) {
+    white-space: nowrap;
+  }
+
+  .execution-row td:nth-child(3) {
+    justify-self: end;
+  }
+
+  .execution-row td:nth-child(4) {
+    grid-column: 1;
+  }
+
+  .execution-row td:nth-child(6) {
+    text-align: right;
+  }
+
+  .execution-row td.execution-actions-cell {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    white-space: normal;
+  }
+
+  .execution-actions-cell .pg-btn + .pg-btn {
+    margin-left: 0;
+  }
+
+  .executions-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .execution-detail-row td {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .execution-trace {
+    padding: 12px;
+  }
+
+  .execution-trace-item {
+    gap: 6px 10px;
+  }
+}
+
 /* ---- Motion ------------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {

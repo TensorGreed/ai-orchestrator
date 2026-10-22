@@ -142,6 +142,54 @@ describe("GuardTracePanel", () => {
     expect(within(panel).getByText("2 verdicts · 2 nodes")).toBeInTheDocument();
   });
 
+  it("lists an enforced profile evaluated twice, and its repeated finding, once (no duplicate keys)", async () => {
+    vi.mocked(api.fetchExecutionGuardEvents).mockResolvedValue({ events: [] });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const entry = (hash: string, action: string) => ({
+      profile: { profileId: "support-baseline", version: 2, hash, name: "Support baseline" },
+      summary: {
+        action,
+        channel: "prompt",
+        findings: [{ detectorId: "dlp.patterns", category: "sensitive_data", dataClass: "email", score: 0.9, evidence: "j***@e***.com" }],
+        actions: [{ requested: action, effective: action, shadow: false }],
+        shadowAction: "allow",
+        timings: { totalMs: 1, detectors: [{ detectorId: "dlp.patterns", durationMs: 0.5, status: "ran" }] },
+        budget: { exceeded: false, skippedDetectors: [] }
+      }
+    });
+    render(
+      <GuardTracePanel
+        executionId="x3"
+        nodeResults={[
+          {
+            nodeId: "guard",
+            output: {
+              guard: {
+                action: "review",
+                channel: "prompt",
+                source: "enforced",
+                profiles: [
+                  { profileId: "support-baseline", version: 2, hash: "a", name: "Support baseline" },
+                  { profileId: "support-baseline", version: 2, hash: "b", name: "Support baseline" }
+                ],
+                verdicts: [entry("a", "mask"), entry("b", "review")]
+              }
+            }
+          }
+        ]}
+      />
+    );
+    await waitFor(() => expect(api.fetchExecutionGuardEvents).toHaveBeenCalled());
+    expect(screen.getAllByText(/Support baseline v2/)).toHaveLength(1);
+    expect(screen.getByText("Support baseline v2 + tightened")).toBeInTheDocument();
+    expect(screen.getAllByText("j***@e***.com")).toHaveLength(1);
+    // One finding row and one timing for the detector, the two evaluations added up.
+    expect(document.querySelectorAll(".guard-finding")).toHaveLength(1);
+    expect(screen.getByLabelText("Detector timings")).toHaveTextContent(/^dlp\.patterns 1 ms$/);
+    expect(errors.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(false);
+    errors.mockRestore();
+  });
+
   it("renders nothing for a run without guard activity", async () => {
     vi.mocked(api.fetchExecutionGuardEvents).mockResolvedValue({ events: [] });
     const { container } = render(<GuardTracePanel executionId="x2" nodeResults={[{ nodeId: "a", output: { answer: "hi" } }]} />);

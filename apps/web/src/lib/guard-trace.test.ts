@@ -100,6 +100,71 @@ describe("guard trace", () => {
     expect(node!.verdicts[1]!.toolName).toBe("search");
   });
 
+  it("lists an enforced profile and its tightened copy once, with each finding and detector once", () => {
+    const timings = (direct: number, dlp: number) => ({
+      totalMs: direct + dlp,
+      detectors: [
+        { detectorId: "injection.direct", durationMs: direct, status: "ran" },
+        { detectorId: "dlp.patterns", durationMs: dlp, status: "ran" }
+      ]
+    });
+    const [node] = extractGuardTrace([
+      {
+        nodeId: "guard",
+        output: {
+          guard: {
+            action: "protect",
+            channel: "prompt",
+            source: "enforced",
+            profiles: [
+              { profileId: "support-baseline", version: 2, hash: "original", name: "Support baseline" },
+              { profileId: "support-baseline", version: 2, hash: "tightened", name: "Support baseline" }
+            ],
+            verdicts: [
+              {
+                profile: { profileId: "support-baseline", version: 2, hash: "original" },
+                summary: summary({ action: "mask", findings: [emailFinding], actions: [{ requested: "mask", effective: "mask", shadow: false }], timings: timings(0.1, 0.4) })
+              },
+              {
+                profile: { profileId: "support-baseline", version: 2, hash: "tightened" },
+                summary: summary({ action: "protect", findings: [{ ...emailFinding, score: 0.95 }], actions: [{ requested: "protect", effective: "protect", shadow: false }], timings: timings(5.3, 0.8) })
+              }
+            ]
+          }
+        }
+      }
+    ]);
+    expect(node!.profiles).toEqual([{ profileId: "support-baseline", version: 2, hash: "original", name: "Support baseline", tightened: true }]);
+    const [verdict] = node!.verdicts;
+    expect(verdict!.profiles).toHaveLength(1);
+    expect(verdict!.findings).toHaveLength(1);
+    expect(verdict!.findings[0]).toMatchObject({ dataClass: "email", effective: "protect", requested: "protect", score: 0.95 });
+    expect(verdict!.timings).toEqual([
+      { detectorId: "injection.direct", durationMs: 5.4, status: "ran" },
+      { detectorId: "dlp.patterns", durationMs: 1.2, status: "ran" }
+    ]);
+  });
+
+  it("keeps distinct findings of one detector apart", () => {
+    const [node] = extractGuardTrace([
+      {
+        nodeId: "g",
+        output: {
+          guard: {
+            channel: "prompt",
+            verdicts: [
+              {
+                profile: { profileId: "p", version: 1, hash: "h" },
+                summary: summary({ action: "block", findings: [{ ...emailFinding, evidence: "a" }, { ...emailFinding, evidence: "b" }] })
+              }
+            ]
+          }
+        }
+      }
+    ]);
+    expect(node!.verdicts[0]!.findings.map((finding) => finding.evidence)).toEqual(["a", "b"]);
+  });
+
   it("rebuilds nodes without an output trace from guard events", () => {
     const base: GuardEventView = {
       id: "e1",

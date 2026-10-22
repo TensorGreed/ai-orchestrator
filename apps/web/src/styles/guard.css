@@ -54,6 +54,21 @@
 .wf-handle-review {
   background: var(--warn);
 }
+.wf-guard-ports {
+  padding-right: 0;
+}
+.wf-guard-port .port-label {
+  position: absolute;
+  left: calc(100% + 12px);
+  transform: translateY(calc(-100% - 2px));
+  padding: 1px 4px;
+  border-radius: var(--r-sm);
+  background: var(--canvas-bg);
+  white-space: nowrap;
+}
+.wf-guard-port-pass .port-label {
+  color: var(--ok);
+}
 .wf-guard-port-blocked .port-label {
   color: var(--err);
 }
@@ -184,6 +199,7 @@
 /* ---- Trace: guard verdicts ------------------------------------------- */
 .guard-trace {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   margin-bottom: 14px;
   padding: 12px;
@@ -205,6 +221,7 @@
 }
 .guard-trace-node {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
 }
@@ -219,6 +236,7 @@
   margin: 0;
   padding: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
 }
 .guard-verdict {
@@ -262,6 +280,7 @@
 .guard-verdict-body {
   padding: 4px 10px 10px 26px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   min-width: 0;
 }
@@ -320,6 +339,7 @@
 .guard-overview,
 .guard-profiles {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   min-width: 0;
 }
@@ -554,6 +574,7 @@
 
 .guard-editor {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   min-width: 0;
 }
@@ -606,11 +627,16 @@
 }
 .guard-channel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   margin-top: 10px;
 }
 .guard-threshold {
   width: 72px;
+}
+/* Rule actions keep a readable width; on a phone the rules table scrolls instead. */
+.guard-rules .kb-table select {
+  min-width: 132px;
 }
 .guard-add-rule,
 .guard-save-row {

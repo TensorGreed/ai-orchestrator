@@ -259,8 +259,9 @@ export function ringGeometry(slots: AttachmentSlots, options: { allowWorkers?: b
     out.push({ port: "memory", nodeId: extra, angle: Math.PI / 2 + Math.PI / 4, radius: ORBIT.innerRadius });
   }
 
-  // Phase 12.1 — the guard slot sits on the inner ring, up and to the left,
-  // clear of the model / memory axis, the DAG edges and the tool bearings.
+  // Phase 12.1 — the guard slot sits on the inner ring, up and to the left
+  // (45° off the model / memory axis, so its label goes to the left and stays
+  // clear of the model's), away from the DAG edges and the first tool bearings.
   const guards = slots.guard ?? [];
   out.push({ port: "guard", nodeId: guards[0] ?? null, angle: GUARD_ANGLE, radius: ORBIT.innerRadius });
   for (const [index, extra] of guards.slice(1).entries()) {
@@ -284,11 +285,12 @@ export function ringGeometry(slots: AttachmentSlots, options: { allowWorkers?: b
 /**
  * Preferred slot angles (degrees, clockwise from east). Tools avoid the
  * vertical axis where model / memory and their labels sit; workers take the
- * axis and the diagonals so they never share a bearing with a tool.
+ * axis and the diagonals so they never share a bearing with a tool. The
+ * upper-left bearing (210) comes last: the guard slot and its label sit there.
  */
-const TOOL_ANGLES_DEG = [30, 150, 330, 210, 60, 120, 300, 240];
+const TOOL_ANGLES_DEG = [30, 150, 330, 60, 300, 120, 240, 210];
 const WORKER_ANGLES_DEG = [90, 270, 200, 340, 160, 20];
-export const GUARD_ANGLE = (235 * Math.PI) / 180;
+export const GUARD_ANGLE = (225 * Math.PI) / 180;
 /** Protection providers of a guard satellite fan out beyond it on the outer ring (offsets in degrees). */
 const PROTECTION_FAN_DEG = [0, 16, -16, 32, -32];
 /** How far below a Guard card its protection providers hang. */

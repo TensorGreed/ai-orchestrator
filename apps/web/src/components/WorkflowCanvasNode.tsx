@@ -240,10 +240,13 @@ function StructuralPorts({ data }: { data: EditorNodeData }) {
     const onOpen = data.onOpenAgentAttachmentDrawer;
     return (
       <>
-        <div className="wf-structural-ports">
+        <div className="wf-structural-ports wf-guard-ports">
           {ports.map((port) => (
             <div key={port.id} className={`wf-structural-port wf-guard-port wf-guard-port-${port.id}`}>
-              <span className="port-label">{port.label}</span>
+              {/* Outside the card, just above the edge that leaves this handle. */}
+              <span className="port-label" style={{ top: port.top }}>
+                {port.label}
+              </span>
               <Handle id={port.id} type="source" position={Position.Right} className={`wf-handle wf-handle-main${port.className}`} style={{ top: port.top }} />
             </div>
           ))}
