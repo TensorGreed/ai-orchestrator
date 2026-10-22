@@ -1208,6 +1208,9 @@ function StudioApp() {
   const [importReport, setImportReport] = useState<{ workflowId: string; report: ImportReport } | null>(null);
   const pasteCountRef = useRef(0);
   const didAttemptInitialWipRef = useRef(false);
+  // The latest workflow load wins; a slower earlier fetch must not hydrate over it.
+  const workflowLoadSeqRef = useRef(0);
+  const pendingWorkflowLoadIdRef = useRef<string | null>(null);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<EditorNodeData>([]);
@@ -2667,21 +2670,29 @@ function StudioApp() {
 
   const loadWorkflowById = useCallback(
     async (id: string) => {
+      const seq = ++workflowLoadSeqRef.current;
+      const isLatest = () => workflowLoadSeqRef.current === seq;
       try {
         const localWip = readWipWorkflow(id);
         if (localWip && localWip.nodes.length > 0) {
+          pendingWorkflowLoadIdRef.current = null;
           hydrateWorkflow(localWip);
           return;
         }
 
+        pendingWorkflowLoadIdRef.current = id;
         const workflow = await fetchWorkflow(id);
+        if (!isLatest()) return;
         const chosen = preferTabWip(localWip, workflow);
         if (localWip && chosen !== localWip) {
           deleteTabWipWorkflow(id);
         }
         hydrateWorkflow(chosen);
       } catch (loadError) {
+        if (!isLatest()) return;
         handleApiError(loadError, "Failed to load workflow");
+      } finally {
+        if (isLatest()) pendingWorkflowLoadIdRef.current = null;
       }
     },
     [handleApiError, hydrateWorkflow, readWipWorkflow]
@@ -2690,7 +2701,12 @@ function StudioApp() {
   const handleTemplateWorkflowCreated = useCallback(
     async (workflowId: string) => {
       try {
-        const workflow = await fetchWorkflow(workflowId);
+        const seq = ++workflowLoadSeqRef.current;
+        pendingWorkflowLoadIdRef.current = workflowId;
+        const workflow = await fetchWorkflow(workflowId).finally(() => {
+          if (workflowLoadSeqRef.current === seq) pendingWorkflowLoadIdRef.current = null;
+        });
+        if (workflowLoadSeqRef.current !== seq) return;
         hydrateWorkflow(workflow);
 
         const targetProjectId = workflow.projectId || activeProjectId;
@@ -2754,6 +2770,11 @@ function StudioApp() {
 
     const currentExists = workflowList.some((item) => item.id === currentWorkflow.id);
     if (currentExists) {
+      return;
+    }
+
+    // An explicit open (Home card, palette, MCP pages) is still fetching; it decides what shows.
+    if (pendingWorkflowLoadIdRef.current) {
       return;
     }
 
