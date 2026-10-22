@@ -13,13 +13,15 @@
  *                     signed file index and manifest digest.
  *
  *   l2m replay run    Phase 15.1 — replay a golden run against the draft or a
- *                     saved version (side effects stubbed) and gate on the diff.
+ *                     saved version and gate on the diff. Connector, HTTP,
+ *                     MCP and code nodes are answered from the recording;
+ *                     expressions in the nodes that run are still evaluated.
  *
  * Exit codes: 0 clean, 1 the check found problems (or a request failed),
  * 2 usage errors, 3 an audit bundle is internally consistent but its signer
  * was not verified (no --public-key), 4 a replay could not complete (the
- * recording could not answer the candidate, the request failed, or the
- * answer was not a replay result). A replay whose flags the API rejects
+ * recording could not answer the candidate or reached a node it never saw,
+ * the request failed, or the answer was not a replay result). A replay whose flags the API rejects
  * (400) exits 2, like any usage error.
  */
 import fs from "node:fs";
