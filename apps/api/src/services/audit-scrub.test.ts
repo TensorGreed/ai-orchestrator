@@ -1,9 +1,11 @@
 /**
  * Phase 11.1 — the secret scrubber used for manifests and audit bundles.
  */
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "@ai-orchestrator/shared";
-import { environmentSecretValues, isTextMime, REDACTED, SecretScrubber } from "./audit-scrub.js";
+import { z } from "zod";
+import { canonicalJson, runManifestConstantGuide, schemaConstantGuide } from "@ai-orchestrator/shared";
+import { environmentSecretValues, isTextMime, REDACTED, scrubExemptionWarnings, SecretScrubber } from "./audit-scrub.js";
 
 const QUOTE = 'pa"ss\\word-12"34';
 const PEM = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\n";
@@ -75,6 +77,94 @@ describe("SecretScrubber", () => {
     scrubber.resetHits();
     scrubber.text(`${QUOTE} ${QUOTE}`);
     expect(scrubber.hits).toBe(2);
+  });
+});
+
+describe("SecretScrubber guided by a schema's enum and literal positions", () => {
+  const guide = schemaConstantGuide(
+    z.object({
+      status: z.enum(["success", "error"]),
+      algorithm: z.literal("Ed25519"),
+      label: z.string(),
+      digest: z.string().regex(/^[a-f0-9]{64}$/),
+      steps: z.array(z.object({ outcome: z.enum(["policy_blocked", "ok"]), note: z.string().nullable() })),
+      config: z.record(z.string(), z.unknown())
+    })
+  );
+
+  it("keeps a value at an enum or literal position only when it equals one of that position's constants", () => {
+    const scrubber = new SecretScrubber(["success", "Ed25519", "blocked"]);
+    const out = scrubber.tree(
+      { status: "success", algorithm: "Ed25519", label: "success", steps: [{ outcome: "policy_blocked", note: "success" }], config: { status: "success" } },
+      { guide }
+    );
+    expect(out).toEqual({
+      status: "success",
+      algorithm: "Ed25519",
+      label: REDACTED,
+      steps: [{ outcome: "policy_blocked", note: REDACTED }],
+      config: { status: REDACTED }
+    });
+  });
+
+  it("scrubs a value at an enum position that is not one of its constants", () => {
+    const scrubber = new SecretScrubber(["success", "sk-live-0123456789"]);
+    const out = scrubber.tree({ status: "success and more", algorithm: "sk-live-0123456789", steps: [{ outcome: "error success" }] }, { guide }) as Record<string, unknown>;
+    expect(out).toEqual({ status: `${REDACTED} and more`, algorithm: REDACTED, steps: [{ outcome: `error ${REDACTED}` }] });
+    // A constant of another position is not exempt here.
+    expect(scrubber.tree({ label: "success" }, { guide })).toEqual({ label: REDACTED });
+  });
+
+  it("still scrubs format-constrained strings and undeclared keys", () => {
+    const digest = createHash("sha256").update("workflow").digest("hex");
+    const scrubber = new SecretScrubber([digest.slice(4, 20), "status"]);
+    const out = scrubber.tree({ digest, status: "error", config: { status: "x" }, extra: { status: "y" } }, { guide }) as Record<string, unknown>;
+    expect(out.digest).toBe(`${digest.slice(0, 4)}${REDACTED}${digest.slice(20)}`);
+    // Declared keys are schema constants; keys of a free record are not.
+    expect(out.status).toBe("error");
+    expect(out.config).toEqual({ [REDACTED]: "x" });
+    expect(out.extra).toEqual({ [REDACTED]: "y" });
+  });
+
+  it("behaves exactly as before without a guide", () => {
+    const scrubber = new SecretScrubber(["success"]);
+    expect(scrubber.tree({ status: "success", algorithm: "success" })).toEqual({ status: REDACTED, algorithm: REDACTED });
+  });
+
+  it("works with the run manifest's own guide", () => {
+    const scrubber = new SecretScrubber(["success", "captured", "system"]);
+    const out = scrubber.tree(
+      {
+        run: { status: "success", error: "success" },
+        workflow: { source: "captured", name: "captured" },
+        nodes: [{ status: "success", name: "success", config: { note: "success" } }],
+        prompts: [{ role: "system", rendered: "system" }]
+      },
+      { guide: runManifestConstantGuide() }
+    );
+    expect(out).toEqual({
+      run: { status: "success", error: REDACTED },
+      workflow: { source: "captured", name: REDACTED },
+      nodes: [{ status: "success", name: REDACTED, config: { note: REDACTED } }],
+      prompts: [{ role: "system", rendered: REDACTED }]
+    });
+  });
+});
+
+describe("scrubExemptionWarnings", () => {
+  it("warns when a value matches a run-record constant it would not be hidden in, without echoing it", () => {
+    for (const value of ["success", "captured", "workflow", "blocked"]) {
+      const warnings = scrubExemptionWarnings(value);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).not.toContain(value);
+    }
+  });
+
+  it("does not warn for unique values, other cases, or values too short to be scrubbed", () => {
+    expect(scrubExemptionWarnings("sk-live-9f8e7d6c5b4a")).toEqual([]);
+    expect(scrubExemptionWarnings("Success")).toEqual([]);
+    expect(scrubExemptionWarnings("error")).toEqual([]);
+    expect(scrubExemptionWarnings("ok")).toEqual([]);
   });
 });
 

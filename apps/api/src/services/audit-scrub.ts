@@ -15,7 +15,18 @@
  *
  * Values shorter than `MIN_SCRUB_LENGTH` are ignored: replacing every
  * occurrence of a very short value would mangle unrelated text.
+ *
+ * A value tree checked against a schema afterwards (the run manifest) can be
+ * walked with that schema's `SchemaConstantGuide`: a string at an enum or
+ * literal position that is exactly one of the position's constants, and a
+ * key the schema declares, are left as they are. They are fixed words of
+ * the schema, not secret material, and a secret that happens to equal one
+ * (a builder stored `success`) would otherwise break validation of every
+ * manifest. The decision is made from the schema alone, before scrubbing;
+ * every other string, format-constrained ones included, is scrubbed.
  */
+
+import { runManifestConstantWords, type SchemaConstantGuide } from "@ai-orchestrator/shared";
 
 export const REDACTED = "[REDACTED]";
 export const MIN_SCRUB_LENGTH = 6;
@@ -149,19 +160,42 @@ export class SecretScrubber {
 
   /**
    * A value tree with every string and key scrubbed. Objects are rebuilt
-   * without a prototype so an own `__proto__` key survives as data.
+   * without a prototype so an own `__proto__` key survives as data. With a
+   * `guide`, a string equal to one of its position's schema constants and a
+   * key the schema declares at that position are kept.
    */
-  tree(value: unknown, depth = 0): unknown {
+  tree(value: unknown, options: { guide?: SchemaConstantGuide } = {}): unknown {
     if (this.values.length === 0) return value;
-    if (typeof value === "string") return this.string(value);
+    return this.walk(value, 0, options.guide);
+  }
+
+  private walk(value: unknown, depth: number, guide: SchemaConstantGuide | undefined): unknown {
+    if (typeof value === "string") return guide?.constants?.has(value) ? value : this.string(value);
     if (depth > 64 || value === null || typeof value !== "object") return value;
-    if (Array.isArray(value)) return value.map((entry) => this.tree(entry, depth + 1));
+    if (Array.isArray(value)) return value.map((entry) => this.walk(entry, depth + 1, guide?.element));
     const out = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(value)) {
-      out[this.replaceAll(key, this.values)] = this.tree((value as Record<string, unknown>)[key], depth + 1);
+      const declared = guide?.keys?.get(key);
+      const name = declared ? key : this.replaceAll(key, this.values);
+      out[name] = this.walk((value as Record<string, unknown>)[key], depth + 1, declared ?? guide?.rest);
     }
     return out;
   }
+}
+
+export const SCRUB_EXEMPTION_WARNING =
+  "This value is a common word used in run records, such as a status or field name. It will not be hidden there; choose a more unique value.";
+
+/**
+ * Save-time warnings for a secret value: one when the value is, or is part
+ * of, a word the run manifest schema fixes (an enum or literal constant, or
+ * a field name), since manifests keep those words as they are. Values too
+ * short to be scrubbed never warn. The value itself is never part of a warning.
+ */
+export function scrubExemptionWarnings(value: string): string[] {
+  if (typeof value !== "string" || value.length < MIN_SCRUB_LENGTH) return [];
+  for (const word of runManifestConstantWords()) if (word.includes(value)) return [SCRUB_EXEMPTION_WARNING];
+  return [];
 }
 
 /** Environment variable names that hold credentials (provider API keys, tokens, passwords, keys). */

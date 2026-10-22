@@ -761,6 +761,8 @@ export async function createSecret(payload: {
     name: string;
     provider: string;
     projectId: string;
+    /** Non-blocking notes about the saved value; they never contain it. */
+    warnings?: string[];
   }>("/api/secrets", {
     method: "POST",
     body: JSON.stringify(payload)
@@ -1447,6 +1449,7 @@ export async function createExternalSecret(payload: {
     provider: string;
     projectId: string;
     source: "external";
+    warnings?: string[];
   }>("/api/secrets", {
     method: "POST",
     body: JSON.stringify(payload)

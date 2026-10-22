@@ -1057,6 +1057,23 @@ body {
   font-size: var(--fs-sm);
 }
 
+.warn-banner {
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+  color: var(--fg);
+  padding: 8px 12px;
+  font-size: var(--fs-sm);
+}
+
+.warn-banner p {
+  margin: 0;
+}
+
+.warn-banner p + p {
+  margin-top: 4px;
+}
+
 .global-banner {
   margin: 0 16px;
 }

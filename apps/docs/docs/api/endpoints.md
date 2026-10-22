@@ -185,7 +185,7 @@ See [Audit bundles and signed run manifests](../security/audit-bundles.md).
 
 ## Secrets
 
-- `POST /api/secrets`
+- `POST /api/secrets` (`{ id, name, provider, projectId, source, warnings }`; `warnings` is non-blocking and never contains the value: it flags a value that equals a word run manifests keep, such as a status)
 - `GET /api/secrets`
 
 ## Webhooks

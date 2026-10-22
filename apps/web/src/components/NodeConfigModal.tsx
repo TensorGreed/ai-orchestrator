@@ -17,6 +17,7 @@ import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow"
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
+import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import {
   createSecret,
   discoverMcpTools,
@@ -1288,6 +1289,7 @@ export function NodeInspector({
   const [inlineGoogleServiceAccountJson, setInlineGoogleServiceAccountJson] = useState("");
   const [inlineSecretBusy, setInlineSecretBusy] = useState(false);
   const [inlineSecretError, setInlineSecretError] = useState<string | null>(null);
+  const [inlineSecretWarnings, setInlineSecretWarnings] = useState<{ fieldKey: string; warnings: string[] } | null>(null);
   const provider = useMemo(() => asRecord(config.provider), [config.provider]);
   const directSecretId = getSecretId(config.secretRef);
   const directBaseUrl = toStringValue(config.baseUrl).trim();
@@ -1707,6 +1709,7 @@ export function NodeInspector({
     setInlineGoogleAccessToken("");
     setInlineGoogleServiceAccountJson("");
     setInlineSecretError(null);
+    setInlineSecretWarnings(null);
   }, []);
 
   const closeInlineSecretCreator = useCallback(() => {
@@ -1782,6 +1785,7 @@ export function NodeInspector({
             return [...map.values()];
           });
           input.onSelect(createdSecret.id);
+          setInlineSecretWarnings(created.warnings?.length ? { fieldKey: input.fieldKey, warnings: created.warnings } : null);
           setActiveSecretFieldKey(null);
           setInlineSecretProvider("custom");
           setInlineSecretName("");
@@ -1816,11 +1820,13 @@ export function NodeInspector({
                 return;
               }
               closeInlineSecretCreator();
+              setInlineSecretWarnings(null);
               input.onSelect(next);
             }}
             options={options}
           />
           {input.hint && <div className="cfg-tip">{input.hint}</div>}
+          {inlineSecretWarnings?.fieldKey === input.fieldKey && <SecretSaveWarnings warnings={inlineSecretWarnings.warnings} />}
           {input.required && !input.value && (
             <div className="cfg-tip" role="alert">
               A credential is required. Select one or add a new credential.
@@ -1887,6 +1893,7 @@ export function NodeInspector({
       inlineSecretBusy,
       inlineSecretError,
       inlineSecretName,
+      inlineSecretWarnings,
       inlineSecretProvider,
       inlineSecretValue,
       onRefreshSecrets,
