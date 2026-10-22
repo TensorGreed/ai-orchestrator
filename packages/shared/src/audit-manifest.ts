@@ -45,7 +45,10 @@ export const AUDIT_KEY_ID_HEX_CHARS = 16;
  * same sorted-key approach as the guard profile hash and the MCP cassette
  * argument hash, so equal values always produce identical bytes.
  * Non-finite numbers have no JSON form and are refused rather than
- * silently written as `null`.
+ * silently written as `null`. An own `__proto__` key is kept as an ordinary
+ * member. Keys that are canonical array indices ("0", "1", ...) are written
+ * first, in ascending numeric order, then the other keys sorted (the property
+ * order JavaScript gives objects); this is not RFC 8785 ordering.
  */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(canonicalValue(value, new Set()));
@@ -64,9 +67,12 @@ function canonicalValue(value: unknown, seen: Set<object>): unknown {
     if (Array.isArray(value)) return value.map((entry) => canonicalValue(entry, seen));
     const toJson = (value as { toJSON?: unknown }).toJSON;
     if (typeof toJson === "function") return canonicalValue((toJson as () => unknown).call(value), seen);
-    const out: Record<string, unknown> = {};
+    // A null-prototype object keeps an own `__proto__` key as data: on a plain
+    // object the assignment would set the prototype and the key would vanish,
+    // so `{"__proto__":{..},"a":1}` and `{"a":1}` would share a digest.
+    const out = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      const inner = (value as Record<string, unknown>)[key];
+      const inner = Object.prototype.hasOwnProperty.call(value, key) ? (value as Record<string, unknown>)[key] : undefined;
       if (inner === undefined || typeof inner === "function" || typeof inner === "symbol") continue;
       out[key] = canonicalValue(inner, seen);
     }

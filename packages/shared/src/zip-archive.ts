@@ -7,9 +7,13 @@
  * Node built-ins and is shared by the API (writer) and the CLI (reader).
  *
  * The reader is deliberately strict because it feeds an integrity check:
- * a truncated file, trailing bytes, overlapping or out-of-order entries,
- * duplicate or unsafe names, a CRC mismatch or a size that differs from the
- * directory are all errors, never best-effort recoveries.
+ * a truncated file, bytes before the first entry, between entries or after
+ * the end record, an archive comment, overlapping or out-of-order entries,
+ * a local header that disagrees with the central directory, data
+ * descriptors, extra fields, duplicate or unsafe names, names that collide
+ * when case or Unicode normalisation is ignored, a CRC mismatch or a size
+ * that differs from the directory are all errors, never best-effort
+ * recoveries. Archives this module writes always pass.
  */
 
 export interface ZipEntryInput {
@@ -49,12 +53,15 @@ const CENTRAL_HEADER = 0x02014b50;
 const END_OF_CENTRAL_DIRECTORY = 0x06054b50;
 const FLAG_UTF8 = 0x0800;
 const FLAG_ENCRYPTED = 0x0001;
+const FLAG_DATA_DESCRIPTOR = 0x0008;
 const METHOD_STORED = 0;
 const METHOD_DEFLATED = 8;
 const VERSION = 20;
 const MAX_UINT16 = 0xffff;
 const MAX_UINT32 = 0xffffffff;
-const DEFAULT_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
+/** Default cap on the total expanded size of an archive (512 MiB). */
+export const DEFAULT_ZIP_MAX_TOTAL_BYTES = 512 * 1024 * 1024;
+const DEFAULT_MAX_TOTAL_BYTES = DEFAULT_ZIP_MAX_TOTAL_BYTES;
 const DEFAULT_MAX_ENTRIES = 100_000;
 
 const CRC_TABLE = (() => {
@@ -73,6 +80,11 @@ export function crc32(data: Uint8Array): number {
     crc = CRC_TABLE[(crc ^ data[index]!) & 0xff]! ^ (crc >>> 8);
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+/** The key two names collide under on a case-insensitive or normalising file system. */
+export function zipCollisionKey(path: string): string {
+  return path.normalize("NFC").toLowerCase();
 }
 
 /** A relative, forward-slash path with no empty, `.` or `..` segments. */
@@ -149,8 +161,9 @@ export function prepareZip(entries: ZipEntryInput[], options: ZipWriteOptions = 
   let offset = 0;
   for (const entry of entries) {
     if (!isSafeZipPath(entry.path)) throw new ZipFormatError(`Unsafe entry path '${entry.path}'`);
-    if (seen.has(entry.path)) throw new ZipFormatError(`Duplicate entry path '${entry.path}'`);
-    seen.add(entry.path);
+    const key = zipCollisionKey(entry.path);
+    if (seen.has(key)) throw new ZipFormatError(`Duplicate entry path '${entry.path}' (names must differ beyond case and Unicode normalisation)`);
+    seen.add(key);
     const name = encoder.encode(entry.path);
     if (name.length > MAX_UINT16) throw new ZipFormatError(`Entry path too long: '${entry.path}'`);
     const deflated = options.deflateRaw && entry.data.length > 0 ? options.deflateRaw(entry.data) : null;
@@ -238,16 +251,12 @@ export function readZip(bytes: Uint8Array, options: ZipReadOptions): ZipEntry[] 
   const decoder = new TextDecoder("utf-8", { fatal: true });
   if (bytes.length < 22) throw new ZipFormatError("Not a ZIP archive: too short (truncated?)");
 
-  // The end-of-central-directory record must end exactly at the end of the file.
-  let eocd = -1;
-  const lowest = Math.max(0, bytes.length - 22 - MAX_UINT16);
-  for (let index = bytes.length - 22; index >= lowest; index -= 1) {
-    if (view.getUint32(index, true) === END_OF_CENTRAL_DIRECTORY && index + 22 + view.getUint16(index + 20, true) === bytes.length) {
-      eocd = index;
-      break;
-    }
+  // The end-of-central-directory record is the last 22 bytes: no archive comment, nothing after it.
+  const eocd = bytes.length - 22;
+  if (view.getUint32(eocd, true) !== END_OF_CENTRAL_DIRECTORY) {
+    throw new ZipFormatError("Not a ZIP archive, truncated, or followed by extra bytes: end of central directory not found at the end");
   }
-  if (eocd < 0) throw new ZipFormatError("Not a ZIP archive or truncated: end of central directory not found");
+  if (view.getUint16(eocd + 20, true) !== 0) throw new ZipFormatError("Archive comments are not allowed");
   const disk = view.getUint16(eocd + 4, true);
   const centralDisk = view.getUint16(eocd + 6, true);
   const entriesOnDisk = view.getUint16(eocd + 8, true);
@@ -261,8 +270,12 @@ export function readZip(bytes: Uint8Array, options: ZipReadOptions): ZipEntry[] 
 
   const entries: ZipEntry[] = [];
   const names = new Set<string>();
-  const ranges: Array<{ start: number; end: number }> = [];
+  const folded = new Map<string, string>();
   let pointer = centralOffset;
+  // Entries must tile the data region: the first starts at offset 0, each one
+  // starts where the previous one ended, and the central directory follows the
+  // last one. A gap or prefix could hide content that a streaming extractor shows.
+  let expectedOffset = 0;
   let total = 0;
   for (let count = 0; count < totalEntries; count += 1) {
     if (pointer + 46 > eocd || view.getUint32(pointer, true) !== CENTRAL_HEADER) throw new ZipFormatError("Corrupt central directory entry");
@@ -274,33 +287,60 @@ export function readZip(bytes: Uint8Array, options: ZipReadOptions): ZipEntry[] 
     const nameLength = view.getUint16(pointer + 28, true);
     const extraLength = view.getUint16(pointer + 30, true);
     const commentLength = view.getUint16(pointer + 32, true);
+    const diskStart = view.getUint16(pointer + 34, true);
     const localOffset = view.getUint32(pointer + 42, true);
     const next = pointer + 46 + nameLength + extraLength + commentLength;
     if (next > eocd) throw new ZipFormatError("Corrupt central directory entry");
+    const nameBytes = bytes.subarray(pointer + 46, pointer + 46 + nameLength);
     let path: string;
     try {
-      path = decoder.decode(bytes.subarray(pointer + 46, pointer + 46 + nameLength));
+      path = decoder.decode(nameBytes);
     } catch {
       throw new ZipFormatError("Entry name is not valid UTF-8");
     }
     pointer = next;
     if (flags & FLAG_ENCRYPTED) throw new ZipFormatError(`Entry '${path}' is encrypted`);
+    if (flags & FLAG_DATA_DESCRIPTOR) throw new ZipFormatError(`Entry '${path}' uses a data descriptor`);
+    if (flags & ~FLAG_UTF8) throw new ZipFormatError(`Entry '${path}' has unsupported flags`);
+    if (extraLength !== 0 || commentLength !== 0) throw new ZipFormatError(`Entry '${path}' has extra fields or a comment`);
+    if (diskStart !== 0) throw new ZipFormatError("Multi-disk archives are not supported");
     if (compressedSize === MAX_UINT32 || size === MAX_UINT32 || localOffset === MAX_UINT32) throw new ZipFormatError("ZIP64 archives are not supported");
     const isDirectory = path.endsWith("/");
     const cleanPath = isDirectory ? path.slice(0, -1) : path;
     if (!isSafeZipPath(cleanPath)) throw new ZipFormatError(`Unsafe entry path '${path}'`);
     if (names.has(path)) throw new ZipFormatError(`Duplicate entry '${path}'`);
     names.add(path);
+    const key = zipCollisionKey(path);
+    const clash = folded.get(key);
+    if (clash !== undefined) throw new ZipFormatError(`Entries '${clash}' and '${path}' collide when case or Unicode normalisation is ignored`);
+    folded.set(key, path);
 
+    if (localOffset !== expectedOffset) {
+      throw new ZipFormatError(
+        expectedOffset === 0
+          ? "Archive does not start with its first entry (prepended data)"
+          : `Entry '${path}' does not start where the previous entry ended (gap, overlap or reordered entries)`
+      );
+    }
     if (localOffset + 30 > centralOffset || view.getUint32(localOffset, true) !== LOCAL_HEADER) throw new ZipFormatError(`Missing local header for '${path}'`);
+    const localFlags = view.getUint16(localOffset + 6, true);
+    const localMethod = view.getUint16(localOffset + 8, true);
+    const localCrc = view.getUint32(localOffset + 14, true);
+    const localCompressedSize = view.getUint32(localOffset + 18, true);
+    const localSize = view.getUint32(localOffset + 22, true);
     const localNameLength = view.getUint16(localOffset + 26, true);
     const localExtraLength = view.getUint16(localOffset + 28, true);
+    if (localOffset + 30 + localNameLength > centralOffset) throw new ZipFormatError(`Entry '${path}' runs past the end of the data (truncated archive)`);
     const localName = bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength);
-    if (localNameLength !== nameLength || decoder.decode(localName) !== path) throw new ZipFormatError(`Local header name differs from the directory for '${path}'`);
-    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    if (localNameLength !== nameLength || !sameBytes(localName, nameBytes)) throw new ZipFormatError(`Local header name differs from the directory for '${path}'`);
+    if (localFlags !== flags || localMethod !== method || localCrc !== crc || localCompressedSize !== compressedSize || localSize !== size) {
+      throw new ZipFormatError(`Local header of '${path}' differs from the directory (flags, method, CRC or sizes)`);
+    }
+    if (localExtraLength !== 0) throw new ZipFormatError(`Entry '${path}' has extra fields or a comment`);
+    const dataStart = localOffset + 30 + localNameLength;
     const dataEnd = dataStart + compressedSize;
     if (dataEnd > centralOffset) throw new ZipFormatError(`Entry '${path}' runs past the end of the data (truncated archive)`);
-    ranges.push({ start: localOffset, end: dataEnd });
+    expectedOffset = dataEnd;
 
     if (isDirectory) {
       if (size !== 0 || compressedSize !== 0) throw new ZipFormatError(`Directory entry '${path}' has content`);
@@ -327,9 +367,12 @@ export function readZip(bytes: Uint8Array, options: ZipReadOptions): ZipEntry[] 
     entries.push({ path, data });
   }
   if (pointer !== eocd) throw new ZipFormatError("Unexpected bytes after the central directory entries");
-  ranges.sort((a, b) => a.start - b.start);
-  for (let index = 1; index < ranges.length; index += 1) {
-    if (ranges[index]!.start < ranges[index - 1]!.end) throw new ZipFormatError("Entries overlap");
-  }
+  if (expectedOffset !== centralOffset) throw new ZipFormatError("Unexpected bytes between the last entry and the central directory");
   return entries;
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) return false;
+  return true;
 }
