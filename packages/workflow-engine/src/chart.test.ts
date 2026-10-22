@@ -144,3 +144,56 @@ describe("chart offline mode (replays)", () => {
     }
   });
 });
+
+describe("chart links never crash the process", () => {
+  /** Render, then let detached promises settle, and report any rejection nobody handled. */
+  async function renderAndCollectUnhandled(options: Parameters<typeof renderChart>[0]) {
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", listener);
+    try {
+      const outcome = await renderChart(options).then(
+        (result) => ({ ok: true as const, result }),
+        (error: unknown) => ({ ok: false as const, error })
+      );
+      for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      return { outcome, unhandled };
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
+  }
+
+  const linkedBars = (href: string) => ({
+    mark: "bar",
+    data: { values: [{ a: "x", b: 1 }, { a: "y", b: 2 }] },
+    encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" }, href: { value: href } }
+  });
+
+  it("an offline chart with an href renders like a live one, with no unhandled rejection", async () => {
+    const offline = await renderAndCollectUnhandled({ spec: linkedBars("https://example.com/"), offline: true });
+    expect(offline.unhandled).toEqual([]);
+    expect(offline.outcome.ok).toBe(true);
+    const live = await renderAndCollectUnhandled({ spec: linkedBars("https://example.com/") });
+    expect(live.unhandled).toEqual([]);
+    expect(live.outcome.ok && offline.outcome.ok && offline.outcome.result.svg).toBe(live.outcome.ok && live.outcome.result.svg);
+  });
+
+  it("an href the loader refuses drops the link instead of crashing, live or offline", async () => {
+    for (const offline of [false, true]) {
+      const run = await renderAndCollectUnhandled({ spec: linkedBars("javascript:alert(1)"), offline });
+      expect(run.unhandled).toEqual([]);
+      expect(run.outcome.ok).toBe(true);
+      if (run.outcome.ok) expect(run.outcome.result.svg).not.toContain("javascript:");
+    }
+  });
+
+  it("an offline image mark is a blocked load, not a crash", async () => {
+    const run = await renderAndCollectUnhandled({
+      spec: { mark: "image", data: { values: [{ u: "https://example.com/a.png", x: 1 }] }, encoding: { url: { field: "u", type: "nominal" }, x: { field: "x", type: "quantitative" } } },
+      offline: true
+    });
+    expect(run.unhandled).toEqual([]);
+    expect(run.outcome.ok).toBe(false);
+    if (!run.outcome.ok) expect(String(run.outcome.error)).toContain(REPLAY_BLOCKED_LOAD_MARKER);
+  });
+});

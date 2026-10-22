@@ -93,7 +93,8 @@ export async function renderChart(options: ChartRenderOptions): Promise<ChartRen
   let view: vega.View;
   try {
     const runtime = vega.parse(vegaSpec, options.config);
-    view = new vega.View(runtime, { renderer: "none", ...(options.offline ? { loader: offlineLoader(() => (blocked = true)) } : {}) });
+    const loader = options.offline ? offlineLoader(() => (blocked = true)) : linkSafeLoader(vega.loader());
+    view = new vega.View(runtime, { renderer: "none", loader });
   } catch (err) {
     throw new Error(`vega parse failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -117,13 +118,40 @@ export async function renderChart(options: ChartRenderOptions): Promise<ChartRen
   };
 }
 
-/** A Vega loader that refuses every load and reports that it did. */
+/**
+ * Vega's SVG renderer resolves a mark's `href` through `loader.sanitize` in a
+ * promise nobody awaits, and a refused link (for example `javascript:`) ends
+ * as an unhandled rejection that terminates Node. A link is never a load, so
+ * a refused one is dropped (`href: null`) instead of rejected.
+ */
+function linkSafeLoader(base: vega.Loader): vega.Loader {
+  const sanitize = base.sanitize.bind(base);
+  base.sanitize = (async (uri: string, options?: { context?: string }) => {
+    try {
+      return await sanitize(uri, options as never);
+    } catch (error) {
+      if (options?.context === "href") return { href: null };
+      throw error;
+    }
+  }) as vega.Loader["sanitize"];
+  return base;
+}
+
+/**
+ * A Vega loader that refuses every load and reports that it did. Links
+ * (`href`) are not loads: they are resolved by the default loader's
+ * `sanitize`, which does no I/O, so a replayed chart draws the same links as
+ * the live run.
+ */
 function offlineLoader(onBlocked: () => void): vega.Loader {
+  const links = linkSafeLoader(vega.loader());
   const refuse = async (): Promise<never> => {
     onBlocked();
     throw new Error(REPLAY_BLOCKED_LOAD_MARKER);
   };
-  return { options: {}, load: refuse, sanitize: refuse, http: refuse, file: refuse } as unknown as vega.Loader;
+  const sanitize = async (uri: string, options?: { context?: string }) =>
+    options?.context === "href" ? links.sanitize(uri, options as never) : refuse();
+  return { options: {}, load: refuse, sanitize, http: refuse, file: refuse } as unknown as vega.Loader;
 }
 
 /**
