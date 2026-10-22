@@ -302,6 +302,8 @@ export interface ReplayRecordingCapabilities {
   models: "live";
   /** Session memory starts empty in a replay. */
   memory: "empty";
+  /** `captured`: the workflow as it ran was recorded with the run; `current`: the run predates that, so the workflow as saved when the golden run was made is kept instead. */
+  workflowSource: "captured" | "current";
 }
 
 export interface ReplayRecordingSummary {
@@ -349,8 +351,9 @@ export type ReplayMcpMode = (typeof REPLAY_MCP_MODES)[number];
 /**
  * A replay request. The candidate is the draft (the workflow as saved now)
  * or one saved version. `mcpMode` is how MCP calls are matched against the
- * cassette: `strict` needs the same arguments, `lenient` accepts a recorded
- * call to the same tool. Neither ever reaches a live MCP server.
+ * cassette: both need the same arguments; `strict` answers each recorded
+ * call once, `lenient` reuses the last answer for a call made more often
+ * than recorded. Neither ever reaches a live MCP server.
  */
 export const replayRunRequestSchema = z
   .object({
