@@ -2,6 +2,70 @@ import type { LLMCallResponse, LLMUsage, ProviderDefinition, ToolCall, ChatMessa
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
 import { resilientFetch } from "../resilient-fetch";
 
+/** Model used when an Anthropic provider config names none. */
+export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
+
+const SAMPLING_PARAMS = ["temperature", "top_p", "top_k"] as const;
+
+/**
+ * True for Claude models that reject the sampling parameters (temperature,
+ * top_p, top_k) and budget-based extended thinking: the Fable / Mythos
+ * families, every 5-generation model, and Opus 4.7 / 4.8. Older models
+ * (Claude 3.x, 4.0 - 4.6) still accept them.
+ */
+export function anthropicModelRejectsSampling(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  const match = /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?!\d)/.exec(normalized);
+  if (!match) {
+    return false;
+  }
+  const family = match[1];
+  const major = Number(match[2]);
+  const minor = match[3] ? Number(match[3]) : 0;
+  if (family === "fable" || family === "mythos") {
+    return true;
+  }
+  if (major >= 5) {
+    return true;
+  }
+  return major === 4 && minor >= 7;
+}
+
+interface AnthropicErrorBody {
+  type?: string;
+  message?: string;
+}
+
+function parseAnthropicError(body: string): AnthropicErrorBody {
+  try {
+    const parsed = JSON.parse(body) as { error?: AnthropicErrorBody };
+    return parsed && typeof parsed.error === "object" && parsed.error ? parsed.error : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Names the sampling parameter a 400 response says the model rejects, if any. */
+function rejectedSamplingParam(body: Record<string, unknown>, error: AnthropicErrorBody): (typeof SAMPLING_PARAMS)[number] | undefined {
+  if (error.type !== "invalid_request_error" || typeof error.message !== "string") {
+    return undefined;
+  }
+  const message = error.message;
+  return SAMPLING_PARAMS.find((param) => param in body && message.includes(param));
+}
+
+/** Builds the error thrown for a failed Anthropic request, with guidance for known cases. */
+export function describeAnthropicFailure(status: number, body: string, model: string): string {
+  const error = parseAnthropicError(body);
+  if (status === 404 && error.type === "not_found_error" && /model/i.test(error.message ?? "")) {
+    return (
+      `Anthropic model "${model}" is not available (404 not_found_error). It may be retired or misspelled. ` +
+      `Pick a current model, for example ${DEFAULT_ANTHROPIC_MODEL}, in the chat model node's Model field and save the node.`
+    );
+  }
+  return `Anthropic request failed (${status}): ${body}`;
+}
+
 export class AnthropicProviderAdapter implements LLMProviderAdapter {
   readonly definition: ProviderDefinition = {
     id: "anthropic",
@@ -11,7 +75,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       type: "object",
       properties: {
         baseUrl: { type: "string", format: "uri" },
-        model: { type: "string", default: "claude-3-5-sonnet-latest" },
+        model: { type: "string", default: DEFAULT_ANTHROPIC_MODEL },
         secretRef: { type: "object", properties: { secretId: { type: "string" } } }
       },
       required: ["model"]
@@ -24,7 +88,8 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       throw new Error("Anthropic requires API key via secretRef or ANTHROPIC_API_KEY env var");
     }
 
-    const model = request.provider.model || "claude-3-5-sonnet-latest";
+    const model = request.provider.model || DEFAULT_ANTHROPIC_MODEL;
+    const rejectsSampling = anthropicModelRejectsSampling(model);
     const rawBaseUrl = request.provider.baseUrl || "https://api.anthropic.com/v1";
     const normalizedBaseUrl = rawBaseUrl.replace(/\/+$/, "");
     const endpoint = normalizedBaseUrl.endsWith("/messages") ? normalizedBaseUrl : `${normalizedBaseUrl}/messages`;
@@ -75,11 +140,18 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       model,
       system: system.trim() || undefined,
       messages: anthropicMessages,
-      max_tokens: request.provider.maxTokens || 4096,
-      temperature: request.provider.temperature ?? 0.2
+      max_tokens: request.provider.maxTokens || 4096
     };
 
-    if (request.provider.extra?.enableThinking === true) {
+    // Newer models reject sampling parameters outright, so they are only sent to
+    // models that accept them, and only when the config sets one.
+    if (!rejectsSampling && typeof request.provider.temperature === "number" && Number.isFinite(request.provider.temperature)) {
+      body.temperature = request.provider.temperature;
+    }
+
+    if (request.provider.extra?.enableThinking === true && rejectsSampling) {
+      body.thinking = { type: "adaptive" };
+    } else if (request.provider.extra?.enableThinking === true) {
       const thinkingTokens =
         typeof request.provider.extra.thinkingTokens === "number" && Number.isFinite(request.provider.extra.thinkingTokens)
           ? Math.max(1, Math.floor(request.provider.extra.thinkingTokens))
@@ -95,19 +167,34 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
     }
 
     const startedAt = Date.now();
-    const response = await resilientFetch(endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify(body)
-    }, { timeoutMs: 60_000, maxRetries: 3, provider: "anthropic" });
+    const send = () =>
+      resilientFetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01"
+        },
+        body: JSON.stringify(body)
+      }, { timeoutMs: 60_000, maxRetries: 3, provider: "anthropic" });
+
+    let response = await send();
+
+    if (!response.ok && response.status === 400) {
+      // A model the capability check does not know yet may still reject a
+      // sampling parameter; drop the one it names and retry once.
+      const respBody = await response.text();
+      const rejected = rejectedSamplingParam(body, parseAnthropicError(respBody));
+      if (!rejected) {
+        throw new Error(describeAnthropicFailure(response.status, respBody, model));
+      }
+      delete body[rejected];
+      response = await send();
+    }
 
     if (!response.ok) {
       const respBody = await response.text();
-      throw new Error(`Anthropic request failed (${response.status}): ${respBody}`);
+      throw new Error(describeAnthropicFailure(response.status, respBody, model));
     }
 
     const json = (await response.json()) as any;

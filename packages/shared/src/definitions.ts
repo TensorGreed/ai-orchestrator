@@ -336,8 +336,7 @@ export const nodeDefinitions: NodeDefinition[] = [
       required: ["model"]
     },
     sampleConfig: {
-      model: "claude-3-5-sonnet-latest",
-      temperature: 0.2,
+      model: "claude-sonnet-5-5",
       maxTokens: 1024,
       promptKey: "prompt",
       systemPromptKey: "system_prompt"

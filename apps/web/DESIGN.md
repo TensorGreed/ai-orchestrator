@@ -118,6 +118,8 @@ Dark is the default (`:root`).
   existing input inspection), **Output** (existing output, pin / unpin), **Trace** (status,
   duration, tokens, latency, error + remediation for the last run).
 - Footer: Cancel · Save changes (sticky). Unsaved edits show a dot on Save.
+- Closing with unsaved edits (Esc, ×, Cancel, or opening another node) asks first in a
+  small prompt over the drawer: Keep editing · Discard · Save. With no edits it closes at once.
 - Agent nodes get a **Slots** section at the top of Parameters listing model / memory /
   tools / workers with "+ attach" actions.
 
