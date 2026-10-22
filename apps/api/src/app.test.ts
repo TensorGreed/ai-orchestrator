@@ -929,6 +929,83 @@ describe("auth + rbac API", () => {
       });
     }
   });
+
+  it("tests an Anthropic connection without forcing a temperature the model rejects", async () => {
+    const context = await createTestContext();
+    const builderCookie = await createRoleSession(context, {
+      email: "builder-provider-test-anthropic@example.com",
+      password: "BuilderPass123!",
+      role: "builder"
+    });
+    const secretRef = context.secretService.createSecret({
+      name: "anthropic-test-key",
+      provider: "anthropic",
+      value: "anthropic-secret"
+    });
+
+    const bodies: Array<Record<string, unknown>> = [];
+    const server = http.createServer((request, response) => {
+      let raw = "";
+      request.on("data", (chunk) => {
+        raw += chunk;
+      });
+      request.on("end", () => {
+        const body = JSON.parse(raw) as Record<string, unknown>;
+        bodies.push(body);
+        if ("temperature" in body) {
+          response.writeHead(400, { "content-type": "application/json" });
+          response.end(
+            JSON.stringify({
+              type: "error",
+              error: { type: "invalid_request_error", message: "`temperature` is deprecated for this model." }
+            })
+          );
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            content: [{ type: "text", text: "connection_ok" }],
+            usage: { input_tokens: 5, output_tokens: 2 }
+          })
+        );
+      });
+    });
+
+    try {
+      await new Promise<void>((resolve) => {
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Unable to bind test Anthropic endpoint");
+      }
+      const response = await context.app.inject({
+        method: "POST",
+        url: "/api/providers/test",
+        headers: {
+          cookie: builderCookie
+        },
+        payload: {
+          provider: {
+            providerId: "anthropic",
+            model: "claude-sonnet-5-5",
+            secretRef,
+            baseUrl: `http://127.0.0.1:${address.port}/v1`
+          }
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json<{ ok: boolean; preview: string }>()).toMatchObject({ ok: true, preview: "connection_ok" });
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).not.toHaveProperty("temperature");
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
 });
 
 describe("secured webhook execution", () => {

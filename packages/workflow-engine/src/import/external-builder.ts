@@ -1856,7 +1856,7 @@ const REGISTRATIONS: readonly HandlerRegistration[] = [
   { sourceType: `${BASE}stickyNote`, targetType: "sticky_note", category: "core", notes: "", handler: stickyNote },
   { sourceType: `${LANGCHAIN}lmChatOpenAi`, targetType: "openai_chat_model", category: "ai", notes: "", handler: chatModelHandler("openai_chat_model", { model: "gpt-4o-mini" }) },
   { sourceType: `${LANGCHAIN}lmOpenAi`, targetType: "openai_chat_model", category: "ai", notes: "Completion model approximated as a chat model.", handler: chatModelHandler("openai_chat_model", { model: "gpt-4o-mini" }, "Completion model approximated as a chat model.") },
-  { sourceType: `${LANGCHAIN}lmChatAnthropic`, targetType: "anthropic_chat_model", category: "ai", notes: "", handler: chatModelHandler("anthropic_chat_model", { model: "claude-3-5-sonnet-latest" }) },
+  { sourceType: `${LANGCHAIN}lmChatAnthropic`, targetType: "anthropic_chat_model", category: "ai", notes: "", handler: chatModelHandler("anthropic_chat_model", { model: "claude-sonnet-5-5" }) },
   { sourceType: `${LANGCHAIN}lmChatGoogleGemini`, targetType: "google_gemini_chat_model", category: "ai", notes: "", handler: chatModelHandler("google_gemini_chat_model", { model: "gemini-2.5-flash" }) },
   { sourceType: `${LANGCHAIN}lmChatOllama`, targetType: "ollama_chat_model", category: "ai", notes: "Base URL defaults to the local Ollama endpoint.", handler: chatModelHandler("ollama_chat_model", { model: "llama3.1", baseUrl: "http://localhost:11434/v1" }) },
   { sourceType: `${LANGCHAIN}lmOllama`, targetType: "ollama_chat_model", category: "ai", notes: "Base URL defaults to the local Ollama endpoint.", handler: chatModelHandler("ollama_chat_model", { model: "llama3.1", baseUrl: "http://localhost:11434/v1" }) },

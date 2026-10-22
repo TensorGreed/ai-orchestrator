@@ -24,6 +24,9 @@ describe("Phase 8.2 — FinOps cost rollup", () => {
     it("ships defaults for the major providers", () => {
       expect(DEFAULT_PRICING.openai!["gpt-4o"]).toBeDefined();
       expect(DEFAULT_PRICING.anthropic!["claude-sonnet-4"]).toBeDefined();
+      expect(DEFAULT_PRICING.anthropic!["claude-sonnet-5-5"]).toEqual({ inputUsdPer1M: 2, outputUsdPer1M: 10, cachedInputUsdPer1M: 0.2 });
+      expect(DEFAULT_PRICING.anthropic!["claude-opus-5-5"]).toEqual({ inputUsdPer1M: 4, outputUsdPer1M: 20, cachedInputUsdPer1M: 0.2 });
+      expect(DEFAULT_PRICING.anthropic!["claude-3-5-sonnet"]).toBeDefined();
       expect(DEFAULT_PRICING.gemini!["gemini-2.0-flash"]).toBeDefined();
     });
 

@@ -546,6 +546,38 @@ function buildSimpleChatProvider(
   };
 }
 
+/** Env var each hosted chat model node falls back to when it has no API key secret. */
+const CHAT_MODEL_API_KEY_ENV: Record<string, { env: string; label: string }> = {
+  openai_chat_model: { env: "OPENAI_API_KEY", label: "OpenAI" },
+  anthropic_chat_model: { env: "ANTHROPIC_API_KEY", label: "Anthropic" },
+  google_gemini_chat_model: { env: "GEMINI_API_KEY", label: "Gemini" }
+};
+
+/**
+ * Fails with a message that names the chat model node when it has no API key
+ * secret and the server has no env var to fall back to. The provider adapters
+ * only know the provider, not which node on the canvas holds its config.
+ */
+export function assertChatModelCredentials(
+  node: WorkflowNode,
+  provider: LLMProviderConfig,
+  env: Record<string, string | undefined> = process.env
+): void {
+  const requirement = CHAT_MODEL_API_KEY_ENV[node.type];
+  if (!requirement || provider.secretRef?.secretId) {
+    return;
+  }
+  if (typeof env[requirement.env] === "string" && env[requirement.env]!.trim()) {
+    return;
+  }
+  const nodeName = node.name?.trim() || node.type;
+  throw new Error(
+    `Chat model node "${nodeName}" (${node.id}) has no ${requirement.label} API key. ` +
+      `Open the node, select an API key secret, and save the node and the workflow ` +
+      `(or set ${requirement.env} on the API server).`
+  );
+}
+
 function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | undefined {
   const nodeConfig = toRecord(node.config);
   if (node.type === "llm_call") {
@@ -557,7 +589,7 @@ function buildProviderFromModelNode(node: WorkflowNode): LLMProviderConfig | und
   }
 
   if (node.type === "anthropic_chat_model") {
-    return buildSimpleChatProvider("anthropic", nodeConfig, "claude-3-5-sonnet-latest");
+    return buildSimpleChatProvider("anthropic", nodeConfig, "claude-sonnet-5-5");
   }
 
   if (node.type === "ollama_chat_model") {
@@ -3252,6 +3284,7 @@ async function executeNode(
       if (!provider) {
         throw new Error(`${node.name || node.type} requires a valid model configuration.`);
       }
+      assertChatModelCredentials(node, provider);
 
       const promptKey = typeof config.promptKey === "string" ? config.promptKey : "prompt";
       const systemPromptKey = typeof config.systemPromptKey === "string" ? config.systemPromptKey : "system_prompt";
@@ -3335,6 +3368,7 @@ async function executeNode(
         temperature: typeof config.temperature === "number" && Number.isFinite(config.temperature) ? config.temperature : undefined,
         maxTokens: typeof config.maxTokens === "number" && Number.isFinite(config.maxTokens) ? Math.max(1, Math.floor(config.maxTokens)) : undefined
       };
+      assertChatModelCredentials(node, provider);
 
       return runLlmNode({
         nodeId: node.id,
@@ -4463,6 +4497,9 @@ async function executeNode(
       const provider = attachedModelNode ? buildProviderFromModelNode(attachedModelNode) : undefined;
       if (!provider) {
         throw new Error("Agent Orchestrator requires an attached Chat Model node on chat_model.");
+      }
+      if (attachedModelNode) {
+        assertChatModelCredentials(attachedModelNode, provider);
       }
 
       const maxIterations = typeof config.maxIterations === "number" ? Math.max(1, Math.floor(config.maxIterations)) : 4;

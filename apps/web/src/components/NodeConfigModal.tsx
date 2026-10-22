@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import type {
   LLMProviderConfig,
   MCPToolDefinition,
@@ -62,8 +62,24 @@ export interface NodeSlots {
   worker: string[];
 }
 
+/** Lets the host ask the inspector to close without losing unsaved edits. */
+export interface NodeInspectorHandle {
+  /** True when the form holds edits that have not been saved to the node. */
+  isDirty: () => boolean;
+  /**
+   * Closes the inspector, asking first when there are unsaved edits. `next` runs
+   * instead of `onClose` once the edits are saved or discarded (for example to
+   * open another node).
+   */
+  requestClose: (next?: () => void) => void;
+}
+
+type PendingClose = { next?: () => void };
+
 export interface NodeInspectorProps {
   node: EditorNode;
+  /** Imperative handle used by the host to guard selection changes. */
+  controlRef?: Ref<NodeInspectorHandle>;
   /** Last-run trace for this node (status, duration, telemetry, error). */
   trace?: NodeTrace;
   /** Attached agent ports (agent_orchestrator / supervisor_node only). */
@@ -487,6 +503,53 @@ function NumberField({
       />
     </label>
   );
+}
+
+/** A number input that may be left blank; blank means "not set" (undefined). */
+function OptionalNumberField({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  step,
+  placeholder,
+  help
+}: {
+  label: string;
+  value: number | undefined;
+  onChange: (next: number | undefined) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  placeholder?: string;
+  help?: React.ReactNode;
+}) {
+  return (
+    <label className="cfg-field">
+      <FieldLabel label={label} help={help} />
+      <input
+        type="number"
+        value={typeof value === "number" && Number.isFinite(value) ? value : ""}
+        min={min}
+        max={max}
+        step={step}
+        placeholder={placeholder}
+        onChange={(event) => {
+          const raw = event.target.value.trim();
+          const parsed = Number(raw);
+          onChange(raw === "" || !Number.isFinite(parsed) ? undefined : parsed);
+        }}
+      />
+    </label>
+  );
+}
+
+const ANTHROPIC_TEMPERATURE_HELP =
+  "Optional. Leave blank to use the model's default. Newer Claude models ignore or reject temperature, so it is only sent to models that accept it.";
+
+function readOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function SelectField({
@@ -1057,7 +1120,8 @@ export function NodeInspector({
   onSave,
   onExecuteStep,
   onPinNodeOutput,
-  onUnpinNodeOutput
+  onUnpinNodeOutput,
+  controlRef
 }: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
@@ -1070,16 +1134,41 @@ export function NodeInspector({
   const [resizing, setResizing] = useState(false);
   const resizeOrigin = useRef<{ startX: number; startWidth: number } | null>(null);
   const isAgentNode = node.data.nodeType === "agent_orchestrator" || node.data.nodeType === "supervisor_node";
+  const [pendingClose, setPendingClose] = useState<PendingClose | null>(null);
+  const isDirtyRef = useRef(false);
+  const unsavedDialogTitleId = useId();
+  const keepEditingButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  const requestClose = useCallback(
+    (next?: () => void) => {
+      if (!isDirtyRef.current) {
+        (next ?? onClose)();
+        return;
+      }
+      setPendingClose({ next });
+    },
+    [onClose]
+  );
+
+  useImperativeHandle(controlRef, () => ({ isDirty: () => isDirtyRef.current, requestClose }), [requestClose]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       event.preventDefault();
-      onClose();
+      if (pendingClose) {
+        setPendingClose(null);
+        return;
+      }
+      requestClose();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [pendingClose, requestClose]);
+
+  useEffect(() => {
+    if (pendingClose) keepEditingButtonRef.current?.focus();
+  }, [pendingClose]);
 
   const handleResizeStart = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
@@ -2138,7 +2227,7 @@ export function NodeInspector({
         node.data.nodeType === "openai_chat_model"
           ? "gpt-4o-mini"
           : node.data.nodeType === "anthropic_chat_model"
-            ? "claude-3-5-sonnet-latest"
+            ? "claude-sonnet-5-5"
             : node.data.nodeType === "ollama_chat_model"
               ? "llama3.1"
               : "";
@@ -2385,14 +2474,27 @@ export function NodeInspector({
             })
         })}
         <div className="cfg-grid-2">
-          <NumberField
-            label="Temperature"
-            value={toNumberValue(provider.temperature, 0.2)}
-            min={0}
-            max={2}
-            step={0.1}
-            onChange={(next) => setProvider({ temperature: next })}
-          />
+          {toStringValue(provider.providerId) === "anthropic" ? (
+            <OptionalNumberField
+              label="Temperature"
+              value={readOptionalNumber(provider.temperature)}
+              min={0}
+              max={1}
+              step={0.1}
+              placeholder="Model default"
+              help={ANTHROPIC_TEMPERATURE_HELP}
+              onChange={(next) => setProvider({ temperature: next })}
+            />
+          ) : (
+            <NumberField
+              label="Temperature"
+              value={toNumberValue(provider.temperature, 0.2)}
+              min={0}
+              max={2}
+              step={0.1}
+              onChange={(next) => setProvider({ temperature: next })}
+            />
+          )}
           <NumberField
             label="Max Tokens"
             value={toNumberValue(provider.maxTokens, 1024)}
@@ -4453,14 +4555,27 @@ export function NodeInspector({
           onChange: (next) => setConfig((current) => ({ ...current, model: next }))
         })}
         <div className="cfg-grid-2">
-          <NumberField
-            label="Temperature"
-            value={toNumberValue(config.temperature, 0.2)}
-            min={0}
-            max={2}
-            step={0.1}
-            onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
-          />
+          {options.providerId === "anthropic" ? (
+            <OptionalNumberField
+              label="Temperature"
+              value={readOptionalNumber(config.temperature)}
+              min={0}
+              max={1}
+              step={0.1}
+              placeholder="Model default"
+              help={ANTHROPIC_TEMPERATURE_HELP}
+              onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
+            />
+          ) : (
+            <NumberField
+              label="Temperature"
+              value={toNumberValue(config.temperature, 0.2)}
+              min={0}
+              max={2}
+              step={0.1}
+              onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
+            />
+          )}
           <NumberField
             label="Max Tokens"
             value={toNumberValue(config.maxTokens, 1024)}
@@ -4535,14 +4650,27 @@ export function NodeInspector({
           onChange: (next) => setConfig((current) => ({ ...current, model: next }))
         })}
         <div className="cfg-grid-2">
-          <NumberField
-            label="Temperature"
-            value={toNumberValue(config.temperature, 0.2)}
-            min={0}
-            max={2}
-            step={0.1}
-            onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
-          />
+          {apiProvider === "anthropic" ? (
+            <OptionalNumberField
+              label="Temperature"
+              value={readOptionalNumber(config.temperature)}
+              min={0}
+              max={1}
+              step={0.1}
+              placeholder="Model default"
+              help={ANTHROPIC_TEMPERATURE_HELP}
+              onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
+            />
+          ) : (
+            <NumberField
+              label="Temperature"
+              value={toNumberValue(config.temperature, 0.2)}
+              min={0}
+              max={2}
+              step={0.1}
+              onChange={(next) => setConfig((current) => ({ ...current, temperature: next }))}
+            />
+          )}
           <NumberField
             label="Max Tokens"
             value={toNumberValue(config.maxTokens, 1024)}
@@ -5448,8 +5576,8 @@ export function NodeInspector({
       case "anthropic_chat_model":
         return renderDirectChatModelParameters({
           providerId: "anthropic",
-          defaultModel: "claude-3-5-sonnet-latest",
-          modelPlaceholder: "claude-3-5-sonnet-latest",
+          defaultModel: "claude-sonnet-5-5",
+          modelPlaceholder: "claude-sonnet-5-5",
           secretLabel: "Anthropic API Key",
           secretProvider: "anthropic",
           help: "Uses the Anthropic API key from the selected secret or ANTHROPIC_API_KEY on the API server."
@@ -8771,6 +8899,7 @@ export function NodeInspector({
     if ((nodeColor ?? undefined) !== (node.data.color ?? undefined)) return true;
     return stableStringify(getConfigForSave()) !== stableStringify(stripAgentOnlyKeys(node.data.nodeType, savedConfig));
   }, [config, label, node.data, nodeColor, nodeDisabled]);
+  isDirtyRef.current = isDirty;
 
   const handleSave = () =>
     onSave({
@@ -8779,6 +8908,14 @@ export function NodeInspector({
       disabled: nodeDisabled || undefined,
       color: nodeColor
     });
+
+  const resolvePendingClose = (choice: "save" | "discard" | "keep") => {
+    const pending = pendingClose;
+    setPendingClose(null);
+    if (!pending || choice === "keep") return;
+    if (choice === "save") handleSave();
+    (pending.next ?? (choice === "discard" ? onClose : undefined))?.();
+  };
 
   const renderSlots = () => {
     if (!isAgentNode) return null;
@@ -9094,7 +9231,7 @@ export function NodeInspector({
         <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep}>
           Run this node
         </button>
-        <button type="button" className="insp-close" aria-label="Close inspector" onClick={onClose}>
+        <button type="button" className="insp-close" aria-label="Close inspector" onClick={() => requestClose()}>
           ×
         </button>
       </header>
@@ -9133,7 +9270,7 @@ export function NodeInspector({
       </div>
 
       <footer className="insp-foot">
-        <button type="button" className="insp-btn" onClick={onClose}>
+        <button type="button" className="insp-btn" onClick={() => requestClose()}>
           Cancel
         </button>
         <button type="button" className="insp-btn primary" onClick={handleSave} data-dirty={isDirty ? "true" : undefined}>
@@ -9141,6 +9278,34 @@ export function NodeInspector({
           {isDirty ? <span className="insp-dirty" aria-hidden="true" /> : null}
         </button>
       </footer>
+      {pendingClose ? (
+        <div className="insp-unsaved-backdrop">
+          <div
+            className="insp-unsaved"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby={unsavedDialogTitleId}
+            data-testid="insp-unsaved-dialog"
+          >
+            <h3 id={unsavedDialogTitleId}>Unsaved changes</h3>
+            <p>
+              {label || node.data.label} has changes that are not saved yet. Save them to the node, discard them, or keep
+              editing.
+            </p>
+            <div className="insp-unsaved-actions">
+              <button type="button" className="insp-btn" ref={keepEditingButtonRef} onClick={() => resolvePendingClose("keep")}>
+                Keep editing
+              </button>
+              <button type="button" className="insp-btn danger" onClick={() => resolvePendingClose("discard")}>
+                Discard
+              </button>
+              <button type="button" className="insp-btn primary" onClick={() => resolvePendingClose("save")}>
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </aside>
   );
 }

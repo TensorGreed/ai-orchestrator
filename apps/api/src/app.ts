@@ -7260,10 +7260,14 @@ export function createApp(
         {
           provider: {
             ...testProvider,
+            // Anthropic's current models reject sampling parameters, so the probe
+            // only sends a temperature there when the node sets one.
             temperature:
               typeof testProvider.temperature === "number" && Number.isFinite(testProvider.temperature)
                 ? testProvider.temperature
-                : 0,
+                : testProvider.providerId === "anthropic"
+                  ? undefined
+                  : 0,
             maxTokens:
               typeof testProvider.maxTokens === "number" && Number.isFinite(testProvider.maxTokens)
                 ? Math.max(1, Math.floor(testProvider.maxTokens))

@@ -98,7 +98,13 @@ import { StickyNoteNode } from "./components/StickyNoteNode";
 import { KeyboardShortcutsPanel } from "./components/KeyboardShortcutsPanel";
 import { RadialActionRing, type RadialAction } from "./components/RadialActionRing";
 import { AttachmentSpokeEdge, WorkflowCanvasEdge } from "./components/WorkflowCanvasEdge";
-import { NodeInspector, buildNodeSlots, buildNodeTrace, type NodeInputOption } from "./components/NodeConfigModal";
+import {
+  NodeInspector,
+  buildNodeSlots,
+  buildNodeTrace,
+  type NodeInputOption,
+  type NodeInspectorHandle
+} from "./components/NodeConfigModal";
 import { LeftMenuBar } from "./components/LeftMenuBar";
 import { StudioHeader } from "./components/StudioHeader";
 import { deriveRunStatus, isMcpMode, type StudioMode } from "./components/studio-layout-types";
@@ -4056,9 +4062,19 @@ function StudioApp() {
     [buildCurrentWorkflow, currentWorkflow, currentWorkflowExists, handleApiError, persistWorkflow, setCurrentWorkflow]
   );
 
-  const openNodeConfig = useCallback((nodeId: string) => {
-    setEditingNodeId(nodeId);
-  }, []);
+  const inspectorRef = useRef<NodeInspectorHandle | null>(null);
+  const openNodeConfig = useCallback(
+    (nodeId: string) => {
+      const inspector = inspectorRef.current;
+      if (editingNodeId && editingNodeId !== nodeId && inspector?.isDirty()) {
+        // Ask before the open inspector's unsaved edits are replaced by another node.
+        inspector.requestClose(() => setEditingNodeId(nodeId));
+        return;
+      }
+      setEditingNodeId(nodeId);
+    },
+    [editingNodeId]
+  );
 
   // --- Radial action ring (Phase 4.1 / L2M distinct UI) ------------------------
   const soloSelectedNode = useMemo(() => {
@@ -5625,6 +5641,7 @@ function StudioApp() {
       )}
       {editingNode && (
         <NodeInspector
+          controlRef={inspectorRef}
           node={editingNode}
           trace={buildNodeTrace(editingNode.id, executionResult, executionStatuses, telemetryByNodeId)}
           slots={buildNodeSlots(editingNode.id, nodes, edges)}
