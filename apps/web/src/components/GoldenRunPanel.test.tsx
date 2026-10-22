@@ -218,6 +218,32 @@ describe("GoldenRunViewer", () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it("keeps Delete out of the candidate panel and does not delete when confirm is declined", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchReplayRecording).mockResolvedValue({ recording: recording() });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const onClose = vi.fn();
+    const { container } = render(<GoldenRunViewer recordingId="rec_123456789abc" canReplay onClose={onClose} onChanged={vi.fn()} />);
+    await screen.findByRole("dialog", { name: /Refund baseline/ });
+    const toolbar = container.querySelector(".golden-toolbar") as HTMLElement;
+    expect(within(toolbar).getByRole("button", { name: "Replay" })).toBeInTheDocument();
+    const del = screen.getByRole("button", { name: "Delete" });
+    expect(toolbar.contains(del)).toBe(false);
+    expect(container.querySelector("header")?.contains(del)).toBe(true);
+    await user.click(del);
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(api.deleteReplayRecording).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("hides Delete for read-only viewers", async () => {
+    vi.mocked(api.fetchReplayRecording).mockResolvedValue({ recording: recording() });
+    render(<GoldenRunViewer recordingId="rec_123456789abc" canReplay={false} onClose={vi.fn()} />);
+    await screen.findByRole("dialog", { name: /Refund baseline/ });
+    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+  });
+
   it("warns when the golden run has no recorded MCP calls and shows load errors", async () => {
     vi.mocked(api.fetchReplayRecording).mockResolvedValueOnce({ recording: recording({ capabilities: { mcp: "none", models: "live", memory: "empty", workflowSource: "current" } }) });
     const { unmount } = render(<GoldenRunViewer recordingId="rec_1" canReplay={false} onClose={vi.fn()} />);

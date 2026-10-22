@@ -419,9 +419,16 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
               </p>
             )}
           </div>
-          <button type="button" className="pg-btn ghost small" onClick={onClose} aria-label="Close golden run">
-            Close
-          </button>
+          <div className="golden-header-actions">
+            {canReplay && recording && (
+              <button type="button" className="pg-btn small ghost danger" onClick={() => void remove()} disabled={deleting}>
+                Delete
+              </button>
+            )}
+            <button type="button" className="pg-btn ghost small" onClick={onClose} aria-label="Close golden run">
+              Close
+            </button>
+          </div>
         </header>
         <div className="pg-modal-body">
           {!recording && !error && <div className="page-hint">Loading golden run…</div>}
@@ -470,9 +477,6 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
                   </label>
                   <button type="button" className="pg-btn small primary" onClick={() => void replay()} disabled={running}>
                     {running ? "Replaying…" : "Replay"}
-                  </button>
-                  <button type="button" className="pg-btn small ghost danger" onClick={() => void remove()} disabled={deleting}>
-                    Delete
                   </button>
                 </div>
               )}

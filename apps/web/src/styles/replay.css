@@ -35,6 +35,13 @@
   width: min(920px, 100%);
 }
 
+.golden-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
 .golden-save-modal {
   width: min(560px, 100%);
 }
