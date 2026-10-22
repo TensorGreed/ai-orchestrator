@@ -1,4 +1,5 @@
-import { excerptEvidence, shannonEntropy } from "../masking";
+import { shannonEntropy } from "../masking";
+import { scrubbedExcerpt } from "./dlp";
 import type { DetectorContext, GuardDetector, GuardFinding, GuardInput } from "../types";
 import { clampScore } from "../types";
 
@@ -116,7 +117,7 @@ export function createExfiltrationDetector(): GuardDetector {
           category: "exfiltration",
           score,
           spans: [{ start, end }],
-          evidence: excerptEvidence(text, { start, end }, 60),
+          evidence: scrubbedExcerpt(text, { start, end }, 60),
           message: `${kind}${signal.reasons.length ? ` (${[...signal.reasons, ...reasonsExtra].join(", ")})` : reasonsExtra.length ? ` (${reasonsExtra.join(", ")})` : ""}`,
           metadata: { kind, reasons: [...signal.reasons, ...reasonsExtra], host: safeHost(url) }
         });

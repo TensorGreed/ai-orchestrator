@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as nodePath from "node:path";
-import { excerptEvidence } from "../masking";
+import { scrubbedExcerpt } from "./dlp";
 import type { DetectorContext, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 
 export const PATH_GUARD_DETECTOR_ID = "tool.path";
@@ -129,7 +129,7 @@ export function createPathGuardDetector(defaults: { realpath?: RealpathFn } = {}
           category: "path_traversal",
           score: check.reason === "realpath_failed" ? 0.6 : 1,
           spans: [span],
-          evidence: excerptEvidence(context.text, span),
+          evidence: scrubbedExcerpt(context.text, span),
           message: check.message ?? "Path not allowed",
           metadata: { reason: check.reason, path: candidate.path }
         });
