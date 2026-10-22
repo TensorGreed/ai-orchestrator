@@ -216,7 +216,7 @@ describe("GoldenRunViewer", () => {
     expect(viewer).toHaveTextContent(/code nodes are answered from the recording/i);
     expect(viewer).toHaveTextContent(/expressions inside the nodes that do run are still evaluated and can make network calls/i);
     // A pass never hides an untested node: new nodes and changed code make the replay inconclusive.
-    expect(viewer).toHaveTextContent(/could not complete if it reaches a node the golden run never saw, or a code node whose code changed/i);
+    expect(viewer).toHaveTextContent(/is inconclusive if it reaches a node the golden run never saw, a code node whose code changed/i);
     await waitFor(() => expect(screen.getByRole("option", { name: /Version 2/ })).toBeInTheDocument());
     await user.selectOptions(screen.getByLabelText("Candidate"), "2");
     await user.selectOptions(screen.getByLabelText("MCP calls"), "lenient");
@@ -268,8 +268,8 @@ describe("GoldenRunViewer", () => {
     expect(await screen.findByText("Golden run not found")).toBeInTheDocument();
   });
 
-  it("labels an inconclusive replay as could not complete", () => {
+  it("labels an inconclusive replay as inconclusive", () => {
     render(<ReplayResultView result={result({ verdict: "error", reasons: ["1 MCP call had no recorded answer"] })} />);
-    expect(screen.getByText("Could not complete")).toBeInTheDocument();
+    expect(screen.getByText("Inconclusive")).toBeInTheDocument();
   });
 });

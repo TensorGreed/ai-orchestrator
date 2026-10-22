@@ -809,6 +809,50 @@ describe("golden runs with side effects stubbed", () => {
     expect(changed.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "config_changed", nodeId: "shout", blocking: true })]));
   });
 
+  it("calls a replay inconclusive when a stubbed write node is called more often than recorded", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    const loopWorkflow = (list: string[]): Workflow =>
+      ({
+        id: "wf-loop-write",
+        name: "Loop write",
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        projectId: "default",
+        nodes: [
+          { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+          { id: "items", type: "set_node", name: "Items", position: { x: 150, y: 0 }, config: { assignments: [{ key: "list", valueTemplate: JSON.stringify(list) }] } },
+          { id: "loop", type: "loop_node", name: "Loop", position: { x: 300, y: 0 }, config: { inputKey: "list", itemVariable: "item" } },
+          { id: "post", type: "http_request", name: "Post", position: { x: 450, y: 0 }, config: { method: "POST", urlTemplate: `${counter.base}/post`, retry: { enabled: false } } },
+          { id: "output", type: "output", name: "Output", position: { x: 600, y: 0 }, config: { responseTemplate: "done" } }
+        ],
+        edges: [
+          { id: "e1", source: "start", target: "items" },
+          { id: "e2", source: "items", target: "loop" },
+          { id: "e3", source: "loop", target: "post" },
+          { id: "e4", source: "post", target: "output" }
+        ]
+      }) as Workflow;
+    context.store.upsertWorkflow(loopWorkflow(["a", "b"]));
+    const run = (await call(context, "POST", "/api/workflows/wf-loop-write/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
+    expect(run.status, JSON.stringify(run)).toBe("success");
+    expect(counter.count("/post")).toBe(2);
+    const golden = await saveGolden(context, builder.cookie, run.executionId);
+
+    const same = await replay(context, builder.cookie, golden.id);
+    expect(same.verdict, JSON.stringify(same.reasons)).toBe("pass");
+    context.store.upsertWorkflow(loopWorkflow(["a"]));
+    expect((await replay(context, builder.cookie, golden.id)).diff.health.some((warning) => warning.kind === "recording_overrun")).toBe(false);
+
+    context.store.upsertWorkflow(loopWorkflow(["a", "b", "c"]));
+    const over = await replay(context, builder.cookie, golden.id);
+    expect(over.verdict).toBe("error");
+    expect(over.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "recording_overrun", nodeId: "post", blocking: true })]));
+    expect(over.diff.health.find((warning) => warning.kind === "recording_overrun")!.message).toContain("post");
+    expect(counter.count("/post")).toBe(2);
+  });
+
   it("truncates the largest node outputs to fit REPLAY_RECORDING_MAX_BYTES", async () => {
     const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
     const builder = await login(context, "builder");

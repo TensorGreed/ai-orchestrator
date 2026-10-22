@@ -19,7 +19,7 @@
  *
  * Exit codes: 0 clean, 1 the check found problems (or a request failed),
  * 2 usage errors, 3 an audit bundle is internally consistent but its signer
- * was not verified (no --public-key), 4 a replay could not complete (the
+ * was not verified (no --public-key), 4 a replay is inconclusive (the
  * recording could not answer the candidate or reached a node it never saw,
  * the request failed, or the answer was not a replay result). A replay whose flags the API rejects
  * (400) exits 2, like any usage error.
@@ -66,7 +66,7 @@ export const EXIT_FAILED = 1;
 export const EXIT_USAGE = 2;
 /** `l2m audit verify` without a trusted public key: consistent, but not proven to come from the deployment. */
 export const EXIT_SIGNER_UNVERIFIED = 3;
-/** `l2m replay run`: the replay could not complete, so it proves nothing either way. */
+/** `l2m replay run`: the replay is inconclusive, so it proves nothing either way. */
 export const EXIT_INCOMPLETE = 4;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -90,7 +90,7 @@ Exit codes: 0 clean (replay: pass), 1 problems found or a request failed
 (replay: the candidate differs from the golden run), 2 usage error
 (replay: also flags the API rejects),
 3 audit bundle signer not verified (no --public-key; see --trust-embedded-key),
-4 a replay could not complete.
+4 a replay is inconclusive.
 `;
 
 function write(stream: NodeJS.WritableStream, text: string): void {
@@ -485,13 +485,13 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
         write(io.stderr, `l2m: ${error.message}`);
         return EXIT_USAGE;
       }
-      write(io.stderr, `l2m: replay could not complete: ${error.message}`);
+      write(io.stderr, `l2m: replay is inconclusive: ${error.message}`);
       return EXIT_INCOMPLETE;
     }
     throw error;
   }
   if (!isReplayRunResponse(result)) {
-    write(io.stderr, "l2m: replay could not complete: the API's answer is not a replay result (is the CLI the same version as the API?)");
+    write(io.stderr, "l2m: replay is inconclusive: the API's answer is not a replay result (is the CLI the same version as the API?)");
     return EXIT_INCOMPLETE;
   }
   try {
@@ -503,7 +503,7 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
     if (judged.verdict === "fail") return EXIT_FAILED;
     return EXIT_INCOMPLETE;
   } catch (error) {
-    write(io.stderr, `l2m: replay could not complete: the API's answer could not be read (${error instanceof Error ? error.message : String(error)})`);
+    write(io.stderr, `l2m: replay is inconclusive: the API's answer could not be read (${error instanceof Error ? error.message : String(error)})`);
     return EXIT_INCOMPLETE;
   }
 }

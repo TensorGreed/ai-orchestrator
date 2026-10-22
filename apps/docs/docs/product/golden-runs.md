@@ -1,6 +1,6 @@
 # Golden runs and replay
 
-A **golden run** is a run you keep as a reference: what went in, what every node returned and which MCP calls it made. **Replay** runs a changed workflow (the draft, or a saved version) against that reference, with every node that reaches outside L2M and every code node answered from the recording, then shows what changed and gives a verdict: **pass**, **fail** or **could not complete**. Use it to check a prompt, model or tool change before it reaches anyone.
+A **golden run** is a run you keep as a reference: what went in, what every node returned and which MCP calls it made. **Replay** runs a changed workflow (the draft, or a saved version) against that reference, with every node that reaches outside L2M and every code node answered from the recording, then shows what changed and gives a verdict: **pass**, **fail** or **inconclusive**. Use it to check a prompt, model or tool change before it reaches anyone.
 
 Everything stays on your deployment.
 
@@ -18,7 +18,7 @@ Saving copies, into separate storage:
 
 A golden run is not removed by execution-history retention (`EXECUTION_HISTORY_RETENTION_DAYS`), cassette pruning or saved-version pruning. It is kept until you delete it, or until its workflow is deleted.
 
-**Record MCP calls** before you save a run whose workflow uses MCP tools. Without a cassette, a replay cannot answer MCP calls and reports that it could not complete.
+**Record MCP calls** before you save a run whose workflow uses MCP tools. Without a cassette, a replay cannot answer MCP calls and is inconclusive.
 
 ### Secrets
 
@@ -28,7 +28,7 @@ Scrubbing can change values that later nodes read: a pagination field named `tok
 
 ### Size
 
-`REPLAY_RECORDING_MAX_BYTES` (default 4 MiB) caps one golden run. When a run is bigger, the largest node outputs are replaced with a `{ "_replayTruncated": true, "bytes": … }` marker until it fits, and the golden run is marked **truncated**. A replay that has to answer a node from a cut output reports **could not complete** (CLI exit code 4), because the nodes after it would see the marker instead of the data. A run that still does not fit is refused (413). `REPLAY_RECORDINGS_MAX_PER_WORKFLOW` (default 500) caps how many one workflow can have, `REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW` (default 256 MiB) caps the bytes they use together, copied cassettes included, and `REPLAY_RECORDINGS_MAX_TOTAL_BYTES` (default 1 GiB) caps the bytes of every golden run in the deployment. Golden runs are never pruned automatically, so saving past any of these limits is refused (409) until you delete some. Sizes are first estimated from the raw run, so a run far over a limit is refused before the scrubbing work starts.
+`REPLAY_RECORDING_MAX_BYTES` (default 4 MiB) caps one golden run. When a run is bigger, the largest node outputs are replaced with a `{ "_replayTruncated": true, "bytes": … }` marker until it fits, and the golden run is marked **truncated**. A replay that has to answer a node from a cut output reports **inconclusive** (CLI exit code 4), because the nodes after it would see the marker instead of the data. A run that still does not fit is refused (413). `REPLAY_RECORDINGS_MAX_PER_WORKFLOW` (default 500) caps how many one workflow can have, `REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW` (default 256 MiB) caps the bytes they use together, copied cassettes included, and `REPLAY_RECORDINGS_MAX_TOTAL_BYTES` (default 1 GiB) caps the bytes of every golden run in the deployment. Golden runs are never pruned automatically, so saving past any of these limits is refused (409) until you delete some. Sizes are first estimated from the raw run, so a run far over a limit is refused before the scrubbing work starts.
 
 A run can be saved once. Saving the same run again is refused (409) with the id of the golden run it was saved as; the Runs page shows **Save as golden** only on runs that have not been saved.
 
@@ -39,7 +39,7 @@ The candidate runs on the golden run's input. Each node is classified by type:
 | Node class | Examples | In a replay |
 | --- | --- | --- |
 | Logic | Set, If, Switch, Merge, Sort, Output, Webhook Response | Runs, including the expressions in its fields (see below) |
-| Chart | Chart | Runs from inline data; a chart that needs a data URL or file is not loaded, and the replay could not complete |
+| Chart | Chart | Runs from inline data; a chart that needs a data URL or file is not loaded, and the replay is inconclusive |
 | Model | LLM Call, Agent Orchestrator, Supervisor, Output Parser (it can ask the model to repair its output) | Runs live |
 | Guard | Guard nodes and agent guard bindings | Runs |
 | MCP | MCP Tool, agent tools | Answered from the copied cassette only |
@@ -49,11 +49,11 @@ The candidate runs on the golden run's input. Each node is classified by type:
 | Approval, wait | Human Approval, Wait | Skipped: approvals take the recorded decision, waits pass through |
 | Unknown | A node type this version does not know | Treated as an external write |
 
-A node that has to be answered from the recording but has no recorded result (you added it after the golden run was saved, or a changed branch now reaches it) gets a stub output marked `_replayStub`. It never runs live, and the replay reports **could not complete** (CLI exit code 4): whatever the output says, that node was never tested. Save a golden run that goes through it.
+A node that has to be answered from the recording but has no recorded result (you added it after the golden run was saved, or a changed branch now reaches it) gets a stub output marked `_replayStub`. It never runs live, and the replay reports **inconclusive** (CLI exit code 4): whatever the output says, that node was never tested. Save a golden run that goes through it.
 
-A node answered from the recording inside a loop gets the recorded result of the same iteration. If the candidate calls it more often than the golden run did, the extra calls reuse the last recorded result; for a code node that makes the replay **could not complete**, for other nodes it is a warning.
+A node answered from the recording inside a loop gets the recorded result of the same iteration. If the candidate calls it more often than the golden run did, the extra calls cannot be judged and the replay is **inconclusive**, for every node that is answered from the recording.
 
-Code nodes are answered from the recording because neither runtime is cut off from the network: the JavaScript sandbox is a `vm` context, not an isolate, and Python runs as a subprocess. A replay therefore cannot test a change to a code node: when a code node's code or settings differ from the golden run's, the replay reports **could not complete** and names the node ("code changed since the golden run; code nodes are not executed in replay"). Save a new golden run after the change. A changed external read or write is answered from the recording too, with a warning that the change is untested.
+Code nodes are answered from the recording because neither runtime is cut off from the network: the JavaScript sandbox is a `vm` context, not an isolate, and Python runs as a subprocess. A replay therefore cannot test a change to a code node: when a code node's code or settings differ from the golden run's, the replay reports **inconclusive** and names the node ("code changed since the golden run; code nodes are not executed in replay"). Save a new golden run after the change. A changed external read or write is answered from the recording too, with a warning that the change is untested.
 
 ### What a replay does not stop yet
 
@@ -66,13 +66,13 @@ Replays never write to deployment state: session memory, the session tool cache 
 - **Strict** (default): each recorded call answers one call with the same server, tool and scrubbed arguments.
 - **Lenient**: as strict, but a call made more often than recorded reuses its last answer.
 
-A call the cassette cannot answer fails in the replay and makes the verdict **could not complete**. Neither mode ever calls a live MCP server.
+A call the cassette cannot answer fails in the replay and makes the verdict **inconclusive**. Neither mode ever calls a live MCP server.
 
 ## Reading the result
 
 The replay result shows:
 
-- **Verdict**: pass when the status did not get worse and the output is the same; fail when the candidate's status regressed or its output changed; could not complete when the recording could not answer the candidate or the comparison would not mean anything (an unanswered MCP call, a node the golden run never saw, a code node whose code changed or that ran more often than recorded, a cut recorded output, a chart that needs a data URL, an approval pause, an error before the run started).
+- **Verdict**: pass when the status did not get worse and the output is the same; fail when the candidate's status regressed or its output changed; inconclusive when the recording could not answer the candidate or the comparison would not mean anything (an unanswered MCP call, a node the golden run never saw, a code, read or write node that ran more often than recorded, or a code node whose code changed, a cut recorded output, a chart that needs a data URL, an approval pause, an error before the run started).
 - **Replay health**: stubbed nodes without a recording, recorded nodes whose configuration changed, recorded nodes called more often than recorded, unknown node types, unanswered MCP calls, charts that tried to load a data URL, cut recorded outputs, recorded values changed by scrubbing, and an output diff with more changes than it lists.
 - **Output**: each changed path with the golden run's and the replay's value. Whitespace differences are ignored, as are timing and id fields (`**._telemetry`, `**.durationMs`, `**.latencyMs`, `**.startedAt`, `**.completedAt`, `**.executionId`).
 - **Tool calls**: the two runs' tool calls side by side, aligned in order: same, arguments changed, outcome changed, new or missing.
@@ -103,4 +103,4 @@ l2m replay run --recording rec_… --version 12 --mcp strict --ignore-path "**.i
 | 0 | Pass |
 | 1 | The candidate differs from the golden run |
 | 2 | Usage error, including flags the API rejects (HTTP 400) and ignore paths over the limits |
-| 4 | The replay could not complete: the recording could not answer the candidate, the comparison would not mean anything, the request failed, or the answer was not a replay result |
+| 4 | The replay is inconclusive: the recording could not answer the candidate, the comparison would not mean anything, the request failed, or the answer was not a replay result |

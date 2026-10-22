@@ -98,7 +98,7 @@ describe("l2m replay run", () => {
       throw new Error("ECONNREFUSED");
     }) as unknown as typeof fetch);
     expect(await main(["replay", "run", "--recording", "rec_1"], down)).toBe(EXIT_INCOMPLETE);
-    expect(down.err()).toContain("could not complete");
+    expect(down.err()).toContain("is inconclusive");
   });
 
   it("exits 4, not 1, when a 2xx body is not a full replay result", async () => {
@@ -106,7 +106,7 @@ describe("l2m replay run", () => {
     for (const body of [partial, { ...response(diff()), diff: { ...diff(), health: "none" } }, { ...response(diff()), diff: { ...diff(), output: { equal: false } } }, "not a result", null]) {
       const cli = io(replyWith(200, body));
       expect(await main(["replay", "run", "--recording", "rec_1"], cli)).toBe(EXIT_INCOMPLETE);
-      expect(cli.err()).toContain("could not complete");
+      expect(cli.err()).toContain("is inconclusive");
     }
     const garbled = io((async () => new Response("<html>proxy error</html>", { status: 200 })) as unknown as typeof fetch);
     expect(await main(["replay", "run", "--recording", "rec_1"], garbled)).toBe(EXIT_INCOMPLETE);

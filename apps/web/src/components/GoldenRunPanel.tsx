@@ -172,7 +172,7 @@ export function SaveGoldenRunDialog({ executionId, workflowName, hasCassette, on
 const VERDICT_LABELS: Record<ReplayRunResponse["verdict"], string> = {
   pass: "Pass",
   fail: "Fail",
-  error: "Could not complete"
+  error: "Inconclusive"
 };
 
 function ToolLane({ step }: { step: ReplayToolStep }) {
@@ -443,7 +443,7 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
                   run live. Expressions inside the nodes that do run are still evaluated and can make network calls until expression sandboxing lands.
                 </p>
                 <p className="golden-note">
-                  A replay could not complete if it reaches a node the golden run never saw, or a code node whose code changed: neither is run, so neither can be
+                  A replay is inconclusive if it reaches a node the golden run never saw, a code node whose code changed, or a node that runs more often than the golden run recorded: neither is run, so neither can be
                   judged.
                 </p>
                 {recording.capabilities.mcp === "none" && (

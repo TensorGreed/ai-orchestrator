@@ -215,13 +215,14 @@ export class ReplayService {
       if (!hit.overrun || overrun.has(hit.nodeId)) continue;
       overrun.add(hit.nodeId);
       const code = hit.nodeClass === "code";
+      // Calls past the recording are never answered by the real node, so nothing says what they would have done.
       warnings.push({
         kind: "recording_overrun",
         nodeId: hit.nodeId,
         message: code
           ? `Code node ${hit.nodeId} ran more times than the golden run recorded; code nodes are not executed in replay, so the extra calls cannot be judged.`
-          : `Node ${hit.nodeId} (${hit.nodeType}) ran more times than the golden run recorded; the extra calls reused its last recorded answer.`,
-        blocking: code
+          : `Node ${hit.nodeId} (${hit.nodeType}) ran more times than the golden run recorded; the extra calls are not executed in replay, so they cannot be judged.`,
+        blocking: true
       });
     }
     const changedHits = new Set(plan.hits.filter((hit) => hit.configChanged).map((hit) => hit.nodeId));
