@@ -35,6 +35,25 @@ describe("RunTape", () => {
     expect(row).toHaveTextContent("3.0s");
   });
 
+  it("ticks the head while a node runs, then shows the run total", () => {
+    const { rerender } = render(<RunTape executionResult={runResult({ liveStartedAtMs: Date.now() } as never)} nodeMetaById={meta} />);
+    const head = () => document.querySelector(".run-tape-head > span")!;
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    expect(head()).toHaveTextContent("running 4.0s");
+    expect(head()).toHaveTextContent("status running");
+
+    rerender(
+      <RunTape
+        executionResult={{ ...runResult({ status: "success", durationMs: 4200, completedAt: "2026-01-01T00:00:04.200Z" }), status: "success" }}
+        nodeMetaById={meta}
+      />
+    );
+    expect(head()).toHaveTextContent("last run 4.2s");
+    expect(head()).toHaveTextContent("status success");
+  });
+
   it("shows the error and its fix inline under a failed lane", () => {
     const result = runResult({
       status: "error",

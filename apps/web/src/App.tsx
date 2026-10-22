@@ -928,6 +928,8 @@ function isExecutionEdgeForVisual(edge: Edge): boolean {
   );
 }
 
+const CANCEL_REQUESTED_MESSAGE = "Cancellation requested. Waiting for workflow to stop.";
+
 export default function App() {
   return (
     <StudioProvider>
@@ -2466,7 +2468,7 @@ function StudioApp() {
     }
     try {
       await cancelExecution(executionId);
-      setError((current) => current ?? "Cancellation requested. Waiting for workflow to stop.");
+      setError((current) => current ?? CANCEL_REQUESTED_MESSAGE);
       void refreshExecutionHistory();
     } catch (cancelError) {
       handleApiError(cancelError, "Failed to stop active workflow");
@@ -3120,6 +3122,8 @@ function StudioApp() {
         setActiveMode("editor");
       }
     } finally {
+      // The run has ended, so a pending "waiting to stop" notice is stale.
+      setError((current) => (current === CANCEL_REQUESTED_MESSAGE ? null : current));
       setLiveNodeStatuses({});
       setRunningExecutionId(null);
       setBusy(false);
@@ -3173,6 +3177,8 @@ function StudioApp() {
         setActiveMode("editor");
       }
     } finally {
+      // The run has ended, so a pending "waiting to stop" notice is stale.
+      setError((current) => (current === CANCEL_REQUESTED_MESSAGE ? null : current));
       stopVisualRun();
       setRunningExecutionId(null);
       setBusy(false);

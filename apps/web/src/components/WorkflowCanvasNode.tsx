@@ -99,7 +99,7 @@ export function LiveElapsed({ result, className }: { result: { startedAt?: strin
 function RunningPill({ data }: { data: EditorNodeData }) {
   if (data.executionStatus !== "running" || typeof data.liveStartedAtMs !== "number") return null;
   return (
-    <div className="wf-node-telemetry">
+    <div className="wf-node-telemetry wf-node-telemetry-running">
       <span className="wf-telemetry-pill wf-telemetry-pill-running">
         Running <LiveElapsed result={{ liveStartedAtMs: data.liveStartedAtMs }} />
       </span>
@@ -129,7 +129,9 @@ function DebugPreview({ data }: { data: EditorNodeData }) {
       )}
       {preview.error && (
         <div className="wf-node-debug-error">
-          <strong>Err</strong> {preview.error}
+          <div className="wf-node-debug-text">
+            <strong>Err</strong> {preview.error}
+          </div>
           {preview.errorRemediation && (
             <div className="wf-node-debug-remediation">
               <strong>Fix:</strong> {preview.errorRemediation}

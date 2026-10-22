@@ -100,6 +100,21 @@ function categorizeStatus(status: number): ErrorCategory {
   return ErrorCategory.UNKNOWN;
 }
 
+/**
+ * The error a provider throws for a non-OK response once retries are done. It keeps the
+ * status category (auth, quota, transient) so the node shows the matching fix.
+ */
+export function providerHttpError(provider: string, status: number, message: string): LLMProviderError {
+  return new LLMProviderError({
+    message,
+    provider,
+    category: categorizeStatus(status),
+    statusCode: status,
+    retryAttempts: 0,
+    retryable: DEFAULT_RETRYABLE_STATUSES.has(status)
+  });
+}
+
 function parseRetryAfterMs(headers: Headers): number | undefined {
   const retryAfter = headers.get("retry-after");
   if (!retryAfter) {

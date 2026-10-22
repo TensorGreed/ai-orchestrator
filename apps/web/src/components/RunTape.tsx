@@ -120,13 +120,27 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
   }
 
   const denominator = Math.max(totalMs, 1);
+  // While a node is still running, the head ticks from the run's start instead of showing the frozen total.
+  const isRunning = lanes.some((lane) => lane.status === "running");
+  const firstLane = lanes.reduce((first, lane) => (lane.startMs < first.startMs ? lane : first), lanes[0]!);
+  const runStart = { startedAt: executionResult.startedAt, liveStartedAtMs: firstLane.liveStartedAtMs };
   const llmTotal = lanes.reduce((acc, lane) => acc + (lane.llmMs ?? 0), 0);
 
   return (
     <div className="run-tape" role="table" aria-label="Run tape">
       <div className="run-tape-head">
         <span>
-          last run <b>{formatLatency(totalMs)}</b> · {lanes.length} node{lanes.length === 1 ? "" : "s"} · status <b className={`run-tape-status run-tape-status-${executionResult.status}`}>{executionResult.status}</b>
+          {isRunning ? (
+            <>
+              running <b><LiveElapsed result={runStart} /></b>
+            </>
+          ) : (
+            <>
+              last run <b>{formatLatency(totalMs)}</b>
+            </>
+          )}{" "}
+          · {lanes.length} node{lanes.length === 1 ? "" : "s"} · status{" "}
+          <b className={`run-tape-status run-tape-status-${isRunning ? "running" : executionResult.status}`}>{isRunning ? "running" : executionResult.status}</b>
         </span>
         <span className="run-tape-key">
           <i className="run-tape-key-swatch run-tape-key-node" /> node

@@ -194,6 +194,24 @@ describe("NodeInspector", () => {
     expect(screen.getByRole("dialog", { name: "Inspect User Prompt" }).style.width).toBe("");
   });
 
+  it("keeps the open tab and unsaved edits while a run updates the node's live status", async () => {
+    const user = userEvent.setup();
+    const node = makeNode();
+    const props = makeProps({ node });
+    const { rerender } = render(<NodeInspector {...props} />);
+
+    await user.type(screen.getByLabelText("Text"), "!");
+    await user.click(screen.getByRole("tab", { name: "Trace" }));
+
+    // A streamed event re-creates the node with new runtime fields but the same settings.
+    const runningNode = { ...node, data: { ...node.data, executionStatus: "running" as const, liveStartedAtMs: 1000 } };
+    rerender(<NodeInspector {...props} node={runningNode} inputOptions={[]} />);
+
+    expect(screen.getByRole("tab", { name: "Trace" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Parameters" }));
+    expect(screen.getByLabelText("Text")).toHaveValue("What should I help with?!");
+  });
+
   it("renders 'No run yet' on the Trace tab without a run", async () => {
     const user = userEvent.setup();
     render(<NodeInspector {...makeProps()} />);

@@ -546,6 +546,22 @@ function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean 
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
+const ERROR_CATEGORIES = new Set<string>(Object.values(ErrorCategory));
+
+// LLMProviderError (provider-sdk) tags HTTP failures as auth / quota / transient.
+function categorizedProviderError(
+  error: unknown
+): { category: ErrorCategory; provider?: string; retryable?: boolean } | undefined {
+  if (!(error instanceof Error) || error.name !== "LLMProviderError") return undefined;
+  const fields = error as Error & { category?: unknown; provider?: unknown; retryable?: unknown };
+  if (typeof fields.category !== "string" || !ERROR_CATEGORIES.has(fields.category)) return undefined;
+  return {
+    category: fields.category as ErrorCategory,
+    provider: typeof fields.provider === "string" ? fields.provider : undefined,
+    retryable: typeof fields.retryable === "boolean" ? fields.retryable : undefined
+  };
+}
+
 function isWebhookTrigger(globals: Record<string, unknown>): boolean {
   const triggerType = typeof globals.trigger_type === "string" ? globals.trigger_type.trim().toLowerCase() : "";
   return triggerType.startsWith("webhook");
@@ -7136,16 +7152,17 @@ export async function executeWorkflow(
       const errorMessage = error instanceof Error ? error.message : "Node execution failed";
       // Surface a structured error block (category + remediation + retryable)
       // alongside the raw message so the UI can render an actionable hint
-      // without parsing strings. Non-WorkflowError throws fall back to UNKNOWN
-      // with its generic remediation.
+      // without parsing strings. Provider errors carry their own category;
+      // other throws fall back to UNKNOWN with its generic remediation.
+      const providerError = error instanceof WorkflowError ? undefined : categorizedProviderError(error);
       const errorCategoryName =
-        error instanceof WorkflowError ? error.category : ErrorCategory.UNKNOWN;
+        error instanceof WorkflowError ? error.category : providerError?.category ?? ErrorCategory.UNKNOWN;
       const errorRemediation =
         error instanceof WorkflowError
           ? error.remediation
-          : remediationForCategory(ErrorCategory.UNKNOWN);
+          : remediationForCategory(errorCategoryName, providerError ? { providerId: providerError.provider } : undefined);
       const errorRetryable =
-        error instanceof WorkflowError ? error.retryable : undefined;
+        error instanceof WorkflowError ? error.retryable : providerError?.retryable;
       const errorFields = {
         error: errorMessage,
         errorCategory: errorCategoryName,

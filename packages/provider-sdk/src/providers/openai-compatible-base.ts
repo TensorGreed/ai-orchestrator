@@ -1,6 +1,6 @@
 import type { ChatMessage, LLMCallResponse, LLMProviderConfig, LLMUsage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { readResponseJson, readResponseText, readStreamChunk, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
+import { providerHttpError, readResponseJson, readResponseText, readStreamChunk, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
 import { parseToolArguments } from "../tool-arg-parser";
 
 interface OpenAICompatibleResponse {
@@ -267,7 +267,7 @@ export async function callOpenAICompatible(
   const bodyRead = { timeoutMs, signal: context.signal, provider: options.id };
   if (!response.ok) {
     const body = await readResponseText(response, bodyRead);
-    throw new Error(`Provider ${options.id} request failed (${response.status}): ${body}`);
+    throw providerHttpError(options.id, response.status, `Provider ${options.id} request failed (${response.status}): ${body}`);
   }
 
   const json = await readResponseJson<OpenAICompatibleResponse>(response, bodyRead);
@@ -306,7 +306,7 @@ export async function* callOpenAICompatibleStream(
 
   if (!response.ok) {
     const body = await readResponseText(response, { timeoutMs, signal: context.signal, provider: options.id });
-    throw new Error(`Provider ${options.id} stream request failed (${response.status}): ${body}`);
+    throw providerHttpError(options.id, response.status, `Provider ${options.id} stream request failed (${response.status}): ${body}`);
   }
 
   if (!response.body) {

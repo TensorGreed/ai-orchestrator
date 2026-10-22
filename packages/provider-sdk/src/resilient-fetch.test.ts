@@ -160,4 +160,20 @@ describe("stream idle timeout", () => {
     await expect(consume()).rejects.toThrow(/aborted/);
     expect(requestSignal?.aborted).toBe(true);
   });
+
+  it("throws a categorized LLMProviderError for a non-OK model response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":"bad key"}', { status: 401 })));
+    const adapter = new OpenAICompatibleProviderAdapter();
+    const call = adapter.generate(
+      { provider: { providerId: "openai_compatible", model: "m", baseUrl: "http://provider.test/v1" }, messages: [{ role: "user", content: "hi" }] },
+      { resolveSecret: async () => undefined }
+    );
+    await expect(call).rejects.toBeInstanceOf(LLMProviderError);
+    await expect(call).rejects.toMatchObject({
+      category: ErrorCategory.PROVIDER_AUTH,
+      statusCode: 401,
+      retryable: false,
+      message: expect.stringContaining("request failed (401)")
+    });
+  });
 });

@@ -1,7 +1,7 @@
 import type { ProviderDefinition, LLMUsage } from "@ai-orchestrator/shared";
 import type { ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { readResponseJson, readResponseText, readStreamChunk, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
+import { providerHttpError, readResponseJson, readResponseText, readStreamChunk, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
 import { parseToolArguments } from "../tool-arg-parser";
 
 interface AzureOpenAIResponse {
@@ -298,7 +298,7 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
     const bodyRead = { timeoutMs, signal: context.signal, provider: "azure_openai" };
     if (!response.ok) {
       const body = await readResponseText(response, bodyRead);
-      throw new Error(`Provider azure_openai request failed (${response.status}): ${body}`);
+      throw providerHttpError("azure_openai", response.status, `Provider azure_openai request failed (${response.status}): ${body}`);
     }
 
     const json = await readResponseJson<AzureOpenAIResponse>(response, bodyRead);
@@ -357,7 +357,7 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
 
     if (!response.ok) {
       const body = await readResponseText(response, { timeoutMs, signal: context.signal, provider: "azure_openai" });
-      throw new Error(`Provider azure_openai stream request failed (${response.status}): ${body}`);
+      throw providerHttpError("azure_openai", response.status, `Provider azure_openai stream request failed (${response.status}): ${body}`);
     }
     if (!response.body) {
       throw new Error("Provider azure_openai stream response did not include a body.");

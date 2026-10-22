@@ -1,6 +1,6 @@
 import type { LLMCallResponse, LLMUsage, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
+import { providerHttpError, readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
 
 const ANTHROPIC_TIMEOUT_MS = 60_000;
 
@@ -190,7 +190,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
       const respBody = await readResponseText(response, bodyRead);
       const rejected = rejectedSamplingParam(body, parseAnthropicError(respBody));
       if (!rejected) {
-        throw new Error(describeAnthropicFailure(response.status, respBody, model));
+        throw providerHttpError("anthropic", response.status, describeAnthropicFailure(response.status, respBody, model));
       }
       delete body[rejected];
       response = await send();
@@ -198,7 +198,7 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
 
     if (!response.ok) {
       const respBody = await readResponseText(response, bodyRead);
-      throw new Error(describeAnthropicFailure(response.status, respBody, model));
+      throw providerHttpError("anthropic", response.status, describeAnthropicFailure(response.status, respBody, model));
     }
 
     const json = await readResponseJson<any>(response, bodyRead);

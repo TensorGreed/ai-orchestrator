@@ -1446,7 +1446,10 @@ export function NodeInspector({
     setInlineGoogleServiceAccountJson("");
     setInlineSecretBusy(false);
     setInlineSecretError(null);
-  }, [inputOptions, mcpServerDefinitions, node]);
+    // Keyed on the node's own settings, not the node object: during a debug run the node is
+    // re-created on every streamed event (status, live text, timer), which would reset the
+    // open tab and any unsaved edits several times a second.
+  }, [node.id, node.data.nodeType, node.data.config, node.data.label, node.data.disabled, node.data.color, mcpServerDefinitions]);
 
   const availableSecrets = useMemo(() => {
     const byId = new Map<string, SecretListItem>();

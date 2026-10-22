@@ -1,6 +1,6 @@
 import type { LLMCallResponse, LLMProviderConfig, LLMUsage, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext, ProviderTestResult } from "../types";
-import { readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
+import { providerHttpError, readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
 
 interface GeminiPart {
   text?: string;
@@ -194,7 +194,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
           message = parsed.error.message.split("\n")[0];
         }
       } catch { /* use raw body */ }
-      throw new Error(`Gemini request failed (${response.status}): ${message}`);
+      throw providerHttpError("gemini", response.status, `Gemini request failed (${response.status}): ${message}`);
     }
 
     const json = await readResponseJson<GeminiResponse>(response, bodyRead);
@@ -279,4 +279,4 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       latencyMs
     };
   }
-}
+}
