@@ -63,6 +63,8 @@ export interface ReplayRecordingServiceOptions {
   maxPerWorkflow: number;
   /** Total bytes one workflow's golden runs may use, cassettes included. */
   maxBytesPerWorkflow: number;
+  /** Total bytes every golden run in the deployment may use, cassettes included. */
+  maxTotalBytes: number;
   now?: () => Date;
 }
 
@@ -80,6 +82,18 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function byteLength(text: string): number {
   return Buffer.byteLength(text, "utf8");
 }
+
+function jsonBytes(value: unknown): number {
+  return byteLength(JSON.stringify(value ?? null) ?? "null");
+}
+
+/**
+ * Scrubbing replaces secret values and token-shaped strings with a short
+ * marker, so it can shrink a run but rarely by much. Before the scrub passes
+ * run, a run is refused only if it would still be over a limit after
+ * shrinking to half its raw size; the exact sizes are checked again after.
+ */
+const SCRUB_SHRINK_ALLOWANCE = 2;
 
 export class ReplayRecordingService {
   constructor(private readonly options: ReplayRecordingServiceOptions) {}
@@ -238,6 +252,18 @@ export class ReplayRecordingService {
       priceTurn: this.options.priceTurn
     });
 
+    // Cheap size checks on the raw copy first: the clone, scrub and serialise passes below cost time on the event loop.
+    const cassetteRecord = store.getMcpCassetteForExecution(history.id);
+    const rawFixed = jsonBytes(facts) + (history.input === undefined || history.input === null ? 0 : jsonBytes(history.input)) + jsonBytes(captured);
+    const rawNodes = jsonBytes(nodes);
+    const rawCassette = cassetteRecord ? jsonBytes(cassetteRecord.cassette) : 0;
+    if (rawFixed / SCRUB_SHRINK_ALLOWANCE > this.options.maxBytes) {
+      throw new ReplayRecordingError(this.tooLargeMessage(), "too_large");
+    }
+    // Node outputs that do not fit are cut, so only an untruncated run counts them in its estimate.
+    const estimate = (rawFixed + (rawFixed + rawNodes <= this.options.maxBytes ? rawNodes : 0) + rawCassette) / SCRUB_SHRINK_ALLOWANCE;
+    this.checkBudgets(history.workflowId, Math.ceil(estimate), true);
+
     const scrubber = this.scrubber();
     const scrubbedNodes = this.scrubValue(nodes, scrubber);
     const scrubbedFacts = this.scrubFacts(facts, scrubber);
@@ -257,39 +283,34 @@ export class ReplayRecordingService {
 
     const inputJson = scrubbedInput === null ? null : this.serialise(scrubbedInput, scrubber);
     const factsJson = this.serialise(scrubbedFacts, scrubber);
+    const fixedBytes = byteLength(factsJson) + (inputJson ? byteLength(inputJson) : 0) + byteLength(workflowJson);
+    if (fixedBytes > this.options.maxBytes) throw new ReplayRecordingError(this.tooLargeMessage(), "too_large");
     let truncated = false;
     let nodesJson = this.serialise(scrubbedNodes, scrubber);
-    const fixedBytes = byteLength(factsJson) + (inputJson ? byteLength(inputJson) : 0) + byteLength(workflowJson);
     if (fixedBytes + byteLength(nodesJson) > this.options.maxBytes) {
-      // Cut the largest node outputs first until the recording fits.
+      // Cut the largest node outputs first until the recording fits. Sizes are tracked per node, so
+      // the whole map is serialised again only once, after the cuts.
+      let nodesBytes = byteLength(nodesJson);
       const sized = Object.values(scrubbedNodes)
-        .map((node) => ({ node, bytes: byteLength(JSON.stringify(node.output ?? null)) + (node.runs ? byteLength(JSON.stringify(node.runs)) : 0) }))
+        .map((node) => ({ node, entryBytes: jsonBytes(node), bytes: jsonBytes(node.output) + (node.runs ? jsonBytes(node.runs) : 0) }))
         .sort((a, b) => b.bytes - a.bytes);
       for (const entry of sized) {
-        if (fixedBytes + byteLength(nodesJson) <= this.options.maxBytes) break;
+        if (fixedBytes + nodesBytes <= this.options.maxBytes) break;
         if (entry.bytes < 256) break;
         // A cut node keeps no per-iteration results: a replay that reaches it is inconclusive either way.
         delete entry.node.runs;
         entry.node.output = { [REPLAY_TRUNCATED_MARKER]: true, bytes: entry.bytes };
         truncated = true;
-        nodesJson = this.serialise(scrubbedNodes, scrubber);
+        nodesBytes += jsonBytes(entry.node) - entry.entryBytes;
       }
-      if (fixedBytes + byteLength(nodesJson) > this.options.maxBytes) {
-        throw new ReplayRecordingError(`The run is too large to save as a golden run (over REPLAY_RECORDING_MAX_BYTES, ${this.options.maxBytes} bytes).`, "too_large");
-      }
+      nodesJson = this.serialise(scrubbedNodes, scrubber);
+      if (fixedBytes + byteLength(nodesJson) > this.options.maxBytes) throw new ReplayRecordingError(this.tooLargeMessage(), "too_large");
     }
 
-    const cassetteRecord = store.getMcpCassetteForExecution(history.id);
     const cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(cassetteRecord.cassette) as McpCassette) : null;
     const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
     const bytes = fixedBytes + byteLength(nodesJson) + (cassetteJson ? byteLength(cassetteJson) : 0);
-    const used = store.sumReplayRecordingBytesForWorkflow(history.workflowId);
-    if (used + bytes > this.options.maxBytesPerWorkflow) {
-      throw new ReplayRecordingError(
-        `Saving this run (${bytes} bytes) would take this workflow's golden runs over REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW (${used} of ${this.options.maxBytesPerWorkflow} bytes used). Delete some before saving more.`,
-        "limit"
-      );
-    }
+    this.checkBudgets(history.workflowId, bytes);
 
     return store.saveReplayRecording({
       id: `rec_${randomUUID()}`,
@@ -313,6 +334,30 @@ export class ReplayRecordingService {
       createdAt: this.now().toISOString(),
       createdBy
     });
+  }
+
+  private tooLargeMessage(): string {
+    return `The run is too large to save as a golden run (over REPLAY_RECORDING_MAX_BYTES, ${this.options.maxBytes} bytes).`;
+  }
+
+  /** Refuses a save of `bytes` that would take the workflow's or the deployment's golden runs over their budget. */
+  private checkBudgets(workflowId: string, bytes: number, estimated = false): void {
+    const store = this.options.store;
+    const size = estimated ? `at least about ${bytes} bytes once scrubbed` : `${bytes} bytes`;
+    const used = store.sumReplayRecordingBytesForWorkflow(workflowId);
+    if (used + bytes > this.options.maxBytesPerWorkflow) {
+      throw new ReplayRecordingError(
+        `Saving this run (${size}) would take this workflow's golden runs over REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW (${used} of ${this.options.maxBytesPerWorkflow} bytes used). Delete some before saving more.`,
+        "limit"
+      );
+    }
+    const total = store.sumReplayRecordingBytes();
+    if (total + bytes > this.options.maxTotalBytes) {
+      throw new ReplayRecordingError(
+        `Saving this run (${size}) would take the golden runs in this deployment over REPLAY_RECORDINGS_MAX_TOTAL_BYTES (${total} of ${this.options.maxTotalBytes} bytes used). Delete some before saving more.`,
+        "limit"
+      );
+    }
   }
 
   get(id: string): ReplayRecordingRecord | null {

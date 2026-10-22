@@ -9825,6 +9825,12 @@ export class SqliteStore {
     return row ? toNumber(row.total ?? 0) : 0;
   }
 
+  /** Bytes every golden run in the deployment uses, cassettes included. */
+  sumReplayRecordingBytes(): number {
+    const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings`, []);
+    return row ? toNumber(row.total ?? 0) : 0;
+  }
+
   /** The golden run already saved from an execution, if any. */
   findReplayRecordingIdForExecution(executionId: string): string | null {
     const row = this.queryOne<{ id: string }>(`SELECT id FROM replay_recordings WHERE source_execution_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1`, [executionId]);

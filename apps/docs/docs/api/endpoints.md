@@ -187,7 +187,7 @@ See [Audit bundles and signed run manifests](../security/audit-bundles.md).
 
 See [Golden runs and replay](../product/golden-runs.md).
 
-- `POST /api/replay/recordings` (builder; `{ executionId, name, notes? }`; `201 { recording }`; 409 while the run is in progress, for a replay, for a run already saved (`code: "duplicate"`) or over `REPLAY_RECORDINGS_MAX_PER_WORKFLOW` or `REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW`; 413 over `REPLAY_RECORDING_MAX_BYTES`; audited as `replay.recording.created`)
+- `POST /api/replay/recordings` (builder; `{ executionId, name, notes? }`; `201 { recording }`; 409 while the run is in progress, for a replay, for a run already saved (`code: "duplicate"`) or over `REPLAY_RECORDINGS_MAX_PER_WORKFLOW`, `REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW` or `REPLAY_RECORDINGS_MAX_TOTAL_BYTES`; 413 over `REPLAY_RECORDING_MAX_BYTES`; audited as `replay.recording.created`)
 - `GET /api/replay/recordings?workflowId=&limit=&offset=` (viewer; `{ items, total }`)
 - `GET /api/replay/recordings/:id` (viewer; `{ recording }` with input, recorded node results and run facts)
 - `DELETE /api/replay/recordings/:id` (builder; audited as `replay.recording.deleted`)

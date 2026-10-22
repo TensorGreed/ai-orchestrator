@@ -19,6 +19,7 @@ import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
+import { ReplayRecordingService } from "./services/replay-recording-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
@@ -615,6 +616,76 @@ describe("golden runs with side effects stubbed", () => {
     expect(refused?.body).toContain("REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW");
     const saved = context.store.listReplayRecordings({ workflowId: "wf-sized" }).items;
     expect(saved.reduce((sum, entry) => sum + entry.bytes, 0)).toBeLessThanOrEqual(65536);
+  });
+
+  it("caps the bytes all golden runs in the deployment may use", async () => {
+    const context = await createTestContext({ REPLAY_RECORDINGS_MAX_TOTAL_BYTES: "65536" });
+    const builder = await login(context, "builder");
+    const sized = (id: string): Workflow =>
+      ({
+        id,
+        name: id,
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        projectId: "default",
+        nodes: [
+          { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+          { id: "set", type: "set_node", name: "Set", position: { x: 150, y: 0 }, config: { assignments: [{ key: "blob", valueTemplate: "word ".repeat(4000) }] } },
+          { id: "output", type: "output", name: "Output", position: { x: 300, y: 0 }, config: { responseTemplate: "done" } }
+        ],
+        edges: [
+          { id: "e1", source: "start", target: "set" },
+          { id: "e2", source: "set", target: "output" }
+        ]
+      }) as Workflow;
+    let refused: { statusCode: number; body: string } | null = null;
+    // A new workflow each time: only the deployment-wide cap can stop this.
+    for (let attempt = 0; attempt < 6 && !refused; attempt += 1) {
+      context.store.upsertWorkflow(sized(`wf-total-${attempt}`));
+      const executionId = (await call(context, "POST", `/api/workflows/wf-total-${attempt}/execute`, builder.cookie, {})).json<{ executionId: string }>().executionId;
+      const response = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId, name: `Run ${attempt}` });
+      if (response.statusCode !== 201) refused = response;
+    }
+    expect(refused?.statusCode).toBe(409);
+    expect(refused?.body).toContain("REPLAY_RECORDINGS_MAX_TOTAL_BYTES");
+    expect(context.store.sumReplayRecordingBytes()).toBeLessThanOrEqual(65536);
+  });
+
+  it("refuses an oversized run or a spent budget before scrubbing it", async () => {
+    const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384", REPLAY_RECORDINGS_MAX_TOTAL_BYTES: "16384" });
+    const builder = await login(context, "builder");
+    const workflow = (id: string, template: string): Workflow =>
+      ({
+        id,
+        name: id,
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        projectId: "default",
+        nodes: [
+          { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+          { id: "output", type: "output", name: "Output", position: { x: 150, y: 0 }, config: { responseTemplate: template } }
+        ],
+        edges: [{ id: "e1", source: "start", target: "output" }]
+      }) as Workflow;
+    const scrub = vi.spyOn(ReplayRecordingService.prototype, "scrubValue");
+
+    // The run's own output cannot be cut, and it is far over the per-run limit.
+    context.store.upsertWorkflow(workflow("wf-huge", "word ".repeat(20_000)));
+    const huge = (await call(context, "POST", "/api/workflows/wf-huge/execute", builder.cookie, {})).json<{ executionId: string }>().executionId;
+    scrub.mockClear();
+    const tooLarge = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: huge, name: "Huge" });
+    expect(tooLarge.statusCode).toBe(413);
+    expect(scrub).not.toHaveBeenCalled();
+
+    // A deployment whose golden runs nearly fill the budget refuses the next save without scrubbing anything.
+    context.store.upsertWorkflow(workflow("wf-small", "word ".repeat(600)));
+    const small = (await call(context, "POST", "/api/workflows/wf-small/execute", builder.cookie, {})).json<{ executionId: string }>().executionId;
+    vi.spyOn(context.store, "sumReplayRecordingBytes").mockReturnValue(16384 - 500);
+    scrub.mockClear();
+    const spent = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: small, name: "Small" });
+    expect(spent.statusCode).toBe(409);
+    expect(spent.body).toContain("REPLAY_RECORDINGS_MAX_TOTAL_BYTES");
+    expect(scrub).not.toHaveBeenCalled();
   });
 
   it("warns when scrubbing changed a recorded value the replay feeds to the candidate", async () => {

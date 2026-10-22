@@ -1660,7 +1660,7 @@ export const openApiSpec = {
           "201": { description: "{ recording }" },
           "403": { description: "No write access to the workflow" },
           "404": { description: "Execution not found" },
-          "409": { description: "The run has not finished, is itself a replay, is already saved as a golden run, or the workflow's golden runs are over the count or byte limit" },
+          "409": { description: "The run has not finished, is itself a replay, is already saved as a golden run, or the workflow's golden runs (or all golden runs in the deployment) are over the count or byte limit" },
           "413": { description: "The run is larger than REPLAY_RECORDING_MAX_BYTES" }
         }
       }

@@ -208,6 +208,12 @@ const envSchema = z.object({
   REPLAY_RECORDINGS_MAX_PER_WORKFLOW: z.coerce.number().int().min(1).max(100_000).default(500),
   /** Phase 15.1 — total bytes one workflow's golden runs may use (recordings plus their copied cassettes). */
   REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW: z.coerce.number().int().min(16_384).max(17_179_869_184).default(268_435_456),
+  /**
+   * Phase 15.1 — total bytes all golden runs in the deployment may use
+   * (1 GiB). A builder can create workflows freely, so the per-workflow
+   * budget alone does not bound storage.
+   */
+  REPLAY_RECORDINGS_MAX_TOTAL_BYTES: z.coerce.number().int().min(16_384).max(1_099_511_627_776).default(1_073_741_824),
   /** Phase 11.1 — largest audit bundle (zip) the API exports, in bytes. */
   AUDIT_BUNDLE_MAX_BYTES: z.coerce.number().int().min(1_024).max(2_147_483_647).default(104_857_600),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
