@@ -61,6 +61,45 @@ describe("value diff", () => {
     expect(tokenSimilarity("", "")).toBe(1);
   });
 
+  it("reports a removed or added key named like an Object.prototype member", () => {
+    const withProto = JSON.parse('{"__proto__": {"polluted": true}, "x": 1}') as unknown;
+    expect(diffValues(withProto, { x: 1 }).changes).toEqual([{ path: "__proto__", kind: "removed", baseline: { polluted: true } }]);
+    expect(diffValues({ x: 1 }, withProto).changes).toEqual([{ path: "__proto__", kind: "added", candidate: { polluted: true } }]);
+    expect(diffValues({ constructor: "x" }, {}).changes).toEqual([{ path: "constructor", kind: "removed", baseline: "x" }]);
+    expect(diffValues({}, { toString: 1 }).changes).toEqual([{ path: "toString", kind: "added", candidate: 1 }]);
+    // Below the walk, inside an ignored subtree's equality check, too.
+    expect(diffValues({ meta: withProto }, { meta: { x: 1 } }, { ignorePaths: ["meta"] }).ignored).toBe(1);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("reports a difference below the depth limit instead of dropping it", () => {
+    const nested = (depth: number, leaf: unknown) => {
+      let value: unknown = leaf;
+      for (let level = 0; level < depth; level += 1) value = { next: value };
+      return value;
+    };
+    for (const depth of [80, 150, 400]) {
+      const result = diffValues(nested(depth, "a"), nested(depth, "b"));
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0]).toMatchObject({ kind: "changed", truncated: true });
+      expect(result.truncated).toBe(true);
+      const same = diffValues(nested(depth, "a"), nested(depth, "a"));
+      expect(same.changes).toEqual([]);
+      expect(same.truncated).toBe(false);
+    }
+  });
+
+  it("says when there were more changes than it lists", () => {
+    const many = (prefix: string) => Object.fromEntries(Array.from({ length: 300 }, (_, index) => [`k${index}`, `${prefix}${index}`]));
+    const result = diffValues(many("a"), many("b"));
+    expect(result.changes).toHaveLength(200);
+    expect(result.truncated).toBe(true);
+    const diff = diffRunFacts(facts({ output: many("a") }), facts({ output: many("b") }));
+    expect(diff.output.truncated).toBe(true);
+    expect(diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "diff_truncated", blocking: false })]));
+    expect(diffRunFacts(facts(), facts()).output.truncated).toBe(false);
+  });
+
   it("matches glob patterns over path segments", () => {
     expect(matchesIgnorePath(["a", "b", "id"], "**.id")).toBe(true);
     expect(matchesIgnorePath(["id"], "**.id")).toBe(true);

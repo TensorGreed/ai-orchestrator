@@ -418,6 +418,8 @@ export interface ReplayValueChange {
   candidate?: unknown;
   /** For changed strings: token-overlap similarity, 0..1. */
   similarity?: number;
+  /** The values differ below the depth the diff walks to; this change stands for everything below it. */
+  truncated?: boolean;
 }
 
 export interface ReplayNumberDelta {
@@ -447,6 +449,7 @@ export type ReplayHealthKind =
   | "no_cassette"
   | "paused"
   | "blocked_load"
+  | "diff_truncated"
   | "replay_error";
 
 export interface ReplayHealthWarning {
@@ -459,7 +462,8 @@ export interface ReplayHealthWarning {
 
 export interface RunDiff {
   status: { baseline: string; candidate: string; changed: boolean; regression: boolean };
-  output: { equal: boolean; changes: ReplayValueChange[]; ignored: number; ignorePaths: string[] };
+  /** `truncated`: more changes than listed, or some reported without detail (see `ReplayValueChange.truncated`). */
+  output: { equal: boolean; changes: ReplayValueChange[]; ignored: number; ignorePaths: string[]; truncated?: boolean };
   toolCalls: { baselineCount: number; candidateCount: number; changed: boolean; steps: ReplayToolStep[]; countDelta: Array<{ server: string; tool: string; baseline: number; candidate: number }> };
   path: {
     added: string[];

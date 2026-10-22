@@ -155,28 +155,50 @@ function valuesEqual(a: unknown, b: unknown, tolerance: number): boolean {
   return a === b;
 }
 
-function deepEqual(a: unknown, b: unknown, tolerance: number, depth = 0): boolean {
-  if (depth > MAX_DEPTH) return true;
-  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((entry, index) => deepEqual(entry, b[index], tolerance, depth + 1));
-  if (isRecord(a) && isRecord(b)) {
-    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-    for (const key of keys) if (!deepEqual(a[key], b[key], tolerance, depth + 1)) return false;
-    return true;
-  }
-  return valuesEqual(a, b, tolerance);
+/** An own property only: a key named `__proto__` or `constructor` that one side lacks reads as missing, never as the prototype's member. */
+function own(record: JsonRecord, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
 }
 
-/** Path-level differences between two JSON values. */
-export function diffValues(baseline: unknown, candidate: unknown, options: ValueDiffOptions = {}): { changes: ReplayValueChange[]; ignored: number } {
+/** Deep equality without a depth limit (an explicit stack, so deep values cannot overflow the call stack). */
+function deepEqual(a: unknown, b: unknown, tolerance: number): boolean {
+  const stack: Array<[unknown, unknown]> = [[a, b]];
+  while (stack.length > 0) {
+    const [left, right] = stack.pop()!;
+    if (Array.isArray(left) && Array.isArray(right)) {
+      if (left.length !== right.length) return false;
+      for (let index = 0; index < left.length; index += 1) stack.push([left[index], right[index]]);
+      continue;
+    }
+    if (isRecord(left) && isRecord(right)) {
+      for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) stack.push([own(left, key), own(right, key)]);
+      continue;
+    }
+    if (!valuesEqual(left, right, tolerance)) return false;
+  }
+  return true;
+}
+
+/**
+ * Path-level differences between two JSON values. `truncated` is true when
+ * the list is not the whole story: more than the listed number of changes,
+ * or a difference below the depth the walk goes to, which is reported at
+ * that depth (marked `truncated`) without the detail below it.
+ */
+export function diffValues(baseline: unknown, candidate: unknown, options: ValueDiffOptions = {}): { changes: ReplayValueChange[]; ignored: number; truncated: boolean } {
   const ignorePaths = options.ignorePaths ?? [];
   const tolerance = options.numberTolerance ?? 0;
   const changes: ReplayValueChange[] = [];
   let ignored = 0;
+  let truncated = false;
 
   const patterns = ignorePaths.map(compilePattern).filter((pattern) => pattern.segments.length > 0);
 
   const walk = (a: unknown, b: unknown, path: Array<string | number>, depth: number, states: MatchState[]) => {
-    if (changes.length >= MAX_VALUE_CHANGES) return;
+    if (changes.length >= MAX_VALUE_CHANGES) {
+      if (!truncated && !deepEqual(a, b, tolerance)) truncated = true;
+      return;
+    }
     if (path.length > 0 && patterns.some((pattern, index) => stateMatches(pattern, states[index]!))) {
       if (!deepEqual(a, b, tolerance)) ignored += 1;
       return;
@@ -198,17 +220,21 @@ export function diffValues(baseline: unknown, candidate: unknown, options: Value
     }
     if (depth < MAX_DEPTH && isRecord(a) && isRecord(b)) {
       const keys = [...Object.keys(a), ...Object.keys(b).filter((key) => !Object.prototype.hasOwnProperty.call(a, key))];
-      for (const key of keys) walk(a[key], b[key], [...path, key], depth + 1, child(key));
+      for (const key of keys) walk(own(a, key), own(b, key), [...path, key], depth + 1, child(key));
       return;
     }
     if (deepEqual(a, b, tolerance)) return;
     const change: ReplayValueChange = { path: displayPath(path), kind: "changed", baseline: a, candidate: b };
+    if (depth >= MAX_DEPTH && (Array.isArray(a) || isRecord(a)) && (Array.isArray(b) || isRecord(b))) {
+      change.truncated = true;
+      truncated = true;
+    }
     if (typeof a === "string" && typeof b === "string") change.similarity = tokenSimilarity(a, b);
     changes.push(change);
   };
 
   walk(baseline, candidate, [], 0, patterns.map(initialState));
-  return { changes, ignored };
+  return { changes, ignored, truncated };
 }
 
 const toolKey = (call: RunFactToolCall) => `${call.server}\u0000${call.tool}`;
@@ -374,7 +400,7 @@ export function diffRunFacts(baseline: RunFacts, candidate: RunFacts, options: R
       changed: baseline.status !== candidate.status,
       regression: statusRank(candidate.status) < statusRank(baseline.status)
     },
-    output: { equal: output.changes.length === 0, changes: output.changes, ignored: output.ignored, ignorePaths },
+    output: { equal: output.changes.length === 0, changes: output.changes, ignored: output.ignored, ignorePaths, truncated: output.truncated },
     toolCalls: {
       baselineCount: baseline.toolCalls.length,
       candidateCount: candidate.toolCalls.length,
@@ -395,6 +421,18 @@ export function diffRunFacts(baseline: RunFacts, candidate: RunFacts, options: R
       toolCalls: numberDelta(baseline.totals.toolCalls, candidate.totals.toolCalls)
     },
     guard: diffGuard(baseline.guard, candidate.guard),
-    health: options.health ?? []
+    health: [
+      ...(options.health ?? []),
+      ...(output.truncated
+        ? [
+            {
+              kind: "diff_truncated" as const,
+              nodeId: null,
+              message: `The output differs in more places than are listed (over ${MAX_VALUE_CHANGES} changes, or below ${MAX_DEPTH} levels of nesting, shown without detail).`,
+              blocking: false
+            }
+          ]
+        : [])
+    ]
   };
 }
