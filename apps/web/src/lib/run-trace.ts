@@ -67,6 +67,7 @@ export function applyNodeStartToExecutionResult(
     input: event.input ?? existing?.input,
     output: existing?.output,
     error: existing?.error,
+    liveText: undefined,
     liveStartedAtMs: existing?.liveStartedAtMs ?? nowMs
   };
 
@@ -134,7 +135,8 @@ export function applyLlmDeltaToExecutionResult(
 ): WorkflowExecutionResult | null {
   if (!current || !event.delta) return current;
   const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId) as LiveNodeResult | undefined;
-  if (!existing) return current;
+  // Late tokens flushed after node_complete must not leak into the node's next run.
+  if (!existing || existing.status !== "running") return current;
   const next: LiveNodeResult = { ...existing, liveText: appendCappedText(existing.liveText ?? "", event.delta) };
   return {
     ...current,
@@ -292,6 +294,7 @@ export function createTraceStreamHandlers<S extends string = string>(options: Tr
     },
     onNodeComplete: (event) => {
       if (!enabled) return;
+      delete pending[event.nodeId];
       const reset = !initializedTrace;
       initializedTrace = true;
       setExecutionResult((current) => {

@@ -68,6 +68,7 @@ describe("run trace helpers", () => {
     const withText = applyLlmDeltaToExecutionResult(base, { nodeId: "llm", delta: "x" })!;
     const done = applyNodeCompleteToExecutionResult(withText, { nodeId: "llm", nodeType: "llm_call", status: "success", completedAt: T0, durationMs: 1 });
     expect((done.nodeResults[0] as LiveNodeResult).liveText).toBeUndefined();
+    expect(applyLlmDeltaToExecutionResult(done, { nodeId: "llm", delta: "late" })).toBe(done);
   });
 
   it("marks running nodes as errored on stream failure and keeps finished ones", () => {
@@ -162,6 +163,25 @@ describe("createTraceStreamHandlers", () => {
       handlers.dispose();
       expect((get().result!.nodeResults[0] as LiveNodeResult).liveText).toBe("tail");
       expect(handlers.lastError()).toBe("boom");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops tokens still buffered at node_complete so the node's next run starts clean", () => {
+    vi.useFakeTimers();
+    try {
+      const { handlers, get } = setup();
+      handlers.onNodeStart({ nodeId: "llm", nodeType: "llm_call", startedAt: T0 });
+      handlers.onLlmDelta({ nodeId: "llm", delta: "first run", index: 0 });
+      handlers.onNodeComplete({ nodeId: "llm", nodeType: "llm_call", status: "success", completedAt: T0, durationMs: 1 });
+      vi.advanceTimersByTime(100);
+      expect((get().result!.nodeResults[0] as LiveNodeResult).liveText).toBeUndefined();
+
+      handlers.onNodeStart({ nodeId: "llm", nodeType: "llm_call", startedAt: T0 });
+      handlers.onLlmDelta({ nodeId: "llm", delta: "second", index: 0 });
+      vi.advanceTimersByTime(100);
+      expect((get().result!.nodeResults[0] as LiveNodeResult).liveText).toBe("second");
     } finally {
       vi.useRealTimers();
     }

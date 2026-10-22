@@ -7740,6 +7740,11 @@ export function createApp(
         ? reasonRecord.reason.trim()
         : `Execution canceled by ${user.email}`;
     const active = activeExecutions.get(request.params.id);
+    // The run already hit its time limit and is ending; it is saved as a timeout error, not a cancel.
+    if (active && isExecutionTimeoutAbort(active.controller.signal)) {
+      reply.code(409);
+      return { error: "Execution already timed out and is stopping" };
+    }
     active?.controller.abort(reason);
     if (execution.status === "waiting_approval") {
       deleteWorkflowExecutionSafely(execution.id, execution.workflowId);
