@@ -1223,6 +1223,8 @@ export interface GuardEventFilters {
   executionId?: string;
   projectId?: string;
   workflowId?: string;
+  /** Limits events to these workflows (the ones a non-admin can read); empty matches nothing. */
+  workflowIds?: string[];
   profileId?: string;
   channel?: string;
   action?: string;
@@ -9409,6 +9411,13 @@ export class SqliteStore {
     if (filters.executionId) add("execution_id = ?", filters.executionId);
     if (filters.projectId) add("project_id = ?", filters.projectId);
     if (filters.workflowId) add("workflow_id = ?", filters.workflowId);
+    if (filters.workflowIds) {
+      if (filters.workflowIds.length === 0) clauses.push("1 = 0");
+      else {
+        clauses.push(`workflow_id IN (${filters.workflowIds.map(() => "?").join(", ")})`);
+        params.push(...filters.workflowIds);
+      }
+    }
     if (filters.profileId) add("profile_id = ?", filters.profileId);
     if (filters.channel) add("channel = ?", filters.channel);
     if (filters.action) add("effective_action = ?", filters.action);

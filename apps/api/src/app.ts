@@ -1791,6 +1791,8 @@ export function createApp(
                     }
                   },
                   resolveSecret: (ref) => secretService.resolveSecret(ref),
+                  // The error handler is guarded under its own bindings, like any other run.
+                  guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
                   resolveRegisteredMcpServer,
                   loadMcpToolPolicy
                 }
@@ -10454,7 +10456,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 
-  registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), audit: (request, user, event) => audit(request, user, event) });
+  registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
 
   registerMcpTestingRoutes({
     app,

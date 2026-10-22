@@ -36,7 +36,9 @@ export interface GuardRoutesDeps {
   store: SqliteStore;
   guard: GuardService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
-  canAccessWorkflow: (user: SafeUser, workflow: Workflow, permission: "workflow:read" | "workflow:write") => boolean;
+  canAccessWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }, permission: "workflow:read" | "workflow:write") => boolean;
+  /** Project-level permission (memberships, then the global role); admins always pass. */
+  canInProject: (user: SafeUser, projectId: string, permission: "workflow:read" | "workflow:write") => boolean;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
 }
 
@@ -91,6 +93,28 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     throw error;
   };
 
+  /**
+   * An enforced profile is the admin's floor for a project: a builder who
+   * could append a version to it would loosen every run it covers. Edits and
+   * re-imports of a profile any project enforces are admin-only.
+   */
+  const refuseEnforcedEdit = (user: SafeUser, reply: FastifyReply, profileId: string) => {
+    if (user.role === "admin") return null;
+    const enforcedBy = store.listGuardBindingsForProfile(profileId).filter((binding) => binding.scope === "project" && binding.mode === "enforced");
+    if (enforcedBy.length === 0) return null;
+    reply.code(403);
+    return { error: "This guard profile is enforced on a project; only an admin can change it" };
+  };
+
+  const forbidden = (reply: FastifyReply) => {
+    reply.code(403);
+    return { error: "Insufficient permissions for project" };
+  };
+
+  /** Workflows a non-admin may read, for scoping guard events; undefined for admins (no filter). */
+  const readableWorkflowIds = (user: SafeUser): string[] | undefined =>
+    user.role === "admin" ? undefined : store.listWorkflows().filter((workflow) => deps.canAccessWorkflow(user, workflow, "workflow:read")).map((workflow) => workflow.id);
+
   // ---------------------------------------------------------------------------
   // Profiles
   // ---------------------------------------------------------------------------
@@ -136,6 +160,9 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid guard profile", issues: [{ path: "document", message: "Expected a profile document object" }] };
     }
+    const importId = typeof (document as Record<string, unknown>).id === "string" ? ((document as Record<string, unknown>).id as string) : "";
+    const refused = importId ? refuseEnforcedEdit(user, reply, importId) : null;
+    if (refused) return refused;
     try {
       const result = guard.importProfile({ document: document as Record<string, unknown>, ...(str(body.note) ? { note: str(body.note) } : {}) }, user.id);
       deps.audit(request, user, {
@@ -161,7 +188,13 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       reply.code(404);
       return { error: "Guard profile not found" };
     }
-    return { ...found, bindings: store.listGuardBindingsForProfile(request.params.id).filter((binding) => binding.mode !== "inherit") };
+    const bindings = store.listGuardBindingsForProfile(request.params.id).filter((binding) => {
+      if (binding.mode === "inherit") return false;
+      if (binding.scope === "project") return deps.canInProject(user, binding.scopeId, "workflow:read");
+      const workflow = store.getWorkflow(binding.scopeId);
+      return workflow ? deps.canAccessWorkflow(user, workflow, "workflow:read") : user.role === "admin";
+    });
+    return { ...found, bindings };
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/guard/profiles/:id", async (request, reply) => {
@@ -172,6 +205,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid guard profile", issues: zodIssues(parsed.error.issues) };
     }
+    const refused = refuseEnforcedEdit(user, reply, request.params.id);
+    if (refused) return refused;
     try {
       const result = guard.updateProfile(request.params.id, parsed.data, user.id);
       if (result.changed) {
@@ -288,6 +323,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       reply.code(404);
       return { error: "Project not found" };
     }
+    if (!deps.canInProject(user, request.params.projectId, "workflow:read")) return forbidden(reply);
     return {
       binding: projectBindingView(request.params.projectId),
       effective: guard.resolutionView(guard.resolveRun({ workflowId: "", projectId: request.params.projectId }))
@@ -302,6 +338,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
       reply.code(404);
       return { error: "Project not found" };
     }
+    if (!deps.canInProject(user, projectId, "workflow:write")) return forbidden(reply);
     const parsed = guardProjectBindingInputSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -410,6 +447,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const projectId = str(request.query.projectId) ?? "default";
+    if (!deps.canInProject(user, projectId, "workflow:read")) return forbidden(reply);
     return { project: projectBindingView(projectId), effective: guard.resolutionView(guard.resolveRun({ workflowId: "", projectId })) };
   });
 
@@ -420,9 +458,15 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get<{ Params: { id: string } }>("/api/executions/:id/guard-events", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    if (!store.getExecutionHistory(request.params.id)) {
+    const execution = store.getExecutionHistory(request.params.id);
+    if (!execution) {
       reply.code(404);
       return { error: "Execution not found" };
+    }
+    const workflow = store.getWorkflow(execution.workflowId);
+    if (workflow && !deps.canAccessWorkflow(user, workflow, "workflow:read")) {
+      reply.code(403);
+      return { error: "Insufficient permissions" };
     }
     return { events: guard.eventsForExecution(request.params.id) };
   });
@@ -430,7 +474,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   app.get<{ Querystring: Record<string, unknown> }>("/api/guard/events", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const filters = eventFilters(request.query);
+    const workflowIds = readableWorkflowIds(user);
+    const filters = { ...eventFilters(request.query), ...(workflowIds ? { workflowIds } : {}) };
     const { events, total } = guard.listEvents(filters);
     const names = new Map<string, string>();
     for (const event of events) {
@@ -443,7 +488,8 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const query = { days: 14, ...request.query };
-    const filters = eventFilters(query);
+    const workflowIds = readableWorkflowIds(user);
+    const filters = { ...eventFilters(query), ...(workflowIds ? { workflowIds } : {}) };
     return { since: filters.since ?? null, stats: guard.stats(filters) };
   });
 }

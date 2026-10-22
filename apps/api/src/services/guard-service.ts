@@ -24,6 +24,7 @@ import {
   guardProfileSchema,
   hashGuardProfile,
   serializeGuardProfile,
+  unsafeDictionaryPattern,
   type GuardProfile,
   type GuardProfileChange,
   type TokenVaultRecord,
@@ -175,6 +176,11 @@ export class GuardService {
     }
     for (const [index, dictionary] of result.data.dictionaries.entries()) {
       for (const [patternIndex, pattern] of dictionary.patterns.entries()) {
+        const unsafe = unsafeDictionaryPattern(pattern);
+        if (unsafe) {
+          issues.push({ path: `dictionaries.${index}.patterns.${patternIndex}`, message: unsafe });
+          continue;
+        }
         try {
           new RegExp(pattern, "giu");
         } catch {
