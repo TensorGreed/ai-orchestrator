@@ -3014,22 +3014,6 @@ function StudioApp() {
     };
   }, [authUser, busy, handleSave, loading]);
 
-  useEffect(() => {
-    const handleEscapeToCloseNodeConfig = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || !editingNodeId) {
-        return;
-      }
-
-      event.preventDefault();
-      setEditingNodeId(null);
-    };
-
-    window.addEventListener("keydown", handleEscapeToCloseNodeConfig);
-    return () => {
-      window.removeEventListener("keydown", handleEscapeToCloseNodeConfig);
-    };
-  }, [editingNodeId]);
-
   const handleLogsResizeStart = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
       if (isLogsPanelCollapsed) {
