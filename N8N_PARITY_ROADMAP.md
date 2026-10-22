@@ -619,6 +619,81 @@ Ideas from the positioning discussion, kept for later; each must remain self-hos
 - [ ] Workflow → standalone MCP server exporter (package a workflow so Claude Code, Cursor or another L2M can call it) to keep lock-in low (the in-instance endpoint is 10.4; this item is the standalone package)
 - [ ] "MCP agent operations" checklist and maturity model in the docs
 
+## Phase 15: Replay and Release Gate — CI for agents
+
+**Why:** a team that changes a model, a prompt, an MCP server version, a guard profile or a workflow has no way
+to know what the change does to real traffic before it ships. Recording real runs, replaying them against a
+candidate, diffing outputs, tool calls, cost and guard decisions, scoring the result and blocking promotion on
+regression makes L2M the place where agent changes are tested. The golden sets a deployment accumulates are its
+own regression suite. Everything runs inside the deployment; replay and scoring use the deployment's own
+providers and secrets.
+
+**Design principles**
+- Replay is a controlled experiment: pin everything except what the candidate changes. Model calls are live by
+  default (they are usually what is under test); MCP calls are answered from the recorded cassette; side-effecting
+  nodes are stubbed with their recorded output and never run live in a gate run.
+- Golden runs are self-contained, scrubbed copies (secrets through `SecretScrubber` and the cassette scrubber),
+  independent of execution-history retention.
+- Builds on what exists: eval datasets become golden sets, eval runs become replay jobs, the run-manifest facts and
+  hashes anchor what a golden run is, and pinned data is the stubbing seam.
+- Opt-in: a workflow without a release gate behaves exactly as before.
+
+### 15.1 Golden runs and replay
+- [ ] Save any execution as a golden run (`replay_recordings`, migration v30): captured workflow and hash, scrubbed
+  input and node outputs, copied MCP cassette, normalised run facts shared with the run manifest
+- [ ] Side-effect classification on node definitions; replay plan stubs write and read connectors through pinned
+  data and auto-resolves approvals and waits; a node the recording never saw is stubbed and flagged
+- [ ] Replay sandbox: `replay` trigger type, isolated memory, tool cache, artifacts and knowledge-base writes; no
+  error workflows, notifications, elicitation prompts or SLO impact
+- [ ] Run diff: status, structural output diff with ignore paths and tolerance, tool-call alignment with argument
+  diffs, path, model, token, cost and latency deltas, guard verdict changes, replay-health warnings
+- [ ] "Save as golden run" and a replay diff drawer on the Runs page; `l2m replay run --recording` with exit codes
+
+### 15.2 Golden sets, replay jobs and scorers
+- [ ] Golden sets as eval datasets tied to a workflow; replay jobs as background eval runs (concurrency cap, cancel,
+  progress, interrupted-on-restart), migration v31; plain eval runs move to the same runner
+- [ ] Scorers: structural JSON equality, JSON Schema, text similarity, tool sequence, status, no new guard blocks,
+  cost / token / latency budgets, LLM judge (rubric, pairwise, votes, provider credentials through `SecretService`)
+- [ ] Evaluations page replaces the placeholder: golden sets, replay jobs, per-case scores and diffs
+
+### 15.3 Candidates and fair comparison
+- [ ] Candidate = saved version, draft or a workflow file, plus overrides: model per node or provider, guard profile
+  version, MCP live or stub per server
+- [ ] Model tape in `packages/provider-sdk` (record and replay model calls; misses fall back to live) and memory seed
+  capture, so guard-only and MCP-only candidates replay without model calls
+- [ ] Compare against the recording or a baseline rerun in the same job; repeats with an aggregation rule for flaky
+  cases; cost estimate before a run and a per-job budget
+- [ ] Guard profile override per run, delivering the engine for 12.4 policy simulation
+
+### 15.4 Release gate and publish
+- [ ] Published version per workflow (migration v32); production entry points (webhooks, schedules, app triggers,
+  MCP gateway, chat, enqueue, sub-workflow calls) run the published version, the editor and test webhooks run the draft
+- [ ] Gate policy per workflow (pass rate, regressions, required scorers, cost and latency budgets, no new guard
+  blocks, minimum cases, recording age); publish requires a passing replay job for the exact workflow hash
+- [ ] Admin override with a reason, audited and recorded on the release; rollback to an earlier published version;
+  published versions exempt from version retention; `needs_approval` verdict ready for 11.2
+- [ ] Version pill and Publish dialog in the editor HUD; gate settings and release history
+
+### 15.5 CI entry point
+- [ ] `l2m replay run` (saved version, draft or workflow file; overrides; `--wait`; JSON and JUnit output; exit 0
+  pass, 1 regression, 4 could not complete), `l2m replay status`, `l2m release publish`
+- [ ] Golden-set export and import files (`l2m.golden-set`, scrubbed, optionally signed with the audit key) so
+  suites live in git next to the workflows
+- [ ] Docs with CI recipes that call the deployment's own API
+
+### 15.6 Production capture
+- [ ] Sampled capture of cassettes and model tapes on production runs into a triage inbox; promote to a golden set in
+  one click; short retention for unpromoted captures; optional DLP masking on record
+- [ ] Guard policy simulation over recent captured runs, shown on the Security page (12.4)
+
+### Decided 2026-10-22
+- The draft and published split is opt-in per workflow; the gate applies on publish, never on save
+- Golden sets reuse the eval tables (golden set = dataset, replay job = eval run); `POST /api/eval/runs` returns 202, and the old blocking behaviour stays behind `?wait=true` for one release
+- Replay compares against the recording by default; the gate switches to a fresh baseline rerun when a golden run is older than 30 days
+- PII masking is on by default for production captures
+- Live write calls are never allowed in gate runs
+- Only admins can override a failed gate, with a reason, until approval gates (11.2) land
+
 ## Implementation Priority Matrix
 
 | Priority | Phase | Estimated Effort | Business Impact |
