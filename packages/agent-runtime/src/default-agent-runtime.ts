@@ -714,6 +714,58 @@ function findUnansweredClarifyToolCallId(messages: ChatMessage[]): string | null
   return null;
 }
 
+/**
+ * Model APIs reject a history where a tool call is not answered by the tool
+ * messages right after it, or where a tool message answers no call (Anthropic:
+ * "`tool_use` ids were found without `tool_result` blocks"). Memory can hold
+ * both: tool results are not persisted by default, and the `maxMessages` trim
+ * can cut a call from its results. This keeps only answered calls with their
+ * results, and drops assistant turns that are left empty. A trailing
+ * unanswered `agent_clarify` call stays: it marks a run waiting for the
+ * user's reply.
+ */
+export function repairToolCallPairs(messages: ChatMessage[]): ChatMessage[] {
+  const repaired: ChatMessage[] = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    // A tool message reached here has no assistant call right before it.
+    if (message.role === "tool") continue;
+    if (message.role !== "assistant" || !message.toolCalls || message.toolCalls.length === 0) {
+      repaired.push(message);
+      continue;
+    }
+
+    const results: ChatMessage[] = [];
+    let next = index + 1;
+    while (next < messages.length && messages[next]!.role === "tool") {
+      results.push(messages[next]!);
+      next += 1;
+    }
+    const answeredIds = new Set(results.map((result) => result.toolCallId).filter((id): id is string => typeof id === "string"));
+    const isLast = next >= messages.length;
+    const keptCalls = message.toolCalls.filter(
+      (call) => answeredIds.has(call.id) || (isLast && call.name === CLARIFY_TOOL_NAME)
+    );
+
+    if (keptCalls.length > 0) {
+      repaired.push({ ...message, toolCalls: keptCalls });
+    } else if (message.content.trim()) {
+      const { toolCalls: _dropped, ...withoutCalls } = message;
+      repaired.push(withoutCalls);
+    }
+    const keptIds = new Set(keptCalls.map((call) => call.id));
+    const emitted = new Set<string>();
+    for (const result of results) {
+      if (result.toolCallId && keptIds.has(result.toolCallId) && !emitted.has(result.toolCallId)) {
+        emitted.add(result.toolCallId);
+        repaired.push(result);
+      }
+    }
+    index = next - 1;
+  }
+  return repaired;
+}
+
 function normalizeStoredMessages(
   messages: ChatMessage[],
   maxMessages: number,
@@ -760,7 +812,7 @@ export class DefaultAgentRuntime implements AgentRuntimeAdapter {
     let memoryMessages: ChatMessage[] = [];
     if (memoryEnabled && request.sessionId) {
       const loaded = await context.memoryStore!.loadMessages(memoryNamespace, request.sessionId);
-      memoryMessages = normalizeStoredMessages(loaded, memoryMaxMessages, toolOutputLimits.messageMaxChars);
+      memoryMessages = repairToolCallPairs(normalizeStoredMessages(loaded, memoryMaxMessages, toolOutputLimits.messageMaxChars));
     }
 
     // Phase: agent_clarify resume detection. If the last assistant message
@@ -951,7 +1003,7 @@ ${effectiveSystemPrompt}`;
         })
         .slice(-memoryMaxMessages);
 
-      await context.memoryStore.saveMessages(memoryNamespace, request.sessionId, persistable);
+      await context.memoryStore.saveMessages(memoryNamespace, request.sessionId, repairToolCallPairs(persistable));
     };
 
     const LLM_RETRY_MAX = 2;

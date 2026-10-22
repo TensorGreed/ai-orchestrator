@@ -1113,7 +1113,13 @@ function StudioApp() {
 
   const [systemPrompt, setSystemPrompt] = useState("You are a precise tool-using AI assistant.");
   const [userPrompt, setUserPrompt] = useState("What time is it in America/Toronto? Use tools when needed.");
-  const [sessionId, setSessionId] = useState("session-local-dev");
+  // Each workflow gets its own editor session, so one workflow's agent memory never feeds another's runs.
+  const [sessionIdOverrides, setSessionIdOverrides] = useState<Record<string, string>>({});
+  const sessionId = sessionIdOverrides[currentWorkflow.id] ?? `editor-${currentWorkflow.id}`;
+  const setSessionId = useCallback(
+    (next: string) => setSessionIdOverrides((current) => ({ ...current, [currentWorkflow.id]: next })),
+    [currentWorkflow.id]
+  );
   // Phase 10.8 — "Record MCP calls" for manual editor runs; off again on reload.
   const [recordMcp, setRecordMcp] = useState(false);
   const [chatInput, setChatInput] = useState("");
