@@ -18,14 +18,18 @@
  * Exit codes: 0 clean, 1 the check found problems (or a request failed),
  * 2 usage errors, 3 an audit bundle is internally consistent but its signer
  * was not verified (no --public-key), 4 a replay could not complete (the
- * recording could not answer the candidate, or the request failed).
+ * recording could not answer the candidate, the request failed, or the
+ * answer was not a replay result). A replay whose flags the API rejects
+ * (400) exits 2, like any usage error.
  */
 import fs from "node:fs";
 import {
   DEFAULT_ZIP_MAX_TOTAL_BYTES,
   judgeMcpCheck,
   judgeReplayDiff,
+  REPLAY_IGNORE_PATHS_MAX,
   REPLAY_MCP_MODES,
+  replayIgnorePathSchema,
   type ReplayRunResponse,
   type McpCheckReport,
   type McpCheckServerResult,
@@ -81,7 +85,8 @@ const USAGE = `Usage:
 
 The API URL and key default to L2M_API_URL and L2M_API_KEY.
 Exit codes: 0 clean (replay: pass), 1 problems found or a request failed
-(replay: the candidate differs from the golden run), 2 usage error,
+(replay: the candidate differs from the golden run), 2 usage error
+(replay: also flags the API rejects),
 3 audit bundle signer not verified (no --public-key; see --trust-embedded-key),
 4 a replay could not complete.
 `;
@@ -127,7 +132,15 @@ function apiTarget(args: ParsedArgs, io: CliIo): ApiTarget {
   return { url, key, fetch: io.fetch ?? fetch };
 }
 
-class RequestError extends Error {}
+class RequestError extends Error {
+  constructor(
+    message: string,
+    /** The HTTP status, when the API answered. */
+    readonly status: number | null = null
+  ) {
+    super(message);
+  }
+}
 
 async function apiRequest<T>(target: ApiTarget, method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
   let response: Response;
@@ -140,7 +153,12 @@ async function apiRequest<T>(target: ApiTarget, method: "GET" | "POST", path: st
   } catch (error) {
     throw new RequestError(`Cannot reach ${target.url}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    throw new RequestError(`${method} ${path}: the response could not be read: ${error instanceof Error ? error.message : String(error)}`, response.status);
+  }
   let parsed: unknown = null;
   try {
     parsed = text ? JSON.parse(text) : null;
@@ -149,7 +167,7 @@ async function apiRequest<T>(target: ApiTarget, method: "GET" | "POST", path: st
   }
   if (!response.ok) {
     const message = parsed && typeof parsed === "object" && "error" in parsed ? String((parsed as { error: unknown }).error) : text.slice(0, 200);
-    throw new RequestError(`${method} ${path} failed with ${response.status}: ${message}`);
+    throw new RequestError(`${method} ${path} failed with ${response.status}: ${message}`, response.status);
   }
   return parsed as T;
 }
@@ -403,6 +421,25 @@ function formatReplay(result: ReplayRunResponse, verdict: string, reasons: strin
   return lines.join("\n");
 }
 
+const isObject = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+/** Whether a 2xx body has everything the verdict and the report are built from. */
+function isReplayRunResponse(value: unknown): value is ReplayRunResponse {
+  if (!isObject(value) || !isObject(value.diff) || !isObject(value.candidate)) return false;
+  const diff = value.diff;
+  return (
+    isObject(diff.status) &&
+    typeof diff.status.regression === "boolean" &&
+    isObject(diff.output) &&
+    typeof diff.output.equal === "boolean" &&
+    Array.isArray(diff.output.changes) &&
+    isObject(diff.toolCalls) &&
+    Array.isArray(diff.toolCalls.steps) &&
+    Array.isArray(diff.health) &&
+    diff.health.every((warning) => isObject(warning) && typeof warning.blocking === "boolean")
+  );
+}
+
 async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
   const recording = oneFlag(args, "recording");
   if (!recording) throw new UsageError("l2m replay run needs --recording <id>");
@@ -423,11 +460,17 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
     if (!Number.isFinite(numberTolerance) || numberTolerance < 0) throw new UsageError("--number-tolerance must be a number of at least 0");
   }
   const ignorePaths = listFlag(args, "ignore-path");
+  // The API's own limits, checked here so a bad flag is a usage error and nothing is sent.
+  if (ignorePaths.length > REPLAY_IGNORE_PATHS_MAX) throw new UsageError(`--ignore-path can be given at most ${REPLAY_IGNORE_PATHS_MAX} times`);
+  for (const pattern of ignorePaths) {
+    const checked = replayIgnorePathSchema.safeParse(pattern);
+    if (!checked.success) throw new UsageError(`--ignore-path ${JSON.stringify(pattern.slice(0, 40))}: ${checked.error.issues[0]?.message ?? "invalid"}`);
+  }
   const target = apiTarget(args, io);
 
-  let result: ReplayRunResponse;
+  let result: unknown;
   try {
-    result = await apiRequest<ReplayRunResponse>(target, "POST", `/api/replay/recordings/${encodeURIComponent(recording)}/replay`, {
+    result = await apiRequest<unknown>(target, "POST", `/api/replay/recordings/${encodeURIComponent(recording)}/replay`, {
       ...(version !== undefined ? { version } : { draft: true }),
       ...(mcpMode ? { mcpMode } : {}),
       ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
@@ -435,22 +478,32 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
     });
   } catch (error) {
     if (error instanceof RequestError) {
+      // A 400 is the API refusing the flags: a usage error, like one caught here.
+      if (error.status === 400) {
+        write(io.stderr, `l2m: ${error.message}`);
+        return EXIT_USAGE;
+      }
       write(io.stderr, `l2m: replay could not complete: ${error.message}`);
       return EXIT_INCOMPLETE;
     }
     throw error;
   }
-  if (!result || typeof result !== "object" || !result.diff) {
-    write(io.stderr, "l2m: replay could not complete: the API returned no diff");
+  if (!isReplayRunResponse(result)) {
+    write(io.stderr, "l2m: replay could not complete: the API's answer is not a replay result (is the CLI the same version as the API?)");
     return EXIT_INCOMPLETE;
   }
-  // The verdict is judged again here from the diff, so a gate never trusts a summary field alone.
-  const judged = judgeReplayDiff(result.diff);
-  if (args.booleans.has("json")) io.stdout.write(`${JSON.stringify({ ...result, verdict: judged.verdict, reasons: judged.reasons }, null, 2)}\n`);
-  else write(io.stdout, formatReplay(result, judged.verdict, judged.reasons));
-  if (judged.verdict === "pass") return EXIT_OK;
-  if (judged.verdict === "fail") return EXIT_FAILED;
-  return EXIT_INCOMPLETE;
+  try {
+    // The verdict is judged again here from the diff, so a gate never trusts a summary field alone.
+    const judged = judgeReplayDiff(result.diff);
+    if (args.booleans.has("json")) io.stdout.write(`${JSON.stringify({ ...result, verdict: judged.verdict, reasons: judged.reasons }, null, 2)}\n`);
+    else write(io.stdout, formatReplay(result, judged.verdict, judged.reasons));
+    if (judged.verdict === "pass") return EXIT_OK;
+    if (judged.verdict === "fail") return EXIT_FAILED;
+    return EXIT_INCOMPLETE;
+  } catch (error) {
+    write(io.stderr, `l2m: replay could not complete: the API's answer could not be read (${error instanceof Error ? error.message : String(error)})`);
+    return EXIT_INCOMPLETE;
+  }
 }
 
 // --- entry -------------------------------------------------------------------

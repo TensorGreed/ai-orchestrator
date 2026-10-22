@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import type { RunDiff, ReplayRunResponse } from "@ai-orchestrator/shared";
+import { REPLAY_IGNORE_PATH_MAX_LENGTH, REPLAY_IGNORE_PATHS_MAX, type RunDiff, type ReplayRunResponse } from "@ai-orchestrator/shared";
 import { EXIT_FAILED, EXIT_INCOMPLETE, EXIT_OK, EXIT_USAGE, main, type CliIo } from "./main";
 
 function io(fetchImpl?: typeof fetch): CliIo & { out: () => string; err: () => string; requests: Array<{ url: string; body: unknown; auth: string | null }> } {
@@ -92,6 +92,35 @@ describe("l2m replay run", () => {
     }) as unknown as typeof fetch);
     expect(await main(["replay", "run", "--recording", "rec_1"], down)).toBe(EXIT_INCOMPLETE);
     expect(down.err()).toContain("could not complete");
+  });
+
+  it("exits 4, not 1, when a 2xx body is not a full replay result", async () => {
+    const partial = { ...response(diff()), diff: { status: { baseline: "success", candidate: "success", changed: false, regression: false } } };
+    for (const body of [partial, { ...response(diff()), diff: { ...diff(), health: "none" } }, { ...response(diff()), diff: { ...diff(), output: { equal: false } } }, "not a result", null]) {
+      const cli = io(replyWith(200, body));
+      expect(await main(["replay", "run", "--recording", "rec_1"], cli)).toBe(EXIT_INCOMPLETE);
+      expect(cli.err()).toContain("could not complete");
+    }
+    const garbled = io((async () => new Response("<html>proxy error</html>", { status: 200 })) as unknown as typeof fetch);
+    expect(await main(["replay", "run", "--recording", "rec_1"], garbled)).toBe(EXIT_INCOMPLETE);
+    const broken = io((async () => ({ ok: true, status: 200, text: async () => { throw new Error("socket hang up"); } }) as unknown as Response) as unknown as typeof fetch);
+    expect(await main(["replay", "run", "--recording", "rec_1"], broken)).toBe(EXIT_INCOMPLETE);
+    expect(broken.err()).toContain("socket hang up");
+  });
+
+  it("exits 2 when the API rejects the flags (400)", async () => {
+    const cli = io(replyWith(400, { error: "ignorePaths: too many" }));
+    expect(await main(["replay", "run", "--recording", "rec_1", "--ignore-path", "a"], cli)).toBe(EXIT_USAGE);
+    expect(cli.err()).toContain("too many");
+  });
+
+  it("checks ignore paths against the API's limits before sending", async () => {
+    const tooMany = Array.from({ length: REPLAY_IGNORE_PATHS_MAX + 1 }, (_, index) => ["--ignore-path", `k${index}`]).flat();
+    for (const extra of [tooMany, ["--ignore-path", "a".repeat(REPLAY_IGNORE_PATH_MAX_LENGTH + 1)], ["--ignore-path", `${"**.".repeat(9)}z`]]) {
+      const cli = io(replyWith(200, response(diff())));
+      expect(await main(["replay", "run", "--recording", "rec_1", ...extra], cli)).toBe(EXIT_USAGE);
+      expect(cli.requests).toEqual([]);
+    }
   });
 
   it("exits 2 on usage errors", async () => {

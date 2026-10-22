@@ -96,5 +96,5 @@ l2m replay run --recording rec_… --version 12 --mcp strict --ignore-path "**.i
 | --- | --- |
 | 0 | Pass |
 | 1 | The candidate differs from the golden run |
-| 2 | Usage error |
-| 4 | The replay could not complete (the recording could not answer the candidate, or the request failed) |
+| 2 | Usage error, including flags the API rejects (HTTP 400) and ignore paths over the limits |
+| 4 | The replay could not complete: the recording could not answer the candidate, the comparison would not mean anything, the request failed, or the answer was not a replay result |
