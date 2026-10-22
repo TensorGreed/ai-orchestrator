@@ -940,13 +940,26 @@
   color: var(--fg-muted);
 }
 
+/* Above the card's top edge: the bottom edge is taken by the debug preview. */
+.wf-node-telemetry.wf-node-telemetry-running {
+  top: -10px;
+  bottom: auto;
+  z-index: 6;
+}
+
+.wf-telemetry-pill-running {
+  background: var(--bg-elev-2);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
 .wf-node-debug-preview {
   position: absolute;
   z-index: 5;
   top: calc(100% + 6px);
   left: 8px;
   right: 8px;
-  max-height: 48px;
+  max-height: 160px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -963,6 +976,30 @@
 .wf-node-hub .wf-node-debug-preview {
   left: -40px;
   right: -40px;
+}
+
+/* Clamp each line instead of the box, so a long input never pushes the error and its fix out of view. */
+.wf-node-debug-preview > div,
+.wf-node-debug-remediation {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.wf-node-debug-preview > .wf-node-debug-error {
+  display: block;
+}
+
+.wf-node-debug-error > .wf-node-debug-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.wf-node-debug-remediation {
+  -webkit-line-clamp: 4;
 }
 
 .wf-node-debug-preview strong {
@@ -2718,6 +2755,20 @@
   height: 3px;
   background: var(--fg);
   opacity: 0.55;
+}
+
+.run-tape-error {
+  grid-column: 2 / 4;
+  font: 400 var(--fs-xs) var(--font-mono);
+  color: var(--err);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-tape-error small {
+  color: var(--fg-muted);
+  font: inherit;
 }
 
 .run-tape-progress {

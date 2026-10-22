@@ -9,6 +9,35 @@ import type {
 import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentToolRuntime, InternalToolResult } from "./types";
 import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt } from "./types";
 
+/** The error `run()` throws once the run's abort signal fires: its reason when that is an Error. */
+function abortErrorFor(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  if (reason instanceof Error) {
+    return reason;
+  }
+  const error = new Error(typeof reason === "string" && reason.trim() ? reason.trim() : "Agent run aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+/** Retry wait that ends early, by throwing the abort error, when `signal` aborts. */
+function waitUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(abortErrorFor(signal));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(handle);
+      reject(abortErrorFor(signal as AbortSignal));
+    };
+    const handle = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 const MAX_MESSAGE_CHARS = 3000;
 const MAX_SYSTEM_MESSAGE_CHARS = 8000;
 const DEFAULT_TOOL_MESSAGE_MAX_CHARS = 6000;
@@ -971,6 +1000,9 @@ ${effectiveSystemPrompt}`;
 
     try {
       for (let iteration = 1; iteration <= request.maxIterations; iteration += 1) {
+        if (context.signal?.aborted) {
+          throw abortErrorFor(context.signal);
+        }
         // Phase 12.1 — guard hook: before each model call.
         await guardPrompts(iteration);
         // --- LLM call with per-iteration retry ---
@@ -991,7 +1023,9 @@ ${effectiveSystemPrompt}`;
                 tools: request.toolCallingEnabled ? activeTools : []
               },
               {
-                resolveSecret: context.resolveSecret
+                resolveSecret: context.resolveSecret,
+                ...(context.signal ? { signal: context.signal } : {}),
+                ...(context.onProviderRetry ? { onRetry: context.onProviderRetry } : {})
               }
             );
             // Telemetry: accumulate usage + latency on every successful call.
@@ -1009,6 +1043,10 @@ ${effectiveSystemPrompt}`;
             llmError = undefined;
             break;
           } catch (error) {
+            // A stopped or timed-out run is not a model failure: no retry, no graceful fallback.
+            if (context.signal?.aborted) {
+              throw abortErrorFor(context.signal);
+            }
             llmError = error instanceof Error ? error : new Error(String(error));
             const errorMsg = llmError.message.toLowerCase();
             const isQuotaError = errorMsg.includes("quota") || errorMsg.includes("billing") || errorMsg.includes("limit: 0") || errorMsg.includes("rate_limit_exceeded");
@@ -1017,7 +1055,7 @@ ${effectiveSystemPrompt}`;
             }
             if (llmAttempt < LLM_RETRY_MAX) {
               const delay = LLM_RETRY_BASE_DELAY_MS * Math.pow(2, llmAttempt);
-              await new Promise((resolve) => setTimeout(resolve, delay));
+              await waitUnlessAborted(delay, context.signal);
             }
           }
         }
@@ -1434,6 +1472,11 @@ ${effectiveSystemPrompt}`;
       // it leaves the loop as is, without writing the stopped turn to memory.
       if (isAgentGuardInterrupt(error)) {
         throw error;
+      }
+      // A stopped or timed-out run leaves the loop as is too: the caller
+      // reports it as canceled or timed out, not as an agent answer.
+      if (context.signal?.aborted) {
+        throw abortErrorFor(context.signal);
       }
       const result: AgentRunState = {
         finalAnswer: error instanceof Error ? error.message : "Agent runtime failed",

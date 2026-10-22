@@ -57,7 +57,9 @@ import {
   type SecretReference,
   type Workflow,
   type WorkflowExecutionState,
-  type WorkflowNode
+  type WorkflowNode,
+  ErrorCategory,
+  WorkflowError
 } from "@ai-orchestrator/shared";
 import {
   executeCodeNodeSandbox,
@@ -122,6 +124,7 @@ import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { GuardService } from "./services/guard-service.js";
+import { startSseHeartbeat } from "./sse-heartbeat.js";
 import {
   McpCassetteService,
   applyReplayOutcome,
@@ -503,6 +506,16 @@ function stripSignaturePrefix(value: string): string {
     return trimmed.slice(equalsIndex + 1).trim();
   }
   return trimmed;
+}
+
+/**
+ * True when a run's abort signal fired because the execution timeout ran
+ * out, not because a person stopped it. A timed-out run ends as an error
+ * on the node that was running; a stopped run ends as canceled.
+ */
+function isExecutionTimeoutAbort(signal: AbortSignal | undefined): boolean {
+  const reason: unknown = signal?.aborted ? signal.reason : undefined;
+  return reason instanceof WorkflowError && reason.category === ErrorCategory.WORKFLOW_TIMEOUT;
 }
 
 function normalizeExecutionTimeoutMs(
@@ -1502,7 +1515,13 @@ export function createApp(
     }
   ): boolean => {
     const active = activeExecutions.get(meta.executionId);
-    if (active?.controller.signal.aborted && record.status !== "canceled") {
+    // A stopped run keeps the canceled record the cancel route wrote. A
+    // timed-out run is still saved: it ends as an error with its node results.
+    if (
+      active?.controller.signal.aborted &&
+      record.status !== "canceled" &&
+      !(isExecutionTimeoutAbort(active.controller.signal) && meta.phase === "final")
+    ) {
       return false;
     }
     try {
@@ -1598,6 +1617,19 @@ export function createApp(
       variables: { ...projectVars, ...(input.workflow.variables ?? {}) }
     };
     const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
+    // The execution timeout aborts the run's signal, so it interrupts a
+    // model call, MCP call or retry wait that is in flight instead of only
+    // being checked between nodes. The reason marks it as a timeout, which
+    // the engine reports on the running node, unlike a person's Stop.
+    const runController = controller ?? new AbortController();
+    const executionTimeoutHandle = setTimeout(() => {
+      if (!runController.signal.aborted) {
+        runController.abort(
+          WorkflowError.timeout(`Workflow exceeded the ${executionTimeoutMs}ms execution timeout.`, { timeoutMs: executionTimeoutMs })
+        );
+      }
+    }, executionTimeoutMs);
+    executionTimeoutHandle.unref?.();
     try {
       const result = await executeWorkflow(
         {
@@ -1714,7 +1746,7 @@ export function createApp(
                   triggerType: input.triggerType,
                   createdBy: input.policyActor?.id ?? null,
                   timeoutMs: executionTimeoutMs,
-                  signal: controller?.signal
+                  signal: runController.signal
                 })
             : undefined,
           persistPausedExecution: async (paused) => {
@@ -1805,11 +1837,13 @@ export function createApp(
           onNodeComplete: input.hooks?.onNodeComplete,
           onLLMDelta: input.hooks?.onLLMDelta,
           onMcpProgress: input.hooks?.onMcpProgress,
-          abortSignal: controller?.signal
+          abortSignal: runController.signal
         }
       );
 
-      if (controller?.signal.aborted && result.status !== "canceled") {
+      // A person's Stop always ends as canceled. A timeout keeps the engine's
+      // result: the error on the node that was running, with its remediation.
+      if (runController.signal.aborted && !isExecutionTimeoutAbort(runController.signal) && result.status !== "canceled") {
         const completedAt = new Date().toISOString();
         return {
           ...result,
@@ -1822,6 +1856,7 @@ export function createApp(
 
       return result;
     } finally {
+      clearTimeout(executionTimeoutHandle);
       if (input.executionId) {
         mcpElicitationService.releaseExecution(input.executionId, "The run ended before the request was answered.");
       }
@@ -7084,6 +7119,7 @@ export function createApp(
     if (typeof reply.raw.flushHeaders === "function") {
       reply.raw.flushHeaders();
     }
+    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => streamClosed);
 
     sendSseEvent("execution_started", {
       executionId,
@@ -7165,6 +7201,7 @@ export function createApp(
       const message = error instanceof Error ? error.message : "Execution failed";
       sendSseEvent("error", { message });
     } finally {
+      stopHeartbeat();
       unsubscribeElicitations();
       if (!streamClosed) {
         reply.raw.end();
@@ -7703,6 +7740,11 @@ export function createApp(
         ? reasonRecord.reason.trim()
         : `Execution canceled by ${user.email}`;
     const active = activeExecutions.get(request.params.id);
+    // The run already hit its time limit and is ending; it is saved as a timeout error, not a cancel.
+    if (active && isExecutionTimeoutAbort(active.controller.signal)) {
+      reply.code(409);
+      return { error: "Execution already timed out and is stopping" };
+    }
     active?.controller.abort(reason);
     if (execution.status === "waiting_approval") {
       deleteWorkflowExecutionSafely(execution.id, execution.workflowId);
@@ -8773,6 +8815,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (typeof reply.raw.flushHeaders === "function") {
       reply.raw.flushHeaders();
     }
+    const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS, () => streamClosed);
 
     sendSseEvent("execution_started", {
       executionId,
@@ -8844,6 +8887,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const message = error instanceof Error ? error.message : "Execution failed";
       sendSseEvent("error", { message });
     } finally {
+      stopHeartbeat();
       if (!streamClosed) {
         reply.raw.end();
       }

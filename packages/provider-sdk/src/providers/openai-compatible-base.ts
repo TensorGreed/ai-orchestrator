@@ -1,6 +1,6 @@
 import type { ChatMessage, LLMCallResponse, LLMProviderConfig, LLMUsage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { resilientFetch } from "../resilient-fetch";
+import { providerHttpError, readResponseJson, readResponseText, readStreamChunk, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
 import { parseToolArguments } from "../tool-arg-parser";
 
 interface OpenAICompatibleResponse {
@@ -258,17 +258,19 @@ export async function callOpenAICompatible(
     {
       method: "POST",
       headers: connection.headers,
-      body: JSON.stringify(connection.payload)
+      body: JSON.stringify(connection.payload),
+      signal: context.signal
     },
-    { timeoutMs, maxRetries, provider: options.id }
+    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry }
   );
 
+  const bodyRead = { timeoutMs, signal: context.signal, provider: options.id };
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Provider ${options.id} request failed (${response.status}): ${body}`);
+    const body = await readResponseText(response, bodyRead);
+    throw providerHttpError(options.id, response.status, `Provider ${options.id} request failed (${response.status}): ${body}`);
   }
 
-  const json = (await response.json()) as OpenAICompatibleResponse;
+  const json = await readResponseJson<OpenAICompatibleResponse>(response, bodyRead);
   const content = json.choices?.[0]?.message?.content ?? "";
 
   return {
@@ -296,14 +298,15 @@ export async function* callOpenAICompatibleStream(
       body: JSON.stringify({
         ...connection.payload,
         stream: true
-      })
+      }),
+      signal: context.signal
     },
-    { timeoutMs, maxRetries, provider: options.id }
+    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry }
   );
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Provider ${options.id} stream request failed (${response.status}): ${body}`);
+    const body = await readResponseText(response, { timeoutMs, signal: context.signal, provider: options.id });
+    throw providerHttpError(options.id, response.status, `Provider ${options.id} stream request failed (${response.status}): ${body}`);
   }
 
   if (!response.body) {
@@ -357,29 +360,44 @@ export async function* callOpenAICompatibleStream(
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-
-    buffer += decoder.decode(value, { stream: true });
+  const idleTimeoutMs = streamIdleTimeoutMs(request.provider.extra, timeoutMs);
+  let finished = false;
+  try {
     while (true) {
-      const boundary = findSSEBoundary(buffer);
-      if (!boundary) {
+      const { done, value } = await readStreamChunk(reader, {
+        timeoutMs: idleTimeoutMs,
+        signal: context.signal,
+        provider: options.id,
+        timeoutMessage: `Provider ${options.id} stream sent no data for ${idleTimeoutMs}ms; the connection looks stalled. Raise extra.streamIdleTimeoutMs on the model if it needs longer between chunks.`
+      });
+      if (done) {
+        finished = true;
         break;
       }
 
-      const rawEvent = buffer.slice(0, boundary.index);
-      buffer = buffer.slice(boundary.index + boundary.separatorLength);
-      const payload = parseSSEEventPayload(rawEvent);
-      if (!payload) {
-        continue;
-      }
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const boundary = findSSEBoundary(buffer);
+        if (!boundary) {
+          break;
+        }
 
-      for await (const chunk of processEventPayload(payload)) {
-        yield chunk;
+        const rawEvent = buffer.slice(0, boundary.index);
+        buffer = buffer.slice(boundary.index + boundary.separatorLength);
+        const payload = parseSSEEventPayload(rawEvent);
+        if (!payload) {
+          continue;
+        }
+
+        for await (const chunk of processEventPayload(payload)) {
+          yield chunk;
+        }
       }
+    }
+  } finally {
+    if (!finished) {
+      // The consumer stopped early (run canceled) or the read failed: free the connection.
+      void reader.cancel().catch(() => undefined);
     }
   }
 

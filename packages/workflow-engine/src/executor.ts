@@ -15,7 +15,7 @@ import {
   parseMcpRuntimeRejection,
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
-import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
 import type {
   ChatMessage,
   ConnectorDocument,
@@ -472,6 +472,69 @@ function isCancellationError(error: unknown): boolean {
   return error instanceof WorkflowCanceledError;
 }
 
+interface ExecutionTimeoutFields {
+  error: string;
+  errorCategory: string;
+  errorRemediation: string;
+  retryable: boolean;
+}
+
+/**
+ * True when the run was aborted by its execution timeout rather than by a
+ * person: the caller aborts with a WORKFLOW_TIMEOUT `WorkflowError` as the
+ * reason. Checked by category, not `instanceof`, so a reason built from
+ * another copy of the shared package still counts.
+ */
+function isExecutionTimeoutAbort(signal?: AbortSignal): boolean {
+  if (!signal?.aborted) {
+    return false;
+  }
+  const reason: unknown = signal.reason;
+  return Boolean(
+    reason && typeof reason === "object" && (reason as { category?: unknown }).category === ErrorCategory.WORKFLOW_TIMEOUT
+  );
+}
+
+/** Error fields for a node or run that ran out of execution time. */
+function executionTimeoutFields(timeoutMs: number, reason?: unknown, message?: string): ExecutionTimeoutFields {
+  const record = reason && typeof reason === "object" ? (reason as Record<string, unknown>) : {};
+  const metadata = record.metadata && typeof record.metadata === "object" ? (record.metadata as Record<string, unknown>) : {};
+  const limitMs = typeof metadata.timeoutMs === "number" ? metadata.timeoutMs : timeoutMs;
+  const reasonMessage = typeof record.message === "string" && record.message.trim() ? record.message.trim() : undefined;
+  return {
+    error: message ?? reasonMessage ?? `Workflow exceeded the ${limitMs}ms execution timeout.`,
+    errorCategory: ErrorCategory.WORKFLOW_TIMEOUT,
+    errorRemediation:
+      typeof record.remediation === "string" && record.remediation.trim()
+        ? record.remediation
+        : remediationForCategory(ErrorCategory.WORKFLOW_TIMEOUT, { timeoutMs: limitMs }),
+    retryable: false
+  };
+}
+
+/**
+ * The provider call context for a node: the run's abort signal, so Stop and
+ * the execution timeout interrupt in-flight model calls, and a retry hook
+ * that reports backoff waits to the run logger.
+ */
+function providerCallContext(
+  dependencies: Pick<WorkflowExecutionDependencies, "resolveSecret" | "abortSignal" | "logger">,
+  nodeId?: string
+): ProviderExecutionContext {
+  const logger = dependencies.logger;
+  return {
+    resolveSecret: dependencies.resolveSecret,
+    ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
+    ...(logger
+      ? {
+          onRetry: (info: ResilientFetchRetryInfo) => {
+            logger("LLM provider request is being retried", { ...(nodeId ? { nodeId } : {}), ...info });
+          }
+        }
+      : {})
+  };
+}
+
 function toRecord(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -483,9 +546,33 @@ function hasOwnRecordKey(record: Record<string, unknown>, key: string): boolean 
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
+const ERROR_CATEGORIES = new Set<string>(Object.values(ErrorCategory));
+
+// LLMProviderError (provider-sdk) tags HTTP failures as auth / quota / transient.
+function categorizedProviderError(
+  error: unknown
+): { category: ErrorCategory; provider?: string; retryable?: boolean } | undefined {
+  if (!(error instanceof Error) || error.name !== "LLMProviderError") return undefined;
+  const fields = error as Error & { category?: unknown; provider?: unknown; retryable?: unknown };
+  if (typeof fields.category !== "string" || !ERROR_CATEGORIES.has(fields.category)) return undefined;
+  return {
+    category: fields.category as ErrorCategory,
+    provider: typeof fields.provider === "string" ? fields.provider : undefined,
+    retryable: typeof fields.retryable === "boolean" ? fields.retryable : undefined
+  };
+}
+
 function isWebhookTrigger(globals: Record<string, unknown>): boolean {
   const triggerType = typeof globals.trigger_type === "string" ? globals.trigger_type.trim().toLowerCase() : "";
   return triggerType.startsWith("webhook");
+}
+
+// A prompt sent with the run (chat message, API call) wins over the text saved
+// on a Text Input / User Prompt node; the saved text is the default for runs
+// that send none, such as the editor's Run button.
+function resolveRuntimeUserPrompt(globals: Record<string, unknown>): string | undefined {
+  const prompt = globals.user_prompt;
+  return typeof prompt === "string" && prompt.trim() ? prompt : undefined;
 }
 
 function resolveWebhookPrompt(globals: Record<string, unknown>): string | undefined {
@@ -2374,9 +2461,7 @@ async function runLlmNode(input: {
         provider: input.provider,
         messages
       },
-      {
-        resolveSecret: input.dependencies.resolveSecret
-      }
+      providerCallContext(input.dependencies, input.nodeId)
     )) {
       throwIfAborted(input.dependencies.abortSignal);
       if (chunk.type === "text_delta" && chunk.textDelta) {
@@ -2434,9 +2519,7 @@ async function runLlmNode(input: {
       provider: input.provider,
       messages
     },
-    {
-      resolveSecret: input.dependencies.resolveSecret
-    }
+    providerCallContext(input.dependencies, input.nodeId)
   );
   throwIfAborted(input.dependencies.abortSignal);
 
@@ -2815,11 +2898,8 @@ async function executeNode(
       const text =
         typeof webhookPrompt === "string"
           ? webhookPrompt
-          : typeof config.text === "string"
-            ? config.text
-            : typeof context.globals.user_prompt === "string"
-              ? context.globals.user_prompt
-              : "";
+          : resolveRuntimeUserPrompt(context.globals) ??
+            (typeof config.text === "string" ? config.text : "");
 
       return {
         text,
@@ -2840,12 +2920,7 @@ async function executeNode(
 
     case "user_prompt": {
       return {
-        user_prompt:
-          typeof config.text === "string"
-            ? config.text
-            : typeof context.globals.user_prompt === "string"
-              ? context.globals.user_prompt
-              : ""
+        user_prompt: resolveRuntimeUserPrompt(context.globals) ?? (typeof config.text === "string" ? config.text : "")
       };
     }
 
@@ -4822,6 +4897,7 @@ async function executeNode(
             : undefined;
         let workerPendingApproval: ApprovalHandoffRequest | undefined;
 
+        const agentProviderRetry = providerCallContext(dependencies, node.id).onRetry;
         const modelRunStarted = Date.now();
         const modelRunStartedAt = nowIso();
         let agentState: Awaited<ReturnType<typeof dependencies.agentRuntime.run>>;
@@ -4884,7 +4960,9 @@ async function executeNode(
             resolveSecret: dependencies.resolveSecret,
             memoryStore: dependencies.memoryStore,
             toolDataStore: dependencies.toolDataStore,
-            ...(guardSession ? { guard: guardSession.hooks } : {})
+            ...(guardSession ? { guard: guardSession.hooks } : {}),
+            ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
+            ...(agentProviderRetry ? { onProviderRetry: agentProviderRetry } : {})
           }
         );
         } catch (error) {
@@ -5117,9 +5195,11 @@ async function executeNode(
                     { role: "user", content: correctionPrompt }
                   ]
                 },
-                { resolveSecret: dependencies.resolveSecret }
+                providerCallContext(dependencies, node.id)
               );
             } catch (error) {
+              // A stopped or timed-out run ends here; it is not a parse failure to fall back from.
+              throwIfAborted(dependencies.abortSignal);
               // Graceful fallback: don't crash the workflow if the retry LLM call fails
               break; // Exit retry loop, use best heuristic result;
             }
@@ -5213,9 +5293,7 @@ async function executeNode(
                 }
               ]
             },
-            {
-              resolveSecret: dependencies.resolveSecret
-            }
+            providerCallContext(dependencies, node.id)
           );
           candidate = retryResponse.content;
           failures = validateGuardrailChecks(candidate, checks);
@@ -6502,7 +6580,81 @@ export async function executeWorkflow(
     };
   };
 
+  /**
+   * End the run on its execution timeout. The node that was running, if
+   * any, fails with WORKFLOW_TIMEOUT and the remediation, so the failure
+   * shows on the node rather than only on the run; later nodes are skipped
+   * and the error workflow runs as for any other failure.
+   */
+  const finishOnExecutionTimeout = async (
+    remainderStart: number,
+    fields: ExecutionTimeoutFields,
+    running?: { node: WorkflowNode; nodeInput: unknown; startedAtNode: string; started: number }
+  ): Promise<WorkflowExecutionResult> => {
+    const completedAt = nowIso();
+    if (running) {
+      const durationMs = Date.now() - running.started;
+      nodeResults.push({
+        nodeId: running.node.id,
+        status: "error",
+        startedAt: running.startedAtNode,
+        completedAt,
+        durationMs,
+        input: running.nodeInput,
+        ...fields
+      });
+      await dependencies.onNodeComplete?.({
+        nodeId: running.node.id,
+        nodeType: running.node.type,
+        status: "error",
+        completedAt,
+        durationMs,
+        input: running.nodeInput,
+        ...fields
+      });
+    }
+    for (let remaining = remainderStart; remaining < nodeOrder.length; remaining += 1) {
+      nodeResults.push({
+        nodeId: nodeOrder[remaining],
+        status: "skipped",
+        startedAt: completedAt,
+        completedAt,
+        durationMs: 0,
+        output: { reason: "execution_timeout" }
+      });
+    }
+    if (workflow.settings?.errorWorkflowId && dependencies.triggerErrorWorkflow) {
+      dependencies.triggerErrorWorkflow({
+        errorWorkflowId: workflow.settings.errorWorkflowId,
+        sourceWorkflowId: workflow.id,
+        sourceWorkflowName: workflow.name,
+        executionId: request.executionId,
+        error: fields.error,
+        timestamp: completedAt
+      }).catch(() => {
+        // Intentionally ignored — error workflow trigger failures do not affect the result
+      });
+    }
+    return {
+      workflowId: workflow.id,
+      status: "error",
+      startedAt,
+      completedAt,
+      executionId: request.executionId,
+      customData,
+      nodeResults,
+      error: fields.error,
+      errorCategory: fields.errorCategory,
+      errorRemediation: fields.errorRemediation,
+      warnings: workflowWarnings,
+      retriedNodes
+    };
+  };
+
   for (let index = startIndex; index < nodeOrder.length; index += 1) {
+    if (isExecutionTimeoutAbort(dependencies.abortSignal)) {
+      return await finishOnExecutionTimeout(index, executionTimeoutFields(executionTimeoutMs, dependencies.abortSignal?.reason));
+    }
     if (dependencies.abortSignal?.aborted) {
       appendCanceledRemainder(nodeOrder, index, nodeResults);
       return {
@@ -6522,28 +6674,14 @@ export async function executeWorkflow(
     // Check execution timeout
     const elapsedMs = Date.now() - executionStartTime;
     if (elapsedMs > executionTimeoutMs) {
-      for (let remaining = index; remaining < nodeOrder.length; remaining += 1) {
-        nodeResults.push({
-          nodeId: nodeOrder[remaining],
-          status: "skipped",
-          startedAt: nowIso(),
-          completedAt: nowIso(),
-          durationMs: 0,
-          output: { reason: "execution_timeout" }
-        });
-      }
-      return {
-        workflowId: workflow.id,
-        status: "error" as const,
-        startedAt,
-        completedAt: nowIso(),
-        executionId: request.executionId,
-        customData,
-        nodeResults,
-        error: `Workflow execution timed out after ${elapsedMs}ms (limit: ${executionTimeoutMs}ms)`,
-        warnings: workflowWarnings,
-        retriedNodes
-      };
+      return await finishOnExecutionTimeout(
+        index,
+        executionTimeoutFields(
+          executionTimeoutMs,
+          undefined,
+          `Workflow execution timed out after ${elapsedMs}ms (limit: ${executionTimeoutMs}ms)`
+        )
+      );
     }
     const nodeId = nodeOrder[index];
     const node = graphIndexes.nodeById.get(nodeId);
@@ -6967,6 +7105,14 @@ export async function executeWorkflow(
           ...(error.request.details ? { details: error.request.details } : {})
         });
       }
+      // The execution timeout fires while a node runs: that node failed, it was not canceled.
+      if (isExecutionTimeoutAbort(dependencies.abortSignal)) {
+        return await finishOnExecutionTimeout(
+          index + 1,
+          executionTimeoutFields(executionTimeoutMs, dependencies.abortSignal?.reason),
+          { node, nodeInput, startedAtNode, started }
+        );
+      }
       if (isCancellationError(error) || dependencies.abortSignal?.aborted) {
         const canceledAt = nowIso();
         const cancelMessage = getAbortMessage(dependencies.abortSignal);
@@ -7006,16 +7152,17 @@ export async function executeWorkflow(
       const errorMessage = error instanceof Error ? error.message : "Node execution failed";
       // Surface a structured error block (category + remediation + retryable)
       // alongside the raw message so the UI can render an actionable hint
-      // without parsing strings. Non-WorkflowError throws fall back to UNKNOWN
-      // with its generic remediation.
+      // without parsing strings. Provider errors carry their own category;
+      // other throws fall back to UNKNOWN with its generic remediation.
+      const providerError = error instanceof WorkflowError ? undefined : categorizedProviderError(error);
       const errorCategoryName =
-        error instanceof WorkflowError ? error.category : ErrorCategory.UNKNOWN;
+        error instanceof WorkflowError ? error.category : providerError?.category ?? ErrorCategory.UNKNOWN;
       const errorRemediation =
         error instanceof WorkflowError
           ? error.remediation
-          : remediationForCategory(ErrorCategory.UNKNOWN);
+          : remediationForCategory(errorCategoryName, providerError ? { providerId: providerError.provider } : undefined);
       const errorRetryable =
-        error instanceof WorkflowError ? error.retryable : undefined;
+        error instanceof WorkflowError ? error.retryable : providerError?.retryable;
       const errorFields = {
         error: errorMessage,
         errorCategory: errorCategoryName,

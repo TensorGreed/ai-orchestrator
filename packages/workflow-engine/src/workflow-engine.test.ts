@@ -488,6 +488,42 @@ describe("workflow engine", () => {
     expect(textNodeOutput.text).toBe("prompt-from-webhook");
   });
 
+  it("uses the run's user prompt over saved text on Text Input and User Prompt nodes", async () => {
+    const workflow: Workflow = {
+      id: "wf-chat-overrides-input-nodes",
+      name: "Chat message overrides input nodes",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "text", type: "text_input", name: "Text Input", position: { x: 0, y: 0 }, config: { text: "saved text" } },
+        { id: "prompt", type: "user_prompt", name: "User Prompt", position: { x: 0, y: 120 }, config: { text: "saved prompt" } },
+        { id: "output", type: "output", name: "Output", position: { x: 220, y: 0 }, config: { responseTemplate: "{{user_prompt}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "text", target: "output" },
+        { id: "e2", source: "prompt", target: "output" }
+      ]
+    };
+    const dependencies = {
+      providerRegistry: createProviderRegistry(),
+      connectorRegistry: createDefaultConnectorRegistry(),
+      mcpRegistry: createDefaultMCPRegistry(),
+      agentRuntime: new FakeAgentRuntime(),
+      resolveSecret: async () => undefined
+    };
+    const outputOf = (result: Awaited<ReturnType<typeof executeWorkflow>>, nodeId: string) =>
+      result.nodeResults.find((entry) => entry.nodeId === nodeId)?.output as Record<string, unknown>;
+
+    const chatRun = await executeWorkflow({ workflow, userPrompt: "typed in chat" }, dependencies);
+    expect(chatRun.status).toBe("success");
+    expect(outputOf(chatRun, "text").text).toBe("typed in chat");
+    expect(outputOf(chatRun, "prompt").user_prompt).toBe("typed in chat");
+
+    const editorRun = await executeWorkflow({ workflow, userPrompt: "   " }, dependencies);
+    expect(outputOf(editorRun, "text").text).toBe("saved text");
+    expect(outputOf(editorRun, "prompt").user_prompt).toBe("saved prompt");
+  });
+
   it("requires chat_model attachment for agent orchestrator nodes", () => {
     const workflow: Workflow = {
       id: "wf-agent-no-model",

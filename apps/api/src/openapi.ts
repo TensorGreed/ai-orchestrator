@@ -396,7 +396,7 @@ export const openApiSpec = {
         summary: "Execute a workflow with SSE streaming",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
-          "200": { description: "SSE stream of node_start, node_complete, llm_delta, node_progress (MCP progress notifications: nodeId, toolName, serverId, registryServerId, progress, total, percent, message, at), result events", content: { "text/event-stream": { schema: { type: "string" } } } },
+          "200": { description: "SSE stream of node_start, node_complete, llm_delta, node_progress (MCP progress notifications: nodeId, toolName, serverId, registryServerId, progress, total, percent, message, at), result events, plus a `: ping` comment every SSE_HEARTBEAT_INTERVAL_MS (15s by default) while nothing else is sent", content: { "text/event-stream": { schema: { type: "string" } } } },
           "404": { description: "Workflow not found" }
         }
       }

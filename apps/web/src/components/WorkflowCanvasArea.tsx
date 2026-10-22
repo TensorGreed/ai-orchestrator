@@ -39,6 +39,8 @@ import {
 } from "../lib/stages";
 import { NodePalette, type PaletteDefinition, type PaletteSection } from "./NodePalette";
 import { RunTape } from "./RunTape";
+import { LiveElapsed } from "./WorkflowCanvasNode";
+import type { LiveNodeResult } from "../lib/run-trace";
 import { StageStrip, type StageStripNode } from "./StageStrip";
 import type { PaletteCategoryIconKey } from "./node-icons";
 import { ImportReportPanel, type ImportReportPanelProps } from "./ImportReportPanel";
@@ -797,7 +799,8 @@ export function WorkflowCanvasArea({
                           const nodeType = typeof nodeResultRecord.nodeType === "string" ? String(nodeResultRecord.nodeType) : meta?.type;
                           const started = result.startedAt ? new Date(result.startedAt).toLocaleTimeString() : "—";
                           const completed = result.completedAt ? new Date(result.completedAt).toLocaleTimeString() : "—";
-                          const hasDetails = result.input !== undefined || result.output !== undefined || Boolean(result.error);
+                          const liveText = result.status === "running" ? (result as LiveNodeResult).liveText : undefined;
+                          const hasDetails = result.input !== undefined || result.output !== undefined || Boolean(result.error) || Boolean(liveText);
 
                           return (
                             <div key={result.nodeId} className={isExpanded ? "node-status-item expanded" : "node-status-item"}>
@@ -810,7 +813,11 @@ export function WorkflowCanvasArea({
                                   </span>
                                 </div>
                                 <div className="node-status-meta">
-                                  {result.durationMs !== undefined ? <span>{result.durationMs}ms</span> : null}
+                                  {result.status === "running" ? (
+                                    <LiveElapsed result={result as LiveNodeResult} />
+                                  ) : result.durationMs !== undefined ? (
+                                    <span>{result.durationMs}ms</span>
+                                  ) : null}
                                   <strong className={`node-status-value node-status-${result.status}`} style={{ color: statusColors[result.status] }}>
                                     {result.status}
                                   </strong>
@@ -845,10 +852,18 @@ export function WorkflowCanvasArea({
                                     </div>
                                   )}
 
+                                  {liveText && (
+                                    <div className="node-log-section">
+                                      <h4>Streaming output</h4>
+                                      <pre className="result-block">{liveText}</pre>
+                                    </div>
+                                  )}
+
                                   {result.error && (
                                     <div className="node-log-section">
                                       <h4>Error</h4>
                                       <pre className="result-block result-block-error">{result.error}</pre>
+                                      {result.errorRemediation && <p className="insp-trace-remedy">{result.errorRemediation}</p>}
                                     </div>
                                   )}
 

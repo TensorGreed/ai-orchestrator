@@ -1,6 +1,6 @@
 import type { LLMCallResponse, LLMProviderConfig, LLMUsage, ProviderDefinition, ToolCall } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext, ProviderTestResult } from "../types";
-import { resilientFetch } from "../resilient-fetch";
+import { providerHttpError, readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
 
 interface GeminiPart {
   text?: string;
@@ -173,17 +173,19 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       }
     };
 
-    console.warn(`[Gemini] POST models/${model}:generateContent | messages=${contents.length} tools=${request.tools?.length ?? 0} key=${apiKey.slice(0, 6)}...${apiKey.slice(-4)}`);
+    console.warn(`[Gemini] POST models/${model}:generateContent | messages=${contents.length} tools=${request.tools?.length ?? 0}`);
 
     const startedAt = Date.now();
     const response = await resilientFetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(requestBody)
-    }, { timeoutMs: 60_000, maxRetries: 3, provider: "gemini" });
+      body: JSON.stringify(requestBody),
+      signal: context.signal
+    }, { timeoutMs: 60_000, maxRetries: 3, provider: "gemini", onRetry: context.onRetry });
+    const bodyRead = { timeoutMs: 60_000, signal: context.signal, provider: "gemini" };
 
     if (!response.ok) {
-      const body = await response.text();
+      const body = await readResponseText(response, bodyRead);
       console.warn(`[Gemini] ERROR ${response.status} for model=${model}:`, body.slice(0, 500));
       let message = body;
       try {
@@ -192,10 +194,10 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
           message = parsed.error.message.split("\n")[0];
         }
       } catch { /* use raw body */ }
-      throw new Error(`Gemini request failed (${response.status}): ${message}`);
+      throw providerHttpError("gemini", response.status, `Gemini request failed (${response.status}): ${message}`);
     }
 
-    const json = (await response.json()) as GeminiResponse;
+    const json = await readResponseJson<GeminiResponse>(response, bodyRead);
     const parts = json.candidates?.[0]?.content?.parts || [];
     
     let content = "";
@@ -251,13 +253,15 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
     const startedAt = Date.now();
     const response = await resilientFetch(endpoint, {
       method: "GET",
-      headers: { "content-type": "application/json" }
+      headers: { "content-type": "application/json" },
+      signal: context.signal
     }, { timeoutMs: 15_000, maxRetries: 1, provider: "gemini" });
+    const bodyRead = { timeoutMs: 15_000, signal: context.signal, provider: "gemini" };
 
     const latencyMs = Date.now() - startedAt;
 
     if (!response.ok) {
-      const body = await response.text();
+      const body = await readResponseText(response, bodyRead);
       let message = body;
       try {
         const parsed = JSON.parse(body);
@@ -268,11 +272,11 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       return { ok: false, message: `Gemini connection failed (${response.status}): ${message}` };
     }
 
-    const json = await response.json() as { displayName?: string; name?: string };
+    const json = await readResponseJson<{ displayName?: string; name?: string }>(response, bodyRead);
     return {
       ok: true,
       message: `Connection successful — model: ${json.displayName || json.name || model}`,
       latencyMs
     };
   }
-}
+}

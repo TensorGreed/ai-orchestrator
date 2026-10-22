@@ -6,9 +6,18 @@ import type {
   SecretReference,
   ToolDefinition
 } from "@ai-orchestrator/shared";
+import type { ResilientFetchRetryInfo } from "./resilient-fetch";
 
 export interface ProviderExecutionContext {
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
+  /**
+   * The run's abort signal. Adapters pass it to every request, so a canceled
+   * or timed-out run stops the in-flight call, its backoff waits and any
+   * body or stream read.
+   */
+  signal?: AbortSignal;
+  /** Called before each retry backoff wait (no request data is included). */
+  onRetry?: (info: ResilientFetchRetryInfo) => void;
 }
 
 export interface ProviderCallRequest {

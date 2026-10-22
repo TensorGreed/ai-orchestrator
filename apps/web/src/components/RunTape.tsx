@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import type { NodeProgressSnapshot, WorkflowExecutionResult } from "@ai-orchestrator/shared";
-import { formatLatency } from "./WorkflowCanvasNode";
+import { formatLatency, LiveElapsed } from "./WorkflowCanvasNode";
 import { guardMarkerFor, type GuardMarker } from "../lib/guard-trace";
+import type { LiveNodeResult } from "../lib/run-trace";
 
 export interface RunTapeProps {
   executionResult: WorkflowExecutionResult | null;
@@ -20,6 +21,11 @@ export interface TapeLane {
   /** Provider-call latency inside the node, ms (LLM time). */
   llmMs: number | null;
   error?: string;
+  errorRemediation?: string;
+  /** Server start time, used to tick elapsed time while the lane runs. */
+  startedAt?: string;
+  /** Browser clock at node start (preferred over `startedAt` for ticking). */
+  liveStartedAtMs?: number;
   /** Phase 10.5 — latest MCP tool progress the node reported. */
   progress?: NodeProgressSnapshot;
   /** Phase 12.1 — a guard blocked, held for review or rewrote content in this step. */
@@ -87,6 +93,13 @@ export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, 
       durationMs: duration,
       llmMs,
       error: result.error,
+      ...(result.errorRemediation ? { errorRemediation: result.errorRemediation } : {}),
+      ...(result.status === "running"
+        ? {
+            startedAt: result.startedAt,
+            ...((result as LiveNodeResult).liveStartedAtMs !== undefined ? { liveStartedAtMs: (result as LiveNodeResult).liveStartedAtMs } : {})
+          }
+        : {}),
       ...(result.progress ? { progress: result.progress } : {}),
       ...guardLane(result)
     };
@@ -107,13 +120,27 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
   }
 
   const denominator = Math.max(totalMs, 1);
+  // While a node is still running, the head ticks from the run's start instead of showing the frozen total.
+  const isRunning = lanes.some((lane) => lane.status === "running");
+  const firstLane = lanes.reduce((first, lane) => (lane.startMs < first.startMs ? lane : first), lanes[0]!);
+  const runStart = { startedAt: executionResult.startedAt, liveStartedAtMs: firstLane.liveStartedAtMs };
   const llmTotal = lanes.reduce((acc, lane) => acc + (lane.llmMs ?? 0), 0);
 
   return (
     <div className="run-tape" role="table" aria-label="Run tape">
       <div className="run-tape-head">
         <span>
-          last run <b>{formatLatency(totalMs)}</b> · {lanes.length} node{lanes.length === 1 ? "" : "s"} · status <b className={`run-tape-status run-tape-status-${executionResult.status}`}>{executionResult.status}</b>
+          {isRunning ? (
+            <>
+              running <b><LiveElapsed result={runStart} /></b>
+            </>
+          ) : (
+            <>
+              last run <b>{formatLatency(totalMs)}</b>
+            </>
+          )}{" "}
+          · {lanes.length} node{lanes.length === 1 ? "" : "s"} · status{" "}
+          <b className={`run-tape-status run-tape-status-${isRunning ? "running" : executionResult.status}`}>{isRunning ? "running" : executionResult.status}</b>
         </span>
         <span className="run-tape-key">
           <i className="run-tape-key-swatch run-tape-key-node" /> node
@@ -131,6 +158,7 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
             `${lane.status} · ${formatLatency(lane.durationMs)}`,
             lane.llmMs !== null ? `LLM ${formatLatency(lane.llmMs)}` : null,
             lane.error ? `error: ${lane.error}` : null,
+            lane.errorRemediation ? `fix: ${lane.errorRemediation}` : null,
             lane.progress ? formatProgress(lane.progress) : null,
             lane.guard ? lane.guard.title : null
           ]
@@ -164,8 +192,14 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
                 </i>
               </span>
               <span className="run-tape-time" role="cell">
-                {formatLatency(lane.durationMs)}
+                {lane.status === "running" ? <LiveElapsed result={lane} /> : formatLatency(lane.durationMs)}
               </span>
+              {lane.error && (
+                <span className="run-tape-error" role="cell">
+                  {lane.error}
+                  {lane.errorRemediation ? <small> · {lane.errorRemediation}</small> : null}
+                </span>
+              )}
               {lane.progress && (
                 <span className="run-tape-progress" role="cell">
                   {formatProgress(lane.progress)}

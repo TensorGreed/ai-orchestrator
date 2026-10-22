@@ -65,10 +65,7 @@ import {
   type ExecutionHistoryDetail,
   type McpReplayMode,
   type SecretListItem,
-  type StreamExecutionStartedEvent,
-  type StreamNodeCompleteEvent,
-  type StreamNodeStartEvent,
-  type StreamNodeProgressEvent
+  type StreamExecutionStartedEvent
 } from "./lib/api";
 import {
   createBlankWorkflow,
@@ -80,6 +77,18 @@ import {
   type EditorNodeData
 } from "./lib/workflow";
 import { AGENT_ATTACHMENT_STYLES } from "./lib/agent-attachments";
+import {
+  buildExecutionErrorResult,
+  buildStreamFailureResult,
+  createPartialExecutionResult,
+  createTraceStreamHandlers,
+  pickStreamFailureMessage,
+  summarizeInputPreview,
+  tailPreview,
+  traceStreamCallbacks,
+  type LiveNodeResult,
+  type TraceStreamHandlers
+} from "./lib/run-trace";
 import { computeAttachmentSlots, orbitPositions } from "./lib/stages";
 import {
   deleteTabWipWorkflow,
@@ -508,18 +517,6 @@ function getValidationMessages(payload?: Record<string, unknown>): string[] {
     .filter((message) => message.length > 0);
 }
 
-function buildExecutionErrorResult(workflowId: string, message: string): WorkflowExecutionResult {
-  const now = new Date().toISOString();
-  return {
-    workflowId,
-    status: "error",
-    startedAt: now,
-    completedAt: now,
-    nodeResults: [],
-    error: message
-  };
-}
-
 function toWorkflowExecutionResult(detail: ExecutionHistoryDetail): WorkflowExecutionResult {
   return {
     workflowId: detail.workflowId,
@@ -531,93 +528,6 @@ function toWorkflowExecutionResult(detail: ExecutionHistoryDetail): WorkflowExec
     nodeResults: Array.isArray(detail.nodeResults) ? (detail.nodeResults as WorkflowExecutionResult["nodeResults"]) : [],
     output: detail.output,
     error: detail.error ?? undefined
-  };
-}
-
-function createPartialExecutionResult(workflowId: string, at: string): WorkflowExecutionResult {
-  return {
-    workflowId,
-    status: "partial",
-    startedAt: at,
-    completedAt: at,
-    nodeResults: []
-  };
-}
-
-function upsertNodeResult(
-  nodeResults: WorkflowExecutionResult["nodeResults"],
-  next: WorkflowExecutionResult["nodeResults"][number]
-): WorkflowExecutionResult["nodeResults"] {
-  const existingIndex = nodeResults.findIndex((entry) => entry.nodeId === next.nodeId);
-  if (existingIndex < 0) {
-    return [...nodeResults, next];
-  }
-  const updated = [...nodeResults];
-  updated[existingIndex] = {
-    ...updated[existingIndex],
-    ...next
-  };
-  return updated;
-}
-
-function applyNodeStartToExecutionResult(
-  current: WorkflowExecutionResult,
-  event: StreamNodeStartEvent
-): WorkflowExecutionResult {
-  const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId);
-  const nextNodeResult: WorkflowExecutionResult["nodeResults"][number] = {
-    nodeId: event.nodeId,
-    status: "running",
-    startedAt: existing?.startedAt ?? event.startedAt,
-    input: event.input ?? existing?.input,
-    output: existing?.output,
-    error: existing?.error
-  };
-
-  return {
-    ...current,
-    status: "partial",
-    completedAt: event.startedAt,
-    nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult)
-  };
-}
-
-function applyNodeCompleteToExecutionResult(
-  current: WorkflowExecutionResult,
-  event: StreamNodeCompleteEvent
-): WorkflowExecutionResult {
-  const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId);
-  const nextNodeResult: WorkflowExecutionResult["nodeResults"][number] = {
-    nodeId: event.nodeId,
-    status: event.status as WorkflowExecutionResult["nodeResults"][number]["status"],
-    startedAt: existing?.startedAt ?? event.completedAt,
-    completedAt: event.completedAt,
-    durationMs: event.durationMs,
-    input: event.input ?? existing?.input,
-    output: event.output ?? existing?.output,
-    error: event.error
-  };
-
-  return {
-    ...current,
-    status: "partial",
-    completedAt: event.completedAt,
-    nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult)
-  };
-}
-
-/** Phase 10.5 — keep the latest MCP tool progress on the node's result (the run tape shows it). */
-function applyNodeProgressToExecutionResult(
-  current: WorkflowExecutionResult | null,
-  event: StreamNodeProgressEvent
-): WorkflowExecutionResult | null {
-  if (!current) return current;
-  const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId);
-  if (!existing) return current;
-  const { nodeId: _nodeId, ...progress } = event;
-  return {
-    ...current,
-    nodeResults: upsertNodeResult(current.nodeResults, { ...existing, progress })
   };
 }
 
@@ -1018,6 +928,8 @@ function isExecutionEdgeForVisual(edge: Edge): boolean {
   );
 }
 
+const CANCEL_REQUESTED_MESSAGE = "Cancellation requested. Waiting for workflow to stop.";
+
 export default function App() {
   return (
     <StudioProvider>
@@ -1373,12 +1285,25 @@ function StudioApp() {
       return map;
     }
     for (const nodeResult of executionResult.nodeResults) {
+      const liveText = nodeResult.status === "running" ? (nodeResult as LiveNodeResult).liveText : undefined;
       map.set(nodeResult.nodeId, {
-        input: nodeResult.input !== undefined ? truncatePreview(summarizePreviewValue(nodeResult.input)) : undefined,
+        input: nodeResult.input !== undefined ? truncatePreview(summarizeInputPreview(nodeResult.input, summarizePreviewValue)) : undefined,
+        live: liveText ? tailPreview(liveText) : undefined,
         output: nodeResult.output !== undefined ? truncatePreview(summarizePreviewValue(nodeResult.output)) : undefined,
         error: nodeResult.error ? truncatePreview(nodeResult.error) : undefined,
         errorRemediation: nodeResult.errorRemediation ?? undefined
       });
+    }
+    return map;
+  }, [executionResult, isDebugMode]);
+
+  // Browser start time of each running node, so its canvas card can tick an elapsed pill.
+  const liveStartedAtByNodeId = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!isDebugMode || !executionResult) return map;
+    for (const nodeResult of executionResult.nodeResults) {
+      const started = (nodeResult as LiveNodeResult).liveStartedAtMs;
+      if (nodeResult.status === "running" && typeof started === "number") map.set(nodeResult.nodeId, started);
     }
     return map;
   }, [executionResult, isDebugMode]);
@@ -1682,7 +1607,7 @@ function StudioApp() {
 
     let cancelled = false;
     const syncLatestExecution = async () => {
-      if (busy) {
+      if (busy || chatBusy) {
         return;
       }
 
@@ -1757,7 +1682,7 @@ function StudioApp() {
       window.clearTimeout(firstPollTimerId);
       window.clearInterval(timerId);
     };
-  }, [activeMode, authUser, busy, currentWorkflow.id, currentWorkflowExists, isDebugMode]);
+  }, [activeMode, authUser, busy, chatBusy, currentWorkflow.id, currentWorkflowExists, isDebugMode]);
 
   useEffect(() => {
     setNodes((currentNodes) => {
@@ -1766,9 +1691,11 @@ function StudioApp() {
         const executionStatus = executionStatuses.get(node.id) as EditorNodeData["executionStatus"];
         const executionPreview = executionPreviewByNodeId.get(node.id);
         const telemetry = telemetryByNodeId.get(node.id);
+        const liveStartedAtMs = liveStartedAtByNodeId.get(node.id);
         const pinned = pinnedNodeIds.has(node.id);
         if (
           node.data.executionStatus === executionStatus &&
+          node.data.liveStartedAtMs === liveStartedAtMs &&
           node.data.executionPreview === executionPreview &&
           node.data.telemetry === telemetry &&
           node.data.pinned === pinned
@@ -1783,13 +1710,14 @@ function StudioApp() {
             executionStatus,
             executionPreview,
             telemetry,
+            liveStartedAtMs,
             pinned
           }
         };
       });
       return changed ? nextNodes : currentNodes;
     });
-  }, [executionPreviewByNodeId, executionStatuses, pinnedNodeIds, setNodes, telemetryByNodeId]);
+  }, [executionPreviewByNodeId, executionStatuses, liveStartedAtByNodeId, pinnedNodeIds, setNodes, telemetryByNodeId]);
 
   useEffect(() => {
     setEdges((currentEdges) => currentEdges.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
@@ -2540,7 +2468,7 @@ function StudioApp() {
     }
     try {
       await cancelExecution(executionId);
-      setError((current) => current ?? "Cancellation requested. Waiting for workflow to stop.");
+      setError((current) => current ?? CANCEL_REQUESTED_MESSAGE);
       void refreshExecutionHistory();
     } catch (cancelError) {
       handleApiError(cancelError, "Failed to stop active workflow");
@@ -3139,72 +3067,43 @@ function StudioApp() {
     return payload;
   }, [promptNodeSources.systemPromptFromNodes, promptNodeSources.userPromptFromNodes, sessionId, systemPrompt, userPrompt]);
 
+  const createRunTraceHandlers = useCallback(
+    (workflowId: string) =>
+      createTraceStreamHandlers({
+        workflowId,
+        enabled: isDebugMode,
+        setExecutionResult,
+        setLiveNodeStatuses,
+        normalizeStatus: normalizeEditorExecutionStatus
+      }),
+    [isDebugMode]
+  );
+
+  // A broken stream reports the server's own error when it sent one, not the generic "no final result" text.
+  const reportStreamFailure = useCallback(
+    (streamFailure: unknown, fallbackMessage: string, trace: TraceStreamHandlers | null) => {
+      const message = pickStreamFailureMessage(trace?.lastError() ?? null, handleApiError(streamFailure, fallbackMessage));
+      setError(message);
+      return message;
+    },
+    [handleApiError]
+  );
+
   const handleExecute = useCallback(async (options?: { startNodeId?: string; runMode?: "workflow" | "single_node" }) => {
+    let trace: TraceStreamHandlers | null = null;
     try {
       setBusy(true);
       setRunningExecutionId(null);
       setError(null);
-      let initializedTrace = false;
-      let initializedStatuses = false;
       const saved = await persistWorkflow();
+      trace = createRunTraceHandlers(saved.id);
       const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(options?.startNodeId, options?.runMode), {
+        ...traceStreamCallbacks(trace, (event) => setError((current) => current ?? event.message)),
         onExecutionStarted: (event) => {
           handleStreamExecutionStarted(event);
-        },
-        onNodeStart: (event) => {
-          if (!isDebugMode) {
-            return;
-          }
-          setExecutionResult((current) => {
-            const base = initializedTrace ? (current ?? createPartialExecutionResult(saved.id, event.startedAt)) : createPartialExecutionResult(saved.id, event.startedAt);
-            initializedTrace = true;
-            return applyNodeStartToExecutionResult(base, event);
-          });
-          setLiveNodeStatuses((current) => {
-            if (!initializedStatuses) {
-              initializedStatuses = true;
-              return { [event.nodeId]: "running" };
-            }
-            return {
-              ...current,
-              [event.nodeId]: "running"
-            };
-          });
-        },
-        onNodeProgress: (event) => {
-          if (!isDebugMode) {
-            return;
-          }
-          setExecutionResult((current) => applyNodeProgressToExecutionResult(current, event));
-        },
-        onNodeComplete: (event) => {
-          if (!isDebugMode) {
-            return;
-          }
-          setExecutionResult((current) => {
-            const base = initializedTrace ? (current ?? createPartialExecutionResult(saved.id, event.completedAt)) : createPartialExecutionResult(saved.id, event.completedAt);
-            initializedTrace = true;
-            return applyNodeCompleteToExecutionResult(base, event);
-          });
-          const normalizedStatus = normalizeEditorExecutionStatus(event.status);
-          if (!normalizedStatus) {
-            return;
-          }
-          setLiveNodeStatuses((current) => {
-            if (!initializedStatuses) {
-              initializedStatuses = true;
-              return { [event.nodeId]: normalizedStatus };
-            }
-            return {
-              ...current,
-              [event.nodeId]: normalizedStatus
-            };
-          });
-        },
-        onError: (event) => {
-          setError((current) => current ?? event.message);
         }
       });
+      trace.dispose();
       if (isDebugMode) {
         setExecutionResult(result);
         setLogsTab("logs");
@@ -3215,13 +3114,16 @@ function StudioApp() {
       }
       void refreshExecutionHistory();
     } catch (execError) {
-      const message = handleApiError(execError, "Execution failed");
+      trace?.dispose();
+      const message = reportStreamFailure(execError, "Execution failed", trace);
       if (isDebugMode) {
-        setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
+        setExecutionResult((current) => buildStreamFailureResult(current, currentWorkflow.id, message));
         setLogsTab("logs");
         setActiveMode("editor");
       }
     } finally {
+      // The run has ended, so a pending "waiting to stop" notice is stale.
+      setError((current) => (current === CANCEL_REQUESTED_MESSAGE ? null : current));
       setLiveNodeStatuses({});
       setRunningExecutionId(null);
       setBusy(false);
@@ -3229,84 +3131,34 @@ function StudioApp() {
   }, [
     currentWorkflow.id,
     buildEditorExecutionPayload,
+    createRunTraceHandlers,
     executeWorkflowStream,
     handleStreamExecutionStarted,
-    handleApiError,
+    reportStreamFailure,
     isDebugMode,
     persistWorkflow,
     refreshExecutionHistory,
   ]);
 
   const handleWebhookExecute = useCallback(async () => {
+    let trace: TraceStreamHandlers | null = null;
     try {
       setBusy(true);
       setRunningExecutionId(null);
       setError(null);
       startVisualRun();
-      let initializedTrace = false;
-      let initializedStatuses = false;
       const saved = await persistWorkflow();
+      trace = createRunTraceHandlers(saved.id);
       const result = await runWebhookStream({
         workflow_id: saved.id,
         ...buildWebhookExecutionPayload()
       }, {
+        ...traceStreamCallbacks(trace, (event) => setError((current) => current ?? event.message)),
         onExecutionStarted: (event) => {
           handleStreamExecutionStarted(event);
-        },
-        onNodeStart: (event) => {
-          if (!isDebugMode) {
-            return;
-          }
-          setExecutionResult((current) => {
-            const base = initializedTrace ? (current ?? createPartialExecutionResult(saved.id, event.startedAt)) : createPartialExecutionResult(saved.id, event.startedAt);
-            initializedTrace = true;
-            return applyNodeStartToExecutionResult(base, event);
-          });
-          setLiveNodeStatuses((current) => {
-            if (!initializedStatuses) {
-              initializedStatuses = true;
-              return { [event.nodeId]: "running" };
-            }
-            return {
-              ...current,
-              [event.nodeId]: "running"
-            };
-          });
-        },
-        onNodeProgress: (event) => {
-          if (!isDebugMode) {
-            return;
-          }
-          setExecutionResult((current) => applyNodeProgressToExecutionResult(current, event));
-        },
-        onNodeComplete: (event) => {
-          if (!isDebugMode) {
-            return;
-          }
-          setExecutionResult((current) => {
-            const base = initializedTrace ? (current ?? createPartialExecutionResult(saved.id, event.completedAt)) : createPartialExecutionResult(saved.id, event.completedAt);
-            initializedTrace = true;
-            return applyNodeCompleteToExecutionResult(base, event);
-          });
-          const normalizedStatus = normalizeEditorExecutionStatus(event.status);
-          if (!normalizedStatus) {
-            return;
-          }
-          setLiveNodeStatuses((current) => {
-            if (!initializedStatuses) {
-              initializedStatuses = true;
-              return { [event.nodeId]: normalizedStatus };
-            }
-            return {
-              ...current,
-              [event.nodeId]: normalizedStatus
-            };
-          });
-        },
-        onError: (event) => {
-          setError((current) => current ?? event.message);
         }
       });
+      trace.dispose();
       if (isDebugMode) {
         setExecutionResult(result);
         setLogsTab("logs");
@@ -3317,13 +3169,16 @@ function StudioApp() {
       }
       void refreshExecutionHistory();
     } catch (execError) {
-      const message = handleApiError(execError, "Webhook execution failed");
+      trace?.dispose();
+      const message = reportStreamFailure(execError, "Webhook execution failed", trace);
       if (isDebugMode) {
-        setExecutionResult(buildExecutionErrorResult(currentWorkflow.id, message));
+        setExecutionResult((current) => buildStreamFailureResult(current, currentWorkflow.id, message));
         setLogsTab("logs");
         setActiveMode("editor");
       }
     } finally {
+      // The run has ended, so a pending "waiting to stop" notice is stale.
+      setError((current) => (current === CANCEL_REQUESTED_MESSAGE ? null : current));
       stopVisualRun();
       setRunningExecutionId(null);
       setBusy(false);
@@ -3331,8 +3186,9 @@ function StudioApp() {
   }, [
     currentWorkflow.id,
     buildWebhookExecutionPayload,
+    createRunTraceHandlers,
     handleStreamExecutionStarted,
-    handleApiError,
+    reportStreamFailure,
     isDebugMode,
     persistWorkflow,
     refreshExecutionHistory,
@@ -3353,8 +3209,7 @@ function StudioApp() {
     setChatBusy(true);
     setChatError(null);
     setChatNodeTrace([]);
-    let initializedTrace = false;
-    let initializedStatuses = false;
+    let trace: TraceStreamHandlers | null = null;
     let activeWorkflowId = currentWorkflow.id;
 
     let streamedAnyDelta = false;
@@ -3403,53 +3258,23 @@ function StudioApp() {
         chatExecutionPayload.system_prompt = chatSystemPrompt;
       }
 
+      const chatTrace = createRunTraceHandlers(workflowId);
+      trace = chatTrace;
       const result = await executeWorkflowStream(
         workflowId,
         chatExecutionPayload,
         {
+          ...traceStreamCallbacks(chatTrace, (event) => setChatError(event.message)),
           onNodeStart: (event) => {
-            if (isDebugMode) {
-              setExecutionResult((current) => {
-                const base = initializedTrace
-                  ? (current ?? createPartialExecutionResult(workflowId, event.startedAt))
-                  : createPartialExecutionResult(workflowId, event.startedAt);
-                initializedTrace = true;
-                return applyNodeStartToExecutionResult(base, event);
-              });
-              setLiveNodeStatuses((current) => ({
-                ...(initializedStatuses ? current : {}),
-                [event.nodeId]: "running"
-              }));
-              initializedStatuses = true;
-            }
+            chatTrace.onNodeStart(event);
             setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: "running", at: event.startedAt }].slice(-40));
           },
-          onNodeProgress: (event) => {
-            if (isDebugMode) {
-              setExecutionResult((current) => applyNodeProgressToExecutionResult(current, event));
-            }
-          },
           onNodeComplete: (event) => {
-            if (isDebugMode) {
-              setExecutionResult((current) => {
-                const base = initializedTrace
-                  ? (current ?? createPartialExecutionResult(workflowId, event.completedAt))
-                  : createPartialExecutionResult(workflowId, event.completedAt);
-                initializedTrace = true;
-                return applyNodeCompleteToExecutionResult(base, event);
-              });
-              const normalizedStatus = normalizeEditorExecutionStatus(event.status);
-              if (normalizedStatus) {
-                setLiveNodeStatuses((current) => ({
-                  ...(initializedStatuses ? current : {}),
-                  [event.nodeId]: normalizedStatus
-                }));
-                initializedStatuses = true;
-              }
-            }
+            chatTrace.onNodeComplete(event);
             setChatNodeTrace((current) => [...current, { nodeId: event.nodeId, status: event.status, at: event.completedAt }].slice(-40));
           },
           onLlmDelta: (event) => {
+            chatTrace.onLlmDelta(event);
             streamedAnyDelta = true;
             chatDeltaBufferRef.current += event.delta;
           },
@@ -3458,11 +3283,9 @@ function StudioApp() {
               upsertChatMessageElicitation(workflowId, activeAssistantMessageIdRef.current, event.elicitation);
             }
           },
-          onError: (event) => {
-            setChatError(event.message);
-          }
         }
       );
+      chatTrace.dispose();
 
       if (chatDeltaBufferRef.current.length && activeAssistantMessageIdRef.current) {
         updateChatMessageText(workflowId, activeAssistantMessageIdRef.current, chatDeltaBufferRef.current);
@@ -3522,10 +3345,11 @@ function StudioApp() {
       }
       void refreshExecutionHistory();
     } catch (error) {
-      const messageText = handleApiError(error, "Failed to stream chat response");
+      trace?.dispose();
+      const messageText = reportStreamFailure(error, "Failed to stream chat response", trace);
       setChatError(messageText);
       if (isDebugMode) {
-        setExecutionResult(buildExecutionErrorResult(activeWorkflowId, messageText));
+        setExecutionResult((current) => buildStreamFailureResult(current, activeWorkflowId, messageText));
         setLogsTab("logs");
       }
       if (activeAssistantMessageIdRef.current) {
@@ -3555,7 +3379,8 @@ function StudioApp() {
     chatSessionsByWorkflow,
     chatSystemPrompt,
     currentWorkflow.id,
-    handleApiError,
+    createRunTraceHandlers,
+    reportStreamFailure,
     isDebugMode,
     persistWorkflow,
     promptNodeSources.systemPromptFromNodes,
