@@ -89,6 +89,7 @@ import {
 } from "./services/mcp-gateway-sessions.js";
 import { McpClientService, capRole, resolveMcpClientSubject, roleRank } from "./services/mcp-client-service.js";
 import { MCP_TELEMETRY_WINDOWS, parseMcpTelemetryWindow, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
+import { startSseHeartbeat } from "./sse-heartbeat.js";
 
 const SERVER_VERSION = "0.1.0";
 const MAX_ERROR_CHARS = 500;
@@ -917,15 +918,22 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
           "mcp-session-id": session.id,
           "x-request-id": request.id
         });
-        for (const response of responses) writeSse(reply, response);
-        const emit: Emit = (notification) => writeSse(reply, notification);
-        await Promise.all(
-          requests.map(async (entry) => {
-            const response = await dispatch(session, auth, toolset, entry, emit);
-            if (response !== SUPPRESSED) writeSse(reply, response);
-          })
-        );
-        if (!reply.raw.writableEnded) reply.raw.end();
+        // Long tool calls can go quiet between progress notifications; the
+        // comment frames keep proxies from dropping the stream.
+        const stopHeartbeat = startSseHeartbeat(reply.raw, config.SSE_HEARTBEAT_INTERVAL_MS);
+        try {
+          for (const response of responses) writeSse(reply, response);
+          const emit: Emit = (notification) => writeSse(reply, notification);
+          await Promise.all(
+            requests.map(async (entry) => {
+              const response = await dispatch(session, auth, toolset, entry, emit);
+              if (response !== SUPPRESSED) writeSse(reply, response);
+            })
+          );
+        } finally {
+          stopHeartbeat();
+          if (!reply.raw.writableEnded) reply.raw.end();
+        }
         return reply;
       }
 

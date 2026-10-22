@@ -367,6 +367,53 @@ function parseSseFrame(frame: string): { event: string; data: string } | null {
   };
 }
 
+/**
+ * How long a run stream may stay silent before the client gives up on the
+ * connection. The server sends a `: ping` comment every 15s, so 45s of no
+ * bytes at all means the connection is gone, not that the run is quiet.
+ */
+export const STREAM_IDLE_TIMEOUT_MS = 45_000;
+
+/** Thrown when a run stream stops delivering bytes; the run itself may still be going on the server. */
+export class StreamConnectionLostError extends Error {
+  readonly executionId?: string;
+
+  constructor(executionId?: string) {
+    super(
+      executionId
+        ? `Lost connection to the run; it may still be running on the server (execution ${executionId}).`
+        : "Lost connection to the run; it may still be running on the server."
+    );
+    this.name = "StreamConnectionLostError";
+    this.executionId = executionId;
+  }
+}
+
+/**
+ * One `reader.read()` raced against the idle watchdog. Any bytes, pings
+ * included, settle the read and so restart the watchdog for the next one.
+ */
+async function readStreamWithWatchdog(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleTimeoutMs: number,
+  executionId: () => string | undefined
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const watchdog = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new StreamConnectionLostError(executionId())), idleTimeoutMs);
+  });
+  try {
+    return await Promise.race([reader.read(), watchdog]);
+  } catch (error) {
+    if (error instanceof StreamConnectionLostError) {
+      void reader.cancel().catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function streamWorkflowExecutionRequest(
   path: string,
   payload: Record<string, unknown>,
@@ -400,9 +447,10 @@ async function streamWorkflowExecutionRequest(
   const reader = response.body.getReader();
   let buffer = "";
   let finalResult: WorkflowExecutionResult | null = null;
+  let streamExecutionId: string | undefined;
 
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readStreamWithWatchdog(reader, STREAM_IDLE_TIMEOUT_MS, () => streamExecutionId);
     if (done) {
       break;
     }
@@ -435,6 +483,10 @@ async function streamWorkflowExecutionRequest(
       }
 
       if (parsedFrame.event === "execution_started" && data && typeof data === "object") {
+        const startedExecutionId = (data as StreamExecutionStartedEvent).executionId;
+        if (typeof startedExecutionId === "string" && startedExecutionId) {
+          streamExecutionId = startedExecutionId;
+        }
         handlers.onExecutionStarted?.(data as StreamExecutionStartedEvent);
         continue;
       }

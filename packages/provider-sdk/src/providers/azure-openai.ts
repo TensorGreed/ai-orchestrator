@@ -1,7 +1,7 @@
 import type { ProviderDefinition, LLMUsage } from "@ai-orchestrator/shared";
 import type { ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { resilientFetch } from "../resilient-fetch";
+import { readResponseJson, readResponseText, readStreamChunk, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
 import { parseToolArguments } from "../tool-arg-parser";
 
 interface AzureOpenAIResponse {
@@ -289,17 +289,19 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
           "content-type": "application/json",
           [connection.authHeaderName]: connection.authHeaderValue
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: context.signal
       },
-      { timeoutMs, maxRetries, provider: "azure_openai" }
+      { timeoutMs, maxRetries, provider: "azure_openai", onRetry: context.onRetry }
     );
 
+    const bodyRead = { timeoutMs, signal: context.signal, provider: "azure_openai" };
     if (!response.ok) {
-      const body = await response.text();
+      const body = await readResponseText(response, bodyRead);
       throw new Error(`Provider azure_openai request failed (${response.status}): ${body}`);
     }
 
-    const json = (await response.json()) as AzureOpenAIResponse;
+    const json = await readResponseJson<AzureOpenAIResponse>(response, bodyRead);
     const content = json.choices?.[0]?.message?.content ?? "";
     let usage: LLMUsage | undefined;
     if (json.usage) {
@@ -347,13 +349,14 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
           "content-type": "application/json",
           [connection.authHeaderName]: connection.authHeaderValue
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: context.signal
       },
-      { timeoutMs, maxRetries, provider: "azure_openai" }
+      { timeoutMs, maxRetries, provider: "azure_openai", onRetry: context.onRetry }
     );
 
     if (!response.ok) {
-      const body = await response.text();
+      const body = await readResponseText(response, { timeoutMs, signal: context.signal, provider: "azure_openai" });
       throw new Error(`Provider azure_openai stream request failed (${response.status}): ${body}`);
     }
     if (!response.body) {
@@ -364,57 +367,72 @@ export class AzureOpenAIProviderAdapter implements LLMProviderAdapter {
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-
+    const idleTimeoutMs = streamIdleTimeoutMs(provider.extra, timeoutMs);
+    let finished = false;
+    try {
       while (true) {
-        const boundary = findSSEBoundary(buffer);
-        if (!boundary) {
+        const { done, value } = await readStreamChunk(reader, {
+          timeoutMs: idleTimeoutMs,
+          signal: context.signal,
+          provider: "azure_openai",
+          timeoutMessage: `Provider azure_openai stream sent no data for ${idleTimeoutMs}ms; the connection looks stalled. Raise extra.streamIdleTimeoutMs on the model if it needs longer between chunks.`
+        });
+        if (done) {
+          finished = true;
           break;
         }
-        const rawEvent = buffer.slice(0, boundary.index);
-        buffer = buffer.slice(boundary.index + boundary.separatorLength);
-        const payloadChunk = parseSSEEventPayload(rawEvent);
-        if (!payloadChunk || payloadChunk === "[DONE]") {
-          continue;
-        }
+        buffer += decoder.decode(value, { stream: true });
 
-        let parsed: AzureOpenAIStreamResponse;
-        try {
-          parsed = JSON.parse(payloadChunk) as AzureOpenAIStreamResponse;
-        } catch {
-          continue;
-        }
-
-        const delta = parsed.choices?.[0]?.delta;
-        if (!delta) {
-          continue;
-        }
-
-        if (typeof delta.content === "string" && delta.content.length > 0) {
-          yield {
-            type: "text_delta",
-            textDelta: delta.content
-          };
-        }
-
-        if (Array.isArray(delta.tool_calls)) {
-          for (const toolCall of delta.tool_calls) {
-            if (!toolCall.id && !toolCall.function?.name && !toolCall.function?.arguments) {
-              continue;
-            }
+        while (true) {
+          const boundary = findSSEBoundary(buffer);
+          if (!boundary) {
+            break;
+          }
+          const rawEvent = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary.separatorLength);
+          const payloadChunk = parseSSEEventPayload(rawEvent);
+          if (!payloadChunk || payloadChunk === "[DONE]") {
+            continue;
+          }
+  
+          let parsed: AzureOpenAIStreamResponse;
+          try {
+            parsed = JSON.parse(payloadChunk) as AzureOpenAIStreamResponse;
+          } catch {
+            continue;
+          }
+  
+          const delta = parsed.choices?.[0]?.delta;
+          if (!delta) {
+            continue;
+          }
+  
+          if (typeof delta.content === "string" && delta.content.length > 0) {
             yield {
-              type: "tool_call_delta",
-              toolCallId: toolCall.id,
-              name: toolCall.function?.name,
-              argumentsDelta: toolCall.function?.arguments
+              type: "text_delta",
+              textDelta: delta.content
             };
           }
+  
+          if (Array.isArray(delta.tool_calls)) {
+            for (const toolCall of delta.tool_calls) {
+              if (!toolCall.id && !toolCall.function?.name && !toolCall.function?.arguments) {
+                continue;
+              }
+              yield {
+                type: "tool_call_delta",
+                toolCallId: toolCall.id,
+                name: toolCall.function?.name,
+                argumentsDelta: toolCall.function?.arguments
+              };
+            }
+          }
         }
+      }
+    } finally {
+      if (!finished) {
+        // The consumer stopped early (run canceled) or the read failed: free the connection.
+        void reader.cancel().catch(() => undefined);
       }
     }
   }

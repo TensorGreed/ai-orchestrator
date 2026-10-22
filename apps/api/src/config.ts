@@ -23,6 +23,10 @@ const envSchema = z.object({
   WEB_ORIGIN: z.string().default("http://localhost:5173"),
   API_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   WORKFLOW_EXECUTION_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
+  // How often a streamed run (SSE) sends a `: ping` comment while nothing else
+  // is sent. The web client treats 45s without any bytes as a lost connection,
+  // so keep this well below that.
+  SSE_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().max(30000).default(15000),
   EXECUTION_HISTORY_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(30),
   EXECUTION_HISTORY_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),
   SEED_SAMPLE_WORKFLOWS: booleanFromEnv.default(false),

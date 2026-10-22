@@ -1,6 +1,8 @@
 import type { LLMCallResponse, LLMUsage, ProviderDefinition, ToolCall, ChatMessage } from "@ai-orchestrator/shared";
 import type { LLMProviderAdapter, ProviderCallRequest, ProviderExecutionContext } from "../types";
-import { resilientFetch } from "../resilient-fetch";
+import { readResponseJson, readResponseText, resilientFetch } from "../resilient-fetch";
+
+const ANTHROPIC_TIMEOUT_MS = 60_000;
 
 /** Model used when an Anthropic provider config names none. */
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
@@ -175,15 +177,17 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
           "x-api-key": apiKey,
           "anthropic-version": "2023-06-01"
         },
-        body: JSON.stringify(body)
-      }, { timeoutMs: 60_000, maxRetries: 3, provider: "anthropic" });
+        body: JSON.stringify(body),
+        signal: context.signal
+      }, { timeoutMs: ANTHROPIC_TIMEOUT_MS, maxRetries: 3, provider: "anthropic", onRetry: context.onRetry });
+    const bodyRead = { timeoutMs: ANTHROPIC_TIMEOUT_MS, signal: context.signal, provider: "anthropic" };
 
     let response = await send();
 
     if (!response.ok && response.status === 400) {
       // A model the capability check does not know yet may still reject a
       // sampling parameter; drop the one it names and retry once.
-      const respBody = await response.text();
+      const respBody = await readResponseText(response, bodyRead);
       const rejected = rejectedSamplingParam(body, parseAnthropicError(respBody));
       if (!rejected) {
         throw new Error(describeAnthropicFailure(response.status, respBody, model));
@@ -193,11 +197,11 @@ export class AnthropicProviderAdapter implements LLMProviderAdapter {
     }
 
     if (!response.ok) {
-      const respBody = await response.text();
+      const respBody = await readResponseText(response, bodyRead);
       throw new Error(describeAnthropicFailure(response.status, respBody, model));
     }
 
-    const json = (await response.json()) as any;
+    const json = await readResponseJson<any>(response, bodyRead);
     
     let content = "";
     const toolCalls: ToolCall[] = [];

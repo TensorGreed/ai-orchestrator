@@ -1,5 +1,5 @@
 import type { AgentRunRequest, AgentRunState, ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
-import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import type { ProviderExecutionContext, ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 
 export interface AgentToolRuntime {
   tools: ToolDefinition[];
@@ -19,6 +19,15 @@ export interface AgentRuntimeContext {
   toolDataStore?: AgentSessionToolDataStore;
   /** Phase 12.1 — guard hooks run inside the loop when the agent is guarded. */
   guard?: AgentGuardHooks;
+  /**
+   * The run's abort signal. It is passed to every model call and ends retry
+   * waits early; once it aborts, `run()` throws instead of returning an
+   * `error` stop reason, so the caller can tell a stop or a timeout apart
+   * from a model failure.
+   */
+  signal?: AbortSignal;
+  /** Called before each provider retry backoff wait. */
+  onProviderRetry?: ProviderExecutionContext["onRetry"];
 }
 
 /**

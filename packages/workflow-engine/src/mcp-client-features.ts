@@ -222,7 +222,7 @@ export function createMcpSamplingHandler(options: McpSamplingHandlerOptions): Mc
       const adapter = options.providerRegistry.get(samplingProvider.providerId);
       const response = await adapter.generate(
         { provider: samplingProvider, messages: toChatMessages(request) },
-        { resolveSecret: options.resolveSecret }
+        { resolveSecret: options.resolveSecret, ...(options.signal ? { signal: options.signal } : {}) }
       );
       requests += 1;
       usage = addUsage(usage, response.usage);
