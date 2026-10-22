@@ -125,6 +125,9 @@ import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js"
 import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
+import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
+import { AuditBundleService } from "./services/audit-bundle-service.js";
+import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import {
@@ -2060,6 +2063,15 @@ export function createApp(
 
     if (persisted) {
       deleteWorkflowExecutionSafely(input.executionId, input.workflow.id);
+      // Phase 11.1 — what the run's signed manifest describes: the workflow as it ran and its MCP servers.
+      try {
+        auditBundleService.captureRunContext(input.executionId, input.workflow);
+      } catch (error) {
+        app.log.warn(
+          { executionId: input.executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
+          "Failed to capture the run context for the run manifest"
+        );
+      }
     }
 
     auditService.record({
@@ -10546,6 +10558,22 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runtime: (serverId, user) => runtimeStateView(serverId, user),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
+
+  // Phase 11.1 — signed run manifests, audit bundles and the signing key.
+  const auditSigningService = new AuditSigningService(store, secretService, {
+    envKeyBase64: config.AUDIT_SIGNING_KEY_BASE64,
+    logger: { info: (message, fields) => app.log.info(fields ?? {}, message), warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
+  const auditBundleService = new AuditBundleService({
+    store,
+    signing: auditSigningService,
+    secrets: secretService,
+    priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+    catalogEntries: () => mcpCatalogService.listEntries(),
+    maxBundleBytes: config.AUDIT_BUNDLE_MAX_BYTES,
+    logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
+  registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), audit: (request, user, event) => audit(request, user, event) });
 
   registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
 

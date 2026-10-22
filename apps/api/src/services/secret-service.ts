@@ -12,11 +12,11 @@ interface EncryptedSecret {
 
 /**
  * Phase 10.5 — secrets L2M manages for itself (MCP OAuth tokens and client
- * registrations). They are never handed to node configs: `resolveSecret`
+ * registrations; Phase 11.1 — the generated audit signing key). They are never handed to node configs: `resolveSecret`
  * refuses them, the secrets list hides them and the generic delete route
  * leaves them alone. Only `resolveInternalSecret` reads them.
  */
-export const INTERNAL_SECRET_PROVIDERS: ReadonlySet<string> = new Set(["mcp_oauth", "mcp_oauth_user"]);
+export const INTERNAL_SECRET_PROVIDERS: ReadonlySet<string> = new Set(["mcp_oauth", "mcp_oauth_user", "audit_signing"]);
 
 export function isInternalSecretProvider(provider: string | null | undefined): boolean {
   return typeof provider === "string" && INTERNAL_SECRET_PROVIDERS.has(provider);
@@ -214,7 +214,8 @@ export class SecretService {
     let credentialValue: string | undefined;
     if (provider.credentialsSecretId) {
       const credRow = this.store.getSecret(provider.credentialsSecretId);
-      if (credRow && credRow.source !== "external") {
+      // Secrets L2M manages for itself (OAuth tokens, the audit signing key) never leave as provider credentials.
+      if (credRow && credRow.source !== "external" && !isInternalSecretProvider(credRow.provider)) {
         credentialValue = this.decrypt({
           iv: credRow.iv,
           authTag: credRow.auth_tag,

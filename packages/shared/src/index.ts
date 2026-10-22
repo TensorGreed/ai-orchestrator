@@ -7,3 +7,5 @@ export * from "./mcp-runtime-safety";
 export * from "./guard";
 
 export * from "./node-credentials";
+export * from "./audit-manifest";
+export * from "./zip-archive";

@@ -138,6 +138,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     MCP_RESOURCE_MAX_BYTES: 5242880,
     MCP_CASSETTE_MAX_BYTES: 5242880,
     MCP_CASSETTE_MAX_CALLS: 5000,
+    AUDIT_BUNDLE_MAX_BYTES: 104857600,
     GUARD_AUTO_APPLY: true,
     MCP_SANDBOX_DEFAULT: "none",
     MCP_SANDBOX_REQUIRED: false,

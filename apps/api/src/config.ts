@@ -183,6 +183,22 @@ const envSchema = z.object({
     ),
   /** Container runtime for sandboxes: `auto` prefers docker, then podman. */
   MCP_SANDBOX_RUNTIME: z.enum(["auto", "docker", "podman"]).default("auto"),
+  /**
+   * Phase 11.1 — Ed25519 private key (base64 of the 32-byte seed) that signs
+   * run manifests and audit bundles. When unset, the API generates one on
+   * first use and stores it encrypted through SecretService. Generate with:
+   * node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+   */
+  AUDIT_SIGNING_KEY_BASE64: z
+    .string()
+    .trim()
+    .transform((value) => (value ? value : undefined))
+    .refine((value) => value === undefined || (/^[A-Za-z0-9+/]+={0,2}$/.test(value) && Buffer.from(value, "base64").length === 32), {
+      message: "AUDIT_SIGNING_KEY_BASE64 must be base64 of exactly 32 bytes"
+    })
+    .optional(),
+  /** Phase 11.1 — largest audit bundle (zip) the API exports, in bytes. */
+  AUDIT_BUNDLE_MAX_BYTES: z.coerce.number().int().min(1_024).max(2_147_483_647).default(104_857_600),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
   AUDIT_EXPORT_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   AUDIT_EXPORT_BATCH_SIZE: z.coerce.number().int().positive().default(500),

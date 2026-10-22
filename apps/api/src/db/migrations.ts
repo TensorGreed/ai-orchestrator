@@ -1398,6 +1398,41 @@ export const MIGRATIONS: Migration[] = [
       DROP TABLE IF EXISTS guard_profile_versions;
       DROP TABLE IF EXISTS guard_profiles;
     `
+  },
+  {
+    version: 29,
+    description: "Phase 11.1 — Signed run manifests (execution_manifests, audit_signing_keys)",
+    up: `
+      CREATE TABLE IF NOT EXISTS execution_manifests (
+        execution_id TEXT PRIMARY KEY,
+        run_context_json TEXT,
+        manifest_json TEXT,
+        manifest_digest TEXT,
+        key_id TEXT,
+        signature TEXT,
+        signed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_execution_manifests_created ON execution_manifests(created_at);
+
+      CREATE TABLE IF NOT EXISTS audit_signing_keys (
+        key_id TEXT PRIMARY KEY,
+        algorithm TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        secret_id TEXT,
+        status TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        retired_at TIMESTAMPTZ
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_signing_keys_active ON audit_signing_keys(status) WHERE status = 'active';
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_audit_signing_keys_active;
+      DROP TABLE IF EXISTS audit_signing_keys;
+      DROP INDEX IF EXISTS idx_execution_manifests_created;
+      DROP TABLE IF EXISTS execution_manifests;
+    `
   }
 ];
 
