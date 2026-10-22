@@ -10,3 +10,4 @@ export * from "./node-credentials";
 export * from "./audit-manifest";
 export * from "./schema-constants";
 export * from "./zip-archive";
+export * from "./replay";
