@@ -1433,6 +1433,43 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_execution_manifests_created;
       DROP TABLE IF EXISTS execution_manifests;
     `
+  },
+  {
+    version: 30,
+    description: "Phase 15.1 — Golden runs (replay_recordings)",
+    up: `
+      CREATE TABLE IF NOT EXISTS replay_recordings (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        project_id TEXT,
+        name TEXT NOT NULL,
+        notes TEXT,
+        source_execution_id TEXT,
+        source_trigger_type TEXT,
+        source_status TEXT NOT NULL,
+        workflow_hash TEXT NOT NULL,
+        workflow_saved_version INTEGER,
+        captured_workflow_json TEXT NOT NULL,
+        input_json TEXT,
+        node_outputs_json TEXT NOT NULL,
+        facts_json TEXT NOT NULL,
+        mcp_cassette_json TEXT,
+        model_tape_json TEXT,
+        memory_seed_json TEXT,
+        capabilities_json TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL,
+        created_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_replay_recordings_workflow ON replay_recordings(workflow_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_replay_recordings_source ON replay_recordings(source_execution_id);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_replay_recordings_source;
+      DROP INDEX IF EXISTS idx_replay_recordings_workflow;
+      DROP TABLE IF EXISTS replay_recordings;
+    `
   }
 ];
 
