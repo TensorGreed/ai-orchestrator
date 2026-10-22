@@ -4,12 +4,14 @@ import type {
   MCPToolDefinition,
   McpElicitationTraceEntry,
   McpSamplingTraceEntry,
+  NodeActivityEvent,
   McpToolPolicyTrace,
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
+import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields";
@@ -1521,6 +1523,7 @@ export function NodeInspector({
         startedAt?: string;
         liveStartedAtMs?: number;
         liveText?: string;
+        activity?: NodeActivityEvent[];
       }
     >();
     for (const result of executionResult?.nodeResults ?? []) {
@@ -1534,7 +1537,8 @@ export function NodeInspector({
         durationMs: result.durationMs,
         startedAt: result.startedAt,
         liveStartedAtMs: live.liveStartedAtMs,
-        liveText: live.liveText
+        liveText: live.liveText,
+        activity: result.activity
       });
     }
     return map;
@@ -9006,8 +9010,15 @@ export function NodeInspector({
     if (!showRuntimeInspection) {
       return <div className="insp-empty">Switch to debug mode and run the workflow to inspect this node's input.</div>;
     }
+    const resolvedThisRun = latestResolvedFields(currentNodeResult?.activity);
     return (
       <>
+        {resolvedThisRun && (
+          <div className="insp-resolved">
+            <strong className="insp-resolved-title">Resolved this run</strong>
+            <ResolvedFieldsTable fields={resolvedThisRun} />
+          </div>
+        )}
         <SelectField
           label="Input Source"
           value={selectedInputId}
@@ -9114,6 +9125,7 @@ export function NodeInspector({
     const sampling = readTraceList<McpSamplingTraceEntry>(currentNodeResult?.output, "_mcpSampling");
     const elicitations = readTraceList<McpElicitationTraceEntry>(currentNodeResult?.output, "_mcpElicitations");
     const serverPrompt = asRecord(asRecord(currentNodeResult?.output)._serverPrompt);
+    const activity = currentNodeResult?.activity;
     const hasRun = Boolean(status || durationMs !== undefined || telemetry || error || toolPolicy);
     if (!hasRun) {
       return <div className="insp-empty">No run yet. Run the workflow or this node to see its trace.</div>;
@@ -9154,6 +9166,12 @@ export function NodeInspector({
               </div>
             ))}
         </dl>
+        {activity && activity.length > 0 ? (
+          <div className="insp-trace-policy insp-trace-list">
+            <strong>Activity</strong>
+            <NodeActivityList activity={activity} startedAt={currentNodeResult?.startedAt} />
+          </div>
+        ) : null}
         {error ? (
           <div className="insp-trace-error" role="alert">
             <strong>Error</strong>

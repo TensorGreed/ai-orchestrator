@@ -1,6 +1,8 @@
-import type { NodeExecutionResult, WorkflowExecutionResult } from "@ai-orchestrator/shared";
+import { NODE_ACTIVITY_LIMIT } from "@ai-orchestrator/shared";
+import type { NodeActivityEvent, NodeExecutionResult, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type {
   StreamLlmDeltaEvent,
+  StreamNodeActivityEvent,
   StreamNodeCompleteEvent,
   StreamNodeProgressEvent,
   StreamNodeStartEvent
@@ -67,6 +69,7 @@ export function applyNodeStartToExecutionResult(
     input: event.input ?? existing?.input,
     output: existing?.output,
     error: existing?.error,
+    activity: existing?.activity,
     liveText: undefined,
     liveStartedAtMs: existing?.liveStartedAtMs ?? nowMs
   };
@@ -96,6 +99,7 @@ export function applyNodeCompleteToExecutionResult(
     errorCategory: event.errorCategory,
     errorRemediation: event.errorRemediation,
     retryable: event.retryable,
+    activity: existing?.activity,
     liveText: undefined
   };
 
@@ -120,6 +124,112 @@ export function applyNodeProgressToExecutionResult(
     ...current,
     nodeResults: upsertNodeResult(current.nodeResults, { ...existing, progress })
   };
+}
+
+/** Add a streamed activity entry to its node: ordered by seq, de-duplicated, capped. Unknown nodes are ignored. */
+export function applyNodeActivityToExecutionResult(
+  current: WorkflowExecutionResult | null,
+  event: StreamNodeActivityEvent
+): WorkflowExecutionResult | null {
+  if (!current) return current;
+  const existing = current.nodeResults.find((entry) => entry.nodeId === event.nodeId);
+  if (!existing) return current;
+  const list = existing.activity ?? [];
+  if (list.some((entry) => entry.seq === event.seq)) return current;
+  const merged = [...list, event].sort((a, b) => a.seq - b.seq);
+  const activity = merged.length > NODE_ACTIVITY_LIMIT ? merged.slice(merged.length - NODE_ACTIVITY_LIMIT) : merged;
+  return {
+    ...current,
+    nodeResults: upsertNodeResult(current.nodeResults, { ...existing, activity })
+  };
+}
+
+function formatSeconds(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const seconds = ms / 1000;
+  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+}
+
+const RETRY_SCOPE_WORDS = { provider: "model request", agent_llm: "model call", node: "node" } as const;
+
+function clip(text: string, max: number = 120): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function describeResolvedInput(fields: Record<string, string | number | boolean | string[]>): string {
+  const text = (key: string) => (typeof fields[key] === "string" ? (fields[key] as string) : "");
+  if (text("url")) return `${text("method") || "GET"} ${text("url")}`;
+  if (text("toolName")) {
+    const server = text("serverId") || text("registryServerId");
+    return server ? `Tool ${text("toolName")} on ${server}` : `Tool ${text("toolName")}`;
+  }
+  if (text("model")) return text("providerId") ? `Using ${text("model")} · ${text("providerId")}` : `Using ${text("model")}`;
+  return "Inputs resolved";
+}
+
+/** One short line for an activity entry, for the canvas, run tape and timelines. */
+export function describeActivity(event: NodeActivityEvent): string {
+  const prefix = event.workerNodeId ? `Worker ${event.workerNodeId}: ` : "";
+  return `${prefix}${describeActivityBody(event)}`;
+}
+
+function describeActivityBody(event: NodeActivityEvent): string {
+  switch (event.kind) {
+    case "resolved_input":
+      return describeResolvedInput(event.fields);
+    case "llm_call": {
+      if (event.phase === "start") {
+        return `Calling ${event.model}${event.iteration !== undefined ? ` (step ${event.iteration})` : ""}`;
+      }
+      if (event.error) return `Model call failed: ${clip(event.error)}`;
+      return typeof event.latencyMs === "number" ? `Model replied in ${formatSeconds(event.latencyMs)}` : "Model replied";
+    }
+    case "retry": {
+      const attempts = event.maxAttempts ? ` of ${event.maxAttempts}` : "";
+      return `Retrying ${RETRY_SCOPE_WORDS[event.scope]} in ${formatSeconds(event.delayMs)} (attempt ${event.attempt + 1}${attempts}): ${clip(event.reason)}`;
+    }
+    case "agent_step": {
+      if (event.phase === "start") return `Step ${event.iteration} of ${event.maxIterations}`;
+      if (event.final) return `Step ${event.iteration} gave the final answer`;
+      return event.toolCalls && event.toolCalls.length > 0
+        ? `Step ${event.iteration} asked for ${event.toolCalls.join(", ")}`
+        : `Step ${event.iteration} done`;
+    }
+    case "tool_call": {
+      if (event.phase === "start") return `Calling ${event.toolName}`;
+      if (event.outcome === "blocked") return `${event.toolName} blocked by the guard`;
+      if (event.outcome === "error") return `${event.toolName} failed${event.error ? `: ${clip(event.error)}` : ""}`;
+      return typeof event.durationMs === "number" ? `${event.toolName} done in ${formatSeconds(event.durationMs)}` : `${event.toolName} done`;
+    }
+  }
+}
+
+/** The entry worth showing as "Now": the last start without a matching end, else the last entry. */
+export function currentActivity(result: { activity?: NodeActivityEvent[] } | undefined): NodeActivityEvent | undefined {
+  const activity = result?.activity;
+  if (!activity || activity.length === 0) return undefined;
+  const open: NodeActivityEvent[] = [];
+  for (const entry of activity) {
+    if (entry.kind !== "llm_call" && entry.kind !== "agent_step" && entry.kind !== "tool_call") continue;
+    const same = (other: NodeActivityEvent) =>
+      other.kind === entry.kind &&
+      other.workerNodeId === entry.workerNodeId &&
+      (entry.kind === "tool_call" && other.kind === "tool_call"
+        ? entry.toolCallId !== undefined
+          ? other.toolCallId === entry.toolCallId
+          : other.toolName === entry.toolName
+        : entry.kind === "agent_step" && other.kind === "agent_step"
+          ? other.iteration === entry.iteration
+          : true);
+    if (entry.phase === "start") {
+      open.push(entry);
+    } else {
+      const index = open.map(same).lastIndexOf(true);
+      if (index >= 0) open.splice(index, 1);
+    }
+  }
+  return open.length > 0 ? open[open.length - 1] : activity[activity.length - 1];
 }
 
 /** Keep the tail of `text` once it grows past the limit. */
@@ -225,6 +335,7 @@ export interface TraceStreamHandlers {
   onNodeStart: (event: StreamNodeStartEvent) => void;
   onNodeComplete: (event: StreamNodeCompleteEvent) => void;
   onNodeProgress: (event: StreamNodeProgressEvent) => void;
+  onNodeActivity: (event: StreamNodeActivityEvent) => void;
   onLlmDelta: (event: StreamLlmDeltaEvent) => void;
   onError: (event: { message: string }) => void;
   /** Push buffered deltas now and stop the flush timer. */
@@ -239,6 +350,7 @@ export function traceStreamCallbacks(trace: TraceStreamHandlers, onError: (event
     onNodeStart: trace.onNodeStart,
     onNodeComplete: trace.onNodeComplete,
     onNodeProgress: trace.onNodeProgress,
+    onNodeActivity: trace.onNodeActivity,
     onLlmDelta: trace.onLlmDelta,
     onError: (event: { message: string }) => {
       trace.onError(event);
@@ -307,6 +419,10 @@ export function createTraceStreamHandlers<S extends string = string>(options: Tr
     onNodeProgress: (event) => {
       if (!enabled) return;
       setExecutionResult((current) => applyNodeProgressToExecutionResult(current, event));
+    },
+    onNodeActivity: (event) => {
+      if (!enabled) return;
+      setExecutionResult((current) => applyNodeActivityToExecutionResult(current, event));
     },
     onLlmDelta: (event) => {
       if (!enabled || !event.delta) return;
