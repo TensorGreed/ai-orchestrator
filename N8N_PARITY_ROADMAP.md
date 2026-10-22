@@ -479,7 +479,7 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 ### 11.1 Signed run manifests
 - [x] Per execution, a manifest recording workflow version hash, every node's resolved config (secret refs only), provider + model + parameters, tool server identities + schema snapshot hashes, prompts, citations, token and cost totals
 - [x] Manifest signed with a per-deployment key (`AUDIT_SIGNING_KEY_BASE64`, generated locally, stored like `SECRET_MASTER_KEY_BASE64`); verification CLI `l2m audit verify <bundle>` that runs offline
-- [x] Export "audit bundle" (zip: manifest, node I/O, trace, logs, rendered outputs) from the Runs page and via `GET /api/executions/:id/bundle`; retention follows the existing audit-log retention setting
+- [x] Export "audit bundle" (zip: manifest, node I/O, trace, logs, rendered outputs) from the Runs page and via `GET /api/executions/:id/bundle`; a stored manifest is pruned once it is past the audit-log retention and its execution history is gone
 
 ### 11.2 Approval gates
 - [ ] `approval_gate` node: pauses the run, records who may approve (role/user), optional timeout and fallback branch; resumes through the existing wait/resume plumbing

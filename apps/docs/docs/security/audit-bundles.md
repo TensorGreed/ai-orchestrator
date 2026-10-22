@@ -1,6 +1,6 @@
 # Audit bundles and signed run manifests
 
-Every finished run can be exported as an **audit bundle**: a zip holding a signed **run manifest**, the run's node inputs and outputs, its trace and logs, and the files it produced. Anyone with the deployment's public key can check, offline, that nothing in the bundle was changed after L2M signed it.
+Every finished run can be exported as an **audit bundle**: a zip holding a signed **run manifest**, the run's node inputs and outputs, its trace and logs, and the files it produced. Anyone with the deployment's public key can check, offline, that nothing in the bundle was changed after L2M signed it. The public key has to come from the deployment through a channel you trust: the key embedded in a bundle proves nothing about who signed it.
 
 Everything happens on your own deployment. Signing uses a key that never leaves the server, and verification needs no network access, no hosted service and no timestamping or transparency service.
 
@@ -24,13 +24,36 @@ The manifest is a versioned JSON document (`format: "l2m.run-manifest"`, `manife
 
 ### What is left out
 
-- **Secret values.** Configs keep `secretRef.secretId` only. Literal values under keys that look like credentials (`apiKey`, `token`, `password`, `authorization` and similar) become `[REDACTED]`, and credentials and query strings are removed from URLs. As a second line of defence, the values of the local secrets the workflow references are scrubbed from the manifest and from every text file in the bundle. Values held in external secret stores are never fetched for this.
+- **Secret values.** Configs keep `secretRef.secretId` only. Literal values under keys that look like credentials (`apiKey`, `token`, `password`, `authorization` and similar) become `[REDACTED]`, and credentials and query strings are removed from URLs. See [What is scrubbed](#what-is-scrubbed) for the second line of defence.
 - **Payloads.** The manifest holds digests of node inputs and outputs, tool arguments and results, and citation text. The payloads themselves are in the bundle's `execution/nodes/` files, which follow the same redaction as execution history.
 - **Guard evidence.** Guard verdicts are summarised without matched content.
 
+### What is scrubbed
+
+Execution history stores node inputs and outputs as the run produced them, so a credential a node echoed (an HTTP response, a model reply) can be in them. Before anything goes into a manifest or a bundle, every secret value the deployment holds is replaced with `[REDACTED]`:
+
+- every secret in the secret store, in every project (a node can reference any secret id), including the secrets L2M keeps for itself, such as MCP OAuth tokens. For a value that is a JSON document (token sets, service-account keys, MCP secret bundles) its credential fields are included too;
+- the locally cached values of external secrets (Vault, AWS, GCP, Azure). Nothing is fetched from an external store for this, so an external secret that was never cached on this deployment is not covered;
+- credentials L2M reads from its environment: provider API keys (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY` and similar), other variables whose names mark them as keys, tokens, secrets or passwords, and `SECRET_MASTER_KEY_BASE64` and `AUDIT_SIGNING_KEY_BASE64`.
+
+Values shorter than 6 characters are skipped, because replacing them everywhere would mangle unrelated text.
+
+Where the values are replaced:
+
+- the manifest and every JSON file of the bundle are scrubbed as data before they are serialised (every string and every object key), then the serialised text is scrubbed again for the JSON-escaped form of each value, so values with quotes, backslashes, newlines (PEM keys) or control characters are caught;
+- `execution/logs.jsonl` is scrubbed line by line in the same way;
+- text files under `outputs/` (plain text, CSV, Markdown, HTML, JSON, SVG, XML and other text types) are decoded, scrubbed and re-encoded. Text data URLs inside node files are scrubbed inside their base64 too;
+- a binary output (PDF, image, DOCX, XLSX) that contains a value as UTF-8, UTF-16 or JSON-escaped bytes is left out of the bundle, and a binary data URL inside a node file that contains one becomes `[REDACTED]`.
+
+`redactions.json`, which is in the signed index, lists every file in which a value was replaced and every output that was left out, with the reason. It never contains a value.
+
+Limits: content compressed inside a binary format (PDF streams, the parts of a DOCX or XLSX) is not inspected, and a secret that was transformed before it reached the output (base64-encoded, hashed, split) is not recognised. A file in which a value was replaced no longer matches the digest the manifest records for that node, since the manifest digests describe the stored run.
+
 ### Canonical form and digests
 
-The manifest is serialised as canonical JSON: object keys sorted, no whitespace, `undefined` fields dropped, and non-finite numbers refused. The **manifest digest** is the SHA-256 of those bytes, which are exactly the bytes of `manifest.json` in a bundle. Each digest in the manifest is the SHA-256 of the canonical JSON of the value it describes, so you can recompute any of them from the files in the bundle.
+The manifest is serialised as canonical JSON: object keys sorted, no whitespace, `undefined` fields dropped, and non-finite numbers refused. An own `__proto__` key is kept as an ordinary member. Keys that are array indices (`"0"`, `"1"`, ...) come first in ascending numeric order, followed by the other keys sorted by UTF-16 code units. That is the property order JavaScript gives objects; it is not RFC 8785 ordering. The **manifest digest** is the SHA-256 of those bytes, which are exactly the bytes of `manifest.json` in a bundle. Each digest in the manifest is the SHA-256 of the canonical JSON of the value it describes, so you can recompute any of them from the files in the bundle.
+
+The digests are not salted. For a small or guessable value (a yes/no field, a one-time code, a short password), anyone who has only the manifest can confirm a guess by hashing it. Keep that in mind before sharing a manifest on its own.
 
 ### Generated once, never changed
 
@@ -69,9 +92,12 @@ workflow.json              the workflow as it ran; its canonical JSON hashes to 
 execution/run.json         the execution record (redacted input, output, status)
 execution/nodes/NNN-<id>.json   each node's input and output, in run order
 execution/trace.json       node timings, MCP tool-call telemetry, guard events (masked evidence)
-execution/logs.jsonl       node activity, errors and warnings, and the run's audit-log entries
+execution/logs.jsonl       node activity, errors and warnings, and the audit-log entries about this run
 outputs/<node>/NN-<name>.<ext>  files the run produced (PDFs, images, documents, CSV and similar)
+redactions.json            files in which secret values were replaced, and outputs left out
 ```
+
+The audit-log entries in `logs.jsonl` are the rows about this execution: rows whose resource is the execution, or whose metadata names it as `executionId`. Each carries the actor's user id and role. Actor email addresses are included only when an admin exports the bundle.
 
 `signature.json` signs an **index**: the execution id, workflow id, the manifest digest, and the path, SHA-256 and size of every file in the bundle except `signature.json` itself. The signature covers the canonical JSON of every field of `signature.json` except `signature`. Changing, adding or removing any file therefore breaks verification.
 
@@ -79,9 +105,9 @@ Response headers `x-l2m-manifest-digest` and `x-l2m-signing-key-id` carry the di
 
 Who may export: anyone who can read the run's workflow (viewer and up, subject to project roles). Runs of a deleted workflow are admin-only. Each export is recorded in the audit log as `execution.audit_bundle.export` with the manifest digest and key id; a refused oversize export is recorded with outcome `failure`.
 
-Bundles larger than `AUDIT_BUNDLE_MAX_BYTES` (default 100 MB) are refused with `413`; the manifest is still available.
+Bundles larger than `AUDIT_BUNDLE_MAX_BYTES` (default 100 MB) are refused with `413`; the manifest is still available. The limit is checked while the files are assembled, on their uncompressed size, so an oversize export stops before any compression work, and again on the finished zip. Compression runs off the API's event loop.
 
-Stored manifests follow the audit-log retention (`AUDIT_LOG_RETENTION_DAYS`): they are pruned with the audit log. A run whose manifest was pruned gets a new one, with a new signing time, the next time it is asked for, as long as its execution history is still kept.
+A stored manifest is pruned only when both are true: it is older than the audit-log retention (`AUDIT_LOG_RETENTION_DAYS`), and its run's execution history has been deleted (by `EXECUTION_HISTORY_RETENTION_DAYS` or with its workflow). While a run's history is kept, its manifest is kept, so a manifest is never regenerated with a new signing time, key or workflow. Once both are gone the run cannot be exported any more.
 
 On the **Runs** page, expanding a finished run shows its signed manifest (digest, signing key, signed-at, workflow version and hash) and an **Audit bundle** button.
 
@@ -92,36 +118,38 @@ The `l2m` command line verifies bundles without contacting any server:
 ```bash
 pnpm l2m audit verify l2m-audit-<id>.zip --public-key audit-key.pub.pem
 pnpm l2m audit verify l2m-audit-<id>.zip --public-key MCowBQYDK2VwAyEA… --json
+pnpm l2m audit verify big-run.zip --public-key audit-key.pub.pem --max-bytes 2147483648
 ```
 
 `--public-key` takes a file or an inline value: a PEM public key, the base64 of the raw 32-byte key, or the base64 of its DER encoding.
 
 It checks, in order:
 
-1. the zip is well formed: not truncated, no duplicate or unsafe names, every entry's CRC matches;
+1. the zip is well formed and strict: not truncated; no bytes before the first entry, between entries, before the central directory or after the end record; no archive comment, extra fields or data descriptors; each local header matches its central directory entry (name, flags, method, CRC, sizes); no unsafe names, and no names that collide when case or Unicode normalisation is ignored; every entry's CRC matches; the total expanded size stays under `--max-bytes` (default 512 MiB);
 2. `signature.json` is valid and its key id matches its public key;
 3. the given public key has the bundle's key id, and the Ed25519 signature over the index verifies;
 4. every file matches its digest and size in the signed index, and no file was added or removed;
 5. `manifest.json` hashes to the signed manifest digest and names the same execution and workflow as the index;
 6. `workflow.json`, when present, hashes to the manifest's workflow hash.
 
-Without `--public-key` the key embedded in the bundle is used and a note says so: that proves the bundle was not changed after signing, but not who signed it. Always pass the deployment's public key when it matters who signed.
+Only the deployment's public key, obtained through a channel you trust, proves who signed a bundle. Without `--public-key` the signature is checked against the key embedded in `signature.json`. That shows only that the bundle is internally consistent: anyone who changes a bundle can re-sign it with a key of their own and embed that key. It proves neither who signed the bundle nor that it is unchanged since L2M signed it. Such a result is reported as **SIGNER NOT VERIFIED** and exits with code 3, never 0. `--trust-embedded-key` accepts it explicitly (exit 0, with a warning); use it only when you have established the key some other way. `--key-id` pinning is not offered: a 16-hex-character key id is too short to stand in for the key.
 
 | Exit code | Meaning |
 | --- | --- |
-| 0 | Every check passed. |
+| 0 | Every check passed with the given public key (or with `--trust-embedded-key`). |
 | 1 | A check failed: the bundle was changed, is damaged, or was signed by another key. |
-| 2 | Usage error: missing bundle path, unreadable file or a malformed public key. |
+| 2 | Usage error: missing bundle path, unreadable file, a malformed public key, a bad `--max-bytes`, or a file larger than `--max-bytes`. |
+| 3 | Signer not verified: the bundle is internally consistent, but no `--public-key` was given. |
 
-`--json` prints `{ ok, keyId, keySource, signedAt, manifestDigest, executionId, workflowId, checks[], warnings[] }`.
+`--json` prints `{ ok, status, integrityOk, signerVerified, embeddedKeyTrusted, keyId, keySource, signedAt, manifestDigest, executionId, workflowId, checks[], warnings[] }`. `status` is `pass`, `fail` or `signer_unverified`; `ok` is true only for a verified signer or an explicitly trusted embedded key.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `AUDIT_SIGNING_KEY_BASE64` | unset | Base64 of a 32-byte Ed25519 seed. Unset: a key is generated and stored encrypted. |
-| `AUDIT_BUNDLE_MAX_BYTES` | `104857600` | Largest bundle the API will build. |
-| `AUDIT_LOG_RETENTION_DAYS` | existing | Also prunes stored manifests. |
+| `AUDIT_BUNDLE_MAX_BYTES` | `104857600` | Largest bundle the API will build (uncompressed content and the zip). |
+| `AUDIT_LOG_RETENTION_DAYS` | existing | Stored manifests older than this are pruned once their execution history is gone. |
 
 ## API
 
