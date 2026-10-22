@@ -11,9 +11,9 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { afterAll, describe, expect, it } from "vitest";
-import { readZip, writeZip } from "@ai-orchestrator/shared";
-import { parsePublicKeyInput, verifyAuditBundle, type AuditVerifyResult } from "./audit-verify";
-import { EXIT_FAILED, EXIT_OK, EXIT_USAGE, main, type CliIo } from "./main";
+import { auditBundleSignedBytes, readZip, writeZip } from "@ai-orchestrator/shared";
+import { keyIdForPublicKey, parsePublicKeyInput, verifyAuditBundle, type AuditVerifyResult } from "./audit-verify";
+import { EXIT_FAILED, EXIT_OK, EXIT_SIGNER_UNVERIFIED, EXIT_USAGE, main, type CliIo } from "./main";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const bundlePath = path.resolve(here, "../testdata/audit-bundle.zip");
@@ -66,21 +66,81 @@ describe("l2m audit verify", () => {
     expect(human.out()).toContain("public key given");
     const { code, result } = await verify(bundlePath);
     expect(code).toBe(EXIT_OK);
-    expect(result).toMatchObject({ ok: true, keySource: "provided", warnings: [] });
+    expect(result).toMatchObject({ ok: true, status: "pass", integrityOk: true, signerVerified: true, keySource: "provided", warnings: [] });
     expect(result.checks.map((entry) => entry.name)).toEqual(["archive", "signature file", "signature", "files", "manifest digest", "manifest", "workflow"]);
-    expect(result.files).toBe(13);
+    expect(result.files).toBe(14);
   });
 
-  it("accepts the key as base64 (raw or SPKI) and warns when it uses the bundle's own key", async () => {
+  it("accepts the key as base64 (raw or SPKI)", () => {
     const raw = publicKey.toString("base64");
     const spki = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), publicKey]).toString("base64");
     expect(parsePublicKeyInput(raw).equals(publicKey)).toBe(true);
     expect(parsePublicKeyInput(spki).equals(publicKey)).toBe(true);
+  });
+
+  it("never passes on the bundle's own key alone: signer not verified, exit 3", async () => {
     const run = io();
-    expect(await main(["audit", "verify", bundlePath, "--json"], run)).toBe(EXIT_OK);
+    expect(await main(["audit", "verify", bundlePath, "--json"], run)).toBe(EXIT_SIGNER_UNVERIFIED);
     const result = JSON.parse(run.out()) as AuditVerifyResult;
-    expect(result.keySource).toBe("bundle");
-    expect(result.warnings[0]).toContain("not who signed it");
+    expect(result).toMatchObject({ ok: false, status: "signer_unverified", integrityOk: true, signerVerified: false, keySource: "bundle" });
+    expect(result.warnings[0]).toContain("SIGNER NOT VERIFIED");
+    expect(result.warnings[0]).toContain("internally consistent");
+    const human = io();
+    expect(await main(["audit", "verify", bundlePath], human)).toBe(EXIT_SIGNER_UNVERIFIED);
+    expect(human.out()).toMatch(/^SIGNER NOT VERIFIED /);
+    expect(human.out()).not.toMatch(/^PASS/m);
+
+    // Only an explicit --trust-embedded-key turns it into exit 0, with the warning kept.
+    const trusted = io();
+    expect(await main(["audit", "verify", bundlePath, "--trust-embedded-key"], trusted)).toBe(EXIT_OK);
+    expect(trusted.out()).toMatch(/^PASS \(embedded key trusted: SIGNER NOT VERIFIED\)/);
+    expect(trusted.out()).toContain("WARNING  SIGNER NOT VERIFIED");
+    const trustedJson = io();
+    expect(await main(["audit", "verify", bundlePath, "--trust-embedded-key", "--json"], trustedJson)).toBe(EXIT_OK);
+    expect(JSON.parse(trustedJson.out())).toMatchObject({ ok: true, signerVerified: false, embeddedKeyTrusted: true });
+    expect(await main(["audit", "verify", bundlePath, "--trust-embedded-key", "--public-key", pemPath], io())).toBe(EXIT_USAGE);
+  });
+
+  it("does not pass a forged bundle re-signed with an attacker key embedded in it", async () => {
+    const list = entries();
+    const manifest = list.find((entry) => entry.path === "manifest.json")!;
+    const changed = new TextEncoder().encode(new TextDecoder().decode(manifest.data).replace('"status":"success"', '"status":"failed"'));
+    const digest = crypto.createHash("sha256").update(changed).digest("hex");
+    const signature = JSON.parse(new TextDecoder().decode(list.find((entry) => entry.path === "signature.json")!.data)) as Record<string, unknown> & {
+      index: { manifestDigest: string; files: Array<{ path: string; sha256: string; bytes: number }> };
+    };
+    signature.index.manifestDigest = digest;
+    const indexed = signature.index.files.find((entry) => entry.path === "manifest.json")!;
+    indexed.sha256 = digest;
+    indexed.bytes = changed.length;
+    const attacker = crypto.generateKeyPairSync("ed25519");
+    const raw = Buffer.from((attacker.publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-32));
+    signature.publicKey = raw.toString("base64");
+    signature.keyId = keyIdForPublicKey(raw);
+    const { signature: _old, ...body } = signature;
+    signature.signature = crypto.sign(null, Buffer.from(auditBundleSignedBytes(body as never)), attacker.privateKey).toString("base64");
+    const file = rezip(
+      list.map((entry) =>
+        entry.path === "manifest.json" ? { path: entry.path, data: changed } : entry.path === "signature.json" ? { path: entry.path, data: new TextEncoder().encode(JSON.stringify(signature)) } : entry
+      )
+    );
+    const run = io();
+    expect(await main(["audit", "verify", file, "--json"], run)).toBe(EXIT_SIGNER_UNVERIFIED);
+    expect(JSON.parse(run.out())).toMatchObject({ ok: false, integrityOk: true, signerVerified: false });
+    const { code } = await verify(file);
+    expect(code).toBe(EXIT_FAILED);
+  });
+
+  it("caps the expanded size: 512 MiB by default, --max-bytes to change it", async () => {
+    const small = io();
+    expect(await main(["audit", "verify", bundlePath, "--public-key", pemPath, "--max-bytes", "1000", "--json"], small)).toBe(EXIT_USAGE);
+    const { code, result } = await verify(bundlePath, "--max-bytes", "200000");
+    expect(code).toBe(EXIT_OK);
+    expect(result.ok).toBe(true);
+    const tight = verifyAuditBundle(new Uint8Array(original), { publicKey, maxBytes: original.length + 10 });
+    expect(tight.checks[0]).toMatchObject({ name: "archive", ok: false });
+    expect(tight.checks[0]!.detail).toMatch(/expands past/);
+    expect(await main(["audit", "verify", bundlePath, "--max-bytes", "lots"], io())).toBe(EXIT_USAGE);
   });
 
   it("fails a modified manifest", async () => {

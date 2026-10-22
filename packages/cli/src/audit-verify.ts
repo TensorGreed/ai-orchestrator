@@ -11,12 +11,19 @@
  *   - `manifest.json` hashes to the signed manifest digest, is a valid manifest
  *     and names the same execution and workflow as the index;
  *   - `workflow.json`, when present, hashes to the manifest's workflow hash.
+ *
+ * Only a public key obtained from the deployment through a trusted channel
+ * proves who signed a bundle. Checked against the key embedded in the
+ * bundle, the result shows internal consistency only: whoever changes a
+ * bundle can re-sign it with a key of their own and embed that key. Such a
+ * result is never a pass unless the caller explicitly trusts the embedded key.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { inflateRawSync } from "node:zlib";
 import {
   AUDIT_BUNDLE_MANIFEST_PATH,
+  DEFAULT_ZIP_MAX_TOTAL_BYTES,
   AUDIT_BUNDLE_SIGNATURE_PATH,
   AUDIT_KEY_ID_HEX_CHARS,
   auditBundleSignatureSchema,
@@ -36,8 +43,21 @@ export interface AuditVerifyCheck {
   detail: string;
 }
 
+export type AuditVerifyStatus = "pass" | "fail" | "signer_unverified";
+
 export interface AuditVerifyResult {
+  /**
+   * True only when every check passed and the signer is verified (a trusted
+   * public key was given), or the caller explicitly trusted the embedded key.
+   */
   ok: boolean;
+  status: AuditVerifyStatus;
+  /** Every check passed (signature, file digests, manifest), whatever key was used. */
+  integrityOk: boolean;
+  /** The signature verified with a public key given by the caller, not the one inside the bundle. */
+  signerVerified: boolean;
+  /** The caller passed --trust-embedded-key. */
+  embeddedKeyTrusted: boolean;
   bundle: string;
   keyId: string | null;
   /** Where the public key used for the signature check came from. */
@@ -106,9 +126,28 @@ export function parsePublicKeyInput(value: string): Buffer {
   throw new PublicKeyInputError("The public key must be a 32-byte Ed25519 key (base64) or a PEM public key");
 }
 
-export function verifyAuditBundle(bytes: Uint8Array, options: { bundle?: string; publicKey?: Uint8Array; maxBytes?: number } = {}): AuditVerifyResult {
+export const EMBEDDED_KEY_WARNING =
+  "SIGNER NOT VERIFIED: no --public-key was given, so the signature was checked against the key embedded in the bundle. " +
+  "That only shows the bundle is internally consistent: anyone who changes a bundle can re-sign it with their own key. " +
+  "It proves neither who signed it nor that it is unchanged since the server signed it. Pass the deployment's public key.";
+
+export interface AuditVerifyOptions {
+  bundle?: string;
+  /** The deployment's public key, obtained through a trusted channel. */
+  publicKey?: Uint8Array;
+  /** Accept a bundle checked only against its embedded key (internal consistency). */
+  trustEmbeddedKey?: boolean;
+  /** Largest total expanded size accepted (default 512 MiB). */
+  maxBytes?: number;
+}
+
+export function verifyAuditBundle(bytes: Uint8Array, options: AuditVerifyOptions = {}): AuditVerifyResult {
   const result: AuditVerifyResult = {
     ok: false,
+    status: "fail",
+    integrityOk: false,
+    signerVerified: false,
+    embeddedKeyTrusted: Boolean(options.trustEmbeddedKey),
     bundle: options.bundle ?? "bundle",
     keyId: null,
     keySource: null,
@@ -128,7 +167,10 @@ export function verifyAuditBundle(bytes: Uint8Array, options: { bundle?: string;
     return ok;
   };
   const finish = () => {
-    result.ok = result.checks.length > 0 && result.checks.every((entry) => entry.ok);
+    result.integrityOk = result.checks.length > 0 && result.checks.every((entry) => entry.ok);
+    result.signerVerified = result.integrityOk && result.keySource === "provided";
+    result.ok = result.signerVerified || (result.integrityOk && result.embeddedKeyTrusted);
+    result.status = !result.integrityOk ? "fail" : result.signerVerified ? "pass" : "signer_unverified";
     return result;
   };
 
@@ -137,7 +179,7 @@ export function verifyAuditBundle(bytes: Uint8Array, options: { bundle?: string;
   try {
     const entries = readZip(bytes, {
       inflateRaw: (data, expected) => new Uint8Array(inflateRawSync(data, { maxOutputLength: Math.max(1, expected) })),
-      maxTotalBytes: options.maxBytes ?? 2 * 1024 * 1024 * 1024
+      maxTotalBytes: options.maxBytes ?? DEFAULT_ZIP_MAX_TOTAL_BYTES
     });
     files = new Map(entries.map((entry) => [entry.path, Buffer.from(entry.data)]));
   } catch (error) {
@@ -184,7 +226,7 @@ export function verifyAuditBundle(bytes: Uint8Array, options: { bundle?: string;
     key = provided;
   } else {
     result.keySource = "bundle";
-    result.warnings.push("No --public-key given: the key inside the bundle was used. This proves the bundle was not changed after signing, not who signed it.");
+    result.warnings.push(EMBEDDED_KEY_WARNING);
   }
   const { signature: signatureValue, ...signedBody } = signature;
   let signatureOk = false;
@@ -258,7 +300,15 @@ export function verifyAuditBundle(bytes: Uint8Array, options: { bundle?: string;
 
 export function formatAuditVerifyResult(result: AuditVerifyResult): string {
   const lines: string[] = [];
-  lines.push(`${result.ok ? "PASS" : "FAIL"}  ${result.bundle}`);
+  const headline =
+    result.status === "fail"
+      ? "FAIL"
+      : result.status === "pass"
+        ? "PASS"
+        : result.embeddedKeyTrusted
+          ? "PASS (embedded key trusted: SIGNER NOT VERIFIED)"
+          : "SIGNER NOT VERIFIED (internally consistent; no trusted public key given)";
+  lines.push(`${headline}  ${result.bundle}`);
   const field = (label: string, value: string | null | undefined) => {
     if (value) lines.push(`  ${label.padEnd(11)} ${value}`);
   };
@@ -266,10 +316,10 @@ export function formatAuditVerifyResult(result: AuditVerifyResult): string {
   field("Workflow", result.workflowId ? `${result.workflowId}${result.workflowName ? ` (${result.workflowName})` : ""}` : null);
   field("Run status", result.runStatus ? `${result.runStatus}${result.completedAt ? `, finished ${result.completedAt}` : ""}` : null);
   field("Manifest", result.manifestDigest ? `sha256 ${result.manifestDigest}` : null);
-  field("Key id", result.keyId ? `${result.keyId} (${result.keySource === "provided" ? "public key given" : "public key from the bundle"})` : null);
+  field("Key id", result.keyId ? `${result.keyId} (${result.keySource === "provided" ? "public key given" : "public key from the bundle, not trusted"})` : null);
   field("Signed at", result.signedAt);
   lines.push("");
   for (const entry of result.checks) lines.push(`  ${entry.ok ? "ok  " : "FAIL"}  ${entry.name.padEnd(16)} ${entry.detail}`);
-  for (const warning of result.warnings) lines.push(`  note  ${warning}`);
+  for (const warning of result.warnings) lines.push(`  ${warning === EMBEDDED_KEY_WARNING ? "WARNING" : "note"}  ${warning}`);
   return `${lines.join("\n")}\n`;
 }
