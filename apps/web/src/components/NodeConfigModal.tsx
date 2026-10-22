@@ -8,6 +8,7 @@ import type {
   McpToolPolicyTrace,
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
+import { getNodeDefinition } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
@@ -277,6 +278,26 @@ function toBooleanValue(value: unknown, fallback = false): boolean {
 
 function shouldOfferJsonFormatting(label: string): boolean {
   return /\bjson\b/i.test(label);
+}
+
+function humanizeFieldKey(key: string): string {
+  const spaced = key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+type SchemaFieldKind = "text" | "number" | "boolean" | "select" | "json";
+
+function schemaFieldKind(propSchema: Record<string, unknown>): SchemaFieldKind {
+  if (Array.isArray(propSchema.enum) && propSchema.enum.length > 0) return "select";
+  const typeRaw = propSchema.type;
+  const type = Array.isArray(typeRaw) ? typeRaw[0] : typeRaw;
+  switch (type) {
+    case "string": return "text";
+    case "integer":
+    case "number": return "number";
+    case "boolean": return "boolean";
+    default: return "json";
+  }
 }
 
 function sampleValueForSchema(propSchema: Record<string, unknown>): unknown {
@@ -1711,6 +1732,9 @@ export function NodeInspector({
       preferredProvider: string;
       onSelect: (secretId: string) => void;
       filter?: (secret: SecretListItem) => boolean;
+      /** Visible note under the picker, e.g. what the secret must contain. */
+      hint?: string;
+      required?: boolean;
     }) => {
       const filteredSecrets = input.filter ? availableSecrets.filter(input.filter) : availableSecrets;
       const options = [
@@ -1796,6 +1820,12 @@ export function NodeInspector({
             }}
             options={options}
           />
+          {input.hint && <div className="cfg-tip">{input.hint}</div>}
+          {input.required && !input.value && (
+            <div className="cfg-tip" role="alert">
+              A credential is required. Select one or add a new credential.
+            </div>
+          )}
           {isActiveCreator && (
             <div className="cfg-tip">
               <div style={{ marginBottom: "8px" }}>
@@ -5554,6 +5584,121 @@ export function NodeInspector({
     );
   };
 
+  /**
+   * Schema-driven editor for nodes without a bespoke one: a secret picker for
+   * every credential the node's handler reads, plus a field per declared
+   * config property, so required inputs are always editable.
+   */
+  const renderDefinitionParameters = () => {
+    const definition = getNodeDefinition(node.data.nodeType);
+    if (!definition) {
+      return <div className="cfg-tip">This node type has no configurable fields.</div>;
+    }
+    const schema = asRecord(definition.configSchema);
+    const properties = asRecord(schema.properties);
+    const requiredKeys = new Set(Array.isArray(schema.required) ? schema.required.map(String) : []);
+    const credentials = definition.credentials ?? [];
+    const credentialKeys = new Set(credentials.map((spec) => spec.key));
+    const fieldKeys = Object.keys(properties).filter((key) => !credentialKeys.has(key) && !/secretref$/i.test(key));
+
+    const credentialFields = credentials.map((spec) =>
+      renderCredentialSecretField({
+        fieldKey: `schema_${spec.key}`,
+        label: spec.required ? `${spec.label} (required)` : spec.label,
+        value: toStringValue(asRecord(config[spec.key]).secretId),
+        noneLabel: "Select secret",
+        preferredProvider: spec.provider,
+        hint: spec.hint,
+        required: spec.required,
+        onSelect: (next) =>
+          setConfig((current) => ({
+            ...current,
+            [spec.key]: next ? { secretId: next } : undefined
+          }))
+      })
+    );
+
+    if (credentials.length === 0 && fieldKeys.length === 0) {
+      return <div className="cfg-tip">This node has no configurable fields.</div>;
+    }
+
+    return (
+      <>
+        {credentialFields.map((field, index) => (
+          <div key={credentials[index].key}>{field}</div>
+        ))}
+        {fieldKeys.map((key) => {
+          const propSchema = asRecord(properties[key]);
+          const kind = schemaFieldKind(propSchema);
+          const label = `${humanizeFieldKey(key)}${requiredKeys.has(key) ? " (required)" : ""}`;
+          const raw = config[key];
+          if (kind === "select") {
+            const values = (propSchema.enum as unknown[]).map(String);
+            return (
+              <SelectField
+                key={key}
+                label={label}
+                value={toStringValue(raw, values[0])}
+                onChange={(next) => setConfig((current) => ({ ...current, [key]: next }))}
+                options={values.map((value) => ({ value, label: value }))}
+              />
+            );
+          }
+          if (kind === "boolean") {
+            return (
+              <ToggleField
+                key={key}
+                label={label}
+                checked={toBooleanValue(raw, false)}
+                onChange={(next) => setConfig((current) => ({ ...current, [key]: next }))}
+              />
+            );
+          }
+          if (kind === "number") {
+            return (
+              <NumberField
+                key={key}
+                label={label}
+                value={toNumberValue(raw, 0)}
+                onChange={(next) => setConfig((current) => ({ ...current, [key]: next }))}
+              />
+            );
+          }
+          if (kind === "json") {
+            return (
+              <TextAreaField
+                key={key}
+                label={`${label} (JSON)`}
+                value={typeof raw === "string" ? raw : raw === undefined ? "" : JSON.stringify(raw, null, 2)}
+                allowJsonFormat
+                onChange={(next) => {
+                  if (!next.trim()) {
+                    setConfig((current) => ({ ...current, [key]: undefined }));
+                    return;
+                  }
+                  try {
+                    setConfig((current) => ({ ...current, [key]: JSON.parse(next) }));
+                  } catch {
+                    setConfig((current) => ({ ...current, [key]: next }));
+                  }
+                }}
+                rows={4}
+              />
+            );
+          }
+          return (
+            <TextField
+              key={key}
+              label={label}
+              value={toStringValue(raw)}
+              onChange={(next) => setConfig((current) => ({ ...current, [key]: next }))}
+            />
+          );
+        })}
+      </>
+    );
+  };
+
   const renderParameters = () => {
     switch (node.data.nodeType) {
       case "schedule_trigger":
@@ -8733,9 +8878,7 @@ export function NodeInspector({
           </>
         );
       default:
-        return (
-          <div className="cfg-tip">Structured fields are not defined for this node yet. Add parameters in its dedicated editor in a future update.</div>
-        );
+        return renderDefinitionParameters();
     }
   };
 

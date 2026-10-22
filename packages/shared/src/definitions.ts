@@ -1,6 +1,7 @@
 import type { NodeDefinition } from "./types";
+import { withCredentialSpecs } from "./node-credentials";
 
-export const nodeDefinitions: NodeDefinition[] = [
+const baseNodeDefinitions: NodeDefinition[] = [
   {
     type: "schedule_trigger",
     label: "Schedule Trigger",
@@ -3289,6 +3290,8 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   }
 ];
+
+export const nodeDefinitions: NodeDefinition[] = withCredentialSpecs(baseNodeDefinitions);
 
 export function getNodeDefinition(type: string): NodeDefinition | undefined {
   return nodeDefinitions.find((node) => node.type === type);

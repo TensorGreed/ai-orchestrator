@@ -19,7 +19,7 @@ Create one or more records in an Airtable table (personal access token).
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `baseId` | `string` | yes | — |
 | `table` | `string` | yes | — |
 | `fieldsJson` | `string` | no | — |
@@ -46,7 +46,7 @@ List records from an Airtable table with optional formula + max page size.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `baseId` | `string` | yes | — |
 | `table` | `string` | yes | — |
 | `filterByFormula` | `string` | no | — |
@@ -73,7 +73,7 @@ Patch an Airtable record by ID.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `baseId` | `string` | yes | — |
 | `table` | `string` | yes | — |
 | `recordId` | `string` | yes | — |
@@ -103,7 +103,7 @@ Download an object from S3. Returns text for text/* and application/json, otherw
 | `region` | `string` | yes | — |
 | `bucket` | `string` | yes | — |
 | `key` | `string` | yes | — |
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 
 **Example config**
 
@@ -129,7 +129,7 @@ List objects under a prefix via S3 ListObjectsV2.
 | `bucket` | `string` | yes | — |
 | `prefix` | `string` | no | — |
 | `maxKeys` | `number` | no | — |
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 
 **Example config**
 
@@ -157,7 +157,7 @@ Upload an object to S3 via SigV4. Credentials secret stores JSON {accessKeyId, s
 | `key` | `string` | yes | — |
 | `body` | `string` | no | — |
 | `contentType` | `string` | no | — |
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 
 **Example config**
 
@@ -417,7 +417,7 @@ Create a calendar event using an OAuth access token stored as a secret.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `calendarId` | `string` | yes | — |
 | `summary` | `string` | yes | — |
 | `description` | `string` | no | — |
@@ -448,7 +448,7 @@ List upcoming events from a Google Calendar.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `calendarId` | `string` | yes | — |
 | `timeMin` | `string` | no | — |
 | `timeMax` | `string` | no | — |
@@ -627,7 +627,7 @@ Create a HubSpot contact using a private app access token.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `propertiesJson` | `string` | no | — |
 
 **Example config**
@@ -648,7 +648,7 @@ Fetch a HubSpot contact by ID or email.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `identifier` | `string` | yes | — |
 | `idProperty` | `string` | no | — |
 
@@ -672,7 +672,7 @@ Create a Jira Cloud issue. Auth via Atlassian API token (email:token basic auth 
 | Field | Type | Required | Values |
 |---|---|---|---|
 | `baseUrl` | `string` | yes | — |
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `email` | `string` | no | — |
 | `projectKey` | `string` | yes | — |
 | `issueType` | `string` | yes | — |
@@ -703,7 +703,7 @@ Run a JQL search against Jira Cloud.
 | Field | Type | Required | Values |
 |---|---|---|---|
 | `baseUrl` | `string` | yes | — |
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `email` | `string` | no | — |
 | `jql` | `string` | yes | — |
 | `maxResults` | `number` | no | — |
@@ -797,7 +797,7 @@ Create a page in a Notion database using an integration token.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `databaseId` | `string` | yes | — |
 | `titleProperty` | `string` | no | — |
 | `title` | `string` | no | — |
@@ -825,7 +825,7 @@ Query a Notion database with optional filter/sort JSON.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `databaseId` | `string` | yes | — |
 | `filterJson` | `string` | no | — |
 | `sortsJson` | `string` | no | — |
@@ -955,7 +955,7 @@ Create a record on a Salesforce sObject. Auth via OAuth access token stored as a
 |---|---|---|---|
 | `instanceUrl` | `string` | yes | — |
 | `apiVersion` | `string` | no | — |
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `sobject` | `string` | yes | — |
 | `fieldsJson` | `string` | no | — |
 
@@ -982,7 +982,7 @@ Run a SOQL query against Salesforce.
 |---|---|---|---|
 | `instanceUrl` | `string` | yes | — |
 | `apiVersion` | `string` | no | — |
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `soql` | `string` | yes | — |
 
 **Example config**
@@ -1070,7 +1070,7 @@ Create a Stripe PaymentIntent (the modern replacement for Charges).
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `amount` | `number` | yes | — |
 | `currency` | `string` | yes | — |
 | `customerId` | `string` | no | — |
@@ -1097,7 +1097,7 @@ Create a Stripe customer. Secret must contain a restricted/private API key.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `email` | `string` | no | — |
 | `name` | `string` | no | — |
 | `description` | `string` | no | — |
@@ -1150,7 +1150,7 @@ Send a Telegram message via the Bot API. Secret stores the bot token.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `chatId` | `string` | yes | — |
 | `text` | `string` | yes | — |
 | `parseMode` | `string` | no | `` \| `Markdown` \| `MarkdownV2` \| `HTML` |
@@ -1177,7 +1177,7 @@ Send an SMS via Twilio. Secret stores the auth token paired with the Account SID
 | Field | Type | Required | Values |
 |---|---|---|---|
 | `accountSid` | `string` | yes | — |
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `from` | `string` | yes | — |
 | `to` | `string` | yes | — |
 | `body` | `string` | yes | — |

@@ -263,6 +263,18 @@ export interface Folder {
   updatedAt: string;
 }
 
+/** A secret a node's runtime handler reads, resolved from `config[key].secretId`. */
+export interface NodeCredentialSpec {
+  /** Config property holding `{ secretId }`, e.g. `secretRef`. */
+  key: string;
+  /** Preferred secret provider when creating a credential inline. */
+  provider: string;
+  label: string;
+  /** What the stored secret value must contain, shown beside the picker. */
+  hint: string;
+  required: boolean;
+}
+
 export interface NodeDefinition {
   type: WorkflowNodeType;
   label: string;
@@ -270,6 +282,8 @@ export interface NodeDefinition {
   description: string;
   configSchema: Record<string, unknown>;
   sampleConfig: Record<string, unknown>;
+  /** Optional, additive: credentials the handler needs. Does not change the workflow JSON contract. */
+  credentials?: NodeCredentialSpec[];
 }
 
 export type NodeExecutionStatus =

@@ -191,7 +191,7 @@ Poll a Google Drive folder for new or modified files using an access token.
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `secretRef` | `object` | no | — |
+| `secretRef` | `object` | yes | — |
 | `folderId` | `string` | yes | — |
 | `query` | `string` | no | — |
 | `pollIntervalSeconds` | `number` | no | — |
