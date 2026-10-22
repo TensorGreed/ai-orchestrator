@@ -205,10 +205,15 @@ function describeActivityBody(event: NodeActivityEvent): string {
   }
 }
 
-/** The entry worth showing as "Now": the last start without a matching end, else the last entry. */
+/**
+ * The entry worth showing as "Now": a retry wait if that is the latest entry, else the last
+ * start without a matching end, else the last entry.
+ */
 export function currentActivity(result: { activity?: NodeActivityEvent[] } | undefined): NodeActivityEvent | undefined {
   const activity = result?.activity;
   if (!activity || activity.length === 0) return undefined;
+  const latest = activity[activity.length - 1]!;
+  if (latest.kind === "retry") return latest;
   const open: NodeActivityEvent[] = [];
   for (const entry of activity) {
     if (entry.kind !== "llm_call" && entry.kind !== "agent_step" && entry.kind !== "tool_call") continue;

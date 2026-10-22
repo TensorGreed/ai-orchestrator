@@ -8,7 +8,8 @@ export function latestResolvedFields(activity: NodeActivityEvent[] | undefined):
   if (!activity) return undefined;
   for (let index = activity.length - 1; index >= 0; index -= 1) {
     const entry = activity[index]!;
-    if (entry.kind === "resolved_input") return entry.fields;
+    // A Supervisor also receives its workers' entries; only its own describe this node.
+    if (entry.kind === "resolved_input" && !entry.workerNodeId) return entry.fields;
   }
   return undefined;
 }

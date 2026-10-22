@@ -9,6 +9,7 @@ import {
   currentActivity,
   describeActivity
 } from "./run-trace";
+import { latestResolvedFields } from "../components/NodeActivityList";
 
 const T0 = "2026-01-01T00:00:00.000Z";
 
@@ -99,6 +100,17 @@ describe("applyNodeActivityToExecutionResult", () => {
 });
 
 describe("currentActivity", () => {
+  it("shows a retry wait while a model call or step is still open", () => {
+    const activity = [
+      ev(1, { kind: "agent_step", phase: "start", iteration: 1, maxIterations: 5 }),
+      ev(2, { kind: "llm_call", phase: "start", providerId: "openai", model: "gpt-4o", iteration: 1 }),
+      ev(3, { kind: "retry", scope: "provider", attempt: 1, maxAttempts: 4, delayMs: 2000, reason: "HTTP 503 from openai" })
+    ];
+    expect(currentActivity({ activity })?.kind).toBe("retry");
+    const resumed = [...activity, ev(4, { kind: "llm_call", phase: "end", providerId: "openai", model: "gpt-4o", iteration: 1, latencyMs: 900 })];
+    expect(currentActivity({ activity: resumed })?.kind).toBe("agent_step");
+  });
+
   it("returns the last start without an end, else the last entry", () => {
     expect(currentActivity(undefined)).toBeUndefined();
     const open = [
@@ -116,5 +128,15 @@ describe("currentActivity", () => {
       ev(8, { kind: "agent_step", phase: "end", iteration: 1, maxIterations: 3, final: true })
     ];
     expect(currentActivity({ activity: closed })!.seq).toBe(8);
+  });
+});
+
+describe("latestResolvedFields", () => {
+  it("ignores a worker's resolved input on a Supervisor", () => {
+    const activity = [
+      ev(1, { kind: "resolved_input", fields: { providerId: "openai", model: "supervisor-model" } }),
+      ev(2, { kind: "resolved_input", fields: { providerId: "openai", model: "worker-model" } }, { workerNodeId: "worker-1" })
+    ];
+    expect(latestResolvedFields(activity)).toEqual({ providerId: "openai", model: "supervisor-model" });
   });
 });

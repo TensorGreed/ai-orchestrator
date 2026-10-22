@@ -125,6 +125,46 @@ describe("node activity", () => {
     expect(Object.keys((first as { fields: object }).fields).sort()).toEqual(["method", "url"]);
   });
 
+  it("masks credential-like path segments in an HTTP request URL", async () => {
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }));
+    const result = await executeWorkflow(
+      {
+        workflow: workflow(
+          [
+            node("input", "text_input", { text: "x" }),
+            node("http", "http_request", { method: "post", urlTemplate: "https://hooks.example.com/services/T0001/B0002/abcdefghijklmnopqrstuvwx" }),
+            node("tg", "http_request", { method: "get", urlTemplate: "https://api.telegram.org/bot123456:ABC-def/getMe" }),
+            node("output", "output")
+          ],
+          [edge("input", "http"), edge("http", "tg"), edge("tg", "output")]
+        )
+      },
+      makeDeps()
+    );
+    const urlOf = (id: string) => (result.nodeResults.find((entry) => entry.nodeId === id)!.activity![0] as unknown as { fields: { url: string } }).fields.url;
+    expect(urlOf("http")).toBe("https://hooks.example.com/services/T0001/B0002/•••");
+    expect(urlOf("tg")).toBe("https://api.telegram.org/•••/getMe");
+  });
+
+  it("saves the activity recorded before an approval pause with the paused state", async () => {
+    let saved: { nodeResults: Array<{ nodeId: string; activity?: NodeActivityEvent[] }> } | undefined;
+    const paused = workflow(
+      [node("input", "text_input", { text: "hi there" }), node("llm", "llm_call", { provider: { providerId: "fake", model: "m1" } }), node("approve", "human_approval", { approvalMessage: "Approve?", timeoutMinutes: 5 }), node("output", "output")],
+      [edge("input", "llm"), edge("llm", "approve"), edge("approve", "output")]
+    );
+    const result = await executeWorkflow(
+      { workflow: paused },
+      makeDeps({
+        persistPausedExecution: async (input) => {
+          saved = input.state as unknown as typeof saved;
+        }
+      })
+    );
+    expect(result.status).toBe("waiting_approval");
+    const llm = saved?.nodeResults.find((entry) => entry.nodeId === "llm");
+    expect(llm?.activity?.map((entry) => entry.kind)).toEqual(["resolved_input", "llm_call", "llm_call"]);
+  });
+
   it("keeps only the last NODE_ACTIVITY_LIMIT entries per node and numbers them in order", async () => {
     const runtime = new ScriptedAgentRuntime(async (_request, _tools, context) => {
       for (let index = 0; index < NODE_ACTIVITY_LIMIT + 30; index += 1) {

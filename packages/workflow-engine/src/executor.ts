@@ -450,12 +450,23 @@ function previewForActivity(value: string): string {
 }
 
 /** A URL with userinfo, query string and fragment removed, so it is safe to show. */
+// Webhook-style URLs carry their credential in the path (Slack, Discord, Telegram /bot<token>/).
+// Long or colon-bearing segments are masked; short, readable route segments stay.
+function maskPathTokens(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((segment) => (segment.length >= 20 || segment.includes(":") ? "•••" : segment))
+    .join("/");
+}
+
 function urlForActivity(raw: string): string {
   try {
     const parsed = new URL(raw);
-    return previewForActivity(`${parsed.protocol}//${parsed.host}${parsed.pathname}`);
+    return previewForActivity(`${parsed.protocol}//${parsed.host}${maskPathTokens(parsed.pathname)}`);
   } catch {
-    return previewForActivity(raw.replace(/[?#].*$/s, "").replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1"));
+    const stripped = raw.replace(/[?#].*$/s, "").replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1");
+    const origin = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i.exec(stripped)?.[0] ?? "";
+    return previewForActivity(origin + maskPathTokens(stripped.slice(origin.length)));
   }
 }
 
@@ -6167,11 +6178,17 @@ export async function executeWorkflow(
   }
   const recorder = createNodeActivityRecorder(dependencies.onNodeActivity);
   const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
-  for (const nodeResult of result.nodeResults) {
+  attachNodeActivity(result.nodeResults, recorder);
+  return result;
+}
+
+/** Copies each node's recorded activity onto its results; nodes restored from a paused run keep theirs. */
+function attachNodeActivity(nodeResults: NodeExecutionResult[], recorder: NodeActivityRecorder | undefined): void {
+  if (!recorder) return;
+  for (const nodeResult of nodeResults) {
     const activity = recorder.snapshot(nodeResult.nodeId);
     if (activity.length > 0) nodeResult.activity = activity;
   }
-  return result;
 }
 
 async function executeWorkflowRun(
@@ -6723,6 +6740,8 @@ async function executeWorkflowRun(
     });
 
     const executionId = request.executionId ?? randomUUID();
+    // The paused state is saved now and resumed later, so it must carry the activity recorded so far.
+    attachNodeActivity(nodeResults, dependencies.activityRecorder);
     const stateSnapshot: WorkflowExecutionState = {
       workflow,
       nodeOrder,
