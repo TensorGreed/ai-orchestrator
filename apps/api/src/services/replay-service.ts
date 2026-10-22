@@ -90,23 +90,38 @@ function durationOf(result: ReplayExecutionResult): number | null {
 export class ReplayService {
   constructor(private readonly options: ReplayServiceOptions) {}
 
-  /** The candidate workflow: the draft, or a saved version of the golden run's workflow. */
+  /**
+   * The candidate workflow: the draft, or a saved version of the golden
+   * run's workflow. A saved version is a snapshot of the whole workflow,
+   * including the project it lived in then; it runs under the workflow's
+   * current project and folder, so project variables, guard bindings and
+   * budgets are the ones that apply to the workflow now (a moved workflow
+   * never replays under its old project).
+   */
   resolveCandidate(recording: ReplayRecordingRecord, request: ReplayRunRequest): { workflow: Workflow; kind: "draft" | "version"; version: number | null } {
-    if (request.version !== undefined) {
-      const entry = this.options.store.getWorkflowVersion(recording.workflowId, request.version);
-      if (!entry) throw new ReplayRunError(`Version ${request.version} of this workflow was not found.`, "not_found");
-      let parsed: Workflow;
-      try {
-        parsed = JSON.parse(entry.workflowJson) as Workflow;
-      } catch {
-        throw new ReplayRunError(`Version ${request.version} could not be read.`, "invalid");
-      }
-      if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) throw new ReplayRunError(`Version ${request.version} could not be read.`, "invalid");
-      return { workflow: { ...parsed, id: recording.workflowId }, kind: "version", version: request.version };
+    const current = this.options.store.getWorkflow(recording.workflowId);
+    if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
+    if (request.version === undefined) return { workflow: current, kind: "draft", version: null };
+    const entry = this.options.store.getWorkflowVersion(recording.workflowId, request.version);
+    if (!entry) throw new ReplayRunError(`Version ${request.version} of this workflow was not found.`, "not_found");
+    let parsed: Workflow;
+    try {
+      parsed = JSON.parse(entry.workflowJson) as Workflow;
+    } catch {
+      throw new ReplayRunError(`Version ${request.version} could not be read.`, "invalid");
     }
-    const draft = this.options.store.getWorkflow(recording.workflowId);
-    if (!draft) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
-    return { workflow: draft, kind: "draft", version: null };
+    if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) throw new ReplayRunError(`Version ${request.version} could not be read.`, "invalid");
+    const { projectId: _savedProject, folderId: _savedFolder, ...snapshot } = parsed;
+    return {
+      workflow: {
+        ...snapshot,
+        id: recording.workflowId,
+        ...(current.projectId !== undefined ? { projectId: current.projectId } : {}),
+        ...(current.folderId !== undefined ? { folderId: current.folderId } : {})
+      },
+      kind: "version",
+      version: request.version
+    };
   }
 
   async replay(recording: ReplayRecordingRecord, request: ReplayRunRequest, actor: SafeUser): Promise<ReplayRunResponse> {

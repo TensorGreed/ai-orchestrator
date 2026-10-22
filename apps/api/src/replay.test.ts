@@ -434,6 +434,40 @@ describe("golden runs with side effects stubbed", () => {
     expect(context.store.getReplayRecording(another.id)).toBeNull();
   });
 
+  it("replays a saved version under the workflow's current project, not the project it was saved in", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    context.store.upsertProject({ id: "proj-a", name: "Project A" });
+    context.store.upsertProject({ id: "proj-b", name: "Project B" });
+    context.store.upsertVariable({ id: "var-a", projectId: "proj-a", key: "GREETING", value: "from A" });
+    context.store.upsertVariable({ id: "var-b", projectId: "proj-b", key: "GREETING", value: "from B" });
+    const moved = (projectId: string): Workflow =>
+      ({
+        id: "wf-moved",
+        name: "Moved",
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        projectId,
+        nodes: [
+          { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+          { id: "output", type: "output", name: "Output", position: { x: 150, y: 0 }, config: { responseTemplate: "{{vars.GREETING}}" } }
+        ],
+        edges: [{ id: "e1", source: "start", target: "output" }]
+      }) as Workflow;
+    // Version 3 was saved while the workflow lived in project A; it has since moved to project B.
+    context.store.writeWorkflowVersion({ id: "ver-3", workflowId: "wf-moved", version: 3, workflowJson: JSON.stringify(moved("proj-a")) });
+    context.store.upsertWorkflow(moved("proj-b"));
+    const run = (await call(context, "POST", "/api/workflows/wf-moved/execute", builder.cookie, {})).json<{ executionId: string; output: unknown }>();
+    expect(JSON.stringify(run.output)).toContain("from B");
+    const golden = await saveGolden(context, builder.cookie, run.executionId);
+
+    const versioned = await replay(context, builder.cookie, golden.id, { version: 3 });
+    expect(versioned.candidate).toMatchObject({ kind: "version", version: 3 });
+    expect(JSON.stringify(versioned.facts.output)).not.toContain("from A");
+    expect(versioned.verdict, JSON.stringify(versioned.reasons)).toBe("pass");
+    expect(context.store.getExecutionHistory(versioned.executionId)).toMatchObject({ workflowId: "wf-moved" });
+  });
+
   it("scrubs secrets from the stored golden run and keeps session memory untouched in a replay", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
