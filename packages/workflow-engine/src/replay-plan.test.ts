@@ -285,3 +285,59 @@ describe("replay plan", () => {
     expect(plan.hook(node("tool", "mcp_tool"))).toBeNull();
   });
 });
+
+describe("recorded stubs that no longer match the candidate", () => {
+  const loopWorkflow = (code: string) =>
+    chain([
+      node("start", "manual_trigger"),
+      node("items", "code_node", { code: "return { list: ['a', 'b', 'c'] };" }),
+      node("loop", "loop_node", { inputKey: "list", itemVariable: "item" }),
+      node("shout", "code_node", { language: "javascript", code })
+    ]);
+
+  const items = { nodeId: "items", nodeType: "code_node", output: { list: ["a", "b", "c"] } };
+
+  it("flags a code node whose code changed since the golden run, and still never runs it", async () => {
+    const before = node("js", "code_node", { language: "javascript", code: "return { n: 1 };" });
+    const after = node("js", "code_node", { language: "javascript", code: "return { n: 2 };" });
+    const slackBefore = node("slack", "slack_send_message", { channel: "#ops", text: "hi" });
+    const slackAfter = node("slack", "slack_send_message", { channel: "#ops", text: "hello" });
+    const rec = recorded([{ nodeId: "js", nodeType: "code_node", output: { n: 1 } }, { nodeId: "slack", nodeType: "slack_send_message", output: { ok: true } }]);
+    const recordedWorkflow = chain([node("start", "manual_trigger"), before, slackBefore]);
+
+    const same = buildReplayPlan(recordedWorkflow, rec, { recordedWorkflow });
+    expect(same.warnings).toEqual([]);
+
+    const workflow = chain([node("start", "manual_trigger"), after, slackAfter]);
+    const plan = buildReplayPlan(workflow, rec, { recordedWorkflow });
+    expect(plan.warnings).toEqual([
+      expect.objectContaining({ kind: "config_changed", nodeId: "js", nodeClass: "code", message: expect.stringContaining("code changed since the golden run; code nodes are not executed in replay") }),
+      expect.objectContaining({ kind: "config_changed", nodeId: "slack", nodeClass: "write" })
+    ]);
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(resultOf(result, "js")[0]!.output).toEqual({ n: 1 });
+    expect(plan.hits.find((hit) => hit.nodeId === "js")).toMatchObject({ recorded: true, configChanged: true });
+
+    // A different language is a code change too; a config normaliser applied on both sides is honoured.
+    const python = buildReplayPlan(chain([node("start", "manual_trigger"), node("js", "code_node", { language: "python", code: "return { n: 1 };" })]), rec, { recordedWorkflow });
+    expect(python.warnings.map((warning) => warning.nodeId)).toContain("js");
+    const normalised = buildReplayPlan(workflow, rec, { recordedWorkflow, normaliseConfig: () => ({}) });
+    expect(normalised.warnings).toEqual([]);
+  });
+
+  it("replays a code node inside a loop iteration by iteration when the recording has every iteration", async () => {
+    const workflow = loopWorkflow("return { up: item.toUpperCase() };");
+    const runs = ["A", "B", "C"].map((up) => ({ status: "success", output: { up } }));
+    const plan = buildReplayPlan(workflow, recorded([items, { nodeId: "shout", nodeType: "code_node", output: { up: "C" }, runs }]), { recordedWorkflow: workflow });
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(resultOf(result, "shout").map((entry) => entry.output)).toEqual([{ up: "A" }, { up: "B" }, { up: "C" }]);
+    expect(plan.hits.filter((hit) => hit.nodeId === "shout").map((hit) => hit.overrun)).toEqual([false, false, false]);
+  });
+
+  it("marks a hit past the recorded iterations instead of silently reusing the last one", async () => {
+    const workflow = loopWorkflow("return { up: item.toUpperCase() };");
+    const plan = buildReplayPlan(workflow, recorded([items, { nodeId: "shout", nodeType: "code_node", output: { up: "C" } }]));
+    await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(plan.hits.filter((hit) => hit.nodeId === "shout").map((hit) => hit.overrun)).toEqual([false, true, true]);
+  });
+});

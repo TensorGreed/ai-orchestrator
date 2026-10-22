@@ -308,12 +308,21 @@ export interface RunFacts {
 // Golden runs (recordings)
 // ---------------------------------------------------------------------------
 
-export interface ReplayRecordedNode {
-  nodeId: string;
-  nodeType: string;
+export interface ReplayRecordedRun {
   status: string;
   output?: unknown;
   error?: string | null;
+}
+
+export interface ReplayRecordedNode extends ReplayRecordedRun {
+  nodeId: string;
+  nodeType: string;
+  /**
+   * Every finished result of the node in run order, when it ran more than
+   * once (a loop body). A replay answers the n-th call with the n-th entry.
+   * The top-level fields hold the last one.
+   */
+  runs?: ReplayRecordedRun[];
 }
 
 export interface ReplayRecordingCapabilities {
@@ -459,6 +468,8 @@ export type ReplayHealthKind =
   | "unrecorded_stub"
   | "unknown_node_type"
   | "truncated_recording"
+  | "config_changed"
+  | "recording_overrun"
   | "mcp_unmatched"
   | "no_cassette"
   | "paused"
