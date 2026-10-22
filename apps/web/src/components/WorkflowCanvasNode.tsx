@@ -1,5 +1,7 @@
 import { Handle, Position, type NodeProps } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
+import { runningElapsedMs } from "../lib/run-trace";
+import { useNow } from "../lib/use-now";
 import { AGENT_ATTACHMENT_STYLES, type AgentAttachmentHandle } from "../lib/agent-attachments";
 import { ORBIT, emptySlots, isHubType, ringGeometry, summarizeNode } from "../lib/stages";
 import type { McpCanvasMarker, McpNavTarget } from "../lib/mcp-control-plane";
@@ -88,14 +90,36 @@ function Badges({ data }: { data: EditorNodeData }) {
   );
 }
 
+/** Ticking "how long has this been running" label; the only thing that re-renders each second. */
+export function LiveElapsed({ result, className }: { result: { startedAt?: string; liveStartedAtMs?: number }; className?: string }) {
+  const now = useNow(true);
+  return <span className={className}>{formatLatency(Math.floor(runningElapsedMs(result, now) / 1000) * 1000)}</span>;
+}
+
+function RunningPill({ data }: { data: EditorNodeData }) {
+  if (data.executionStatus !== "running" || typeof data.liveStartedAtMs !== "number") return null;
+  return (
+    <div className="wf-node-telemetry">
+      <span className="wf-telemetry-pill wf-telemetry-pill-running">
+        Running <LiveElapsed result={{ liveStartedAtMs: data.liveStartedAtMs }} />
+      </span>
+    </div>
+  );
+}
+
 function DebugPreview({ data }: { data: EditorNodeData }) {
   const preview = data.executionPreview;
-  if (!preview || !(preview.input || preview.output || preview.error)) return null;
+  if (!preview || !(preview.input || preview.output || preview.error || preview.live)) return null;
   return (
     <div className="wf-node-debug-preview">
       {preview.input && (
         <div>
           <strong>In</strong> {preview.input}
+        </div>
+      )}
+      {preview.live && (
+        <div className="wf-node-debug-live">
+          <strong>Live</strong> {preview.live}
         </div>
       )}
       {preview.output && (
@@ -166,6 +190,7 @@ function CardNode({ data, selected }: VariantProps) {
       <span className={`wf-status-ring wf-status-${status ?? "idle"}`} title={statusTitle(status)} aria-label={statusTitle(status)} />
       <StructuralPorts data={data} />
       <DebugPreview data={data} />
+      <RunningPill data={data} />
       <Telemetry data={data} />
     </div>
   );
@@ -373,6 +398,7 @@ function HubNode({ data, selected }: VariantProps) {
         })}
 
       <DebugPreview data={data} />
+      <RunningPill data={data} />
       <Telemetry data={data} />
     </div>
   );

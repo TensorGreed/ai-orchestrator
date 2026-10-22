@@ -940,13 +940,19 @@
   color: var(--fg-muted);
 }
 
+.wf-telemetry-pill-running {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
 .wf-node-debug-preview {
   position: absolute;
   z-index: 5;
   top: calc(100% + 6px);
   left: 8px;
   right: 8px;
-  max-height: 48px;
+  max-height: 84px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -2718,6 +2724,20 @@
   height: 3px;
   background: var(--fg);
   opacity: 0.55;
+}
+
+.run-tape-error {
+  grid-column: 2 / 4;
+  font: 400 var(--fs-xs) var(--font-mono);
+  color: var(--err);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-tape-error small {
+  color: var(--fg-muted);
+  font: inherit;
 }
 
 .run-tape-progress {

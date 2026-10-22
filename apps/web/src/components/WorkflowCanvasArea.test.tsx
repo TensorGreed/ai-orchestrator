@@ -316,6 +316,39 @@ describe("WorkflowCanvasArea", () => {
     expect(positionChanges).toEqual([expect.objectContaining({ id: "model", type: "position" })]);
   });
 
+  it("shows error remediation and streaming output in expanded log rows", async () => {
+    const user = userEvent.setup();
+    const executionResult: WorkflowExecutionResult = {
+      workflowId: "wf",
+      status: "error",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:00:05.000Z",
+      nodeResults: [
+        {
+          nodeId: "a",
+          status: "error",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          durationMs: 900,
+          error: "401 unauthorized",
+          errorRemediation: "Check the API key."
+        },
+        {
+          nodeId: "b",
+          status: "running",
+          startedAt: "2026-01-01T00:00:01.000Z",
+          liveText: "Once upon a time"
+        } as WorkflowExecutionResult["nodeResults"][number]
+      ]
+    };
+    const nodes = [makeNode("a", "llm_call", "First"), makeNode("b", "llm_call", "Second", { x: 400, y: 0 })];
+    render(<WorkflowCanvasArea {...makeProps({ nodes, executionResult })} />);
+    await user.click(screen.getByRole("tab", { name: "Logs" }));
+    await user.click(screen.getByRole("button", { name: /Expand all/ }));
+    expect(screen.getByText("Check the API key.")).toBeInTheDocument();
+    expect(screen.getByText("Streaming output")).toBeInTheDocument();
+    expect(screen.getByText("Once upon a time")).toBeInTheDocument();
+  });
+
   it("renders the run tape with LLM time from node telemetry", () => {
     const executionResult: WorkflowExecutionResult = {
       workflowId: "wf",

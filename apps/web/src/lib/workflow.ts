@@ -35,6 +35,8 @@ export interface EditorNodeData {
   executionPreview?: {
     input?: string;
     output?: string;
+    /** Tail of the model text streamed so far, while the node runs. */
+    live?: string;
     error?: string;
     /** One-sentence remediation hint produced by the executor for the failing
      *  node. Surfaced under the raw error in the on-canvas preview. */
@@ -46,6 +48,8 @@ export interface EditorNodeData {
    * Surfaced as inline pills on the canvas card.
    */
   telemetry?: NodeTelemetry;
+  /** Browser clock (ms) when the node started running; drives the elapsed pill. Render-time only. */
+  liveStartedAtMs?: number;
   pinned?: boolean;
   disabled?: boolean;
   color?: NodeColorKey;

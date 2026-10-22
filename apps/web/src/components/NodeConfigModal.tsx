@@ -8,6 +8,8 @@ import type {
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
+import type { LiveNodeResult } from "../lib/run-trace";
+import { LiveElapsed } from "./WorkflowCanvasNode";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields";
@@ -1506,16 +1508,30 @@ export function NodeInspector({
   const nodeResultById = useMemo(() => {
     const map = new Map<
       string,
-      { input?: unknown; output?: unknown; error?: string; errorRemediation?: string; status?: string; durationMs?: number }
+      {
+        input?: unknown;
+        output?: unknown;
+        error?: string;
+        errorRemediation?: string;
+        status?: string;
+        durationMs?: number;
+        startedAt?: string;
+        liveStartedAtMs?: number;
+        liveText?: string;
+      }
     >();
     for (const result of executionResult?.nodeResults ?? []) {
+      const live = result as LiveNodeResult;
       map.set(result.nodeId, {
         input: result.input,
         output: result.output,
         error: result.error,
         errorRemediation: result.errorRemediation,
         status: result.status,
-        durationMs: result.durationMs
+        durationMs: result.durationMs,
+        startedAt: result.startedAt,
+        liveStartedAtMs: live.liveStartedAtMs,
+        liveText: live.liveText
       });
     }
     return map;
@@ -9040,6 +9056,11 @@ export function NodeInspector({
     return (
       <>
         {pinControls}
+        {currentNodeResult?.status === "running" && currentNodeResult.liveText ? (
+          <div className="cfg-group">
+            <TextAreaField label="Streaming output" value={currentNodeResult.liveText} onChange={() => undefined} rows={8} readOnly />
+          </div>
+        ) : null}
         {resolvedOutputPreview !== undefined || currentPinnedOutput !== undefined ? (
           <div className="cfg-group">
             <div className="cfg-tip">
@@ -9113,6 +9134,14 @@ export function NodeInspector({
           <span className="insp-trace-status-label" data-testid="insp-trace-status">{status ?? "unknown"}</span>
         </div>
         <dl className="insp-metrics">
+          {status === "running" && currentNodeResult ? (
+            <div className="insp-metric">
+              <dt>Elapsed</dt>
+              <dd>
+                <LiveElapsed result={currentNodeResult} />
+              </dd>
+            </div>
+          ) : null}
           {metrics
             .filter((metric) => metric.value !== undefined)
             .map((metric) => (

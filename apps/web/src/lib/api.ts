@@ -297,6 +297,9 @@ export interface StreamNodeCompleteEvent {
   input?: unknown;
   output?: unknown;
   error?: string;
+  errorCategory?: string;
+  errorRemediation?: string;
+  retryable?: boolean;
 }
 
 export interface StreamLlmDeltaEvent {
