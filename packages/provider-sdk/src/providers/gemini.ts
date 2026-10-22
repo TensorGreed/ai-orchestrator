@@ -173,7 +173,7 @@ export class GeminiProviderAdapter implements LLMProviderAdapter {
       }
     };
 
-    console.warn(`[Gemini] POST models/${model}:generateContent | messages=${contents.length} tools=${request.tools?.length ?? 0} key=${apiKey.slice(0, 6)}...${apiKey.slice(-4)}`);
+    console.warn(`[Gemini] POST models/${model}:generateContent | messages=${contents.length} tools=${request.tools?.length ?? 0}`);
 
     const startedAt = Date.now();
     const response = await resilientFetch(endpoint, {
