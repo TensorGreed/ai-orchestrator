@@ -289,6 +289,17 @@ export function readTabWipWorkflow(
   return parsed;
 }
 
+/**
+ * Which copy to open: the tab's unsaved work, unless it is an empty canvas while the server
+ * copy has nodes. That empty copy is almost always a half-reset editor (a dev reload, a failed
+ * load), not a deliberate clear, and opening it would invite saving over the real workflow.
+ */
+export function preferTabWip(wip: Workflow | null, server: Workflow): Workflow {
+  if (!wip) return server;
+  if (wip.nodes.length === 0 && server.nodes.length > 0) return server;
+  return wip;
+}
+
 export function deleteTabWipWorkflow(
   workflowId: string,
   deps: {
