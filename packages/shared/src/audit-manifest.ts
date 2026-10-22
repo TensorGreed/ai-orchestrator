@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { schemaConstantGuide, schemaConstantWords, type SchemaConstantGuide } from "./schema-constants";
 
 /**
  * Phase 11.1 — signed run manifests and audit bundles.
@@ -108,12 +109,21 @@ export const RUN_MANIFEST_TOOL_OUTCOMES = [
 ] as const;
 export type RunManifestToolOutcome = (typeof RUN_MANIFEST_TOOL_OUTCOMES)[number];
 
+/**
+ * Statuses a run and its nodes record. The status fields still accept any
+ * string (older and newer runs may record others); listing the known ones
+ * makes them schema constants, so a secret that happens to equal a status
+ * word is not scrubbed out of the status (see `runManifestConstantGuide`).
+ */
+export const RUN_MANIFEST_RUN_STATUSES = ["success", "error", "partial", "canceled", "waiting_approval"] as const;
+export const RUN_MANIFEST_NODE_STATUSES = ["pending", "running", "success", "error", "skipped", "waiting_approval", "canceled", "not_run"] as const;
+
 export const runManifestNodeSchema = z.object({
   id: z.string(),
   type: z.string(),
   name: z.string(),
   /** `not_run` for nodes of the workflow that have no result in this run. */
-  status: z.string(),
+  status: z.union([z.enum(RUN_MANIFEST_NODE_STATUSES), z.string()]),
   startedAt: nullableString,
   completedAt: nullableString,
   durationMs: nullableNumber,
@@ -254,7 +264,7 @@ export const runManifestSchema = z.object({
   }),
   run: z.object({
     executionId: z.string(),
-    status: z.string(),
+    status: z.union([z.enum(RUN_MANIFEST_RUN_STATUSES), z.string()]),
     triggerType: nullableString,
     /** Who or what started the run, as execution history recorded it. */
     subject: nullableString,
@@ -299,6 +309,26 @@ export const runManifestSchema = z.object({
 });
 
 export type RunManifest = z.infer<typeof runManifestSchema>;
+
+let manifestGuide: SchemaConstantGuide | null = null;
+let manifestWords: ReadonlySet<string> | null = null;
+
+/**
+ * The manifest's enum and literal positions and declared keys, derived from
+ * `runManifestSchema`, so a new enum field is covered without a list to keep.
+ * The audit scrubber leaves a value at such a position alone only when it is
+ * exactly one of that position's constants; everything else is scrubbed.
+ */
+export function runManifestConstantGuide(): SchemaConstantGuide {
+  manifestGuide ??= schemaConstantGuide(runManifestSchema);
+  return manifestGuide;
+}
+
+/** Every constant and declared key of the manifest schema: words a secret value should never be. */
+export function runManifestConstantWords(): ReadonlySet<string> {
+  manifestWords ??= schemaConstantWords(runManifestConstantGuide());
+  return manifestWords;
+}
 export type RunManifestNode = z.infer<typeof runManifestNodeSchema>;
 export type RunManifestModelCall = z.infer<typeof runManifestModelCallSchema>;
 export type RunManifestToolCall = z.infer<typeof runManifestToolCallSchema>;

@@ -127,7 +127,7 @@ import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
-import { environmentSecretValues } from "./services/audit-scrub.js";
+import { environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
@@ -9381,7 +9381,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       name: parsed.data.name,
       provider: parsed.data.provider,
       projectId: parsed.data.projectId ?? "default",
-      source
+      source,
+      // Non-blocking: the secret is saved; the warning never carries the value.
+      warnings: source === "local" ? scrubExemptionWarnings(parsed.data.value as string) : []
     };
   });
 

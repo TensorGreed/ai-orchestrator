@@ -14,7 +14,11 @@
  * and the provider keys from the environment) is scrubbed from the manifest,
  * every JSON and log file, and every text output; binary outputs that carry
  * one are left out and listed in `redactions.json`. Values are only held in
- * memory while scrubbing; they are never logged or returned.
+ * memory while scrubbing; they are never logged or returned. In the manifest
+ * only, a value at an enum or literal position of its schema that equals one
+ * of that position's constants (a run status `success`) and the schema's own
+ * field names are kept, so a secret equal to such a word cannot make every
+ * manifest fail validation.
  */
 
 import crypto from "node:crypto";
@@ -34,6 +38,7 @@ import {
   RUN_MANIFEST_FORMAT,
   RUN_MANIFEST_VERSION,
   runManifestAttestationBytes,
+  runManifestConstantGuide,
   runManifestSchema,
   type AuditBundleIndexEntry,
   type AuditBundleSignature,
@@ -402,7 +407,10 @@ export class AuditBundleService {
   private async generate(history: HistoryRecord, existing: ExecutionManifestRecord | null): Promise<ExecutionManifestRecord> {
     const context = this.readRunContext(existing);
     const manifest = this.buildManifest(history, context);
-    const scrubbed = this.scrubber().tree(manifest);
+    // Enum and literal values (statuses, outcomes, roles) and declared keys are
+    // kept when they equal a schema constant; every other string is scrubbed,
+    // and anything left invalid still fails closed below.
+    const scrubbed = this.scrubber().tree(manifest, { guide: runManifestConstantGuide() });
     const parsed = runManifestSchema.safeParse(scrubbed);
     if (!parsed.success) {
       this.options.logger?.warn("Generated run manifest failed validation", { executionId: history.id, issues: parsed.error.issues.length });
