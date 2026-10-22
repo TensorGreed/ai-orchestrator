@@ -1,0 +1,243 @@
+/**
+ * Phase 15.1 — replay safety in the engine. With a replay plan's hook, no
+ * node that can touch the outside world runs its handler: every external
+ * read and write, approval, wait, sub-workflow and unknown node type is
+ * answered from the recording (or a stub), at the top level, inside loops
+ * and for disconnected-from-recording nodes alike. Global `fetch` is
+ * replaced by a trap for every test, so a handler that slipped through
+ * would be caught.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
+import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
+import { MCPRegistry } from "@ai-orchestrator/mcp-sdk";
+import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import {
+  getNodeDefinition,
+  nodeDefinitions,
+  REPLAY_ALWAYS_STUBBED_CLASSES,
+  REPLAY_STUB_MARKER,
+  replayNodeClass,
+  type ReplayRecordedNode,
+  type Workflow,
+  type WorkflowNode
+} from "@ai-orchestrator/shared";
+import { executeWorkflow, type WorkflowExecutionDependencies } from "./executor";
+import { buildReplayPlan } from "./replay-plan";
+
+let fetchCalls: string[] = [];
+const realFetch = globalThis.fetch;
+
+beforeEach(() => {
+  fetchCalls = [];
+  globalThis.fetch = vi.fn(async (input: unknown) => {
+    fetchCalls.push(String(input instanceof Request ? input.url : input));
+    throw new Error("network is not allowed in a replay test");
+  }) as unknown as typeof fetch;
+});
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+function deps(extra: Partial<WorkflowExecutionDependencies> = {}): WorkflowExecutionDependencies {
+  return {
+    providerRegistry: new ProviderRegistry(),
+    mcpRegistry: new MCPRegistry(),
+    connectorRegistry: createDefaultConnectorRegistry(),
+    agentRuntime: new DefaultAgentRuntime(),
+    resolveSecret: async () => "resolved-secret-value",
+    ...extra
+  };
+}
+
+function node(id: string, type: string, config: Record<string, unknown> = {}): WorkflowNode {
+  return { id, type, name: id, position: { x: 0, y: 0 }, config } as WorkflowNode;
+}
+
+/** The nodes in a line, ending in an Output node (`out`). */
+function chain(input: WorkflowNode[], extraEdges: Workflow["edges"] = []): Workflow {
+  const nodes = [...input, node("out", "output", { responseTemplate: "done" })];
+  const edges = nodes.slice(1).map((entry, index) => ({ id: `e${index}`, source: nodes[index]!.id, target: entry.id }));
+  return { id: "wf-replay", name: "Replay", schemaVersion: "1.0.0", workflowVersion: 1, nodes, edges: [...edges, ...extraEdges] } as Workflow;
+}
+
+function recorded(entries: Array<Partial<ReplayRecordedNode> & { nodeId: string; nodeType: string }>): Record<string, ReplayRecordedNode> {
+  return Object.fromEntries(entries.map((entry) => [entry.nodeId, { status: "success", ...entry } as ReplayRecordedNode]));
+}
+
+const resultOf = (result: Awaited<ReturnType<typeof executeWorkflow>>, nodeId: string) => result.nodeResults.filter((entry) => entry.nodeId === nodeId);
+
+describe("every side-effect class is stubbed", () => {
+  const stubbedTypes = nodeDefinitions
+    .map((definition) => definition.type)
+    .filter((type) => REPLAY_ALWAYS_STUBBED_CLASSES.has(replayNodeClass({ type })) && replayNodeClass({ type }) !== "wait");
+
+  it("covers connectors, approvals and sub-workflows", () => {
+    for (const type of ["slack_send_message", "smtp_send_email", "http_request", "postgres_query", "redis_command", "mongo_operation", "aws_s3_put_object", "stripe_create_charge", "execute_workflow", "human_approval", "rag_retrieve", "qdrant_vector_store"]) {
+      expect(stubbedTypes).toContain(type);
+    }
+  });
+
+  it.each(stubbedTypes)("%s replays its recorded output and never runs", async (type) => {
+    const sentinel = { sentinel: `recorded-${type}` };
+    // The sample configuration passes validation; the node must still never run.
+    const config = { ...(getNodeDefinition(type)?.sampleConfig ?? {}), urlTemplate: "https://example.invalid/hook", method: "POST", workflowId: "wf-child", endpoint: "https://example.invalid", deployment: "embed", secretRef: { secretId: "sec_test" } };
+    const workflow = chain([node("start", "manual_trigger"), node("x", type, config)]);
+    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "x", nodeType: type, output: sentinel }]));
+    const loadWorkflow = vi.fn();
+    const persistPausedExecution = vi.fn();
+    const resolveSecret = vi.fn(async () => "resolved-secret-value");
+    const result = await executeWorkflow({ workflow, executionId: "exec-1" }, deps({ replayNodeHook: plan.hook, loadWorkflow, persistPausedExecution, resolveSecret }));
+    expect(result.error ?? "").toBe("");
+    expect(result.status).toBe("success");
+    expect(resultOf(result, "x").map((entry) => entry.output)).toEqual([sentinel]);
+    expect(fetchCalls).toEqual([]);
+    expect(loadWorkflow).not.toHaveBeenCalled();
+    expect(persistPausedExecution).not.toHaveBeenCalled();
+    // A handler that ran would have resolved its credential first.
+    expect(resolveSecret).not.toHaveBeenCalled();
+    expect(plan.hits).toEqual([expect.objectContaining({ nodeId: "x", stub: "output", recorded: true })]);
+  });
+});
+
+describe("replay plan", () => {
+  it("stubs a side effect the recording never saw, with a marker and a warning", async () => {
+    const workflow = chain([node("start", "manual_trigger"), node("slack", "slack_send_message", { channel: "#ops", text: "hi" })]);
+    const plan = buildReplayPlan(workflow, {});
+    expect(plan.decisions).toEqual([
+      { nodeId: "start", nodeType: "manual_trigger", nodeClass: "trigger", action: "run" },
+      { nodeId: "slack", nodeType: "slack_send_message", nodeClass: "write", action: "unrecorded_stub" },
+      { nodeId: "out", nodeType: "output", nodeClass: "logic", action: "run" }
+    ]);
+    expect(plan.warnings).toEqual([expect.objectContaining({ kind: "unrecorded_stub", nodeId: "slack" })]);
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(result.status).toBe("success");
+    expect(resultOf(result, "slack")[0]!.output).toEqual({ [REPLAY_STUB_MARKER]: "unrecorded", nodeId: "slack", nodeType: "slack_send_message" });
+    expect(fetchCalls).toEqual([]);
+  });
+
+  it("does not reuse a recorded output for a node whose type changed", async () => {
+    const workflow = chain([node("start", "manual_trigger"), node("x", "smtp_send_email", { to: "a@example.com" })]);
+    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "x", nodeType: "http_request", output: { status: 200 } }]));
+    expect(plan.decisions[1]!.action).toBe("unrecorded_stub");
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect((resultOf(result, "x")[0]!.output as Record<string, unknown>)[REPLAY_STUB_MARKER]).toBe("unrecorded");
+  });
+
+  it("replays a recorded failure without retrying or running the node", async () => {
+    const workflow = chain([node("start", "manual_trigger"), node("http", "http_request", { urlTemplate: "https://example.invalid", method: "POST", retry: { enabled: true, maxAttempts: 5, delayMs: 2000 } })]);
+    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "http", nodeType: "http_request", status: "error", error: "HTTP 503 from upstream" }]));
+    const started = Date.now();
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(result.status).toBe("error");
+    expect(resultOf(result, "http")[0]).toMatchObject({ status: "error" });
+    expect(resultOf(result, "http")[0]!.error).toContain("HTTP 503 from upstream");
+    expect(fetchCalls).toEqual([]);
+  });
+
+  it("stubs a side effect inside a loop body on every iteration", async () => {
+    const workflow = chain([
+      node("start", "manual_trigger"),
+      node("items", "code_node", { code: "return { list: ['a', 'b', 'c'] };" }),
+      node("loop", "loop_node", { inputKey: "list", itemVariable: "item" }),
+      node("slack", "slack_send_message", { channel: "#ops", text: "{{item}}" })
+    ]);
+    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "slack", nodeType: "slack_send_message", output: { ok: true, ts: "1" } }]));
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(fetchCalls).toEqual([]);
+    const slackRuns = resultOf(result, "slack");
+    expect(slackRuns.length).toBeGreaterThanOrEqual(1);
+    for (const run of slackRuns) expect(run.output).toEqual({ ok: true, ts: "1" });
+    expect(plan.hits.filter((hit) => hit.nodeId === "slack").length).toBe(slackRuns.length);
+  });
+
+  it("never starts a sub-workflow, sync or async", async () => {
+    const loadWorkflow = vi.fn(() => chain([node("child-start", "manual_trigger"), node("child-slack", "slack_send_message", {})]));
+    for (const mode of ["sync", "async"]) {
+      const workflow = chain([node("start", "manual_trigger"), node("sub", "execute_workflow", { workflowId: "wf-child", mode })]);
+      const plan = buildReplayPlan(workflow, {});
+      const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook, loadWorkflow }));
+      expect(result.status).toBe("success");
+    }
+    expect(loadWorkflow).not.toHaveBeenCalled();
+    expect(fetchCalls).toEqual([]);
+  });
+
+  it("stubs an unknown node type instead of running it", async () => {
+    const workflow = chain([node("start", "manual_trigger"), node("fax", "community_send_fax", { number: "+1555" })]);
+    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "fax", nodeType: "community_send_fax", output: { sent: true } }]));
+    expect(plan.decisions[1]).toMatchObject({ nodeClass: "write", action: "recorded" });
+    expect(plan.warnings).toEqual([expect.objectContaining({ kind: "unknown_node_type", nodeId: "fax" })]);
+    expect(plan.hook(node("fax", "community_send_fax"))).toEqual({ kind: "output", output: { sent: true } });
+    expect(plan.hook(node("other", "community_post_tweet"))).toMatchObject({ kind: "output", output: { [REPLAY_STUB_MARKER]: "unrecorded" } });
+    // The engine refuses to start a workflow with a type it does not know; either way nothing runs.
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(result.nodeResults.filter((entry) => entry.nodeId === "fax" && entry.status === "success").every((entry) => JSON.stringify(entry.output) === JSON.stringify({ sent: true }))).toBe(true);
+    expect(fetchCalls).toEqual([]);
+  });
+
+  it("passes a wait straight through", async () => {
+    const workflow = chain([node("start", "manual_trigger"), node("wait", "wait_node", { delayMs: 25_000, maxDelayMs: 30_000 })]);
+    const plan = buildReplayPlan(workflow, {});
+    expect(plan.decisions[1]!.action).toBe("pass_through");
+    const started = Date.now();
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(result.status).toBe("success");
+  });
+
+  it("replays a recorded approval instead of pausing for a person", async () => {
+    const workflow = chain([node("start", "manual_trigger"), node("approve", "human_approval", { approvalMessage: "ok?", timeoutMinutes: 5 }), node("after", "noop_node")]);
+    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "approve", nodeType: "human_approval", output: { approved: true, decision: "approve" } }]));
+    const persistPausedExecution = vi.fn();
+    const result = await executeWorkflow({ workflow, executionId: "exec-approval" }, deps({ replayNodeHook: plan.hook, persistPausedExecution }));
+    expect(result.status).toBe("success");
+    expect(persistPausedExecution).not.toHaveBeenCalled();
+    expect(resultOf(result, "approve")[0]!.output).toEqual({ approved: true, decision: "approve" });
+  });
+
+  it("runs JavaScript code live and stubs Python code", async () => {
+    const js = node("js", "code_node", { language: "javascript", code: "return { doubled: 21 * 2 };" });
+    const py = node("py", "code_node", { language: "python", code: "import urllib.request\nresult = 1" });
+    const workflow = chain([node("start", "manual_trigger"), js, py]);
+    const plan = buildReplayPlan(workflow, recorded([
+      { nodeId: "js", nodeType: "code_node", output: { doubled: 0 } },
+      { nodeId: "py", nodeType: "code_node", output: { code_result: "recorded" } }
+    ]));
+    expect(plan.decisions.map((decision) => decision.action)).toEqual(["run", "run", "recorded", "run"]);
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect((resultOf(result, "js")[0]!.output as Record<string, unknown>).doubled).toBe(42);
+    expect(resultOf(result, "py")[0]!.output).toEqual({ code_result: "recorded" });
+  });
+
+  it("replays a trigger's recorded output, and runs an unrecorded trigger", async () => {
+    const workflow = chain([node("hook", "webhook_input", { path: "x" }), node("set", "set_node", { assignments: [{ key: "seen", valueTemplate: "{{message}}" }] })]);
+    const withTrigger = buildReplayPlan(workflow, recorded([{ nodeId: "hook", nodeType: "webhook_input", output: { message: "recorded input" } }]));
+    expect(withTrigger.decisions[0]!.action).toBe("recorded");
+    const result = await executeWorkflow({ workflow, webhookPayload: { message: "live input" } }, deps({ replayNodeHook: withTrigger.hook }));
+    expect(resultOf(result, "hook")[0]!.output).toEqual({ message: "recorded input" });
+    const without = buildReplayPlan(workflow, {});
+    expect(without.decisions[0]!.action).toBe("run");
+  });
+
+  it("leaves disabled nodes and sticky notes to the engine", async () => {
+    const disabled = { ...node("slack", "slack_send_message", {}), disabled: true } as WorkflowNode;
+    const workflow = chain([node("start", "manual_trigger"), disabled]);
+    const plan = buildReplayPlan(workflow, {});
+    expect(plan.warnings).toEqual([]);
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(result.status).toBe("success");
+    expect(plan.hits).toEqual([]);
+    expect(fetchCalls).toEqual([]);
+  });
+
+  it("does not stub model, MCP or logic nodes", () => {
+    const workflow = chain([node("start", "manual_trigger"), node("llm", "llm_call"), node("tool", "mcp_tool"), node("mem", "local_memory"), node("set", "noop_node")]);
+    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "llm", nodeType: "llm_call", output: { answer: "x" } }]));
+    expect(plan.decisions.map((decision) => decision.action)).toEqual(["run", "run", "cassette", "run", "run", "run"]);
+    expect(plan.hook(node("llm", "llm_call"))).toBeNull();
+    expect(plan.hook(node("tool", "mcp_tool"))).toBeNull();
+  });
+});

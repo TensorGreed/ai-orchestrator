@@ -19,4 +19,5 @@ export { FileSystemBinaryStore } from "./binary-store";
 export * from "./mcp-client-features";
 export * from "./approval-handoff";
 export * from "./guard-runtime";
+export * from "./replay-plan";
 export { executeGuardNodeStep, type GuardNodeSummary } from "./guard-node";

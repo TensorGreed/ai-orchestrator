@@ -99,6 +99,7 @@ import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orches
 import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
+import type { ReplayNodeHook, ReplayNodeStub } from "./replay-plan";
 import {
   builtInGuardProfile,
   createAgentGuardSession,
@@ -214,6 +215,12 @@ export interface WorkflowExecutionDependencies {
   mcpResourceMaxBytes?: number;
   abortSignal?: AbortSignal;
   logger?: (message: string, metadata?: unknown) => void;
+  /**
+   * Phase 15.1 — replay: asked before any node handler runs (top level, loop
+   * bodies, workers, sub-workflows). A returned stub replaces the handler,
+   * which is then never called; null lets the node run. See replay-plan.ts.
+   */
+  replayNodeHook?: ReplayNodeHook;
   triggerErrorWorkflow?: (input: {
     errorWorkflowId: string;
     sourceWorkflowId: string;
@@ -2891,6 +2898,24 @@ function protectionNodesFor(guardNode: WorkflowNode, context: NodeRuntimeContext
   return ids.map((id) => context.nodeById.get(id)).filter((entry): entry is WorkflowNode => Boolean(entry));
 }
 
+/** Phase 15.1 — the replay stub for a node, if the run is a replay and the node is stubbed. */
+function replayStubFor(node: WorkflowNode, dependencies: WorkflowExecutionDependencies): ReplayNodeStub | null {
+  if (!dependencies.replayNodeHook || node.type === "sticky_note" || node.disabled === true) {
+    return null;
+  }
+  return dependencies.replayNodeHook(node);
+}
+
+function resolveReplayStub(stub: ReplayNodeStub, context: NodeRuntimeContext): unknown {
+  if (stub.kind === "pass_through") {
+    return mergeParentOutputs(context.parentOutputs);
+  }
+  if (stub.kind === "error") {
+    throw new Error(`Replayed from the recording: ${stub.message}`);
+  }
+  return stub.output;
+}
+
 async function executeNode(
   node: WorkflowNode,
   context: NodeRuntimeContext,
@@ -2907,6 +2932,11 @@ async function executeNode(
   // Disabled nodes pass through their parent outputs unchanged so the rest of the graph still runs.
   if (node.disabled === true) {
     return mergeParentOutputs(context.parentOutputs);
+  }
+
+  const replayStub = replayStubFor(node, dependencies);
+  if (replayStub) {
+    return resolveReplayStub(replayStub, context);
   }
 
   const templateData = buildTemplateData(context, config);
@@ -6009,6 +6039,12 @@ async function executeNodeWithRetry(
   dependencies: WorkflowExecutionDependencies
 ): Promise<{ output: unknown; attempts: number }> {
   const config = toRecord(node.config);
+  // A replayed node is answered once from the recording; a recorded failure is not retried.
+  const replayStub = replayStubFor(node, dependencies);
+  if (replayStub) {
+    throwIfAborted(dependencies.abortSignal);
+    return { output: resolveReplayStub(replayStub, context), attempts: 1 };
+  }
   const retry = getRetryConfigForNode(node);
   if (!retry) {
     return { output: await executeNode(node, context, dependencies), attempts: 1 };
@@ -7237,7 +7273,8 @@ async function executeWorkflowRun(
         continue;
       }
 
-      if (node.type === "human_approval") {
+      // Phase 15.1 — a replay answers the approval from the recording below instead of pausing for a person.
+      if (node.type === "human_approval" && !dependencies.replayNodeHook) {
         const approvalMessageTemplate =
           typeof nodeConfig.approvalMessage === "string" && nodeConfig.approvalMessage.trim()
             ? nodeConfig.approvalMessage
