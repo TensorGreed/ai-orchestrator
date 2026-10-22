@@ -27,6 +27,7 @@ import {
   type ReplayRecordingCapabilities,
   type ReplayRecordingDetail,
   type ReplayRecordingSummary,
+  type ReplayScrubbedValues,
   type RunFacts,
   type Workflow
 } from "@ai-orchestrator/shared";
@@ -225,6 +226,17 @@ export class ReplayRecordingService {
     const scrubbedNodes = this.scrubValue(nodes, scrubber);
     const scrubbedFacts = this.scrubFacts(facts, scrubber);
     const scrubbedInput = history.input === undefined || history.input === null ? null : this.scrubValue(history.input, scrubber);
+    // Where scrubbing changed what the replay will feed the candidate (or compare against), so a replay can say so.
+    const altered = (before: unknown, after: unknown) => canonicalJson(before ?? null) !== canonicalJson(after ?? null);
+    const scrubbed: ReplayScrubbedValues = {
+      input: scrubbedInput !== null && altered(history.input, scrubbedInput),
+      output: altered(facts.output, scrubbedFacts.output),
+      nodes: Object.keys(nodes).filter((nodeId) => {
+        const before = nodes[nodeId]!;
+        const after = scrubbedNodes[nodeId];
+        return !after || altered(before.output, after.output) || altered(before.error, after.error);
+      })
+    };
     const workflowJson = this.serialise(scrubber.tree(captured), scrubber);
 
     const inputJson = scrubbedInput === null ? null : this.serialise(scrubbedInput, scrubber);
@@ -277,7 +289,7 @@ export class ReplayRecordingService {
       nodeOutputsJson: nodesJson,
       factsJson,
       mcpCassetteJson: cassetteJson,
-      capabilities: { mcp: cassette ? "cassette" : "none", models: "live", memory: "empty", workflowSource },
+      capabilities: { mcp: cassette ? "cassette" : "none", models: "live", memory: "empty", workflowSource, scrubbed },
       bytes,
       truncated,
       createdAt: this.now().toISOString(),

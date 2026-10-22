@@ -1302,7 +1302,16 @@ function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordin
       mcp: capabilities?.mcp === "cassette" ? "cassette" : "none",
       models: "live",
       memory: "empty",
-      workflowSource: capabilities?.workflowSource === "captured" ? "captured" : "current"
+      workflowSource: capabilities?.workflowSource === "captured" ? "captured" : "current",
+      ...(capabilities?.scrubbed && typeof capabilities.scrubbed === "object"
+        ? {
+            scrubbed: {
+              input: capabilities.scrubbed.input === true,
+              output: capabilities.scrubbed.output === true,
+              nodes: Array.isArray(capabilities.scrubbed.nodes) ? capabilities.scrubbed.nodes.filter((id): id is string => typeof id === "string") : []
+            }
+          }
+        : {})
     },
     bytes: toNumber(row.bytes),
     truncated: toNumber(row.truncated) === 1,

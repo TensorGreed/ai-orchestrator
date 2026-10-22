@@ -214,6 +214,39 @@ export class ReplayService {
         });
       }
     }
+    // Scrubbing protects secrets but can change what downstream logic reads; say so where the replay used such a value.
+    const scrubbed = recording.capabilities.scrubbed;
+    if (scrubbed) {
+      const scrubbedNodes = new Set(scrubbed.nodes);
+      const used = new Set<string>();
+      for (const hit of plan.hits) {
+        if (hit.recorded && scrubbedNodes.has(hit.nodeId) && !used.has(hit.nodeId)) {
+          used.add(hit.nodeId);
+          warnings.push({
+            kind: "scrubbed_recording",
+            nodeId: hit.nodeId,
+            message: `The recorded output of node ${hit.nodeId} had values replaced with [REDACTED] when the golden run was saved (secrets, credential-named keys or long token-like strings). Nodes that read them saw the placeholder, which can change their result.`,
+            blocking: false
+          });
+        }
+      }
+      if (scrubbed.input) {
+        warnings.push({
+          kind: "scrubbed_recording",
+          nodeId: null,
+          message: "The golden run's input had values replaced with [REDACTED] when it was saved; the candidate ran on the scrubbed input.",
+          blocking: false
+        });
+      }
+      if (scrubbed.output) {
+        warnings.push({
+          kind: "scrubbed_recording",
+          nodeId: null,
+          message: "The golden run's output had values replaced with [REDACTED]; the replay's output is scrubbed the same way before they are compared.",
+          blocking: false
+        });
+      }
+    }
     const blockedLoads = new Set<string>();
     for (const entry of nodeResultRecords(result.nodeResults)) {
       if (typeof entry.error === "string" && entry.error.includes(REPLAY_BLOCKED_LOAD_MARKER)) blockedLoads.add(entry.nodeId as string);

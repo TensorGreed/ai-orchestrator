@@ -325,6 +325,20 @@ export interface ReplayRecordingCapabilities {
   memory: "empty";
   /** `captured`: the workflow as it ran was recorded with the run; `current`: the run predates that, so the workflow as saved when the golden run was made is kept instead. */
   workflowSource: "captured" | "current";
+  /**
+   * Where secret scrubbing changed a recorded value: the trigger input, the
+   * run's final output, and the nodes whose recorded output or error was
+   * altered. A replay feeds those scrubbed values to the candidate (a
+   * pagination token or a long id becomes `[REDACTED]`), so it warns when it
+   * uses one. Absent on golden runs saved before this was recorded.
+   */
+  scrubbed?: ReplayScrubbedValues;
+}
+
+export interface ReplayScrubbedValues {
+  input: boolean;
+  output: boolean;
+  nodes: string[];
 }
 
 export interface ReplayRecordingSummary {
@@ -450,6 +464,7 @@ export type ReplayHealthKind =
   | "paused"
   | "blocked_load"
   | "diff_truncated"
+  | "scrubbed_recording"
   | "replay_error";
 
 export interface ReplayHealthWarning {

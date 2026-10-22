@@ -614,6 +614,44 @@ describe("golden runs with side effects stubbed", () => {
     expect(saved.reduce((sum, entry) => sum + entry.bytes, 0)).toBeLessThanOrEqual(65536);
   });
 
+  it("warns when scrubbing changed a recorded value the replay feeds to the candidate", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const cursor = "f".repeat(64);
+    const scrubbedWorkflow = (template: string): Workflow =>
+      ({
+        id: "wf-scrub",
+        name: "Scrub",
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        projectId: "default",
+        nodes: [
+          { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+          { id: "page", type: "code_node", name: "Page", position: { x: 150, y: 0 }, config: { code: `return { token: "next-page-7", cursor: "${cursor}", count: 3 };` } },
+          { id: "plain", type: "code_node", name: "Plain", position: { x: 300, y: 0 }, config: { code: "return { ok: true };" } },
+          { id: "output", type: "output", name: "Output", position: { x: 450, y: 0 }, config: { responseTemplate: template } }
+        ],
+        edges: [
+          { id: "e1", source: "start", target: "page" },
+          { id: "e2", source: "page", target: "plain" },
+          { id: "e3", source: "plain", target: "output" }
+        ]
+      }) as Workflow;
+    context.store.upsertWorkflow(scrubbedWorkflow("{{results.page.count}} items"));
+    const run = (await call(context, "POST", "/api/workflows/wf-scrub/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
+    expect(run.status).toBe("success");
+    const golden = await saveGolden(context, builder.cookie, run.executionId);
+    expect(golden.capabilities.scrubbed).toEqual({ input: false, output: false, nodes: ["page"] });
+    const detail = (await call(context, "GET", `/api/replay/recordings/${golden.id}`, builder.cookie)).json<{ recording: ReplayRecordingDetail }>().recording;
+    expect(JSON.stringify(detail.nodes.page!.output)).not.toContain(cursor);
+
+    const result = await replay(context, builder.cookie, golden.id);
+    expect(result.verdict, JSON.stringify(result.reasons)).toBe("pass");
+    const warnings = result.diff.health.filter((warning) => warning.kind === "scrubbed_recording");
+    expect(warnings).toEqual([expect.objectContaining({ nodeId: "page", blocking: false })]);
+    expect(warnings[0]!.message).toContain("[REDACTED]");
+  });
+
   it("truncates the largest node outputs to fit REPLAY_RECORDING_MAX_BYTES", async () => {
     const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
     const builder = await login(context, "builder");

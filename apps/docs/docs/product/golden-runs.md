@@ -24,6 +24,8 @@ A golden run is not removed by execution-history retention (`EXECUTION_HISTORY_R
 
 Before anything is stored, values are scrubbed twice: credential-named keys and token-shaped strings become `[REDACTED]`, and then every secret value the deployment holds (secret store and provider keys from the environment) is replaced wherever it appears, including inside JSON strings. Workflow configurations only ever hold `secretRef.secretId`. A replay resolves credentials through the secret store like any run.
 
+Scrubbing can change values that later nodes read: a pagination field named `token`, or any string of 40 or more letters, digits and `+/=_-` (a SHA-256, a long document id), becomes `[REDACTED]`. The golden run remembers where that happened. When a replay feeds such a value to the candidate, **Replay health** shows a `scrubbed recording` warning for that node (and for the input or output), so a fail caused by a placeholder is easy to spot. The warning does not change the verdict.
+
 ### Size
 
 `REPLAY_RECORDING_MAX_BYTES` (default 4 MiB) caps one golden run. When a run is bigger, the largest node outputs are replaced with a `{ "_replayTruncated": true, "bytes": … }` marker until it fits, and the golden run is marked **truncated**. A replay that has to answer a node from a cut output reports **could not complete** (CLI exit code 4), because the nodes after it would see the marker instead of the data. A run that still does not fit is refused (413). `REPLAY_RECORDINGS_MAX_PER_WORKFLOW` (default 500) caps how many one workflow can have, and `REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW` (default 256 MiB) caps the bytes they use together, copied cassettes included. Golden runs are never pruned automatically, so saving past either limit is refused (409) until you delete some.
@@ -69,7 +71,7 @@ A call the cassette cannot answer fails in the replay and makes the verdict **co
 The replay result shows:
 
 - **Verdict**: pass when the status did not get worse and the output is the same; fail when the candidate's status regressed or its output changed; could not complete when the recording could not answer the candidate or the comparison would not mean anything (an unanswered MCP call, a cut recorded output, a chart that needs a data URL, an approval pause, an error before the run started).
-- **Replay health**: stubbed nodes without a recording, unknown node types, unanswered MCP calls, charts that tried to load a data URL.
+- **Replay health**: stubbed nodes without a recording, unknown node types, unanswered MCP calls, charts that tried to load a data URL, cut recorded outputs, recorded values changed by scrubbing, and an output diff with more changes than it lists.
 - **Output**: each changed path with the golden run's and the replay's value. Whitespace differences are ignored, as are timing and id fields (`**._telemetry`, `**.durationMs`, `**.latencyMs`, `**.startedAt`, `**.completedAt`, `**.executionId`).
 - **Tool calls**: the two runs' tool calls side by side, aligned in order: same, arguments changed, outcome changed, new or missing.
 - **Totals**: token, cost, model call and path changes.
