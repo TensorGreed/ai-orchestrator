@@ -1660,7 +1660,7 @@ export const openApiSpec = {
           "201": { description: "{ recording }" },
           "403": { description: "No write access to the workflow" },
           "404": { description: "Execution not found" },
-          "409": { description: "The run has not finished, is itself a replay, or the workflow has too many golden runs" },
+          "409": { description: "The run has not finished, is itself a replay, is already saved as a golden run, or the workflow's golden runs are over the count or byte limit" },
           "413": { description: "The run is larger than REPLAY_RECORDING_MAX_BYTES" }
         }
       }
@@ -1695,7 +1695,7 @@ export const openApiSpec = {
                   draft: { type: "boolean" },
                   version: { type: "integer", minimum: 1 },
                   mcpMode: { type: "string", enum: ["strict", "lenient"], default: "strict" },
-                  ignorePaths: { type: "array", items: { type: "string" } },
+                  ignorePaths: { type: "array", maxItems: 32, items: { type: "string", maxLength: 128, description: "Glob over output paths; at most eight ** segments" } },
                   numberTolerance: { type: "number", minimum: 0 }
                 }
               }
