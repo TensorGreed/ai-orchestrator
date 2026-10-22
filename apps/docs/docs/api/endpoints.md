@@ -140,6 +140,40 @@ See [Testing MCP workflows](../product/testing-mcp-workflows.md).
 - `POST /api/mcp/check` (builder, API keys; `{ serverIds?, toolsetId?, workflowIds?, failOnUnreachable?, failOnPolicyBlocked? }` → `{ ok, checkedAt, servers[], blockedTools[], failures[] }`; probes without storing anything; 404 for unknown servers or toolsets)
 - MCP adapter `snapshot_mock` (connection `{ sourceServerId | snapshot, cassetteId?, fixedText? }`) for registry servers that serve a snapshot offline
 
+## Guard
+
+See [Guard in workflows](../product/guard.md). Validation errors are `400 { error, issues: [{ path, message }] }`.
+
+Profiles:
+
+- `GET /api/guard/profiles` (viewer; `{ profiles, autoApply, builtInId }`)
+- `POST /api/guard/profiles` (builder; `{ id?, document, note? }`; 409 when the id exists)
+- `POST /api/guard/profiles/import` (builder; `{ document }` or `{ text }`; a known id adds a version)
+- `GET /api/guard/profiles/:id` (viewer; summary, latest version and bindings)
+- `PUT /api/guard/profiles/:id` (builder; `{ document, note? }`; no new version when the hash is unchanged; 409 for the built-in profile)
+- `DELETE /api/guard/profiles/:id` (builder; 409 for the built-in profile or while bound)
+- `GET /api/guard/profiles/:id/versions` (viewer)
+- `GET /api/guard/profiles/:id/versions/:version` (viewer)
+- `GET /api/guard/profiles/:id/diff?from=&to=` (viewer; `{ from, to, changes: [{ path, kind, before?, after? }] }`)
+- `GET /api/guard/profiles/:id/export?version=` (viewer; the profile JSON with `x-guard-profile-version` and `x-guard-profile-hash` headers)
+- `GET /api/guard/detectors` (viewer; registered detectors with tier, channels and categories)
+
+Bindings:
+
+- `GET /api/guard/bindings/projects/:projectId` (viewer; `{ binding, effective }`)
+- `PUT /api/guard/bindings/projects/:projectId` (builder; `{ mode: "inherit" | "override" | "enforced", profileId? }`; setting or changing an enforced binding is admin only, 403 otherwise)
+- `GET /api/guard/bindings/workflows/:workflowId` (workflow read access; `{ binding, project, effective }`)
+- `PUT /api/guard/bindings/workflows/:workflowId` (workflow write access; `{ mode: "inherit" | "override", profileId? }`; `enforced` is 400)
+- `GET /api/guard/effective?workflowId=` or `?projectId=` (viewer; the profile stack and the binding chain)
+
+Events (masked evidence only):
+
+- `GET /api/executions/:id/guard-events` (viewer)
+- `GET /api/guard/events?projectId=&workflowId=&profileId=&channel=&action=&days=&since=&findings=true&limit=&offset=` (viewer; `{ events, total }`, newest first)
+- `GET /api/guard/stats?projectId=&workflowId=&profileId=&days=` (viewer; counts by verdict, action, category, channel and detector, shadow would-block, budget overruns and per-day counts; 14 days by default)
+
+Profile writes and binding changes are audited as `guard.profile.created`, `guard.profile.updated`, `guard.profile.deleted`, `guard.profile.imported` and `guard.binding.updated`.
+
 ## Secrets
 
 - `POST /api/secrets`

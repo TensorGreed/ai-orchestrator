@@ -68,6 +68,8 @@ export type WorkflowNodeType =
   | "human_approval"
   | "input_validator"
   | "output_guardrail"
+  | "guard"
+  | "guard_protection"
   | "basic_llm_chain"
   | "qa_chain"
   | "summarization_chain"
@@ -360,7 +362,32 @@ export interface WorkflowExecutionState {
   finalOutput?: unknown;
   /** Phase 10.2 — the tool policy subject of the paused run, reused on resume. */
   toolPolicySubject?: McpToolPolicySubject;
+  /**
+   * Phase 12.1 — set when the run paused through an approval hand-off (a
+   * guard verdict asked for approval) instead of a Human Approval node; it
+   * says what approving or rejecting does when the run resumes.
+   */
+  approvalHandoff?: ApprovalHandoffState;
+  /**
+   * Phase 12.1 — guard approval keys granted by `rerun` hand-offs, written
+   * only by the resume path. Kept out of `globals` so run input can never
+   * carry an approval.
+   */
+  approvedHandoffKeys?: string[];
 }
+
+/**
+ * Phase 12.1 — approval hand-off. A node other than Human Approval can pause
+ * the run for a person's decision:
+ * - `route`: the node has its approve and reject outputs ready; resuming
+ *   records the matching one and routes from it (the guard node).
+ * - `rerun`: the node runs again after approval with the decision key
+ *   accepted (an agent whose guard asked for approval mid-loop); rejecting
+ *   fails the node.
+ */
+export type ApprovalHandoffState =
+  | { kind: "route"; source: string; onApprove: unknown; onReject: unknown }
+  | { kind: "rerun"; source: string; approvalKey: string };
 
 export interface WorkflowValidationIssue {
   code: string;

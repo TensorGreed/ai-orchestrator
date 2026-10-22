@@ -27,7 +27,9 @@ const SLOT_LABEL: Record<AgentAttachmentHandle, string> = {
   chat_model: "+ model",
   memory: "+ memory",
   tool: "+ tool",
-  worker: "+ worker"
+  worker: "+ worker",
+  guard: "+ guard",
+  protection: "+ protect"
 };
 
 function statusClass(status: EditorNodeData["executionStatus"]): string {
@@ -225,6 +227,51 @@ function StructuralPorts({ data }: { data: EditorNodeData }) {
       </div>
     );
   }
+  if (nodeType === "guard") {
+    // Phase 12.1 — items are routed, not failed: pass carries the (rewritten)
+    // item, blocked and review carry the verdict summary. An unconnected
+    // review output falls back to blocked.
+    const ports = [
+      { id: "pass", label: "Pass", top: "26%", className: "" },
+      { id: "blocked", label: "Blocked", top: "50%", className: " wf-handle-err" },
+      { id: "review", label: "Review", top: "74%", className: " wf-handle-review" }
+    ];
+    const protection = data.slots?.protection ?? [];
+    const onOpen = data.onOpenAgentAttachmentDrawer;
+    return (
+      <>
+        <div className="wf-structural-ports wf-guard-ports">
+          {ports.map((port) => (
+            <div key={port.id} className={`wf-structural-port wf-guard-port wf-guard-port-${port.id}`}>
+              {/* Outside the card, just above the edge that leaves this handle. */}
+              <span className="port-label" style={{ top: port.top }}>
+                {port.label}
+              </span>
+              <Handle id={port.id} type="source" position={Position.Right} className={`wf-handle wf-handle-main${port.className}`} style={{ top: port.top }} />
+            </div>
+          ))}
+        </div>
+        <Handle id="protection" type="source" position={Position.Bottom} className="wf-handle-hidden" />
+        {protection.length === 0 && (
+          <button
+            type="button"
+            className="wf-slot wf-slot-protection wf-guard-protect-slot nodrag nopan"
+            title={`Add protection — ${AGENT_ATTACHMENT_STYLES.protection.description}`}
+            aria-label={`Add protection — ${AGENT_ATTACHMENT_STYLES.protection.description}`}
+            disabled={!onOpen}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen?.("protection");
+            }}
+          >
+            <span className="wf-slot-glyph">+</span>
+            <span className="wf-slot-label">{SLOT_LABEL.protection}</span>
+          </button>
+        )}
+      </>
+    );
+  }
   if (nodeType === "chat_intent_router") {
     const ports = [
       { id: "report", label: "Report", top: "20%" },
@@ -277,6 +324,7 @@ function HubNode({ data, selected }: VariantProps) {
       <Handle id="memory" type="source" position={Position.Bottom} className="wf-handle-hidden" />
       <Handle id="tool" type="source" position={Position.Bottom} className="wf-handle-hidden" />
       {isSupervisor && <Handle id="worker" type="source" position={Position.Bottom} className="wf-handle-hidden" />}
+      <Handle id="guard" type="source" position={Position.Bottom} className="wf-handle-hidden" />
 
       <div className="wf-hub-core">
         <div className="wf-hub-glyph">
@@ -342,6 +390,7 @@ function SatelliteNode({ data, selected }: VariantProps) {
     >
       <Handle type="target" position={Position.Top} className="wf-handle-hidden" />
       <Handle type="source" position={Position.Bottom} className="wf-handle-hidden" />
+      {data.nodeType === "guard" && <Handle id="protection" type="source" position={Position.Bottom} className="wf-handle-hidden" />}
       <Badges data={data} />
       <div className="wf-satellite-glyph">
         <NodeTypeIcon nodeType={data.nodeType} fallbackIcon="ai" />

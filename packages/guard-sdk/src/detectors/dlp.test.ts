@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { GuardFinding } from "../types";
 import { createDlpDetector, ibanValid, luhnCheckDigit, luhnValid, scanDlp, ukNinoValid, usSsnValid } from "./dlp";
+import { unsafeDictionaryPattern } from "../profile";
 
 const classes = (text: string, options?: Parameters<typeof scanDlp>[1]) => scanDlp(text, options).map((m) => m.dataClass);
 
@@ -99,5 +100,18 @@ describe("dlp patterns", () => {
       nationalIds: [{ country: "XX", label: "Test id", pattern: /\b\d{4} \d{4} \d{4}\b/g, dataClass: "test_id" }]
     });
     expect(matches.map((m) => m.dataClass)).toEqual(["test_id"]);
+  });
+});
+
+describe("dlp: custom pattern safety", () => {
+  it("refuses nested quantifiers and overlong patterns, and skips them at scan time", () => {
+    expect(unsafeDictionaryPattern("(a+)+$")).toMatch(/Nested quantifiers/);
+    expect(unsafeDictionaryPattern("(\\w*\\s?)*x")).toMatch(/Nested quantifiers/);
+    expect(unsafeDictionaryPattern("x".repeat(300))).toMatch(/limited to/);
+    expect(unsafeDictionaryPattern("\\bEMP-[0-9]{6}\\b")).toBeUndefined();
+    const started = Date.now();
+    const matches = scanDlp(`${"a".repeat(40)}!`, { dictionaries: [{ dataClass: "custom", terms: [], patterns: ["(a+)+$"], score: 0.9 }] });
+    expect(matches.filter((m) => m.dataClass === "custom")).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

@@ -49,14 +49,14 @@ export interface EditorNodeData {
   pinned?: boolean;
   disabled?: boolean;
   color?: NodeColorKey;
-  onOpenAgentAttachmentDrawer?: (sourceHandle: "chat_model" | "memory" | "tool" | "worker") => void;
+  onOpenAgentAttachmentDrawer?: (sourceHandle: "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection") => void;
   /**
    * Render-time only (set by WorkflowCanvasArea, never persisted): attachment
    * slots of an agent hub, and for attached nodes the hub + port they orbit.
    */
   slots?: AttachmentSlots;
   attachedTo?: string;
-  attachedAs?: "chat_model" | "memory" | "tool" | "worker";
+  attachedAs?: "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection";
   /** Which side of a satellite its label sits on (away from the hub). */
   labelSide?: "top" | "bottom" | "left" | "right";
   /**

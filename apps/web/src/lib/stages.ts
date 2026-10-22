@@ -37,6 +37,12 @@ export interface AttachmentSlots {
   memory: string[];
   tool: string[];
   worker: string[];
+  /** Phase 12.1 — the hub's guard node (0..1). */
+  guard?: string[];
+  /** Phase 12.1 — protection providers attached to a Guard node. */
+  protection?: string[];
+  /** Set on Guard node entries: they carry protection attachments and are not hubs. */
+  carrier?: "guard";
 }
 
 export type AttachmentSlotMap = Record<string, AttachmentSlots>;
@@ -116,9 +122,12 @@ export function computeAttachmentSlots(nodes: StageNodeInput[], edges: StageEdge
     const port = isAttachmentEdge(edge);
     if (!port) continue;
     const source = byId.get(edge.source);
-    if (!source || !isHubType(nodeTypeOf(source))) continue;
-    if (!byId.has(edge.target)) continue;
-    const bucket = (slots[edge.source] ??= emptySlots())[port];
+    if (!source || !byId.has(edge.target)) continue;
+    const sourceType = nodeTypeOf(source);
+    // Protection providers hang off a Guard node; every other port off a hub.
+    if (port === "protection" ? sourceType !== "guard" : !isHubType(sourceType)) continue;
+    const entry = (slots[edge.source] ??= port === "protection" ? { ...emptySlots(), carrier: "guard" } : emptySlots());
+    const bucket = (entry[port] ??= []);
     if (!bucket.includes(edge.target)) {
       bucket.push(edge.target);
     }
@@ -126,21 +135,26 @@ export function computeAttachmentSlots(nodes: StageNodeInput[], edges: StageEdge
   return slots;
 }
 
+/** True for a slot entry that belongs to an agent hub (not a Guard node carrying protection). */
+export function isHubEntry(entry: AttachmentSlots | undefined): entry is AttachmentSlots {
+  return Boolean(entry) && entry!.carrier !== "guard";
+}
+
 export function attachedNodeIds(slots: AttachmentSlotMap): Set<string> {
   const attached = new Set<string>();
   for (const entry of Object.values(slots)) {
     for (const port of AGENT_ATTACHMENT_HANDLES) {
-      for (const id of entry[port]) attached.add(id);
+      for (const id of entry[port] ?? []) attached.add(id);
     }
   }
   return attached;
 }
 
-/** Hub id for an attached node (first hub that lists it), or null. */
+/** Hub (or Guard node, for protection) an attached node belongs to, or null. */
 export function findHubOf(nodeId: string, slots: AttachmentSlotMap): { hubId: string; port: AgentAttachmentHandle } | null {
   for (const [hubId, entry] of Object.entries(slots)) {
     for (const port of AGENT_ATTACHMENT_HANDLES) {
-      if (entry[port].includes(nodeId)) {
+      if ((entry[port] ?? []).includes(nodeId)) {
         return { hubId, port };
       }
     }
@@ -245,6 +259,15 @@ export function ringGeometry(slots: AttachmentSlots, options: { allowWorkers?: b
     out.push({ port: "memory", nodeId: extra, angle: Math.PI / 2 + Math.PI / 4, radius: ORBIT.innerRadius });
   }
 
+  // Phase 12.1 — the guard slot sits on the inner ring, up and to the left
+  // (45° off the model / memory axis, so its label goes to the left and stays
+  // clear of the model's), away from the DAG edges and the first tool bearings.
+  const guards = slots.guard ?? [];
+  out.push({ port: "guard", nodeId: guards[0] ?? null, angle: GUARD_ANGLE, radius: ORBIT.innerRadius });
+  for (const [index, extra] of guards.slice(1).entries()) {
+    out.push({ port: "guard", nodeId: extra, angle: GUARD_ANGLE - (Math.PI / 7) * (index + 1), radius: ORBIT.innerRadius });
+  }
+
   const tools: Array<string | null> = [...slots.tool, null];
   tools.forEach((id, index) => {
     out.push({ port: "tool", nodeId: id, angle: ringAngle(TOOL_ANGLES_DEG, index, tools.length), radius: ORBIT.outerRadius });
@@ -262,10 +285,44 @@ export function ringGeometry(slots: AttachmentSlots, options: { allowWorkers?: b
 /**
  * Preferred slot angles (degrees, clockwise from east). Tools avoid the
  * vertical axis where model / memory and their labels sit; workers take the
- * axis and the diagonals so they never share a bearing with a tool.
+ * axis and the diagonals so they never share a bearing with a tool. The
+ * upper-left bearing (210) comes last: the guard slot and its label sit there.
  */
-const TOOL_ANGLES_DEG = [30, 150, 330, 210, 60, 120, 300, 240];
+const TOOL_ANGLES_DEG = [30, 150, 330, 60, 300, 120, 240, 210];
 const WORKER_ANGLES_DEG = [90, 270, 200, 340, 160, 20];
+export const GUARD_ANGLE = (225 * Math.PI) / 180;
+/** Protection providers of a guard satellite fan out beyond it on the outer ring (offsets in degrees). */
+const PROTECTION_FAN_DEG = [0, 16, -16, 32, -32];
+/** How far below a Guard card its protection providers hang. */
+const PROTECTION_DROP = 64;
+
+/** Positions for the protection providers attached to a Guard node. */
+function protectionPositions(
+  guardId: string,
+  slots: AttachmentSlotMap,
+  placement: { kind: "card"; position: Point } | { kind: "satellite"; hubCenter: Point; angle: number; scale: number }
+): Record<string, Point> {
+  const out: Record<string, Point> = {};
+  const ids = slots[guardId]?.protection ?? [];
+  const s = ORBIT.satelliteSize / 2;
+  ids.forEach((id, index) => {
+    if (placement.kind === "card") {
+      const centerX = placement.position.x + ORBIT.cardWidth / 2 + (index - (ids.length - 1) / 2) * (ORBIT.satelliteSize + 44);
+      const centerY = placement.position.y + ORBIT.cardHeight + PROTECTION_DROP + s;
+      out[id] = { x: Math.round(centerX - s), y: Math.round(centerY - s) };
+    } else {
+      const offset = ((PROTECTION_FAN_DEG[index] ?? index * 16) * Math.PI) / 180;
+      const point = polar(placement.hubCenter, placement.angle + offset, ORBIT.outerRadius * placement.scale);
+      out[id] = { x: Math.round(point.x - s), y: Math.round(point.y - s) };
+    }
+  });
+  return out;
+}
+
+/** Height a Guard card needs for its protection providers below it (used by tidy). */
+function guardCardHeight(guardId: string, slots: AttachmentSlotMap): number {
+  return (slots[guardId]?.protection ?? []).length > 0 ? ORBIT.cardHeight + PROTECTION_DROP + ORBIT.satelliteSize + 48 : ORBIT.cardHeight;
+}
 
 function ringAngle(preferred: number[], index: number, count: number): number {
   if (count <= preferred.length) {
@@ -292,6 +349,10 @@ export function orbitPositions(
   const out: Record<string, Point> = {};
   const entry = slots[hubId];
   if (!entry) return out;
+  if (entry.carrier === "guard") {
+    // A Guard card on DAG edges: its protection providers hang below it.
+    return protectionPositions(hubId, slots, { kind: "card", position: hubPosition });
+  }
   const visited = options.visited ?? new Set<string>();
   if (visited.has(hubId)) return out;
   visited.add(hubId);
@@ -311,6 +372,9 @@ export function orbitPositions(
     } else {
       const s = ORBIT.satelliteSize / 2;
       out[slot.nodeId] = { x: Math.round(point.x - s), y: Math.round(point.y - s) };
+      if (slot.port === "guard") {
+        Object.assign(out, protectionPositions(slot.nodeId, slots, { kind: "satellite", hubCenter: center, angle: slot.angle, scale }));
+      }
     }
   }
   return out;
@@ -360,7 +424,7 @@ export function tidyLayout(nodes: StageNodeInput[], edges: StageEdgeInput[], opt
       const reach = hubReach(id, slots);
       return { w: reach * 2, h: reach * 2 };
     }
-    return { w: ORBIT.cardWidth, h: ORBIT.cardHeight };
+    return { w: ORBIT.cardWidth, h: guardCardHeight(id, slots) };
   };
 
   let x = origin.x;
@@ -384,7 +448,9 @@ export function tidyLayout(nodes: StageNodeInput[], edges: StageEdgeInput[], opt
         out[item.id] = pos;
         Object.assign(out, orbitPositions(item.id, slots, pos));
       } else {
-        out[item.id] = { x: Math.round(cx - item.w / 2), y: Math.round(cy - item.h / 2) };
+        const pos = { x: Math.round(cx - item.w / 2), y: Math.round(cy - item.h / 2) };
+        out[item.id] = pos;
+        if (slots[item.id]?.carrier === "guard") Object.assign(out, orbitPositions(item.id, slots, pos));
       }
       y += item.h + rowGap;
     }
@@ -403,7 +469,7 @@ export function hasOrbitOverlap(nodes: StageNodeInput[], edges: StageEdgeInput[]
   const attached = attachedNodeIds(slots);
   const half = ORBIT.hubSize / 2;
   const hubs = nodes
-    .filter((node) => slots[node.id] && !attached.has(node.id) && node.position)
+    .filter((node) => isHubEntry(slots[node.id]) && !attached.has(node.id) && node.position)
     .map((node) => ({
       id: node.id,
       cx: node.position!.x + half,
@@ -412,7 +478,7 @@ export function hasOrbitOverlap(nodes: StageNodeInput[], edges: StageEdgeInput[]
     }));
   if (hubs.length === 0) return false;
 
-  const others = nodes.filter((node) => !slots[node.id] && !attached.has(node.id) && nodeTypeOf(node) !== "sticky_note" && node.position);
+  const others = nodes.filter((node) => !isHubEntry(slots[node.id]) && !attached.has(node.id) && nodeTypeOf(node) !== "sticky_note" && node.position);
   for (const hub of hubs) {
     for (const node of others) {
       const left = node.position!.x;
@@ -551,6 +617,14 @@ export function summarizeNode(node: { type: string; config?: unknown }): string 
       return join([str(c.mode), str(c.parsingMode), typeof c.maxRetries === "number" ? `retries ${c.maxRetries}` : null]);
     case "output_guardrail":
       return join([Array.isArray(c.checks) ? c.checks.map(String).join(", ") : null, str(c.onFail) ? `on fail ${String(c.onFail)}` : null]);
+    case "guard":
+      return join([
+        !c.profileId || c.profileId === "effective" ? "effective profile" : `profile ${String(c.profileId)}`,
+        str(c.channel) ?? "prompt",
+        c.inputField && c.inputField !== "user_prompt" ? `field ${String(c.inputField)}` : null
+      ]);
+    case "guard_protection":
+      return join([str(c.providerId) ?? "mask", Array.isArray(c.dataClasses) ? c.dataClasses.map(String).join(", ") : "all classes"]);
     case "input_validator": {
       const n = Array.isArray(c.rules) ? c.rules.length : 0;
       return join([`${n} rule${n === 1 ? "" : "s"}`, str(c.onFail) ? `on fail ${String(c.onFail)}` : null]);

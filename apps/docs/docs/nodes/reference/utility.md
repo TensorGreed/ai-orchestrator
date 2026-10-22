@@ -8,7 +8,7 @@
 
 DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait.
 
-40 nodes.
+42 nodes.
 
 ---
 ### `aggregate_node` — Aggregate
@@ -359,6 +359,67 @@ Evaluates conditions against context data and routes to pass or filtered branche
   ],
   "combineWith": "AND",
   "passMode": "pass"
+}
+```
+
+---
+
+### `guard` — Guard
+
+Checks content with a guard profile and routes it to pass, blocked or review instead of failing the run. Attached to an agent's guard port, it guards the agent loop.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `profileId` | `string` | yes | — |
+| `profileOverride` | `object` | no | — |
+| `channel` | `string` | yes | `prompt` \| `model_output` \| `tool_arguments` \| `tool_result` \| `final_output` |
+| `inputField` | `string` | no | — |
+| `labels` | `array<string>` | no | — |
+| `approvalMessage` | `string` | no | — |
+| `timeoutMinutes` | `number` | no | — |
+
+**Example config**
+
+```json
+{
+  "profileId": "effective",
+  "channel": "prompt",
+  "inputField": "user_prompt",
+  "timeoutMinutes": 60
+}
+```
+
+---
+
+### `guard_protection` — Protection Provider
+
+Tokenises, encrypts, hashes or masks sensitive data for a guard. Attach it to a guard node's protection port; keys come from the secret store.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `providerId` | `string` | yes | `mask` \| `keyed_hash` \| `aes_gcm` \| `token_vault` |
+| `dataClasses` | `array<string>` | yes | — |
+| `keySecretRef` | `object` | no | — |
+| `deterministic` | `boolean` | no | — |
+| `formatPreserving` | `boolean` | no | — |
+| `protectMatches` | `boolean` | no | — |
+
+**Example config**
+
+```json
+{
+  "providerId": "token_vault",
+  "dataClasses": [
+    "email",
+    "phone"
+  ],
+  "deterministic": false,
+  "formatPreserving": false,
+  "protectMatches": true
 }
 ```
 

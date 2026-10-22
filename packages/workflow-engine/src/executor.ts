@@ -93,6 +93,18 @@ import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connect
 import { executePythonCodeNode } from "./python-runner";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
+import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
+import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
+import { executeGuardNodeStep } from "./guard-node";
+import {
+  builtInGuardProfile,
+  createAgentGuardSession,
+  GuardBlockedError,
+  isGuardBlockedError,
+  type AgentGuardSession,
+  type GuardEvalScope,
+  type GuardRuntimeDependencies
+} from "./guard-runtime";
 
 const MAX_SUB_WORKFLOW_DEPTH = 10;
 
@@ -126,6 +138,12 @@ export interface WorkflowExecutionDependencies {
    * "no write tools" setting is enforced.
    */
   loadMcpToolPolicy?: () => McpToolPolicySnapshot | Promise<McpToolPolicySnapshot>;
+  /**
+   * Phase 12.1 — L2M Guard: stored profiles, the run's bindings, the token
+   * vault and where verdicts are recorded. Without it guard nodes evaluate
+   * the built-in default profile and agents run unguarded.
+   */
+  guard?: GuardRuntimeDependencies;
   persistPausedExecution?: (input: {
     executionId: string;
     workflowId: string;
@@ -277,6 +295,8 @@ interface NodeRuntimeContext {
   callStack: string[];
   /** Phase 10.2 — subject the MCP tool policy is evaluated with for this run. */
   toolPolicySubject?: McpToolPolicySubject;
+  /** Phase 12.1 — guard approvals granted by a resumed `rerun` hand-off (never from globals). */
+  approvedHandoffKeys?: ReadonlySet<string>;
   recordAttachmentUsage?: (usage: {
     attachedNodeId: string;
     usedByNodeId: string;
@@ -289,8 +309,8 @@ interface NodeRuntimeContext {
   }) => Promise<void> | void;
 }
 
-type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
-const AGENT_ATTACHMENT_HANDLES = new Set<AgentAttachmentHandle>(["chat_model", "memory", "tool", "worker"]);
+type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection";
+const AGENT_ATTACHMENT_HANDLES = new Set<AgentAttachmentHandle>(["chat_model", "memory", "tool", "worker", "guard", "protection"]);
 const ALL_MCP_TOOLS_SENTINEL = "__all__";
 /** Marks the per-node `results` snapshot so passthrough nodes can tell it apart from user data. */
 const DERIVED_RESULTS_MARKER = Symbol("derivedResults");
@@ -2608,6 +2628,36 @@ function buildGraphIndexes(workflow: Workflow): GraphIndexes {
   };
 }
 
+/** Phase 12.1 — without guard dependencies, guard nodes use the built-in default profile and agents run unguarded. */
+const STANDALONE_GUARD: GuardRuntimeDependencies = {
+  resolveRun: () => ({ source: "none", stack: [], chain: [] }),
+  loadProfile: (profileId) => (profileId === "default" ? builtInGuardProfile() : undefined)
+};
+
+function guardScopeFor(
+  node: WorkflowNode,
+  context: NodeRuntimeContext,
+  dependencies: WorkflowExecutionDependencies,
+  placement: GuardEvalScope["placement"]
+): GuardEvalScope {
+  return {
+    guard: dependencies.guard ?? STANDALONE_GUARD,
+    resolveSecret: dependencies.resolveSecret,
+    executionId: typeof context.globals.execution_id === "string" ? context.globals.execution_id : "",
+    workflowId: context.workflow.id,
+    nodeId: node.id,
+    placement,
+    ...(context.toolPolicySubject ? { subject: context.toolPolicySubject } : {}),
+    ...(dependencies.logger ? { logger: dependencies.logger } : {})
+  };
+}
+
+/** Protection Provider nodes on a guard node's protection port. */
+function protectionNodesFor(guardNode: WorkflowNode, context: NodeRuntimeContext): WorkflowNode[] {
+  const ids = context.attachmentsBySource.get(guardNode.id)?.get("protection") ?? [];
+  return ids.map((id) => context.nodeById.get(id)).filter((entry): entry is WorkflowNode => Boolean(entry));
+}
+
 async function executeNode(
   node: WorkflowNode,
   context: NodeRuntimeContext,
@@ -4745,9 +4795,38 @@ async function executeNode(
         const images = rawImages.filter(img => img && typeof img.data === "string" && img.data && typeof img.mimeType === "string" && img.mimeType.startsWith("image/"));
 
 
+        // Phase 12.1 — guard hooks: the guard node on the guard port, or the
+        // run's automatic profiles. Attachment port, never a DAG step.
+        const portGuardNode = getAttachedNodes("guard").find((attached) => attached.type === "guard" && attached.disabled !== true);
+        const guardSession: AgentGuardSession | undefined =
+          dependencies.guard || portGuardNode
+            ? await createAgentGuardSession({
+                scope: guardScopeFor(node, context, dependencies, "agent"),
+                ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
+                ...(portGuardNode ? { portGuardNode } : {}),
+                protectionNodes: portGuardNode ? protectionNodesFor(portGuardNode, context) : [],
+                describeTool: (exposedName) => {
+                  const resolved = resolvedTools.resolved.find((entry) => entry.exposedName === exposedName);
+                  if (resolved) {
+                    return {
+                      serverId: resolved.registryServerId ?? resolved.serverId,
+                      toolName: resolved.originalName,
+                      inputSchema: resolved.definition.inputSchema,
+                      ...(resolved.annotations ? { annotations: resolved.annotations } : {})
+                    };
+                  }
+                  const worker = workerTools.find((entry) => entry.name === exposedName);
+                  return worker ? { serverId: worker.serverId, toolName: worker.name, inputSchema: worker.inputSchema } : undefined;
+                }
+              })
+            : undefined;
+        let workerPendingApproval: ApprovalHandoffRequest | undefined;
+
         const modelRunStarted = Date.now();
         const modelRunStartedAt = nowIso();
-        const agentState = await dependencies.agentRuntime.run(
+        let agentState: Awaited<ReturnType<typeof dependencies.agentRuntime.run>>;
+        try {
+        agentState = await dependencies.agentRuntime.run(
           {
             provider,
             systemPrompt,
@@ -4782,8 +4861,17 @@ async function executeNode(
                      callStack: [...context.callStack, node.id]
                   };
                 
-                  const workerResult = await executeNode(workerNode, workerContext, dependencies);
-                  return workerResult;
+                  // Phase 12.1 — the worker runs its own guard; a pause there pauses this agent too.
+                  try {
+                    const workerResult = await executeNode(workerNode, workerContext, dependencies);
+                    return workerResult;
+                  } catch (error) {
+                    if (isApprovalHandoffSignal(error)) {
+                      workerPendingApproval = error.request;
+                      throw new AgentGuardInterrupt("approval_required", "tool_result", 0, error.message);
+                    }
+                    throw error;
+                  }
                }
                // Phase 10.5 — each tool call gets a fresh sampling budget.
                const originalName = resolvedTools.resolved.find((entry) => entry.exposedName === toolName)?.originalName ?? toolName;
@@ -4795,9 +4883,40 @@ async function executeNode(
             providerRegistry: dependencies.providerRegistry,
             resolveSecret: dependencies.resolveSecret,
             memoryStore: dependencies.memoryStore,
-            toolDataStore: dependencies.toolDataStore
+            toolDataStore: dependencies.toolDataStore,
+            ...(guardSession ? { guard: guardSession.hooks } : {})
           }
         );
+        } catch (error) {
+          if (isAgentGuardInterrupt(error)) {
+            if (error.reason === "approval_required") {
+              const request = guardSession?.takePendingApproval() ?? workerPendingApproval;
+              if (request) throw new ApprovalHandoffSignal(request);
+            }
+            throw new GuardBlockedError(
+              `Guard blocked the agent's ${error.channel.replace("_", " ")}: ${error.message}`,
+              guardSession?.trace().verdicts.at(-1)?.verdicts ?? []
+            );
+          }
+          throw error;
+        }
+        if (portGuardNode && guardSession) {
+          const guardTrace = guardSession.trace();
+          await context.recordAttachmentUsage?.({
+            attachedNodeId: portGuardNode.id,
+            usedByNodeId: node.id,
+            handle: "guard",
+            output: { profiles: guardTrace.profiles, verdicts: guardTrace.verdicts.length }
+          });
+          for (const protectionNode of protectionNodesFor(portGuardNode, context)) {
+            await context.recordAttachmentUsage?.({
+              attachedNodeId: protectionNode.id,
+              usedByNodeId: portGuardNode.id,
+              handle: "protection",
+              output: { providerId: toRecord(protectionNode.config).providerId }
+            });
+          }
+        }
         const modelRunCompletedAt = nowIso();
         if (attachedModelNode) {
           const lastStep = agentState.steps.at(-1);
@@ -4849,6 +4968,8 @@ async function executeNode(
           ...(serverPromptUsed ? { _serverPrompt: serverPromptUsed } : {}),
           // Phase 10.2 — whose role the tool policy used and which tools it hid.
           ...(toolPolicy ? { _toolPolicy: { ...toolPolicy.trace, hidden: resolvedTools.hidden } } : {}),
+          // Phase 12.1 — which profiles guarded this agent and every verdict (masked evidence only).
+          ...(guardSession ? { _guard: guardSession.trace() } : {}),
           // Phase 7.1 — surface cumulative agent telemetry on the node output.
           _telemetry: {
             providerId: provider.providerId,
@@ -5016,6 +5137,36 @@ async function executeNode(
       }
 
       return { parsed: result.parsed, raw: rawInput, retries, parserTrace: result.trace };
+    }
+
+    case "guard": {
+      const protectionNodes = protectionNodesFor(node, context);
+      const connectedHandles = new Set(
+        context.workflow.edges.filter((edge) => edge.source === node.id && edge.sourceHandle).map((edge) => edge.sourceHandle as string)
+      );
+      const output = await executeGuardNodeStep({
+        node,
+        scope: guardScopeFor(node, context, dependencies, "node"),
+        merged: context.merged,
+        parentIds: Object.keys(context.parentOutputs),
+        globals: context.globals,
+        protectionNodes,
+        connectedHandles
+      });
+      for (const protectionNode of protectionNodes) {
+        await context.recordAttachmentUsage?.({
+          attachedNodeId: protectionNode.id,
+          usedByNodeId: node.id,
+          handle: "protection",
+          output: { providerId: toRecord(protectionNode.config).providerId }
+        });
+      }
+      return output;
+    }
+
+    case "guard_protection": {
+      // Only meaningful on a guard node's protection port, where it is consumed, not executed.
+      return { ...mergeParentOutputs(context.parentOutputs), note: "Protection Provider nodes take effect only on a Guard node's protection port." };
     }
 
     case "output_guardrail": {
@@ -5612,7 +5763,8 @@ async function executeNodeWithRetry(
       const output = await executeNode(node, context, dependencies);
       return { output, attempts: attempt };
     } catch (error) {
-      if (isCancellationError(error) || dependencies.abortSignal?.aborted || isMcpToolPolicyBlock(error)) {
+      // Phase 12.1 — a guard block or an approval pause is a decision, not a transient failure.
+      if (isCancellationError(error) || dependencies.abortSignal?.aborted || isMcpToolPolicyBlock(error) || isGuardBlockedError(error) || isApprovalHandoffSignal(error)) {
         throw error;
       }
       if (error instanceof WorkflowError) {
@@ -5845,8 +5997,8 @@ export async function executeWorkflow(
   const globals: Record<string, unknown> = request.resumeState
     ? toRecord(request.resumeState.globals)
     : {
-        ...(request.input ?? {}),
-        ...(request.variables ?? {}),
+        ...withoutReservedKeys(request.input),
+        ...withoutReservedKeys(request.variables),
         vars: toRecord(workflow.variables),
         webhook: request.webhookPayload ?? {},
         system_prompt:
@@ -5862,6 +6014,7 @@ export async function executeWorkflow(
         trigger_type: request.triggerType ?? "manual",
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
+  const approvedHandoffKeys = approvedHandoffKeysFromState(request.resumeState);
   const customData = request.resumeState
     ? toRecord(globals.execution_custom_data)
     : toRecord(request.customData);
@@ -6106,7 +6259,38 @@ export async function executeWorkflow(
       reason: request.approvalDecision.reason
     });
 
-    if (request.approvalDecision.decision === "approve") {
+    // Phase 12.1 — approval hand-off: a guard node routes the decision, an
+    // agent re-runs with the approval granted (a rejection fails it below).
+    const handoff = request.resumeState.approvalHandoff;
+    const approved = request.approvalDecision.decision === "approve";
+    let handledByHandoff = false;
+    if (handoff?.kind === "route") {
+      const routed = approved ? handoff.onApprove : handoff.onReject;
+      nodeOutputs.set(waitingNode.id, routed);
+      nodeResults.push({
+        nodeId: waitingNode.id,
+        status: "success",
+        startedAt: decidedAt,
+        completedAt: decidedAt,
+        durationMs: 0,
+        input: decisionInput,
+        output: routed
+      });
+      applySuccessfulNodeRouting(waitingNode, routed);
+      handledByHandoff = true;
+    } else if (handoff?.kind === "rerun") {
+      if (approved) {
+        approvedHandoffKeys.add(handoff.approvalKey);
+        handledByHandoff = true;
+      } else {
+        // The rejected node is not run again.
+        startIndex += 1;
+      }
+    }
+
+    if (handledByHandoff) {
+      // Nothing more to record: the routed output or the re-run carries on below.
+    } else if (request.approvalDecision.decision === "approve") {
       nodeOutputs.set(waitingNode.id, decisionPayload);
       nodeResults.push({
         nodeId: waitingNode.id,
@@ -6225,6 +6409,98 @@ export async function executeWorkflow(
   const workflowWarnings: string[] = [];
   const retriedNodes: Array<{ nodeId: string; attempts: number; nodeType: string }> = [];
   const executionStartTime = Date.now();
+
+  /**
+   * Pause the run for a person's decision: a Human Approval node, or an
+   * approval hand-off (`ApprovalHandoffSignal`). A `route` hand-off resumes
+   * after the node; a `rerun` hand-off runs the node again once approved.
+   */
+  const pauseForApproval = async (pause: {
+    node: WorkflowNode;
+    index: number;
+    nodeInput: unknown;
+    startedAtNode: string;
+    started: number;
+    approvalMessage: string;
+    timeoutMinutes: number;
+    handoff?: WorkflowExecutionState["approvalHandoff"];
+    details?: Record<string, unknown>;
+  }): Promise<WorkflowExecutionResult> => {
+    const waitingOutput = {
+      message: pause.approvalMessage,
+      timeoutMinutes: pause.timeoutMinutes,
+      ...(pause.handoff ? { handoff: pause.handoff.source } : {}),
+      ...(pause.details ? toRecord(toJsonSafeValue(pause.details)) : {})
+    };
+    nodeResults.push({
+      nodeId: pause.node.id,
+      status: "waiting_approval",
+      startedAt: pause.startedAtNode,
+      completedAt: nowIso(),
+      durationMs: Date.now() - pause.started,
+      input: pause.nodeInput,
+      output: waitingOutput
+    });
+    await dependencies.onNodeComplete?.({
+      nodeId: pause.node.id,
+      nodeType: pause.node.type,
+      status: "waiting_approval",
+      completedAt: nowIso(),
+      durationMs: Date.now() - pause.started,
+      input: pause.nodeInput,
+      output: waitingOutput
+    });
+
+    const executionId = request.executionId ?? randomUUID();
+    const stateSnapshot: WorkflowExecutionState = {
+      workflow,
+      nodeOrder,
+      nextNodeIndex: pause.handoff?.kind === "rerun" ? pause.index : pause.index + 1,
+      waitingNodeId: pause.node.id,
+      startedAt,
+      globals,
+      nodeOutputs: serializeNodeOutputs(nodeOutputs),
+      nodeResults,
+      skippedByBranch: [...skippedByBranch],
+      tryCatchScopes: serializeTryCatchScopes(tryCatchScopes),
+      hadContinuedErrors,
+      finalOutput,
+      ...(toolPolicySubject ? { toolPolicySubject } : {}),
+      ...(pause.handoff ? { approvalHandoff: pause.handoff } : {}),
+      ...(approvedHandoffKeys.size > 0 ? { approvedHandoffKeys: [...approvedHandoffKeys] } : {})
+    };
+
+    if (dependencies.persistPausedExecution) {
+      await dependencies.persistPausedExecution({
+        executionId,
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        triggerType: request.triggerType,
+        triggeredBy: request.triggeredBy,
+        waitingNodeId: pause.node.id,
+        approvalMessage: pause.approvalMessage,
+        timeoutMinutes: pause.timeoutMinutes,
+        startedAt,
+        state: stateSnapshot
+      });
+    }
+
+    return {
+      workflowId: workflow.id,
+      status: "waiting_approval",
+      startedAt,
+      completedAt: nowIso(),
+      executionId,
+      customData,
+      nodeResults,
+      output: {
+        waitingForApproval: true,
+        waitingNodeId: pause.node.id,
+        approvalMessage: pause.approvalMessage,
+        timeoutMinutes: pause.timeoutMinutes
+      }
+    };
+  };
 
   for (let index = startIndex; index < nodeOrder.length; index += 1) {
     if (dependencies.abortSignal?.aborted) {
@@ -6520,10 +6796,12 @@ export async function executeWorkflow(
                   attachmentsBySource: graphIndexes.attachmentsBySource,
                   callStack,
                   toolPolicySubject,
+                  approvedHandoffKeys,
                   recordAttachmentUsage
                 },
                 dependencies
               );
+              approvedHandoffKeys.clear();
 
               iterationOutputs[childNode.id] = childOutput;
               nodeOutputs.set(childNode.id, childOutput);
@@ -6624,78 +6902,7 @@ export async function executeWorkflow(
           parent_outputs: parentOutputs
         });
 
-        nodeResults.push({
-          nodeId: node.id,
-          status: "waiting_approval",
-          startedAt: startedAtNode,
-          completedAt: nowIso(),
-          durationMs: Date.now() - started,
-          input: nodeInput,
-          output: {
-            message: approvalMessage,
-            timeoutMinutes
-          }
-        });
-        await dependencies.onNodeComplete?.({
-          nodeId: node.id,
-          nodeType: node.type,
-          status: "waiting_approval",
-          completedAt: nowIso(),
-          durationMs: Date.now() - started,
-          input: nodeInput,
-          output: {
-            message: approvalMessage,
-            timeoutMinutes
-          }
-        });
-
-        const executionId = request.executionId ?? randomUUID();
-        const stateSnapshot: WorkflowExecutionState = {
-          workflow,
-          nodeOrder,
-          nextNodeIndex: index + 1,
-          waitingNodeId: node.id,
-          startedAt,
-          globals,
-          nodeOutputs: serializeNodeOutputs(nodeOutputs),
-          nodeResults,
-          skippedByBranch: [...skippedByBranch],
-          tryCatchScopes: serializeTryCatchScopes(tryCatchScopes),
-          hadContinuedErrors,
-          finalOutput,
-          ...(toolPolicySubject ? { toolPolicySubject } : {})
-        };
-
-        if (dependencies.persistPausedExecution) {
-          await dependencies.persistPausedExecution({
-            executionId,
-            workflowId: workflow.id,
-            workflowName: workflow.name,
-            triggerType: request.triggerType,
-            triggeredBy: request.triggeredBy,
-            waitingNodeId: node.id,
-            approvalMessage,
-            timeoutMinutes,
-            startedAt,
-            state: stateSnapshot
-          });
-        }
-
-        return {
-          workflowId: workflow.id,
-          status: "waiting_approval",
-          startedAt,
-          completedAt: nowIso(),
-          executionId,
-          customData,
-          nodeResults,
-          output: {
-            waitingForApproval: true,
-            waitingNodeId: node.id,
-            approvalMessage,
-            timeoutMinutes
-          }
-        };
+        return await pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes });
       }
 
       const { output, attempts } = await executeNodeWithRetry(
@@ -6710,10 +6917,13 @@ export async function executeWorkflow(
           attachmentsBySource: graphIndexes.attachmentsBySource,
           callStack,
           toolPolicySubject,
+          approvedHandoffKeys,
           recordAttachmentUsage
         },
         dependencies
       );
+      // Single use: a granted approval covers the re-run of the node it paused, not later nodes or runs.
+      approvedHandoffKeys.clear();
 
       nodeOutputs.set(node.id, output);
 
@@ -6743,6 +6953,20 @@ export async function executeWorkflow(
 
       applySuccessfulNodeRouting(node, output);
     } catch (error) {
+      // Phase 12.1 — approval hand-off: the node asked for a person's decision.
+      if (isApprovalHandoffSignal(error) && !dependencies.abortSignal?.aborted) {
+        return await pauseForApproval({
+          node,
+          index,
+          nodeInput,
+          startedAtNode,
+          started,
+          approvalMessage: error.request.message,
+          timeoutMinutes: error.request.timeoutMinutes,
+          handoff: error.request.handoff,
+          ...(error.request.details ? { details: error.request.details } : {})
+        });
+      }
       if (isCancellationError(error) || dependencies.abortSignal?.aborted) {
         const canceledAt = nowIso();
         const cancelMessage = getAbortMessage(dependencies.abortSignal);

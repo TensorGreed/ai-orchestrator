@@ -1,4 +1,4 @@
-import { excerptEvidence } from "../masking";
+import { scrubbedExcerpt } from "./dlp";
 import type { DetectorContext, GuardDetector, GuardFinding, GuardInput } from "../types";
 import { locateValue } from "./path-guard";
 
@@ -292,7 +292,7 @@ export function createEgressGuardDetector(defaults: { resolver?: DnsResolver } =
           category: "egress",
           score: check.reason === "unresolved" || check.reason === "resolver_error" ? 0.7 : 1,
           spans: [span],
-          evidence: excerptEvidence(context.text, span, 60),
+          evidence: scrubbedExcerpt(context.text, span, 60),
           message: check.url !== url ? `${check.message} (after redirect to another host)` : check.message ?? "Outbound URL not allowed",
           metadata: { reason: check.reason, host: check.host, addresses: check.addresses, hop: check.url === url ? 0 : chain.indexOf(check.url) }
         });

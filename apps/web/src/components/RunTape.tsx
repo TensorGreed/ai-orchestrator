@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { NodeProgressSnapshot, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { formatLatency } from "./WorkflowCanvasNode";
+import { guardMarkerFor, type GuardMarker } from "../lib/guard-trace";
 
 export interface RunTapeProps {
   executionResult: WorkflowExecutionResult | null;
@@ -21,6 +22,8 @@ export interface TapeLane {
   error?: string;
   /** Phase 10.5 — latest MCP tool progress the node reported. */
   progress?: NodeProgressSnapshot;
+  /** Phase 12.1 — a guard blocked, held for review or rewrote content in this step. */
+  guard?: GuardMarker;
 }
 
 /** 0..100 when the server sent a total, else null. */
@@ -45,6 +48,11 @@ function toMs(value: unknown): number | null {
   if (typeof value !== "string") return null;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
+}
+
+function guardLane(result: { output?: unknown; error?: string; status?: string }): { guard?: GuardMarker } {
+  const marker = guardMarkerFor(result);
+  return marker ? { guard: marker } : {};
 }
 
 export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, nodeMetaById: Map<string, { label: string; type: string }>): { lanes: TapeLane[]; totalMs: number } {
@@ -79,7 +87,8 @@ export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, 
       durationMs: duration,
       llmMs,
       error: result.error,
-      ...(result.progress ? { progress: result.progress } : {})
+      ...(result.progress ? { progress: result.progress } : {}),
+      ...guardLane(result)
     };
   });
 
@@ -122,7 +131,8 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
             `${lane.status} · ${formatLatency(lane.durationMs)}`,
             lane.llmMs !== null ? `LLM ${formatLatency(lane.llmMs)}` : null,
             lane.error ? `error: ${lane.error}` : null,
-            lane.progress ? formatProgress(lane.progress) : null
+            lane.progress ? formatProgress(lane.progress) : null,
+            lane.guard ? lane.guard.title : null
           ]
             .filter(Boolean)
             .join("\n");
@@ -139,6 +149,11 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
               <span className="run-tape-label" role="cell">
                 <b>{lane.label}</b>
                 <small>{lane.type || lane.nodeId}</small>
+                {lane.guard && (
+                  <em className={`run-tape-guard run-tape-guard-${lane.guard.kind}`} title={lane.guard.title}>
+                    {lane.guard.label}
+                  </em>
+                )}
               </span>
               <span className="run-tape-track" role="cell">
                 <i className={`run-tape-bar run-tape-bar-${lane.status}`} style={{ left: `${left}%`, width: `${width}%` }}>

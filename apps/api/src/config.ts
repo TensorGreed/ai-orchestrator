@@ -150,6 +150,12 @@ const envSchema = z.object({
   MCP_CASSETTE_MAX_BYTES: z.coerce.number().int().min(1_024).max(268_435_456).default(5_242_880),
   /** Phase 10.8 — most MCP calls one cassette keeps. */
   MCP_CASSETTE_MAX_CALLS: z.coerce.number().int().min(1).max(100_000).default(5_000),
+  /**
+   * Phase 12.1 — apply the built-in default guard profile to agent traffic
+   * in projects and workflows with no guard binding. Bindings and guard
+   * ports still apply when this is off.
+   */
+  GUARD_AUTO_APPLY: booleanFromEnv.default(true),
   // Phase 10.7 — MCP runtime safety.
   /** Sandbox mode for stdio servers that do not choose one: `none` (on the host) or `container`. */
   MCP_SANDBOX_DEFAULT: z.enum(["none", "container"]).default("none"),

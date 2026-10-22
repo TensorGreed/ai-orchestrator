@@ -1,7 +1,13 @@
-import { Parser, type AST } from "node-sql-parser";
-import { excerptEvidence } from "../masking";
+import * as sqlParserModule from "node-sql-parser";
+import type { AST } from "node-sql-parser";
+import { scrubbedExcerpt, scrubEvidenceText } from "./dlp";
 import type { DetectorContext, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 import { clampScore } from "../types";
+
+type SqlParserModule = typeof sqlParserModule;
+// node-sql-parser is CommonJS whose exports Node's ESM loader cannot detect: under
+// Node the classes sit on the default export, under bundlers and vitest on the namespace.
+const { Parser } = ((sqlParserModule as SqlParserModule & { default?: SqlParserModule }).default ?? sqlParserModule) as SqlParserModule;
 
 export const SQL_GUARD_DETECTOR_ID = "tool.sql";
 
@@ -357,7 +363,7 @@ export function analyzeSql(sql: string, options: SqlGuardOptions = {}): SqlGuard
       category: "sql_injection",
       score: 0.8,
       code: "unparseable",
-      message: `SQL could not be parsed as ${dialect}; unparseable statements are refused (${String((error as Error).message).split("\n")[0]?.slice(0, 120)})`
+      message: `SQL could not be parsed as ${dialect}; unparseable statements are refused (${scrubEvidenceText(String((error as Error).message).split("\n")[0] ?? "", { sqlLiterals: true }).slice(0, 120)})`
     });
     result.ok = false;
     return result;
@@ -574,7 +580,7 @@ export function createSqlGuardDetector(): GuardDetector {
             category: issue.category,
             score: clampScore(issue.score),
             spans: [span],
-            evidence: excerptEvidence(context.text, span),
+            evidence: scrubbedExcerpt(context.text, span, 80, { sqlLiterals: true }),
             message: issue.message,
             metadata: { code: issue.code, path: candidate.path, dialect: result.dialect, statements: result.statements.map((s) => `${s.type}:${s.kind}`) }
           });

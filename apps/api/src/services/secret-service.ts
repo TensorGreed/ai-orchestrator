@@ -76,6 +76,31 @@ export class SecretService {
     return decrypted.toString("utf8");
   }
 
+  /**
+   * Phase 12.1 — seals a value for storage outside the secrets table (the
+   * guard token vault) with the master key. `purpose` is bound as
+   * authenticated data, so a sealed value only opens for the same purpose
+   * and cannot be swapped with a stored secret.
+   */
+  sealValue(purpose: string, plaintext: string): string {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", this.key, iv);
+    cipher.setAAD(Buffer.from(`l2m:${purpose}`, "utf8"));
+    const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+    return ["v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), encrypted.toString("base64")].join(".");
+  }
+
+  openValue(purpose: string, sealed: string): string {
+    const [format, iv, authTag, ciphertext] = sealed.split(".");
+    if (format !== "v1" || !iv || !authTag || ciphertext === undefined) {
+      throw new Error("Sealed value has an unknown format");
+    }
+    const decipher = crypto.createDecipheriv("aes-256-gcm", this.key, Buffer.from(iv, "base64"));
+    decipher.setAAD(Buffer.from(`l2m:${purpose}`, "utf8"));
+    decipher.setAuthTag(Buffer.from(authTag, "base64"));
+    return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64")), decipher.final()]).toString("utf8");
+  }
+
   createSecret(input: {
     name: string;
     provider: string;

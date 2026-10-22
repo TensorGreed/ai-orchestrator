@@ -45,6 +45,24 @@ export const dictionarySchema = z.object({
   score: z.number().min(0).max(1).default(0.9)
 });
 
+/** Longest custom dictionary pattern a profile may carry. */
+export const MAX_DICTIONARY_PATTERN_LENGTH = 256;
+
+/** A group with a quantifier inside, quantified again: `(a+)+`, `(\\w*\\s?)*`, `(x{1,9}){2,}`. */
+const NESTED_QUANTIFIER = /\((?:[^()\\]|\\.)*(?:[*+]|\{\d+,?\d*\})(?:[^()\\]|\\.)*\)(?:[*+]|\{\d+,\d*\})/;
+
+/**
+ * Why a custom dictionary pattern is refused, or undefined when it is fine:
+ * too long, or shaped for catastrophic backtracking (a quantified group that
+ * holds a quantifier). Profiles are written by builders, so patterns are
+ * refused when saved and skipped at scan time.
+ */
+export function unsafeDictionaryPattern(pattern: string): string | undefined {
+  if (pattern.length > MAX_DICTIONARY_PATTERN_LENGTH) return `Patterns are limited to ${MAX_DICTIONARY_PATTERN_LENGTH} characters`;
+  if (NESTED_QUANTIFIER.test(pattern)) return "Nested quantifiers such as (a+)+ can backtrack catastrophically; rewrite the pattern without them";
+  return undefined;
+}
+
 export const protectionMappingSchema = z.object({
   providerId: z.string().min(1),
   /** Provider-specific settings, such as the key id to use. */
@@ -73,7 +91,21 @@ export const guardProfileSchema = z.object({
       fallback: guardActionSchema.default("block")
     })
     .default({ dataClasses: {}, fallback: "block" }),
-  dictionaries: z.array(dictionarySchema).default([])
+  dictionaries: z.array(dictionarySchema).default([]),
+  /**
+   * Spotlighting of untrusted content inside the agent loop: tool results are
+   * wrapped in delimiters or datamarked, and the matching system-prompt text
+   * is added. Absent means off, so existing profiles keep their hash.
+   */
+  spotlighting: z
+    .object({
+      mode: z.enum(["off", "delimiters", "datamark"]).default("delimiters"),
+      /** Also add the general prompt-hardening text to the system prompt. */
+      hardenSystemPrompt: z.boolean().default(true)
+    })
+    .optional(),
+  /** Plant a canary token in each agent's system prompt and look for it in tool arguments and the final answer. */
+  canaries: z.object({ enabled: z.boolean().default(true) }).optional()
 });
 
 export type GuardProfileInput = z.input<typeof guardProfileSchema>;

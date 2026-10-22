@@ -1,7 +1,7 @@
-import { maskedEvidence, shannonEntropy } from "../masking";
+import { maskedEvidence, maskForDataClass, MASK_CHAR, replaceSpans, shannonEntropy } from "../masking";
 import type { DetectorContext, GuardDataClass, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 import { clampScore } from "../types";
-import type { GuardDictionary } from "../profile";
+import { unsafeDictionaryPattern, type GuardDictionary } from "../profile";
 
 export const DLP_DETECTOR_ID = "dlp.patterns";
 
@@ -234,6 +234,7 @@ export function scanDlp(text: string, options: DlpScanOptions = {}): DlpMatch[] 
       );
     }
     for (const source of dictionary.patterns) {
+      if (unsafeDictionaryPattern(source)) continue;
       let regex: RegExp;
       try {
         regex = new RegExp(source, "giu");
@@ -270,6 +271,31 @@ function looksLikeJwt(token: string): boolean {
   } catch {
     return false;
   }
+}
+
+const URL_QUERY_OR_FRAGMENT = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#"'`<>]*)[?#][^\s"'`<>)\]]*/gi;
+const SQL_STRING_LITERAL = /'(?:[^'\\]|\\.|'')*'/g;
+
+/**
+ * Text that pattern detectors (egress, exfiltration, SQL, command, path)
+ * keep as evidence or put in a message: URL query and fragment values are
+ * dropped (scheme, host and path stay), SQL string literals are blanked on
+ * request, and whatever the DLP scan finds is masked by its data class.
+ */
+export function scrubEvidenceText(text: string, options: { sqlLiterals?: boolean } = {}): string {
+  let out = text.replace(URL_QUERY_OR_FRAGMENT, (_match, base: string) => `${base}?${MASK_CHAR.repeat(3)}`);
+  if (options.sqlLiterals) out = out.replace(SQL_STRING_LITERAL, `'${MASK_CHAR.repeat(3)}'`);
+  const matches = scanDlp(out);
+  if (matches.length === 0) return out;
+  const byStart = new Map(matches.map((match) => [`${match.span.start}:${match.span.end}`, match.dataClass]));
+  return replaceSpans(out, matches.map((match) => match.span), (original, span) => maskForDataClass(original, byStart.get(`${span.start}:${span.end}`)));
+}
+
+/** `excerptEvidence` for pattern detectors: the excerpt is scrubbed before it is flattened and capped. */
+export function scrubbedExcerpt(text: string, span: GuardSpan, maxLength = 80, options: { sqlLiterals?: boolean } = {}): string {
+  const raw = scrubEvidenceText(text.slice(span.start, span.end), options).replace(/\s+/g, " ").trim();
+  const chars = Array.from(raw);
+  return chars.length > maxLength ? `${chars.slice(0, maxLength).join("")}…` : raw;
 }
 
 export interface DlpDetectorOptions {

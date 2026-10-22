@@ -1,4 +1,4 @@
-import { excerptEvidence } from "../masking";
+import { scrubbedExcerpt } from "./dlp";
 import type { DetectorContext, GuardDetector, GuardFinding, GuardInput, GuardSpan } from "../types";
 import { clampScore } from "../types";
 
@@ -117,7 +117,7 @@ export function createCommandGuardDetector(): GuardDetector {
             category: "command_injection",
             score: clampScore(issue.score),
             spans: [span],
-            evidence: excerptEvidence(context.text, span),
+            evidence: scrubbedExcerpt(context.text, span),
             message: issue.message,
             metadata: { code: issue.code, path }
           });
@@ -150,7 +150,7 @@ export function createCommandGuardDetector(): GuardDetector {
                 category: "command_injection",
                 score: clampScore(issue.score),
                 spans: [span],
-                evidence: excerptEvidence(context.text, span),
+                evidence: scrubbedExcerpt(context.text, span),
                 message: issue.message,
                 metadata: { code: "argument_injection", path: `${path}[${issue.index}]` }
               });
@@ -268,7 +268,7 @@ export function createCodeGuardDetector(): GuardDetector {
             category: "unsafe_code",
             score: clampScore(issue.score),
             spans: [span],
-            evidence: excerptEvidence(context.text, span),
+            evidence: scrubbedExcerpt(context.text, span),
             message: issue.message,
             metadata: { ruleId: issue.ruleId, path, language }
           });

@@ -3,6 +3,7 @@ import { fetchMcpElicitations, type ExecutionHistoryDetail, type ExecutionHistor
 import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
 import { McpCassetteViewer } from "./McpCassetteViewer";
 import { McpElicitationForm } from "./McpElicitationForm";
+import { GuardTracePanel } from "./GuardTracePanel";
 
 /** Phase 10.5 — how often the Runs page looks for server questions waiting on a person. */
 const ELICITATION_POLL_MS = 5000;
@@ -437,6 +438,7 @@ export function ExecutionHistoryPanel({
                                 <pre className="result-block">{stringifyPretty(customData)}</pre>
                               </div>
                             )}
+                            <GuardTracePanel executionId={item.id} nodeResults={nodeResults} />
                             <div className="execution-trace-grid">
                               {nodeResults.length === 0 && <div className="page-hint">No node-by-node trace available.</div>}
                               {nodeResults.map((entry, index) => {

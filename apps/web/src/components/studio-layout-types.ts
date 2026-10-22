@@ -18,6 +18,7 @@ export type StudioMode =
   | "mcp-playground"
   | "mcp-changes"
   | "connections"
+  | "security"
   | "secrets"
   | "settings";
 
@@ -53,6 +54,8 @@ export const STUDIO_MODE_ITEMS: ReadonlyArray<StudioModeItem> = [
   { mode: "templates", label: "Templates" },
   { mode: "variables", label: "Variables" },
   { mode: "executions", label: "Runs" },
+  // Phase 12.1 — guard verdicts, profiles and bindings; everyone who can read runs.
+  { mode: "security", label: "Security" },
   { mode: "chat", label: "Chat" },
   { mode: "evaluations", label: "Evaluations" },
   { mode: "knowledge", label: "Knowledge" },

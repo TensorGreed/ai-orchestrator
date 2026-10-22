@@ -35,6 +35,9 @@ importers:
       '@ai-orchestrator/connector-sdk':
         specifier: workspace:*
         version: link:../../packages/connector-sdk
+      '@ai-orchestrator/guard-sdk':
+        specifier: workspace:*
+        version: link:../../packages/guard-sdk
       '@ai-orchestrator/mcp-sdk':
         specifier: workspace:*
         version: link:../../packages/mcp-sdk
@@ -267,6 +270,9 @@ importers:
       '@ai-orchestrator/connector-sdk':
         specifier: workspace:*
         version: link:../connector-sdk
+      '@ai-orchestrator/guard-sdk':
+        specifier: workspace:*
+        version: link:../guard-sdk
       '@ai-orchestrator/mcp-sdk':
         specifier: workspace:*
         version: link:../mcp-sdk

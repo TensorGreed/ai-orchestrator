@@ -17,3 +17,6 @@ export {
 } from "./connectors/triggers-dispatch";
 export { FileSystemBinaryStore } from "./binary-store";
 export * from "./mcp-client-features";
+export * from "./approval-handoff";
+export * from "./guard-runtime";
+export { executeGuardNodeStep, type GuardNodeSummary } from "./guard-node";

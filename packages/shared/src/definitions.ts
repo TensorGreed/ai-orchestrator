@@ -1269,6 +1269,58 @@ export const nodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "guard",
+    label: "Guard",
+    category: "Utility",
+    description:
+      "Checks content with a guard profile and routes it to pass, blocked or review instead of failing the run. Attached to an agent's guard port, it guards the agent loop.",
+    configSchema: {
+      type: "object",
+      properties: {
+        profileId: { type: "string" },
+        profileOverride: { type: "object" },
+        channel: { type: "string", enum: ["prompt", "model_output", "tool_arguments", "tool_result", "final_output"] },
+        inputField: { type: "string" },
+        labels: { type: "array", items: { type: "string", enum: ["trusted", "user", "untrusted_external", "sensitive"] } },
+        approvalMessage: { type: "string" },
+        timeoutMinutes: { type: "number" }
+      },
+      required: ["profileId", "channel"]
+    },
+    sampleConfig: {
+      profileId: "effective",
+      channel: "prompt",
+      inputField: "user_prompt",
+      timeoutMinutes: 60
+    }
+  },
+  {
+    type: "guard_protection",
+    label: "Protection Provider",
+    category: "Utility",
+    description:
+      "Tokenises, encrypts, hashes or masks sensitive data for a guard. Attach it to a guard node's protection port; keys come from the secret store.",
+    configSchema: {
+      type: "object",
+      properties: {
+        providerId: { type: "string", enum: ["mask", "keyed_hash", "aes_gcm", "token_vault"] },
+        dataClasses: { type: "array", items: { type: "string" } },
+        keySecretRef: { type: "object" },
+        deterministic: { type: "boolean" },
+        formatPreserving: { type: "boolean" },
+        protectMatches: { type: "boolean" }
+      },
+      required: ["providerId", "dataClasses"]
+    },
+    sampleConfig: {
+      providerId: "token_vault",
+      dataClasses: ["email", "phone"],
+      deterministic: false,
+      formatPreserving: false,
+      protectMatches: true
+    }
+  },
+  {
     type: "basic_llm_chain",
     label: "Basic LLM Chain",
     category: "LLM",

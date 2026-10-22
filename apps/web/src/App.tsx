@@ -115,6 +115,7 @@ import { KnowledgeBasePage } from "./components/KnowledgeBasePage";
 import { McpServersPage } from "./components/McpServersPage";
 import { McpOverviewPage } from "./components/McpOverviewPage";
 import { McpMyConnectionsPage } from "./components/McpRuntimeSafety";
+import { GuardSecurityPage } from "./components/GuardSecurityPage";
 import { McpToolsPage } from "./components/McpToolsPage";
 import { McpChangesPage } from "./components/McpChangesPage";
 import type { McpNavTarget } from "./lib/mcp-control-plane";
@@ -142,7 +143,7 @@ interface DefinitionNode {
   sampleConfig: Record<string, unknown>;
 }
 
-type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
+type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection";
 
 interface NodeDrawerContext {
   title: string;
@@ -253,7 +254,7 @@ const statusColors: Record<string, string> = {
   waiting_approval: "#a154f2",
   canceled: "#8a5a44"
 };
-const auxiliaryHandles = new Set(["chat_model", "memory", "tool", "worker"]);
+const auxiliaryHandles = new Set(["chat_model", "memory", "tool", "worker", "guard", "protection"]);
 const chatModelNodeTypes: EditorNodeData["nodeType"][] = [
   "openai_chat_model",
   "anthropic_chat_model",
@@ -283,6 +284,26 @@ function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: A
       title: "Memory",
       description: "Choose memory storage for this AI Agent.",
       allowedTypes: ["local_memory"],
+      sourceNodeId,
+      sourceHandle
+    };
+  }
+
+  if (sourceHandle === "guard") {
+    return {
+      title: "Guard",
+      description: "Attach a Guard node to check this agent's prompts, tool calls, tool results and final answer.",
+      allowedTypes: ["guard"],
+      sourceNodeId,
+      sourceHandle
+    };
+  }
+
+  if (sourceHandle === "protection") {
+    return {
+      title: "Protection",
+      description: "Attach a protection provider for the sensitive data this guard finds.",
+      allowedTypes: ["guard_protection"],
       sourceNodeId,
       sourceHandle
     };
@@ -4281,7 +4302,9 @@ function StudioApp() {
         chat_model: chatModelNodeTypes,
         memory: "local_memory",
         tool: "mcp_tool",
-        worker: ["agent_orchestrator", "supervisor_node"]
+        worker: ["agent_orchestrator", "supervisor_node"],
+        guard: "guard",
+        protection: "guard_protection"
       };
       const expectedHandleByTargetType: Partial<Record<EditorNodeData["nodeType"], string>> = {
         llm_call: "chat_model",
@@ -4303,7 +4326,12 @@ function StudioApp() {
           sourceHandle = inferred;
         } else if (targetNode.data.nodeType === "agent_orchestrator" || targetNode.data.nodeType === "supervisor_node") {
           sourceHandle = "worker";
+        } else if (targetNode.data.nodeType === "guard") {
+          sourceHandle = "guard";
         }
+      }
+      if (sourceNode?.data.nodeType === "guard" && targetNode?.data.nodeType === "guard_protection" && (!sourceHandle || sourceHandle === "pass")) {
+        sourceHandle = "protection";
       }
 
       if ((targetNode?.data.nodeType === "agent_orchestrator" || targetNode?.data.nodeType === "supervisor_node") && sourceNode) {
@@ -4319,8 +4347,16 @@ function StudioApp() {
       const isAgentAttachmentHandle = auxiliaryHandles.has(sourceHandle);
 
       if (isAgentAttachmentHandle) {
-        if (sourceNode?.data.nodeType !== "agent_orchestrator" && sourceNode?.data.nodeType !== "supervisor_node") {
-          setError("chat_model/memory/tool/worker handles can only be used from an Agent Orchestrator or Supervisor node.");
+        const carrierOk =
+          sourceHandle === "protection"
+            ? sourceNode?.data.nodeType === "guard"
+            : sourceNode?.data.nodeType === "agent_orchestrator" || sourceNode?.data.nodeType === "supervisor_node";
+        if (!carrierOk) {
+          setError(
+            sourceHandle === "protection"
+              ? "The protection handle can only be used from a Guard node."
+              : "chat_model/memory/tool/worker/guard handles can only be used from an Agent Orchestrator or Supervisor node."
+          );
           return;
         }
 
@@ -5367,6 +5403,19 @@ function StudioApp() {
           {activeMode === "mcp" && <McpOverviewPage onNavigate={navigateMcp} />}
 
           {activeMode === "connections" && <McpMyConnectionsPage />}
+
+          {activeMode === "security" && authUser && (
+            <GuardSecurityPage
+              projects={projects}
+              workflows={workflowList}
+              activeProjectId={activeProjectId}
+              role={authUser.role}
+              onOpenRun={(executionId) => {
+                setActiveMode("executions");
+                if (!expandedExecutionIds.includes(executionId)) void toggleExecutionRow(executionId);
+              }}
+            />
+          )}
 
           {(activeMode === "mcp-servers" ||
             activeMode === "mcp-policies" ||

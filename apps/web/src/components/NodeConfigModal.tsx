@@ -10,6 +10,7 @@ import type {
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
+import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import {
   createSecret,
@@ -41,7 +42,7 @@ export interface NodeInputOption {
   label: string;
 }
 
-export type InspectorAttachmentHandle = "chat_model" | "memory" | "tool" | "worker";
+export type InspectorAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard";
 
 /** Last-run summary for the Trace tab. All fields optional; "No run yet" when nothing is set. */
 export interface NodeTrace {
@@ -60,6 +61,8 @@ export interface NodeSlots {
   memory: string[];
   tool: string[];
   worker: string[];
+  /** Phase 12.1 — the guard node on the agent's guard port (0..1). */
+  guard?: string[];
 }
 
 /** Lets the host ask the inspector to close without losing unsaved edits. */
@@ -124,7 +127,8 @@ const SLOT_DEFINITIONS: Array<{ handle: InspectorAttachmentHandle; label: string
   { handle: "chat_model", label: "Model", required: true },
   { handle: "memory", label: "Memory" },
   { handle: "tool", label: "Tools" },
-  { handle: "worker", label: "Workers" }
+  { handle: "worker", label: "Workers" },
+  { handle: "guard", label: "Guard" }
 ];
 
 function readStoredInspectorWidth(): number | null {
@@ -213,6 +217,10 @@ export function buildNodeSlots(
   for (const edge of edges) {
     if (edge.source !== nodeId) continue;
     const handle = edge.sourceHandle;
+    if (handle === "guard") {
+      (slots.guard ??= []).push(labelById.get(edge.target) ?? edge.target);
+      continue;
+    }
     if (handle !== "chat_model" && handle !== "memory" && handle !== "tool" && handle !== "worker") continue;
     slots[handle].push(labelById.get(edge.target) ?? edge.target);
   }
@@ -6219,6 +6227,17 @@ export function NodeInspector({
             )}
           </>
         );
+      case "guard":
+        return (
+          <GuardNodeFields
+            config={config}
+            setConfig={setConfig}
+            attachedAsPort={node.data.attachedAs === "guard"}
+            {...(workflowContext?.id ? { workflowId: workflowContext.id } : {})}
+          />
+        );
+      case "guard_protection":
+        return <GuardProtectionFields config={config} setConfig={setConfig} secrets={availableSecrets} />;
       case "human_approval":
         return (
           <>
@@ -8928,6 +8947,7 @@ export function NodeInspector({
         </div>
         {visibleSlots.map((slot) => {
           const attached = slots?.[slot.handle] ?? [];
+          const full = slot.handle === "guard" && attached.length > 0;
           return (
             <div key={slot.handle} className={`insp-slot ${slot.handle}`} data-testid={`insp-slot-${slot.handle}`}>
               <i aria-hidden="true" />
@@ -8946,7 +8966,7 @@ export function NodeInspector({
                   <span className="insp-slot-empty">{slot.required ? "required" : "none"}</span>
                 )}
               </span>
-              {onAttach ? (
+              {onAttach && !full ? (
                 <button
                   type="button"
                   className="insp-slot-add"
