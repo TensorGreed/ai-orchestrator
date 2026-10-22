@@ -28,6 +28,14 @@ import type {
   McpPlaygroundCallResponse
 } from "@ai-orchestrator/shared";
 import type {
+  ReplayGoldenBadge,
+  ReplayMcpMode,
+  ReplayRecordingDetail,
+  ReplayRecordingSummary,
+  ReplayRunRequest,
+  ReplayRunResponse
+} from "@ai-orchestrator/shared";
+import type {
   McpCassette,
   McpCassetteBadge,
   McpCassetteEntry,
@@ -931,6 +939,8 @@ export interface ExecutionHistorySummary {
   createdAt: string;
   /** Phase 10.8 — present when the run was recorded into a cassette. */
   mcpCassette?: McpCassetteBadge;
+  /** Phase 15.1 — present when the run was saved as one or more golden runs. */
+  goldenRuns?: ReplayGoldenBadge;
 }
 
 export interface ExecutionHistoryDetail extends ExecutionHistorySummary {
@@ -1023,6 +1033,33 @@ export function mcpCassetteExportUrl(id: string): string {
 
 export async function deleteMcpCassette(id: string) {
   return apiRequest<{ ok: boolean }>(`/api/mcp/cassettes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// Phase 15.1 — golden runs and replay.
+export type { ReplayGoldenBadge, ReplayMcpMode, ReplayRecordingDetail, ReplayRecordingSummary, ReplayRunRequest, ReplayRunResponse };
+
+export async function createReplayRecording(payload: { executionId: string; name: string; notes?: string }) {
+  return apiRequest<{ recording: ReplayRecordingSummary }>("/api/replay/recordings", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function fetchReplayRecordings(filter: { workflowId?: string; limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (filter.workflowId) params.set("workflowId", filter.workflowId);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{ items: ReplayRecordingSummary[]; total: number }>(`/api/replay/recordings${q}`);
+}
+
+export async function fetchReplayRecording(id: string) {
+  return apiRequest<{ recording: ReplayRecordingDetail }>(`/api/replay/recordings/${encodeURIComponent(id)}`);
+}
+
+export async function deleteReplayRecording(id: string) {
+  return apiRequest<{ deleted: boolean }>(`/api/replay/recordings/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function runReplay(id: string, payload: ReplayRunRequest = {}) {
+  return apiRequest<ReplayRunResponse>(`/api/replay/recordings/${encodeURIComponent(id)}/replay`, { method: "POST", body: JSON.stringify(payload) });
 }
 
 export async function replayExecution(id: string, payload: { mode?: McpReplayMode; cassetteId?: string } = {}) {
