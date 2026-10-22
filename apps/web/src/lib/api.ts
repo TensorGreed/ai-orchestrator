@@ -1,4 +1,7 @@
 import type {
+  AuditSigningKeysResponse,
+  AuditSigningKeyView,
+  RunManifestView,
   GuardBindingMode,
   GuardEventView,
   GuardProfileSummary,
@@ -3485,4 +3488,48 @@ export async function fetchGuardEvents(filter: GuardEventFilter = {}) {
 
 export async function fetchGuardStats(filter: GuardEventFilter = {}) {
   return apiRequest<{ since: string | null; stats: GuardStats }>(`/api/guard/stats${guardQuery(filter)}`);
+}
+
+// Phase 11.1 — signed run manifests, audit bundles and signing keys.
+
+export async function fetchExecutionManifest(executionId: string) {
+  return apiRequest<RunManifestView>(`/api/executions/${encodeURIComponent(executionId)}/manifest`);
+}
+
+export interface AuditBundleDownload {
+  blob: Blob;
+  fileName: string;
+  manifestDigest: string | null;
+  keyId: string | null;
+}
+
+/** Fetches the bundle as a blob so a refusal (in progress, too large, no access) can be shown inline. */
+export async function downloadAuditBundle(executionId: string): Promise<AuditBundleDownload> {
+  const response = await fetch(`${API_BASE}/api/executions/${encodeURIComponent(executionId)}/bundle`, { credentials: "include" });
+  if (!response.ok) {
+    let payload: Record<string, unknown> = {};
+    try {
+      const json: unknown = await response.json();
+      if (json && typeof json === "object") payload = json as Record<string, unknown>;
+    } catch {
+      payload = {};
+    }
+    throw new ApiError(String(payload.error ?? "Audit bundle export failed"), response.status, payload);
+  }
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return {
+    blob: await response.blob(),
+    fileName: match?.[1] ?? `l2m-audit-${executionId}.zip`,
+    manifestDigest: response.headers.get("x-l2m-manifest-digest"),
+    keyId: response.headers.get("x-l2m-signing-key-id")
+  };
+}
+
+export async function fetchAuditSigningKeys() {
+  return apiRequest<AuditSigningKeysResponse>("/api/audit/signing-keys");
+}
+
+export async function rotateAuditSigningKey() {
+  return apiRequest<{ key: AuditSigningKeyView; keys: AuditSigningKeysResponse }>("/api/audit/signing-keys/rotate", { method: "POST" });
 }
