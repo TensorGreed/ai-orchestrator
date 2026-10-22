@@ -16,6 +16,7 @@ import {
   withDelegatedUser
 } from "@ai-orchestrator/mcp-sdk";
 import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
+import { NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS } from "@ai-orchestrator/shared";
 import type {
   ChatMessage,
   ConnectorDocument,
@@ -32,6 +33,8 @@ import type {
   McpElicitationTraceEntry,
   McpListChangedEvent,
   McpSamplingTraceEntry,
+  NodeActivity,
+  NodeActivityEvent,
   NodeExecutionResult,
   SecretReference,
   Workflow,
@@ -191,6 +194,14 @@ export interface WorkflowExecutionDependencies {
    * an MCP Tool node or an agent's tool call runs.
    */
   onMcpProgress?: (event: McpToolProgressEvent & { nodeId: string }) => Promise<void> | void;
+  /**
+   * Step-by-step node activity (resolved inputs, model calls, retries, agent
+   * steps, tool calls). Called fire-and-forget: a slow or throwing consumer
+   * never delays or fails a node.
+   */
+  onNodeActivity?: (event: NodeActivityEvent) => Promise<void> | void;
+  /** Set by the engine for the duration of a run; not part of the caller contract. */
+  activityRecorder?: NodeActivityRecorder;
   /** Phase 10.5 — a `list_changed` notification from an upstream server; the API re-probes the registry entry. */
   onMcpListChanged?: (event: McpListChangedEvent & { nodeId: string }) => Promise<void> | void;
   /**
@@ -377,6 +388,77 @@ interface NodeMcpContext {
   samplingHandler: McpSamplingHandler;
 }
 
+/** Per-run store of node activity: numbers entries per node and keeps the last NODE_ACTIVITY_LIMIT. */
+export interface NodeActivityRecorder {
+  emit(nodeId: string, activity: NodeActivity, workerNodeId?: string): void;
+  snapshot(nodeId: string): NodeActivityEvent[];
+}
+
+const NOOP_ACTIVITY_RECORDER: NodeActivityRecorder = { emit: () => undefined, snapshot: () => [] };
+
+function createNodeActivityRecorder(onNodeActivity?: WorkflowExecutionDependencies["onNodeActivity"]): NodeActivityRecorder {
+  const buffers = new Map<string, NodeActivityEvent[]>();
+  const sequence = new Map<string, number>();
+  return {
+    emit(nodeId, activity, workerNodeId) {
+      const seq = sequence.get(nodeId) ?? 0;
+      sequence.set(nodeId, seq + 1);
+      const event = { ...activity, nodeId, at: nowIso(), seq, ...(workerNodeId ? { workerNodeId } : {}) } as NodeActivityEvent;
+      const buffer = buffers.get(nodeId) ?? [];
+      buffer.push(event);
+      if (buffer.length > NODE_ACTIVITY_LIMIT) buffer.shift();
+      buffers.set(nodeId, buffer);
+      if (!onNodeActivity) return;
+      try {
+        const pending = onNodeActivity(event);
+        if (pending && typeof (pending as Promise<void>).catch === "function") {
+          (pending as Promise<void>).catch(() => undefined);
+        }
+      } catch {
+        // Activity reporting never fails a node.
+      }
+    },
+    snapshot: (nodeId) => [...(buffers.get(nodeId) ?? [])]
+  };
+}
+
+/** Records activity for a node. Never throws. */
+function emitNodeActivity(
+  dependencies: Pick<WorkflowExecutionDependencies, "activityRecorder">,
+  nodeId: string,
+  activity: NodeActivity,
+  workerNodeId?: string
+): void {
+  try {
+    dependencies.activityRecorder?.emit(nodeId, activity, workerNodeId);
+  } catch {
+    // Activity reporting never fails a node.
+  }
+}
+
+/** Routes a worker's activity to its parent Supervisor, tagged with the worker's node id. */
+function workerActivityRecorder(parent: NodeActivityRecorder | undefined, parentNodeId: string): NodeActivityRecorder | undefined {
+  if (!parent) return undefined;
+  return {
+    emit: (nodeId, activity, workerNodeId) => parent.emit(parentNodeId, activity, workerNodeId ?? nodeId),
+    snapshot: () => []
+  };
+}
+
+function previewForActivity(value: string): string {
+  return value.length > NODE_ACTIVITY_PREVIEW_CHARS ? `${value.slice(0, NODE_ACTIVITY_PREVIEW_CHARS)}...` : value;
+}
+
+/** A URL with userinfo, query string and fragment removed, so it is safe to show. */
+function urlForActivity(raw: string): string {
+  try {
+    const parsed = new URL(raw);
+    return previewForActivity(`${parsed.protocol}//${parsed.host}${parsed.pathname}`);
+  } catch {
+    return previewForActivity(raw.replace(/[?#].*$/s, "").replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1"));
+  }
+}
+
 /**
  * Phase 10.5 — the MCP execution context for one agent or MCP Tool node: the
  * run's abort signal (adapters cancel in-flight calls with it), a progress
@@ -518,17 +600,32 @@ function executionTimeoutFields(timeoutMs: number, reason?: unknown, message?: s
  * that reports backoff waits to the run logger.
  */
 function providerCallContext(
-  dependencies: Pick<WorkflowExecutionDependencies, "resolveSecret" | "abortSignal" | "logger">,
+  dependencies: Pick<WorkflowExecutionDependencies, "resolveSecret" | "abortSignal" | "logger" | "activityRecorder">,
   nodeId?: string
 ): ProviderExecutionContext {
   const logger = dependencies.logger;
   return {
     resolveSecret: dependencies.resolveSecret,
     ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
-    ...(logger
+    ...(logger || (nodeId && dependencies.activityRecorder)
       ? {
           onRetry: (info: ResilientFetchRetryInfo) => {
-            logger("LLM provider request is being retried", { ...(nodeId ? { nodeId } : {}), ...info });
+            logger?.("LLM provider request is being retried", { ...(nodeId ? { nodeId } : {}), ...info });
+            if (nodeId) {
+              emitNodeActivity(dependencies, nodeId, {
+                kind: "retry",
+                scope: "provider",
+                attempt: info.attempt,
+                maxAttempts: info.maxRetries + 1,
+                delayMs: info.delayMs,
+                reason:
+                  info.reason === "status"
+                    ? `HTTP ${info.status ?? "error"} from ${info.provider}`
+                    : info.reason === "timeout"
+                      ? `${info.provider} request timed out`
+                      : `${info.provider} network error`
+              });
+            }
           }
         }
       : {})
@@ -2450,6 +2547,48 @@ async function runLlmNode(input: {
   messages.push({ role: "user", content: input.userPrompt });
 
   const providerAdapter = input.dependencies.providerRegistry.get(input.provider.providerId);
+  const llmIdentity = { providerId: String(input.provider.providerId), model: input.provider.model };
+  emitNodeActivity(input.dependencies, input.nodeId, {
+    kind: "resolved_input",
+    fields: {
+      ...llmIdentity,
+      systemPrompt: previewForActivity(input.systemPrompt),
+      userPrompt: previewForActivity(input.userPrompt)
+    }
+  });
+  emitNodeActivity(input.dependencies, input.nodeId, { kind: "llm_call", phase: "start", ...llmIdentity });
+  const llmStartedMs = Date.now();
+  try {
+    const output = await runLlmCall(input, providerAdapter, messages);
+    const latency = (output._telemetry as { latencyMs?: unknown } | undefined)?.latencyMs;
+    emitNodeActivity(input.dependencies, input.nodeId, {
+      kind: "llm_call",
+      phase: "end",
+      ...llmIdentity,
+      latencyMs: typeof latency === "number" ? latency : Math.max(0, Date.now() - llmStartedMs)
+    });
+    return output;
+  } catch (error) {
+    emitNodeActivity(input.dependencies, input.nodeId, {
+      kind: "llm_call",
+      phase: "end",
+      ...llmIdentity,
+      latencyMs: Math.max(0, Date.now() - llmStartedMs),
+      error: previewForActivity((error instanceof Error ? error.message : String(error)).slice(0, 200))
+    });
+    throw error;
+  }
+}
+
+async function runLlmCall(
+  input: {
+    nodeId: string;
+    provider: LLMProviderConfig;
+    dependencies: WorkflowExecutionDependencies;
+  },
+  providerAdapter: ReturnType<ProviderRegistry["get"]>,
+  messages: Array<{ role: "system" | "user"; content: string }>
+): Promise<Record<string, unknown>> {
   if (input.dependencies.onLLMDelta && providerAdapter.generateStream) {
     let streamedText = "";
     const toolCallById = new Map<string, { id: string; name: string; argumentsText: string }>();
@@ -2803,6 +2942,11 @@ async function executeNode(
       if (!renderedUrl) {
         throw new Error("HTTP Request node requires a non-empty rendered URL.");
       }
+
+      emitNodeActivity(dependencies, node.id, {
+        kind: "resolved_input",
+        fields: { method: safeMethod, url: urlForActivity(renderedUrl) }
+      });
 
       const headersTemplate = typeof config.headersTemplate === "string" ? config.headersTemplate : "{}";
       const renderedHeaders = renderTemplate(headersTemplate, templateData);
@@ -4486,6 +4630,14 @@ async function executeNode(
         dependencies,
         context.toolPolicySubject
       );
+      emitNodeActivity(dependencies, node.id, {
+        kind: "resolved_input",
+        fields: {
+          serverId: serverConfig.registryServerId ?? serverConfig.serverId,
+          toolName,
+          ...(operation === "call_tool" ? { argsPreview: previewForActivity(JSON.stringify(args) ?? "") } : {})
+        }
+      });
 
       // Phase 10.2 — policy first (no server call needed), then the
       // workflow's "no write tools" switch, which may need the tool's
@@ -4897,6 +5049,18 @@ async function executeNode(
             : undefined;
         let workerPendingApproval: ApprovalHandoffRequest | undefined;
 
+        emitNodeActivity(dependencies, node.id, {
+          kind: "resolved_input",
+          fields: {
+            providerId: String(provider.providerId),
+            model: provider.model,
+            systemPrompt: previewForActivity(systemPrompt),
+            userPrompt: previewForActivity(userPrompt),
+            tools: allToolsForModel.map((tool) => tool.name),
+            maxIterations,
+            ...(node.type === "supervisor_node" ? { workers: attachedWorkerNodes.map((worker) => worker.id) } : {})
+          }
+        });
         const agentProviderRetry = providerCallContext(dependencies, node.id).onRetry;
         const modelRunStarted = Date.now();
         const modelRunStartedAt = nowIso();
@@ -4939,7 +5103,10 @@ async function executeNode(
                 
                   // Phase 12.1 — the worker runs its own guard; a pause there pauses this agent too.
                   try {
-                    const workerResult = await executeNode(workerNode, workerContext, dependencies);
+                    const workerResult = await executeNode(workerNode, workerContext, {
+                      ...dependencies,
+                      activityRecorder: workerActivityRecorder(dependencies.activityRecorder, node.id)
+                    });
                     return workerResult;
                   } catch (error) {
                     if (isApprovalHandoffSignal(error)) {
@@ -4962,7 +5129,8 @@ async function executeNode(
             toolDataStore: dependencies.toolDataStore,
             ...(guardSession ? { guard: guardSession.hooks } : {}),
             ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
-            ...(agentProviderRetry ? { onProviderRetry: agentProviderRetry } : {})
+            ...(agentProviderRetry ? { onProviderRetry: agentProviderRetry } : {}),
+            ...(dependencies.activityRecorder ? { onEvent: (event) => emitNodeActivity(dependencies, node.id, event) } : {})
           }
         );
         } catch (error) {
@@ -5861,6 +6029,14 @@ async function executeNodeWithRetry(
       }
       if (attempt < retry.maxAttempts) {
         const delay = retry.delayMs * Math.pow(retry.backoffMultiplier, attempt - 1);
+        emitNodeActivity(dependencies, node.id, {
+          kind: "retry",
+          scope: "node",
+          attempt,
+          maxAttempts: retry.maxAttempts,
+          delayMs: delay,
+          reason: previewForActivity(lastError.message.slice(0, 200))
+        });
         await sleep(delay, dependencies.abortSignal);
       }
     }
@@ -5982,6 +6158,23 @@ function appendCanceledRemainder(nodeOrder: string[], startIndex: number, nodeRe
 }
 
 export async function executeWorkflow(
+  request: ExecuteWorkflowRequest,
+  dependencies: WorkflowExecutionDependencies
+): Promise<WorkflowExecutionResult> {
+  // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
+  if (dependencies.activityRecorder) {
+    return executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined });
+  }
+  const recorder = createNodeActivityRecorder(dependencies.onNodeActivity);
+  const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
+  for (const nodeResult of result.nodeResults) {
+    const activity = recorder.snapshot(nodeResult.nodeId);
+    if (activity.length > 0) nodeResult.activity = activity;
+  }
+  return result;
+}
+
+async function executeWorkflowRun(
   request: ExecuteWorkflowRequest,
   dependencies: WorkflowExecutionDependencies
 ): Promise<WorkflowExecutionResult> {
