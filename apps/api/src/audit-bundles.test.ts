@@ -505,6 +505,142 @@ describe("secrets stay out", () => {
   });
 });
 
+describe("secret scrubbing in bundles", () => {
+  const b64 = (data: string | Buffer) => Buffer.from(data).toString("base64");
+  const escaped = (value: string) => JSON.stringify(value).slice(1, -1);
+  const PNG_HEADER = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+
+  it("scrubs secrets that need JSON escaping, every secret the deployment holds, text outputs, and leaves out binary outputs that carry one", async () => {
+    const ENV_KEY = "sk-env-OPENAI-key-0011223344";
+    const context = await createTestContext({ OPENAI_API_KEY: ENV_KEY });
+    const admin = await login(context, "admin");
+    const tricky = {
+      quote: 'pa"ss\\word-12"34',
+      pem: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nabcdefXYZ0123456789\n-----END PRIVATE KEY-----\n",
+      unicode: "clé-sécrète-日本-🚀-x",
+      control: "tab\there-ctl\u0007-99"
+    };
+    for (const [name, value] of Object.entries(tricky)) {
+      expect((await call(context, "POST", "/api/secrets", admin.cookie, { name, provider: "generic", value })).statusCode).toBe(200);
+    }
+    // Not referenced by any workflow: a secret of another project and an MCP OAuth token set.
+    const OTHER_PROJECT = "other-project-secret-value-77";
+    context.secretService.createSecret({ name: "elsewhere", provider: "generic", value: OTHER_PROJECT, projectId: "elsewhere" });
+    const OAUTH_TOKEN = "oauth-access-TOKEN-1234567890";
+    context.secretService.createSecret({ name: "oauth", provider: "mcp_oauth", value: JSON.stringify({ access_token: OAUTH_TOKEN, token_type: "Bearer" }) });
+    // Too short to scrub without mangling unrelated text.
+    context.secretService.createSecret({ name: "short", provider: "generic", value: "ab12z" });
+
+    const secrets = [...Object.values(tricky), OTHER_PROJECT, OAUTH_TOKEN, ENV_KEY];
+    const now = new Date().toISOString();
+    context.store.saveExecutionHistory({
+      id: "exec-scrub",
+      workflowId: "wf-scrub-gone",
+      status: "success",
+      startedAt: now,
+      completedAt: now,
+      outputJson: { answer: `env ${ENV_KEY}` },
+      nodeResultsJson: [
+        {
+          nodeId: "render",
+          status: "success",
+          startedAt: now,
+          completedAt: now,
+          output: {
+            text: `all: ${secrets.join(" | ")} and ab12z`,
+            [`key ${tricky.quote}`]: "secret in a key",
+            report: { filename: "report.txt", dataUrl: `data:text/plain;base64,${b64(`report ${tricky.pem} ${tricky.unicode}`)}` },
+            table: { filename: "table.csv", dataUrl: `data:text/csv;base64,${b64(`a,b\n${OTHER_PROJECT},2\n`)}` },
+            chart: { filename: "chart.png", dataUrl: `data:image/png;base64,${b64(Buffer.concat([PNG_HEADER, Buffer.from(ENV_KEY)]))}` },
+            wide: { filename: "wide.png", dataUrl: `data:image/png;base64,${b64(Buffer.concat([PNG_HEADER, Buffer.from(OAUTH_TOKEN, "utf16le")]))}` },
+            clean: { filename: "clean.png", dataUrl: `data:image/png;base64,${b64(Buffer.concat([PNG_HEADER, Buffer.from("nothing to hide")]))}` }
+          },
+          activity: [{ at: now, message: `called with ${tricky.quote} and ${tricky.control}` }],
+          warnings: [`careful: ${tricky.pem}`]
+        },
+        { nodeId: "fail", status: "error", startedAt: now, completedAt: now, error: `boom ${tricky.unicode} ${OAUTH_TOKEN}` }
+      ]
+    });
+
+    const manifest = await call(context, "GET", "/api/executions/exec-scrub/manifest", admin.cookie);
+    expect(manifest.statusCode).toBe(200);
+    const bundle = await call(context, "GET", "/api/executions/exec-scrub/bundle", admin.cookie);
+    expect(bundle.statusCode).toBe(200);
+    const files = unzip(bundle.rawPayload);
+    for (const [name, data] of files) {
+      for (const secret of secrets) {
+        expect(data.includes(Buffer.from(secret)), `${name} has a raw secret`).toBe(false);
+        expect(data.includes(Buffer.from(escaped(secret))), `${name} has an escaped secret`).toBe(false);
+        expect(data.includes(Buffer.from(secret, "utf16le")), `${name} has a UTF-16 secret`).toBe(false);
+      }
+    }
+    expect(manifest.body.includes(OTHER_PROJECT) || manifest.body.includes(ENV_KEY)).toBe(false);
+
+    // Node file: secrets replaced, short values kept, text data URLs scrubbed inside their base64, binary ones replaced.
+    const nodeFile = JSON.parse(files.get("execution/nodes/001-render.json")!.toString("utf8")) as { output: Record<string, unknown> };
+    expect(String(nodeFile.output.text)).toContain("[REDACTED]");
+    expect(String(nodeFile.output.text)).toContain("ab12z");
+    expect(Object.keys(nodeFile.output)).toContain("key [REDACTED]");
+    const report = nodeFile.output.report as { dataUrl: string };
+    const decoded = Buffer.from(report.dataUrl.split(",")[1]!, "base64").toString("utf8");
+    expect(decoded).toBe("report [REDACTED] [REDACTED]");
+    expect((nodeFile.output.chart as { dataUrl: string }).dataUrl).toBe("[REDACTED]");
+    expect((nodeFile.output.clean as { dataUrl: string }).dataUrl.startsWith("data:image/png;base64,")).toBe(true);
+
+    // Outputs: text scrubbed, binary with a secret left out, clean binary kept.
+    const names = [...files.keys()];
+    const reportFile = names.find((name) => /^outputs\/render\/\d{2}-report\.txt$/.test(name))!;
+    expect(files.get(reportFile)!.toString("utf8")).toBe("report [REDACTED] [REDACTED]");
+    expect(names.find((name) => name.endsWith("-table.csv"))).toBeTruthy();
+    expect(names.some((name) => name.endsWith("-chart.png"))).toBe(false);
+    expect(names.some((name) => name.endsWith("-wide.png"))).toBe(false);
+    expect(names.some((name) => name.endsWith("-clean.png"))).toBe(true);
+    const redactions = JSON.parse(files.get("redactions.json")!.toString("utf8")) as {
+      format: string;
+      omitted: Array<{ path: string; reason: string }>;
+      scrubbed: Array<{ path: string }>;
+    };
+    expect(redactions.format).toBe("l2m.audit-bundle-redactions");
+    expect(redactions.omitted.map((entry) => entry.path).sort()).toEqual([
+      expect.stringMatching(/^outputs\/render\/\d{2}-chart\.png$/),
+      expect.stringMatching(/^outputs\/render\/\d{2}-wide\.png$/)
+    ]);
+    expect(redactions.omitted[0]!.reason).toContain("image/png");
+    expect(redactions.scrubbed.map((entry) => entry.path)).toEqual(
+      expect.arrayContaining(["execution/nodes/001-render.json", "execution/nodes/002-fail.json", "execution/run.json", "execution/logs.jsonl", reportFile])
+    );
+    const logs = files.get("execution/logs.jsonl")!.toString("utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(logs.some((line) => line.source === "node_activity" && line.message === "called with [REDACTED] and [REDACTED]")).toBe(true);
+
+    // The signed index covers redactions.json, and the bundle still verifies.
+    const keys = (await call(context, "GET", "/api/audit/signing-keys", admin.cookie)).json<AuditSigningKeysResponse>();
+    expect(verifyBundle(bundle.rawPayload, keys.keys[0]!.publicKey)).toBe(true);
+    const signature = auditBundleSignatureSchema.parse(JSON.parse(files.get("signature.json")!.toString("utf8")));
+    expect(signature.index.files.some((entry) => entry.path === "redactions.json")).toBe(true);
+  });
+});
+
+describe("SecretService.valuesForScrubbing", () => {
+  it("covers local, internal and cached external secrets, and credential fields of JSON values, without fetching anything", async () => {
+    const context = await createTestContext();
+    const service = context.secretService;
+    service.createSecret({ name: "local", provider: "generic", value: "local-value-123456", projectId: "any-project" });
+    service.createSecret({
+      name: "bundle",
+      provider: "mcp_oauth",
+      value: JSON.stringify({ headers: { Authorization: "Bearer bundle-bearer-token-42" }, token_type: "Bearer", scope: "read" })
+    });
+    const external = service.createExternalSecret({ name: "vault", provider: "generic", externalProviderId: "missing-provider", externalKey: "path/to/key" });
+    const encrypt = (service as unknown as { encrypt: (value: string) => { iv: string; authTag: string; ciphertext: string } }).encrypt.bind(service);
+    context.store.upsertExternalSecretCacheEntry({ secretId: external.secretId, ...encrypt("external-cached-value-99"), expiresAt: new Date(Date.now() - 1000).toISOString() });
+    const values = service.valuesForScrubbing();
+    expect(values).toEqual(expect.arrayContaining(["local-value-123456", "Bearer bundle-bearer-token-42", "bundle-bearer-token-42", "external-cached-value-99"]));
+    expect(values).not.toContain("__external__");
+    expect(values).not.toContain("read");
+    expect(values).not.toContain("Bearer");
+  });
+});
+
 describe("audit bundle export", () => {
   it("exports a signed zip that verifies offline and is audit-logged", async () => {
     const context = await createTestContext();
@@ -589,16 +725,92 @@ describe("audit bundle export", () => {
     expect((await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).statusCode).toBe(200);
   });
 
-  it("prunes cached manifests with the audit-log retention", async () => {
+  it("prunes a cached manifest only when it is past the audit-log retention and its execution history is gone", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
     const { executionId } = await runAuditedWorkflow(context, admin.cookie);
-    await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie);
+    const first = (await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).json<RunManifestView>();
     expect(context.store.getExecutionManifest(executionId)?.manifestJson).toBeTruthy();
-    context.store.pruneAuditLogs({ before: new Date(Date.now() - 86_400_000).toISOString() });
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const past = new Date(Date.now() - 86_400_000).toISOString();
+
+    // Past the retention, but the history is kept: the manifest stays and is served unchanged, never regenerated.
+    context.store.pruneAuditLogs({ before: future });
     expect(context.store.getExecutionManifest(executionId)?.manifestJson).toBeTruthy();
-    context.store.pruneAuditLogs({ before: new Date(Date.now() + 60_000).toISOString() });
+    const again = (await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).json<RunManifestView>();
+    expect(again).toEqual(first);
+
+    // History gone, manifest still inside the retention: kept.
+    context.store.pruneExecutionHistory({ before: future });
+    expect(context.store.getExecutionHistory(executionId)).toBeNull();
+    context.store.pruneAuditLogs({ before: past });
+    expect(context.store.getExecutionManifest(executionId)?.manifestJson).toBeTruthy();
+
+    // Both: pruned.
+    context.store.pruneAuditLogs({ before: future });
     expect(context.store.getExecutionManifest(executionId)).toBeNull();
+    expect((await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie)).statusCode).toBe(404);
+  });
+
+  it("puts only this execution's audit rows in logs.jsonl, with actor emails for admins only", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const viewer = await login(context, "viewer");
+    const { executionId } = await runAuditedWorkflow(context, admin.cookie);
+    // A row that merely mentions the id deeper in its metadata is not about this execution.
+    context.store.writeAuditLog({
+      id: "unrelated-row",
+      eventType: "other.event",
+      category: "system",
+      action: "other",
+      outcome: "success",
+      actorEmail: "someone@example.com",
+      metadata: { parent: { executionId } }
+    });
+    expect((await call(context, "GET", `/api/executions/${executionId}/bundle`, admin.cookie)).statusCode).toBe(200);
+    const auditLines = (bytes: Buffer) =>
+      unzip(bytes)
+        .get("execution/logs.jsonl")!
+        .toString("utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line.source === "audit_log");
+
+    const forViewer = auditLines((await call(context, "GET", `/api/executions/${executionId}/bundle`, viewer.cookie)).rawPayload);
+    expect(forViewer.length).toBeGreaterThan(0);
+    expect(forViewer.some((line) => line.eventType === "other.event")).toBe(false);
+    for (const line of forViewer) expect(line).not.toHaveProperty("actorEmail");
+    expect(forViewer.find((line) => line.eventType === "execution.audit_bundle.export")).toMatchObject({ actorUserId: admin.id, actorRole: "admin" });
+
+    const forAdmin = auditLines((await call(context, "GET", `/api/executions/${executionId}/bundle`, admin.cookie)).rawPayload);
+    expect(forAdmin.some((line) => line.eventType === "other.event")).toBe(false);
+    expect(forAdmin.find((line) => line.actorUserId === viewer.id)).toMatchObject({ actorEmail: "viewer@example.com", actorRole: "viewer" });
+  });
+});
+
+describe("internal secret providers", () => {
+  it("cannot be created through the API, and their share routes answer like a missing secret", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const created = await call(context, "POST", "/api/secrets", admin.cookie, { name: "sneaky", provider: "audit_signing", value: "x".repeat(32) });
+    expect(created.statusCode).toBe(400);
+    expect(created.body).not.toContain("internal");
+    expect((await call(context, "POST", "/api/secrets", admin.cookie, { name: "oauth", provider: "mcp_oauth", value: "token-value" })).statusCode).toBe(400);
+
+    await call(context, "GET", "/api/audit/signing-keys", admin.cookie);
+    const internalId = context.store.listAuditSigningKeys()[0]!.secretId!;
+    for (const id of [internalId, "sec_does_not_exist"]) {
+      const list = await call(context, "GET", `/api/secrets/${id}/shares`, admin.cookie);
+      const share = await call(context, "POST", `/api/secrets/${id}/shares`, admin.cookie, { projectId: "default" });
+      const unshare = await call(context, "DELETE", `/api/secrets/${id}/shares/default`, admin.cookie);
+      expect([list.statusCode, share.statusCode, unshare.statusCode]).toEqual([404, 404, 404]);
+      expect(list.json()).toEqual({ error: "Secret not found" });
+      expect(share.json()).toEqual({ error: "Secret not found" });
+    }
+    // Ordinary secrets still share.
+    const ordinary = (await call(context, "POST", "/api/secrets", admin.cookie, { name: "ok", provider: "generic", value: "ordinary-value" })).json<{ id: string }>();
+    expect((await call(context, "GET", `/api/secrets/${ordinary.id}/shares`, admin.cookie)).statusCode).toBe(200);
   });
 });
 

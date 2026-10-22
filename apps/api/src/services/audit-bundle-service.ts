@@ -9,14 +9,17 @@
  * cached in `execution_manifests`, so it never changes afterwards.
  *
  * Secrets: node configurations keep `secretRef.secretId` only, secret-looking
- * literals are replaced with `[REDACTED]`, and as a last line of defence the
- * values of the local secrets the workflow references are scrubbed from the
- * manifest and from every text file of the bundle. Values are only held in
+ * literals are replaced with `[REDACTED]`, and as a last line of defence every
+ * secret value the deployment holds (see `SecretService.valuesForScrubbing`
+ * and the provider keys from the environment) is scrubbed from the manifest,
+ * every JSON and log file, and every text output; binary outputs that carry
+ * one are left out and listed in `redactions.json`. Values are only held in
  * memory while scrubbing; they are never logged or returned.
  */
 
 import crypto from "node:crypto";
-import { deflateRawSync } from "node:zlib";
+import { promisify } from "node:util";
+import { deflateRaw, deflateRawSync } from "node:zlib";
 import {
   AUDIT_BUNDLE_MANIFEST_PATH,
   AUDIT_BUNDLE_README_PATH,
@@ -27,6 +30,7 @@ import {
   auditBundleSignedBytes,
   canonicalJson,
   prepareZip,
+  zipCollisionKey,
   RUN_MANIFEST_FORMAT,
   RUN_MANIFEST_VERSION,
   runManifestAttestationBytes,
@@ -52,9 +56,15 @@ import { parseMcpRuntimeRejection } from "@ai-orchestrator/mcp-sdk";
 import type { ExecutionManifestRecord, McpServerRecord, SqliteStore } from "../db/database.js";
 import type { AuditSigningService } from "./audit-signing-service.js";
 import { findCatalogEntryForCommand, packageSpecOf } from "./mcp-catalog.js";
+import { REDACTED, SecretScrubber } from "./audit-scrub.js";
 import type { SecretService } from "./secret-service.js";
 
-export const REDACTED = "[REDACTED]";
+export { REDACTED };
+
+const deflateRawAsync = promisify(deflateRaw);
+/** Moderate compression: level 9 costs much more CPU for little gain on JSON. */
+const DEFLATE_LEVEL = 6;
+export const AUDIT_BUNDLE_REDACTIONS_PATH = "redactions.json";
 
 /** Statuses of a run that has not finished; no manifest is generated for them. */
 const IN_PROGRESS_STATUSES = new Set(["running", "pending", "queued", "waiting_approval"]);
@@ -105,6 +115,8 @@ export interface AuditBundleServiceOptions {
   priceTurn: (providerId: string, model: string, inputTokens: number, outputTokens: number, cachedInputTokens: number) => number | null;
   catalogEntries: () => McpCatalogEntry[];
   maxBundleBytes: number;
+  /** Secret values that live outside the secret store: provider API keys and other credentials from the environment. */
+  environmentSecretValues?: () => string[];
   logger?: { warn: (message: string, fields?: Record<string, unknown>) => void };
   now?: () => Date;
 }
@@ -181,7 +193,7 @@ export function sanitizeConfig(value: unknown, depth = 0): unknown {
     if (typeof value === "string" && /^[a-z][a-z0-9+.-]*:\/\/[^/\s]*@/i.test(value)) return sanitizeUrl(value) ?? REDACTED;
     return value;
   }
-  const out: JsonRecord = {};
+  const out = Object.create(null) as JsonRecord;
   for (const [key, inner] of Object.entries(record)) {
     if ((key === "secretId" || key.endsWith("SecretId")) && typeof inner === "string") {
       out[key] = inner;
@@ -194,39 +206,6 @@ export function sanitizeConfig(value: unknown, depth = 0): unknown {
       out[key] = sanitizeConfig(inner, depth + 1);
     }
   }
-  return out;
-}
-
-/** Every `secretId` a value references (secretRef objects, registry entries, key ids). */
-function collectSecretIds(value: unknown, into: Set<string>, depth = 0): void {
-  if (depth > 32) return;
-  if (Array.isArray(value)) {
-    for (const entry of value) collectSecretIds(entry, into, depth + 1);
-    return;
-  }
-  const record = asRecord(value);
-  if (!record) return;
-  for (const [key, inner] of Object.entries(record)) {
-    if ((key === "secretId" || key === "credentialsSecretId" || key === "keySecretId") && typeof inner === "string") into.add(inner);
-    else collectSecretIds(inner, into, depth + 1);
-  }
-}
-
-function scrubString(text: string, values: string[]): string {
-  let out = text;
-  for (const value of values) if (out.includes(value)) out = out.split(value).join(REDACTED);
-  return out;
-}
-
-function scrubValue(value: unknown, values: string[], depth = 0): unknown {
-  if (values.length === 0) return value;
-  if (typeof value === "string") return scrubString(value, values);
-  if (depth > 64) return value;
-  if (Array.isArray(value)) return value.map((entry) => scrubValue(entry, values, depth + 1));
-  const record = asRecord(value);
-  if (!record) return value;
-  const out: JsonRecord = {};
-  for (const [key, inner] of Object.entries(record)) out[scrubString(key, values)] = scrubValue(inner, values, depth + 1);
   return out;
 }
 
@@ -376,27 +355,26 @@ export class AuditBundleService {
     return history;
   }
 
-  /** Values of the local secrets this run's workflow and servers reference, longest first. */
-  private async knownSecretValues(workflow: unknown, servers: RunManifestMcpServer[]): Promise<string[]> {
-    const ids = new Set<string>();
-    collectSecretIds(workflow, ids);
-    for (const server of servers) {
-      const record = this.options.store.getMcpServer(server.registryServerId);
-      if (record?.secretId) ids.add(record.secretId);
+  /**
+   * Every secret value the run could have used: all secrets in the secret
+   * store (local values of every project, since a node can reference any
+   * secret id; internal secrets such as MCP OAuth tokens; locally cached
+   * values of external secrets, never fetched for this) and the credentials
+   * L2M reads from its environment (provider API keys and similar).
+   */
+  private scrubber(): SecretScrubber {
+    const values: string[] = [];
+    try {
+      values.push(...this.options.secrets.valuesForScrubbing());
+    } catch {
+      // The secret store is unreadable: nothing from it can be scrubbed, or have been used.
     }
-    const values = new Set<string>();
-    for (const id of ids) {
-      const row = this.options.store.getSecret(id);
-      // External secrets are not fetched for this: an export must not reach out to a secrets manager.
-      if (!row || row.source !== "local") continue;
-      try {
-        const value = await this.options.secrets.resolveSecret({ secretId: id });
-        if (value && value.length >= 4) values.add(value);
-      } catch {
-        // An unreadable secret cannot appear in the run's output either.
-      }
+    try {
+      values.push(...(this.options.environmentSecretValues?.() ?? []));
+    } catch {
+      // No environment values.
     }
-    return [...values].sort((a, b) => b.length - a.length);
+    return new SecretScrubber(values);
   }
 
   /** The cached manifest, generated and signed on first request after the run finished. */
@@ -424,8 +402,7 @@ export class AuditBundleService {
   private async generate(history: HistoryRecord, existing: ExecutionManifestRecord | null): Promise<ExecutionManifestRecord> {
     const context = this.readRunContext(existing);
     const manifest = this.buildManifest(history, context);
-    const secretValues = await this.knownSecretValues(context?.workflow ?? this.options.store.getWorkflow(history.workflowId), manifest.mcpServers);
-    const scrubbed = scrubValue(manifest, secretValues);
+    const scrubbed = this.scrubber().tree(manifest);
     const parsed = runManifestSchema.safeParse(scrubbed);
     if (!parsed.success) {
       this.options.logger?.warn("Generated run manifest failed validation", { executionId: history.id, issues: parsed.error.issues.length });
@@ -780,8 +757,14 @@ export class AuditBundleService {
   // Bundle
   // -------------------------------------------------------------------------
 
-  /** Builds and signs the bundle; refuses runs in progress and bundles over the size limit. */
-  async prepareBundle(executionId: string): Promise<PreparedAuditBundle> {
+  /**
+   * Builds and signs the bundle; refuses runs in progress and bundles over
+   * the size limit. The limit is enforced while the files are assembled
+   * (uncompressed bytes), before any compression work, and again on the
+   * final archive. `includeActorEmails` is for admins: other exporters get
+   * audit-log rows with the actor's user id and role only.
+   */
+  async prepareBundle(executionId: string, options: { includeActorEmails?: boolean } = {}): Promise<PreparedAuditBundle> {
     const view = await this.getManifest(executionId);
     const history = this.requireFinished(executionId);
     const record = this.options.store.getExecutionManifest(executionId);
@@ -790,48 +773,83 @@ export class AuditBundleService {
       const current = this.options.store.getWorkflow(history.workflowId);
       return current ? workflowForHash(current) : null;
     })();
-    const secretValues = await this.knownSecretValues(workflow, view.manifest.mcpServers);
+    const scrubber = this.scrubber();
     const encoder = new TextEncoder();
-    const textFile = (path: string, value: unknown): { path: string; data: Uint8Array } => ({ path, data: encoder.encode(scrubString(new TextDecoder().decode(pretty(value)), secretValues)) });
-
+    const maxBytes = this.options.maxBundleBytes;
     const files: Array<{ path: string; data: Uint8Array }> = [];
+    const usedNames = new Set<string>();
+    const redactions: { scrubbed: Array<{ path: string; reason: string }>; omitted: Array<{ path: string; reason: string }> } = { scrubbed: [], omitted: [] };
+    let rawBytes = 0;
+    const add = (path: string, data: Uint8Array) => {
+      rawBytes += data.length;
+      if (rawBytes > maxBytes) throw new AuditBundleError(this.tooLargeMessage(rawBytes, true), "too_large");
+      usedNames.add(zipCollisionKey(path));
+      files.push({ path, data });
+    };
+    const noteScrubbed = (path: string) => {
+      if (scrubber.hits > 0) redactions.scrubbed.push({ path, reason: "secret value replaced with [REDACTED]" });
+    };
+    /** JSON file: scrubbed as a value tree, then its text again for escaped forms. */
+    const textFile = (path: string, value: unknown) => {
+      scrubber.resetHits();
+      const data = encoder.encode(scrubber.text(new TextDecoder().decode(pretty(scrubber.tree(value)))));
+      noteScrubbed(path);
+      add(path, data);
+    };
+
     const manifestBytes = encoder.encode(record!.manifestJson!);
     if (sha256Hex(manifestBytes) !== view.digest) throw new AuditBundleError("The cached manifest does not match its digest", "invalid");
+    add(AUDIT_BUNDLE_MANIFEST_PATH, manifestBytes);
 
-    if (workflow) files.push(textFile("workflow.json", workflow));
+    if (workflow) textFile("workflow.json", workflow);
     const { nodeResults, ...run } = history;
-    files.push(textFile("execution/run.json", run));
+    textFile("execution/run.json", run);
     const results = (Array.isArray(nodeResults) ? nodeResults : []).map(asRecord).filter((entry): entry is JsonRecord => Boolean(entry));
     results.forEach((result, index) => {
-      files.push(textFile(`execution/nodes/${String(index + 1).padStart(3, "0")}-${safeSegment(String(result.nodeId ?? "node"))}.json`, result));
+      textFile(`execution/nodes/${String(index + 1).padStart(3, "0")}-${safeSegment(String(result.nodeId ?? "node"))}.json`, result);
     });
-    files.push(
-      textFile("execution/trace.json", {
-        executionId,
-        nodes: results.map((result) => ({
-          nodeId: result.nodeId,
-          status: result.status,
-          startedAt: result.startedAt ?? null,
-          completedAt: result.completedAt ?? null,
-          durationMs: result.durationMs ?? null,
-          attempts: result.attempts ?? null,
-          errorCategory: result.errorCategory ?? null
-        })),
-        mcpToolCalls: this.options.store.listMcpToolCallsForExecution(executionId),
-        guardEvents: this.options.store.listGuardEventsForExecution(executionId)
-      })
-    );
+    textFile("execution/trace.json", {
+      executionId,
+      nodes: results.map((result) => ({
+        nodeId: result.nodeId,
+        status: result.status,
+        startedAt: result.startedAt ?? null,
+        completedAt: result.completedAt ?? null,
+        durationMs: result.durationMs ?? null,
+        attempts: result.attempts ?? null,
+        errorCategory: result.errorCategory ?? null
+      })),
+      mcpToolCalls: this.options.store.listMcpToolCallsForExecution(executionId),
+      guardEvents: this.options.store.listGuardEventsForExecution(executionId)
+    });
+
+    // Logs: each line is scrubbed as a value before it is serialised, then as text.
+    scrubber.resetHits();
     const logLines: string[] = [];
+    const logLine = (value: unknown) => logLines.push(scrubber.text(JSON.stringify(scrubber.tree(value))));
     for (const result of results) {
-      for (const activity of Array.isArray(result.activity) ? result.activity : []) logLines.push(JSON.stringify({ source: "node_activity", ...asRecord(activity) }));
-      if (typeof result.error === "string") logLines.push(JSON.stringify({ source: "node_error", nodeId: result.nodeId, at: result.completedAt ?? result.startedAt ?? null, error: result.error }));
-      for (const warning of Array.isArray(result.warnings) ? result.warnings : []) logLines.push(JSON.stringify({ source: "node_warning", nodeId: result.nodeId, warning }));
+      for (const activity of Array.isArray(result.activity) ? result.activity : []) logLine({ source: "node_activity", ...asRecord(activity) });
+      if (typeof result.error === "string") logLine({ source: "node_error", nodeId: result.nodeId, at: result.completedAt ?? result.startedAt ?? null, error: result.error });
+      for (const warning of Array.isArray(result.warnings) ? result.warnings : []) logLine({ source: "node_warning", nodeId: result.nodeId, warning });
     }
-    for (const entry of this.options.store.listAuditLogsForExecution(executionId)) logLines.push(JSON.stringify({ source: "audit_log", ...entry }));
-    files.push({ path: "execution/logs.jsonl", data: encoder.encode(scrubString(logLines.join("\n") + (logLines.length ? "\n" : ""), secretValues)) });
+    for (const entry of this.options.store.listAuditLogsForExecution(executionId)) {
+      const { actorEmail, ...rest } = entry;
+      logLine({ source: "audit_log", ...rest, ...(options.includeActorEmails ? { actorEmail } : {}) });
+    }
+    noteScrubbed("execution/logs.jsonl");
+    add("execution/logs.jsonl", encoder.encode(logLines.join("\n") + (logLines.length ? "\n" : "")));
 
     // Rendered outputs: files a node produced as data URLs (PDFs, charts, documents).
+    // Text outputs are scrubbed; binary outputs that carry a secret value are left out.
     const seen = new Set<string>();
+    const uniquePath = (path: string): string => {
+      if (!usedNames.has(zipCollisionKey(path))) return path;
+      const dot = path.lastIndexOf(".");
+      for (let suffix = 2; ; suffix += 1) {
+        const candidate = `${path.slice(0, dot)}-${suffix}${path.slice(dot)}`;
+        if (!usedNames.has(zipCollisionKey(candidate))) return candidate;
+      }
+    };
     results.forEach((result) => {
       const nodeId = safeSegment(String(result.nodeId ?? "node"));
       let count = 0;
@@ -842,14 +860,23 @@ export class AuditBundleService {
           const match = /^data:([a-z0-9.+/-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(value);
           const mime = match?.[1]?.toLowerCase();
           const extension = mime ? RENDERED_OUTPUT_TYPES[mime] : undefined;
-          if (!match || !extension) return;
-          const data = new Uint8Array(Buffer.from(match[2]!.replace(/\s+/g, ""), "base64"));
-          const fingerprint = `${nodeId}:${sha256Hex(data)}`;
-          if (data.length === 0 || seen.has(fingerprint)) return;
+          if (!match || !mime || !extension) return;
+          const raw = new Uint8Array(Buffer.from(match[2]!.replace(/\s+/g, ""), "base64"));
+          const fingerprint = `${nodeId}:${sha256Hex(raw)}`;
+          if (raw.length === 0 || seen.has(fingerprint)) return;
           seen.add(fingerprint);
           count += 1;
           const base = safeSegment((filename ?? key).replace(/\.[A-Za-z0-9]+$/, ""));
-          files.push({ path: `outputs/${nodeId}/${String(count).padStart(2, "0")}-${base}.${extension}`, data });
+          const path = uniquePath(`outputs/${nodeId}/${String(count).padStart(2, "0")}-${base}.${extension}`);
+          scrubber.resetHits();
+          const data = scrubber.bytes(raw, mime);
+          if (data === null) {
+            usedNames.add(zipCollisionKey(path));
+            redactions.omitted.push({ path, reason: `${mime} output contains a secret value; left out` });
+            return;
+          }
+          noteScrubbed(path);
+          add(path, data);
           return;
         }
         if (Array.isArray(value)) {
@@ -864,8 +891,21 @@ export class AuditBundleService {
       visit(result.output, "output", 0, null);
     });
 
-    files.push({ path: AUDIT_BUNDLE_README_PATH, data: encoder.encode(readmeText(view)) });
-    files.push({ path: AUDIT_BUNDLE_MANIFEST_PATH, data: manifestBytes });
+    add(
+      AUDIT_BUNDLE_REDACTIONS_PATH,
+      pretty({
+        format: "l2m.audit-bundle-redactions",
+        version: 1,
+        policy:
+          "Secret values held by the deployment (its secret store in every project, cached external secrets, credentials from its environment; " +
+          "values of at least 6 characters) " +
+          "are replaced with [REDACTED] in every JSON, log and text file. Binary outputs that contain one are left out. " +
+          "Content compressed inside binary formats (PDF streams, DOCX/XLSX parts) is not inspected.",
+        scrubbed: redactions.scrubbed,
+        omitted: redactions.omitted
+      })
+    );
+    add(AUDIT_BUNDLE_README_PATH, encoder.encode(readmeText(view)));
     files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
     const index: AuditBundleIndexEntry[] = files.map((file) => ({ path: file.path, sha256: sha256Hex(file.data), bytes: file.data.length }));
@@ -891,14 +931,23 @@ export class AuditBundleService {
       files.find((file) => file.path === AUDIT_BUNDLE_README_PATH)!,
       ...files.filter((file) => file.path !== AUDIT_BUNDLE_MANIFEST_PATH && file.path !== AUDIT_BUNDLE_README_PATH)
     ];
+    // Compress off the event loop (zlib's thread pool), one file at a time.
+    const compressed = new Map<Uint8Array, Uint8Array>();
+    for (const file of ordered) {
+      if (file.data.length > 0) compressed.set(file.data, new Uint8Array(await deflateRawAsync(file.data, { level: DEFLATE_LEVEL })));
+    }
     const completed = history.completedAt ? new Date(history.completedAt) : new Date(history.startedAt);
-    const zip = prepareZip(ordered, { deflateRaw: (data) => new Uint8Array(deflateRawSync(data, { level: 9 })), modifiedAt: completed });
-    if (zip.size > this.options.maxBundleBytes) throw new AuditBundleError(this.tooLargeMessage(zip.size), "too_large");
+    const zip = prepareZip(ordered, {
+      deflateRaw: (data) => compressed.get(data) ?? new Uint8Array(deflateRawSync(data, { level: DEFLATE_LEVEL })),
+      modifiedAt: completed
+    });
+    if (zip.size > maxBytes) throw new AuditBundleError(this.tooLargeMessage(zip.size, false), "too_large");
     return { fileName: `l2m-audit-${safeSegment(executionId)}.zip`, zip, manifestDigest: view.digest, keyId, files: ordered.length };
   }
 
-  private tooLargeMessage(size: number): string {
-    return `The audit bundle would be ${size} bytes, over the ${this.options.maxBundleBytes}-byte limit (AUDIT_BUNDLE_MAX_BYTES). Raise the limit or export the manifest alone.`;
+  private tooLargeMessage(size: number, uncompressed: boolean): string {
+    const what = uncompressed ? `The audit bundle's files add up to at least ${size} bytes` : `The audit bundle would be ${size} bytes`;
+    return `${what}, over the ${this.options.maxBundleBytes}-byte limit (AUDIT_BUNDLE_MAX_BYTES). Raise the limit or export the manifest alone.`;
   }
 }
 
@@ -924,8 +973,10 @@ function readmeText(view: RunManifestView): string {
     "execution/run.json     The execution record as stored (redacted input, output, status).",
     "execution/nodes/       Each node's input and output as stored in execution history (redacted).",
     "execution/trace.json   Node timings, MCP tool-call telemetry and guard events (masked evidence).",
-    "execution/logs.jsonl   Node activity, errors, warnings and the run's audit-log entries.",
+    "execution/logs.jsonl   Node activity, errors, warnings and the run's audit-log entries",
+    "                       (actor user id and role; actor emails only in bundles exported by an admin).",
     "outputs/               Files the run produced (PDFs, charts, documents), when there are any.",
+    "redactions.json        Which files had secret values replaced, and which outputs were left out.",
     "",
     "Verify offline",
     "--------------",
@@ -935,12 +986,22 @@ function readmeText(view: RunManifestView): string {
     "   It checks the signature, every file digest against the signed index, that no",
     "   file was added or removed, and the manifest digest. No network access is needed.",
     "",
-    "Without --public-key the key inside signature.json is used: that proves the bundle",
-    "was not changed after signing, but not who signed it.",
+    "Only the deployment's public key, obtained through a channel you trust, proves who",
+    "signed this bundle. Without --public-key the verifier checks the signature against",
+    "the key inside signature.json and reports SIGNER NOT VERIFIED (exit code 3): that only",
+    "shows the bundle is internally consistent. Anyone who changes a bundle can re-sign it",
+    "with a key of their own, so it proves neither who signed it nor that it is unchanged.",
     "",
     "Manifest fields hold digests (SHA-256 of canonical JSON) of node inputs and outputs,",
-    "not the payloads; compare them with the files under execution/nodes/. Secrets appear",
-    "only as secretRef.secretId; resolved secret values are never included.",
+    "not the payloads; compare them with the files under execution/nodes/. The digests are",
+    "not salted: for a small or guessable value, a digest confirms a correct guess.",
+    "",
+    "Secrets: node configs keep secretRef.secretId only, and literals under credential-like",
+    "keys are [REDACTED]. Every secret value the deployment holds (its secret store, cached",
+    "external secrets, provider keys from its environment; values of 6 characters or more)",
+    "is replaced with [REDACTED] in the manifest and in every JSON, log and text file. Binary",
+    "outputs containing one are left out (see redactions.json). Content compressed inside a",
+    "binary file (PDF streams, DOCX/XLSX parts) is not inspected.",
     ""
   ].join("\n");
 }

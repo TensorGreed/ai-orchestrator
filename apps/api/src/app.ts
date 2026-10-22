@@ -127,6 +127,7 @@ import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
+import { environmentSecretValues } from "./services/audit-scrub.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
@@ -6142,15 +6143,29 @@ export function createApp(
     projectId: z.string().min(1).max(120)
   });
 
+  /** Secrets L2M manages for itself answer exactly like a secret that does not exist. */
+  const shareableSecret = (id: string) => {
+    const row = store.getSecret(id);
+    return row && !isInternalSecretProvider(row.provider) ? row : null;
+  };
+
   app.get<{ Params: { id: string } }>("/api/secrets/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (!shareableSecret(request.params.id)) {
+      reply.code(404);
+      return { error: "Secret not found" };
+    }
     return { shares: rbacService.listSecretShares(request.params.id) };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/secrets/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
+    if (!shareableSecret(request.params.id)) {
+      reply.code(404);
+      return { error: "Secret not found" };
+    }
     const parsed = secretShareSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -6181,6 +6196,10 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
+      if (!shareableSecret(request.params.id)) {
+        reply.code(404);
+        return { error: "Share not found" };
+      }
       const ok = rbacService.unshareSecret(request.params.id, request.params.projectId);
       if (!ok) {
         reply.code(404);
@@ -9313,6 +9332,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         details: parsed.error.issues
       };
     }
+    if (isInternalSecretProvider(parsed.data.provider)) {
+      // Providers L2M uses for its own secrets cannot be created through the API.
+      reply.code(400);
+      return { error: "Invalid secret payload", details: [{ path: ["provider"], message: "Unsupported provider" }] };
+    }
 
     let secretRef;
     let source: "local" | "external" = "local";
@@ -10571,6 +10595,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
     catalogEntries: () => mcpCatalogService.listEntries(),
     maxBundleBytes: config.AUDIT_BUNDLE_MAX_BYTES,
+    environmentSecretValues: () => environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
   registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), audit: (request, user, event) => audit(request, user, event) });

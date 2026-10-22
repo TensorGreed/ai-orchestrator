@@ -268,6 +268,35 @@ export class SecretService {
     return true;
   }
 
+  /**
+   * Phase 11.1 — every secret value held on this deployment, for scrubbing
+   * audit bundles: local secrets of every project (a node can reference any
+   * secret id), L2M's own internal secrets (MCP OAuth tokens, the signing
+   * seed) and the locally cached values of external secrets. Nothing is
+   * fetched from an external store. For a value that is a JSON document
+   * (OAuth token sets, service-account keys, MCP secret bundles) the
+   * credential-like fields are added too, with and without an auth scheme.
+   * Callers hold these in memory only; never log or return them.
+   */
+  valuesForScrubbing(): string[] {
+    const values = new Set<string>();
+    for (const listed of this.store.listSecrets()) {
+      const row = this.store.getSecret(listed.id);
+      if (!row) continue;
+      try {
+        if (row.source === "external") {
+          const cached = this.store.getExternalSecretCacheEntry(row.id);
+          if (cached) addScrubValue(values, this.decrypt({ iv: cached.iv, authTag: cached.authTag, ciphertext: cached.ciphertext }));
+        } else {
+          addScrubValue(values, this.decrypt({ iv: row.iv, authTag: row.auth_tag, ciphertext: row.ciphertext }));
+        }
+      } catch {
+        // A value that cannot be decrypted cannot have reached a run either.
+      }
+    }
+    return [...values];
+  }
+
   invalidateExternalCache(secretId: string): void {
     this.store.deleteExternalSecretCacheEntry(secretId);
   }
@@ -315,4 +344,41 @@ export class SecretService {
 
     return value;
   }
+}
+
+const CREDENTIAL_FIELD = /(token|secret|password|passwd|key|credential|authorization|auth|cookie)/i;
+/** Fields next to credentials that describe them rather than hold them (token_type, auth_uri, expires_at). */
+const DESCRIPTIVE_FIELD = /(type|uri|url|endpoint|expires?(_at|_in)?|scope|issuer|method|name|id)$/i;
+
+/** A secret value, plus its credential-like fields when it is a JSON document. */
+function addScrubValue(into: Set<string>, value: string): void {
+  if (!value || value === "__external__") return;
+  into.add(value);
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return;
+  }
+  const visit = (node: unknown, key: string, depth: number): void => {
+    if (depth > 8) return;
+    if (typeof node === "string") {
+      if (!CREDENTIAL_FIELD.test(key) || DESCRIPTIVE_FIELD.test(key) || /^(bearer|basic|token)$/i.test(node.trim())) return;
+      into.add(node);
+      // "Bearer <token>" / "Basic <credentials>": the credential can appear without its scheme.
+      const scheme = /^(bearer|basic|token)\s+(\S.*)$/i.exec(node);
+      if (scheme) into.add(scheme[2]!);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const entry of node) visit(entry, key, depth + 1);
+      return;
+    }
+    if (node && typeof node === "object") {
+      for (const [innerKey, inner] of Object.entries(node as Record<string, unknown>)) visit(inner, innerKey, depth + 1);
+    }
+  };
+  visit(parsed, "", 0);
 }

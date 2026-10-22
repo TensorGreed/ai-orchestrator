@@ -5993,7 +5993,7 @@ export class SqliteStore {
   }
 
   pruneAuditLogs(options: { before: string }): number {
-    // Phase 11.1 — cached run manifests follow the audit-log retention.
+    // Phase 11.1 — cached run manifests older than the audit-log retention whose execution history is gone.
     this.pruneExecutionManifests(options);
     const existing = this.queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM audit_logs WHERE created_at < ?`,
@@ -9634,36 +9634,66 @@ export class SqliteStore {
     return this.queryAll<McpToolCallRow>(`SELECT * FROM mcp_tool_calls WHERE execution_id = ? ORDER BY started_at, id`, [executionId]).map(mapMcpToolCall);
   }
 
-  /** Audit-log entries that name this execution in their metadata (no IP address or user agent). */
+  /**
+   * Audit-log entries about this execution: rows whose metadata `executionId`
+   * is this execution, or whose resource is this execution. No IP address or
+   * user agent; the actor's current role comes from the users table.
+   */
   listAuditLogsForExecution(executionId: string): Array<{
     eventType: string;
     action: string;
     outcome: string;
+    actorUserId: string | null;
+    actorRole: string | null;
     actorEmail: string | null;
     actorType: string;
     message: string | null;
     createdAt: string;
   }> {
     return this.queryAll<Record<string, unknown>>(
-      `SELECT event_type, action, outcome, actor_email, actor_type, message, created_at FROM audit_logs
-       WHERE instr(metadata_json, ?) > 0 ORDER BY created_at, id`,
-      [JSON.stringify({ executionId }).slice(1, -1)]
-    ).map((row) => ({
-      eventType: toString(row.event_type),
-      action: toString(row.action),
-      outcome: toString(row.outcome),
-      actorEmail: typeof row.actor_email === "string" ? row.actor_email : null,
-      actorType: toString(row.actor_type),
-      message: typeof row.message === "string" ? row.message : null,
-      createdAt: toString(row.created_at)
-    }));
+      `SELECT a.event_type, a.action, a.outcome, a.actor_user_id, a.actor_email, a.actor_type, a.message, a.created_at,
+              a.resource_type, a.resource_id, a.metadata_json, u.role AS actor_role
+       FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id
+       WHERE (a.resource_type = 'execution' AND a.resource_id = ?) OR instr(a.metadata_json, ?) > 0
+       ORDER BY a.created_at, a.id`,
+      [executionId, JSON.stringify(executionId)]
+    )
+      .filter((row) => {
+        if (row.resource_type === "execution" && row.resource_id === executionId) return true;
+        try {
+          const metadata = JSON.parse(String(row.metadata_json ?? "null")) as unknown;
+          return Boolean(metadata) && typeof metadata === "object" && (metadata as Record<string, unknown>).executionId === executionId;
+        } catch {
+          return false;
+        }
+      })
+      .map((row) => ({
+        eventType: toString(row.event_type),
+        action: toString(row.action),
+        outcome: toString(row.outcome),
+        actorUserId: typeof row.actor_user_id === "string" ? row.actor_user_id : null,
+        actorRole: typeof row.actor_role === "string" ? row.actor_role : null,
+        actorEmail: typeof row.actor_email === "string" ? row.actor_email : null,
+        actorType: toString(row.actor_type),
+        message: typeof row.message === "string" ? row.message : null,
+        createdAt: toString(row.created_at)
+      }));
   }
 
-  /** Cached manifests follow the audit-log retention (AUDIT_LOG_RETENTION_DAYS). */
+  /**
+   * Cached manifests are pruned only once both are true: older than the
+   * audit-log retention (AUDIT_LOG_RETENTION_DAYS) and their execution's
+   * history row is gone. While a run's history is kept its manifest is kept,
+   * so it is never regenerated with a new signing time, key or workflow.
+   */
   pruneExecutionManifests(options: { before: string }): number {
-    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM execution_manifests WHERE created_at < ?`, [options.before]);
+    const where = `created_at < ? AND NOT EXISTS (SELECT 1 FROM execution_history h WHERE h.id = execution_manifests.execution_id)`;
+    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM execution_manifests WHERE ${where}`, [options.before]);
     const count = row ? toNumber(row.count) : 0;
-    if (count > 0) this.exec(`DELETE FROM execution_manifests WHERE created_at < ?`, [options.before]);
+    if (count > 0) {
+      this.exec(`DELETE FROM execution_manifests WHERE ${where}`, [options.before]);
+      this.persist();
+    }
     return count;
   }
 

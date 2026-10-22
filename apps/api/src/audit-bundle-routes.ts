@@ -93,7 +93,7 @@ export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
     if (!user) return reply;
     let prepared;
     try {
-      prepared = await bundles.prepareBundle(request.params.id);
+      prepared = await bundles.prepareBundle(request.params.id, { includeActorEmails: user.role === "admin" });
     } catch (error) {
       if (error instanceof AuditBundleError && error.code === "too_large") {
         deps.audit(request, user, {
