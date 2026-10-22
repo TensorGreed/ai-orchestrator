@@ -94,7 +94,7 @@ import { executePythonCodeNode } from "./python-runner";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
-import { ApprovalHandoffSignal, grantHandoffKey, isApprovalHandoffSignal, type ApprovalHandoffRequest } from "./approval-handoff";
+import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
 import {
   builtInGuardProfile,
@@ -295,6 +295,8 @@ interface NodeRuntimeContext {
   callStack: string[];
   /** Phase 10.2 — subject the MCP tool policy is evaluated with for this run. */
   toolPolicySubject?: McpToolPolicySubject;
+  /** Phase 12.1 — guard approvals granted by a resumed `rerun` hand-off (never from globals). */
+  approvedHandoffKeys?: ReadonlySet<string>;
   recordAttachmentUsage?: (usage: {
     attachedNodeId: string;
     usedByNodeId: string;
@@ -4763,7 +4765,7 @@ async function executeNode(
           dependencies.guard || portGuardNode
             ? await createAgentGuardSession({
                 scope: guardScopeFor(node, context, dependencies, "agent"),
-                globals: context.globals,
+                ...(context.approvedHandoffKeys ? { approvals: context.approvedHandoffKeys } : {}),
                 ...(portGuardNode ? { portGuardNode } : {}),
                 protectionNodes: portGuardNode ? protectionNodesFor(portGuardNode, context) : [],
                 describeTool: (exposedName) => {
@@ -5958,8 +5960,8 @@ export async function executeWorkflow(
   const globals: Record<string, unknown> = request.resumeState
     ? toRecord(request.resumeState.globals)
     : {
-        ...(request.input ?? {}),
-        ...(request.variables ?? {}),
+        ...withoutReservedKeys(request.input),
+        ...withoutReservedKeys(request.variables),
         vars: toRecord(workflow.variables),
         webhook: request.webhookPayload ?? {},
         system_prompt:
@@ -5975,6 +5977,7 @@ export async function executeWorkflow(
         trigger_type: request.triggerType ?? "manual",
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
+  const approvedHandoffKeys = approvedHandoffKeysFromState(request.resumeState);
   const customData = request.resumeState
     ? toRecord(globals.execution_custom_data)
     : toRecord(request.customData);
@@ -6240,7 +6243,7 @@ export async function executeWorkflow(
       handledByHandoff = true;
     } else if (handoff?.kind === "rerun") {
       if (approved) {
-        grantHandoffKey(globals, handoff.approvalKey);
+        approvedHandoffKeys.add(handoff.approvalKey);
         handledByHandoff = true;
       } else {
         // The rejected node is not run again.
@@ -6426,7 +6429,8 @@ export async function executeWorkflow(
       hadContinuedErrors,
       finalOutput,
       ...(toolPolicySubject ? { toolPolicySubject } : {}),
-      ...(pause.handoff ? { approvalHandoff: pause.handoff } : {})
+      ...(pause.handoff ? { approvalHandoff: pause.handoff } : {}),
+      ...(approvedHandoffKeys.size > 0 ? { approvedHandoffKeys: [...approvedHandoffKeys] } : {})
     };
 
     if (dependencies.persistPausedExecution) {
@@ -6755,10 +6759,12 @@ export async function executeWorkflow(
                   attachmentsBySource: graphIndexes.attachmentsBySource,
                   callStack,
                   toolPolicySubject,
+                  approvedHandoffKeys,
                   recordAttachmentUsage
                 },
                 dependencies
               );
+              approvedHandoffKeys.clear();
 
               iterationOutputs[childNode.id] = childOutput;
               nodeOutputs.set(childNode.id, childOutput);
@@ -6874,10 +6880,13 @@ export async function executeWorkflow(
           attachmentsBySource: graphIndexes.attachmentsBySource,
           callStack,
           toolPolicySubject,
+          approvedHandoffKeys,
           recordAttachmentUsage
         },
         dependencies
       );
+      // Single use: a granted approval covers the re-run of the node it paused, not later nodes or runs.
+      approvedHandoffKeys.clear();
 
       nodeOutputs.set(node.id, output);
 

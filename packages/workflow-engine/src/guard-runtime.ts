@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import type { AgentGuardCheck, AgentGuardDecision, AgentGuardHooks } from "@ai-orchestrator/agent-runtime";
 import {
@@ -42,7 +42,7 @@ import {
   type SecretReference,
   type WorkflowNode
 } from "@ai-orchestrator/shared";
-import { approvedHandoffKeys, type ApprovalHandoffRequest } from "./approval-handoff";
+import type { ApprovalHandoffRequest } from "./approval-handoff";
 
 /**
  * Phase 12.1 — guard wiring in the engine. Detection lives in
@@ -287,17 +287,28 @@ export function describeGuardVerdict(result: GuardCheckResult): string {
   return list ? `${result.action}: ${list}` : result.action;
 }
 
-/** Key a person's approval is recorded under: the node, the channel and what was found, not the exact text. */
-export function guardApprovalKey(nodeId: string, channel: GuardChannel, result: GuardCheckResult): string {
+/**
+ * Key a person's approval is recorded under: the node, the channel, the tool,
+ * what was found and a hash of the masked evidence. A re-run that sends other
+ * values (another card, another URL) or calls another tool needs a new
+ * approval; the same masked findings match, so a re-run converges.
+ */
+export function guardApprovalKey(nodeId: string, channel: GuardChannel, result: GuardCheckResult, toolName?: string): string {
   const findings = new Set<string>();
+  const evidence = new Set<string>();
   for (const { summary } of result.verdicts) {
-    for (const action of summary.actions) {
-      if (!action.shadow && (action.effective === "review" || action.effective === "require_approval")) {
-        findings.add(`${action.detectorId}/${action.category}/${action.dataClass ?? ""}`);
+    const approvalActions = summary.actions.filter((action) => !action.shadow && (action.effective === "review" || action.effective === "require_approval"));
+    for (const action of approvalActions) {
+      findings.add(`${action.detectorId}/${action.category}/${action.dataClass ?? ""}`);
+    }
+    for (const finding of summary.findings) {
+      if (approvalActions.some((action) => action.detectorId === finding.detectorId && action.category === finding.category && (action.dataClass ?? "") === (finding.dataClass ?? ""))) {
+        evidence.add(`${finding.detectorId}/${finding.category}/${finding.dataClass ?? ""}/${finding.evidence}`);
       }
     }
   }
-  return `guard:${nodeId}:${channel}:${[...findings].sort().join("|")}`;
+  const digest = createHash("sha256").update([...evidence].sort().join("\u0000")).digest("hex").slice(0, 16);
+  return `guard:${nodeId}:${channel}:${toolName ?? ""}:${[...findings].sort().join("|")}:${digest}`;
 }
 
 export function needsApproval(action: GuardAction): boolean {
@@ -337,7 +348,8 @@ export interface AgentGuardSession {
  */
 export async function createAgentGuardSession(input: {
   scope: GuardEvalScope;
-  globals: Record<string, unknown>;
+  /** Approval keys granted by resumed `rerun` hand-offs; read only. */
+  approvals?: ReadonlySet<string>;
   portGuardNode?: WorkflowNode;
   protectionNodes: WorkflowNode[];
   describeTool: (exposedName: string) => GuardToolContext | undefined;
@@ -363,7 +375,7 @@ export async function createAgentGuardSession(input: {
   const canary = profiles.some((entry) => entry.profile.canaries?.enabled === true) ? generateCanaryToken() : undefined;
   const boundary = `DATA-${randomBytes(6).toString("hex").toUpperCase()}`;
   const verdictLog: AgentGuardTraceEntry[] = [];
-  const approvals = approvedHandoffKeys(input.globals);
+  const approvals: ReadonlySet<string> = input.approvals ?? new Set<string>();
   let pendingApproval: ApprovalHandoffRequest | undefined;
 
   const systemText = (() => {
@@ -408,7 +420,7 @@ export async function createAgentGuardSession(input: {
       verdictLog.push(entry);
       if (result.action === "block") return { outcome: "block", message: describeGuardVerdict(result) };
       if (needsApproval(result.action)) {
-        const key = guardApprovalKey(scope.nodeId, check.channel, result);
+        const key = guardApprovalKey(scope.nodeId, check.channel, result, tool?.toolName);
         if (!approvals.has(key)) {
           const message = `Guard ${result.action === "review" ? "review" : "approval"} needed on ${check.channel.replace("_", " ")}${tool ? ` (${tool.toolName})` : ""}: ${describeGuardVerdict(result)}`;
           pendingApproval = {

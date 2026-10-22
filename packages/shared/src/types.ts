@@ -368,6 +368,12 @@ export interface WorkflowExecutionState {
    * says what approving or rejecting does when the run resumes.
    */
   approvalHandoff?: ApprovalHandoffState;
+  /**
+   * Phase 12.1 — guard approval keys granted by `rerun` hand-offs, written
+   * only by the resume path. Kept out of `globals` so run input can never
+   * carry an approval.
+   */
+  approvedHandoffKeys?: string[];
 }
 
 /**

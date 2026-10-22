@@ -6,7 +6,7 @@ import type {
   ChatMessage,
   ToolDefinition
 } from "@ai-orchestrator/shared";
-import type { AgentRuntimeAdapter, AgentRuntimeContext, AgentToolRuntime, InternalToolResult } from "./types";
+import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentToolRuntime, InternalToolResult } from "./types";
 import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt } from "./types";
 
 const MAX_MESSAGE_CHARS = 3000;
@@ -1093,6 +1093,10 @@ ${effectiveSystemPrompt}`;
             const callStartedMs = Date.now();
             const callStartedAt = new Date(callStartedMs).toISOString();
             const resultsBeforeCall = toolResults.length;
+            // Phase 12.1 — the arguments after the guard's rewrite, and the
+            // external tool being called; the failure path below needs both.
+            let callArguments = call.arguments;
+            let guardedTool: AgentGuardCheck["tool"] | undefined;
             try {
               // --- Check if tool exists before invoking ---
               const toolDefinition = toolDefinitionByName.get(call.name);
@@ -1217,19 +1221,23 @@ ${effectiveSystemPrompt}`;
               // Phase 12.1 — guard hook: before each external tool call.
               // Internal tools (session cache, clarify) only replay content
               // that was already guarded, so they are not checked again.
-              let callArguments = call.arguments;
               const guardTool = { name: call.name, inputSchema: toolDefinition?.inputSchema, toolCallId: call.id };
               if (guard && !internalTool) {
+                guardedTool = guardTool;
                 const decision = await guard.check({ channel: "tool_arguments", content: callArguments, labels: [], iteration, tool: guardTool });
                 if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_arguments", iteration, decision.message);
-                if (decision.outcome === "block") {
-                  const errorMsg = `Tool call '${call.name}' was blocked by the guard: ${decision.message}. Do not retry it with the same arguments.`;
+                // A rewrite that is no longer an argument object cannot be sent safely: it is refused like a block.
+                const unusableRewrite =
+                  decision.outcome === "rewrite" && (!decision.content || typeof decision.content !== "object" || Array.isArray(decision.content));
+                if (decision.outcome === "block" || unusableRewrite) {
+                  const reason = decision.outcome === "block" ? decision.message : "the rewritten arguments are not an object";
+                  const errorMsg = `Tool call '${call.name}' was blocked by the guard: ${reason}. Do not retry it with the same arguments.`;
                   toolResults.push({ toolCallId: call.id, toolName: call.name, output: null, error: errorMsg });
                   messages.push({ role: "tool", content: serializeToolMessage(false, errorMsg, toolOutputLimits), toolCallId: call.id, name: call.name });
                   failedToolCount += 1;
                   continue;
                 }
-                if (decision.outcome === "rewrite" && decision.content && typeof decision.content === "object" && !Array.isArray(decision.content)) {
+                if (decision.outcome === "rewrite") {
                   callArguments = decision.content as Record<string, unknown>;
                 }
               }
@@ -1306,7 +1314,16 @@ ${effectiveSystemPrompt}`;
                       ", "
                     )}. Provide these arguments explicitly.`
                   : rawError;
-              const toolError = createToolErrorResult(call, normalizedError);
+              // Phase 12.1 — a failed external call's error text comes from the
+              // tool and is as untrusted as a result: guard it before the model sees it.
+              let guardedError = normalizedError;
+              if (guard && guardedTool) {
+                const decision = await guard.check({ channel: "tool_result", content: normalizedError, labels: ["untrusted_external"], iteration, tool: guardedTool });
+                if (decision.outcome === "pause") throw new AgentGuardInterrupt("approval_required", "tool_result", iteration, decision.message);
+                if (decision.outcome === "block") guardedError = `The error from '${call.name}' was withheld by the guard: ${decision.message}.`;
+                else if (decision.outcome === "rewrite") guardedError = typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
+              }
+              const toolError = createToolErrorResult(call, guardedError);
               toolResults.push(toolError);
               failedToolCount += 1;
 
@@ -1324,19 +1341,20 @@ ${effectiveSystemPrompt}`;
                     sessionId: request.sessionId,
                     toolName: call.name,
                     toolCallId: call.id,
-                    args: call.arguments,
+                    args: callArguments,
                     output: null,
                     error: toolError.error,
-                    summary: buildToolOutputSummary(call.arguments, null, toolError.error)
+                    summary: buildToolOutputSummary(callArguments, null, toolError.error)
                   });
                 } catch {
                   // Cache persistence must never break agent execution.
                 }
               }
 
+              const serializedError = serializeToolMessage(false, toolError.error, toolOutputLimits);
               messages.push({
                 role: "tool",
-                content: serializeToolMessage(false, toolError.error, toolOutputLimits),
+                content: guard?.spotlight && guardedTool ? guard.spotlight(serializedError, { toolName: call.name, iteration }) : serializedError,
                 toolCallId: call.id,
                 name: call.name
               });

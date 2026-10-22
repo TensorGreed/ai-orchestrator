@@ -37,16 +37,18 @@ export function isApprovalHandoffSignal(error: unknown): error is ApprovalHandof
   return error instanceof ApprovalHandoffSignal;
 }
 
-/** Run-scoped approvals granted through `rerun` hand-offs, kept in the run globals so they survive the pause. */
-export const APPROVED_HANDOFF_KEYS_GLOBAL = "__approved_handoff_keys";
-
-export function approvedHandoffKeys(globals: Record<string, unknown>): Set<string> {
-  const raw = globals[APPROVED_HANDOFF_KEYS_GLOBAL];
+/**
+ * Approvals granted through `rerun` hand-offs live in the paused state's
+ * `approvedHandoffKeys`, which only the resume path writes; never in the run
+ * globals, which run input and variables reach.
+ */
+export function approvedHandoffKeysFromState(state: { approvedHandoffKeys?: unknown } | undefined): Set<string> {
+  const raw = state?.approvedHandoffKeys;
   return new Set(Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : []);
 }
 
-export function grantHandoffKey(globals: Record<string, unknown>, key: string): void {
-  const keys = approvedHandoffKeys(globals);
-  keys.add(key);
-  globals[APPROVED_HANDOFF_KEYS_GLOBAL] = [...keys];
+/** Keys starting with `__` are reserved for the engine: dropped from run input and variables before they become globals. */
+export function withoutReservedKeys(record: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!record) return {};
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !key.startsWith("__")));
 }
