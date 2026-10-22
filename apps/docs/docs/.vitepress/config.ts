@@ -51,6 +51,7 @@ export default defineConfig({
           { text: "MCP gateway", link: "/product/mcp-gateway" },
           { text: "MCP onboarding and catalog", link: "/product/mcp-onboarding" },
           { text: "Testing MCP workflows", link: "/product/testing-mcp-workflows" },
+          { text: "Golden runs and replay", link: "/product/golden-runs" },
           { text: "Guard engine", link: "/product/guard-engine" },
           { text: "Guard in workflows", link: "/product/guard" }
         ]
