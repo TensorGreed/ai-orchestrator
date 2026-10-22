@@ -303,7 +303,74 @@ export interface NodeExecutionResult {
   attempts?: number;
   /** Phase 10.5 — latest MCP tool progress reported while the node ran. */
   progress?: NodeProgressSnapshot;
+  /** What the node did while it ran, oldest first, capped at NODE_ACTIVITY_LIMIT entries. */
+  activity?: NodeActivityEvent[];
 }
+
+/** Most activity entries kept per node; older ones are dropped. */
+export const NODE_ACTIVITY_LIMIT = 50;
+/** Longest preview text (prompt, URL, tool arguments) an activity entry carries. */
+export const NODE_ACTIVITY_PREVIEW_CHARS = 400;
+
+/**
+ * One step a node took while it ran, streamed as the `node_activity` SSE event
+ * and kept on the node result. Previews are short, truncated text; they never
+ * carry headers, secret values or URL query strings.
+ */
+export type NodeActivity =
+  /** The values the node actually used this run, once its templates resolved. */
+  | { kind: "resolved_input"; fields: Record<string, string | number | boolean | string[]> }
+  | {
+      kind: "llm_call";
+      phase: "start" | "end";
+      providerId: string;
+      model: string;
+      /** Agent loop iteration this call belongs to. */
+      iteration?: number;
+      latencyMs?: number;
+      error?: string;
+    }
+  | {
+      kind: "retry";
+      /** provider: HTTP retry inside the provider SDK; agent_llm: the agent loop retrying a failed model call; node: the node's retry policy. */
+      scope: "provider" | "agent_llm" | "node";
+      /** 1-based number of the attempt that just failed. */
+      attempt: number;
+      maxAttempts?: number;
+      delayMs: number;
+      reason: string;
+    }
+  | {
+      kind: "agent_step";
+      phase: "start" | "end";
+      iteration: number;
+      maxIterations: number;
+      /** Tools the model asked for in this step (end only). */
+      toolCalls?: string[];
+      /** Set on the step that produced the final answer. */
+      final?: boolean;
+    }
+  | {
+      kind: "tool_call";
+      phase: "start" | "end";
+      toolName: string;
+      toolCallId?: string;
+      iteration?: number;
+      /** Arguments after the guard ran, as truncated JSON (start only). */
+      argsPreview?: string;
+      durationMs?: number;
+      outcome?: "ok" | "error" | "blocked";
+      error?: string;
+    };
+
+export type NodeActivityEvent = NodeActivity & {
+  nodeId: string;
+  at: string;
+  /** Increases per node within a run, so a client can order and de-duplicate entries. */
+  seq: number;
+  /** For a Supervisor's worker: the worker node whose loop produced the entry. */
+  workerNodeId?: string;
+};
 
 export interface WorkflowExecutionResult {
   workflowId: string;

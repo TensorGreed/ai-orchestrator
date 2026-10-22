@@ -8,6 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type RefObject
 } from "react";
+import { NodeActivityList } from "./NodeActivityList";
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -837,6 +838,13 @@ export function WorkflowCanvasArea({
                                       Completed: <strong>{completed}</strong>
                                     </span>
                                   </div>
+
+                                  {result.activity && result.activity.length > 0 && (
+                                    <div className="node-log-section">
+                                      <h4>Activity</h4>
+                                      <NodeActivityList activity={result.activity} startedAt={result.startedAt} />
+                                    </div>
+                                  )}
 
                                   {result.input !== undefined && (
                                     <div className="node-log-section">

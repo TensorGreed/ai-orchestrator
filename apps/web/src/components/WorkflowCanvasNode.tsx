@@ -109,12 +109,17 @@ function RunningPill({ data }: { data: EditorNodeData }) {
 
 function DebugPreview({ data }: { data: EditorNodeData }) {
   const preview = data.executionPreview;
-  if (!preview || !(preview.input || preview.output || preview.error || preview.live)) return null;
+  if (!preview || !(preview.input || preview.output || preview.error || preview.live || preview.now)) return null;
   return (
     <div className="wf-node-debug-preview">
       {preview.input && (
         <div>
           <strong>In</strong> {preview.input}
+        </div>
+      )}
+      {preview.now && (
+        <div className="wf-node-debug-now">
+          <strong>Now</strong> {preview.now}
         </div>
       )}
       {preview.live && (

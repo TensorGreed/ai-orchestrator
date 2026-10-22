@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import type { NodeProgressSnapshot, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { formatLatency, LiveElapsed } from "./WorkflowCanvasNode";
 import { guardMarkerFor, type GuardMarker } from "../lib/guard-trace";
-import type { LiveNodeResult } from "../lib/run-trace";
+import { currentActivity, describeActivity, type LiveNodeResult } from "../lib/run-trace";
 
 export interface RunTapeProps {
   executionResult: WorkflowExecutionResult | null;
@@ -28,6 +28,8 @@ export interface TapeLane {
   liveStartedAtMs?: number;
   /** Phase 10.5 — latest MCP tool progress the node reported. */
   progress?: NodeProgressSnapshot;
+  /** What the running node is doing right now (latest activity entry). */
+  now?: string;
   /** Phase 12.1 — a guard blocked, held for review or rewrote content in this step. */
   guard?: GuardMarker;
 }
@@ -83,6 +85,7 @@ export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, 
       }
     }
     const meta = nodeMetaById.get(result.nodeId);
+    const current = result.status === "running" ? currentActivity(result) : undefined;
     const record = result as unknown as { nodeType?: unknown };
     return {
       nodeId: result.nodeId,
@@ -101,6 +104,7 @@ export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, 
           }
         : {}),
       ...(result.progress ? { progress: result.progress } : {}),
+      ...(current ? { now: describeActivity(current) } : {}),
       ...guardLane(result)
     };
   });
@@ -160,6 +164,7 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
             lane.error ? `error: ${lane.error}` : null,
             lane.errorRemediation ? `fix: ${lane.errorRemediation}` : null,
             lane.progress ? formatProgress(lane.progress) : null,
+            lane.now ? `now: ${lane.now}` : null,
             lane.guard ? lane.guard.title : null
           ]
             .filter(Boolean)
@@ -203,6 +208,11 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
               {lane.progress && (
                 <span className="run-tape-progress" role="cell">
                   {formatProgress(lane.progress)}
+                </span>
+              )}
+              {lane.now && lane.status === "running" && (
+                <span className="run-tape-progress run-tape-now" role="cell">
+                  Now: {lane.now}
                 </span>
               )}
             </Tag>
