@@ -2155,9 +2155,11 @@ export function createApp(
       });
 
       // Phase 8.3 — fire budget alerts on threshold crossings. Debounced per
-      // (budget, period, severity) so users don't get spammed.
+      // (budget, period, severity) so users don't get spammed. Phase 15.1 — a
+      // replay's spend is recorded above, but a replay sends no notifications:
+      // the next real run that is over the threshold fires the alert.
       try {
-        budgetService.recordExecution({
+        if (input.triggerType !== REPLAY_TRIGGER_TYPE) budgetService.recordExecution({
           executionId: input.executionId,
           workflowId: input.workflow.id,
           projectId: input.workflow.projectId ?? null,

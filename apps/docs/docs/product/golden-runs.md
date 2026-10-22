@@ -53,7 +53,7 @@ Code nodes are answered from the recording because neither runtime is cut off fr
 
 Expressions inside the nodes that do run are evaluated as in any run: `{{ }}` templates in prompts, Set and Output fields, If conditions and agent prompts, and Sort node expressions. These run in the API process, so an expression written to make a network call can make that call during a replay too. Treat a replay as protection against the workflow's connectors, HTTP calls and code nodes, not against a hostile workflow author. Sandboxing expressions is planned as separate work, and this page will change when it lands.
 
-Replays never write to deployment state: session memory, the session tool cache and session artifacts live in memory for the replay and are thrown away, knowledge-base writes are refused, MCP elicitation requests are declined, the error workflow and failure notifications are not fired, and replays stay out of execution metrics and MCP tool-call telemetry. Pinned node data on the workflow is ignored. The replay itself is stored as a run with trigger type `replay`.
+Replays never write to deployment state: session memory, the session tool cache and session artifacts live in memory for the replay and are thrown away, knowledge-base writes are refused, MCP elicitation requests are declined, the error workflow and failure notifications are not fired, budget alerts are not sent (a replay's live model spend still counts toward budgets, so the next real run over a threshold sends the alert), and replays stay out of execution metrics and MCP tool-call telemetry. Pinned node data on the workflow is ignored. The replay itself is stored as a run with trigger type `replay`.
 
 ### MCP matching
 

@@ -509,6 +509,31 @@ describe("golden runs with side effects stubbed", () => {
     expect(context.store.loadSessionMemory("golden-mem", "sess-1")).toEqual(memoryBefore);
   });
 
+  it("records a replay's model spend but never sends a budget alert from it", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    const model = await startEchoModel("Hello");
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: PLANTED });
+    context.store.upsertWorkflow(errorWorkflow(counter.base));
+    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    const run = (await call(context, "POST", "/api/workflows/wf-agent/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
+    expect(run.status).toBe("success");
+    const golden = await saveGolden(context, builder.cookie, run.executionId);
+
+    // A one-token budget: any spend crosses it and would post to the budget's channel.
+    context.store.createBudget({ id: "bud-1", name: "Tiny", scopeType: "workflow", scopeId: "wf-agent", period: "day", limitType: "tokens", limitValue: 1, action: "warn", notifyChannel: `${counter.base}/budget` });
+    const result = await replay(context, builder.cookie, golden.id);
+    expect(result.verdict, JSON.stringify(result.reasons)).toBe("pass");
+    await sleep(300);
+    expect(counter.count("/budget")).toBe(0);
+
+    // A live run of the same workflow does alert, so the check above is meaningful.
+    await call(context, "POST", "/api/workflows/wf-agent/execute", builder.cookie, {});
+    for (let attempt = 0; attempt < 40 && counter.count("/budget") === 0; attempt += 1) await sleep(50);
+    expect(counter.count("/budget")).toBe(1);
+  });
+
   it("never lets a chart load its data URL in a replay, and calls that replay inconclusive", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
