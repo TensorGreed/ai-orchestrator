@@ -108,10 +108,39 @@ export class ReplayRecordingService {
     return JSON.parse(scrubber.text(JSON.stringify(tree) ?? "null")) as T;
   }
 
-  /** Run facts scrubbed like a value, with argument hashes taken over the scrubbed arguments. */
+  /**
+   * Run facts scrubbed like a value, with argument hashes taken over the
+   * scrubbed arguments. Identifiers (node ids and types, server ids, tool,
+   * provider and model names, guard placements) only lose secret values:
+   * the token-shape redactor would otherwise blank long registry ids.
+   */
   scrubFacts(facts: RunFacts, scrubber: SecretScrubber = this.scrubber()): RunFacts {
     const scrubbed = this.scrubValue(facts, scrubber);
-    return { ...scrubbed, toolCalls: scrubbed.toolCalls.map((call) => ({ ...call, argsHash: sha256Hex(canonicalJson(call.args ?? null)) })) };
+    const id = (value: string) => scrubber.text(value);
+    const optionalId = (value: string | null) => (value === null ? null : id(value));
+    return {
+      ...scrubbed,
+      nodes: scrubbed.nodes.map((node, index) => ({ ...node, nodeId: id(facts.nodes[index]!.nodeId), nodeType: id(facts.nodes[index]!.nodeType) })),
+      toolCalls: scrubbed.toolCalls.map((call, index) => {
+        const original = facts.toolCalls[index]!;
+        return { ...call, nodeId: id(original.nodeId), server: id(original.server), tool: id(original.tool), outcome: id(original.outcome), argsHash: sha256Hex(canonicalJson(call.args ?? null)) };
+      }),
+      modelCalls: scrubbed.modelCalls.map((call, index) => {
+        const original = facts.modelCalls[index]!;
+        return { ...call, nodeId: id(original.nodeId), providerId: id(original.providerId), model: id(original.model) };
+      }),
+      guard: scrubbed.guard.map((verdict, index) => {
+        const original = facts.guard[index]!;
+        return {
+          ...verdict,
+          nodeId: optionalId(original.nodeId),
+          placement: id(original.placement),
+          channel: id(original.channel),
+          detectorId: optionalId(original.detectorId),
+          effectiveAction: id(original.effectiveAction)
+        };
+      })
+    };
   }
 
   private serialise(value: unknown, scrubber: SecretScrubber): string {

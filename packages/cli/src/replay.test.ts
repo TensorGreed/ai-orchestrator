@@ -19,7 +19,7 @@ function io(fetchImpl?: typeof fetch): CliIo & { out: () => string; err: () => s
   return { stdin: new PassThrough(), stdout, stderr, env: { L2M_API_URL: "http://l2m.test/", L2M_API_KEY: "key-1" }, ...(fetchImpl ? { fetch: recordingFetch } : {}), out: () => out, err: () => err, requests };
 }
 
-const zero = { baseline: 0, candidate: 0, delta: 0, ratio: null };
+const zero = { baseline: 0, candidate: 0, delta: 0, pct: null };
 
 function diff(overrides: Partial<RunDiff> = {}): RunDiff {
   return {

@@ -315,6 +315,8 @@ describe("golden runs with side effects stubbed", () => {
     expect(same.candidate.kind).toBe("draft");
     expect(same.diff.output.equal).toBe(true);
     expect(same.diff.toolCalls.steps.every((step) => step.kind === "matched")).toBe(true);
+    // Identifiers survive scrubbing; only secret values and arguments are scrubbed.
+    expect(same.facts.toolCalls[0]).toMatchObject({ server: serverId, tool: "get_current_time", nodeId: "tool" });
     expect(same.diff.health.filter((entry) => entry.blocking)).toEqual([]);
     expect(counter.count("/slack")).toBe(1);
     expect(counter.count("/http")).toBe(1);
