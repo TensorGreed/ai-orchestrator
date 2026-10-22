@@ -35,12 +35,13 @@ The candidate runs on the golden run's input. Each node is classified by type:
 | Node class | Examples | In a replay |
 | --- | --- | --- |
 | Logic | Set, If, Switch, Merge, Sort, Output, Webhook Response | Runs, including the expressions in its fields (see below) |
-| Model | LLM Call, Agent Orchestrator, Supervisor | Runs live |
+| Chart | Chart | Runs from inline data; a chart that needs a data URL or file is not loaded, and the replay could not complete |
+| Model | LLM Call, Agent Orchestrator, Supervisor, Output Parser (it can ask the model to repair its output) | Runs live |
 | Guard | Guard nodes and agent guard bindings | Runs |
 | MCP | MCP Tool, agent tools | Answered from the copied cassette only |
 | Code | Code node (JavaScript and Python) | Answered from the recording; never runs |
 | External write | Slack, email, HTTP Request, database and queue writes, connectors that write, vector-store upserts, Execute Workflow | Answered from the recording; never runs |
-| External read | Polling triggers, RAG retrieval, web browse, connector reads | Answered from the recording; never runs |
+| External read | Polling triggers, RAG retrieval, web browse, connector reads, PDF Output in HTML mode (Chromium loads whatever the page links to) | Answered from the recording; never runs |
 | Approval, wait | Human Approval, Wait | Skipped: approvals take the recorded decision, waits pass through |
 | Unknown | A node type this version does not know | Treated as an external write |
 
@@ -66,7 +67,7 @@ A call the cassette cannot answer fails in the replay and makes the verdict **co
 The replay result shows:
 
 - **Verdict**: pass when the status did not get worse and the output is the same; fail when the candidate's status regressed or its output changed; could not complete when the recording could not answer the candidate (an unanswered MCP call, an approval pause, an error before the run started).
-- **Replay health**: stubbed nodes without a recording, unknown node types, unanswered MCP calls.
+- **Replay health**: stubbed nodes without a recording, unknown node types, unanswered MCP calls, charts that tried to load a data URL.
 - **Output**: each changed path with the golden run's and the replay's value. Whitespace differences are ignored, as are timing and id fields (`**._telemetry`, `**.durationMs`, `**.latencyMs`, `**.startedAt`, `**.completedAt`, `**.executionId`).
 - **Tool calls**: the two runs' tool calls side by side, aligned in order: same, arguments changed, outcome changed, new or missing.
 - **Totals**: token, cost, model call and path changes.

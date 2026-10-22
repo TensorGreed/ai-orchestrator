@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import {
   canonicalJson,
   judgeReplayDiff,
+  REPLAY_BLOCKED_LOAD_MARKER,
   type ReplayHealthWarning,
   type ReplayMcpMode,
   type ReplayRunRequest,
@@ -37,7 +38,7 @@ import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import { sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import type { McpCassetteRunPlan, McpCassetteService } from "./mcp-cassette-service.js";
 import { diffRunFacts } from "./run-diff.js";
-import { buildRunFacts, type PriceTurn } from "./run-facts.js";
+import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import type { ReplayRecordingService } from "./replay-recording-service.js";
 import type { SafeUser } from "./auth-service.js";
 
@@ -189,6 +190,18 @@ export class ReplayService {
       if (warning.kind === "unknown_node_type" || (warning.kind === "truncated_recording" && plan.hits.some((hit) => hit.nodeId === warning.nodeId))) {
         warnings.push({ kind: warning.kind, nodeId: warning.nodeId, message: warning.message, blocking: false });
       }
+    }
+    const blockedLoads = new Set<string>();
+    for (const entry of nodeResultRecords(result.nodeResults)) {
+      if (typeof entry.error === "string" && entry.error.includes(REPLAY_BLOCKED_LOAD_MARKER)) blockedLoads.add(entry.nodeId as string);
+    }
+    for (const nodeId of blockedLoads) {
+      warnings.push({
+        kind: "blocked_load",
+        nodeId,
+        message: `Node ${nodeId} tried to load data from a URL or file. Replays never make that call, so the result cannot be judged.`,
+        blocking: true
+      });
     }
     const report = result.mcpReplay;
     if (report && report.unmatched.length > 0) {

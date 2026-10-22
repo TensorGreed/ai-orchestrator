@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import { REPLAY_BLOCKED_LOAD_MARKER } from "@ai-orchestrator/shared";
 import { injectData, renderChart } from "./chart.js";
 
 describe("chart", () => {
@@ -117,5 +120,27 @@ describe("chart", () => {
       expect(result.svg).toMatch(/^<svg/);
       expect(result.svg.length).toBeGreaterThan(500);
     });
+  });
+});
+
+describe("chart offline mode (replays)", () => {
+  it("refuses every data load and never contacts the URL, while the default mode still loads it", async () => {
+    let hits = 0;
+    const server = http.createServer((_request, response) => {
+      hits += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify([{ a: "x", b: 1 }]));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as AddressInfo;
+    const spec = { mark: "bar", data: { url: `http://127.0.0.1:${address.port}/exfil?secret=abc` }, encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" } } };
+    try {
+      await expect(renderChart({ spec, offline: true })).rejects.toThrow(REPLAY_BLOCKED_LOAD_MARKER);
+      expect(hits).toBe(0);
+      await renderChart({ spec });
+      expect(hits).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

@@ -63,6 +63,16 @@ describe("replay node classes", () => {
     }
   });
 
+  it("answers an HTML-rendered PDF from the recording, since Chromium loads whatever the page asks for", () => {
+    expect(replayNodeClass({ type: "pdf_output", config: { renderMode: "html", htmlTemplate: "<img src='https://x.test/a.png'>" } })).toBe("read");
+    expect(replayNodeClass({ type: "pdf_output", config: { renderMode: "text" } })).toBe("logic");
+    expect(replayNodeClass({ type: "pdf_output" })).toBe("logic");
+  });
+
+  it("classes the output parser as a model node, since it can ask the model to repair its output", () => {
+    expect(replayNodeClass({ type: "output_parser" })).toBe("model");
+  });
+
   it("keeps models, guard and MCP live-or-cassette and session state sandboxed", () => {
     expect(replayNodeClass({ type: "agent_orchestrator" })).toBe("model");
     expect(replayNodeClass({ type: "guard" })).toBe("guard");

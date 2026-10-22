@@ -475,6 +475,46 @@ describe("golden runs with side effects stubbed", () => {
     expect(context.store.loadSessionMemory("golden-mem", "sess-1")).toEqual(memoryBefore);
   });
 
+  it("never lets a chart load its data URL in a replay, and calls that replay inconclusive", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    const chartWorkflow = (url: string | null) =>
+      ({
+        id: "wf-chart",
+        name: "Chart",
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        projectId: "default",
+        nodes: [
+          { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+          {
+            id: "chart",
+            type: "chart",
+            name: "Chart",
+            position: { x: 150, y: 0 },
+            config: { spec: { mark: "bar", data: url ? { url } : { values: [{ a: "x", b: 1 }] }, encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" } } } }
+          },
+          { id: "output", type: "output", name: "Output", position: { x: 300, y: 0 }, config: { responseTemplate: "charted" } }
+        ],
+        edges: [
+          { id: "e1", source: "start", target: "chart" },
+          { id: "e2", source: "chart", target: "output" }
+        ]
+      }) as Workflow;
+    context.store.upsertWorkflow(chartWorkflow(null));
+    const run = (await call(context, "POST", "/api/workflows/wf-chart/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
+    expect(run.status).toBe("success");
+    const golden = await saveGolden(context, builder.cookie, run.executionId);
+    expect((await replay(context, builder.cookie, golden.id)).verdict).toBe("pass");
+
+    context.store.upsertWorkflow(chartWorkflow(`${counter.base}/chart-data?secret=abc`));
+    const result = await replay(context, builder.cookie, golden.id);
+    expect(counter.count("/chart-data")).toBe(0);
+    expect(result.verdict).toBe("error");
+    expect(result.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "blocked_load", nodeId: "chart", blocking: true })]));
+  });
+
   it("truncates the largest node outputs to fit REPLAY_RECORDING_MAX_BYTES", async () => {
     const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
     const builder = await login(context, "builder");

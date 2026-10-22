@@ -4378,7 +4378,9 @@ async function executeNode(
         data,
         width,
         height,
-        config: themeConfig
+        config: themeConfig,
+        // Phase 15.1 — a replay never lets a chart load data from a URL or file.
+        offline: Boolean(dependencies.replayNodeHook)
       });
 
       return {

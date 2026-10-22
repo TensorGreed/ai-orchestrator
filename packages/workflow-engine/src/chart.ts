@@ -28,6 +28,7 @@
 import * as vega from "vega";
 import * as vegaLite from "vega-lite";
 import type { TopLevelSpec } from "vega-lite";
+import { REPLAY_BLOCKED_LOAD_MARKER } from "@ai-orchestrator/shared";
 
 export interface ChartRenderOptions {
   /** Vega-Lite top-level spec. Use {@link injectData} to merge data at runtime. */
@@ -48,6 +49,12 @@ export interface ChartRenderOptions {
    * consistent branding across many charts.
    */
   config?: Record<string, unknown>;
+  /**
+   * Refuse every data load (`data.url`, image URLs, files). Golden-run
+   * replays render charts this way, so a replay never contacts a URL the
+   * spec names. The render fails instead of drawing a chart without data.
+   */
+  offline?: boolean;
 }
 
 export interface ChartRenderResult {
@@ -79,10 +86,14 @@ export async function renderChart(options: ChartRenderOptions): Promise<ChartRen
     throw new Error(`vega-lite compile failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  let blocked = false;
+  const offlineError = () =>
+    new Error(`A replay never loads chart data from a URL or file; this chart needs one, so the replay cannot judge it (${REPLAY_BLOCKED_LOAD_MARKER}).`);
+
   let view: vega.View;
   try {
     const runtime = vega.parse(vegaSpec, options.config);
-    view = new vega.View(runtime, { renderer: "none" });
+    view = new vega.View(runtime, { renderer: "none", ...(options.offline ? { loader: offlineLoader(() => (blocked = true)) } : {}) });
   } catch (err) {
     throw new Error(`vega parse failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -91,16 +102,28 @@ export async function renderChart(options: ChartRenderOptions): Promise<ChartRen
   try {
     svg = await view.toSVG();
   } catch (err) {
+    if (blocked) throw offlineError();
     throw new Error(`vega render failed: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     view.finalize();
   }
+  // Vega logs a failed load and draws without the data; offline, that is a failure.
+  if (blocked) throw offlineError();
 
   return {
     svg,
     dataUrl: `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`,
     resolvedSpec: merged
   };
+}
+
+/** A Vega loader that refuses every load and reports that it did. */
+function offlineLoader(onBlocked: () => void): vega.Loader {
+  const refuse = async (): Promise<never> => {
+    onBlocked();
+    throw new Error(REPLAY_BLOCKED_LOAD_MARKER);
+  };
+  return { options: {}, load: refuse, sanitize: refuse, http: refuse, file: refuse } as unknown as vega.Loader;
 }
 
 /**

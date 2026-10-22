@@ -74,7 +74,6 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
   set_node: "logic",
   chat_intent_router: "logic",
   helper_chat_response: "logic",
-  output_parser: "logic",
   input_validator: "logic",
   if_node: "logic",
   switch_node: "logic",
@@ -102,7 +101,11 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
   edit_image_node: "logic",
   extract_citations: "logic",
   document_chunker: "logic",
+  // Runs, but in a replay a chart never loads data from a URL or file (the
+  // engine refuses the load and the replay is inconclusive).
   chart: "logic",
+  // Text mode runs; HTML mode renders in Chromium, which loads whatever the
+  // page asks for, so it is answered from the recording (`replayNodeClass`).
   pdf_output: "logic",
   output: "logic",
   webhook_response: "logic",
@@ -126,6 +129,8 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
   text_classifier: "model",
   sentiment_analysis: "model",
   ai_transform: "model",
+  // Parses text; can ask the upstream model to repair output that does not parse.
+  output_parser: "model",
 
   // Guard.
   guard: "guard",
@@ -206,14 +211,29 @@ export const REPLAY_STUBBED_CLASSES: ReadonlySet<ReplayNodeClass> = new Set<Repl
 /** Classes that are stubbed even when the recording has nothing for the node. */
 export const REPLAY_ALWAYS_STUBBED_CLASSES: ReadonlySet<ReplayNodeClass> = new Set<ReplayNodeClass>(["approval", "wait", "read", "write", "code"]);
 
-/** The class of a node in a replay. Unknown types (and prototype keys) are `write`. */
+/**
+ * The class of a node in a replay. Unknown types (and prototype keys) are
+ * `write`. A PDF Output node in HTML mode is a `read`: Chromium loads every
+ * image, script and stylesheet the rendered page points at, so the recorded
+ * PDF is replayed instead.
+ */
 export function replayNodeClass(node: { type: string; config?: unknown }): ReplayNodeClass {
   if (!Object.prototype.hasOwnProperty.call(REPLAY_NODE_CLASSES, node.type)) return "write";
+  if (node.type === "pdf_output") {
+    const config = node.config && typeof node.config === "object" ? (node.config as Record<string, unknown>) : {};
+    if (config.renderMode === "html") return "read";
+  }
   return REPLAY_NODE_CLASSES[node.type as WorkflowNodeType];
 }
 
 /** Marker key on the synthetic output a stubbed node gets when the recording has nothing for it. */
 export const REPLAY_STUB_MARKER = "_replayStub";
+/**
+ * In the error of a node that tried to load data from a URL or file during a
+ * replay (a chart's `data.url`). The load is refused and the replay is
+ * inconclusive.
+ */
+export const REPLAY_BLOCKED_LOAD_MARKER = "replay_blocked_load";
 /** Marker key on a recorded node output that was cut to fit the size limit. */
 export const REPLAY_TRUNCATED_MARKER = "_replayTruncated";
 
@@ -408,6 +428,7 @@ export type ReplayHealthKind =
   | "mcp_unmatched"
   | "no_cassette"
   | "paused"
+  | "blocked_load"
   | "replay_error";
 
 export interface ReplayHealthWarning {

