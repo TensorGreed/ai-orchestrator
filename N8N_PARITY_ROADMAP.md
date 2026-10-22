@@ -477,9 +477,9 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 ## Phase 11: Audit Bundles & Approvals (after Phase 10)
 
 ### 11.1 Signed run manifests
-- [ ] Per execution, a manifest recording workflow version hash, every node's resolved config (secret refs only), provider + model + parameters, tool server identities + schema snapshot hashes, prompts, citations, token and cost totals
-- [ ] Manifest signed with a per-deployment key (`AUDIT_SIGNING_KEY_BASE64`, generated locally, stored like `SECRET_MASTER_KEY_BASE64`); verification CLI `l2m audit verify <bundle>` that runs offline
-- [ ] Export "audit bundle" (zip: manifest, node I/O, trace, logs, rendered outputs) from the Runs page and via `GET /api/executions/:id/bundle`; retention follows the existing audit-log retention setting
+- [x] Per execution, a manifest recording workflow version hash, every node's resolved config (secret refs only), provider + model + parameters, tool server identities + schema snapshot hashes, prompts, citations, token and cost totals
+- [x] Manifest signed with a per-deployment key (`AUDIT_SIGNING_KEY_BASE64`, generated locally, stored like `SECRET_MASTER_KEY_BASE64`); verification CLI `l2m audit verify <bundle>` that runs offline
+- [x] Export "audit bundle" (zip: manifest, node I/O, trace, logs, rendered outputs) from the Runs page and via `GET /api/executions/:id/bundle`; retention follows the existing audit-log retention setting
 
 ### 11.2 Approval gates
 - [ ] `approval_gate` node: pauses the run, records who may approve (role/user), optional timeout and fallback branch; resumes through the existing wait/resume plumbing
@@ -556,7 +556,7 @@ to run agents.
 
 ### 12.7 Visibility and assurance
 - [x] Every verdict stored (`guard_events`: channel, detector, score, action, masked evidence spans, profile version) and shown in the Trace tab, run tape and a Security page with trends
-- [ ] Guard events streamed to SIEM destinations through log streaming and included in signed run manifests (11.1)
+- [ ] Guard events streamed to SIEM destinations through log streaming and included in signed run manifests (11.1) — *partial:* signed run manifests carry a guard verdict summary (`extensions.guard`: profile and version, detector, action, outcome, node; no matched content) and bundles include the run's guard events with masked evidence; streaming to SIEM destinations remains
 - [ ] Red-team corpus and benchmark: attack suites (direct and indirect injection, SQL injection, exfiltration, jailbreaks) run through the eval framework, reporting detection and false-positive rates per profile; CI gate on regressions — *partial:* a labelled corpus, a vitest gate on detection and false-positive rates for the default profile, and an end-to-end test that runs a corpus indirect-injection sample through an agent tool result are delivered; running suites through the eval framework per profile and the CI report remain
 - [ ] Framework mapping in the docs: OWASP Top 10 for LLM applications and for agentic applications, MITRE ATLAS, NIST AI RMF — *partial:* the OWASP Top 10 for LLM applications table is in the guard engine docs; agentic applications, MITRE ATLAS and NIST AI RMF remain
 

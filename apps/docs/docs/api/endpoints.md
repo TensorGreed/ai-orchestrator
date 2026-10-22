@@ -174,6 +174,15 @@ Events (masked evidence only):
 
 Profile writes and binding changes are audited as `guard.profile.created`, `guard.profile.updated`, `guard.profile.deleted`, `guard.profile.imported` and `guard.binding.updated`.
 
+## Audit bundles
+
+See [Audit bundles and signed run manifests](../security/audit-bundles.md).
+
+- `GET /api/executions/:id/manifest` (read access to the run's workflow; `{ executionId, manifest, digest, keyId, algorithm, signedAt, signature }`; generated once and cached; 409 while the run is in progress)
+- `GET /api/executions/:id/bundle` (read access to the run's workflow; streamed zip with `x-l2m-manifest-digest` and `x-l2m-signing-key-id` headers; 409 while in progress, 413 over `AUDIT_BUNDLE_MAX_BYTES`; audited as `execution.audit_bundle.export`)
+- `GET /api/audit/signing-keys` (admin; `{ activeKeyId, canRotate, keys: [{ keyId, algorithm, publicKey, publicKeyPem, source, status, createdAt, retiredAt }] }`)
+- `POST /api/audit/signing-keys/rotate` (admin; `201 { key, keys }`; 409 when the key comes from `AUDIT_SIGNING_KEY_BASE64`; audited as `audit.signing_key.rotated`)
+
 ## Secrets
 
 - `POST /api/secrets`
