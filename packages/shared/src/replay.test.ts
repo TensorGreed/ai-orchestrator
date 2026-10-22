@@ -54,10 +54,13 @@ describe("replay node classes", () => {
     }
   });
 
-  it("stubs a Python code node and runs a JavaScript one", () => {
-    expect(replayNodeClass({ type: "code_node", config: { language: "python", code: "import urllib" } })).toBe("write");
-    expect(replayNodeClass({ type: "code_node", config: { language: "javascript" } })).toBe("logic");
-    expect(replayNodeClass({ type: "code_node" })).toBe("logic");
+  it("answers every code node from the recording, Python and JavaScript alike", () => {
+    // The JavaScript sandbox is not an isolate: host intrinsics reach `process`, so user code is never run in a replay.
+    for (const config of [{ language: "python", code: "import urllib" }, { language: "javascript" }, undefined]) {
+      const nodeClass = replayNodeClass({ type: "code_node", config });
+      expect(nodeClass).toBe("code");
+      expect(REPLAY_ALWAYS_STUBBED_CLASSES.has(nodeClass)).toBe(true);
+    }
   });
 
   it("keeps models, guard and MCP live-or-cassette and session state sandboxed", () => {

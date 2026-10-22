@@ -144,9 +144,18 @@ async function registerServer(context: TestContext, adminCookie: string): Promis
   return id;
 }
 
-/** start → MCP tool (clock) → code → Slack → HTTP → output; the error workflow is wf-error. */
-function sideEffectWorkflow(options: { serverId: string; base: string; answer?: string; tz?: string; codeThrows?: boolean }): Workflow {
-  const code = options.codeThrows ? "throw new Error('candidate broke');" : `return { answer: ${JSON.stringify(options.answer ?? "v1")} };`;
+/**
+ * start → MCP tool (clock) → code → label → Slack → HTTP → output; the
+ * error workflow is wf-error. `escape` gives the code node a script that
+ * breaks out of the JavaScript sandbox and calls the counter's /code route.
+ */
+function sideEffectWorkflow(options: { serverId: string; base: string; answer?: string; tz?: string; broken?: boolean; escape?: boolean }): Workflow {
+  const code = options.escape
+    ? `const p = this.constructor.constructor('return process')(); await p.getBuiltinModule('node:http').get(${JSON.stringify(`${options.base}/code`)}); return { shaped: true };`
+    : "return { shaped: true };";
+  const label = options.broken
+    ? { id: "label", type: "stop_and_error", name: "Label", position: { x: 375, y: 0 }, config: { message: "candidate broke" } }
+    : { id: "label", type: "set_node", name: "Label", position: { x: 375, y: 0 }, config: { assignments: [{ key: "answer", valueTemplate: options.answer ?? "v1" }] } };
   return {
     id: "wf-golden",
     name: "Golden",
@@ -164,16 +173,18 @@ function sideEffectWorkflow(options: { serverId: string; base: string; answer?: 
         config: { registryServerId: options.serverId, toolName: "get_current_time", argsTemplate: JSON.stringify({ tz: options.tz ?? "UTC" }), retry: { enabled: false } }
       },
       { id: "shape", type: "code_node", name: "Shape", position: { x: 300, y: 0 }, config: { code } },
+      label,
       { id: "notify", type: "slack_send_message", name: "Notify", position: { x: 450, y: 0 }, config: { authType: "webhook", webhookUrl: `${options.base}/slack`, text: "done" } },
       { id: "post", type: "http_request", name: "Post", position: { x: 600, y: 0 }, config: { method: "POST", urlTemplate: `${options.base}/http`, retry: { enabled: false } } },
-      { id: "output", type: "output", name: "Output", position: { x: 750, y: 0 }, config: { responseTemplate: "{{results.shape.answer}} at {{results.tool.tool_output}}" } }
+      { id: "output", type: "output", name: "Output", position: { x: 750, y: 0 }, config: { responseTemplate: "{{results.label.answer}} at {{results.tool.tool_output}}" } }
     ],
     edges: [
       { id: "e1", source: "start", target: "tool" },
       { id: "e2", source: "tool", target: "shape" },
-      { id: "e3", source: "shape", target: "notify" },
-      { id: "e4", source: "notify", target: "post" },
-      { id: "e5", source: "post", target: "output" }
+      { id: "e3", source: "shape", target: "label" },
+      { id: "e4", source: "label", target: "notify" },
+      { id: "e5", source: "notify", target: "post" },
+      { id: "e6", source: "post", target: "output" }
     ]
   } as Workflow;
 }
@@ -225,7 +236,7 @@ function agentWorkflow(baseUrl: string, secretId: string, options: { codeThrows?
     { id: "e6", source: "agent", sourceHandle: "memory", target: "memory" }
   ];
   if (options.codeThrows) {
-    nodes.push({ id: "check", type: "code_node", name: "Check", position: { x: 300, y: 0 }, config: { code: "throw new Error('candidate broke');" } });
+    nodes.push({ id: "check", type: "stop_and_error", name: "Check", position: { x: 300, y: 0 }, config: { message: "candidate broke" } });
     edges.push({ id: "e2", source: "agent", target: "check" }, { id: "e3", source: "check", target: "output" });
   } else {
     edges.push({ id: "e2", source: "agent", target: "output" });
@@ -353,8 +364,15 @@ describe("golden runs with side effects stubbed", () => {
     expect(lenient.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "mcp_unmatched", blocking: true })]));
     expect(counter.count("/slack")).toBe(1);
 
+    // A code node is answered from the recording: a candidate script that escapes the JavaScript sandbox never runs.
+    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, escape: true }));
+    const escaped = await replay(context, builder.cookie, golden.id);
+    expect(escaped.verdict, JSON.stringify(escaped.reasons)).toBe("pass");
+    await sleep(200);
+    expect(counter.count("/code")).toBe(0);
+
     // A broken candidate: the run fails, the error workflow and its notifications are not fired.
-    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, codeThrows: true }));
+    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, broken: true }));
     const broken = await replay(context, builder.cookie, golden.id);
     expect(broken.status).toBe("error");
     expect(broken.verdict).toBe("fail");
@@ -370,6 +388,12 @@ describe("golden runs with side effects stubbed", () => {
     expect((await call(context, "POST", `/api/replay/recordings/${golden.id}/replay`, builder.cookie, { draft: true, version: 1 })).statusCode).toBe(400);
     expect((await call(context, "POST", `/api/replay/recordings/${golden.id}/replay`, builder.cookie, { version: 999 })).statusCode).toBe(404);
     expect((await call(context, "POST", `/api/replay/recordings/nope/replay`, builder.cookie, {})).statusCode).toBe(404);
+
+    // The escaping script does reach the network when the workflow runs for real, so the replay check above is meaningful.
+    context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, escape: true }));
+    await call(context, "POST", "/api/workflows/wf-golden/execute", builder.cookie, {});
+    for (let attempt = 0; attempt < 40 && counter.count("/code") === 0; attempt += 1) await sleep(50);
+    expect(counter.count("/code")).toBe(1);
   });
 
   it("keeps golden runs when execution history and cassettes are pruned, and deletes them with their workflow", async () => {

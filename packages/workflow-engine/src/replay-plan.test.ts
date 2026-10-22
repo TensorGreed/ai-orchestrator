@@ -144,13 +144,17 @@ describe("replay plan", () => {
       node("loop", "loop_node", { inputKey: "list", itemVariable: "item" }),
       node("slack", "slack_send_message", { channel: "#ops", text: "{{item}}" })
     ]);
-    const plan = buildReplayPlan(workflow, recorded([{ nodeId: "slack", nodeType: "slack_send_message", output: { ok: true, ts: "1" } }]));
+    const plan = buildReplayPlan(workflow, recorded([
+      { nodeId: "items", nodeType: "code_node", output: { list: ["a", "b", "c"] } },
+      { nodeId: "slack", nodeType: "slack_send_message", output: { ok: true, ts: "1" } }
+    ]));
     const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
     expect(fetchCalls).toEqual([]);
     const slackRuns = resultOf(result, "slack");
     expect(slackRuns.length).toBeGreaterThanOrEqual(1);
     for (const run of slackRuns) expect(run.output).toEqual({ ok: true, ts: "1" });
     expect(plan.hits.filter((hit) => hit.nodeId === "slack").length).toBe(slackRuns.length);
+    expect(slackRuns.length).toBe(3);
   });
 
   it("never starts a sub-workflow, sync or async", async () => {
@@ -198,18 +202,30 @@ describe("replay plan", () => {
     expect(resultOf(result, "approve")[0]!.output).toEqual({ approved: true, decision: "approve" });
   });
 
-  it("runs JavaScript code live and stubs Python code", async () => {
-    const js = node("js", "code_node", { language: "javascript", code: "return { doubled: 21 * 2 };" });
+  it("answers JavaScript and Python code nodes from the recording and never runs them", async () => {
+    // Either script would reach the network if it ran: the JavaScript one through the host realm, the Python one directly.
+    const escape = "const p = this.constructor.constructor('return process')(); p.getBuiltinModule('node:http').get('http://127.0.0.1:9/escape'); return { doubled: 42 };";
+    const js = node("js", "code_node", { language: "javascript", code: escape });
     const py = node("py", "code_node", { language: "python", code: "import urllib.request\nresult = 1" });
     const workflow = chain([node("start", "manual_trigger"), js, py]);
     const plan = buildReplayPlan(workflow, recorded([
       { nodeId: "js", nodeType: "code_node", output: { doubled: 0 } },
       { nodeId: "py", nodeType: "code_node", output: { code_result: "recorded" } }
     ]));
-    expect(plan.decisions.map((decision) => decision.action)).toEqual(["run", "run", "recorded", "run"]);
+    expect(plan.decisions.map((decision) => [decision.nodeClass, decision.action])).toEqual([["trigger", "run"], ["code", "recorded"], ["code", "recorded"], ["logic", "run"]]);
     const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
-    expect((resultOf(result, "js")[0]!.output as Record<string, unknown>).doubled).toBe(42);
+    expect(resultOf(result, "js")[0]!.output).toEqual({ doubled: 0 });
     expect(resultOf(result, "py")[0]!.output).toEqual({ code_result: "recorded" });
+    expect(plan.hits.map((hit) => hit.nodeId)).toEqual(["js", "py"]);
+    expect(fetchCalls).toEqual([]);
+  });
+
+  it("stubs a code node the recording never saw instead of running it", async () => {
+    const workflow = chain([node("start", "manual_trigger"), node("added", "code_node", { code: "return { ran: true };" })]);
+    const plan = buildReplayPlan(workflow, {});
+    expect(plan.warnings).toEqual([expect.objectContaining({ kind: "unrecorded_stub", nodeId: "added" })]);
+    const result = await executeWorkflow({ workflow }, deps({ replayNodeHook: plan.hook }));
+    expect(resultOf(result, "added")[0]!.output).toMatchObject({ [REPLAY_STUB_MARKER]: "unrecorded" });
   });
 
   it("replays a trigger's recorded output, and runs an unrecorded trigger", async () => {

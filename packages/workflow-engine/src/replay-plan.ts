@@ -5,11 +5,14 @@
  * outputs and returns a hook the executor calls before it runs any node
  * handler: at the top level, inside loop bodies, for workers and in
  * sub-workflows alike. For a node whose class is stubbed (external reads
- * and writes, approvals, waits, unknown types) the hook returns the
- * recorded output, the recorded error, or a synthetic stub; the handler is
- * never called. Nothing in a replay can reach a live side effect through a
- * node, because the decision is made per node type at the single place
+ * and writes, code nodes, approvals, waits, unknown types) the hook returns
+ * the recorded output, the recorded error, or a synthetic stub; the handler
+ * is never called. The decision is made per node type at the single place
  * every handler is dispatched from, and unknown types count as writes.
+ *
+ * Nodes that do run (logic, models, guard) still evaluate the workflow's
+ * own `{{ }}` and sort expressions in the host realm, as in any run, so an
+ * expression written to make a network call can make it in a replay too.
  */
 
 import {

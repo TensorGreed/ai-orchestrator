@@ -1,6 +1,6 @@
 # Golden runs and replay
 
-A **golden run** is a run you keep as a reference: what went in, what every node returned and which MCP calls it made. **Replay** runs a changed workflow (the draft, or a saved version) against that reference with every side effect stubbed, then shows what changed and gives a verdict: **pass**, **fail** or **could not complete**. Use it to check a prompt, model or tool change before it reaches anyone.
+A **golden run** is a run you keep as a reference: what went in, what every node returned and which MCP calls it made. **Replay** runs a changed workflow (the draft, or a saved version) against that reference, with every node that reaches outside L2M and every code node answered from the recording, then shows what changed and gives a verdict: **pass**, **fail** or **could not complete**. Use it to check a prompt, model or tool change before it reaches anyone.
 
 Everything stays on your deployment.
 
@@ -34,16 +34,23 @@ The candidate runs on the golden run's input. Each node is classified by type:
 
 | Node class | Examples | In a replay |
 | --- | --- | --- |
-| Logic | Set, If, Switch, Merge, Code (JavaScript), Output, Webhook Response | Runs |
+| Logic | Set, If, Switch, Merge, Sort, Output, Webhook Response | Runs, including the expressions in its fields (see below) |
 | Model | LLM Call, Agent Orchestrator, Supervisor | Runs live |
 | Guard | Guard nodes and agent guard bindings | Runs |
 | MCP | MCP Tool, agent tools | Answered from the copied cassette only |
-| External write | Slack, email, HTTP Request, database and queue writes, connectors that write, vector-store upserts, Execute Workflow, Python code | Answered from the recording; never runs |
+| Code | Code node (JavaScript and Python) | Answered from the recording; never runs |
+| External write | Slack, email, HTTP Request, database and queue writes, connectors that write, vector-store upserts, Execute Workflow | Answered from the recording; never runs |
 | External read | Polling triggers, RAG retrieval, web browse, connector reads | Answered from the recording; never runs |
 | Approval, wait | Human Approval, Wait | Skipped: approvals take the recorded decision, waits pass through |
 | Unknown | A node type this version does not know | Treated as an external write |
 
 A node that has to be answered from the recording but has no recorded result (you added it after the golden run was saved) gets a stub output marked `_replayStub` and a warning in **Replay health**. It never runs live.
+
+Code nodes are answered from the recording because neither runtime is cut off from the network: the JavaScript sandbox is a `vm` context, not an isolate, and Python runs as a subprocess. A change to a code node's script therefore does not show up in a replay; change the logic in other nodes, or save a new golden run after the change.
+
+### What a replay does not stop yet
+
+Expressions inside the nodes that do run are evaluated as in any run: `{{ }}` templates in prompts, Set and Output fields, If conditions and agent prompts, and Sort node expressions. These run in the API process, so an expression written to make a network call can make that call during a replay too. Treat a replay as protection against the workflow's connectors, HTTP calls and code nodes, not against a hostile workflow author. Sandboxing expressions is planned as separate work, and this page will change when it lands.
 
 Replays never write to deployment state: session memory, the session tool cache and session artifacts live in memory for the replay and are thrown away, knowledge-base writes are refused, MCP elicitation requests are declined, the error workflow and failure notifications are not fired, and replays stay out of execution metrics and MCP tool-call telemetry. Pinned node data on the workflow is ignored. The replay itself is stored as a run with trigger type `replay`.
 

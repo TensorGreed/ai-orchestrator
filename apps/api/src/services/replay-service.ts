@@ -5,8 +5,9 @@
  * version. It runs on the recorded input with:
  *
  *   - a replay plan (workflow-engine `buildReplayPlan`) that answers every
- *     external read and write, approval, wait and unknown node type from the
- *     recording; their handlers never run;
+ *     external read and write, code node, approval, wait and unknown node
+ *     type from the recording; their handlers never run. Expressions inside
+ *     the nodes that do run are evaluated as in any run;
  *   - MCP calls answered from the golden run's copied cassette, never from a
  *     live server (strict: each recorded call once; lenient: a call made more
  *     often than recorded reuses its last answer; different arguments are

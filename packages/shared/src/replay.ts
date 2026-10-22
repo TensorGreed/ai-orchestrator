@@ -6,14 +6,20 @@ import type { WorkflowNodeType } from "./types";
  *
  * A golden run is a scrubbed, self-contained copy of one finished
  * execution. Replaying it runs a candidate workflow (the draft or a saved
- * version) on the recorded input, with every call that could touch the
- * outside world answered from the recording instead of being made, and
- * compares the two runs.
+ * version) on the recorded input, with every node that reaches outside the
+ * engine (connectors, HTTP, databases, sub-workflows, MCP) and every code
+ * node answered from the recording instead of being run, and compares the
+ * two runs.
+ *
+ * What this does not cover yet: user expressions inside nodes that do run
+ * (`{{ }}` templates, sort expressions) are evaluated in the host realm, as
+ * in any run, so an expression written to make a network call can still
+ * make one in a replay. Sandboxing those expressions is separate work.
  *
  * What a node does in a replay is decided by its class:
  *
  *   trigger    the run's own input; the recorded output is replayed
- *   logic      deterministic transforms and control flow; runs
+ *   logic      transforms and control flow; runs (user expressions in them run too)
  *   model      model calls; run live (they are usually what is under test)
  *   guard      guard checks; run live
  *   mcp        MCP calls; answered from the recording's cassette, never a live server
@@ -22,12 +28,13 @@ import type { WorkflowNodeType } from "./types";
  *   wait       delays; passed through without waiting
  *   read       external reads; the recorded output is replayed
  *   write      external side effects; the recorded output is replayed
+ *   code       user code (JavaScript and Python code nodes); the recorded output is replayed
  *
  * A node type this table does not know (a community node, a type added
  * later) is a `write`: it is stubbed, never run live.
  */
 
-export type ReplayNodeClass = "trigger" | "logic" | "model" | "guard" | "mcp" | "sandboxed" | "approval" | "wait" | "read" | "write";
+export type ReplayNodeClass = "trigger" | "logic" | "model" | "guard" | "mcp" | "sandboxed" | "approval" | "wait" | "read" | "write" | "code";
 
 export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeClass>> = {
   // Triggers: their output is the run's input.
@@ -65,7 +72,6 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
   loop_node: "logic",
   merge_node: "logic",
   set_node: "logic",
-  code_node: "logic",
   chat_intent_router: "logic",
   helper_chat_response: "logic",
   output_parser: "logic",
@@ -129,6 +135,11 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
   // MCP.
   mcp_tool: "mcp",
 
+  // User code: neither the JavaScript sandbox (a `vm` context, not an
+  // isolate) nor the Python subprocess is cut off from the network, so code
+  // nodes are answered from the recording.
+  code_node: "code",
+
   // Session state: replays get their own in-memory stores.
   local_memory: "sandboxed",
   session_artifact_save: "sandboxed",
@@ -190,25 +201,15 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
 };
 
 /** Classes whose nodes never run their handler in a replay. */
-export const REPLAY_STUBBED_CLASSES: ReadonlySet<ReplayNodeClass> = new Set<ReplayNodeClass>(["trigger", "approval", "wait", "read", "write"]);
+export const REPLAY_STUBBED_CLASSES: ReadonlySet<ReplayNodeClass> = new Set<ReplayNodeClass>(["trigger", "approval", "wait", "read", "write", "code"]);
 
 /** Classes that are stubbed even when the recording has nothing for the node. */
-export const REPLAY_ALWAYS_STUBBED_CLASSES: ReadonlySet<ReplayNodeClass> = new Set<ReplayNodeClass>(["approval", "wait", "read", "write"]);
+export const REPLAY_ALWAYS_STUBBED_CLASSES: ReadonlySet<ReplayNodeClass> = new Set<ReplayNodeClass>(["approval", "wait", "read", "write", "code"]);
 
-/**
- * The class of a node in a replay. Unknown types are `write`. A Python code
- * node runs in a subprocess that can reach the network, so it is a `write`
- * too; a JavaScript code node runs in the engine's sandbox, which has no
- * network, file system or process access.
- */
+/** The class of a node in a replay. Unknown types (and prototype keys) are `write`. */
 export function replayNodeClass(node: { type: string; config?: unknown }): ReplayNodeClass {
   if (!Object.prototype.hasOwnProperty.call(REPLAY_NODE_CLASSES, node.type)) return "write";
-  const known = REPLAY_NODE_CLASSES[node.type as WorkflowNodeType];
-  if (node.type === "code_node") {
-    const config = node.config && typeof node.config === "object" ? (node.config as Record<string, unknown>) : {};
-    if (config.language === "python") return "write";
-  }
-  return known;
+  return REPLAY_NODE_CLASSES[node.type as WorkflowNodeType];
 }
 
 /** Marker key on the synthetic output a stubbed node gets when the recording has nothing for it. */
