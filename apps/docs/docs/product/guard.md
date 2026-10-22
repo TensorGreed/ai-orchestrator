@@ -41,7 +41,9 @@ Attach a Guard node to an agent's **guard** port (0 or 1; the slot sits up and t
 | After each tool result, before the model sees it | `tool_result` | `untrusted_external` | The result is withheld; the model is told to continue without it | The model sees the rewritten result | The run pauses for approval |
 | Before the final answer leaves the node | `final_output` | none | The node fails with "Guard blocked …" | The rewritten answer is the node's output | The run pauses for approval |
 
-Internal tools (the session cache and clarification tools) only replay content that was already checked, so they are not checked again. When an agent pauses for approval and the approver accepts, the node runs again and that exact finding is accepted for the rest of the run; a rejection fails the node.
+Internal tools (the session cache and clarification tools) only replay content that was already checked, so they are not checked again. When an agent pauses for approval and the approver accepts, the node runs again with that approval granted; a rejection fails the node. An approval is tied to the node, the channel, the tool and the masked findings, so a re-run that calls another tool or brings other values (another address, another card) asks again. It covers that one re-run of the node only. Approvals live in the paused run's state, which only the approval decision writes; run input, webhook bodies and variables cannot carry one (keys starting with `__` are dropped from them).
+
+A tool call that fails is guarded too: its error text comes from the tool, so it is checked on the `tool_result` channel with the `untrusted_external` label and spotlit like a result. If the guard rewrites tool arguments into something that is not an object, the call is refused rather than sent with the original arguments. The session cache keeps the rewritten arguments.
 
 A Guard node attached to a port does not run as a workflow step and cannot have DAG edges of its own; the validator reports `guard_port_on_dag` if it does. Its channel and input field are ignored.
 
@@ -57,12 +59,12 @@ The Trace tab names the source of each agent's profiles: guard port, enforced by
 
 ## Profiles
 
-Profiles live on the **Security** page, under **Profiles & bindings**. Admins and builders can create, edit, duplicate, import and delete them; operators and viewers can read and export them.
+Profiles live on the **Security** page, under **Profiles & bindings**. Admins and builders can create, edit, duplicate, import and delete them; operators and viewers can read and export them. A profile that any project enforces can only be edited or re-imported by an admin (others get `403`), so a builder cannot loosen the floor by changing the profile itself.
 
 - **Versions.** Every save is a new immutable version with its hash, author, time and an optional note. Saving a document whose hash has not changed does not add a version. Runs record the profile id, version and hash they used.
 - **Diff.** Pick two versions to see every changed setting by path.
 - **Export and import.** Export downloads a version as JSON (headers `x-guard-profile-version` and `x-guard-profile-hash`); import accepts the same JSON as a new profile or as a new version of an existing one.
-- **Validation.** Errors come back per field (`channels.prompt.detectors.0.threshold: …`) and are shown next to the editor. Profiles may not hold key material: provider options name a stored secret (`keyId`), and the fallback cannot be `protect`.
+- **Validation.** Errors come back per field (`channels.prompt.detectors.0.threshold: …`) and are shown next to the editor. Profiles may not hold key material: provider options name a stored secret (`keyId`), and the fallback cannot be `protect`. Custom dictionary patterns are limited to 256 characters, and patterns with nested quantifiers such as `(a+)+` are refused (and skipped if an older profile already holds one).
 - **Built-in default.** The shipped default profile is seeded read-only. Duplicate it to change it. When an upgrade ships a changed default, a new version is added.
 - **Deleting** a profile is refused while a project or workflow is bound to it.
 
@@ -82,10 +84,12 @@ A project and each of its workflows can bind a profile:
 
 Precedence, for each agent:
 
-1. An **enforced** project profile runs first. Builders cannot change or remove it; the editor shows a lock.
+1. An **enforced** project profile runs first. Builders cannot change or remove the binding, or edit the profile it points at; the editor shows a lock.
 2. Then the agent's **guard port** profile if it has one, otherwise the **workflow override**, otherwise the **project override**, otherwise the **instance default** (when `GUARD_AUTO_APPLY` is on).
 
 Profiles in the stack are deduplicated by hash. All of them run, and the most severe action wins, so an override can add checks to an enforced profile but never loosen it. A guard node with **Effective profile** resolves the same way; a guard node with a named profile runs the enforced profile first and then its own.
+
+Changing a project binding needs write access to that project, and reading it (or `GET /api/guard/effective?projectId=`) needs read access, so a project membership with fewer rights than the global role applies here too.
 
 `GET /api/guard/effective?workflowId=` returns the stack and the chain of levels it came from. The guard node's config panel and the bindings panel show it too.
 
@@ -116,7 +120,7 @@ Every check writes rows to `guard_events`: one per applied action, or one row fo
 - masked evidence (for example `j•••@e••••••.com`) and the detector's message;
 - the profile id, version and hash, the verdict's latency, whether the budget ran out and which detectors it skipped.
 
-Rows never hold the content that was checked, the raw matched value, protection tokens or keys. Evidence is masked inside the engine before it reaches the workflow engine, so nothing raw is available to write. Events follow `EXECUTION_HISTORY_RETENTION_DAYS` and are deleted with their workflow.
+Rows never hold the content that was checked, the raw matched value, protection tokens or keys. Evidence is masked inside the engine before it reaches the workflow engine, so nothing raw is available to write. Pattern detectors (egress, exfiltration, SQL, command and path) keep a short excerpt: URL query strings and fragments are dropped (scheme, host and path stay), SQL string literals are blanked, and anything the DLP patterns recognise in the excerpt or in a parser error is masked. Events follow `EXECUTION_HISTORY_RETENTION_DAYS` and are deleted with their workflow.
 
 ## Where verdicts show up
 
@@ -125,9 +129,14 @@ Rows never hold the content that was checked, the raw matched value, protection 
 - **Security page.** Verdict totals, verdicts per day by outcome, counts by action, category and channel, the detectors that fire most, what shadow rules would have blocked, and the latest events with links to their runs. Filter by project, workflow, profile and window.
 - **Canvas.** Guard cards show their `pass`, `blocked` and `review` outputs and an empty protection slot; agents show a guard slot. The canvas key lists the guard and protection port colours.
 
-## Limits
+## Limits and deployment notes
 
 - Agents check the `prompt`, `tool_arguments`, `tool_result` and `final_output` channels. Intermediate model turns (`model_output`) are not checked inside the loop; use a guard node after the agent to check its output on that channel.
-- The egress guard resolves hostnames with the system resolver at check time. A host that resolves differently a moment later (DNS rebinding) is not caught.
-- HTTP Request and SQL connector nodes are not checked automatically. Put a guard node with the `tool_arguments` channel in front of them.
-- The events listing is filtered by role only, like run history: anyone who can read runs can read every project's guard events.
+- **Egress is advisory for MCP tools.** The egress guard scans tool arguments for `scheme://` URLs only and resolves their hostnames with the system resolver at check time. The MCP server resolves the name again when it makes the request, so a host that resolves differently a moment later (DNS rebinding) is not caught, and a host written without a scheme is not checked. Enforce egress where the request is made: a network policy, proxy or sandbox around the MCP server.
+- HTTP Request and SQL connector nodes are not checked automatically, and HTTP Request has no egress guard. Put a guard node with the `tool_arguments` channel in front of them.
+- **A guard node is not a data barrier.** It decides which branch runs and what it passes on, but later nodes can still read earlier results directly with <span v-pre>`{{results.<nodeId>.field}}`</span>. Do not template a pre-guard node's output into anything the guard is meant to protect.
+- **Approvals use the profile from the pause.** A guard node waiting for approval stored the item it would send to `pass`; approving later sends that item even if the profile changed while the run was paused. Reject and re-run when a profile change matters.
+- **Sub-workflows** run under the calling workflow's guard resolution, not their own bindings. **Error-handler workflows** run under their own workflow and project bindings.
+- **Read scoping.** Guard events, the Security page counts and the bindings listed on a profile are limited to the workflows and projects the user can read. Profiles and their versions are instance-wide: every signed-in user can read every profile. Run history itself is filtered by role only.
+- **Custom patterns.** The nested-quantifier check catches the common catastrophic shapes but not every slow pattern (overlapping alternations such as `(a|aa)+` pass). Patterns run over the whole checked text and the latency budget cannot interrupt a regular expression that is already running, so keep dictionary patterns simple and anchored.
+- **Token vault.** `guard_token_vault` rows are not covered by run retention and are not scoped to a project: a token resolves for any run on the instance, and rows stay until they are deleted. Sealing binds each value to the vault's purpose but not to its token or row. Keys for deterministic tokens and keyed hashes must be at least 16 bytes.
