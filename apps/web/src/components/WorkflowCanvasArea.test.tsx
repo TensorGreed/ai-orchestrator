@@ -349,6 +349,36 @@ describe("WorkflowCanvasArea", () => {
     expect(screen.getByText("Once upon a time")).toBeInTheDocument();
   });
 
+  it("lists a node's activity and resolved fields in its expanded log row", async () => {
+    const user = userEvent.setup();
+    const executionResult: WorkflowExecutionResult = {
+      workflowId: "wf",
+      status: "success",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:00:05.000Z",
+      nodeResults: [
+        {
+          nodeId: "a",
+          status: "success",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          durationMs: 900,
+          activity: [
+            { nodeId: "a", at: "2026-01-01T00:00:00.000Z", seq: 1, kind: "resolved_input", fields: { method: "POST", url: "https://api.x.com/v1/items" } },
+            { nodeId: "a", at: "2026-01-01T00:00:00.800Z", seq: 2, kind: "retry", scope: "provider", attempt: 1, maxAttempts: 3, delayMs: 2000, reason: "503" }
+          ]
+        }
+      ]
+    };
+    render(<WorkflowCanvasArea {...makeProps({ nodes: [makeNode("a", "http_request", "Fetch")], executionResult })} />);
+    await user.click(screen.getByRole("tab", { name: "Logs" }));
+    await user.click(screen.getByRole("button", { name: /Expand all/ }));
+    expect(screen.getByRole("heading", { name: "Activity" })).toBeInTheDocument();
+    expect(screen.getByText("POST https://api.x.com/v1/items")).toBeInTheDocument();
+    expect(screen.getByTestId("activity-resolved-fields")).toHaveTextContent("method");
+    expect(screen.getByText("+0.8s")).toBeInTheDocument();
+    expect(screen.getByText(/Retrying model request in 2.0s \(attempt 2 of 3\)/)).toBeInTheDocument();
+  });
+
   it("renders the run tape with LLM time from node telemetry", () => {
     const executionResult: WorkflowExecutionResult = {
       workflowId: "wf",

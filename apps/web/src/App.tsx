@@ -85,6 +85,8 @@ import {
   pickStreamFailureMessage,
   summarizeInputPreview,
   tailPreview,
+  currentActivity,
+  describeActivity,
   traceStreamCallbacks,
   type LiveNodeResult,
   type TraceStreamHandlers
@@ -1288,6 +1290,7 @@ function StudioApp() {
       const liveText = nodeResult.status === "running" ? (nodeResult as LiveNodeResult).liveText : undefined;
       map.set(nodeResult.nodeId, {
         input: nodeResult.input !== undefined ? truncatePreview(summarizeInputPreview(nodeResult.input, summarizePreviewValue)) : undefined,
+        now: nodeResult.status === "running" && nodeResult.activity?.length ? describeActivity(currentActivity(nodeResult)!) : undefined,
         live: liveText ? tailPreview(liveText) : undefined,
         output: nodeResult.output !== undefined ? truncatePreview(summarizePreviewValue(nodeResult.output)) : undefined,
         error: nodeResult.error ? truncatePreview(nodeResult.error) : undefined,

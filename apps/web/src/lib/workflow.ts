@@ -37,6 +37,8 @@ export interface EditorNodeData {
     output?: string;
     /** Tail of the model text streamed so far, while the node runs. */
     live?: string;
+    /** What the running node is doing right now (latest step it reported). */
+    now?: string;
     error?: string;
     /** One-sentence remediation hint produced by the executor for the failing
      *  node. Surfaced under the raw error in the on-canvas preview. */

@@ -6,7 +6,8 @@ import type {
   ChatMessage,
   ToolDefinition
 } from "@ai-orchestrator/shared";
-import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentToolRuntime, InternalToolResult } from "./types";
+import { NODE_ACTIVITY_PREVIEW_CHARS } from "@ai-orchestrator/shared";
+import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentRuntimeEvent, AgentToolRuntime, InternalToolResult } from "./types";
 import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt } from "./types";
 
 /** The error `run()` throws once the run's abort signal fires: its reason when that is an Error. */
@@ -18,6 +19,10 @@ function abortErrorFor(signal: AbortSignal): Error {
   const error = new Error(typeof reason === "string" && reason.trim() ? reason.trim() : "Agent run aborted.");
   error.name = "AbortError";
   return error;
+}
+
+function previewText(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}...` : value;
 }
 
 /** Retry wait that ends early, by throwing the abort error, when `signal` aborts. */
@@ -998,11 +1003,24 @@ ${effectiveSystemPrompt}`;
       return out;
     };
 
+    const emit = (event: AgentRuntimeEvent) => {
+      if (!context.onEvent) return;
+      try {
+        context.onEvent(event);
+      } catch {
+        // Activity reporting must never break the loop.
+      }
+    };
+    const llmIdentity = { providerId: String(request.provider.providerId), model: request.provider.model };
+    const endStep = (iteration: number, extra: { toolCalls?: string[]; final?: boolean } = {}) =>
+      emit({ kind: "agent_step", phase: "end", iteration, maxIterations: request.maxIterations, ...extra });
+
     try {
       for (let iteration = 1; iteration <= request.maxIterations; iteration += 1) {
         if (context.signal?.aborted) {
           throw abortErrorFor(context.signal);
         }
+        emit({ kind: "agent_step", phase: "start", iteration, maxIterations: request.maxIterations });
         // Phase 12.1 — guard hook: before each model call.
         await guardPrompts(iteration);
         // --- LLM call with per-iteration retry ---
@@ -1016,6 +1034,8 @@ ${effectiveSystemPrompt}`;
               (tool) => !disabledTools.has(tool.name)
             );
 
+            emit({ kind: "llm_call", phase: "start", ...llmIdentity, iteration });
+            const llmStartedMs = Date.now();
             modelResponse = await providerAdapter.generate(
               {
                 provider: request.provider,
@@ -1028,6 +1048,13 @@ ${effectiveSystemPrompt}`;
                 ...(context.onProviderRetry ? { onRetry: context.onProviderRetry } : {})
               }
             );
+            emit({
+              kind: "llm_call",
+              phase: "end",
+              ...llmIdentity,
+              iteration,
+              latencyMs: typeof modelResponse.latencyMs === "number" ? modelResponse.latencyMs : Math.max(0, Date.now() - llmStartedMs)
+            });
             // Telemetry: accumulate usage + latency on every successful call.
             llmCallCount += 1;
             if (typeof modelResponse.latencyMs === "number") {
@@ -1048,6 +1075,7 @@ ${effectiveSystemPrompt}`;
               throw abortErrorFor(context.signal);
             }
             llmError = error instanceof Error ? error : new Error(String(error));
+            emit({ kind: "llm_call", phase: "end", ...llmIdentity, iteration, error: previewText(llmError.message, 200) });
             const errorMsg = llmError.message.toLowerCase();
             const isQuotaError = errorMsg.includes("quota") || errorMsg.includes("billing") || errorMsg.includes("limit: 0") || errorMsg.includes("rate_limit_exceeded");
             if (isQuotaError) {
@@ -1055,6 +1083,14 @@ ${effectiveSystemPrompt}`;
             }
             if (llmAttempt < LLM_RETRY_MAX) {
               const delay = LLM_RETRY_BASE_DELAY_MS * Math.pow(2, llmAttempt);
+              emit({
+                kind: "retry",
+                scope: "agent_llm",
+                attempt: llmAttempt + 1,
+                maxAttempts: LLM_RETRY_MAX + 1,
+                delayMs: delay,
+                reason: previewText(llmError.message, 200)
+              });
               await waitUnlessAborted(delay, context.signal);
             }
           }
@@ -1109,6 +1145,7 @@ ${effectiveSystemPrompt}`;
               toolResults: [],
               ...turnTelemetry(modelResponse)
             });
+            endStep(iteration);
             continue;
           }
           // Last iteration — fall through to return what we have
@@ -1129,6 +1166,21 @@ ${effectiveSystemPrompt}`;
 
           for (const call of requestedTools) {
             const callStartedMs = Date.now();
+            let toolReported = false;
+            const reportToolEnd = (outcome: "ok" | "error" | "blocked", error?: string) => {
+              if (toolReported) return;
+              toolReported = true;
+              emit({
+                kind: "tool_call",
+                phase: "end",
+                toolName: call.name,
+                toolCallId: call.id,
+                iteration,
+                durationMs: Math.max(0, Date.now() - callStartedMs),
+                outcome,
+                ...(error ? { error: previewText(error, 200) } : {})
+              });
+            };
             const callStartedAt = new Date(callStartedMs).toISOString();
             const resultsBeforeCall = toolResults.length;
             // Phase 12.1 — the arguments after the guard's rewrite, and the
@@ -1149,6 +1201,7 @@ ${effectiveSystemPrompt}`;
                 const errorMsg =
                   tools.describeUnavailableTool?.(call.name) ??
                   `Tool '${call.name}' does not exist. Available tools: ${availableToolNames || "none"}`;
+                reportToolEnd("error", errorMsg);
                 toolResults.push({
                   toolCallId: call.id,
                   toolName: call.name,
@@ -1270,6 +1323,7 @@ ${effectiveSystemPrompt}`;
                 if (decision.outcome === "block" || unusableRewrite) {
                   const reason = decision.outcome === "block" ? decision.message : "the rewritten arguments are not an object";
                   const errorMsg = `Tool call '${call.name}' was blocked by the guard: ${reason}. Do not retry it with the same arguments.`;
+                  reportToolEnd("blocked", errorMsg);
                   toolResults.push({ toolCallId: call.id, toolName: call.name, output: null, error: errorMsg });
                   messages.push({ role: "tool", content: serializeToolMessage(false, errorMsg, toolOutputLimits), toolCallId: call.id, name: call.name });
                   failedToolCount += 1;
@@ -1280,6 +1334,14 @@ ${effectiveSystemPrompt}`;
                 }
               }
 
+              emit({
+                kind: "tool_call",
+                phase: "start",
+                toolName: call.name,
+                toolCallId: call.id,
+                iteration,
+                argsPreview: previewText(JSON.stringify(callArguments) ?? "", NODE_ACTIVITY_PREVIEW_CHARS)
+              });
               let output = internalTool
                 ? await internalTool.invoke(callArguments)
                 : await tools.invokeTool(call.name, callArguments);
@@ -1299,6 +1361,7 @@ ${effectiveSystemPrompt}`;
               }
 
               if (guardNotice) {
+                reportToolEnd("blocked", guardNotice);
                 toolResults.push({ toolCallId: call.id, toolName: call.name, output: null, error: guardNotice });
                 messages.push({ role: "tool", content: serializeToolMessage(false, guardNotice, toolOutputLimits), toolCallId: call.id, name: call.name });
                 failedToolCount += 1;
@@ -1311,6 +1374,7 @@ ${effectiveSystemPrompt}`;
                 output
               });
 
+              reportToolEnd("ok");
               // Reset failure count on success
               toolFailureCounts.delete(call.name);
 
@@ -1362,6 +1426,7 @@ ${effectiveSystemPrompt}`;
                 else if (decision.outcome === "rewrite") guardedError = typeof decision.content === "string" ? decision.content : JSON.stringify(decision.content);
               }
               const toolError = createToolErrorResult(call, guardedError);
+              reportToolEnd("error", toolError.error);
               toolResults.push(toolError);
               failedToolCount += 1;
 
@@ -1423,6 +1488,7 @@ ${effectiveSystemPrompt}`;
             toolResults,
             ...turnTelemetry(modelResponse)
           });
+          endStep(iteration, { toolCalls: requestedTools.map((call) => call.name) });
 
           continue;
         }
@@ -1438,6 +1504,7 @@ ${effectiveSystemPrompt}`;
           toolResults: [],
           ...turnTelemetry(modelResponse)
         });
+        endStep(iteration, { final: true });
 
         const result: AgentRunState = {
           finalAnswer,

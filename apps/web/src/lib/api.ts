@@ -5,6 +5,7 @@ import type {
   GuardProfileVersionView,
   GuardResolutionView,
   McpBreakerSettings,
+  NodeActivityEvent,
   McpCredentialMode,
   McpDelegatedFallback,
   McpMyConnection,
@@ -325,6 +326,9 @@ export interface StreamNodeProgressEvent {
   at: string;
 }
 
+/** One step a running node took (resolved input, model call, retry, agent step, tool call). */
+export type StreamNodeActivityEvent = NodeActivityEvent;
+
 /** Phase 10.5 — an MCP server's question to the person running the workflow, as it starts waiting or is settled. */
 export interface StreamElicitationEvent {
   phase: "created" | "settled";
@@ -337,6 +341,7 @@ interface WorkflowExecuteStreamHandlers {
   onNodeComplete?: (event: StreamNodeCompleteEvent) => void;
   onLlmDelta?: (event: StreamLlmDeltaEvent) => void;
   onNodeProgress?: (event: StreamNodeProgressEvent) => void;
+  onNodeActivity?: (event: StreamNodeActivityEvent) => void;
   onElicitation?: (event: StreamElicitationEvent) => void;
   onError?: (event: StreamErrorEvent) => void;
 }
@@ -503,6 +508,11 @@ async function streamWorkflowExecutionRequest(
 
       if (parsedFrame.event === "node_progress" && data && typeof data === "object") {
         handlers.onNodeProgress?.(data as StreamNodeProgressEvent);
+        continue;
+      }
+
+      if (parsedFrame.event === "node_activity" && data && typeof data === "object") {
+        handlers.onNodeActivity?.(data as StreamNodeActivityEvent);
         continue;
       }
 

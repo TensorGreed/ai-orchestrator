@@ -1,4 +1,4 @@
-import type { AgentRunRequest, AgentRunState, ChatMessage, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
+import type { AgentRunRequest, AgentRunState, ChatMessage, NodeActivity, ToolCall, ToolDefinition } from "@ai-orchestrator/shared";
 import type { ProviderExecutionContext, ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 
 export interface AgentToolRuntime {
@@ -11,6 +11,11 @@ export interface AgentToolRuntime {
    */
   describeUnavailableTool?: (toolName: string) => string | undefined;
 }
+
+/** What the loop reports while it runs: model calls, retries, steps and tool calls. */
+export type AgentRuntimeEvent =
+  | Extract<NodeActivity, { kind: "llm_call" | "agent_step" | "tool_call" }>
+  | (Extract<NodeActivity, { kind: "retry" }> & { scope: "agent_llm" });
 
 export interface AgentRuntimeContext {
   providerRegistry: ProviderRegistry;
@@ -28,6 +33,8 @@ export interface AgentRuntimeContext {
   signal?: AbortSignal;
   /** Called before each provider retry backoff wait. */
   onProviderRetry?: ProviderExecutionContext["onRetry"];
+  /** Fire-and-forget progress events; a throwing listener never affects the run. */
+  onEvent?: (event: AgentRuntimeEvent) => void;
 }
 
 /**

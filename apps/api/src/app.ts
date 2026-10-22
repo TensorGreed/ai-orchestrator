@@ -42,6 +42,7 @@ import {
   mcpToolPolicyEvaluateSchema,
   mcpToolPolicyRuleInputSchema,
   mcpToolPolicyRuleUpdateSchema,
+  NODE_ACTIVITY_LIMIT,
   nodeDefinitions,
   workflowExecuteRequestSchema,
   workflowSchema,
@@ -53,6 +54,7 @@ import {
   type McpToolProgressEvent,
   type McpElicitationView,
   type MCPServerConfig,
+  type NodeActivityEvent,
   type NodeProgressSnapshot,
   type SecretReference,
   type Workflow,
@@ -1467,6 +1469,8 @@ export function createApp(
     onLLMDelta?: (event: { nodeId: string; delta: string; index: number }) => Promise<void> | void;
     /** Phase 10.5 — `notifications/progress` from an MCP server during an MCP Tool node or agent tool call. */
     onMcpProgress?: (event: McpToolProgressEvent & { nodeId: string }) => Promise<void> | void;
+    /** Step-by-step node activity: resolved inputs, model calls, retries, agent steps and tool calls. */
+    onNodeActivity?: (event: NodeActivityEvent) => Promise<void> | void;
     /** Phase 10.5 — an `elicitation/create` request started waiting for a person, or was settled. */
     onMcpElicitation?: (event: { phase: "created" | "settled"; elicitation: McpElicitationView }) => Promise<void> | void;
   };
@@ -1837,6 +1841,7 @@ export function createApp(
           onNodeComplete: input.hooks?.onNodeComplete,
           onLLMDelta: input.hooks?.onLLMDelta,
           onMcpProgress: input.hooks?.onMcpProgress,
+          onNodeActivity: input.hooks?.onNodeActivity,
           abortSignal: runController.signal
         }
       );
@@ -2186,7 +2191,13 @@ export function createApp(
     // Progress notifications can be frequent; history writes for them are throttled.
     let lastProgressPersistMs = 0;
 
-    const snapshotNodeResults = () => [...nodeResultsById.values()];
+    // The last NODE_ACTIVITY_LIMIT activity entries per node, so polls of a running execution carry them.
+    const activityByNodeId = new Map<string, NodeActivityEvent[]>();
+    const snapshotNodeResults = () =>
+      [...nodeResultsById.values()].map((entry) => {
+        const activity = activityByNodeId.get(entry.nodeId);
+        return activity?.length ? { ...entry, activity: [...activity] } : entry;
+      });
     const persistProgress = (completedAt?: string) => {
       const effectiveStartedAt = startedAt ?? new Date().toISOString();
       persistExecutionHistoryRecord({
@@ -2333,6 +2344,32 @@ export function createApp(
               error: secretService.redact(error instanceof Error ? error.message : String(error))
             },
             "Execution MCP-progress hook failed"
+          );
+        }
+      },
+      onNodeActivity: async (event) => {
+        const buffer = activityByNodeId.get(event.nodeId) ?? [];
+        buffer.push(event);
+        if (buffer.length > NODE_ACTIVITY_LIMIT) buffer.shift();
+        activityByNodeId.set(event.nodeId, buffer);
+        if (nodeResultsById.has(event.nodeId)) {
+          const nowMs = Date.now();
+          if (nowMs - lastProgressPersistMs >= 1000) {
+            lastProgressPersistMs = nowMs;
+            persistProgress();
+          }
+        }
+        try {
+          await input.passthroughHooks?.onNodeActivity?.(event);
+        } catch (error) {
+          app.log.warn(
+            {
+              executionId: input.executionId,
+              workflowId: input.workflow.id,
+              nodeId: event.nodeId,
+              error: secretService.redact(error instanceof Error ? error.message : String(error))
+            },
+            "Execution node-activity hook failed"
           );
         }
       },
@@ -7152,6 +7189,9 @@ export function createApp(
           },
           onMcpProgress: (event) => {
             sendSseEvent("node_progress", event);
+          },
+          onNodeActivity: (event) => {
+            sendSseEvent("node_activity", event);
           }
         }
       });
@@ -8843,6 +8883,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           },
           onMcpProgress: (event) => {
             sendSseEvent("node_progress", event);
+          },
+          onNodeActivity: (event) => {
+            sendSseEvent("node_activity", event);
           }
         }
       });
