@@ -30,7 +30,7 @@ describe("describeActivity", () => {
 
   it("describes model calls, retries, steps and tools", () => {
     expect(describeActivity(ev(1, { kind: "llm_call", phase: "start", providerId: "p", model: "gpt-4o", iteration: 2 }))).toBe("Calling gpt-4o (step 2)");
-    expect(describeActivity(ev(1, { kind: "llm_call", phase: "end", providerId: "p", model: "m", latencyMs: 1200 }))).toBe("Model replied in 1.2s");
+    expect(describeActivity(ev(1, { kind: "llm_call", phase: "end", providerId: "p", model: "m", latencyMs: 1200 }))).toBe("Model replied after 1.2s");
     expect(describeActivity(ev(1, { kind: "llm_call", phase: "end", providerId: "p", model: "m", error: "boom" }))).toBe("Model call failed: boom");
     expect(describeActivity(ev(1, { kind: "retry", scope: "provider", attempt: 1, maxAttempts: 4, delayMs: 4000, reason: "503 Service Unavailable" }))).toBe(
       "Retrying model request in 4.0s (attempt 2 of 4): 503 Service Unavailable"

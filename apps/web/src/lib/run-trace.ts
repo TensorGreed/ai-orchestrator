@@ -183,7 +183,8 @@ function describeActivityBody(event: NodeActivityEvent): string {
         return `Calling ${event.model}${event.iteration !== undefined ? ` (step ${event.iteration})` : ""}`;
       }
       if (event.error) return `Model call failed: ${clip(event.error)}`;
-      return typeof event.latencyMs === "number" ? `Model replied in ${formatSeconds(event.latencyMs)}` : "Model replied";
+      // "after": the time includes any retry waits inside the call.
+      return typeof event.latencyMs === "number" ? `Model replied after ${formatSeconds(event.latencyMs)}` : "Model replied";
     }
     case "retry": {
       const attempts = event.maxAttempts ? ` of ${event.maxAttempts}` : "";
