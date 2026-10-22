@@ -488,6 +488,14 @@ function isWebhookTrigger(globals: Record<string, unknown>): boolean {
   return triggerType.startsWith("webhook");
 }
 
+// A prompt sent with the run (chat message, API call) wins over the text saved
+// on a Text Input / User Prompt node; the saved text is the default for runs
+// that send none, such as the editor's Run button.
+function resolveRuntimeUserPrompt(globals: Record<string, unknown>): string | undefined {
+  const prompt = globals.user_prompt;
+  return typeof prompt === "string" && prompt.trim() ? prompt : undefined;
+}
+
 function resolveWebhookPrompt(globals: Record<string, unknown>): string | undefined {
   const webhook = toRecord(globals.webhook);
   const candidates = [webhook.user_prompt, webhook.prompt, webhook.message, webhook.text, globals.user_prompt];
@@ -2815,11 +2823,8 @@ async function executeNode(
       const text =
         typeof webhookPrompt === "string"
           ? webhookPrompt
-          : typeof config.text === "string"
-            ? config.text
-            : typeof context.globals.user_prompt === "string"
-              ? context.globals.user_prompt
-              : "";
+          : resolveRuntimeUserPrompt(context.globals) ??
+            (typeof config.text === "string" ? config.text : "");
 
       return {
         text,
@@ -2840,12 +2845,7 @@ async function executeNode(
 
     case "user_prompt": {
       return {
-        user_prompt:
-          typeof config.text === "string"
-            ? config.text
-            : typeof context.globals.user_prompt === "string"
-              ? context.globals.user_prompt
-              : ""
+        user_prompt: resolveRuntimeUserPrompt(context.globals) ?? (typeof config.text === "string" ? config.text : "")
       };
     }
 
