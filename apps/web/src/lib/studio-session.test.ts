@@ -10,8 +10,10 @@ import {
   readStudioUrlState,
   readTabWipWorkflow,
   replaceStudioUrlState,
+  preferTabWip,
   storeTabWipWorkflow
 } from "./studio-session";
+import type { Workflow } from "@ai-orchestrator/shared";
 
 describe("studio-session", () => {
   beforeEach(() => {
@@ -88,5 +90,39 @@ describe("studio-session", () => {
 
     expect(readRememberedTabWorkflowId()).toBe("wf-session");
     expect(readRememberedTabProjectId()).toBe("proj-session");
+  });
+});
+
+describe("preferTabWip", () => {
+  const workflowWith = (nodeCount: number, name = "Workflow 6"): Workflow => ({
+    id: "wf-6",
+    name,
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: Array.from({ length: nodeCount }, (_, index) => ({
+      id: `n${index}`,
+      type: "text_input",
+      name: `Node ${index}`,
+      position: { x: index * 100, y: 0 },
+      config: {}
+    })),
+    edges: []
+  });
+
+  it("opens the server copy when the tab copy is an empty canvas but the server has nodes", () => {
+    const server = workflowWith(6);
+    expect(preferTabWip(workflowWith(0), server)).toBe(server);
+  });
+
+  it("keeps the tab's unsaved work otherwise", () => {
+    const edited = workflowWith(2, "Workflow 6 (edited)");
+    expect(preferTabWip(edited, workflowWith(6))).toBe(edited);
+    const emptyBoth = workflowWith(0, "still empty");
+    expect(preferTabWip(emptyBoth, workflowWith(0))).toBe(emptyBoth);
+  });
+
+  it("opens the server copy when there is no tab copy", () => {
+    const server = workflowWith(3);
+    expect(preferTabWip(null, server)).toBe(server);
   });
 });

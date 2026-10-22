@@ -94,6 +94,7 @@ import {
 import { computeAttachmentSlots, orbitPositions } from "./lib/stages";
 import {
   deleteTabWipWorkflow,
+  preferTabWip,
   readLegacyLocalWipWorkflow,
   readRememberedTabProjectId,
   readRememberedTabWorkflowId,
@@ -2668,13 +2669,17 @@ function StudioApp() {
     async (id: string) => {
       try {
         const localWip = readWipWorkflow(id);
-        if (localWip) {
+        if (localWip && localWip.nodes.length > 0) {
           hydrateWorkflow(localWip);
           return;
         }
 
         const workflow = await fetchWorkflow(id);
-        hydrateWorkflow(workflow);
+        const chosen = preferTabWip(localWip, workflow);
+        if (localWip && chosen !== localWip) {
+          deleteTabWipWorkflow(id);
+        }
+        hydrateWorkflow(chosen);
       } catch (loadError) {
         handleApiError(loadError, "Failed to load workflow");
       }
@@ -2761,7 +2766,8 @@ function StudioApp() {
           : readRememberedTabWorkflowId();
       const wipWorkflow = preferredWorkflowId ? readWipWorkflow(preferredWorkflowId) : null;
       const wipMatchesProject = !wipWorkflow?.projectId || wipWorkflow.projectId === activeProjectId;
-      if (wipWorkflow && wipMatchesProject && workflowList.some((item) => item.id === wipWorkflow.id)) {
+      // An empty tab copy goes through loadWorkflowById below, which checks it against the server.
+      if (wipWorkflow && wipWorkflow.nodes.length > 0 && wipMatchesProject && workflowList.some((item) => item.id === wipWorkflow.id)) {
         hydrateWorkflow(wipWorkflow);
         return;
       }
