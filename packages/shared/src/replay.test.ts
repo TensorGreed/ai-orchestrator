@@ -4,6 +4,8 @@ import {
   judgeReplayDiff,
   REPLAY_ALWAYS_STUBBED_CLASSES,
   REPLAY_NODE_CLASSES,
+  REPLAY_IGNORE_PATH_MAX_LENGTH,
+  REPLAY_IGNORE_PATHS_MAX,
   replayNodeClass,
   replayRunRequestSchema,
   type RunDiff
@@ -92,6 +94,18 @@ describe("replay request", () => {
     expect(replayRunRequestSchema.safeParse({ mcpMode: "live" }).success).toBe(false);
     expect(replayRunRequestSchema.safeParse({ live: true }).success).toBe(false);
     expect(replayRunRequestSchema.safeParse({ version: 0 }).success).toBe(false);
+  });
+
+  it("caps how many ignore paths a request may carry and how long each may be", () => {
+    const ok = Array.from({ length: REPLAY_IGNORE_PATHS_MAX }, (_, index) => `meta.k${index}`);
+    expect(replayRunRequestSchema.safeParse({ ignorePaths: ok }).success).toBe(true);
+    expect(replayRunRequestSchema.safeParse({ ignorePaths: [...ok, "one.more"] }).success).toBe(false);
+    expect(replayRunRequestSchema.safeParse({ ignorePaths: ["a".repeat(REPLAY_IGNORE_PATH_MAX_LENGTH)] }).success).toBe(true);
+    expect(replayRunRequestSchema.safeParse({ ignorePaths: ["a".repeat(REPLAY_IGNORE_PATH_MAX_LENGTH + 1)] }).success).toBe(false);
+    expect(replayRunRequestSchema.safeParse({ ignorePaths: [`${"**.".repeat(66)}z`] }).success).toBe(false);
+    expect(replayRunRequestSchema.safeParse({ ignorePaths: ["a\u0000b"] }).success).toBe(false);
+    expect(REPLAY_IGNORE_PATHS_MAX).toBeLessThanOrEqual(32);
+    expect(REPLAY_IGNORE_PATH_MAX_LENGTH).toBeLessThanOrEqual(128);
   });
 });
 

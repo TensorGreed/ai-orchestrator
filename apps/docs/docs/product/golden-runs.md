@@ -78,7 +78,7 @@ The replay result shows:
 - `GET /api/replay/recordings?workflowId=&limit=&offset=` (viewer; `{ items, total }` for the workflows you can read)
 - `GET /api/replay/recordings/:id` (viewer; input, recorded node results and run facts)
 - `DELETE /api/replay/recordings/:id` (builder)
-- `POST /api/replay/recordings/:id/replay` (builder; `{ draft?: true, version?: n, mcpMode?: "strict" | "lenient", ignorePaths?: string[], numberTolerance?: number }`; returns `{ recordingId, executionId, candidate, status, diff, verdict, reasons, facts }`)
+- `POST /api/replay/recordings/:id/replay` (builder; `{ draft?: true, version?: n, mcpMode?: "strict" | "lenient", ignorePaths?: string[], numberTolerance?: number }`; returns `{ recordingId, executionId, candidate, status, diff, verdict, reasons, facts }`). `ignorePaths` takes up to 32 globs of at most 128 characters each, with at most eight `**` segments per glob.
 
 Access follows the workflow: reading needs read access, saving and deleting need edit access, replaying needs run access.
 

@@ -64,38 +64,79 @@ export function tokenSimilarity(a: string, b: string): number {
   return union === 0 ? 1 : Math.round((shared / union) * 1000) / 1000;
 }
 
-function patternSegments(pattern: string): string[] {
-  return pattern
+/**
+ * A glob compiled to its segments, with consecutive `**` collapsed (they
+ * match the same paths as one).
+ */
+interface CompiledPattern {
+  segments: string[];
+}
+
+function compilePattern(pattern: string): CompiledPattern {
+  const segments: string[] = [];
+  for (const segment of pattern
     .trim()
     .replace(/^\$\.?/, "")
     .replace(/\[(\*|\d+)\]/g, ".$1")
-    .split(".")
-    .filter((segment) => segment.length > 0);
+    .split(".")) {
+    if (segment.length === 0) continue;
+    if (segment === "**" && segments[segments.length - 1] === "**") continue;
+    segments.push(segment);
+  }
+  return { segments };
 }
 
-function matchSegments(path: string[], pattern: string[], pathIndex: number, patternIndex: number): boolean {
-  if (patternIndex === pattern.length) return pathIndex === path.length;
-  const segment = pattern[patternIndex]!;
-  if (segment === "**") {
-    for (let next = pathIndex; next <= path.length; next += 1) {
-      if (matchSegments(path, pattern, next, patternIndex + 1)) return true;
-    }
-    return false;
+/**
+ * Matching runs as a set of pattern positions advanced one path segment at
+ * a time (a non-deterministic automaton walked breadth-first), so a path of
+ * n segments costs O(n · m) for a pattern of m segments, whatever mix of
+ * `*` and `**` it has: there is no backtracking to blow up. The state is
+ * advanced as the diff walks down the value tree, so each node costs one
+ * step per pattern.
+ */
+type MatchState = Uint8Array;
+
+/** Adds the positions reachable without consuming a segment (a `**` may match nothing). */
+function closeState(pattern: CompiledPattern, state: MatchState): MatchState {
+  for (let index = 0; index < pattern.segments.length; index += 1) {
+    if (state[index] && pattern.segments[index] === "**") state[index + 1] = 1;
   }
-  if (pathIndex === path.length) return false;
-  if (segment !== "*" && segment !== path[pathIndex]) return false;
-  return matchSegments(path, pattern, pathIndex + 1, patternIndex + 1);
+  return state;
+}
+
+function initialState(pattern: CompiledPattern): MatchState {
+  const state = new Uint8Array(pattern.segments.length + 1);
+  state[0] = 1;
+  return closeState(pattern, state);
+}
+
+function advanceState(pattern: CompiledPattern, state: MatchState, segment: string): MatchState {
+  const next = new Uint8Array(pattern.segments.length + 1);
+  for (let index = 0; index < pattern.segments.length; index += 1) {
+    if (!state[index]) continue;
+    const expected = pattern.segments[index]!;
+    if (expected === "**") next[index] = 1;
+    else if (expected === "*" || expected === segment) next[index + 1] = 1;
+  }
+  return closeState(pattern, next);
+}
+
+function stateMatches(pattern: CompiledPattern, state: MatchState): boolean {
+  return pattern.segments.length > 0 && state[pattern.segments.length] === 1;
 }
 
 /**
  * Whether a path (as segments: keys and array indices) matches a glob:
  * `a.b`, `items[*].id`, `items[3]`, `*` for one segment, `**` for any
- * number of segments, an optional leading `$.`.
+ * number of segments, an optional leading `$.`. Linear in the path length
+ * times the pattern length.
  */
 export function matchesIgnorePath(path: string[], pattern: string): boolean {
-  const segments = patternSegments(pattern);
-  if (segments.length === 0) return false;
-  return matchSegments(path, segments, 0, 0);
+  const compiled = compilePattern(pattern);
+  if (compiled.segments.length === 0) return false;
+  let state = initialState(compiled);
+  for (const segment of path) state = advanceState(compiled, state, segment);
+  return stateMatches(compiled, state);
 }
 
 function displayPath(segments: Array<string | number>): string {
@@ -132,13 +173,15 @@ export function diffValues(baseline: unknown, candidate: unknown, options: Value
   const changes: ReplayValueChange[] = [];
   let ignored = 0;
 
-  const walk = (a: unknown, b: unknown, path: Array<string | number>, depth: number) => {
+  const patterns = ignorePaths.map(compilePattern).filter((pattern) => pattern.segments.length > 0);
+
+  const walk = (a: unknown, b: unknown, path: Array<string | number>, depth: number, states: MatchState[]) => {
     if (changes.length >= MAX_VALUE_CHANGES) return;
-    const segments = path.map(String);
-    if (path.length > 0 && ignorePaths.some((pattern) => matchesIgnorePath(segments, pattern))) {
+    if (path.length > 0 && patterns.some((pattern, index) => stateMatches(pattern, states[index]!))) {
       if (!deepEqual(a, b, tolerance)) ignored += 1;
       return;
     }
+    const child = (segment: string | number) => patterns.map((pattern, index) => advanceState(pattern, states[index]!, String(segment)));
     if (a === undefined && b === undefined) return;
     if (a === undefined) {
       changes.push({ path: displayPath(path), kind: "added", candidate: b });
@@ -150,12 +193,12 @@ export function diffValues(baseline: unknown, candidate: unknown, options: Value
     }
     if (depth < MAX_DEPTH && Array.isArray(a) && Array.isArray(b)) {
       const length = Math.max(a.length, b.length);
-      for (let index = 0; index < length; index += 1) walk(index < a.length ? a[index] : undefined, index < b.length ? b[index] : undefined, [...path, index], depth + 1);
+      for (let index = 0; index < length; index += 1) walk(index < a.length ? a[index] : undefined, index < b.length ? b[index] : undefined, [...path, index], depth + 1, child(index));
       return;
     }
     if (depth < MAX_DEPTH && isRecord(a) && isRecord(b)) {
       const keys = [...Object.keys(a), ...Object.keys(b).filter((key) => !Object.prototype.hasOwnProperty.call(a, key))];
-      for (const key of keys) walk(a[key], b[key], [...path, key], depth + 1);
+      for (const key of keys) walk(a[key], b[key], [...path, key], depth + 1, child(key));
       return;
     }
     if (deepEqual(a, b, tolerance)) return;
@@ -164,7 +207,7 @@ export function diffValues(baseline: unknown, candidate: unknown, options: Value
     changes.push(change);
   };
 
-  walk(baseline, candidate, [], 0);
+  walk(baseline, candidate, [], 0, patterns.map(initialState));
   return { changes, ignored };
 }
 

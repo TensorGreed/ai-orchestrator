@@ -70,6 +70,37 @@ describe("value diff", () => {
     expect(matchesIgnorePath(["items", "3", "id"], "items[3].id")).toBe(true);
     expect(matchesIgnorePath(["items", "4", "id"], "items[3].id")).toBe(false);
     expect(matchesIgnorePath(["x", "_telemetry"], DEFAULT_REPLAY_IGNORE_PATHS[0]!)).toBe(true);
+    expect(matchesIgnorePath(["a", "b", "c"], "a.**.**.c")).toBe(true);
+    expect(matchesIgnorePath(["a", "c"], "a.**.c")).toBe(true);
+    expect(matchesIgnorePath(["a", "b"], "a.**")).toBe(true);
+    expect(matchesIgnorePath(["a"], "a.**")).toBe(true);
+    expect(matchesIgnorePath(["b", "a"], "a.**")).toBe(false);
+    expect(matchesIgnorePath(["a", "x", "b", "y", "c"], "**.b.*.c")).toBe(true);
+    expect(matchesIgnorePath(["a", "x", "b", "c"], "**.b.*.c")).toBe(false);
+    expect(matchesIgnorePath(["a"], "")).toBe(false);
+  });
+
+  it("matches in linear time: a pattern of many ** never blows up", () => {
+    // The reviewer's case: 66 `**` segments and a final segment that never matches took 7.5 s at depth 6 with backtracking.
+    const pathological = `${"**.".repeat(66)}z`;
+    const started = performance.now();
+    for (const depth of [3, 4, 5, 6, 12, 32, 64]) {
+      expect(matchesIgnorePath(Array.from({ length: depth }, (_, index) => `k${index}`), pathological)).toBe(false);
+    }
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  it("diffs a deep output against 50 pathological patterns quickly", () => {
+    const deep = (leaf: string) => {
+      let value: unknown = leaf;
+      for (let level = 0; level < 7; level += 1) value = { a: value, b: [value, value] };
+      return value;
+    };
+    const patterns = Array.from({ length: 50 }, () => `${"**.".repeat(66)}z`);
+    const started = performance.now();
+    const result = diffValues(deep("x"), deep("y"), { ignorePaths: patterns });
+    expect(result.changes.length).toBeGreaterThan(0);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });
 

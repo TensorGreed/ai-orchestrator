@@ -367,6 +367,24 @@ export const replayRecordingCreateSchema = z.object({
 export type ReplayRecordingCreateInput = z.infer<typeof replayRecordingCreateSchema>;
 
 export const REPLAY_MCP_MODES = ["strict", "lenient"] as const;
+
+/** Most ignore paths one replay request may carry (the defaults come on top). */
+export const REPLAY_IGNORE_PATHS_MAX = 32;
+/** Longest ignore path, in characters. */
+export const REPLAY_IGNORE_PATH_MAX_LENGTH = 128;
+/** Most `**` segments in one ignore path; more never match anything a smaller pattern cannot. */
+export const REPLAY_IGNORE_PATH_MAX_GLOBSTARS = 8;
+
+/** One ignore path: printable characters only, within the length and `**` limits. */
+export const replayIgnorePathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(REPLAY_IGNORE_PATH_MAX_LENGTH)
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), { message: "Ignore paths cannot contain control characters" })
+  .refine((value) => (value.match(/\*\*/g) ?? []).length <= REPLAY_IGNORE_PATH_MAX_GLOBSTARS, {
+    message: `An ignore path can have at most ${REPLAY_IGNORE_PATH_MAX_GLOBSTARS} ** segments`
+  });
 export type ReplayMcpMode = (typeof REPLAY_MCP_MODES)[number];
 
 /**
@@ -381,7 +399,7 @@ export const replayRunRequestSchema = z
     draft: z.boolean().optional(),
     version: z.number().int().positive().optional(),
     mcpMode: z.enum(REPLAY_MCP_MODES).optional(),
-    ignorePaths: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+    ignorePaths: z.array(replayIgnorePathSchema).max(REPLAY_IGNORE_PATHS_MAX).optional(),
     numberTolerance: z.number().min(0).max(1e9).optional()
   })
   .strict()
