@@ -574,6 +574,46 @@ describe("golden runs with side effects stubbed", () => {
     expect(result.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "blocked_load", nodeId: "chart", blocking: true })]));
   });
 
+  it("refuses to save the same run twice and caps the bytes one workflow's golden runs may use", async () => {
+    const context = await createTestContext({ REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW: "65536" });
+    const builder = await login(context, "builder");
+    context.store.upsertWorkflow({
+      id: "wf-sized",
+      name: "Sized",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+        { id: "set", type: "set_node", name: "Set", position: { x: 150, y: 0 }, config: { assignments: [{ key: "blob", valueTemplate: "word ".repeat(4000) }] } },
+        { id: "output", type: "output", name: "Output", position: { x: 300, y: 0 }, config: { responseTemplate: "done" } }
+      ],
+      edges: [
+        { id: "e1", source: "start", target: "set" },
+        { id: "e2", source: "set", target: "output" }
+      ]
+    } as Workflow);
+    const execute = async () => (await call(context, "POST", "/api/workflows/wf-sized/execute", builder.cookie, {})).json<{ executionId: string }>().executionId;
+
+    const first = await execute();
+    const golden = await saveGolden(context, builder.cookie, first);
+    expect(golden.bytes).toBeGreaterThan(20_000);
+    const again = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: first, name: "Again" });
+    expect(again.statusCode).toBe(409);
+    expect(again.json<{ error: string; code: string }>()).toMatchObject({ code: "duplicate" });
+    expect(again.json<{ error: string }>().error).toContain(golden.id);
+
+    let refused: { statusCode: number; body: string } | null = null;
+    for (let attempt = 0; attempt < 6 && !refused; attempt += 1) {
+      const response = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: await execute(), name: `Run ${attempt}` });
+      if (response.statusCode !== 201) refused = response;
+    }
+    expect(refused?.statusCode).toBe(409);
+    expect(refused?.body).toContain("REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW");
+    const saved = context.store.listReplayRecordings({ workflowId: "wf-sized" }).items;
+    expect(saved.reduce((sum, entry) => sum + entry.bytes, 0)).toBeLessThanOrEqual(65536);
+  });
+
   it("truncates the largest node outputs to fit REPLAY_RECORDING_MAX_BYTES", async () => {
     const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
     const builder = await login(context, "builder");

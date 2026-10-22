@@ -42,7 +42,7 @@ const IN_PROGRESS_STATUSES = new Set(["running", "pending", "queued", "waiting_a
 export class ReplayRecordingError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "in_progress" | "not_allowed" | "limit" | "too_large"
+    readonly code: "not_found" | "in_progress" | "not_allowed" | "duplicate" | "limit" | "too_large"
   ) {
     super(message);
     this.name = "ReplayRecordingError";
@@ -59,6 +59,8 @@ export interface ReplayRecordingServiceOptions {
   priceTurn: PriceTurn;
   maxBytes: number;
   maxPerWorkflow: number;
+  /** Total bytes one workflow's golden runs may use, cassettes included. */
+  maxBytesPerWorkflow: number;
   now?: () => Date;
 }
 
@@ -158,6 +160,11 @@ export class ReplayRecordingService {
     if (history.triggerType === "replay") {
       throw new ReplayRecordingError("A replay cannot be saved as a golden run; save the run it replayed instead.", "not_allowed");
     }
+    // One golden run per execution: a second copy of the same run adds storage and nothing to compare.
+    const existing = store.findReplayRecordingIdForExecution(history.id);
+    if (existing) {
+      throw new ReplayRecordingError(`This run is already saved as golden run ${existing}. Open that one, or delete it before saving the run again.`, "duplicate");
+    }
     if (store.countReplayRecordingsForWorkflow(history.workflowId) >= this.options.maxPerWorkflow) {
       throw new ReplayRecordingError(
         `This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before saving more.`,
@@ -245,6 +252,14 @@ export class ReplayRecordingService {
     const cassetteRecord = store.getMcpCassetteForExecution(history.id);
     const cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(cassetteRecord.cassette) as McpCassette) : null;
     const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
+    const bytes = fixedBytes + byteLength(nodesJson) + (cassetteJson ? byteLength(cassetteJson) : 0);
+    const used = store.sumReplayRecordingBytesForWorkflow(history.workflowId);
+    if (used + bytes > this.options.maxBytesPerWorkflow) {
+      throw new ReplayRecordingError(
+        `Saving this run (${bytes} bytes) would take this workflow's golden runs over REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW (${used} of ${this.options.maxBytesPerWorkflow} bytes used). Delete some before saving more.`,
+        "limit"
+      );
+    }
 
     return store.saveReplayRecording({
       id: `rec_${randomUUID()}`,
@@ -263,7 +278,7 @@ export class ReplayRecordingService {
       factsJson,
       mcpCassetteJson: cassetteJson,
       capabilities: { mcp: cassette ? "cassette" : "none", models: "live", memory: "empty", workflowSource },
-      bytes: fixedBytes + byteLength(nodesJson),
+      bytes,
       truncated,
       createdAt: this.now().toISOString(),
       createdBy

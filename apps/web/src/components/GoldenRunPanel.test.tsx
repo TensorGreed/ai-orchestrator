@@ -159,7 +159,13 @@ describe("Save as golden run on the Runs page", () => {
     const { rerender } = render(
       <ExecutionHistoryPanel
         {...panelProps({
-          executionHistoryItems: [summary(), summary({ id: "ex-2", status: "running", completedAt: null }), summary({ id: "ex-3", triggerType: "replay" })],
+          executionHistoryItems: [
+            summary(),
+            summary({ id: "ex-2", status: "running", completedAt: null }),
+            summary({ id: "ex-3", triggerType: "replay" }),
+            // Already saved: a run is saved once, so its golden badge opens the saved one instead.
+            summary({ id: "ex-4", goldenRuns: { count: 1, latestId: "rec_saved" } })
+          ],
           canManageGoldenRuns: true,
           onRefresh
         })}

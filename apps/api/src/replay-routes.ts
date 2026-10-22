@@ -36,6 +36,7 @@ const RECORDING_STATUS: Record<ReplayRecordingError["code"], number> = {
   not_found: 404,
   in_progress: 409,
   not_allowed: 409,
+  duplicate: 409,
   limit: 409,
   too_large: 413
 };

@@ -9810,6 +9810,18 @@ export class SqliteStore {
     return { items, total: total ? toNumber(total.count) : 0 };
   }
 
+  /** Bytes one workflow's golden runs use (each row's `bytes`, cassette included). */
+  sumReplayRecordingBytesForWorkflow(workflowId: string): number {
+    const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings WHERE workflow_id = ?`, [workflowId]);
+    return row ? toNumber(row.total ?? 0) : 0;
+  }
+
+  /** The golden run already saved from an execution, if any. */
+  findReplayRecordingIdForExecution(executionId: string): string | null {
+    const row = this.queryOne<{ id: string }>(`SELECT id FROM replay_recordings WHERE source_execution_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1`, [executionId]);
+    return row ? toString(row.id) : null;
+  }
+
   countReplayRecordingsForWorkflow(workflowId: string): number {
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE workflow_id = ?`, [workflowId]);
     return row ? toNumber(row.count) : 0;

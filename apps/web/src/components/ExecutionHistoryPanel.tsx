@@ -437,7 +437,7 @@ export function ExecutionHistoryPanel({
                           Replay
                         </button>
                       )}
-                      {canManageGoldenRuns && !GOLDEN_SOURCE_BLOCKED.has(item.status) && item.completedAt && item.triggerType !== "replay" && (
+                      {canManageGoldenRuns && !GOLDEN_SOURCE_BLOCKED.has(item.status) && item.completedAt && item.triggerType !== "replay" && !item.goldenRuns && (
                         <button
                           className="pg-btn small"
                           title="Keep this run as a golden run to replay changes against"

@@ -26,7 +26,9 @@ Before anything is stored, values are scrubbed twice: credential-named keys and 
 
 ### Size
 
-`REPLAY_RECORDING_MAX_BYTES` (default 4 MiB) caps one golden run. When a run is bigger, the largest node outputs are replaced with a `{ "_replayTruncated": true, "bytes": … }` marker until it fits, and the golden run is marked **truncated**. A replay that has to answer a node from a cut output reports **could not complete** (CLI exit code 4), because the nodes after it would see the marker instead of the data. A run that still does not fit is refused (413). `REPLAY_RECORDINGS_MAX_PER_WORKFLOW` (default 500) caps how many one workflow can have.
+`REPLAY_RECORDING_MAX_BYTES` (default 4 MiB) caps one golden run. When a run is bigger, the largest node outputs are replaced with a `{ "_replayTruncated": true, "bytes": … }` marker until it fits, and the golden run is marked **truncated**. A replay that has to answer a node from a cut output reports **could not complete** (CLI exit code 4), because the nodes after it would see the marker instead of the data. A run that still does not fit is refused (413). `REPLAY_RECORDINGS_MAX_PER_WORKFLOW` (default 500) caps how many one workflow can have, and `REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW` (default 256 MiB) caps the bytes they use together, copied cassettes included. Golden runs are never pruned automatically, so saving past either limit is refused (409) until you delete some.
+
+A run can be saved once. Saving the same run again is refused (409) with the id of the golden run it was saved as; the Runs page shows **Save as golden** only on runs that have not been saved.
 
 ## What a replay does
 
@@ -74,7 +76,7 @@ The replay result shows:
 
 ## API
 
-- `POST /api/replay/recordings` (builder; `{ executionId, name, notes? }`; `201 { recording }`; 409 while the run is in progress, for a replay or over the per-workflow limit; 413 over the size limit)
+- `POST /api/replay/recordings` (builder; `{ executionId, name, notes? }`; `201 { recording }`; 409 while the run is in progress, for a replay, for a run already saved, or over the per-workflow count or byte limit; 413 over the size limit)
 - `GET /api/replay/recordings?workflowId=&limit=&offset=` (viewer; `{ items, total }` for the workflows you can read)
 - `GET /api/replay/recordings/:id` (viewer; input, recorded node results and run facts)
 - `DELETE /api/replay/recordings/:id` (builder)

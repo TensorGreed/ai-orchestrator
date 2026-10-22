@@ -10649,7 +10649,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     },
     priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
     maxBytes: config.REPLAY_RECORDING_MAX_BYTES,
-    maxPerWorkflow: config.REPLAY_RECORDINGS_MAX_PER_WORKFLOW
+    maxPerWorkflow: config.REPLAY_RECORDINGS_MAX_PER_WORKFLOW,
+    maxBytesPerWorkflow: config.REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW
   });
   const replayService = new ReplayService({
     store,
