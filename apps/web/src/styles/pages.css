@@ -5206,3 +5206,112 @@ img.mcp-pg-block {
   gap: 6px;
   margin-top: 2px;
 }
+
+/* Phase 11.1 — signed run manifest on the Runs page, signing keys in Settings. */
+.audit-bundle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--bg-elev);
+  min-width: 0;
+}
+.audit-bundle-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.audit-bundle-count {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.audit-bundle-action {
+  margin-left: auto;
+}
+.audit-bundle-error {
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--err-soft);
+  color: var(--err);
+  font-size: var(--fs-sm);
+}
+.audit-bundle-facts,
+.audit-key-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+  min-width: 0;
+}
+.audit-bundle-facts > div,
+.audit-key-facts > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.audit-bundle-facts dt,
+.audit-key-facts dt {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.audit-bundle-facts dd,
+.audit-key-facts dd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+}
+.audit-bundle-facts code,
+.audit-key-facts code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.audit-bundle-muted {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.audit-bundle-hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.audit-bundle-hint code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.audit-key-label {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.audit-key-pem {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-input);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.audit-key-table-wrap {
+  overflow-x: auto;
+  min-width: 0;
+}
+.audit-key-row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}

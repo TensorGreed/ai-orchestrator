@@ -118,6 +118,7 @@ import {
   type AuditChainStatus,
   type AuditExportDestination
 } from "../lib/api";
+import { AuditSigningKeysSection } from "./AuditSigningKeysSection";
 
 type SettingsTab =
   | "security"
@@ -127,6 +128,7 @@ type SettingsTab =
   | "sso"
   | "external-secrets"
   | "audit-log"
+  | "audit-signing"
   | "log-streams"
   | "source-control"
   | "variables"
@@ -209,6 +211,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
       tabs: [
         { id: "observability", label: "Metrics & Traces", restricted: !isAdmin },
         { id: "audit-log", label: "Audit Log", restricted: !isAdmin },
+        { id: "audit-signing", label: "Audit Signing", restricted: !isAdmin },
         { id: "log-streams", label: "Log Streams", restricted: !isAdmin }
       ]
     },
@@ -274,6 +277,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
           <ExternalSecretsTab activeProjectId={activeProjectId} />
         )}
         {tab === "audit-log" && isAdmin && <AuditLogTab />}
+        {tab === "audit-signing" && isAdmin && <AuditSigningKeysSection />}
         {tab === "log-streams" && isAdmin && <LogStreamsTab />}
         {tab === "source-control" && isAdmin && <SourceControlTab />}
         {tab === "variables" && (

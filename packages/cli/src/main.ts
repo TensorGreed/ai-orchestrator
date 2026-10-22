@@ -9,11 +9,16 @@
  *   l2m mcp snapshot export
  *                     Download a server's accepted snapshot for the two above.
  *
+ *   l2m audit verify  Phase 11.1 — verify an audit bundle offline: signature,
+ *                     signed file index and manifest digest.
+ *
  * Exit codes: 0 clean, 1 the check found problems (or a request failed),
- * 2 usage errors.
+ * 2 usage errors, 3 an audit bundle is internally consistent but its signer
+ * was not verified (no --public-key).
  */
 import fs from "node:fs";
 import {
+  DEFAULT_ZIP_MAX_TOTAL_BYTES,
   judgeMcpCheck,
   type McpCheckReport,
   type McpCheckServerResult,
@@ -33,6 +38,7 @@ import {
   type MCPServerAdapter
 } from "@ai-orchestrator/mcp-sdk";
 import { listFlag, oneFlag, parseArgs, splitCommand, UsageError, type ParsedArgs } from "./args";
+import { formatAuditVerifyResult, parsePublicKeyInput, PublicKeyInputError, verifyAuditBundle } from "./audit-verify";
 
 export interface CliIo {
   stdin: NodeJS.ReadableStream;
@@ -45,6 +51,8 @@ export interface CliIo {
 export const EXIT_OK = 0;
 export const EXIT_FAILED = 1;
 export const EXIT_USAGE = 2;
+/** `l2m audit verify` without a trusted public key: consistent, but not proven to come from the deployment. */
+export const EXIT_SIGNER_UNVERIFIED = 3;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -56,9 +64,12 @@ const USAGE = `Usage:
                 [--timeout <ms>] [--allow-unreachable] [--json]
   l2m mcp mock --snapshot <file> [--cassette <file>] [--fixed-text <text>]
   l2m mcp snapshot export --server <id> [--out <file>] [--api-url <url>] [--api-key <key>]
+  l2m audit verify <bundle.zip> [--public-key <file|base64>] [--trust-embedded-key]
+                   [--max-bytes <n>] [--json]
 
 The API URL and key default to L2M_API_URL and L2M_API_KEY.
-Exit codes: 0 clean, 1 problems found or a request failed, 2 usage error.
+Exit codes: 0 clean, 1 problems found or a request failed, 2 usage error,
+3 audit bundle signer not verified (no --public-key; see --trust-embedded-key).
 `;
 
 function write(stream: NodeJS.WritableStream, text: string): void {
@@ -315,9 +326,49 @@ async function runSnapshotExport(args: ParsedArgs, io: CliIo): Promise<number> {
   return EXIT_OK;
 }
 
+// --- audit verify ------------------------------------------------------------
+
+function runAuditVerify(args: ParsedArgs, io: CliIo): number {
+  const [, , file, extra] = args.positionals;
+  if (!file || extra) throw new UsageError("l2m audit verify needs exactly one bundle file");
+  let publicKey: Buffer | undefined;
+  const keyFlag = oneFlag(args, "public-key");
+  if (keyFlag !== undefined) {
+    try {
+      publicKey = parsePublicKeyInput(keyFlag);
+    } catch (error) {
+      if (error instanceof PublicKeyInputError) throw new UsageError(error.message);
+      throw error;
+    }
+  }
+  const trustEmbeddedKey = args.booleans.has("trust-embedded-key");
+  if (trustEmbeddedKey && publicKey) throw new UsageError("--trust-embedded-key and --public-key cannot be combined");
+  let maxBytes = DEFAULT_ZIP_MAX_TOTAL_BYTES;
+  const maxFlag = oneFlag(args, "max-bytes");
+  if (maxFlag !== undefined) {
+    if (!/^\d+$/.test(maxFlag.trim()) || Number(maxFlag) <= 0 || !Number.isSafeInteger(Number(maxFlag))) throw new UsageError("--max-bytes must be a positive whole number of bytes");
+    maxBytes = Number(maxFlag);
+  }
+  let bytes: Buffer;
+  try {
+    // The archive is read into memory, so refuse files larger than the expansion cap before reading them.
+    if (fs.statSync(file).size > maxBytes) throw new UsageError(`${file} is larger than --max-bytes (${maxBytes} bytes)`);
+    bytes = fs.readFileSync(file);
+  } catch (error) {
+    if (error instanceof UsageError) throw error;
+    throw new UsageError(`Cannot read ${file}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const result = verifyAuditBundle(new Uint8Array(bytes), { bundle: file, maxBytes, trustEmbeddedKey, ...(publicKey ? { publicKey } : {}) });
+  if (args.booleans.has("json")) io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  else io.stdout.write(formatAuditVerifyResult(result));
+  if (result.status === "fail") return EXIT_FAILED;
+  if (result.status === "signer_unverified" && !result.ok) return EXIT_SIGNER_UNVERIFIED;
+  return EXIT_OK;
+}
+
 // --- entry -------------------------------------------------------------------
 
-const BOOLEAN_FLAGS = ["json", "allow-unreachable", "allow-policy-blocked", "verbose", "help"];
+const BOOLEAN_FLAGS = ["json", "allow-unreachable", "allow-policy-blocked", "verbose", "help", "trust-embedded-key"];
 
 export async function main(argv: string[], io: CliIo): Promise<number> {
   try {
@@ -330,6 +381,7 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
     if (group === "mcp" && command === "check" && !sub) return await runCheck(args, io);
     if (group === "mcp" && command === "mock" && !sub) return await runMock(args, io);
     if (group === "mcp" && command === "snapshot" && sub === "export") return await runSnapshotExport(args, io);
+    if (group === "audit" && command === "verify") return runAuditVerify(args, io);
     throw new UsageError(`Unknown command: ${args.positionals.join(" ")}`);
   } catch (error) {
     if (error instanceof UsageError) {

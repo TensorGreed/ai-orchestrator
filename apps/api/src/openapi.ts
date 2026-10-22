@@ -25,6 +25,7 @@ export const openApiSpec = {
     { name: "Providers", description: "LLM provider testing and model discovery" },
     { name: "MCP", description: "MCP tool discovery" },
     { name: "Guard", description: "Guard profiles, bindings, verdict events and Security page counts" },
+    { name: "Audit bundles", description: "Signed run manifests, audit bundle export and the deployment signing keys" },
     { name: "Git", description: "Git source control sync" },
     { name: "Audit", description: "Audit log and export" },
     { name: "Observability", description: "Health, metrics, traces, SLOs" },
@@ -1458,6 +1459,47 @@ export const openApiSpec = {
           { name: "projectId", in: "query", required: false, schema: { type: "string" } }
         ],
         responses: { "200": { description: "{ effective, project, binding? }" } }
+      }
+    },
+    "/api/executions/{id}/manifest": {
+      get: {
+        tags: ["Audit bundles"],
+        summary: "Signed run manifest of a finished run, generated once and cached (viewers who can read the workflow)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ executionId, manifest, digest, keyId, algorithm, signedAt, signature }" },
+          "403": { description: "No read access to the run's workflow" },
+          "404": { description: "Execution not found" },
+          "409": { description: "The run is still in progress" }
+        }
+      }
+    },
+    "/api/executions/{id}/bundle": {
+      get: {
+        tags: ["Audit bundles"],
+        summary: "Audit bundle (zip): manifest, signed file index, node I/O, trace, logs, rendered outputs; audit-logged",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "application/zip; headers x-l2m-manifest-digest and x-l2m-signing-key-id" },
+          "403": { description: "No read access to the run's workflow" },
+          "404": { description: "Execution not found" },
+          "409": { description: "The run is still in progress" },
+          "413": { description: "Bundle larger than AUDIT_BUNDLE_MAX_BYTES" }
+        }
+      }
+    },
+    "/api/audit/signing-keys": {
+      get: {
+        tags: ["Audit bundles"],
+        summary: "Signing keys (public keys only), active and retired (admins)",
+        responses: { "200": { description: "{ activeKeyId, canRotate, keys }" } }
+      }
+    },
+    "/api/audit/signing-keys/rotate": {
+      post: {
+        tags: ["Audit bundles"],
+        summary: "Generate a new signing key and retire the current one (admins; refused when AUDIT_SIGNING_KEY_BASE64 is set)",
+        responses: { "201": { description: "{ key, keys }" }, "409": { description: "The key comes from AUDIT_SIGNING_KEY_BASE64" } }
       }
     },
     "/api/executions/{id}/guard-events": {

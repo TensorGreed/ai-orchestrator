@@ -1244,6 +1244,34 @@ export interface GuardEventStats {
   daily: Array<{ day: string; action: string; count: number }>;
 }
 
+/** Phase 11.1 — the cached run manifest of one execution (and the run context captured when it finished). */
+export interface ExecutionManifestRecord {
+  executionId: string;
+  /** Captured when the run finished: the workflow as it ran and the MCP servers' identities. */
+  runContext: unknown;
+  /** Canonical manifest JSON; null until the manifest is first generated. */
+  manifestJson: string | null;
+  manifestDigest: string | null;
+  keyId: string | null;
+  signature: string | null;
+  signedAt: string | null;
+  createdAt: string;
+}
+
+/** Phase 11.1 — one deployment signing key. Only public material is stored here. */
+export interface AuditSigningKeyRecord {
+  keyId: string;
+  algorithm: string;
+  /** Base64 of the raw 32-byte Ed25519 public key. */
+  publicKey: string;
+  source: "env" | "generated";
+  /** SecretService secret holding a generated private key; null for the env key and after rotation. */
+  secretId: string | null;
+  status: "active" | "retired";
+  createdAt: string;
+  retiredAt: string | null;
+}
+
 export interface GuardVaultRow {
   token: string;
   data_class: string;
@@ -2615,6 +2643,34 @@ export class SqliteStore {
         created_at TEXT NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_guard_token_vault_hash ON guard_token_vault(value_hash);
+    `);
+
+    // Phase 11.1 — signed run manifests: the run context captured when a run
+    // finishes, the manifest generated (once) from it, and the deployment's
+    // signing keys (public keys only; private keys live in SecretService).
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS execution_manifests (
+        execution_id TEXT PRIMARY KEY,
+        run_context_json TEXT,
+        manifest_json TEXT,
+        manifest_digest TEXT,
+        key_id TEXT,
+        signature TEXT,
+        signed_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_execution_manifests_created ON execution_manifests(created_at);
+      CREATE TABLE IF NOT EXISTS audit_signing_keys (
+        key_id TEXT PRIMARY KEY,
+        algorithm TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        secret_id TEXT,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        retired_at TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_signing_keys_active ON audit_signing_keys(status) WHERE status = 'active';
     `);
 
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -5937,6 +5993,8 @@ export class SqliteStore {
   }
 
   pruneAuditLogs(options: { before: string }): number {
+    // Phase 11.1 — cached run manifests older than the audit-log retention whose execution history is gone.
+    this.pruneExecutionManifests(options);
     const existing = this.queryOne<{ count: number }>(
       `SELECT COUNT(*) as count FROM audit_logs WHERE created_at < ?`,
       [options.before]
@@ -9498,6 +9556,197 @@ export class SqliteStore {
       input.createdAt
     ]);
     this.persist();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 11.1 — signed run manifests and signing keys
+  // ---------------------------------------------------------------------------
+
+  private mapExecutionManifest(row: Record<string, unknown>): ExecutionManifestRecord {
+    let runContext: unknown = null;
+    if (typeof row.run_context_json === "string" && row.run_context_json) {
+      try {
+        runContext = JSON.parse(row.run_context_json);
+      } catch {
+        runContext = null;
+      }
+    }
+    return {
+      executionId: toString(row.execution_id),
+      runContext,
+      manifestJson: typeof row.manifest_json === "string" ? row.manifest_json : null,
+      manifestDigest: typeof row.manifest_digest === "string" ? row.manifest_digest : null,
+      keyId: typeof row.key_id === "string" ? row.key_id : null,
+      signature: typeof row.signature === "string" ? row.signature : null,
+      signedAt: typeof row.signed_at === "string" ? row.signed_at : null,
+      createdAt: toString(row.created_at)
+    };
+  }
+
+  getExecutionManifest(executionId: string): ExecutionManifestRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM execution_manifests WHERE execution_id = ?`, [executionId]);
+    return row ? this.mapExecutionManifest(row) : null;
+  }
+
+  /**
+   * Records what a finished run used. A later write (an approval resume
+   * finishing the same execution) replaces the context, but never once the
+   * manifest has been generated: a manifest is immutable.
+   */
+  saveExecutionRunContext(executionId: string, runContext: unknown, createdAt: string): void {
+    this.exec(
+      `INSERT INTO execution_manifests (execution_id, run_context_json, created_at) VALUES (?, ?, ?)
+       ON CONFLICT(execution_id) DO UPDATE SET run_context_json = excluded.run_context_json, created_at = excluded.created_at
+       WHERE execution_manifests.manifest_json IS NULL`,
+      [executionId, JSON.stringify(runContext), createdAt]
+    );
+  }
+
+  /**
+   * Stores a generated manifest once. Returns the stored record, which is
+   * the first one written if two requests raced to generate it.
+   */
+  saveExecutionManifest(input: {
+    executionId: string;
+    manifestJson: string;
+    manifestDigest: string;
+    keyId: string;
+    signature: string;
+    signedAt: string;
+  }): ExecutionManifestRecord {
+    this.exec(
+      `INSERT INTO execution_manifests (execution_id, manifest_json, manifest_digest, key_id, signature, signed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(execution_id) DO UPDATE SET
+         manifest_json = excluded.manifest_json,
+         manifest_digest = excluded.manifest_digest,
+         key_id = excluded.key_id,
+         signature = excluded.signature,
+         signed_at = excluded.signed_at
+       WHERE execution_manifests.manifest_json IS NULL`,
+      [input.executionId, input.manifestJson, input.manifestDigest, input.keyId, input.signature, input.signedAt, input.signedAt]
+    );
+    return this.getExecutionManifest(input.executionId)!;
+  }
+
+  /** MCP tool-call telemetry rows of one execution, oldest first. */
+  listMcpToolCallsForExecution(executionId: string): McpToolCallRecord[] {
+    return this.queryAll<McpToolCallRow>(`SELECT * FROM mcp_tool_calls WHERE execution_id = ? ORDER BY started_at, id`, [executionId]).map(mapMcpToolCall);
+  }
+
+  /**
+   * Audit-log entries about this execution: rows whose metadata `executionId`
+   * is this execution, or whose resource is this execution. No IP address or
+   * user agent; the actor's current role comes from the users table.
+   */
+  listAuditLogsForExecution(executionId: string): Array<{
+    eventType: string;
+    action: string;
+    outcome: string;
+    actorUserId: string | null;
+    actorRole: string | null;
+    actorEmail: string | null;
+    actorType: string;
+    message: string | null;
+    createdAt: string;
+  }> {
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT a.event_type, a.action, a.outcome, a.actor_user_id, a.actor_email, a.actor_type, a.message, a.created_at,
+              a.resource_type, a.resource_id, a.metadata_json, u.role AS actor_role
+       FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id
+       WHERE (a.resource_type = 'execution' AND a.resource_id = ?) OR instr(a.metadata_json, ?) > 0
+       ORDER BY a.created_at, a.id`,
+      [executionId, JSON.stringify(executionId)]
+    )
+      .filter((row) => {
+        if (row.resource_type === "execution" && row.resource_id === executionId) return true;
+        try {
+          const metadata = JSON.parse(String(row.metadata_json ?? "null")) as unknown;
+          return Boolean(metadata) && typeof metadata === "object" && (metadata as Record<string, unknown>).executionId === executionId;
+        } catch {
+          return false;
+        }
+      })
+      .map((row) => ({
+        eventType: toString(row.event_type),
+        action: toString(row.action),
+        outcome: toString(row.outcome),
+        actorUserId: typeof row.actor_user_id === "string" ? row.actor_user_id : null,
+        actorRole: typeof row.actor_role === "string" ? row.actor_role : null,
+        actorEmail: typeof row.actor_email === "string" ? row.actor_email : null,
+        actorType: toString(row.actor_type),
+        message: typeof row.message === "string" ? row.message : null,
+        createdAt: toString(row.created_at)
+      }));
+  }
+
+  /**
+   * Cached manifests are pruned only once both are true: older than the
+   * audit-log retention (AUDIT_LOG_RETENTION_DAYS) and their execution's
+   * history row is gone. While a run's history is kept its manifest is kept,
+   * so it is never regenerated with a new signing time, key or workflow.
+   */
+  pruneExecutionManifests(options: { before: string }): number {
+    const where = `created_at < ? AND NOT EXISTS (SELECT 1 FROM execution_history h WHERE h.id = execution_manifests.execution_id)`;
+    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM execution_manifests WHERE ${where}`, [options.before]);
+    const count = row ? toNumber(row.count) : 0;
+    if (count > 0) {
+      this.exec(`DELETE FROM execution_manifests WHERE ${where}`, [options.before]);
+      this.persist();
+    }
+    return count;
+  }
+
+  private mapAuditSigningKey(row: Record<string, unknown>): AuditSigningKeyRecord {
+    return {
+      keyId: toString(row.key_id),
+      algorithm: toString(row.algorithm),
+      publicKey: toString(row.public_key),
+      source: row.source === "env" ? "env" : "generated",
+      secretId: typeof row.secret_id === "string" && row.secret_id ? row.secret_id : null,
+      status: row.status === "active" ? "active" : "retired",
+      createdAt: toString(row.created_at),
+      retiredAt: typeof row.retired_at === "string" ? row.retired_at : null
+    };
+  }
+
+  listAuditSigningKeys(): AuditSigningKeyRecord[] {
+    return this.queryAll<Record<string, unknown>>(`SELECT * FROM audit_signing_keys ORDER BY created_at DESC, key_id ASC`).map((row) =>
+      this.mapAuditSigningKey(row)
+    );
+  }
+
+  getAuditSigningKey(keyId: string): AuditSigningKeyRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM audit_signing_keys WHERE key_id = ?`, [keyId]);
+    return row ? this.mapAuditSigningKey(row) : null;
+  }
+
+  getActiveAuditSigningKey(): AuditSigningKeyRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM audit_signing_keys WHERE status = 'active'`);
+    return row ? this.mapAuditSigningKey(row) : null;
+  }
+
+  /**
+   * Makes `key` the active key and retires the previous one in one
+   * transaction. A key id seen before (an env key put back) is re-activated.
+   * Returns false when another writer activated a different key first.
+   */
+  activateAuditSigningKey(key: Omit<AuditSigningKeyRecord, "status" | "retiredAt">, expectedActiveKeyId: string | null): boolean {
+    const now = new Date().toISOString();
+    return this.db.transaction(() => {
+      const current = this.getActiveAuditSigningKey();
+      if ((current?.keyId ?? null) !== expectedActiveKeyId) return false;
+      if (current && current.keyId !== key.keyId) {
+        this.exec(`UPDATE audit_signing_keys SET status = 'retired', retired_at = ?, secret_id = NULL WHERE key_id = ?`, [now, current.keyId]);
+      }
+      this.exec(
+        `INSERT INTO audit_signing_keys (key_id, algorithm, public_key, source, secret_id, status, created_at, retired_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, NULL)
+         ON CONFLICT(key_id) DO UPDATE SET status = 'active', retired_at = NULL, source = excluded.source, secret_id = excluded.secret_id`,
+        [key.keyId, key.algorithm, key.publicKey, key.source, key.secretId, key.createdAt]
+      );
+      return true;
+    })();
   }
 
   /**
