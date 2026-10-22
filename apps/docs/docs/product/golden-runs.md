@@ -26,7 +26,7 @@ Before anything is stored, values are scrubbed twice: credential-named keys and 
 
 ### Size
 
-`REPLAY_RECORDING_MAX_BYTES` (default 4 MiB) caps one golden run. When a run is bigger, the largest node outputs are replaced with a `{ "_replayTruncated": true, "bytes": … }` marker until it fits, and the golden run is marked **truncated**. A run that still does not fit is refused (413). `REPLAY_RECORDINGS_MAX_PER_WORKFLOW` (default 500) caps how many one workflow can have.
+`REPLAY_RECORDING_MAX_BYTES` (default 4 MiB) caps one golden run. When a run is bigger, the largest node outputs are replaced with a `{ "_replayTruncated": true, "bytes": … }` marker until it fits, and the golden run is marked **truncated**. A replay that has to answer a node from a cut output reports **could not complete** (CLI exit code 4), because the nodes after it would see the marker instead of the data. A run that still does not fit is refused (413). `REPLAY_RECORDINGS_MAX_PER_WORKFLOW` (default 500) caps how many one workflow can have.
 
 ## What a replay does
 
@@ -66,7 +66,7 @@ A call the cassette cannot answer fails in the replay and makes the verdict **co
 
 The replay result shows:
 
-- **Verdict**: pass when the status did not get worse and the output is the same; fail when the candidate's status regressed or its output changed; could not complete when the recording could not answer the candidate (an unanswered MCP call, an approval pause, an error before the run started).
+- **Verdict**: pass when the status did not get worse and the output is the same; fail when the candidate's status regressed or its output changed; could not complete when the recording could not answer the candidate or the comparison would not mean anything (an unanswered MCP call, a cut recorded output, a chart that needs a data URL, an approval pause, an error before the run started).
 - **Replay health**: stubbed nodes without a recording, unknown node types, unanswered MCP calls, charts that tried to load a data URL.
 - **Output**: each changed path with the golden run's and the replay's value. Whitespace differences are ignored, as are timing and id fields (`**._telemetry`, `**.durationMs`, `**.latencyMs`, `**.startedAt`, `**.completedAt`, `**.executionId`).
 - **Tool calls**: the two runs' tool calls side by side, aligned in order: same, arguments changed, outcome changed, new or missing.

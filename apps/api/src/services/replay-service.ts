@@ -202,8 +202,16 @@ export class ReplayService {
       });
     }
     for (const warning of plan.warnings) {
-      if (warning.kind === "unknown_node_type" || (warning.kind === "truncated_recording" && plan.hits.some((hit) => hit.nodeId === warning.nodeId))) {
+      if (warning.kind === "unknown_node_type") {
         warnings.push({ kind: warning.kind, nodeId: warning.nodeId, message: warning.message, blocking: false });
+      } else if (warning.kind === "truncated_recording" && plan.hits.some((hit) => hit.nodeId === warning.nodeId)) {
+        // The candidate was fed a placeholder instead of the recorded data, so neither pass nor fail would mean anything.
+        warnings.push({
+          kind: warning.kind,
+          nodeId: warning.nodeId,
+          message: `${warning.message} The replay fed a placeholder to the nodes after it, so the result cannot be judged; save a smaller run or raise REPLAY_RECORDING_MAX_BYTES.`,
+          blocking: true
+        });
       }
     }
     const blockedLoads = new Set<string>();

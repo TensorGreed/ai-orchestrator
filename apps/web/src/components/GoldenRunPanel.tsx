@@ -449,7 +449,7 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
                 )}
                 {recording.truncated && (
                   <p className="golden-note is-warn" role="status">
-                    Some large node outputs were cut to fit the size limit; nodes that read them see a placeholder.
+                    Some large node outputs were cut to fit the size limit. A replay that has to use one cannot complete, because the nodes after it would see a placeholder.
                   </p>
                 )}
               </div>

@@ -578,6 +578,11 @@ describe("golden runs with side effects stubbed", () => {
     const detail = (await call(context, "GET", `/api/replay/recordings/${golden.id}`, builder.cookie)).json<{ recording: ReplayRecordingDetail }>().recording;
     expect(detail.nodes.big!.output).toMatchObject({ _replayTruncated: true });
     expect(detail.nodes.small!.output).toMatchObject({ ok: true });
+
+    // Replaying a cut output proves nothing either way: the verdict is inconclusive, not fail.
+    const result = await replay(context, builder.cookie, golden.id);
+    expect(result.verdict).toBe("error");
+    expect(result.diff.health).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "truncated_recording", nodeId: "big", blocking: true })]));
   });
 });
 
