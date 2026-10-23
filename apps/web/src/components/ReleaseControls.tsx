@@ -31,6 +31,7 @@ export interface ReleasePillProps {
   workflowId: string;
   /** Changes after a save, so the pill reloads the draft version. */
   refreshKey?: number | string;
+  /** Used until the release state loads; then the server's answer (project roles included) decides. */
   canPublish: boolean;
   isAdmin: boolean;
   /** Opens the workflow's gate settings (Evaluations → Release gates). */
@@ -73,6 +74,11 @@ export function ReleasePill({ workflowId, refreshKey, canPublish, isAdmin, onOpe
       >
         <span className="hud-dot" aria-hidden="true" />
         <span className="hud-run-label">{label.text}</span>
+        {state?.productionRefused && (
+          <span className="hud-release-gate is-refused" title="The gate is on but no version is published: production refuses runs until one is">
+            production off
+          </span>
+        )}
         {state?.gateEnabled && (
           <span className="hud-release-gate" title={state.gateEnforced ? "Release gate on (enforced by an admin)" : "Release gate on"}>
             gate{state.gateEnforced ? " · enforced" : ""}
@@ -83,7 +89,7 @@ export function ReleasePill({ workflowId, refreshKey, canPublish, isAdmin, onOpe
         <PublishDialog
           workflowId={workflowId}
           state={state}
-          canPublish={canPublish}
+          canPublish={state ? state.canPublish : canPublish}
           isAdmin={isAdmin}
           onClose={() => setOpen(false)}
           onPublished={() => void load()}

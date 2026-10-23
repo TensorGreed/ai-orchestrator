@@ -7,6 +7,13 @@ export type PillTone = "live" | "ahead" | "draft" | "unknown";
 /** The editor's version pill: what production runs and how far the draft is ahead of it. */
 export function releasePillLabel(state: ReleaseStateView | null): { text: string; tone: PillTone; title: string } {
   if (!state) return { text: "Publish", tone: "unknown", title: "Publish a saved version to production" };
+  if (state.productionRefused) {
+    return {
+      text: state.draftVersion ? `v${state.draftVersion} · not published` : "Not published",
+      tone: "draft",
+      title: "The release gate is on and no version is published: production refuses runs until a version passes the gate, is approved or an admin overrides"
+    };
+  }
   if (state.publishedVersion === null) {
     return {
       text: state.draftVersion ? `v${state.draftVersion} · not published` : "Not saved",
@@ -77,6 +84,23 @@ export interface GateForm {
   allowSelfApproval: boolean;
 }
 
+/**
+ * Which gate fields the user may change. On an enforced gate a non-admin
+ * may only tighten the policy and add golden sets; switching it off, the
+ * approvers, self-approval, the MCP mode and removing sets are the admin's.
+ * Allowing self-approval is the admin's on every gate.
+ */
+export interface GateLocks {
+  /** Every admin-only field (the gate is enforced and the user is not an admin). */
+  adminOnly: boolean;
+  /** Self-approval can only be turned on by an admin. */
+  selfApproval: boolean;
+}
+
+export function gateLocks(gate: Pick<ReleaseGateView, "enforced">, isAdmin: boolean): GateLocks {
+  return { adminOnly: gate.enforced && !isAdmin, selfApproval: !isAdmin };
+}
+
 export function gateFormFrom(gate: ReleaseGateView): GateForm {
   const policy = gate.policy;
   return {
@@ -139,7 +163,9 @@ export function gateSettingsFromForm(form: GateForm, previous: ReleaseGateView):
     enabled: form.enabled,
     enforced: form.enforced,
     datasetIds: form.datasetIds,
-    candidateOptions: { ...previous.candidateOptions, mcpMode: form.mcpMode },
+    // Unset means strict: keep it unset rather than change the gate's options by naming the default.
+    candidateOptions:
+      (previous.candidateOptions.mcpMode ?? "strict") === form.mcpMode ? { ...previous.candidateOptions } : { ...previous.candidateOptions, mcpMode: form.mcpMode },
     policy,
     requireApproval: form.requireApproval,
     approvers: hasApprovers

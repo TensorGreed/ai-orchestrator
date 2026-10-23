@@ -33,6 +33,11 @@
   white-space: nowrap;
 }
 
+.hud-release-gate.is-refused {
+  color: var(--err);
+  border-color: var(--err);
+}
+
 .release-modal {
   width: min(640px, calc(100vw - 32px));
 }

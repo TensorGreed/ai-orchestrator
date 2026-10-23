@@ -66,7 +66,7 @@ beforeEach(() => {
 
 describe("version pill and Publish dialog", () => {
   it("shows the live version and how far the draft is ahead", async () => {
-    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 5, publishedVersion: 3, aheadBy: 2, gateEnabled: true, gateEnforced: true } });
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 5, publishedVersion: 3, aheadBy: 2, gateEnabled: true, gateEnforced: true, productionRefused: false, canPublish: true, canEditGate: true } });
     render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
     const pill = await screen.findByRole("button", { name: /Release: v3 live · draft \+2/ });
     expect(pill).toHaveTextContent("gate · enforced");
@@ -81,7 +81,7 @@ describe("version pill and Publish dialog", () => {
 
   it("publishes a passing version bound to the judged hash and job", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: true, gateEnforced: false } });
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: true, gateEnforced: false, productionRefused: false, canPublish: true, canEditGate: true } });
     vi.mocked(api.fetchWorkflowVersions).mockResolvedValue(versions());
     vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview({ stats: { cases: 3, pass: 3, fail: 0, error: 0, skipped: 0, passRate: 1, regressions: 0, costIncreasePct: 4, p95LatencyIncreasePct: null, newGuardBlocks: 0, oldestRecordingDays: 2 } }) });
     vi.mocked(api.publishWorkflowVersion).mockResolvedValue({ outcome: "published", release: release() });
@@ -97,7 +97,7 @@ describe("version pill and Publish dialog", () => {
 
   it("a blocked version: a builder asks an approver with a reason; an admin may override with a reason", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: true, gateEnforced: false } });
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: true, gateEnforced: false, productionRefused: false, canPublish: true, canEditGate: true } });
     vi.mocked(api.fetchWorkflowVersions).mockResolvedValue(versions());
     vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview({ verdict: "blocked", reasons: ["2 regressions; the gate allows at most 0"], canRequestApproval: true }) });
     vi.mocked(api.publishWorkflowVersion).mockResolvedValue({ outcome: "needs_approval", approvalRequestId: "rar_1", reasons: [] });
@@ -125,9 +125,28 @@ describe("version pill and Publish dialog", () => {
     expect(await within(adminDialog).findByText("Verdict: Admin override")).toBeInTheDocument();
   });
 
+  it("the server's publish permission (project roles included) decides, not the global role", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: true, gateEnforced: false, productionRefused: false, canPublish: false, canEditGate: false } });
+    vi.mocked(api.fetchWorkflowVersions).mockResolvedValue(versions());
+    vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview() });
+    render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
+    await user.click(await screen.findByRole("button", { name: /Release:/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText(/needs the workflow:publish permission/)).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: /Publish v/ })).toBeNull();
+  });
+
+  it("says production is off when the gate is on and nothing is published", async () => {
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 2, publishedVersion: null, aheadBy: 0, gateEnabled: true, gateEnforced: true, productionRefused: true, canPublish: true, canEditGate: false } });
+    render(<ReleasePill workflowId="wf-1" canPublish isAdmin={false} />);
+    const pill = await screen.findByRole("button", { name: /Release: v2 · not published/ });
+    expect(pill).toHaveTextContent("production off");
+  });
+
   it("a viewer sees the verdict but no publish actions", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false } });
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false, productionRefused: false, canPublish: false, canEditGate: false } });
     vi.mocked(api.fetchWorkflowVersions).mockResolvedValue(versions());
     vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview({ gateEnabled: false, replayRunId: null }) });
     render(<ReleasePill workflowId="wf-1" canPublish={false} isAdmin={false} />);
@@ -188,6 +207,22 @@ describe("Release gates tab", () => {
     expect(await screen.findByText("Enforced by an admin")).toBeInTheDocument();
     expect(screen.getByLabelText("Gate publishing on replay jobs")).toBeDisabled();
     expect(screen.getByText("No version was published yet.")).toBeInTheDocument();
+  });
+
+  it("on an enforced gate a builder can only tighten: approvers, self-approval, MCP mode and the gate's sets are locked; operators are never offered as approvers", async () => {
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: gate({ enabled: true, enforced: true, datasetIds: ["set-1"], requireApproval: true, approvers: { approverRoles: ["admin"], approverUsers: [], allowSelfApproval: false } }) });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({ datasets: [{ id: "set-1", name: "Refund cases", workflowId: "wf-1" }, { id: "set-2", name: "More cases", workflowId: "wf-1" }] as never });
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [release({ version: 2 }), release({ id: "rel_0", version: 1 })], publishedVersion: 2 });
+    render(<ReleaseGatePanel workflows={[{ id: "wf-1", name: "Refunds" } as never]} canEdit isAdmin={false} />);
+    expect(await screen.findByText(/An admin enforces this gate/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Refund cases/)).toBeDisabled();
+    expect(screen.getByLabelText(/More cases/)).toBeEnabled();
+    expect(screen.getByLabelText("admin")).toBeDisabled();
+    expect(screen.queryByLabelText("operator")).toBeNull();
+    expect(screen.getByPlaceholderText("Approver emails, comma separated")).toBeDisabled();
+    expect(screen.getByLabelText(/may approve their own release/)).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: /MCP/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Roll back/ })).toBeNull();
   });
 });
 

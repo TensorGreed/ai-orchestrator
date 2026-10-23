@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultReleaseGate } from "@ai-orchestrator/shared";
-import { gateFormFrom, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone } from "./release";
+import { gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone } from "./release";
 
 describe("release helpers", () => {
   it("labels the version pill by what production runs", () => {
@@ -29,6 +29,18 @@ describe("release helpers", () => {
     expect(errors).toEqual(["Pick at least one golden set", "Minimum pass rate is a percentage up to 100", "Requiring approval needs at least one approver role or user"]);
     const users = gateSettingsFromForm({ ...gateFormFrom(gate), approverUsers: "a@example.com, b@example.com" }, gate).settings;
     expect(users.approvers).toMatchObject({ approverUsers: ["a@example.com", "b@example.com"], approverRoles: [], allowSelfApproval: false });
+  });
+
+  it("does not change the candidate options by naming the default MCP mode, and keeps a chosen one", () => {
+    const gate = { ...defaultReleaseGate("wf-1"), enabled: true, datasetIds: ["set-1"], candidateOptions: { repeats: 3 } };
+    expect(gateSettingsFromForm(gateFormFrom(gate), gate).settings.candidateOptions).toEqual({ repeats: 3 });
+    expect(gateSettingsFromForm({ ...gateFormFrom(gate), mcpMode: "lenient" }, gate).settings.candidateOptions).toEqual({ repeats: 3, mcpMode: "lenient" });
+  });
+
+  it("locks admin-only fields on an enforced gate for non-admins, and self-approval for every non-admin", () => {
+    expect(gateLocks({ enforced: true }, false)).toEqual({ adminOnly: true, selfApproval: true });
+    expect(gateLocks({ enforced: false }, false)).toEqual({ adminOnly: false, selfApproval: true });
+    expect(gateLocks({ enforced: true }, true)).toEqual({ adminOnly: false, selfApproval: false });
   });
 
   it("summarizes a judged job and tones verdicts", () => {

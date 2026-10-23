@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { WorkflowListItem } from "@ai-orchestrator/shared";
+import { RELEASE_APPROVER_ROLE_CHOICES, type WorkflowListItem } from "@ai-orchestrator/shared";
 import {
   ApiError,
   fetchEvalDatasets,
@@ -17,9 +17,10 @@ import {
   type ReleaseGateView,
   type WorkflowReleasesView
 } from "../lib/api";
-import { gateFormFrom, gateSettingsFromForm, releaseVerdictLabel, releaseVerdictTone, type GateForm } from "../lib/release";
+import { gateFormFrom, gateLocks, gateSettingsFromForm, releaseVerdictLabel, releaseVerdictTone, type GateForm } from "../lib/release";
 
-const APPROVER_ROLES = ["admin", "builder", "operator"] as const;
+/** Only roles that can hold workflow:publish can approve a release. */
+const APPROVER_ROLES = RELEASE_APPROVER_ROLE_CHOICES;
 
 function errorText(err: unknown, fallback: string): string {
   if (err instanceof ApiError || err instanceof Error) return err.message || fallback;
@@ -100,8 +101,9 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
     void load();
   }, [load]);
 
-  // A builder may not loosen an enforced gate; the server checks it too.
-  const locked = !canEdit || (gate?.enforced === true && !isAdmin);
+  // On an enforced gate a builder may only tighten it; the server checks it too.
+  const locks = gate ? gateLocks(gate, isAdmin) : { adminOnly: !isAdmin, selfApproval: !isAdmin };
+  const locked = !canEdit || locks.adminOnly;
 
   const save = async () => {
     if (!form || !gate) return;
@@ -143,6 +145,9 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
         <p className="settings-help">
           With the gate on, a version reaches production only after a completed replay job of that exact version passes over these golden sets, under the policy in force when you publish.
         </p>
+        {locks.adminOnly && canEdit && (
+          <p className="settings-help">An admin enforces this gate: you can tighten its policy and add golden sets; everything else is the admin's.</p>
+        )}
         <fieldset className="release-fieldset" disabled={!canEdit || saving}>
           <label className="guard-check">
             <input type="checkbox" checked={form.enabled} disabled={locked && form.enabled} onChange={(event) => update({ enabled: event.target.checked })} />
@@ -160,6 +165,7 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
                     <input
                       type="checkbox"
                       checked={form.datasetIds.includes(set.id)}
+                      disabled={locked && gate.datasetIds.includes(set.id)}
                       onChange={(event) =>
                         update({ datasetIds: event.target.checked ? [...form.datasetIds, set.id] : form.datasetIds.filter((id) => id !== set.id) })
                       }
@@ -185,17 +191,17 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
             <label className="cfg-label" htmlFor="gate-mcp-mode">
               MCP answers in the job
             </label>
-            <select id="gate-mcp-mode" className="cfg-input" value={form.mcpMode} onChange={(event) => update({ mcpMode: event.target.value === "lenient" ? "lenient" : "strict" })}>
+            <select id="gate-mcp-mode" className="cfg-input" value={form.mcpMode} disabled={locked} onChange={(event) => update({ mcpMode: event.target.value === "lenient" ? "lenient" : "strict" })}>
               <option value="strict">Strict: every call must match a recorded one</option>
               <option value="lenient">Lenient: unmatched calls fail the call, not the job</option>
             </select>
           </div>
           <label className="guard-check">
-            <input type="checkbox" checked={form.noNewGuardBlocks} onChange={(event) => update({ noNewGuardBlocks: event.target.checked })} />
+            <input type="checkbox" checked={form.noNewGuardBlocks} disabled={locked && gate.policy.noNewGuardBlocks} onChange={(event) => update({ noNewGuardBlocks: event.target.checked })} />
             <span>Block a version that adds guard blocks</span>
           </label>
           <label className="guard-check">
-            <input type="checkbox" checked={form.errorsCountAsFailures} onChange={(event) => update({ errorsCountAsFailures: event.target.checked })} />
+            <input type="checkbox" checked={form.errorsCountAsFailures} disabled={locked && gate.policy.errorsCountAsFailures} onChange={(event) => update({ errorsCountAsFailures: event.target.checked })} />
             <span>Errored cases count as failures</span>
           </label>
 
@@ -207,6 +213,7 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
                   <input
                     type="checkbox"
                     checked={form.approverRoles.includes(role)}
+                    disabled={locked}
                     onChange={(event) =>
                       update({ approverRoles: event.target.checked ? [...form.approverRoles, role] : form.approverRoles.filter((entry) => entry !== role) })
                     }
@@ -220,17 +227,23 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
               aria-label="Approver emails"
               placeholder="Approver emails, comma separated"
               value={form.approverUsers}
+              disabled={locked}
               onChange={(event) => update({ approverUsers: event.target.value })}
             />
             <div className="cfg-help">Approvers also need permission to publish this workflow. A blocked publish can be sent to them with a reason.</div>
           </div>
           <label className="guard-check">
-            <input type="checkbox" checked={form.requireApproval} onChange={(event) => update({ requireApproval: event.target.checked })} />
+            <input type="checkbox" checked={form.requireApproval} disabled={locked && gate.requireApproval} onChange={(event) => update({ requireApproval: event.target.checked })} />
             <span>Every publish needs an approver, even when the gate passes</span>
           </label>
           <label className="guard-check">
-            <input type="checkbox" checked={form.allowSelfApproval} onChange={(event) => update({ allowSelfApproval: event.target.checked })} />
-            <span>The requester may approve their own release</span>
+            <input
+              type="checkbox"
+              checked={form.allowSelfApproval}
+              disabled={locked || (locks.selfApproval && !form.allowSelfApproval)}
+              onChange={(event) => update({ allowSelfApproval: event.target.checked })}
+            />
+            <span>The requester or the version's author may approve their own release{locks.selfApproval ? " (admins only)" : ""}</span>
           </label>
           {isAdmin && (
             <label className="guard-check">
@@ -260,7 +273,7 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
         )}
       </section>
 
-      <ReleaseHistory workflowId={workflowId} history={history} canRollback={canEdit} onChanged={() => void load()} />
+      <ReleaseHistory workflowId={workflowId} history={history} canRollback={canEdit && !locks.adminOnly} onChanged={() => void load()} />
     </div>
   );
 }
