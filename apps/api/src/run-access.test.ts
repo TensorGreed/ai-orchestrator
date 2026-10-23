@@ -334,8 +334,9 @@ describe("project authorization on run endpoints", () => {
       expect((await call(context, "POST", `/api/approvals/${paused["wf-gate-ro"]}/${decision}`, operator.cookie, {})).statusCode).toBe(403);
     }
     expect(context.store.getWorkflowExecutionState(paused["wf-gate-hidden"]!)!.status).toBe("waiting_approval");
-    expect((await call(context, "POST", `/api/approvals/${paused["wf-gate-open"]}/approve`, operator.cookie, {})).statusCode).toBe(200);
-    expect((await call(context, "POST", `/api/approvals/${paused["wf-gate-hidden"]}/approve`, admin.cookie, {})).statusCode).toBe(200);
+    // With the execution queue in use a decision answers 202 and the resume runs on the queue.
+    expect((await call(context, "POST", `/api/approvals/${paused["wf-gate-open"]}/approve`, operator.cookie, {})).statusCode).toBe(202);
+    expect((await call(context, "POST", `/api/approvals/${paused["wf-gate-hidden"]}/approve`, admin.cookie, {})).statusCode).toBe(202);
   });
 
   it("dead-letter queue lists only readable workflows", async () => {
@@ -671,7 +672,7 @@ describe("project authorization: sub-workflows at run time (H3)", () => {
   });
 
   it("an admin approving a builder's paused run does not let it call another project (N1)", async () => {
-    const { context, admin, builder } = await seed();
+    const { context, admin, builder } = await seed({ queuePollMs: 20 });
     context.store.upsertWorkflow(childWorkflow("wf-secret", "hidden", "hidden-project-secret-output"));
     const gated = callerWorkflow("wf-gated", "default", "wf-secret");
     gated.nodes.splice(1, 0, { id: "gate", type: "human_approval", name: "Gate", position: { x: 100, y: 0 }, config: { approvalMessage: "ok?", timeoutMinutes: 60 } });
@@ -684,12 +685,14 @@ describe("project authorization: sub-workflows at run time (H3)", () => {
     const run = (await call(context, "POST", "/api/workflows/wf-gated/execute", builder.cookie, {})).json<{ status: string; executionId: string }>();
     expect(run.status).toBe("waiting_approval");
     const approved = await call(context, "POST", `/api/approvals/${run.executionId}/approve`, admin.cookie, {});
-    // A failed run answers 400 with the run's result.
-    expect(approved.statusCode).toBe(400);
-    expect(approved.body).not.toContain("hidden-project-secret-output");
-    expect(approved.json<{ status: string; error: string }>()).toMatchObject({ status: "error", error: expect.stringContaining("is in another project") });
+    // The resume runs on the execution queue.
+    expect(approved.statusCode).toBe(202);
+    for (let attempt = 0; attempt < 200 && context.store.getExecutionHistory(run.executionId)?.status !== "error"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     const detail = await call(context, "GET", `/api/executions/${run.executionId}`, builder.cookie);
     expect(detail.statusCode).toBe(200);
+    expect(detail.json<{ status: string; error: string }>()).toMatchObject({ status: "error", error: expect.stringContaining("is in another project") });
     expect(detail.body).not.toContain("hidden-project-secret-output");
   });
 
@@ -1065,7 +1068,7 @@ describe("project authorization: shares, imports, restores and other callers", (
     await call(context, "POST", "/api/workflows/wf-gate-hidden/shares", admin.cookie, { projectId: "default", accessLevel: "execute" });
     const paused = (await call(context, "POST", "/api/workflows/wf-gate-hidden/execute", builder.cookie, {})).json<{ status: string; executionId: string }>();
     expect(paused.status).toBe("waiting_approval");
-    expect((await call(context, "POST", `/api/approvals/${paused.executionId}/approve`, operator.cookie, {})).statusCode).toBe(200);
+    expect((await call(context, "POST", `/api/approvals/${paused.executionId}/approve`, operator.cookie, {})).statusCode).toBe(202);
   });
 
   it("imports and restores cannot land a workflow in a project the user cannot write", async () => {

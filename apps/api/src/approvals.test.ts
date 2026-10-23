@@ -7,6 +7,7 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -343,7 +344,9 @@ describe("timeouts", () => {
     const run = await startRun(first, gateWorkflow("wf-late", GATE), requester.cookie);
     await waitFor(() => posts.find((post) => post.body.includes("Approval needed")));
     const requested = JSON.parse(posts.find((post) => post.body.includes("Approval needed"))!.body).text as string;
-    expect(requested).toContain("Send 'Hello Ana'?");
+    // Channels are not project-scoped: the run's own text stays in the inbox.
+    expect(requested).not.toContain("Hello Ana");
+    expect(requested).toContain("Open the approvals inbox");
     expect(requested).toContain("https://l2m.example.test/?mode=approvals&request=apr_");
     await closeContext(first);
 
@@ -800,7 +803,7 @@ describe("who may see and decide", () => {
       name: "Middle",
       schemaVersion: "1.0.0",
       workflowVersion: 1,
-      projectId: "default",
+      projectId: "child-team",
       nodes: [node("start", "manual_trigger"), node("call", "execute_workflow", { workflowId: child.id }), node("out", "output", { responseTemplate: "middle got {{result}}" })],
       edges: [{ id: "m1", source: "start", target: "call" }, { id: "m2", source: "call", target: "out" }]
     } as Workflow;
@@ -815,6 +818,9 @@ describe("who may see and decide", () => {
     } as Workflow;
     context.store.upsertWorkflow(child);
     context.store.upsertWorkflow(middle);
+    // A run may call another project's workflow only through an execute share;
+    // the middle reaches the child inside its own project.
+    context.store.upsertWorkflowShare({ workflowId: middle.id, projectId: "default", accessLevel: "execute" });
     const run = await startRun(context, parent, requester.cookie);
     // Read-only on the child's project: the request shows, but the lead may not decide it.
     context.store.upsertCustomRole({ id: "read-child", projectId: "child-team", name: "Read", permissions: ["workflow:read"] });
@@ -826,6 +832,167 @@ describe("who may see and decide", () => {
     const approved = (await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, {})).json<RunResult>();
     expect(approved.status).toBe("success");
     expect(approved.nodeResults.find((entry) => entry.nodeId === "out")?.output?.result).toBe("parent got middle got deep done");
+  });
+});
+
+describe("project authorization (run-access)", () => {
+  const lockOut = (context: TestContext, userId: string, projectId: string, permissions: string[]) => {
+    const roleId = `${projectId}-${permissions.join("-") || "none"}`;
+    context.store.upsertCustomRole({ id: roleId, projectId, name: roleId, permissions });
+    context.store.upsertProjectRole({ userId, projectId, role: "custom", customRoleId: roleId });
+  };
+
+  it("answers 404 for another project's requests and 403 for a read-only one on the inbox, the run lookup, approve, reject and approve with edits", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const outsider = await login(context, "builder", "outsider");
+    context.store.upsertProject({ id: "hidden", name: "Hidden" });
+    context.store.upsertProject({ id: "ro", name: "Read only" });
+    lockOut(context, outsider.id, "hidden", []);
+    lockOut(context, outsider.id, "ro", ["workflow:read"]);
+    const hidden = await startRun(context, gateWorkflow("wf-authz-hidden", GATE, "hidden"), requester.cookie);
+    const readOnly = await startRun(context, gateWorkflow("wf-authz-ro", GATE, "ro"), requester.cookie);
+
+    const listed = await inbox(context, outsider.cookie, "?status=all");
+    expect(listed.map((item) => item.workflowId)).toEqual(["wf-authz-ro"]);
+    expect(listed[0]).toMatchObject({ canDecide: false });
+    expect((await call(context, "GET", "/api/approvals?workflowId=wf-authz-hidden", outsider.cookie)).statusCode).toBe(404);
+    expect((await call(context, "GET", `/api/approvals?executionId=${hidden.executionId}`, outsider.cookie)).statusCode).toBe(404);
+    // A missing run answers exactly like a hidden one.
+    const missing = await call(context, "GET", "/api/approvals?executionId=no-such-run", outsider.cookie);
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual((await call(context, "GET", `/api/approvals?executionId=${hidden.executionId}`, outsider.cookie)).json());
+    expect(await inbox(context, outsider.cookie, "?workflowId=wf-authz-ro")).toHaveLength(1);
+    expect(await inbox(context, outsider.cookie, `?executionId=${readOnly.executionId}`)).toHaveLength(1);
+
+    const attempts = [
+      ["approve", {}],
+      ["reject", { reason: "no" }],
+      ["approve", { edits: { reply: "Edited by an outsider" }, reason: "edited" }]
+    ] as const;
+    for (const [decision, body] of attempts) {
+      expect((await call(context, "POST", `/api/approvals/${hidden.executionId}/${decision}`, outsider.cookie, body)).statusCode).toBe(404);
+      expect((await call(context, "POST", `/api/approvals/${readOnly.executionId}/${decision}`, outsider.cookie, body)).statusCode).toBe(403);
+    }
+    for (const run of [hidden, readOnly]) {
+      expect(context.store.getWorkflowExecutionState(run.executionId!)!.status).toBe("waiting_approval");
+      expect(context.store.listApprovalRequestsForExecution(run.executionId!).map((entry) => entry.status)).toEqual(["pending"]);
+    }
+    const audits = context.store.listAuditLogs({ category: "approval", pageSize: 100 }).items.filter((entry) => entry.eventType === "approval.decided");
+    expect(audits.every((entry) => entry.outcome === "denied")).toBe(true);
+    // Nothing is recorded for the hidden run: it answered as if it did not exist.
+    expect(audits.some((entry) => entry.resourceId === "wf-authz-hidden")).toBe(false);
+  });
+
+  it("follows the workflow's current project, and a deleted workflow's requests are admin-only", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const lead = await login(context, "builder", "lead");
+    context.store.upsertProject({ id: "moved-to", name: "Moved to" });
+    lockOut(context, lead.id, "moved-to", []);
+    const workflow = gateWorkflow("wf-moves", GATE);
+    const run = await startRun(context, workflow, requester.cookie);
+    expect(await inbox(context, lead.cookie)).toHaveLength(1);
+    // Moved after the pause: the stored request still says "default", but access follows the workflow.
+    context.store.upsertWorkflow({ ...workflow, projectId: "moved-to" });
+    expect(await inbox(context, lead.cookie)).toEqual([]);
+    expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, {})).statusCode).toBe(404);
+
+    const gone = await startRun(context, gateWorkflow("wf-gone", GATE), requester.cookie);
+    // Only the workflow row goes (deleting through the store also clears its runs).
+    rawDb(context).prepare("DELETE FROM workflows WHERE id = ?").run("wf-gone");
+    expect((await inbox(context, lead.cookie)).map((item) => item.workflowId)).not.toContain("wf-gone");
+    expect((await call(context, "POST", `/api/approvals/${gone.executionId}/approve`, lead.cookie, {})).statusCode).toBe(404);
+    const admin = await login(context, "admin");
+    expect((await inbox(context, admin.cookie)).map((item) => item.workflowId)).toContain("wf-gone");
+  });
+
+  it("strict isolation: only members of the workflow's project see and decide its requests", async () => {
+    const context = await createTestContext({ overrides: { PROJECT_ISOLATION: "strict" } });
+    const requester = await login(context, "builder", "requester");
+    const member = await login(context, "builder", "member");
+    const outsider = await login(context, "builder", "outsider");
+    context.store.upsertProject({ id: "team", name: "Team" });
+    context.store.upsertProject({ id: "other", name: "Other" });
+    context.store.upsertProjectRole({ userId: requester.id, projectId: "team", role: "editor" });
+    context.store.upsertProjectRole({ userId: member.id, projectId: "team", role: "editor" });
+    // A member elsewhere: in strict isolation a global role alone reaches no project.
+    context.store.upsertProjectRole({ userId: outsider.id, projectId: "other", role: "editor" });
+    const run = await startRun(context, gateWorkflow("wf-strict", GATE, "team"), requester.cookie);
+    expect(await inbox(context, outsider.cookie)).toEqual([]);
+    expect((await call(context, "GET", "/api/approvals?workflowId=wf-strict", outsider.cookie)).statusCode).toBe(404);
+    expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, outsider.cookie, {})).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/approvals/eligibility", outsider.cookie, { workflowId: "wf-strict", approverRoles: ["builder"] })).statusCode).toBe(404);
+    expect((await inbox(context, member.cookie)).map((item) => item.workflowId)).toEqual(["wf-strict"]);
+    const approved = (await call(context, "POST", `/api/approvals/${run.executionId}/approve`, member.cookie, { edits: { reply: "ok" } })).json<RunResult>();
+    expect(approved.status).toBe("success");
+  });
+
+  it("resumes in the workflow's project scope: an approved run cannot use another project's secret, even when an admin approves", async () => {
+    const seen: string[] = [];
+    const server = http.createServer((request, response) => {
+      seen.push(String(request.headers.authorization ?? ""));
+      response.setHeader("content-type", "application/json");
+      response.end("{}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const context = await createTestContext();
+      const requester = await login(context, "builder", "requester");
+      const admin = await login(context, "admin");
+      context.store.upsertProject({ id: "vault", name: "Vault" });
+      const vaultSecret = context.secretService.createSecret({ name: "vault", provider: "custom", value: "vault-token", projectId: "vault" }).secretId;
+      const withCall = (id: string): Workflow => {
+        const workflow = gateWorkflow(id, { ...GATE, editableFields: [] });
+        workflow.nodes.push(node("call", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/`, secretRef: { secretId: vaultSecret } }));
+        workflow.edges = workflow.edges.map((edge) => (edge.id === "e3" ? { ...edge, target: "call" } : edge));
+        workflow.edges.push({ id: "e6", source: "call", target: "sent" });
+        return workflow;
+      };
+      // Stored directly, as an older or imported definition would be: the save check is not what stops it.
+      const run = await startRun(context, withCall("wf-vault"), requester.cookie);
+      const refused = (await call(context, "POST", `/api/approvals/${run.executionId}/approve`, admin.cookie, {})).json<RunResult>();
+      expect(refused).toMatchObject({ status: "error", error: expect.stringContaining("belongs to another project") });
+      expect(seen).toEqual([]);
+
+      // Shared to the workflow's project: the approved run may use it.
+      expect((await call(context, "POST", `/api/secrets/${vaultSecret}/shares`, admin.cookie, { projectId: "default" })).statusCode).toBe(200);
+      const next = await startRun(context, withCall("wf-vault-shared"), requester.cookie);
+      expect((await call(context, "POST", `/api/approvals/${next.executionId}/approve`, admin.cookie, {})).json<RunResult>().status).toBe("success");
+      expect(seen).toEqual(["Bearer vault-token"]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("refuses a decision by an approver who lost project access after the request, and a queued resume whose approver lost it before it ran", async () => {
+    const context = await createTestContext({ queue: true });
+    const requester = await login(context, "builder", "requester");
+    const lead = await login(context, "builder", "lead");
+    const run = await startRun(context, gateWorkflow("wf-revoked", GATE), requester.cookie);
+    // Read-only now: still visible, no longer decidable.
+    lockOut(context, lead.id, "default", ["workflow:read"]);
+    expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, {})).statusCode).toBe(403);
+    expect((await call(context, "POST", `/api/approvals/${run.executionId}/reject`, lead.cookie, { reason: "no" })).statusCode).toBe(403);
+    expect(context.store.listApprovalRequestsForExecution(run.executionId!).map((entry) => entry.status)).toEqual(["pending"]);
+    context.store.removeProjectRole(lead.id, "default");
+
+    // Decided while allowed, then locked out before the queue ran the resume.
+    context.queue!.stop();
+    expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, { edits: { reply: "ok" } })).statusCode).toBe(202);
+    lockOut(context, lead.id, "default", []);
+    context.queue!.start();
+    await waitFor(() => context.store.listAuditLogs({ category: "approval", pageSize: 100 }).items.find((entry) => entry.eventType === "approval.resume_refused"));
+    await waitFor(() => context.store.getWorkflowExecutionState(run.executionId!)?.status === "waiting_approval");
+    expect(context.store.listApprovalRequestsForExecution(run.executionId!).at(-1)!.status).toBe("pending");
+    expect(context.store.getExecutionHistory(run.executionId!)?.status).not.toBe("success");
+
+    // Someone who may still decide it can.
+    context.store.removeProjectRole(lead.id, "default");
+    const other = await login(context, "builder", "other");
+    expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, other.cookie, { edits: { reply: "ok" } })).statusCode).toBe(202);
+    await waitFor(() => context.store.getExecutionHistory(run.executionId!)?.status === "success");
   });
 });
 
@@ -882,7 +1049,7 @@ describe("what approvals record and send", () => {
   it("answers 501 when the store has no approval requests", async () => {
     const app = Fastify();
     const user = { id: "u1", email: "u@example.com", role: "admin" as const };
-    registerApprovalRoutes({ app, approvals: {} as never, available: false, loadWorkflow: () => null, canReadWorkflow: () => true, canUpdateWorkflow: () => true, canSeeProjectAccounts: () => true, requireRole: async () => user, dispatch: async () => null });
+    registerApprovalRoutes({ app, approvals: {} as never, available: false, loadWorkflow: () => null, loadRun: () => null, runAccess: {} as never, canSeeProjectAccounts: () => true, requireRole: async () => user, dispatch: async () => null });
     await app.ready();
     const listed = await app.inject({ method: "GET", url: "/api/approvals" });
     expect(listed.statusCode).toBe(501);

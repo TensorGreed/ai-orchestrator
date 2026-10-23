@@ -6,9 +6,14 @@
  *   POST /api/approvals/:id/reject       reject it, with a reason when the request requires one
  *   POST /api/approvals/eligibility      who could approve with these approver settings (editor warning; needs workflow:write)
  *
- * Listing needs `workflow:read` on the workflow's project; deciding needs
- * `workflow:execute` on it and must satisfy the request's approvers and its
- * self-approval rule. With the execution queue in use the resume runs on the
+ * Access follows the shared project authorization (run-access.ts): a
+ * workflow or run the user cannot read answers 404, the same as one that
+ * does not exist; one they can read but may not act on answers 403. The
+ * inbox lists only requests of workflows the user can read, filtered in SQL
+ * before the limit, and `?workflowId` / `?executionId` of an unreadable (or
+ * missing) workflow or run answer 404. Deciding needs `workflow:execute` on
+ * the run's workflow (and on every workflow along a sub-workflow path) and
+ * must satisfy the request's approvers and its self-approval rule. With the execution queue in use the resume runs on the
  * queue and the decision answers 202; otherwise it runs inline and answers
  * with the run result, as before.
  *
@@ -20,6 +25,7 @@
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { approvalApproveInputSchema, approvalEligibilityInputSchema, approvalRejectInputSchema } from "@ai-orchestrator/shared";
+import type { RunAccess, RunAccessDenial } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { ApprovalDecisionError, type ApprovalResumeJob, type ApprovalService } from "./services/approval-service.js";
 
@@ -31,9 +37,9 @@ export interface ApprovalRoutesDeps {
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** The workflow as stored, for the eligibility check; null when it does not exist. */
   loadWorkflow: (id: string) => { id: string; projectId?: string } | null;
-  canReadWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
-  /** Edit rights on the workflow (or, for an unsaved one, on the project it will be saved in). */
-  canUpdateWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
+  /** A run by execution id (its history, or its paused state), for the `?executionId` filter. */
+  loadRun: (executionId: string) => { id: string; workflowId: string } | null;
+  runAccess: Pick<RunAccess, "workflow" | "run" | "project">;
   /** May list the accounts of the workflow's project (admins, or `project:invite`). */
   canSeeProjectAccounts: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
   /** Resumes the run: inline (resolves with the run result) or on the queue (resolves with `{ queued: true }`). */
@@ -48,6 +54,10 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
     reply.code(501);
     return { error: "Approvals need the SQLite store in this release" };
   };
+  const deny = (reply: FastifyReply, denial: RunAccessDenial) => {
+    reply.code(denial.status);
+    return { error: denial.error };
+  };
 
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/approvals", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
@@ -56,6 +66,14 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
     const query = request.query ?? {};
     const status = query.status && STATUS_FILTERS.has(query.status) ? (query.status as "pending" | "decided" | "all") : "pending";
     const limit = query.limit ? Number(query.limit) : undefined;
+    if (query.workflowId) {
+      const access = deps.runAccess.workflow(user, query.workflowId, "workflow:read");
+      if (!access.ok) return deny(reply, access);
+    }
+    if (query.executionId) {
+      const access = deps.runAccess.run(user, deps.loadRun(query.executionId), "workflow:read");
+      if (!access.ok) return deny(reply, access);
+    }
     return {
       items: approvals.list(user, {
         status,
@@ -124,16 +142,13 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       return { error: "Invalid eligibility payload", details: parsed.error.issues };
     }
     // An unsaved workflow is checked against the project it will be saved in.
-    const workflow = deps.loadWorkflow(parsed.data.workflowId) ?? { id: parsed.data.workflowId, ...(parsed.data.projectId ? { projectId: parsed.data.projectId } : {}) };
-    if (!deps.canReadWorkflow(user, workflow)) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
-    // Only an editor configuring the gate needs this answer.
-    if (!deps.canUpdateWorkflow(user, workflow)) {
-      reply.code(403);
-      return { error: "Editing the workflow is required to check its approvers" };
-    }
+    // Only an editor configuring the gate needs this answer, so it takes edit rights.
+    const stored = deps.loadWorkflow(parsed.data.workflowId);
+    const workflow = stored ?? { id: parsed.data.workflowId, ...(parsed.data.projectId ? { projectId: parsed.data.projectId } : {}) };
+    const access = stored
+      ? deps.runAccess.workflow(user, stored.id, "workflow:write")
+      : deps.runAccess.project(user, parsed.data.projectId, "workflow:write", "Workflow");
+    if (!access.ok) return deny(reply, access);
     return approvals.eligibility({ workflow, spec: parsed.data, requester: user, accountBlind: !deps.canSeeProjectAccounts(user, workflow) });
   });
 

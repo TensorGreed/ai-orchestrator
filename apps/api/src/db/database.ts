@@ -1625,7 +1625,8 @@ export interface ApprovalRequestInsert {
 }
 
 /** Phase 11.2 — which approval requests a user may see: everything, or these projects plus workflows shared to them. */
-export type ApprovalReadScope = { all: true } | { all?: false; projectIds: string[]; workflowIds: string[] };
+/** Which requests a user may list: every one (admins) or those of the workflows they can read now. */
+export type ApprovalReadScope = { all: true } | { all?: false; workflowIds: string[] };
 
 type ApprovalRequestRow = Record<string, unknown>;
 
@@ -4747,18 +4748,12 @@ export class SqliteStore {
     const params: BindParams = [];
     // Filtered before the limit, so other projects' requests never crowd out the user's own.
     if (filter.scope && !filter.scope.all) {
-      const { projectIds, workflowIds } = filter.scope;
-      if (projectIds.length === 0 && workflowIds.length === 0) return [];
-      const parts: string[] = [];
-      if (projectIds.length > 0) {
-        parts.push(`project_id IN (${projectIds.map(() => "?").join(", ")})`);
-        params.push(...projectIds);
-      }
-      if (workflowIds.length > 0) {
-        parts.push(`workflow_id IN (${workflowIds.map(() => "?").join(", ")})`);
-        params.push(...workflowIds);
-      }
-      clauses.push(`(${parts.join(" OR ")})`);
+      // By workflow, not the stored project_id: a workflow moved to another
+      // project takes its requests with it.
+      const { workflowIds } = filter.scope;
+      if (workflowIds.length === 0) return [];
+      clauses.push(`workflow_id IN (${workflowIds.map(() => "?").join(", ")})`);
+      params.push(...workflowIds);
     }
     if (filter.status === "pending") clauses.push(`status = 'pending'`);
     if (filter.status === "decided") clauses.push(`status <> 'pending'`);

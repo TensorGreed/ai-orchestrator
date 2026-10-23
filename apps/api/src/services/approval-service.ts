@@ -7,10 +7,15 @@
  * request in `approval_requests`: who may decide it, when it expires and,
  * once decided, who decided what and why.
  *
- * - Deciding checks that the user can see the run first (otherwise 404),
- *   then expiry, project access on every workflow along a sub-workflow
- *   path, the request's approvers and the self-approval rule, the reason
- *   and the edits. Claiming the paused run and recording the decision are
+ * - Access follows the shared project authorization (run-access.ts),
+ *   always against the workflow as it is now: a run the user cannot read
+ *   answers 404 and nothing is written for it; deciding then needs
+ *   `workflow:execute` on the workflow and on every workflow along a
+ *   sub-workflow path (403 otherwise), and the inbox is narrowed to readable
+ *   workflows in SQL before its limit. Admins pass, as everywhere else.
+ * - Deciding checks, in order: visibility, expiry, project access, the
+ *   request's approvers and the self-approval rule, the reason and the
+ *   edits. Claiming the paused run and recording the decision are
  *   one transaction, so a second decision (another approver, or the
  *   timeout sweeper) gets a 409 and a crash never leaves one without the
  *   other.
@@ -46,6 +51,7 @@ import type { ApprovalReadScope, ApprovalRequestRecord, SqliteStore } from "../d
 import { approvalEditsDigest, newApprovalEditsSalt } from "./approval-digest.js";
 import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
+import type { RunAccessResult, RunPermission } from "../run-access.js";
 import type { NotificationEvent } from "./notification-service.js";
 
 export interface ApprovalResumeJob {
@@ -81,11 +87,19 @@ export interface ApprovalServiceOptions {
   /** Runs the resume inline or enqueues it; resolves with the run result when inline. */
   dispatch: (job: ApprovalResumeJob) => Promise<unknown>;
   isLeader: () => boolean;
-  canRead: (user: SafeUser, workflow: WorkflowRef) => boolean;
-  /** `projectId` is omitted for a workflow along a sub-workflow path; the caller looks it up. */
-  canExecute: (user: SafeUser, workflow: WorkflowRef) => boolean;
-  /** Which requests the user may see, applied in SQL before the list limit. */
-  readScope: (user: SafeUser) => ApprovalReadScope;
+  /**
+   * The shared run-access check for a run of this workflow: 404 when the user
+   * cannot read it, 403 without `permission`; admins pass, also for a deleted
+   * workflow's runs (which are admin-only).
+   */
+  access: (user: SafeUser, workflowId: string, permission: RunPermission) => RunAccessResult<object>;
+  /** Workflow ids the user can read, or null for everything (admins); applied in SQL before the list limit. */
+  readableWorkflowIds: (user: SafeUser) => string[] | null;
+  /**
+   * Execute access for the editor's "who could approve" check, where the
+   * workflow may not be saved yet (then its project decides).
+   */
+  canExecuteDraft: (user: SafeUser, workflow: WorkflowRef) => boolean;
   /** Every user, for the editor's "who could approve" check. */
   listUsers: () => SafeUser[];
   /** Masks secret values in text shown to approvers. */
@@ -192,7 +206,6 @@ export class ApprovalService {
         approval: {
           requestId: record.id,
           nodeId: record.nodeId,
-          message: record.message ? String(this.options.redact(record.message)) : null,
           expiresAt: record.expiresAt,
           approvers: describeApprovers(record.spec),
           ...(link ? { link } : {}),
@@ -328,14 +341,13 @@ export class ApprovalService {
   }
 
   private decisionCheck(record: ApprovalRequestRecord, user: SafeUser): { allowed: true } | { allowed: false; message: string; code: string } {
-    const workflow = { id: record.workflowId, projectId: record.projectId };
-    if (!this.options.canExecute(user, workflow)) {
+    if (!this.options.access(user, record.workflowId, "workflow:execute").ok) {
       return { allowed: false, code: "project_access", message: "You do not have execute access to this workflow's project." };
     }
     // A gate inside a sub-workflow: execute access on every workflow down to the one that asked.
     const along = new Set([...record.path.map((step) => step.workflowId), record.askingWorkflowId ?? ""].filter((id) => id && id !== record.workflowId));
     for (const workflowId of along) {
-      if (!this.options.canExecute(user, { id: workflowId })) {
+      if (!this.options.access(user, workflowId, "workflow:execute").ok) {
         return { allowed: false, code: "project_access", message: "You do not have execute access to the project of a sub-workflow this request comes from." };
       }
     }
@@ -365,7 +377,7 @@ export class ApprovalService {
     const isRequester = (entry: string) => entry === requester.userId || entry.toLowerCase() === requester.email.toLowerCase();
     const named = blind ? input.spec.approverUsers.filter(isRequester) : input.spec.approverUsers;
     const spec = { ...input.spec, approverUsers: named };
-    const can = (user: SafeUser) => this.options.canExecute(user, input.workflow) && checkApprover(spec, user, requester).allowed;
+    const can = (user: SafeUser) => this.options.canExecuteDraft(user, input.workflow) && checkApprover(spec, user, requester).allowed;
     const someoneElseNamed = blind && input.spec.approverUsers.some((entry) => !isRequester(entry));
     const others = this.options.listUsers().filter((user) => user.id !== input.requester.id && (!blind || user.role !== "admin"));
     return {
@@ -419,13 +431,15 @@ export class ApprovalService {
   list(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number }): ApprovalRequestView[] {
     if (filter.status !== "decided") this.backfillMissing();
     const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
-    const rows = this.store.listApprovalRequests({ ...filter, limit, scope: this.options.readScope(user) });
+    const workflowIds = this.options.readableWorkflowIds(user);
+    const scope: ApprovalReadScope = workflowIds === null ? { all: true } : { workflowIds };
+    const rows = this.store.listApprovalRequests({ ...filter, limit, scope });
+    // The SQL scope already holds only readable workflows; this re-check is per workflow, not per row.
     const readable = new Map<string, boolean>();
     const visible: ApprovalRequestView[] = [];
     for (const row of rows) {
-      const key = `${row.workflowId}\u0000${row.projectId}`;
-      if (!readable.has(key)) readable.set(key, this.options.canRead(user, { id: row.workflowId, projectId: row.projectId }));
-      if (!readable.get(key)) continue;
+      if (!readable.has(row.workflowId)) readable.set(row.workflowId, this.options.access(user, row.workflowId, "workflow:read").ok);
+      if (!readable.get(row.workflowId)) continue;
       visible.push(this.toView(row, user));
       if (visible.length >= limit) break;
     }
@@ -448,9 +462,10 @@ export class ApprovalService {
     if (!pending) throw new ApprovalDecisionError("Pending approval not found", 404);
     const state = pending.state as WorkflowExecutionState | null;
     const validState = Boolean(state && typeof state === "object" && state.workflow);
-    // Visibility first: another project's run answers as if it did not exist, and nothing is written for it.
-    const projectId = validState ? state!.workflow.projectId : undefined;
-    if (!this.options.canRead(input.user, { id: pending.workflowId, ...(projectId ? { projectId } : {}) })) {
+    // Visibility first, by the workflow's current project: another project's run
+    // (or a deleted workflow's, for non-admins) answers as if it did not exist,
+    // and nothing is written for it.
+    if (!this.options.access(input.user, pending.workflowId, "workflow:read").ok) {
       throw new ApprovalDecisionError("Pending approval not found", 404);
     }
     if (pending.status === "resuming") throw new ApprovalDecisionError("This approval was already decided", 409);
@@ -458,7 +473,7 @@ export class ApprovalService {
     if (!validState) throw new ApprovalDecisionError("Stored execution state is invalid and cannot be resumed", 400);
     const record = this.requestFor(input.executionId);
     if (!record) throw new ApprovalDecisionError("Pending approval not found", 404);
-    if (!this.options.canRead(input.user, { id: record.workflowId, projectId: record.projectId })) {
+    if (record.workflowId !== pending.workflowId || !this.options.access(input.user, record.workflowId, "workflow:read").ok) {
       throw new ApprovalDecisionError("Pending approval not found", 404);
     }
     if (input.requestId && input.requestId !== record.id) {

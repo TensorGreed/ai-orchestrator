@@ -3449,8 +3449,36 @@ export function createApp(
       const decided = request ? approvalDecisionOf(request.status) : null;
       if (!request || !decided || decided !== job.decision) return null;
       try {
-        const actorRecord = request.decidedByUserId ? store.getUserById(request.decidedByUserId) : null;
-        const actor: SafeUser | null = actorRecord ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
+        // The resume runs as the person who decided, like main's approve and
+        // queued runs: run-scope gives it the workflow's project (as it is
+        // now) and that user's `secret:use`. A queued or recovered resume can
+        // start later, so the decider is looked up again by id and must still
+        // be the same account with execute access; otherwise the request is
+        // pending again for someone who may decide it. A timeout has no
+        // decider and resumes with no user, like a scheduled run.
+        let actor: SafeUser | null = null;
+        if (request.decidedByUserId) {
+          const actorRecord = store.getUserById(request.decidedByUserId);
+          actor = actorRecord && actorRecord.email === request.decidedBy ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
+          if (!actor || !runAccess.run(actor, pending, "workflow:execute").ok) {
+            auditService.record({
+              category: "approval",
+              eventType: "approval.resume_refused",
+              action: decided,
+              outcome: "denied",
+              actor: { userId: request.decidedByUserId, ...(request.decidedBy ? { email: request.decidedBy } : {}), type: "user" },
+              resourceType: "workflow",
+              resourceId: pending.workflowId,
+              projectId: store.getWorkflow(pending.workflowId)?.projectId ?? request.projectId,
+              metadata: { executionId: job.executionId, requestId: job.requestId, reason: actor ? "no_execute_permission" : "user_not_found" },
+              message: "Approval resume refused: the person who decided may no longer run this workflow."
+            });
+            throw new Error("The person who decided this approval can no longer run this workflow; the request is pending again.");
+          }
+        }
+        // Scoped by the workflow's current project (the one access was checked against), not the one stored at the pause.
+        const current = store.getWorkflow(pending.workflowId);
+        const resumeWorkflow: Workflow = current ? { ...state.workflow, projectId: current.projectId } : state.workflow;
         const actedBy = request.decidedBy ?? job.actedBy;
         const approvalDecision = {
           decision: decided,
@@ -3462,11 +3490,11 @@ export function createApp(
         };
         const result = await runWorkflowExecution({
           policyActor: actor,
-          workflow: state.workflow,
+          workflow: resumeWorkflow,
           executionId: job.executionId,
           triggerType: "approval_resume",
           triggeredBy: actedBy,
-          resumeState: state,
+          resumeState: { ...state, workflow: resumeWorkflow },
           approvalDecision
         });
         persistExecutionHistory({
@@ -3520,14 +3548,13 @@ export function createApp(
     notify: (event) => notificationService.notify(event),
     dispatch: dispatchApprovalResume,
     isLeader: () => leaderElection.isLeader(),
-    canRead: (user, workflow) => rbacService.canAccessWorkflow(user, store.getWorkflow(workflow.id) ?? workflow, "workflow:read"),
-    canExecute: (user, workflow) => rbacService.canAccessWorkflow(user, store.getWorkflow(workflow.id) ?? workflow, "workflow:execute"),
-    readScope: (user) => {
-      if (user.role === "admin") return { all: true };
-      const projectIds = store.listProjects().map((project) => project.id).filter((projectId) => rbacService.can(user, projectId, "workflow:read"));
-      const workflowIds = [...new Set(projectIds.flatMap((projectId) => [...rbacService.listWorkflowsVisibleToProject(projectId).keys()]))];
-      return { projectIds, workflowIds };
-    },
+    // Project authorization is the shared run-access check, on the workflow as it is now.
+    access: (user, workflowId, permission) => runAccess.run(user, { id: workflowId, workflowId }, permission),
+    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
+    canExecuteDraft: (user, workflow) =>
+      store.getWorkflow(workflow.id)
+        ? runAccess.workflow(user, workflow.id, "workflow:execute").ok
+        : runAccess.project(user, workflow.projectId, "workflow:execute").ok,
     listUsers: () =>
       store.listUsers().map((entry) => ({
         id: entry.id,
@@ -8439,8 +8466,8 @@ export function createApp(
     approvals: approvalService,
     available: approvalsSupported,
     loadWorkflow: (id) => store.getWorkflow(id) ?? null,
-    canReadWorkflow: (user, workflow) => rbacService.canAccessWorkflow(user, workflow, "workflow:read"),
-    canUpdateWorkflow: (user, workflow) => rbacService.canAccessWorkflow(user, workflow, "workflow:write"),
+    loadRun: (executionId) => store.getExecutionHistory(executionId) ?? store.getWorkflowExecutionState(executionId) ?? null,
+    runAccess,
     canSeeProjectAccounts: (user, workflow) => user.role === "admin" || rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume

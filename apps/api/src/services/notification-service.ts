@@ -19,7 +19,6 @@ export interface NotificationEvent {
   approval?: {
     requestId: string;
     nodeId: string;
-    message: string | null;
     expiresAt: string | null;
     /** Who may decide, as shown to people (roles and users). */
     approvers: string;
@@ -63,7 +62,9 @@ function describeEvent(event: NotificationEvent): NotificationContent {
       icon: requested ? "\u{1F7E1}" : "\u23F0",
       color: requested ? "F2B705" : "8A8F98",
       facts,
-      text: approval?.message ?? (requested ? "A run is waiting for approval." : "Nobody decided before the approval expired."),
+      // Channels are not scoped to a project, so the run's own text (the
+      // request message, proposed values) stays in the project-scoped inbox.
+      text: requested ? "A run is waiting for approval. Open the approvals inbox to see the request." : "Nobody decided before the approval expired.",
       ...(approval?.link ? { link: approval.link } : {})
     };
   }
