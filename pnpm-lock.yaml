@@ -306,6 +306,9 @@ importers:
       quickjs-emscripten-core:
         specifier: 0.32.0
         version: 0.32.0
+      undici:
+        specifier: 7.25.0
+        version: 7.25.0
       vega:
         specifier: ^5.30.0
         version: 5.33.1

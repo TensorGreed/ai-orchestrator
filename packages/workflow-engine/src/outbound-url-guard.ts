@@ -16,12 +16,17 @@
  *
  * DNS rebinding: the host is resolved and every returned address is
  * classified, so a name that resolves to a blocked address is refused.
- * Redirects are re-checked hop by hop (see `guardedFetch`). The remaining
- * TOCTOU window — a name re-resolving between this check and the socket
- * connect — is noted in the security docs; pinning the connected address
- * needs a custom dispatcher and is tracked separately.
+ * `guardedFetch` also pins the connection: its dispatcher's `lookup` resolves
+ * the name once at connect time, checks every address and hands the socket
+ * only those, so a name cannot pass the check with one address and connect to
+ * another. The URL keeps its hostname, so TLS SNI, certificate checks and the
+ * Host header are unchanged. Redirects are re-checked hop by hop. The
+ * Playwright guard checks each request at route time; Chromium resolves the
+ * name again itself, so that path is not pinned (see the security docs).
  */
 import dns from "node:dns/promises";
+import type { LookupAddress, LookupOptions } from "node:dns";
+import { Agent, fetch as undiciFetch } from "undici";
 import { classifyIp, parseIp, type DnsResolver, type IpClass } from "@ai-orchestrator/guard-sdk";
 
 export interface OutboundGuardConfig {
@@ -141,6 +146,12 @@ export async function checkOutboundUrl(rawUrl: string, config: OutboundGuardConf
   }
   const host = url.hostname.replace(/\.$/, "").replace(/^\[|\]$/g, "");
   const port = url.port || DEFAULT_PORTS[url.protocol] || "";
+  return { ...(await checkOutboundHost(host, port, config, resolver)), url: rawUrl };
+}
+
+/** Checks one host (and the port, for port-specific allowlist entries) against the policy. */
+async function checkOutboundHost(host: string, port: string, config: OutboundGuardConfig, resolver: DnsResolver): Promise<OutboundCheck> {
+  const rawUrl = host;
   if (BLOCKED_METADATA_HOSTNAMES.some((pattern) => pattern.test(host))) {
     return { ok: false, url: rawUrl, host, addresses: [], reason: "host_blocked", message: `Host '${host}' names a cloud metadata service` };
   }
@@ -183,6 +194,40 @@ export async function checkOutboundUrl(rawUrl: string, config: OutboundGuardConf
   return { ok: true, url: rawUrl, host, addresses: classified };
 }
 
+type LookupCallback = (error: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void;
+
+/**
+ * A connect-time `lookup` for one request: resolves the name once, checks
+ * every address against the policy and returns only those addresses, so the
+ * socket connects to exactly what was checked. Exported for tests.
+ */
+export function pinnedLookup(port: string, config: OutboundGuardConfig, resolver: DnsResolver = nodeDnsResolver) {
+  return (hostname: string, options: LookupOptions, callback: LookupCallback): void => {
+    checkOutboundHost(hostname.replace(/\.$/, ""), port, config, resolver).then(
+      (check) => {
+        if (!check.ok) {
+          callback(Object.assign(new OutboundUrlBlockedError(check), { code: "EOUTBOUNDBLOCKED" }), []);
+          return;
+        }
+        let vetted: LookupAddress[] = check.addresses.map((entry) => ({ address: entry.address, family: entry.address.includes(":") ? 6 : 4 }));
+        if (options.family === 4 || options.family === 6) vetted = vetted.filter((entry) => entry.family === options.family);
+        if (vetted.length === 0) {
+          callback(Object.assign(new Error(`Host '${hostname}' has no address of the requested family`), { code: "ENOTFOUND" }), []);
+          return;
+        }
+        if (options.all) callback(null, vetted);
+        else callback(null, vetted[0]!.address, vetted[0]!.family);
+      },
+      (error: unknown) => callback(error as NodeJS.ErrnoException, [])
+    );
+  };
+}
+
+/** A dispatcher whose connections go only to addresses the policy has vetted for this host and port. */
+export function createPinnedDispatcher(port: string, config: OutboundGuardConfig, resolver: DnsResolver = nodeDnsResolver): Agent {
+  return new Agent({ connect: { lookup: pinnedLookup(port, config, resolver) as never } });
+}
+
 /** Checks a URL and throws `OutboundUrlBlockedError` if the policy blocks it. */
 export async function assertOutboundUrlAllowed(rawUrl: string, config: OutboundGuardConfig, resolver: DnsResolver = nodeDnsResolver): Promise<void> {
   const check = await checkOutboundUrl(rawUrl, config, resolver);
@@ -194,6 +239,7 @@ export interface GuardedFetchOptions {
   resolver?: DnsResolver;
   /** Max redirects to follow; each hop is re-checked. Default 5. */
   maxRedirects?: number;
+  /** Replaces the pinned fetch (tests). When set, the connection is not pinned. */
   fetchImpl?: typeof fetch;
 }
 
@@ -204,13 +250,13 @@ export interface GuardedFetchOptions {
  * by the runtime before we can see it.
  */
 export async function guardedFetch(url: string, init: RequestInit, options: GuardedFetchOptions): Promise<Response> {
-  const doFetch = options.fetchImpl ?? fetch;
   const maxRedirects = options.maxRedirects ?? 5;
+  const resolver = options.resolver ?? nodeDnsResolver;
   let currentUrl = url;
   let currentInit: RequestInit = { ...init, redirect: "manual" };
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
-    await assertOutboundUrlAllowed(currentUrl, options.config, options.resolver);
-    const response = await doFetch(currentUrl, currentInit);
+    await assertOutboundUrlAllowed(currentUrl, options.config, resolver);
+    const response = await pinnedFetch(currentUrl, currentInit, options, resolver);
     if (response.status < 300 || response.status >= 400) return response;
     const location = response.headers.get("location");
     if (!location) return response;
@@ -228,6 +274,25 @@ export async function guardedFetch(url: string, init: RequestInit, options: Guar
     }
   }
   throw new OutboundUrlBlockedError({ ok: false, url: currentUrl, addresses: [], reason: "address_blocked", message: `Too many redirects (more than ${maxRedirects})` });
+}
+
+/** One request through a dispatcher pinned to the vetted addresses (or through `fetchImpl` in tests). */
+async function pinnedFetch(url: string, init: RequestInit, options: GuardedFetchOptions, resolver: DnsResolver): Promise<Response> {
+  if (options.fetchImpl) return options.fetchImpl(url, init);
+  const parsed = new URL(url);
+  const dispatcher = createPinnedDispatcher(parsed.port || DEFAULT_PORTS[parsed.protocol] || "", options.config, resolver);
+  try {
+    const response = await undiciFetch(url, { ...(init as Record<string, unknown>), dispatcher } as Parameters<typeof undiciFetch>[1]);
+    return response as unknown as Response;
+  } catch (error) {
+    // Surface a block from the pinned lookup as the guard's own error, not a generic "fetch failed".
+    const cause = (error as { cause?: unknown }).cause;
+    if (cause instanceof OutboundUrlBlockedError) throw cause;
+    throw error;
+  } finally {
+    // Graceful: the agent closes once this request (and its body) has finished.
+    void dispatcher.close().catch(() => undefined);
+  }
 }
 
 /** Minimal shape of a Playwright `Route`, so this module needs no Playwright types. */

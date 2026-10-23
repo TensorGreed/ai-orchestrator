@@ -4,6 +4,9 @@
  * exception, DNS-resolution checks, redirect re-checks and the Playwright
  * route handler.
  */
+import http from "node:http";
+import tls from "node:tls";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_OUTBOUND_GUARD,
@@ -11,6 +14,7 @@ import {
   checkOutboundUrl,
   assertOutboundUrlAllowed,
   guardedFetch,
+  pinnedLookup,
   playwrightOutboundGuard,
   type OutboundGuardConfig
 } from "./outbound-url-guard";
@@ -185,5 +189,78 @@ describe("playwrightOutboundGuard", () => {
 describe("DEFAULT_OUTBOUND_GUARD", () => {
   it("allows private and does not deny by default", () => {
     expect(DEFAULT_OUTBOUND_GUARD).toEqual({ denyPrivate: false, allowlist: [] });
+  });
+});
+
+describe("guardedFetch — the connection is pinned to the vetted address (DNS rebinding)", () => {
+  async function localServer(): Promise<{ port: number; hosts: string[]; close: () => Promise<void> }> {
+    const hosts: string[] = [];
+    const server = http.createServer((request, response) => {
+      hosts.push(String(request.headers.host));
+      response.end("pinned-ok");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return { port: (server.address() as AddressInfo).port, hosts, close: () => new Promise((resolve) => server.close(() => resolve())) };
+  }
+
+  it("refuses a name that answers a public address to the check and the metadata address at connect", async () => {
+    const server = await localServer();
+    try {
+      let calls = 0;
+      // First answer (the pre-check): public. Second answer (the socket's own lookup): metadata.
+      const rebinding = async () => (++calls === 1 ? ["93.184.216.34"] : ["169.254.169.254"]);
+      await expect(guardedFetch(`http://rebind.test:${server.port}/`, {}, { config: allow, resolver: rebinding })).rejects.toBeInstanceOf(OutboundUrlBlockedError);
+      expect(calls).toBe(2);
+      expect(server.hosts).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("connects to the address the guard vetted, keeping the hostname for Host", async () => {
+    const server = await localServer();
+    try {
+      // The system resolver knows nothing of pinned.test; only the guard's resolver does.
+      const resolver = resolverFor({ "pinned.test": ["127.0.0.1"] });
+      const response = await guardedFetch(`http://pinned.test:${server.port}/path`, {}, { config: allow, resolver });
+      expect(await response.text()).toBe("pinned-ok");
+      expect(server.hosts).toEqual([`pinned.test:${server.port}`]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("keeps the hostname as the TLS server name (SNI) while connecting to the vetted address", async () => {
+    const seen: string[] = [];
+    const server = tls.createServer({
+      SNICallback: (servername, callback) => {
+        seen.push(servername);
+        callback(new Error("no certificate in this test"));
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const resolver = resolverFor({ "pinned.test": ["127.0.0.1"] });
+      await expect(guardedFetch(`https://pinned.test:${port}/`, {}, { config: allow, resolver })).rejects.toThrow();
+      expect(seen).toEqual(["pinned.test"]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("pinnedLookup refuses when any address is blocked, and honours the family filter", async () => {
+    const lookup = (config: OutboundGuardConfig, addresses: string[], options: { all?: boolean; family?: number }) =>
+      new Promise<{ error: Error | null; result: unknown }>((resolve) => {
+        pinnedLookup("443", config, async () => addresses)("h.test", options as never, (error, address, family) => resolve({ error, result: options.all ? address : [address, family] }));
+      });
+    const mixed = await lookup(allow, ["93.184.216.34", "169.254.169.254"], { all: true });
+    expect(mixed.error).toBeInstanceOf(OutboundUrlBlockedError);
+    const privateDenied = await lookup({ denyPrivate: true, allowlist: [] }, ["10.0.0.5"], { all: true });
+    expect(privateDenied.error).toBeInstanceOf(OutboundUrlBlockedError);
+    const portAllowlisted = await lookup({ denyPrivate: true, allowlist: ["h.test:443"] }, ["10.0.0.5"], { all: true });
+    expect(portAllowlisted.result).toEqual([{ address: "10.0.0.5", family: 4 }]);
+    const v6Only = await lookup(allow, ["93.184.216.34", "2606:2800:220:1::1"], { family: 6 });
+    expect(v6Only.result).toEqual(["2606:2800:220:1::1", 6]);
   });
 });
