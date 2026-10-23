@@ -61,6 +61,8 @@ export interface RunScopeDeps {
   getWorkflow: (id: string) => Workflow | null | undefined;
   /** Phase 15.4 — the version an entry point on `channel` runs; without it every channel loads the draft. */
   getRunnableWorkflow?: (id: string, channel: ReleaseChannel) => Workflow | null | undefined;
+  /** Phase 15.4 — why production refuses an existing workflow (a deactivated gated one), so a production parent fails with that reason. */
+  productionRefusal?: (id: string) => string | null;
   /** Workflow shares as stored: which project gets which access level. */
   listWorkflowShares: (workflowId: string) => Array<{ projectId: string; accessLevel: string }>;
   /** The secret's project (the default project when it has none), or null if it does not exist. */
@@ -130,7 +132,11 @@ export function createRunScope(deps: RunScopeDeps) {
    */
   const loadWorkflowFor = (caller: Workflow, purpose: "Sub-workflow" | "Error workflow", channel: ReleaseChannel = "draft") => (targetId: string): Workflow | undefined => {
     const target = channel === "production" && deps.getRunnableWorkflow ? deps.getRunnableWorkflow(targetId, "production") : deps.getWorkflow(targetId);
-    if (!target) return undefined;
+    if (!target) {
+      const refusal = channel === "production" ? deps.productionRefusal?.(targetId) : null;
+      if (refusal) throw new Error(`${purpose} '${targetId}': ${refusal}`);
+      return undefined;
+    }
     if (!target.projectId) return target;
     const callerProject = caller.projectId ?? DEFAULT_PROJECT_ID;
     if (target.projectId === callerProject) return target;

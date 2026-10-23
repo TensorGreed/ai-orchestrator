@@ -46,10 +46,19 @@
  * running what it ran. A gate that is on with no published version that
  * loads (the workflow was deleted and created again: the gate and the
  * release history outlive it) makes production refuse runs until a version
- * is published through the gate. Production routing keys (webhook, form
- * and MCP trigger paths) of a workflow with a published version or a gate
- * cannot be claimed by another workflow, and publishing or turning a gate on
- * is refused while another workflow shares one of them.
+ * is published through the gate.
+ *
+ * Production routing keys (webhook, form and MCP trigger paths) belong to
+ * what serves production: a gated workflow's published version, an active
+ * ungated workflow's published version or else its saved workflow. A gated
+ * workflow's draft claims nothing. A save is refused only when it would put
+ * an active ungated workflow on a path another workflow claims; publishing,
+ * turning a gate on, rollback and approving a release are refused when the
+ * version's paths are claimed by another workflow.
+ *
+ * Deactivating a gated workflow is its kill switch: production refuses runs
+ * with "this workflow is deactivated". Without a gate, deactivating only
+ * unregisters schedules and triggers, as before releases existed.
  *
  * Every gate change, publish, override, rollback and release-request event is
  * audited (category `release`). Release tables need the SQLite store; on
@@ -241,17 +250,24 @@ function routingPath(value: unknown, fallback: string): string {
   return (raw || fallback).replace(/^\/+/, "").replace(/\/+$/, "").toLowerCase();
 }
 
-/**
- * The webhook, form and MCP-trigger paths a workflow answers on. Webhooks
- * count by path whatever their method, as `/webhook/:path` routing matches
- * the path first; an empty path falls back to the node id, as routing does.
- */
 /** Whether the workflow was deactivated (`POST /api/workflows/:id/deactivate`), which is stored on the draft. */
-function isDeactivated(workflow: Workflow): boolean {
+export function isWorkflowDeactivated(workflow: Pick<Workflow, "settings">): boolean {
   const settings = workflow.settings as Record<string, unknown> | undefined;
   return Boolean(settings && typeof settings === "object" && settings.active === false);
 }
 
+/** What a production run of a deactivated gated workflow answers, on every production entry point. */
+export const DEACTIVATED_MESSAGE = "This workflow is deactivated, so production runs are refused. Activate it to serve production again.";
+const NOTHING_PUBLISHED_MESSAGE = "No published version of this workflow can be loaded, so production runs are refused until a version is published.";
+
+const TRIGGER_PATH_NODE_TYPES = new Set(["webhook_input", "form_trigger", "mcp_server_trigger"]);
+
+/**
+ * The webhook, form and MCP-trigger paths a workflow answers on, compared
+ * without case. Webhooks count by path whatever their method, as
+ * `/webhook/:path` routing matches the path first; an empty path falls back
+ * to the node id, as routing does.
+ */
 export function productionRoutingKeys(workflow: Pick<Workflow, "nodes">): ProductionRoutingKey[] {
   const keys = new Map<string, string>();
   for (const node of workflow.nodes ?? []) {
@@ -260,12 +276,40 @@ export function productionRoutingKeys(workflow: Pick<Workflow, "nodes">): Produc
       const path = routingPath(config.path, node.id);
       keys.set(`webhook:${path}`, `Webhook path "${path}"`);
     } else if (node.type === "form_trigger" && typeof config.path === "string" && config.path.trim()) {
-      keys.set(`form:${config.path.trim()}`, `Form path "${config.path.trim()}"`);
+      keys.set(`form:${config.path.trim().toLowerCase()}`, `Form path "${config.path.trim()}"`);
     } else if (node.type === "mcp_server_trigger" && typeof config.path === "string" && config.path.trim()) {
-      keys.set(`mcp:${config.path.trim()}`, `MCP trigger path "${config.path.trim()}"`);
+      keys.set(`mcp:${config.path.trim().toLowerCase()}`, `MCP trigger path "${config.path.trim()}"`);
     }
   }
   return [...keys].map(([key, label]) => ({ key, label }));
+}
+
+/**
+ * A copy of `workflow` whose trigger paths (webhook, form, MCP trigger) are
+ * not in `used`: each taken path gets `-copy`, then `-copy-2`, `-copy-3`, ...
+ * A webhook with no path (it answers on its node id) gets one. Used by
+ * duplicate and template use, so a copy never answers on its source's paths.
+ */
+export function withUniqueTriggerPaths<T extends Pick<Workflow, "nodes">>(workflow: T, used: Set<string>): T {
+  const taken = new Set(used);
+  const nodes = (workflow.nodes ?? []).map((node) => {
+    if (!TRIGGER_PATH_NODE_TYPES.has(node.type)) return node;
+    const config = asRecord(node.config);
+    const prefix = node.type === "webhook_input" ? "webhook" : node.type === "form_trigger" ? "form" : "mcp";
+    const raw = typeof config.path === "string" ? config.path.trim() : "";
+    if (!raw && node.type !== "webhook_input") return node;
+    const base = (raw || node.id).replace(/^\/+/, "").replace(/\/+$/, "") || node.id;
+    const keyOf = (path: string) => `${prefix}:${path.toLowerCase()}`;
+    if (!taken.has(keyOf(base))) {
+      taken.add(keyOf(base));
+      return node;
+    }
+    let candidate = `${base}-copy`;
+    for (let index = 2; taken.has(keyOf(candidate)); index += 1) candidate = `${base}-copy-${index}`;
+    taken.add(keyOf(candidate));
+    return { ...node, config: { ...config, path: candidate } };
+  });
+  return { ...workflow, nodes };
 }
 
 export interface RoutingConflict {
@@ -319,18 +363,52 @@ export class ReleaseService {
   resolveRunnableWorkflow(workflowId: string, channel: ReleaseChannel): Workflow | null {
     const draft = this.store.getWorkflow(workflowId);
     if (!draft || channel === "draft" || !this.options.available) return draft;
-    // Deactivating the workflow is the kill switch: it stops production whatever version is published.
-    if (isDeactivated(draft)) return null;
+    const gateOn = Boolean(this.store.getReleaseGate(workflowId)?.enabled);
+    // On a gated workflow deactivating is the kill switch: it stops production whatever version is published.
+    // Without a gate, deactivating only unregisters schedules and triggers, as it always did.
+    if (gateOn && isWorkflowDeactivated(draft)) return null;
     const published = this.store.getPublishedVersion(workflowId);
     if (published === null) {
       // A gate that is on always has a published version, except for a workflow created again under a gated id: fail closed.
-      if (this.store.getReleaseGate(workflowId)?.enabled) {
+      if (gateOn) {
         this.options.logger?.warn("The release gate is on but no version is published; production traffic is refused", { workflowId });
         return null;
       }
       return draft;
     }
     return this.versionWorkflow(workflowId, published);
+  }
+
+  /**
+   * Why production refuses runs of an existing workflow (`resolveRunnableWorkflow`
+   * answered null for it), as every production entry point reports it; null
+   * when production runs it, or when the workflow does not exist.
+   */
+  productionRefusal(workflowId: string): string | null {
+    if (!this.options.available) return null;
+    const draft = this.store.getWorkflow(workflowId);
+    if (!draft) return null;
+    const gateOn = Boolean(this.store.getReleaseGate(workflowId)?.enabled);
+    if (gateOn && isWorkflowDeactivated(draft)) return DEACTIVATED_MESSAGE;
+    return this.resolveRunnableWorkflow(workflowId, "production") === null ? NOTHING_PUBLISHED_MESSAGE : null;
+  }
+
+  /**
+   * The published version of a deactivated gated workflow: what production
+   * would run were it active. Path routing uses it to answer "deactivated"
+   * rather than "not found".
+   */
+  deactivatedProductionWorkflow(workflowId: string): Workflow | null {
+    if (!this.options.available) return null;
+    const draft = this.store.getWorkflow(workflowId);
+    if (!draft || !isWorkflowDeactivated(draft) || !this.store.getReleaseGate(workflowId)?.enabled) return null;
+    const published = this.store.getPublishedVersion(workflowId);
+    if (published === null) return null;
+    try {
+      return this.options.resolveVersion(workflowId, published);
+    } catch {
+      return null;
+    }
   }
 
   /** A saved version as production runs it, remembered as that version for the run's history; null when it cannot load. */
@@ -455,12 +533,14 @@ export class ReleaseService {
     const publishedVersion = this.store.getPublishedVersion(workflowId);
     const enabling = next.enabled && !current.enabled;
     if (enabling) {
-      const draft = this.store.getWorkflow(workflowId);
-      const production = publishedVersion !== null ? this.versionWorkflow(workflowId, publishedVersion) : null;
-      this.assertNoRoutingConflicts(user, workflowId, [draft, production], "turn the release gate on");
+      // What production will run once the gate is on: the published version, or the saved workflow as the baseline.
+      const production = publishedVersion !== null ? this.versionWorkflow(workflowId, publishedVersion) : this.store.getWorkflow(workflowId);
+      this.assertNoRoutingConflicts(user, workflowId, production, "turn the release gate on");
     }
     let baseline: { version: number; workflowHash: string } | null = null;
     if (enabling && publishedVersion === null) {
+      // Turning the gate on here publishes a baseline release in this user's name.
+      this.check(user, workflowId, "workflow:publish");
       if (!this.store.getWorkflow(workflowId)) throw new ReleaseError("Workflow not found", 404);
       const version = this.baselineVersion(user, workflowId);
       baseline = { version, workflowHash: this.versionCandidate(workflowId, version).workflowHash };
@@ -537,78 +617,112 @@ export class ReleaseService {
   // -------------------------------------------------------------------------
 
   /**
-   * Other workflows that answer on one of these workflows' production paths.
-   * `gatedOnly`: only those with a published version or a gate that is on
-   * (what a save may not take over); otherwise every other workflow (what
-   * stops a publish or turning a gate on).
+   * The production paths a workflow claims: those of what actually serves
+   * its production traffic. A gated workflow claims its published version's
+   * paths (its draft claims nothing); an active ungated workflow claims its
+   * published version's paths when it has one, else its saved workflow's; a
+   * deactivated ungated workflow claims nothing. `draft` stands in for the
+   * saved workflow (a save being checked).
    */
-  routingConflicts(workflowId: string, workflows: Array<Workflow | null | undefined>, gatedOnly: boolean): RoutingConflict[] {
-    if (!this.options.available) return [];
-    const keys = new Map<string, string>();
-    for (const workflow of workflows) {
-      if (!workflow) continue;
-      for (const entry of productionRoutingKeys(workflow)) keys.set(entry.key, entry.label);
+  private claimedKeys(workflowId: string, draft?: Workflow | null): ProductionRoutingKey[] {
+    const saved = draft === undefined ? this.store.getWorkflow(workflowId) : draft;
+    const gateOn = Boolean(this.store.getReleaseGate(workflowId)?.enabled);
+    if (!gateOn && (!saved || isWorkflowDeactivated(saved))) return [];
+    const published = this.store.getPublishedVersion(workflowId);
+    if (published !== null) {
+      try {
+        return productionRoutingKeys(this.options.resolveVersion(workflowId, published));
+      } catch {
+        // An unreadable published version answers no traffic.
+        return [];
+      }
     }
-    if (keys.size === 0) return [];
-    const conflicts: RoutingConflict[] = [];
-    const seen = new Set<string>();
+    return gateOn || !saved ? [] : productionRoutingKeys(saved);
+  }
+
+  /** The workflows other than `workflowId` that claim each production path. */
+  private otherClaims(workflowId: string): Map<string, string[]> {
+    const claims = new Map<string, string[]>();
     for (const summary of this.store.listWorkflows()) {
       if (summary.id === workflowId) continue;
-      const published = this.store.getPublishedVersion(summary.id);
-      if (gatedOnly && published === null && !this.store.getReleaseGate(summary.id)?.enabled) continue;
-      const others: Workflow[] = [];
-      const draft = this.store.getWorkflow(summary.id);
-      if (draft) others.push(draft);
-      if (published !== null) {
-        try {
-          others.push(this.options.resolveVersion(summary.id, published));
-        } catch {
-          // An unreadable published version answers no traffic.
-        }
-      }
-      for (const other of others) {
-        for (const entry of productionRoutingKeys(other)) {
-          const label = keys.get(entry.key);
-          if (!label || seen.has(`${entry.key}|${summary.id}`)) continue;
-          seen.add(`${entry.key}|${summary.id}`);
-          conflicts.push({ key: entry.key, label, workflowId: summary.id });
-        }
+      for (const entry of this.claimedKeys(summary.id)) {
+        const owners = claims.get(entry.key) ?? [];
+        if (!owners.includes(summary.id)) owners.push(summary.id);
+        claims.set(entry.key, owners);
       }
     }
+    return claims;
+  }
+
+  /** The paths in `keys` another workflow claims. */
+  private claimedByOthers(workflowId: string, keys: ProductionRoutingKey[]): RoutingConflict[] {
+    if (!this.options.available || keys.length === 0) return [];
+    const claims = this.otherClaims(workflowId);
+    const conflicts: RoutingConflict[] = [];
+    for (const entry of keys) {
+      for (const owner of claims.get(entry.key) ?? []) conflicts.push({ key: entry.key, label: entry.label, workflowId: owner });
+    }
     return conflicts;
+  }
+
+  /**
+   * Every trigger path any workflow answers on or may answer on (drafts and
+   * published versions alike), so a copy can pick paths nobody uses.
+   */
+  usedRoutingKeys(): Set<string> {
+    const used = new Set<string>();
+    for (const summary of this.store.listWorkflows()) {
+      const draft = this.store.getWorkflow(summary.id);
+      if (draft) for (const entry of productionRoutingKeys(draft)) used.add(entry.key);
+      const published = this.options.available ? this.store.getPublishedVersion(summary.id) : null;
+      if (published === null) continue;
+      try {
+        for (const entry of productionRoutingKeys(this.options.resolveVersion(summary.id, published))) used.add(entry.key);
+      } catch {
+        // An unreadable published version answers no traffic.
+      }
+    }
+    return used;
   }
 
   /** How a conflict reads to `user`: another workflow they cannot read stays unnamed. */
   describeConflicts(user: SafeUser, conflicts: RoutingConflict[]): string[] {
     return conflicts.map((conflict) => {
       const readable = this.options.access(user, conflict.workflowId, "workflow:read").ok;
-      const other = readable ? `workflow "${this.store.getWorkflow(conflict.workflowId)?.name ?? conflict.workflowId}" (${conflict.workflowId})` : "another workflow you cannot see";
+      const other = readable ? `workflow "${this.store.getWorkflow(conflict.workflowId)?.name ?? conflict.workflowId}" (${conflict.workflowId})` : "another workflow";
       return `${conflict.label} is already used by ${other}.`;
     });
   }
 
   /**
-   * Why saving `workflow` would take over a production path of another
-   * workflow that has a published version or a gate; null when it would not.
+   * Why saving `workflow` would put an active ungated workflow on a
+   * production path another workflow claims; null when it would not. A gated
+   * workflow's draft claims nothing, so it always saves (its publish is
+   * checked instead), and a path the workflow already claimed before this
+   * save never blocks it.
    */
   claimConflict(user: SafeUser, workflow: Workflow): string | null {
-    const conflicts = this.routingConflicts(workflow.id, [workflow], true);
+    if (!this.options.available) return null;
+    const before = new Set(this.store.getWorkflow(workflow.id) ? this.claimedKeys(workflow.id).map((entry) => entry.key) : []);
+    const added = this.claimedKeys(workflow.id, workflow).filter((entry) => !before.has(entry.key));
+    const conflicts = this.claimedByOthers(workflow.id, added);
     if (conflicts.length === 0) return null;
-    return `${this.describeConflicts(user, conflicts).join(" ")} Production traffic on that path goes to a published or gated workflow, so another workflow cannot claim it: choose another path.`;
+    return `${this.describeConflicts(user, conflicts).join(" ")} Production traffic on that path already goes to another workflow: choose another path.`;
   }
 
-  private assertNoRoutingConflicts(user: SafeUser, workflowId: string, workflows: Array<Workflow | null | undefined>, what: string): void {
-    const conflicts = this.routingConflicts(workflowId, workflows, false);
+  private assertNoRoutingConflicts(user: SafeUser, workflowId: string, workflow: Workflow | null, what: string): void {
+    const conflicts = workflow ? this.claimedByOthers(workflowId, productionRoutingKeys(workflow)) : [];
     if (conflicts.length === 0) return;
-    throw new ReleaseError(`Cannot ${what} while another workflow shares a production path: ${this.describeConflicts(user, conflicts).join(" ")}`, 409, {
+    throw new ReleaseError(`Cannot ${what} while another workflow serves production on one of its paths: ${this.describeConflicts(user, conflicts).join(" ")}`, 409, {
       conflicts: conflicts.map((conflict) => conflict.key)
     });
   }
 
+  /** Why publishing `workflow` (a version) would put it on paths another workflow claims. */
   private conflictReasons(user: SafeUser, workflowId: string, workflow: Workflow): string[] {
-    const conflicts = this.routingConflicts(workflowId, [workflow], false);
+    const conflicts = this.claimedByOthers(workflowId, productionRoutingKeys(workflow));
     if (conflicts.length === 0) return [];
-    return [...this.describeConflicts(user, conflicts), "Production routing to this workflow would be ambiguous: give it its own paths before publishing."];
+    return [...this.describeConflicts(user, conflicts), "Production traffic on that path already goes to another workflow: give this version its own paths before publishing."];
   }
 
   // -------------------------------------------------------------------------
@@ -656,6 +770,17 @@ export class ReleaseService {
     this.refuse(user, dataset.workflowId, "release.golden_set_change.refused", "update", { datasetId, change });
     const what = change === "delete_set" ? "delete this golden set" : change === "remove_case" ? "remove a case from this golden set" : "add a case with its own scorers to this golden set";
     return `An enforced release gate uses this golden set: only an admin can ${what}.`;
+  }
+
+  /** Why `user` may not delete a golden run a case of an enforced gate's golden set uses (admins only); null when they may. Audits a refusal. */
+  recordingDeleteDenial(user: SafeUser, workflowId: string, recordingId: string): string | null {
+    if (user.role === "admin") return null;
+    const gate = this.enforcedGateOf(workflowId);
+    if (!gate) return null;
+    const datasetId = gate.datasetIds.find((id) => this.store.listEvalFixtures(id).some((fixture) => fixture.recordingId === recordingId));
+    if (!datasetId) return null;
+    this.refuse(user, workflowId, "release.golden_set_change.refused", "delete", { datasetId, change: "delete_recording", recordingId });
+    return "An enforced release gate's golden set uses this golden run: only an admin can delete it.";
   }
 
   private projectOf(workflowId: string): string | null {

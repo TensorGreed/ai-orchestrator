@@ -142,6 +142,8 @@ export interface McpGatewayDeps {
    * the draft. The admin API (toolset members, candidates) reads drafts.
    */
   loadProductionWorkflow?: (id: string) => Workflow | null;
+  /** Phase 15.4 — why production refuses an existing workflow (a deactivated gated one); the tool call reports it. */
+  productionRefusal?: (id: string) => string | null;
 }
 
 interface AuthenticatedClient {
@@ -525,7 +527,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const workflow = productionWorkflow(tool.workflowId);
     let outcome: GatewayWorkflowRunOutcome;
     if (!workflow) {
-      outcome = { status: "error", error: `Workflow '${tool.workflowName}' no longer exists.` };
+      const refusal = deps.productionRefusal?.(tool.workflowId) ?? null;
+      outcome = { status: "error", error: refusal ? `Workflow '${tool.workflowName}': ${refusal}` : `Workflow '${tool.workflowName}' no longer exists.` };
     } else {
       const total = workflow.nodes.length;
       let done = 0;

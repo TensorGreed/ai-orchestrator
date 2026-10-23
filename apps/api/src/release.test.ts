@@ -6,10 +6,12 @@
  * enforced gates, release requests in the approvals inbox, rollback,
  * retention pinning, project scoping and migration 33.
  */
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { EvalRunView, ReleaseApprovalRequestView, ReleaseGateView, Workflow, WorkflowNode, WorkflowRelease } from "@ai-orchestrator/shared";
@@ -21,7 +23,10 @@ import { AuthService } from "./services/auth-service.js";
 import { SchedulerService } from "./services/scheduler-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { goldenSetSnapshots } from "./services/release-snapshot.js";
+import { productionRoutingKeys, withUniqueTriggerPaths } from "./services/release-service.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
+
+const SAMPLES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../samples");
 
 interface TestContext {
   app: FastifyInstance;
@@ -1053,33 +1058,164 @@ describe("gates outlive their workflow; turning one on publishes a baseline", ()
   });
 });
 
-describe("production paths cannot be taken over (M1)", () => {
-  it("refuses to save, import or duplicate a path a published or gated workflow uses, and refuses to publish while paths collide", async () => {
+describe("production paths belong to what serves production (M1, N1, N2)", () => {
+  it("a copy's taken trigger paths get -copy, -copy-2, ...; free ones and other nodes stay", () => {
+    const source = {
+      nodes: [
+        node("hook", "webhook_input", { path: "Orders", method: "POST" }),
+        node("bare", "webhook_input", {}),
+        node("form", "form_trigger", { path: "feedback" }),
+        node("tool", "mcp_server_trigger", { path: "helper" }),
+        node("free", "form_trigger", { path: "unused" }),
+        node("slack", "slack_trigger", { path: "slack-events" })
+      ]
+    };
+    const used = new Set(["webhook:orders", "webhook:orders-copy", "webhook:bare", "form:feedback", "mcp:helper"]);
+    const copy = withUniqueTriggerPaths(source, used);
+    expect(copy.nodes.map((entry) => (entry.config as { path?: string }).path)).toEqual(["Orders-copy-2", "bare-copy", "feedback-copy", "helper-copy", "unused", "slack-events"]);
+    expect(productionRoutingKeys(copy).every((entry) => !used.has(entry.key))).toBe(true);
+    expect((source.nodes[0]!.config as { path: string }).path).toBe("Orders");
+  });
+
+  it("refuses a save, import or external import onto a path a published workflow serves; a duplicate gets its own paths instead", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    const v1 = save(context, hookWorkflow("wf-owner", "owner", "default", "shared-path"));
+    const v1 = save(context, hookWorkflow("wf-owner", "owner", "default", "lead-enrich"));
     expect((await call(context, "POST", "/api/workflows/wf-owner/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
-    const thief = hookWorkflow("wf-thief", "thief", "default", "shared-path");
+    const thief = hookWorkflow("wf-thief", "thief", "default", "Lead-Enrich");
     const created = await call(context, "POST", "/api/workflows", builder.cookie, thief);
     expect(created.statusCode).toBe(409);
-    expect(created.json<{ error: string }>().error).toMatch(/Webhook path "shared-path" is already used by workflow "Release wf-owner" \(wf-owner\)/);
+    expect(created.json<{ error: string }>().error).toMatch(/Webhook path "lead-enrich" is already used by workflow "Release wf-owner" \(wf-owner\)/);
     expect((await call(context, "POST", "/api/workflows/import", builder.cookie, { workflow: thief })).statusCode).toBe(409);
-    expect((await call(context, "POST", "/api/workflows/wf-owner/duplicate", builder.cookie, { name: "Copy" })).statusCode).toBe(409);
-    expect(context.store.getWorkflow("wf-thief")).toBeNull();
-    expect(await prodHook(context, "shared-path")).toMatchObject({ output: { result: "owner" } });
+    // An export from another builder that answers on the same path (N1).
+    const external = JSON.parse(fs.readFileSync(path.join(SAMPLES_DIR, "external-imports", "webhook-http-set.json"), "utf8")) as Record<string, unknown>;
+    const externalImport = await call(context, "POST", "/api/workflows/import/external", builder.cookie, { source: external });
+    expect(externalImport.statusCode, externalImport.body).toBe(409);
+    expect(externalImport.json<{ error: string }>().error).toMatch(/lead-enrich.*wf-owner/);
+    expect(context.store.listWorkflows().map((summary) => summary.id)).toEqual(["wf-owner"]);
+    expect(await prodHook(context, "lead-enrich")).toMatchObject({ output: { result: "owner" } });
     // Saving the owner itself is fine.
-    expect((await call(context, "PUT", "/api/workflows/wf-owner", builder.cookie, hookWorkflow("wf-owner", "owner 2", "default", "shared-path"))).statusCode).toBe(200);
+    expect((await call(context, "PUT", "/api/workflows/wf-owner", builder.cookie, hookWorkflow("wf-owner", "owner 2", "default", "lead-enrich"))).statusCode).toBe(200);
 
-    // Two ungated workflows that already share a path (from before this release): neither may be published or gated.
-    context.store.upsertWorkflow(hookWorkflow("wf-a", "a", "default", "old-shared"));
-    context.store.upsertWorkflow(hookWorkflow("wf-b", "b", "default", "old-shared"));
-    const va = save(context, hookWorkflow("wf-a", "a", "default", "old-shared"));
-    const blocked = await call(context, "POST", "/api/workflows/wf-a/publish", builder.cookie, { version: va });
+    // Duplicating a published triggered workflow never answers 409: the copy's paths are rewritten.
+    const copy = await call(context, "POST", "/api/workflows/wf-owner/duplicate", builder.cookie, { name: "Copy" });
+    expect(copy.statusCode, copy.body).toBe(200);
+    expect(copy.json<Workflow>().nodes.find((entry) => entry.id === "hook")!.config).toMatchObject({ path: "lead-enrich-copy" });
+    const second = await call(context, "POST", "/api/workflows/wf-owner/duplicate", builder.cookie, { name: "Copy 2" });
+    expect(second.statusCode, second.body).toBe(200);
+    expect(second.json<Workflow>().nodes.find((entry) => entry.id === "hook")!.config).toMatchObject({ path: "lead-enrich-copy-2" });
+    expect(await prodHook(context, "lead-enrich")).toMatchObject({ output: { result: "owner" } });
+    expect(await prodHook(context, "lead-enrich-copy")).toMatchObject({ output: { result: "owner 2" } });
+    // A template made from it: using it gives the new workflow paths nobody uses either.
+    const template = (await call(context, "POST", "/api/templates", builder.cookie, { name: "Owner template", workflowId: "wf-owner" })).json<{ id: string }>();
+    const used = await call(context, "POST", `/api/templates/${template.id}/use`, builder.cookie);
+    expect(used.statusCode, used.body).toBe(200);
+    const fromTemplate = context.store.getWorkflow(used.json<{ workflowId: string }>().workflowId)!;
+    expect(fromTemplate.nodes.find((entry) => entry.id === "hook")!.config).toMatchObject({ path: "lead-enrich-copy-3" });
+  });
+
+  it("a gated draft claims nothing: it saves onto a claimed path, never blocks the claimant, and cannot be published there (the cross-project probe)", async () => {
+    const context = await createTestContext();
+    const lead = await login(context, "builder", "lead");
+    const other = await login(context, "builder", "other");
+    context.store.upsertProject({ id: "p-a", name: "A" });
+    context.store.upsertProject({ id: "p-b", name: "B" });
+    context.store.upsertProjectRole({ userId: lead.id, projectId: "p-a", role: "editor" });
+    context.store.upsertProjectRole({ userId: other.id, projectId: "p-b", role: "editor" });
+    context.store.upsertCustomRole({ id: "none-b", projectId: "p-b", name: "None", permissions: [] });
+    context.store.upsertProjectRole({ userId: lead.id, projectId: "p-b", role: "custom", customRoleId: "none-b" });
+    save(context, hookWorkflow("wf-a", "a", "p-a", "path-a"));
+    await enableGate(context, lead.cookie, "wf-a");
+    save(context, hookWorkflow("wf-b", "b", "p-b", "path-b"));
+
+    // A's draft moves onto B's path: it serves nothing until published, so the save is fine.
+    const moved = await call(context, "PUT", "/api/workflows/wf-a", lead.cookie, hookWorkflow("wf-a", "a moved", "p-a", "path-b"));
+    expect(moved.statusCode, moved.body).toBe(200);
+    // B, in another project, still saves (a rename), and still serves its path.
+    const renamed = await call(context, "PUT", "/api/workflows/wf-b", other.cookie, { ...hookWorkflow("wf-b", "b", "p-b", "path-b"), name: "B renamed" });
+    expect(renamed.statusCode, renamed.body).toBe(200);
+    expect(await prodHook(context, "path-b")).toMatchObject({ output: { result: "b" } });
+    expect(await prodHook(context, "path-a")).toMatchObject({ output: { result: "a" } });
+    // A cannot publish onto B's path; the owner it cannot read stays unnamed.
+    const version = context.store.maxWorkflowVersionNumber("wf-a");
+    const blocked = await call(context, "POST", "/api/workflows/wf-a/publish", lead.cookie, { version });
     expect(blocked.statusCode).toBe(409);
-    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/old-shared.*wf-b/);
-    const enable = await call(context, "PUT", "/api/workflows/wf-a/release-gate", builder.cookie, { enabled: true, datasetIds: [goldenSetId(context, "wf-a")] });
+    const reasons = blocked.json<{ reasons: string[] }>().reasons.join(" ");
+    expect(reasons).toMatch(/Webhook path "path-b" is already used by another workflow\./);
+    expect(reasons).not.toContain("wf-b");
+    expect(context.store.getPublishedVersion("wf-a")).toBe(1);
+  });
+
+  it("only an active ungated workflow claims its saved paths; activating onto a claimed path, publishing or gating a collision are refused", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    // Two ungated workflows that already share a path (from before this release): each still saves, neither may be published or gated.
+    context.store.upsertWorkflow(hookWorkflow("wf-x", "x", "default", "old-shared"));
+    context.store.upsertWorkflow(hookWorkflow("wf-y", "y", "default", "old-shared"));
+    expect((await call(context, "PUT", "/api/workflows/wf-x", builder.cookie, { ...hookWorkflow("wf-x", "x", "default", "old-shared"), name: "X renamed" })).statusCode).toBe(200);
+    const vx = context.store.maxWorkflowVersionNumber("wf-x");
+    const blocked = await call(context, "POST", "/api/workflows/wf-x/publish", builder.cookie, { version: vx });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/old-shared.*wf-y/);
+    const enable = await call(context, "PUT", "/api/workflows/wf-x/release-gate", builder.cookie, { enabled: true, datasetIds: [goldenSetId(context, "wf-x")] });
     expect(enable.statusCode).toBe(409);
-    expect(context.store.getReleaseGate("wf-a")).toBeNull();
+    expect(context.store.getReleaseGate("wf-x")).toBeNull();
+
+    // A new ungated workflow cannot take an active one's path; a deactivated ungated workflow claims nothing.
+    save(context, hookWorkflow("wf-live", "live", "default", "live-path"));
+    expect((await call(context, "POST", "/api/workflows", builder.cookie, hookWorkflow("wf-new", "new", "default", "live-path"))).statusCode).toBe(409);
+    expect((await call(context, "POST", "/api/workflows/wf-live/deactivate", builder.cookie, {})).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows", builder.cookie, hookWorkflow("wf-new", "new", "default", "live-path"))).statusCode).toBe(200);
+    const activate = await call(context, "POST", "/api/workflows/wf-live/activate", builder.cookie, {});
+    expect(activate.statusCode).toBe(409);
+    expect(activate.json<{ error: string }>().error).toMatch(/live-path.*wf-new/);
+  });
+
+  it("git pull refuses only the workflow that would take a served path, with its reason; the rest import (N1)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const v1 = save(context, hookWorkflow("wf-served", "served", "default", "served-path"));
+    expect((await call(context, "POST", "/api/workflows/wf-served/publish", admin.cookie, { version: v1 })).statusCode).toBe(200);
+    // A repository with one workflow on the served path and one on its own path.
+    const bare = path.join(context.tempDir, "remote.git");
+    const work = path.join(context.tempDir, "seed");
+    const git = (cwd: string, ...args: string[]) => {
+      const result = spawnSync("git", ["-c", "user.email=seed@example.com", "-c", "user.name=Seed", ...args], { cwd, encoding: "utf8" });
+      if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    };
+    fs.mkdirSync(work, { recursive: true });
+    git(context.tempDir, "init", "--bare", "-b", "main", bare);
+    git(work, "init", "-b", "main");
+    fs.mkdirSync(path.join(work, "workflows"));
+    fs.writeFileSync(path.join(work, "workflows", "wf-taker.json"), JSON.stringify(hookWorkflow("wf-taker", "taker", "default", "served-path")));
+    fs.writeFileSync(path.join(work, "workflows", "wf-fine.json"), JSON.stringify(hookWorkflow("wf-fine", "fine", "default", "fine-path")));
+    git(work, "add", ".");
+    git(work, "commit", "-m", "seed");
+    git(work, "push", bare, "main");
+    expect((await call(context, "PUT", "/api/git", admin.cookie, { repoUrl: bare, defaultBranch: "main" })).statusCode).toBe(200);
+
+    const pulled = await call(context, "POST", "/api/git/pull", admin.cookie, { branch: "main" });
+    expect(pulled.statusCode, pulled.body).toBe(200);
+    const result = pulled.json<{ ok: boolean; workflowsImported: number; workflowsRefused: Array<{ workflowId: string; file: string; reason: string }> }>();
+    expect(result).toMatchObject({ ok: true, workflowsImported: 1 });
+    expect(result.workflowsRefused).toEqual([{ workflowId: "wf-taker", file: "wf-taker.json", reason: expect.stringMatching(/served-path.*wf-served/) }]);
+    expect(context.store.getWorkflow("wf-taker")).toBeNull();
+    expect(context.store.getWorkflow("wf-fine")).not.toBeNull();
+    expect(await prodHook(context, "served-path")).toMatchObject({ output: { result: "served" } });
+  });
+
+  it("a duplicate, a template copy and a re-created id never inherit a deleted workflow's gate (N6)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    save(context, hookWorkflow("wf-gone", "gone"));
+    await enableGate(context, admin.cookie, "wf-gone");
+    save(context, hookWorkflow("wf-src", "src"));
+    expect((await call(context, "DELETE", "/api/workflows/wf-gone", admin.cookie)).statusCode).toBe(200);
+    // A duplicate asking for the deleted gated id lands on a fresh one.
+    const copy = await call(context, "POST", "/api/workflows/wf-src/duplicate", admin.cookie, { name: "Copy", id: "wf-gone" });
+    expect(copy.statusCode, copy.body).toBe(200);
+    expect(copy.json<Workflow>().id).toBe("wf-gone-2");
+    expect(context.store.getReleaseGate("wf-gone-2")).toBeNull();
   });
 });
 
@@ -1235,17 +1371,133 @@ describe("a real replay job proves a release (M8)", () => {
   });
 });
 
-describe("the kill switch (L9)", () => {
-  it("deactivating the workflow stops production for a published version; the draft's test route still runs; activating restores it", async () => {
+describe("deactivation (L9, N3)", () => {
+  it("without a gate, deactivating only unregisters schedules and triggers: production webhooks and API-key runs keep working, as before releases", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    const v1 = save(context, hookWorkflow("wf-kill", "live"));
-    expect((await call(context, "POST", "/api/workflows/wf-kill/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    const v1 = save(context, hookWorkflow("wf-plain", "live"));
+    expect((await call(context, "POST", "/api/workflows/wf-plain/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    save(context, hookWorkflow("wf-draft-only", "draft"));
+    expect((await call(context, "POST", "/api/workflows/wf-plain/deactivate", builder.cookie, {})).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows/wf-draft-only/deactivate", builder.cookie, {})).statusCode).toBe(200);
+    expect(await prodHook(context, "hook-wf-plain")).toMatchObject({ status: 200, output: { result: "live" } });
+    expect(await prodHook(context, "hook-wf-draft-only")).toMatchObject({ status: 200, output: { result: "draft" } });
+    const key = (await call(context, "POST", "/api/auth/api-keys", builder.cookie, { name: "CI" })).json<{ key: string }>().key;
+    const viaKey = await context.app.inject({ method: "POST", url: "/api/workflows/wf-draft-only/execute", headers: { authorization: `Bearer ${key}` }, payload: {} });
+    expect(viaKey.statusCode, viaKey.body).toBe(200);
+    expect(viaKey.json<{ output: unknown }>().output).toMatchObject({ result: "draft" });
+  });
+
+  it("on a gated workflow deactivating is the kill switch: every production route says it is deactivated, a production parent fails with it, the test route still runs", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-kill", "live"));
+    await enableGate(context, builder.cookie, "wf-kill");
+    save(context, {
+      id: "wf-caller",
+      name: "Caller",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [node("hook", "webhook_input", { path: "hook-caller", method: "POST" }), node("call", "execute_workflow", { workflowId: "wf-kill" }), node("out", "output", { responseTemplate: "caller got {{result}}" })],
+      edges: [{ id: "p1", source: "hook", target: "call" }, { id: "p2", source: "call", target: "out" }]
+    } as Workflow);
     expect(await prodHook(context, "hook-wf-kill")).toMatchObject({ status: 200, output: { result: "live" } });
     expect((await call(context, "POST", "/api/workflows/wf-kill/deactivate", builder.cookie, {})).statusCode).toBe(200);
-    expect((await prodHook(context, "hook-wf-kill")).status).toBe(404);
+
+    const hook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-kill", payload: {} });
+    expect(hook.statusCode).toBe(409);
+    expect(hook.json<{ error: string }>().error).toBe("This workflow is deactivated, so production runs are refused. Activate it to serve production again.");
+    expect(hook.body).not.toMatch(/release gate/i);
+    const key = (await call(context, "POST", "/api/auth/api-keys", builder.cookie, { name: "CI" })).json<{ key: string }>().key;
+    const viaKey = await context.app.inject({ method: "POST", url: "/api/workflows/wf-kill/execute", headers: { authorization: `Bearer ${key}` }, payload: {} });
+    expect(viaKey.statusCode).toBe(409);
+    expect(viaKey.json<{ error: string }>().error).toMatch(/^This workflow is deactivated/);
+    expect(viaKey.body).not.toMatch(/release gate/i);
+    const compat = await call(context, "POST", "/api/webhooks/execute", builder.cookie, { workflow_id: "wf-kill", input: {} });
+    expect(compat.statusCode).toBe(409);
+    expect(compat.json<{ error: string }>().error).toMatch(/^This workflow is deactivated/);
+    // A production parent fails with the child's reason; the editor's run of the parent calls the child's draft.
+    const parent = await context.app.inject({ method: "POST", url: "/webhook/hook-caller", payload: {} });
+    expect(parent.body).toMatch(/Sub-workflow 'wf-kill': This workflow is deactivated/);
+    expect(JSON.stringify((await call(context, "POST", "/api/workflows/wf-caller/execute", builder.cookie, {})).json().output)).toContain("live");
+    // The draft's test route still runs; activating restores production.
     expect(await testHook(context, "hook-wf-kill")).toMatchObject({ output: { result: "live" } });
     expect((await call(context, "POST", "/api/workflows/wf-kill/activate", builder.cookie, {})).statusCode).toBe(200);
     expect(await prodHook(context, "hook-wf-kill")).toMatchObject({ status: 200, output: { result: "live" } });
+  });
+});
+
+describe("API keys and retries (N4, N5)", () => {
+  it("an API key runs the draft with channel=draft when it may change the workflow; a production retry runs what production runs now", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const v1 = save(context, hookWorkflow("wf-n4", "one"));
+    expect((await call(context, "POST", "/api/workflows/wf-n4/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    save(context, hookWorkflow("wf-n4", "draft"));
+    const key = (await call(context, "POST", "/api/auth/api-keys", builder.cookie, { name: "CI" })).json<{ key: string }>().key;
+    const run = (query: string) => context.app.inject({ method: "POST", url: `/api/workflows/wf-n4/execute${query}`, headers: { authorization: `Bearer ${key}` }, payload: {} });
+    expect((await run("")).json<{ output: unknown }>().output).toMatchObject({ result: "one" });
+    expect((await run("?channel=draft")).json<{ output: unknown }>().output).toMatchObject({ result: "draft" });
+    expect((await run("?channel=other")).statusCode).toBe(400);
+    // A key whose owner may execute but not change the workflow cannot ask for the draft.
+    const runner = await login(context, "builder", "runner");
+    context.store.upsertCustomRole({ id: "run-only", projectId: "default", name: "Run", permissions: ["workflow:read", "workflow:execute"] });
+    context.store.upsertProjectRole({ userId: runner.id, projectId: "default", role: "custom", customRoleId: "run-only" });
+    const runnerKey = (await call(context, "POST", "/api/auth/api-keys", runner.cookie, { name: "Runner" })).json<{ key: string }>().key;
+    const refused = await context.app.inject({ method: "POST", url: "/api/workflows/wf-n4/execute?channel=draft", headers: { authorization: `Bearer ${runnerKey}` }, payload: {} });
+    expect(refused.statusCode, refused.body).toBe(403);
+
+    // A production run of version 1, retried after version 3 is published, runs version 3.
+    const failed = (await run("")).json<{ executionId: string }>().executionId;
+    rawDb(context).prepare("UPDATE execution_history SET status = 'error' WHERE id = ?").run(failed);
+    const v3 = save(context, hookWorkflow("wf-n4", "three"));
+    expect((await call(context, "POST", "/api/workflows/wf-n4/publish", builder.cookie, { version: v3 })).statusCode).toBe(200);
+    const retried = await call(context, "POST", `/api/executions/${failed}/retry`, builder.cookie, {});
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(JSON.stringify(retried.json())).toContain("three");
+    expect(context.store.getExecutionRelease(retried.json<{ executionId: string }>().executionId)).toEqual({ channel: "production", version: v3 });
+  });
+});
+
+describe("enforced gates and golden runs, turning a gate on (N7, N8)", () => {
+  it("only an admin deletes a golden run an enforced gate's set uses; turning a gate on that publishes a baseline needs workflow:publish", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const workflow: Workflow = {
+      id: "wf-n8",
+      name: "N8",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [node("start", "manual_trigger"), node("out", "output", { responseTemplate: "ok" })],
+      edges: [{ id: "e1", source: "start", target: "out" }]
+    } as Workflow;
+    context.store.upsertWorkflow(workflow);
+    const executed = await call(context, "POST", "/api/workflows/wf-n8/execute", builder.cookie, {});
+    const recording = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: executed.json<{ executionId: string }>().executionId, name: "Golden" });
+    expect(recording.statusCode, recording.body).toBe(201);
+    const recordingId = recording.json<{ recording: { id: string } }>().recording.id;
+    const setId = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Suite", workflowId: "wf-n8" })).json<{ dataset: { id: string } }>().dataset.id;
+    expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId })).statusCode).toBe(201);
+    expect((await call(context, "PUT", "/api/workflows/wf-n8/release-gate", admin.cookie, { enabled: true, enforced: true, datasetIds: [setId] })).statusCode).toBe(200);
+    const refused = await call(context, "DELETE", `/api/replay/recordings/${recordingId}`, builder.cookie);
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json<{ error: string }>().error).toMatch(/only an admin can delete it/);
+    expect(auditTypes(context)).toContain("release.golden_set_change.refused");
+    expect((await call(context, "DELETE", `/api/replay/recordings/${recordingId}`, admin.cookie)).statusCode).toBe(200);
+
+    // A custom role with write but without publish may not turn a gate on when that publishes a baseline.
+    const writer = await login(context, "builder", "writer");
+    context.store.upsertProject({ id: "p-w", name: "W" });
+    context.store.upsertCustomRole({ id: "write-only", projectId: "p-w", name: "Write", permissions: ["workflow:read", "workflow:write", "workflow:execute"] });
+    context.store.upsertProjectRole({ userId: writer.id, projectId: "p-w", role: "custom", customRoleId: "write-only" });
+    save(context, hookWorkflow("wf-n7", "x", "p-w"));
+    goldenSet(context, "wf-n7");
+    const enable = await call(context, "PUT", "/api/workflows/wf-n7/release-gate", writer.cookie, { enabled: true, datasetIds: ["set-wf-n7"] });
+    expect(enable.statusCode).toBe(403);
+    expect(context.store.getPublishedVersion("wf-n7")).toBeNull();
+    expect(context.store.getReleaseGate("wf-n7")?.enabled ?? false).toBe(false);
   });
 });

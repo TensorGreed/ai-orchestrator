@@ -30,7 +30,8 @@ function sourceFiles(dir = here, prefix = ""): string[] {
 }
 
 /** Calls that load a workflow or one of its saved versions. */
-const LOAD_CALL = /\b(getWorkflow|getWorkflowVersion|productionWorkflow|resolveRunnableWorkflow|loadProductionWorkflow|versionWorkflow|getRunnableWorkflow)\(/;
+const LOAD_CALL =
+  /\b(getWorkflow|getWorkflowVersion|productionWorkflow|resolveRunnableWorkflow|loadProductionWorkflow|versionWorkflow|getRunnableWorkflow|deactivatedProductionWorkflow)\s*(\?\.)?\(|\.(getWorkflow|getWorkflowVersion)\b(?!\s*[:(?])|\bworkflowVersionService\.get\s*(\?\.)?\(/;
 /** A method or interface declaration of one of those, not a call. */
 const DECLARATION = /^\s*(?:async\s+|private\s+|public\s+)?(?:getWorkflow|getWorkflowVersion|resolveRunnableWorkflow|versionWorkflow)\(\w+:/;
 
@@ -62,7 +63,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   // The store and the resolver themselves.
   { file: "db/database.ts", match: "", kind: "not_run", why: "the SQLite store's own internals (upsert, delete)", count: 2 },
   { file: "db/postgres-store.ts", match: "", kind: "not_run", why: "the Postgres store's own internals (upsert, delete)", count: 2 },
-  { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver and its gate, judge and request checks", count: 14 },
+  { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver, production path claims and its gate, judge and request checks", count: 19 },
 
   // app.ts: production traffic.
   { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },
@@ -75,10 +76,10 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const workflow = productionWorkflow(payload.workflowId);", kind: "production", why: "queued runs and dead-letter re-runs" },
   { file: "app.ts", match: '(channel === "production" ? productionWorkflow(payload.sourceWorkflowId) : store.getWorkflow(payload.sourceWorkflowId))', kind: "production", why: "the error workflow follows the failing run's channel" },
   { file: "app.ts", match: "const loadForRoute = (id: string) => (isTestRoute ? store.getWorkflow(id) : productionWorkflow(id));", kind: "production", why: "/webhook/ runs the published version, /webhook-test/ the draft" },
-  { file: "app.ts", match: 'const workflow = executeChannel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;', kind: "production", why: "/execute and /execute/stream: API-key callers run the published version, the editor the draft", count: 2 },
-  { file: "app.ts", match: "? releaseService.versionWorkflow(sourceExecution.workflowId, ranOn.version)", kind: "production", why: "a retry of a production run runs the version it ran" },
-  { file: "app.ts", match: '!store.getWorkflowVersion(sourceExecution.workflowId, ranOn.version)', kind: "not_run", why: "the retry checks the version still exists" },
-  { file: "app.ts", match: ": store.getWorkflow(sourceExecution.workflowId);", kind: "draft", why: "a retry of a draft run runs the draft" },
+  { file: "app.ts", match: 'const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;', kind: "production", why: "/execute and /execute/stream: API-key callers run the published version (or the draft with channel=draft and workflow:write), the editor the draft", count: 2 },
+  { file: "app.ts", match: 'const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);', kind: "production", why: "a retry of a production run runs what production runs now; a draft run's retry runs the draft" },
+  { file: "app.ts", match: "const workflow = releaseService.deactivatedProductionWorkflow(summary.id);", kind: "not_run", why: "a deactivated gated workflow's paths, only to answer \"deactivated\" rather than \"not found\"" },
+  { file: "app.ts", match: "const entry = workflowVersionService.get(request.params.id, version);", kind: "not_run", why: "reading or diffing a saved version in the history panel", count: 2 },
   { file: "app.ts", match: "load: WorkflowLoader = (id) => store.getWorkflow(id)", kind: "production", why: "webhook path helpers: production routes pass productionWorkflow (checked below)", count: 4, defaultOnly: true },
 
   // app.ts: the draft by design.
@@ -92,8 +93,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const draft = store.getWorkflow(workflowId);", kind: "draft", why: "snapshotting the draft as a gate's baseline version" },
 
   // app.ts: not a run.
-  { file: "app.ts", match: "if (!store.getWorkflow(base)) {", kind: "not_run", why: "a unique workflow id" },
-  { file: "app.ts", match: "if (!store.getWorkflow(candidate)) {", kind: "not_run", why: "a unique workflow id" },
+  { file: "app.ts", match: "if (store.getWorkflow(id)) return true;", kind: "not_run", why: "a unique workflow id" },
   { file: "app.ts", match: "const workflow = store.getWorkflow(summary.id);", kind: "not_run", why: "MCP server usages and the tools listing", count: 2 },
   { file: "app.ts", match: "const workflow = store.getWorkflow(item.id);", kind: "not_run", why: "session namespace owners" },
   { file: "app.ts", match: "const existing = store.getWorkflow(workflow.id);", kind: "not_run", why: "save access check" },
@@ -146,6 +146,15 @@ describe("every workflow load is classified", () => {
         sites.push({ file, line: index + 1, text });
       });
   }
+
+  it("sees optional calls, bound or passed references and the version service (N9)", () => {
+    for (const evasion of ["store.getWorkflow?.(id)", "const load = store.getWorkflow.bind(store);", "items.map(store.getWorkflow)", "workflowVersionService.get(id, 3)", "store.getWorkflowVersion ?.(id, 1)"]) {
+      expect(LOAD_CALL.test(evasion), evasion).toBe(true);
+    }
+    for (const declaration of ["getWorkflow: (id) => store.getWorkflow", "  getWorkflow(id: string): Workflow | null {"]) {
+      expect(LOAD_CALL.test(declaration.split("=>")[0]!) && !DECLARATION.test(declaration), declaration).toBe(false);
+    }
+  });
 
   it("finds the loads it should (the scan itself works)", () => {
     expect(sites.length).toBeGreaterThan(60);
@@ -234,7 +243,7 @@ describe("every run names its release channel", () => {
     // Eval run, executions replay, manual trigger, replay sandbox.
     expect(channels.filter((value) => value === '"draft"').length).toBe(4);
     const computed = [...new Set(channels.filter((value) => value !== '"draft"' && value !== '"production"'))].sort();
-    expect(computed).toEqual(['executeChannel', 'isTestRoute ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
+    expect(computed).toEqual(['executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
   });
 });
 
