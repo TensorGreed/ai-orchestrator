@@ -236,8 +236,8 @@ export class ReplayService {
    * workflow's current project and folder. It is never saved.
    */
   inlineCandidate(workflowId: string, raw: Record<string, unknown>): ResolvedCandidate {
-    const current = this.options.store.getWorkflow(workflowId);
-    if (!current) throw new ReplayRunError("The workflow this golden set belongs to no longer exists.", "not_found");
+    const saved = this.options.store.getWorkflow(workflowId);
+    if (!saved) throw new ReplayRunError("The workflow this golden set belongs to no longer exists.", "not_found");
     const size = Buffer.byteLength(JSON.stringify(raw) ?? "", "utf8");
     if (size > REPLAY_INLINE_WORKFLOW_MAX_BYTES) {
       throw new ReplayRunError(`The workflow file is ${size} bytes; an inline candidate can be at most ${REPLAY_INLINE_WORKFLOW_MAX_BYTES} bytes (2 MiB).`, "invalid");
@@ -262,8 +262,8 @@ export class ReplayService {
       workflow: {
         ...snapshot,
         id: workflowId,
-        ...(current.projectId !== undefined ? { projectId: current.projectId } : {}),
-        ...(current.folderId !== undefined ? { folderId: current.folderId } : {})
+        ...(saved.projectId !== undefined ? { projectId: saved.projectId } : {}),
+        ...(saved.folderId !== undefined ? { folderId: saved.folderId } : {})
       },
       kind: "inline",
       version: null

@@ -1326,6 +1326,46 @@ describe("a real replay job proves a release (M8)", () => {
     }
   }
 
+  it("a real 15.3 job with an override or a comparison setting the gate does not name is refused by publish; the same job without them is accepted", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    context.store.upsertWorkflow(labelled("forty-two"));
+    const recordings = [await goldenRun(context, builder.cookie, "Golden A"), await goldenRun(context, builder.cookie, "Golden B"), await goldenRun(context, builder.cookie, "Golden C")];
+    const created = await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Override suite", workflowId: "wf-real" });
+    const setId = created.json<{ dataset: { id: string } }>().dataset.id;
+    for (const recordingId of recordings) expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId })).statusCode).toBe(201);
+    expect((await call(context, "PUT", "/api/workflows/wf-real/release-gate", builder.cookie, { enabled: true, datasetIds: [setId] })).statusCode).toBe(200);
+    const version = save(context, labelled("forty-two", "Renamed"));
+
+    // A guard profile override (pinned to the version it resolved to): the server marks the job ineligible, and the gate
+    // refuses it although every case passed.
+    const overridden = await runJob(context, builder.cookie, { datasetIds: [setId], version, overrides: { guardProfile: { profileId: "default" } } });
+    expect(overridden.status).toBe("completed");
+    expect(overridden.results.every((result) => result.status === "pass")).toBe(true);
+    expect(overridden.candidate).toMatchObject({ releaseEligible: false, guardProfile: { profileId: "default", version: expect.any(Number) } });
+    const refused = await call(context, "POST", "/api/workflows/wf-real/publish", builder.cookie, { version, replayRunId: overridden.id });
+    expect(refused.statusCode, refused.body).toBe(409);
+    const reasons = refused.json<{ reasons: string[] }>().reasons.join(" ");
+    expect(reasons).toMatch(/not eligible to prove a release/);
+    expect(reasons).toMatch(/A guard profile override replaced the workflow's guard bindings/);
+    expect(reasons).toMatch(/candidate overrides \(guardProfile\)/);
+
+    // An eligible job (no override) that loosens the comparison: still refused, by the gate's own check.
+    const loosened = await runJob(context, builder.cookie, { datasetIds: [setId], version, ignorePaths: ["answer"] });
+    expect(loosened.candidate).toMatchObject({ releaseEligible: true });
+    const looseRefused = await call(context, "POST", "/api/workflows/wf-real/publish", builder.cookie, { version, replayRunId: loosened.id });
+    expect(looseRefused.statusCode).toBe(409);
+    expect(looseRefused.json<{ reasons: string[] }>().reasons.join(" ")).toMatch(/settings the gate does not specify \(ignorePaths\)/);
+    expect(context.store.getPublishedVersion("wf-real")).toBe(1);
+
+    // The plain job is eligible and publishes.
+    const plain = await runJob(context, builder.cookie, { datasetIds: [setId], version });
+    expect(plain.candidate).toMatchObject({ releaseEligible: true, releaseIneligibleReasons: [] });
+    const published = await call(context, "POST", "/api/workflows/wf-real/publish", builder.cookie, { version, replayRunId: plain.id });
+    expect(published.statusCode, published.body).toBe(200);
+    expect(published.json<{ release: WorkflowRelease }>().release).toMatchObject({ version, verdict: "passed", replayRunId: plain.id });
+  });
+
   it("runs a job through the replay-job API, waits for it and publishes with it; a failing job, one with an extra scorer and a stale one are refused", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
