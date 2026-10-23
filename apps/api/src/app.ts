@@ -89,6 +89,7 @@ import {
 } from "@ai-orchestrator/workflow-engine";
 import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
 import { SqliteStore, type McpServerRecord } from "./db/database";
+import { PostgresStore } from "./db/postgres-store.js";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
 import { McpCatalogService } from "./services/mcp-catalog.js";
@@ -2793,17 +2794,23 @@ export function createApp(
       instanceId: config.HA_INSTANCE_ID,
       leaseTtlMs: config.HA_LEASE_TTL_MS,
       renewIntervalMs: config.HA_RENEW_INTERVAL_MS,
-      onBecomeLeader: () => {
-        try {
-          const interrupted = reconcileInterruptedRuns(store, {
-            haEnabled: config.HA_ENABLED,
-            executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
-          });
-          if (interrupted.length > 0) {
-            app.log.warn({ count: interrupted.length }, "Marked interrupted runs as errors after a restart");
+      onBecomeLeader: async () => {
+        // Webhook replicas run beside the main instances with HA off; they never own other instances' runs.
+        if (workerMode !== "webhook") {
+          try {
+            const interrupted = await reconcileInterruptedRuns(store, {
+              // SQLite cannot be shared between processes; on Postgres another instance may own a live run.
+              sharedDatabase: config.HA_ENABLED || (store as object) instanceof PostgresStore
+            });
+            if (interrupted.length > 0) {
+              app.log.warn(
+                { count: interrupted.length, executionIds: interrupted.slice(0, 50).map((run) => run.id) },
+                "Marked interrupted runs as errors after a restart"
+              );
+            }
+          } catch (err) {
+            app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to reconcile interrupted runs");
           }
-        } catch (err) {
-          app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to reconcile interrupted runs");
         }
         if (!runsBackgroundWorkers) return;
         try {
