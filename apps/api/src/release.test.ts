@@ -20,6 +20,7 @@ import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { SchedulerService } from "./services/scheduler-service.js";
 import { SecretService } from "./services/secret-service.js";
+import { goldenSetSnapshots } from "./services/release-snapshot.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
 
 interface TestContext {
@@ -123,15 +124,38 @@ async function versionHash(context: TestContext, cookie: string, workflowId: str
   return response.json<{ preview: { workflowHash: string } }>().preview.workflowHash;
 }
 
-/** A finished replay job as the 15.2 runner stores it, without running anything. */
+/** A case's replay as the 15.2 runner stores it: a run diff with no cost or latency change and no guard verdicts. */
+const plainDiff = { verdict: "same", reasons: [], diff: { totals: { costUsd: { baseline: 0.01, candidate: 0.01 }, latencyMs: { baseline: 100, candidate: 100 } }, guard: { added: [], changed: [] } } };
+
+/**
+ * A finished replay job as the 15.2 runner stores it, without running
+ * anything: one case per status, on cases of the first set (created when the
+ * set has fewer), with a run diff and the snapshot of its sets as they are now.
+ */
 function seedJob(
   context: TestContext,
-  input: { workflowId: string; datasetIds: string[]; version: number; hash: string; statuses: Array<"pass" | "fail" | "error">; status?: string; options?: Record<string, unknown> }
+  input: {
+    workflowId: string;
+    datasetIds: string[];
+    version: number;
+    hash: string;
+    statuses: Array<"pass" | "fail" | "error">;
+    status?: string;
+    options?: Record<string, unknown>;
+    scorers?: Array<Record<string, unknown>>;
+    diff?: unknown;
+  }
 ): string {
   const id = `run_${crypto.randomUUID()}`;
+  const setId = input.datasetIds[0]!;
+  const fixtures = context.store.listEvalFixtures(setId);
+  for (let index = fixtures.length; index < input.statuses.length; index += 1) {
+    context.store.createEvalFixture({ id: `fx_${index}_${setId}`, datasetId: setId, name: `Case ${index + 1}`, input: {} });
+  }
+  const caseIds = context.store.listEvalFixtures(setId).map((fixture) => fixture.id);
   context.store.createEvalRun({
     id,
-    datasetId: input.datasetIds[0]!,
+    datasetId: setId,
     workflowId: input.workflowId,
     kind: "replay",
     status: "running",
@@ -139,15 +163,18 @@ function seedJob(
     candidate: { kind: "version", version: input.version, workflowHash: input.hash },
     workflowHash: input.hash,
     workflowVersion: input.version,
-    options: { mcpMode: "strict", maxCostUsd: 5, ...(input.options ?? {}) }
+    options: { mcpMode: "strict", maxCostUsd: 5, ...(input.options ?? {}) },
+    ...(input.scorers ? { scorers: input.scorers } : {})
   });
+  context.store.setEvalRunSetSnapshot(id, goldenSetSnapshots(input.datasetIds, (datasetId) => context.store.listEvalFixtures(datasetId)));
   input.statuses.forEach((status, index) => {
     context.store.recordEvalResult({
       id: `res_${index}_${id}`,
       runId: id,
-      fixtureId: `fx_${index}`,
+      fixtureId: caseIds[index]!,
       status,
-      score: { pass: status === "pass", details: [{ type: "status", pass: status === "pass", reason: status }] }
+      score: { pass: status === "pass", details: [{ type: "status", pass: status === "pass", reason: status }] },
+      diff: input.diff === undefined ? plainDiff : input.diff
     });
   });
   context.store.finalizeEvalRun({ id, status: (input.status ?? "completed") as "completed" });
@@ -298,7 +325,7 @@ describe("the release gate", () => {
     expect(history.releases.map((release) => release.verdict)).toEqual(["passed", "rollback", "overridden", "ungated"]);
     expect(auditTypes(context)).toEqual(expect.arrayContaining(["release.gate.updated", "release.blocked", "release.overridden", "release.rolled_back", "release.published"]));
     const state = (await call(context, "GET", "/api/workflows/wf-gate/release-state", builder.cookie)).json<{ state: Record<string, unknown> }>().state;
-    expect(state).toEqual({ draftVersion: v3, publishedVersion: v3, aheadBy: 0, gateEnabled: true, gateEnforced: false });
+    expect(state).toEqual({ draftVersion: v3, publishedVersion: v3, aheadBy: 0, gateEnabled: true, gateEnforced: false, productionRefused: false, canPublish: true, canEditGate: true });
   });
 
   it("re-judges a job under the policy in force at publish time", async () => {
@@ -430,8 +457,11 @@ describe("release requests in the approvals inbox", () => {
     const requester = await login(context, "builder", "requester");
     const lead = await login(context, "builder", "lead");
     const operator = await login(context, "operator", "ops");
-    const version = save(context, hookWorkflow("wf-approve", "approved"));
+    save(context, hookWorkflow("wf-approve", "before"));
+    // Turning the gate on publishes the saved version as the baseline.
     await enableGate(context, requester.cookie, "wf-approve", { requireApproval: true, approvers: { approverRoles: ["builder"] } });
+    expect(context.store.getPublishedVersion("wf-approve")).toBe(1);
+    const version = save(context, hookWorkflow("wf-approve", "approved"));
     const hash = await versionHash(context, requester.cookie, "wf-approve", version);
     const runId = seedJob(context, { workflowId: "wf-approve", datasetIds: ["set-wf-approve"], version, hash, statuses: ["pass", "pass", "pass"] });
     const asked = await call(context, "POST", "/api/workflows/wf-approve/publish", requester.cookie, { version });
@@ -440,7 +470,7 @@ describe("release requests in the approvals inbox", () => {
     expect(asked.json()).toMatchObject({ verdict: "needs_approval" });
     // Asking again returns the same pending request.
     expect((await call(context, "POST", "/api/workflows/wf-approve/publish", requester.cookie, { version })).json()).toMatchObject({ approvalRequestId });
-    expect(context.store.getPublishedVersion("wf-approve")).toBeNull();
+    expect(context.store.getPublishedVersion("wf-approve")).toBe(1);
 
     const items = (await call(context, "GET", "/api/approvals", lead.cookie)).json<{ items: Array<ReleaseApprovalRequestView> }>().items;
     const item = items.find((entry) => entry.id === approvalRequestId)!;
@@ -469,8 +499,9 @@ describe("release requests in the approvals inbox", () => {
     const context = await createTestContext();
     const requester = await login(context, "builder", "requester");
     const lead = await login(context, "builder", "lead");
-    const version = save(context, hookWorkflow("wf-blocked", "x"));
+    save(context, hookWorkflow("wf-blocked", "before"));
     await enableGate(context, requester.cookie, "wf-blocked", { approvers: { approverUsers: [lead.email] } });
+    const version = save(context, hookWorkflow("wf-blocked", "x"));
     const blocked = await call(context, "POST", "/api/workflows/wf-blocked/publish", requester.cookie, { version });
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json()).toMatchObject({ verdict: "blocked", canRequestApproval: true });
@@ -484,7 +515,7 @@ describe("release requests in the approvals inbox", () => {
     const rejected = await call(context, "POST", `/api/approvals/${id}/reject`, lead.cookie, { reason: "Fix the case first" });
     expect(rejected.statusCode, rejected.body).toBe(200);
     expect(rejected.json<{ request: ReleaseApprovalRequestView; release: null }>()).toMatchObject({ request: { status: "rejected", reason: "Fix the case first" }, release: null });
-    expect(context.store.getPublishedVersion("wf-blocked")).toBeNull();
+    expect(context.store.getPublishedVersion("wf-blocked")).toBe(1);
   });
 
   it("refuses an approver from another project and a stale request", async () => {
@@ -498,8 +529,9 @@ describe("release requests in the approvals inbox", () => {
     context.store.upsertCustomRole({ id: "read-team", projectId: "p-team", name: "Read only", permissions: ["workflow:read"] });
     context.store.upsertProjectRole({ userId: outsider.id, projectId: "p-team", role: "custom", customRoleId: "none-team" });
     context.store.upsertProjectRole({ userId: reader.id, projectId: "p-team", role: "custom", customRoleId: "read-team" });
-    const version = save(context, hookWorkflow("wf-team", "x", "p-team"));
+    save(context, hookWorkflow("wf-team", "before", "p-team"));
     await enableGate(context, requester.cookie, "wf-team", { requireApproval: true, approvers: { approverRoles: ["builder"] } });
+    const version = save(context, hookWorkflow("wf-team", "x", "p-team"));
     const hash = await versionHash(context, requester.cookie, "wf-team", version);
     seedJob(context, { workflowId: "wf-team", datasetIds: ["set-wf-team"], version, hash, statuses: ["pass", "pass", "pass"] });
     const id = (await call(context, "POST", "/api/workflows/wf-team/publish", requester.cookie, { version })).json<{ approvalRequestId: string }>().approvalRequestId;
@@ -514,7 +546,7 @@ describe("release requests in the approvals inbox", () => {
     expect(stale.statusCode).toBe(409);
     expect(stale.json<{ error: string }>().error).toMatch(/stale.*settings changed/);
     expect(context.store.getReleaseApprovalRequest(id)!.status).toBe("canceled");
-    expect(context.store.getPublishedVersion("wf-team")).toBeNull();
+    expect(context.store.getPublishedVersion("wf-team")).toBe(1);
 
     // Another version published meanwhile also makes a request stale.
     const id2 = (await call(context, "POST", "/api/workflows/wf-team/publish", requester.cookie, { version })).json<{ approvalRequestId: string }>().approvalRequestId;

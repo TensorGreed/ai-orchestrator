@@ -3190,6 +3190,10 @@ export class SqliteStore {
     // Phase 15.4 (migration 33) — release gate and publish. NULL published_version: the draft runs everywhere.
     this.ensureColumn("workflows", "published_version", "INTEGER");
     this.ensureColumn("workflow_versions", "pinned", "INTEGER NOT NULL", "0");
+    // What a replay job's golden sets held when it was queued, and which published version a production run ran.
+    this.ensureColumn("eval_runs", "set_snapshot_json", "TEXT");
+    this.ensureColumn("execution_history", "release_channel", "TEXT");
+    this.ensureColumn("execution_history", "release_version", "INTEGER");
     this.exec(`
       CREATE TABLE IF NOT EXISTS release_gates (
         workflow_id TEXT PRIMARY KEY,
@@ -3548,9 +3552,18 @@ export class SqliteStore {
         this.exec("DELETE FROM eval_runs WHERE workflow_id = ?", [id]);
       }
       if (hasTable("mcp_elicitations")) this.exec("DELETE FROM mcp_elicitations WHERE workflow_id = ?", [id]);
-      // Phase 15.4 — the gate, releases and release requests point at versions deleted above; the audit log keeps the trail.
-      for (const table of ["release_gates", "workflow_releases", "release_approval_requests"]) {
-        if (hasTable(table)) this.exec(`DELETE FROM ${table} WHERE workflow_id = ?`, [id]);
+      // Phase 15.4 — the release gate and the release history outlive the
+      // workflow: a workflow created again with this id inherits the gate
+      // (and, with it on, production refuses runs until a version is
+      // published through it). Pending release requests are canceled; their
+      // versions were deleted above.
+      if (hasTable("release_approval_requests")) {
+        const now = new Date().toISOString();
+        this.exec(
+          `UPDATE release_approval_requests SET status = 'canceled', decided_by = 'system', decided_at = ?, decision_reason = 'The workflow was deleted', updated_at = ?
+           WHERE workflow_id = ? AND status = 'pending'`,
+          [now, now, id]
+        );
       }
       if (legacyNamespaces.length > 0) {
         const placeholders = legacyNamespaces.map(() => "?").join(", ");
@@ -7470,12 +7483,81 @@ export class SqliteStore {
     });
   }
 
-  /** Newest replay jobs that tested exactly this workflow hash. */
-  listReplayRunIdsForHash(workflowId: string, workflowHash: string, limit = 20): string[] {
+  /** Every completed replay job that tested exactly this workflow hash, newest first. */
+  listReplayRunIdsForHash(workflowId: string, workflowHash: string): string[] {
     return this.queryAll<{ id: string }>(
-      `SELECT id FROM eval_runs WHERE kind = 'replay' AND workflow_id = ? AND workflow_hash = ? ORDER BY started_at DESC, id DESC LIMIT ?`,
-      [workflowId, workflowHash, Math.max(1, Math.min(200, limit))]
+      `SELECT id FROM eval_runs WHERE kind = 'replay' AND workflow_id = ? AND workflow_hash = ? AND status = 'completed' ORDER BY started_at DESC, id DESC`,
+      [workflowId, workflowHash]
     ).map((row) => toString(row.id));
+  }
+
+  /** Phase 15.4 — the per-set snapshot a replay job was queued against (set id -> hash). */
+  setEvalRunSetSnapshot(runId: string, snapshot: Record<string, string>): void {
+    this.exec(`UPDATE eval_runs SET set_snapshot_json = ? WHERE id = ?`, [JSON.stringify(snapshot), runId]);
+    this.persist();
+  }
+
+  getEvalRunSetSnapshot(runId: string): Record<string, string> | null {
+    const row = this.queryOne<{ set_snapshot_json: string | null }>(`SELECT set_snapshot_json FROM eval_runs WHERE id = ?`, [runId]);
+    if (!row?.set_snapshot_json) return null;
+    try {
+      const parsed = JSON.parse(toString(row.set_snapshot_json)) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Phase 15.4 — the channel and published version a finished run ran on (null version: the draft). */
+  setExecutionRelease(executionId: string, channel: "production" | "draft", version: number | null): void {
+    this.exec(`UPDATE execution_history SET release_channel = ?, release_version = ? WHERE id = ?`, [channel, version, executionId]);
+    this.persist();
+  }
+
+  getExecutionRelease(executionId: string): { channel: "production" | "draft"; version: number | null } | null {
+    const row = this.queryOne<{ release_channel: string | null; release_version: number | null }>(`SELECT release_channel, release_version FROM execution_history WHERE id = ?`, [executionId]);
+    if (!row || !row.release_channel) return null;
+    return { channel: row.release_channel === "production" ? "production" : "draft", version: nullableNumber(row.release_version) };
+  }
+
+  /** The hashes `version` had when it was released (any release, rollbacks included). */
+  listReleasedVersionHashes(workflowId: string, version: number): string[] {
+    return this.queryAll<{ workflow_hash: string }>(`SELECT DISTINCT workflow_hash FROM workflow_releases WHERE workflow_id = ? AND version = ?`, [workflowId, version]).map((row) =>
+      toString(row.workflow_hash)
+    );
+  }
+
+  /** The release gates that are switched on. */
+  listEnabledReleaseGateWorkflowIds(): string[] {
+    return this.queryAll<{ workflow_id: string }>(`SELECT workflow_id FROM release_gates WHERE enabled = 1`).map((row) => toString(row.workflow_id));
+  }
+
+  /**
+   * Closes every pending release request whose time ran out, so the inbox's
+   * pending and decided filters (and their limits) agree with the clock.
+   * Returns the requests it closed.
+   */
+  timeOutExpiredReleaseApprovalRequests(nowIso: string): ReleaseApprovalRequestRecord[] {
+    const expired = this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM release_approval_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+      [nowIso]
+    ).map(mapReleaseApprovalRequestRow);
+    if (expired.length === 0) return [];
+    this.exec(
+      `UPDATE release_approval_requests SET status = 'timed_out', decided_by = 'system', decided_at = ?, decision_reason = 'Nobody decided before the release request expired', updated_at = ?
+       WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+      [nowIso, nowIso, nowIso]
+    );
+    return expired;
+  }
+
+  /** Pending requests for this version and hash, newest first. */
+  listPendingReleaseApprovalRequests(workflowId: string, version: number, workflowHash: string): ReleaseApprovalRequestRecord[] {
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM release_approval_requests WHERE workflow_id = ? AND version = ? AND workflow_hash = ? AND status = 'pending' ORDER BY created_at DESC`,
+      [workflowId, version, workflowHash]
+    ).map(mapReleaseApprovalRequestRow);
   }
 
   insertReleaseApprovalRequest(record: ReleaseApprovalRequestRecord): ReleaseApprovalRequestRecord {
@@ -7520,19 +7602,19 @@ export class SqliteStore {
     return row ? mapReleaseApprovalRequestRow(row) : null;
   }
 
-  findPendingReleaseApprovalRequest(workflowId: string, version: number, workflowHash: string): ReleaseApprovalRequestRecord | null {
-    const row = this.queryOne<Record<string, unknown>>(
-      `SELECT * FROM release_approval_requests WHERE workflow_id = ? AND version = ? AND workflow_hash = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
-      [workflowId, version, workflowHash]
-    );
-    return row ? mapReleaseApprovalRequestRow(row) : null;
-  }
-
-  listReleaseApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number; scope?: ApprovalReadScope }): ReleaseApprovalRequestRecord[] {
+  listReleaseApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number; scope?: ApprovalReadScope; now?: string }): ReleaseApprovalRequestRecord[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
-    if (filter.status === "pending") clauses.push(`status = 'pending'`);
-    if (filter.status === "decided") clauses.push(`status <> 'pending'`);
+    // Expiry applies in SQL too, so an expired request is never pending (and counts against the decided limit, not the pending one).
+    const now = filter.now ?? new Date().toISOString();
+    if (filter.status === "pending") {
+      clauses.push(`status = 'pending' AND (expires_at IS NULL OR expires_at > ?)`);
+      params.push(now);
+    }
+    if (filter.status === "decided") {
+      clauses.push(`(status <> 'pending' OR (expires_at IS NOT NULL AND expires_at <= ?))`);
+      params.push(now);
+    }
     if (filter.workflowId) {
       clauses.push(`workflow_id = ?`);
       params.push(filter.workflowId);

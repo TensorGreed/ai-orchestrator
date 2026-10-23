@@ -490,6 +490,8 @@ export interface WorkflowExecutionState {
    * sub-workflows. Written and read only by the API; absent means draft.
    */
   releaseChannel?: "production" | "draft";
+  /** Phase 15.4 — the published version a production run started on (null: none was published), for its history. */
+  releaseVersion?: number | null;
 }
 
 /**

@@ -1573,6 +1573,9 @@ export const MIGRATIONS: Migration[] = [
     up: `
       ALTER TABLE workflows ADD COLUMN IF NOT EXISTS published_version INTEGER;
       ALTER TABLE workflow_versions ADD COLUMN IF NOT EXISTS pinned INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS set_snapshot_json TEXT;
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS release_channel TEXT;
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS release_version INTEGER;
       CREATE TABLE IF NOT EXISTS release_gates (
         workflow_id TEXT PRIMARY KEY,
         enabled INTEGER NOT NULL DEFAULT 0,
@@ -1637,6 +1640,9 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_workflow_releases_workflow;
       DROP TABLE IF EXISTS workflow_releases;
       DROP TABLE IF EXISTS release_gates;
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS release_version;
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS release_channel;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS set_snapshot_json;
       ALTER TABLE workflow_versions DROP COLUMN IF EXISTS pinned;
       ALTER TABLE workflows DROP COLUMN IF EXISTS published_version;
     `

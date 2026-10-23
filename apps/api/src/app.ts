@@ -1739,6 +1739,10 @@ export function createApp(
     }
   };
 
+  /** Phase 15.4 — production runs in flight and the published version each runs (null: no published version, the draft). */
+  // Bounded: a run whose history is never persisted must not grow it forever.
+  const productionRunVersions = new Map<string, number | null>();
+
   const runWorkflowExecution = async (input: {
     workflow: Workflow;
     startNodeId?: string;
@@ -1803,8 +1807,16 @@ export function createApp(
      * Default `draft`.
      */
     channel?: ReleaseChannel;
+    /** The published version a production run runs (default: the version the resolver returned this workflow object as). */
+    releaseVersion?: number | null;
   }) => {
     const channel: ReleaseChannel = input.channel ?? "draft";
+    const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
+    // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
+    if (input.executionId && channel === "production" && !input.replay) {
+      if (productionRunVersions.size >= 5_000) productionRunVersions.delete(productionRunVersions.keys().next().value!);
+      productionRunVersions.set(input.executionId, releaseVersion);
+    }
     const controller = input.executionId
       ? registerActiveExecution({
           executionId: input.executionId,
@@ -1931,8 +1943,10 @@ export function createApp(
               triggeredBy: paused.triggeredBy,
               startedAt: paused.startedAt,
               // Approved tool results answer a re-run, so they are stored encrypted, not redacted.
-              state: sealToolResults(secretService, channel === "production" ? { ...paused.state, releaseChannel: "production" } : paused.state)
+              state: sealToolResults(secretService, channel === "production" ? { ...paused.state, releaseChannel: "production", releaseVersion } : paused.state)
             });
+            // The paused state carries the version now; the resume records it again.
+            productionRunVersions.delete(paused.executionId);
             // Phase 11.2 — who may decide, when it expires; audited and notified.
             if (!approvalsSupported) return;
             try {
@@ -2237,6 +2251,16 @@ export function createApp(
       triggerType: input.triggerType,
       status: input.result.status
     });
+
+    const ranOn = productionRunVersions.get(input.executionId);
+    productionRunVersions.delete(input.executionId);
+    if (persisted && ranOn !== undefined && releaseService.available) {
+      try {
+        store.setExecutionRelease(input.executionId, "production", ranOn);
+      } catch (error) {
+        app.log.warn({ executionId: input.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record the published version a run ran");
+      }
+    }
 
     if (persisted) {
       deleteWorkflowExecutionSafely(input.executionId, input.workflow.id);
@@ -2920,8 +2944,8 @@ export function createApp(
   // and a placement that exists (400 otherwise).
   const workflowSaveDenial = (
     user: SafeUser,
-    workflow: { id: string; projectId?: string | null; folderId?: string | null }
-  ): { ok: false; status: 400 | 403 | 404; error: string } | null => {
+    workflow: { id: string; projectId?: string | null; folderId?: string | null; nodes?: Workflow["nodes"] }
+  ): { ok: false; status: 400 | 403 | 404 | 409; error: string } | null => {
     const existing = store.getWorkflow(workflow.id);
     if (existing) {
       const access = runAccess.workflow(user, existing.id, "workflow:write");
@@ -2930,7 +2954,13 @@ export function createApp(
     const target = runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
     if (!target.ok) return target;
     const placement = workflowPlacementError(workflow, existing);
-    return placement ? { ok: false, status: 400, error: placement } : null;
+    if (placement) return { ok: false, status: 400, error: placement };
+    // Phase 15.4 — a production path of a published or gated workflow cannot be taken over by another one.
+    if (Array.isArray(workflow.nodes)) {
+      const conflict = releaseService.claimConflict(user, workflow as Workflow);
+      if (conflict) return { ok: false, status: 409, error: conflict };
+    }
+    return null;
   };
   const denyRunAccess = (reply: FastifyReply, denial: { status: number; error: string }) => {
     reply.code(denial.status);
@@ -3599,7 +3629,8 @@ export function createApp(
           resumeState: { ...state, workflow: resumeWorkflow },
           approvalDecision,
           // The run resumes on the version it started with (the paused state's workflow), on its channel.
-          channel: state.releaseChannel === "production" ? "production" : "draft"
+          channel: state.releaseChannel === "production" ? "production" : "draft",
+          releaseVersion: typeof state.releaseVersion === "number" ? state.releaseVersion : null
         });
         persistExecutionHistory({
           executionId: job.executionId,
@@ -3710,6 +3741,11 @@ export function createApp(
     onPublished: (workflowId) => {
       schedulerService?.reloadWorkflow(workflowId);
       triggerService?.reloadWorkflow(workflowId);
+    },
+    snapshotDraft: (workflowId, actor) => {
+      const draft = store.getWorkflow(workflowId);
+      if (!draft) throw new Error("Workflow not found");
+      return workflowVersionService.snapshot({ workflow: draft, createdBy: actor.id, changeNote: "baseline for the release gate" }).version;
     },
     appPublicUrl: config.APP_PUBLIC_URL,
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
@@ -5221,7 +5257,8 @@ export function createApp(
     canUseSecret: canUseJudgeSecret,
     audit: (request, user, event) => audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
-    strictIsolation: config.PROJECT_ISOLATION === "strict"
+    strictIsolation: config.PROJECT_ISOLATION === "strict",
+    goldenSetChangeDenial: (user, datasetId, change) => releaseService.goldenSetChangeDenial(user, datasetId, change)
   });
 
   app.get("/widget.js", async (_request, reply) => {
@@ -7093,6 +7130,9 @@ export function createApp(
 
     const access = runAccess.workflow(user, request.params.id, "workflow:delete");
     if (!access.ok) return denyRunAccess(reply, access);
+    // Phase 15.4 — the gate and release history outlive the workflow; an enforced gate's workflow is the admin's to delete.
+    const releaseDenial = releaseService.deleteDenial(user, request.params.id);
+    if (releaseDenial) return denyRunAccess(reply, { status: 403, error: releaseDenial });
 
     try {
       const deleted = store.deleteWorkflow(request.params.id);
@@ -7147,6 +7187,8 @@ export function createApp(
     duplicatedWorkflow.id = duplicateId;
     duplicatedWorkflow.name = duplicateName;
     duplicatedWorkflow.workflowVersion = 1;
+    const duplicateDenial = workflowSaveDenial(user, duplicatedWorkflow);
+    if (duplicateDenial) return denyRunAccess(reply, duplicateDenial);
 
     const savedWorkflow = store.upsertWorkflow(duplicatedWorkflow, { createdBy: user.id });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
@@ -7768,7 +7810,14 @@ export function createApp(
 
     const access = runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
+    // Phase 15.4 — an integration calling with an API key is production traffic (the published version);
+    // a person in the editor runs the draft.
+    const executeChannel: ReleaseChannel = authenticateApiKey(request.headers as Record<string, unknown>) ? "production" : "draft";
+    const workflow = executeChannel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;
+    if (!workflow) {
+      reply.code(409);
+      return { error: "This workflow's release gate is on but no published version can be loaded, so production runs are refused until a version is published." };
+    }
 
     // Phase 8.3 — pre-execution budget check. Block-action budgets reject
     // here (HTTP 402); warn-action budgets only fire post-execution.
@@ -7826,8 +7875,8 @@ export function createApp(
     // Phase 10.8 — "Record MCP calls": every MCP call of the run goes into a cassette.
     const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
     const executed = await runWorkflowExecution({
-      // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
-      channel: "draft",
+      // Phase 15.4: API-key callers run the published version; the editor runs the draft.
+      channel: executeChannel,
       mcpPlan,
       policyActor: user,
       workflow,
@@ -7879,7 +7928,14 @@ export function createApp(
 
     const access = runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
+    // Phase 15.4 — an integration calling with an API key is production traffic (the published version);
+    // a person in the editor runs the draft.
+    const executeChannel: ReleaseChannel = authenticateApiKey(request.headers as Record<string, unknown>) ? "production" : "draft";
+    const workflow = executeChannel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;
+    if (!workflow) {
+      reply.code(409);
+      return { error: "This workflow's release gate is on but no published version can be loaded, so production runs are refused until a version is published." };
+    }
 
     const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -7964,8 +8020,8 @@ export function createApp(
       });
       const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
       const executed = await runWorkflowExecution({
-        // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
-        channel: "draft",
+        // Phase 15.4: API-key callers run the published version; the editor runs the draft.
+        channel: executeChannel,
         mcpPlan,
         policyActor: user,
         workflow,
@@ -8379,7 +8435,17 @@ export function createApp(
       return { error: "Only failed or canceled executions can be retried from history" };
     }
 
-    const workflow = store.getWorkflow(sourceExecution.workflowId);
+    // Phase 15.4 — a retry runs what the failed run ran: a production run's published version, on the production channel.
+    const ranOn = releaseService.available ? store.getExecutionRelease(sourceExecution.id) : null;
+    const retryChannel: ReleaseChannel = ranOn?.channel === "production" ? "production" : "draft";
+    if (retryChannel === "production" && ranOn?.version != null && !store.getWorkflowVersion(sourceExecution.workflowId, ranOn.version)) {
+      reply.code(409);
+      return { error: `The failed run ran version ${ranOn.version}, which no longer exists, so it cannot be retried as it ran.` };
+    }
+    const workflow =
+      retryChannel === "production" && ranOn?.version != null
+        ? releaseService.versionWorkflow(sourceExecution.workflowId, ranOn.version)
+        : store.getWorkflow(sourceExecution.workflowId);
     if (!workflow) {
       reply.code(404);
       return { error: "Workflow not found" };
@@ -8416,8 +8482,9 @@ export function createApp(
     });
 
     const result = await runWorkflowExecution({
-      // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
-      channel: "draft",
+      // Phase 15.4: the channel and version the failed run ran on.
+      channel: retryChannel,
+      ...(retryChannel === "production" ? { releaseVersion: ranOn?.version ?? null } : {}),
       policyActor: user,
       workflow,
       startNodeId: executionPayload.startNodeId,

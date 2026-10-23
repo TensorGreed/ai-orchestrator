@@ -3,8 +3,10 @@ import {
   aggregateReleaseRepeats,
   defaultReleaseGate,
   judgeReleaseGate,
+  releaseGateAdminOnlyChanges,
   releaseGateLoosening,
   releaseGatePolicySchema,
+  releaseScorersMatch,
   releaseGateSettingsSchema,
   releasePublishInputSchema,
   type ReleaseGateCase,
@@ -167,6 +169,7 @@ describe("gate settings", () => {
       enabled: false,
       datasetIds: [],
       policy: { minPassRate: 0.5, maxRegressions: 2, errorsCountAsFailures: false, noNewGuardBlocks: false, minCases: 1, maxRecordingAgeDays: 90 },
+      candidateOptions: { mcpMode: "lenient" },
       approvers: { approverRoles: ["admin", "builder"], allowSelfApproval: true }
     });
     const reasons = releaseGateLoosening(before, looser);
@@ -187,6 +190,62 @@ describe("gate settings", () => {
     ]) {
       expect(reasons.join("\n")).toContain(fragment);
     }
+  });
+});
+
+describe("Phase 15.4 review fixes", () => {
+  const settings = (input: Record<string, unknown>) => releaseGateSettingsSchema.parse({ enabled: true, datasetIds: ["set_a"], ...input });
+  const cases = [passing("c1"), passing("c2"), passing("c3")];
+
+  it("replays MCP strictly unless the gate says otherwise (L3)", () => {
+    expect(judgeReleaseGate(evidence(cases, { mcpMode: "lenient" }), policy(), { expected, now: NOW }).reasons.join()).toMatch(/strictly/);
+    expect(judgeReleaseGate(evidence(cases, { mcpMode: "lenient" }), policy(), { expected: { ...expected, mcpMode: "lenient" }, now: NOW }).verdict).toBe("passed");
+  });
+
+  it("requires releaseEligible when the job carries it, and judges by its own checks when it does not (contract addendum)", () => {
+    const refused = judgeReleaseGate(evidence(cases, { releaseEligible: false, releaseIneligibleReasons: ["guard profile override"] }), policy(), { expected, now: NOW });
+    expect(refused.verdict).toBe("blocked");
+    expect(refused.reasons.join()).toMatch(/not eligible to prove a release \(guard profile override\)/);
+    expect(judgeReleaseGate(evidence(cases, { releaseEligible: true }), policy(), { expected, now: NOW }).verdict).toBe("passed");
+    expect(judgeReleaseGate(evidence(cases), policy(), { expected, now: NOW }).verdict).toBe("passed");
+  });
+
+  it("refuses a job judged with other scorers or over sets that changed since it was queued (H2, M4)", () => {
+    expect(judgeReleaseGate(evidence(cases, { scorerMismatch: "ran with its own scorers (regex)" }), policy(), { expected, now: NOW }).reasons.join()).toMatch(/its own scorers \(regex\).*the gate judges with its own scorers/);
+    expect(judgeReleaseGate(evidence(cases, { staleSets: ["set_a"] }), policy(), { expected, now: NOW }).reasons.join()).toMatch(/set_a changed after replay job/);
+    expect(releaseScorersMatch(undefined, null)).toBe(true);
+    expect(releaseScorersMatch([], [])).toBe(true);
+    expect(releaseScorersMatch(undefined, [{ type: "status" }])).toBe(false);
+    expect(releaseScorersMatch([{ type: "regex", pattern: "a" }], [{ pattern: "a", type: "regex" }])).toBe(true);
+  });
+
+  it("counts a case without a complete diff as an error when the policy has cost, latency or guard limits (L5)", () => {
+    const blind = [passing("c1"), passing("c2"), passing("c3", { diffMissing: true })];
+    const judged = judgeReleaseGate(evidence(blind), policy(), { expected, now: NOW });
+    expect(judged.verdict).toBe("blocked");
+    expect(judged.stats).toMatchObject({ pass: 2, error: 1 });
+    // Without any such limit the diff does not matter.
+    expect(judgeReleaseGate(evidence(blind), policy({ noNewGuardBlocks: false }), { expected, now: NOW }).verdict).toBe("passed");
+  });
+
+  it("treats adding approvers to a gate without any as widening, and every approver or job-setting change as admin-only (H1, M2)", () => {
+    const base = settings({ approvers: null });
+    const withSelf = settings({ approvers: { approverUsers: ["me@example.com"], allowSelfApproval: true } });
+    expect(releaseGateLoosening(base, withSelf)).toEqual(expect.arrayContaining(["widens who may approve", "allows self-approval"]));
+    const restricted = settings({ approvers: { approverRoles: ["admin"] } });
+    // Narrowing approvers is not loosening, but it is still the admin's call on an enforced gate.
+    const narrower = settings({ approvers: { approverRoles: ["admin"], approverUsers: ["lead@example.com"] } });
+    expect(releaseGateLoosening(narrower, restricted)).toEqual([]);
+    expect(releaseGateAdminOnlyChanges(narrower, restricted)).toEqual(["changes who may approve"]);
+    expect(releaseGateAdminOnlyChanges(restricted, restricted)).toEqual([]);
+    for (const candidateOptions of [{ repeats: 5, aggregate: "any" }, { aggregate: "majority" }, { compare: "recording" }, { mcpMode: "lenient" }, { scorers: [{ type: "status" }] }, { maxCostUsd: 99 }]) {
+      const after = settings({ candidateOptions });
+      expect(releaseGateAdminOnlyChanges(settings({ candidateOptions: { compare: "baseline_rerun" } }), after).length, JSON.stringify(candidateOptions)).toBeGreaterThan(0);
+    }
+    expect(releaseGateLoosening(settings({}), settings({ candidateOptions: { repeats: 5, aggregate: "any" } }))).toEqual(expect.arrayContaining(["accepts a case that passes on fewer repeats", "gives a flaky case more tries to pass"]));
+    expect(releaseGateLoosening(settings({ candidateOptions: { compare: "baseline_rerun" } }), settings({}))).toContain("stops rerunning the baseline");
+    // Unset MCP mode is strict: naming strict changes nothing.
+    expect(releaseGateAdminOnlyChanges(settings({}), settings({ candidateOptions: { mcpMode: "strict" } }))).toEqual([]);
   });
 });
 

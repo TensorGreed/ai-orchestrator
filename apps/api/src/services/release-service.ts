@@ -27,12 +27,37 @@
  * the version's hash changed (the workflow moved project), the gate's
  * settings changed, or another version was published.
  *
+ * What only an admin may do on an enforced gate: turn it off or loosen it,
+ * change who approves (approvers, self-approval, the request timeout) or the
+ * replay job settings it accepts (candidate options, scorers included),
+ * remove cases from or change case scorers in its golden sets, roll back,
+ * and delete the workflow. Allowing self-approval is an admin's call on
+ * every gate; without it neither the requester nor the person who saved the
+ * version may approve the release.
+ *
+ * The gate decides what passing means: a job counts only when it ran with
+ * the gate's own scorers and candidate options, over golden sets that still
+ * hold what they held when the job was queued (the set snapshot), and, when
+ * the job says so itself, `releaseEligible` is true. Only the cases of the
+ * gate's own sets are judged.
+ *
+ * Turning a gate on publishes the current saved version as the baseline
+ * (verdict `ungated`) when nothing is published yet, so production keeps
+ * running what it ran. A gate that is on with no published version that
+ * loads (the workflow was deleted and created again: the gate and the
+ * release history outlive it) makes production refuse runs until a version
+ * is published through the gate. Production routing keys (webhook, form
+ * and MCP trigger paths) of a workflow with a published version or a gate
+ * cannot be claimed by another workflow, and publishing or turning a gate on
+ * is refused while another workflow shares one of them.
+ *
  * Every gate change, publish, override, rollback and release-request event is
  * audited (category `release`). Release tables need the SQLite store; on
  * Postgres the routes answer 501 and every channel runs the draft.
  */
 
 import { randomUUID } from "node:crypto";
+import { goldenSetSnapshots } from "./release-snapshot.js";
 import {
   RELEASE_APPROVAL_REQUEST_PREFIX,
   aggregateReleaseRepeats,
@@ -40,6 +65,8 @@ import {
   defaultReleaseGate,
   judgeReleaseGate,
   releaseApproversSchema,
+  releaseGateAdminOnlyChanges,
+  releaseScorersMatch,
   releaseCandidateOptionsSchema,
   releaseGateLoosening,
   releaseGatePolicySchema,
@@ -110,6 +137,8 @@ export interface ReleaseServiceOptions {
   redact: (value: string) => string;
   /** Called after the published version moved: schedules and app triggers re-register from it. */
   onPublished: (workflowId: string) => void;
+  /** Saves the draft as a new version (the baseline a gate publishes when it is turned on); returns its number. */
+  snapshotDraft: (workflowId: string, actor: SafeUser) => number;
   appPublicUrl?: string;
   logger?: { warn: (message: string, fields?: Record<string, unknown>) => void };
   now?: () => Date;
@@ -121,6 +150,8 @@ export type PublishOutcome =
   | { status: 409; verdict: "blocked"; reasons: string[]; replayRunId?: string; canRequestApproval: boolean };
 
 const SELF_APPROVAL_MESSAGE = "You asked for this release, and this gate does not allow approving your own release.";
+const AUTHOR_APPROVAL_MESSAGE = "You saved this version, and this gate does not allow approving a release of your own change.";
+const BASELINE_REASON = "Baseline: the release gate was turned on, so the version production already ran is published as the starting point.";
 const SAFE_MCP_SERVER_MODES = new Set(["strict", "lenient", "live_read_only"]);
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -150,9 +181,9 @@ export function replayJobAllowsLiveWrites(run: Pick<EvalRunView, "options" | "ca
 }
 
 /** Candidate fields a plain job carries; `workflow` is an inline candidate, whose content the hash covers. */
-const PLAIN_CANDIDATE_KEYS = new Set(["kind", "version", "workflowHash", "workflow"]);
-/** Job options that do not change what is tested (the budget), or that the gate's candidate options name. */
-const NEUTRAL_OPTION_KEYS = new Set(["maxCostUsd"]);
+const PLAIN_CANDIDATE_KEYS = new Set(["kind", "version", "workflowHash", "workflow", "baseHash", "releaseEligible", "releaseIneligibleReasons", "ineligibleReasons"]);
+/** Job options that do not change what is tested (the budget, the job's own eligibility verdict), or that the judge checks itself (MCP mode). */
+const NEUTRAL_OPTION_KEYS = new Set(["maxCostUsd", "releaseEligible", "releaseIneligibleReasons", "ineligibleReasons", "mcpMode"]);
 const GATE_OPTION_DEFAULTS: Record<string, unknown> = { compare: "recording", repeats: 1, aggregate: "all", models: "live" };
 
 function isEmptyValue(value: unknown): boolean {
@@ -168,7 +199,10 @@ function isEmptyValue(value: unknown): boolean {
  * job's candidate hash, so a job run on the unchanged version under weaker
  * settings would otherwise pass as proof. Every field is read defensively:
  * a field this release does not know counts against the job, and one the
- * gate names counts only when its value differs from the gate's.
+ * gate names counts only when its value differs from the gate's. A
+ * `baseline_rerun` comparison is always acceptable: it is the stricter one,
+ * and the only one that passes once a golden run is too old (decision 3).
+ * The MCP mode is the judge's own check (strict by default).
  */
 export function replayJobOverrideFindings(run: Pick<EvalRunView, "options" | "candidate">, gateOptions: ReleaseCandidateOptions): string[] {
   const findings = new Set<string>();
@@ -184,11 +218,7 @@ export function replayJobOverrideFindings(run: Pick<EvalRunView, "options" | "ca
       findings.add(`overrides (${Object.keys(asRecord(value)).join(", ") || "unreadable"})`);
       continue;
     }
-    if (key === "mcpMode") {
-      // A strict gate's own check names a lenient job; here only a mode other than the gate's counts.
-      if (gate.mcpMode !== undefined && value !== gate.mcpMode) findings.add(`mcpMode ${String(value)}`);
-      continue;
-    }
+    if (key === "compare" && value === "baseline_rerun") continue;
     if (key in GATE_OPTION_DEFAULTS) {
       const expected = gate[key] ?? GATE_OPTION_DEFAULTS[key];
       if (value !== expected) findings.add(`${key} ${String(value)}`);
@@ -200,7 +230,53 @@ export function replayJobOverrideFindings(run: Pick<EvalRunView, "options" | "ca
   return [...findings];
 }
 
+/** A production routing key: what a request names to reach a workflow without its id. */
+export interface ProductionRoutingKey {
+  key: string;
+  label: string;
+}
+
+function routingPath(value: unknown, fallback: string): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  return (raw || fallback).replace(/^\/+/, "").replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * The webhook, form and MCP-trigger paths a workflow answers on. Webhooks
+ * count by path whatever their method, as `/webhook/:path` routing matches
+ * the path first; an empty path falls back to the node id, as routing does.
+ */
+export function productionRoutingKeys(workflow: Pick<Workflow, "nodes">): ProductionRoutingKey[] {
+  const keys = new Map<string, string>();
+  for (const node of workflow.nodes ?? []) {
+    const config = asRecord(node.config);
+    if (node.type === "webhook_input") {
+      const path = routingPath(config.path, node.id);
+      keys.set(`webhook:${path}`, `Webhook path "${path}"`);
+    } else if (node.type === "form_trigger" && typeof config.path === "string" && config.path.trim()) {
+      keys.set(`form:${config.path.trim()}`, `Form path "${config.path.trim()}"`);
+    } else if (node.type === "mcp_server_trigger" && typeof config.path === "string" && config.path.trim()) {
+      keys.set(`mcp:${config.path.trim()}`, `MCP trigger path "${config.path.trim()}"`);
+    }
+  }
+  return [...keys].map(([key, label]) => ({ key, label }));
+}
+
+export interface RoutingConflict {
+  key: string;
+  label: string;
+  workflowId: string;
+}
+
+function sameIdentity(a: { id?: string | null; email?: string | null }, b: { id?: string | null; email?: string | null }): boolean {
+  if (a.id && b.id && a.id === b.id) return true;
+  return Boolean(a.email && b.email && a.email.toLowerCase() === b.email.toLowerCase());
+}
+
 export class ReleaseService {
+  /** The published version each resolved production workflow object came from, for the run's history (retry runs it again). */
+  private readonly versions = new WeakMap<Workflow, number>();
+
   constructor(private readonly options: ReleaseServiceOptions) {}
 
   get available(): boolean {
@@ -238,17 +314,36 @@ export class ReleaseService {
     const draft = this.store.getWorkflow(workflowId);
     if (!draft || channel === "draft" || !this.options.available) return draft;
     const published = this.store.getPublishedVersion(workflowId);
-    if (published === null) return draft;
+    if (published === null) {
+      // A gate that is on always has a published version, except for a workflow created again under a gated id: fail closed.
+      if (this.store.getReleaseGate(workflowId)?.enabled) {
+        this.options.logger?.warn("The release gate is on but no version is published; production traffic is refused", { workflowId });
+        return null;
+      }
+      return draft;
+    }
+    return this.versionWorkflow(workflowId, published);
+  }
+
+  /** A saved version as production runs it, remembered as that version for the run's history; null when it cannot load. */
+  versionWorkflow(workflowId: string, version: number): Workflow | null {
     try {
-      return this.options.resolveVersion(workflowId, published);
+      const workflow = this.options.resolveVersion(workflowId, version);
+      this.versions.set(workflow, version);
+      return workflow;
     } catch (error) {
       this.options.logger?.warn("The published version of a workflow could not be loaded; production traffic is refused", {
         workflowId,
-        version: published,
+        version,
         error: error instanceof Error ? error.message : String(error)
       });
       return null;
     }
+  }
+
+  /** The published version a workflow object returned by `resolveRunnableWorkflow` is, or null for a draft. */
+  versionOf(workflow: Workflow): number | null {
+    return this.versions.get(workflow) ?? null;
   }
 
   /** The published version of a workflow, or null (gate off: the draft runs everywhere). */
@@ -262,7 +357,16 @@ export class ReleaseService {
     const publishedVersion = this.publishedVersion(workflowId);
     const gate = this.options.available ? this.store.getReleaseGate(workflowId) : null;
     const aheadBy = publishedVersion !== null && draftVersion !== null ? Math.max(0, draftVersion - publishedVersion) : 0;
-    return { draftVersion, publishedVersion, aheadBy, gateEnabled: gate?.enabled ?? false, gateEnforced: gate?.enforced ?? false };
+    return {
+      draftVersion,
+      publishedVersion,
+      aheadBy,
+      gateEnabled: gate?.enabled ?? false,
+      gateEnforced: gate?.enforced ?? false,
+      productionRefused: Boolean(gate?.enabled) && (publishedVersion === null || this.resolveRunnableWorkflow(workflowId, "production") === null),
+      canPublish: this.options.access(user, workflowId, "workflow:publish").ok,
+      canEditGate: this.options.access(user, workflowId, "workflow:write").ok
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -297,9 +401,14 @@ export class ReleaseService {
 
   /**
    * Saves the gate. Builders (`workflow:write`) configure an unenforced gate;
-   * only admins set or clear `enforced`, and on an enforced gate builders may
-   * not disable or loosen anything (403 with the reasons). Every golden set
-   * must be this workflow's.
+   * only admins set or clear `enforced`, allow self-approval, or make an
+   * admin-only change to an enforced gate (`releaseGateAdminOnlyChanges`:
+   * 403 with the reasons). Every golden set must be this workflow's.
+   *
+   * Turning the gate on is refused while another workflow shares one of
+   * this workflow's production paths, and, when nothing is published yet,
+   * publishes the current saved version as the baseline (verdict `ungated`),
+   * saving the draft as a version first when it differs from the newest one.
    */
   updateGate(user: SafeUser, workflowId: string, input: ReleaseGateSettingsInput): ReleaseGateView {
     this.requireAvailable();
@@ -311,15 +420,42 @@ export class ReleaseService {
     const isAdmin = user.role === "admin";
     const enforced = next.enforced ?? current.enforced;
     if (enforced !== current.enforced && !isAdmin) throw new ReleaseError("Only admins can enforce a gate or lift enforcement", 403);
+    if (!isAdmin && next.approvers?.allowSelfApproval && !current.approvers?.allowSelfApproval) {
+      throw new ReleaseError("Only admins can allow self-approval on a release gate", 403);
+    }
     if (current.enforced && !isAdmin) {
-      const loosening = releaseGateLoosening(current, next);
-      if (loosening.length > 0) {
-        throw new ReleaseError(`This gate is enforced: only admins can loosen it (the change ${loosening.join(", ")})`, 403, { loosening });
+      const changes = releaseGateAdminOnlyChanges(current, next);
+      if (changes.length > 0) {
+        this.options.audit({
+          category: "release",
+          eventType: "release.gate.update_refused",
+          action: "update",
+          outcome: "denied",
+          actor: { userId: user.id, email: user.email, type: "user" },
+          resourceType: "workflow",
+          resourceId: workflowId,
+          projectId: this.projectOf(workflowId),
+          metadata: { changes }
+        });
+        throw new ReleaseError(`This gate is enforced: only admins can make this change (it ${changes.join(", ")})`, 403, { loosening: changes });
       }
     }
     for (const datasetId of next.datasetIds) {
       const dataset = this.store.getEvalDataset(datasetId);
       if (!dataset || dataset.workflowId !== workflowId) throw new ReleaseError(`Golden set ${datasetId} is not one of this workflow's golden sets`, 400);
+    }
+    const publishedVersion = this.store.getPublishedVersion(workflowId);
+    const enabling = next.enabled && !current.enabled;
+    if (enabling) {
+      const draft = this.store.getWorkflow(workflowId);
+      const production = publishedVersion !== null ? this.versionWorkflow(workflowId, publishedVersion) : null;
+      this.assertNoRoutingConflicts(user, workflowId, [draft, production], "turn the release gate on");
+    }
+    let baseline: { version: number; workflowHash: string } | null = null;
+    if (enabling && publishedVersion === null) {
+      if (!this.store.getWorkflow(workflowId)) throw new ReleaseError("Workflow not found", 404);
+      const version = this.baselineVersion(user, workflowId);
+      baseline = { version, workflowHash: this.versionCandidate(workflowId, version).workflowHash };
     }
     const saved = this.store.upsertReleaseGate({
       workflowId,
@@ -347,14 +483,171 @@ export class ReleaseService {
         enabled: view.enabled,
         enforced: view.enforced,
         datasetIds: view.datasetIds,
+        candidateOptions: { ...view.candidateOptions, scorers: view.candidateOptions.scorers?.map((scorer) => scorer.type) },
         policy: view.policy,
         requireApproval: view.requireApproval,
         approvers: view.approvers ? { roles: view.approvers.approverRoles, users: view.approvers.approverUsers.length, allowSelfApproval: view.approvers.allowSelfApproval } : null,
         loosened: releaseGateLoosening(current, next),
-        enforcedChanged: enforced !== current.enforced
+        enforcedChanged: enforced !== current.enforced,
+        baselineVersion: baseline?.version ?? null
       }
     });
+    if (baseline) {
+      this.commitRelease({
+        actor: user,
+        workflowId,
+        version: baseline.version,
+        workflowHash: baseline.workflowHash,
+        verdict: "ungated",
+        replayRunId: null,
+        reason: BASELINE_REASON,
+        gateReasons: [],
+        approval: null,
+        expectedPrevious: null,
+        baseline: true
+      });
+    }
     return view;
+  }
+
+  /** The saved version that matches the draft production runs now: the newest one, or a fresh snapshot of the draft. */
+  private baselineVersion(user: SafeUser, workflowId: string): number {
+    const draft = this.store.getWorkflow(workflowId)!;
+    const latest = this.store.maxWorkflowVersionNumber(workflowId);
+    if (latest > 0) {
+      try {
+        if (this.options.hashOf(this.options.resolveVersion(workflowId, latest)) === this.options.hashOf(draft)) return latest;
+      } catch {
+        // An unreadable newest version: save the draft as a new one below.
+      }
+    }
+    return this.options.snapshotDraft(workflowId, user);
+  }
+
+  // -------------------------------------------------------------------------
+  // Production routing keys
+  // -------------------------------------------------------------------------
+
+  /**
+   * Other workflows that answer on one of these workflows' production paths.
+   * `gatedOnly`: only those with a published version or a gate that is on
+   * (what a save may not take over); otherwise every other workflow (what
+   * stops a publish or turning a gate on).
+   */
+  routingConflicts(workflowId: string, workflows: Array<Workflow | null | undefined>, gatedOnly: boolean): RoutingConflict[] {
+    if (!this.options.available) return [];
+    const keys = new Map<string, string>();
+    for (const workflow of workflows) {
+      if (!workflow) continue;
+      for (const entry of productionRoutingKeys(workflow)) keys.set(entry.key, entry.label);
+    }
+    if (keys.size === 0) return [];
+    const conflicts: RoutingConflict[] = [];
+    const seen = new Set<string>();
+    for (const summary of this.store.listWorkflows()) {
+      if (summary.id === workflowId) continue;
+      const published = this.store.getPublishedVersion(summary.id);
+      if (gatedOnly && published === null && !this.store.getReleaseGate(summary.id)?.enabled) continue;
+      const others: Workflow[] = [];
+      const draft = this.store.getWorkflow(summary.id);
+      if (draft) others.push(draft);
+      if (published !== null) {
+        try {
+          others.push(this.options.resolveVersion(summary.id, published));
+        } catch {
+          // An unreadable published version answers no traffic.
+        }
+      }
+      for (const other of others) {
+        for (const entry of productionRoutingKeys(other)) {
+          const label = keys.get(entry.key);
+          if (!label || seen.has(`${entry.key}|${summary.id}`)) continue;
+          seen.add(`${entry.key}|${summary.id}`);
+          conflicts.push({ key: entry.key, label, workflowId: summary.id });
+        }
+      }
+    }
+    return conflicts;
+  }
+
+  /** How a conflict reads to `user`: another workflow they cannot read stays unnamed. */
+  describeConflicts(user: SafeUser, conflicts: RoutingConflict[]): string[] {
+    return conflicts.map((conflict) => {
+      const readable = this.options.access(user, conflict.workflowId, "workflow:read").ok;
+      const other = readable ? `workflow "${this.store.getWorkflow(conflict.workflowId)?.name ?? conflict.workflowId}" (${conflict.workflowId})` : "another workflow you cannot see";
+      return `${conflict.label} is already used by ${other}.`;
+    });
+  }
+
+  /**
+   * Why saving `workflow` would take over a production path of another
+   * workflow that has a published version or a gate; null when it would not.
+   */
+  claimConflict(user: SafeUser, workflow: Workflow): string | null {
+    const conflicts = this.routingConflicts(workflow.id, [workflow], true);
+    if (conflicts.length === 0) return null;
+    return `${this.describeConflicts(user, conflicts).join(" ")} Production traffic on that path goes to a published or gated workflow, so another workflow cannot claim it: choose another path.`;
+  }
+
+  private assertNoRoutingConflicts(user: SafeUser, workflowId: string, workflows: Array<Workflow | null | undefined>, what: string): void {
+    const conflicts = this.routingConflicts(workflowId, workflows, false);
+    if (conflicts.length === 0) return;
+    throw new ReleaseError(`Cannot ${what} while another workflow shares a production path: ${this.describeConflicts(user, conflicts).join(" ")}`, 409, {
+      conflicts: conflicts.map((conflict) => conflict.key)
+    });
+  }
+
+  private conflictReasons(user: SafeUser, workflowId: string, workflow: Workflow): string[] {
+    const conflicts = this.routingConflicts(workflowId, [workflow], false);
+    if (conflicts.length === 0) return [];
+    return [...this.describeConflicts(user, conflicts), "Production routing to this workflow would be ambiguous: give it its own paths before publishing."];
+  }
+
+  // -------------------------------------------------------------------------
+  // What only admins may do on an enforced gate
+  // -------------------------------------------------------------------------
+
+  private enforcedGateOf(workflowId: string): ReleaseGateRecord | null {
+    if (!this.options.available) return null;
+    const gate = this.store.getReleaseGate(workflowId);
+    return gate?.enforced ? gate : null;
+  }
+
+  private refuse(user: SafeUser, workflowId: string, eventType: string, action: string, metadata: Record<string, unknown>): void {
+    this.options.audit({
+      category: "release",
+      eventType,
+      action,
+      outcome: "denied",
+      actor: { userId: user.id, email: user.email, type: "user" },
+      resourceType: "workflow",
+      resourceId: workflowId,
+      projectId: this.projectOf(workflowId),
+      metadata
+    });
+  }
+
+  /** Why `user` may not delete this workflow (an enforced gate: admins only); null when they may. Audits a refusal. */
+  deleteDenial(user: SafeUser, workflowId: string): string | null {
+    if (user.role === "admin" || !this.enforcedGateOf(workflowId)) return null;
+    this.refuse(user, workflowId, "release.workflow_delete.refused", "delete", {});
+    return "This workflow has an enforced release gate: only an admin can delete it.";
+  }
+
+  /**
+   * Why `user` may not make this change to a golden set (null when they
+   * may): on a set an enforced gate uses, removing cases, deleting the set
+   * and adding a case with its own scorers are admin-only. Audits a refusal.
+   */
+  goldenSetChangeDenial(user: SafeUser, datasetId: string, change: "remove_case" | "delete_set" | "add_case_with_scorers"): string | null {
+    if (user.role === "admin") return null;
+    const dataset = this.store.getEvalDataset(datasetId);
+    if (!dataset?.workflowId) return null;
+    const gate = this.enforcedGateOf(dataset.workflowId);
+    if (!gate || !gate.datasetIds.includes(datasetId)) return null;
+    this.refuse(user, dataset.workflowId, "release.golden_set_change.refused", "update", { datasetId, change });
+    const what = change === "delete_set" ? "delete this golden set" : change === "remove_case" ? "remove a case from this golden set" : "add a case with its own scorers to this golden set";
+    return `An enforced release gate uses this golden set: only an admin can ${what}.`;
   }
 
   private projectOf(workflowId: string): string | null {
@@ -377,14 +670,32 @@ export class ReleaseService {
     return { workflow, workflowHash: this.options.hashOf(workflow) };
   }
 
-  /** What `judgeReleaseGate` needs from a replay job: its cases with repeats aggregated. */
-  evidenceFor(job: JobView, gateOptions: ReleaseCandidateOptions = {}): ReleaseGateEvidence {
+  /** What the gate's own sets hold now: their case ids and snapshots. */
+  private gateSets(gate: Pick<ReleaseGateView, "datasetIds">): { fixtureIds: Set<string>; snapshots: Record<string, string> } {
+    const fixtureIds = new Set<string>();
+    const snapshots = goldenSetSnapshots(gate.datasetIds, (datasetId) => {
+      const fixtures = this.store.listEvalFixtures(datasetId);
+      for (const fixture of fixtures) fixtureIds.add(fixture.id);
+      return fixtures;
+    });
+    return { fixtureIds, snapshots };
+  }
+
+  /**
+   * What `judgeReleaseGate` needs from a replay job: the cases of the gate's
+   * own sets with repeats aggregated, and how the job's scorers, set
+   * snapshot and own eligibility compare with the gate.
+   */
+  evidenceFor(job: JobView, gate: Pick<ReleaseGateView, "datasetIds" | "candidateOptions">, sets?: { fixtureIds: Set<string>; snapshots: Record<string, string> }): ReleaseGateEvidence {
+    const current = sets ?? this.gateSets(gate);
     const options = asRecord(job.options);
     const aggregate = (typeof options.aggregate === "string" ? options.aggregate : "all") as ReleaseAggregateMode;
     const groups = new Map<string, Array<EvalCaseResult & Record<string, unknown>>>();
     for (const result of job.results as Array<EvalCaseResult & Record<string, unknown>>) {
       // A baseline rerun's own results are compared with, not judged.
       if (result.role === "baseline" || result.baseline === true) continue;
+      // Only the gate's own sets count (a job may cover more).
+      if (!current.fixtureIds.has(result.fixtureId)) continue;
       const key = result.fixtureId || result.recordingId || result.id;
       const list = groups.get(key) ?? [];
       list.push(result);
@@ -405,18 +716,33 @@ export class ReleaseService {
       const costs: number[] = [];
       const latencies: number[] = [];
       let newGuardBlocks = 0;
-      const blocking = (action: string) => action === "block" || action === "review";
+      let diffMissing = false;
+      const blocking = (action: unknown) => action === "block" || action === "review";
       for (const result of results) {
-        const diff = this.options.loadCase(job.id, result.id)?.replay?.diff;
-        if (!diff) continue;
-        costBaseline = numberOrNull(diff.totals.costUsd.baseline) ?? costBaseline;
-        latencyBaseline = numberOrNull(diff.totals.latencyMs.baseline) ?? latencyBaseline;
-        const cost = numberOrNull(diff.totals.costUsd.candidate);
-        if (cost !== null) costs.push(cost);
-        const latency = numberOrNull(diff.totals.latencyMs.candidate);
-        if (latency !== null) latencies.push(latency);
-        const added = diff.guard.added.filter((verdict) => !verdict.shadow && blocking(verdict.effectiveAction)).length;
-        const escalated = diff.guard.changed.filter((change) => !change.candidate.shadow && blocking(change.candidate.effectiveAction) && !blocking(change.baseline.effectiveAction)).length;
+        if (caseStatus(result.status) === "skipped") continue;
+        const diff = asRecord(this.options.loadCase(job.id, result.id)?.replay?.diff);
+        const totals = asRecord(diff.totals);
+        const guard = asRecord(diff.guard);
+        if (!diff.totals || !Array.isArray(guard.added) || !Array.isArray(guard.changed)) {
+          // No diff (or a truncated one): cost, latency and guard verdicts are unknown.
+          diffMissing = true;
+          continue;
+        }
+        const cost = asRecord(totals.costUsd);
+        const latency = asRecord(totals.latencyMs);
+        costBaseline = numberOrNull(cost.baseline) ?? costBaseline;
+        latencyBaseline = numberOrNull(latency.baseline) ?? latencyBaseline;
+        const candidateCost = numberOrNull(cost.candidate);
+        if (candidateCost !== null) costs.push(candidateCost);
+        const candidateLatency = numberOrNull(latency.candidate);
+        if (candidateLatency !== null) latencies.push(candidateLatency);
+        const added = (guard.added as unknown[]).map(asRecord).filter((verdict) => !verdict.shadow && blocking(verdict.effectiveAction)).length;
+        const escalated = (guard.changed as unknown[])
+          .map(asRecord)
+          .filter((change) => {
+            const after = asRecord(change.candidate);
+            return !after.shadow && blocking(after.effectiveAction) && !blocking(asRecord(change.baseline).effectiveAction);
+          }).length;
         newGuardBlocks = Math.max(newGuardBlocks, added + escalated);
       }
       const costCandidate = costs.length > 0 ? Math.max(...costs) : null;
@@ -431,10 +757,22 @@ export class ReleaseService {
         costUsd: { baseline: costBaseline, candidate: costCandidate },
         latencyMs: { baseline: latencyBaseline, candidate: latencyCandidate },
         newGuardBlocks,
-        recordingCreatedAt: first.recordingId ? this.options.recordingCreatedAt(first.recordingId) : null
+        recordingCreatedAt: first.recordingId ? this.options.recordingCreatedAt(first.recordingId) : null,
+        diffMissing
       });
     }
     const candidate = asRecord(job.candidate);
+    const eligible = candidate.releaseEligible ?? options.releaseEligible;
+    const ineligible = candidate.releaseIneligibleReasons ?? options.releaseIneligibleReasons ?? candidate.ineligibleReasons ?? options.ineligibleReasons;
+    const record = this.store.getEvalRun(job.id);
+    const jobScorers = (record?.scorers ?? null) as unknown[] | null;
+    let scorerMismatch: string | null = null;
+    if (!releaseScorersMatch(gate.candidateOptions.scorers, jobScorers)) {
+      const types = (jobScorers ?? []).map((scorer) => String(asRecord(scorer).type ?? "unknown"));
+      scorerMismatch = types.length > 0 ? `ran with its own scorers (${types.join(", ")})` : "ran with the default scorers, not the ones the gate names";
+    }
+    const jobSnapshot = this.store.getEvalRunSetSnapshot(job.id);
+    const staleSets = gate.datasetIds.filter((datasetId) => !jobSnapshot || jobSnapshot[datasetId] !== current.snapshots[datasetId]);
     return {
       job: {
         id: job.id,
@@ -444,7 +782,11 @@ export class ReleaseService {
         compare: typeof options.compare === "string" ? options.compare : null,
         mcpMode: typeof options.mcpMode === "string" ? options.mcpMode : null,
         liveWrites: replayJobAllowsLiveWrites(job),
-        overrides: replayJobOverrideFindings(job, gateOptions)
+        overrides: replayJobOverrideFindings(job, gate.candidateOptions),
+        ...(eligible !== undefined ? { releaseEligible: eligible === true ? true : false } : {}),
+        ...(Array.isArray(ineligible) ? { releaseIneligibleReasons: ineligible.map((entry) => String(entry)) } : {}),
+        scorerMismatch,
+        staleSets
       },
       cases
     };
@@ -453,10 +795,12 @@ export class ReleaseService {
   /**
    * Judges the job (the given one, else the newest completed job for this
    * hash that passes, else the newest one) under the gate's current policy.
+   * Every completed job for the hash is considered.
    */
   judge(gate: ReleaseGateView, workflowId: string, workflowHash: string, replayRunId?: string): { judgement: ReleaseGateJudgement; replayRunId?: string } {
-    const expected = { workflowHash, datasetIds: gate.datasetIds, ...(gate.candidateOptions.mcpMode ? { mcpMode: gate.candidateOptions.mcpMode } : {}) };
-    const judgeJob = (job: JobView) => judgeReleaseGate(this.evidenceFor(job, gate.candidateOptions), gate.policy, { expected, requireApproval: gate.requireApproval, now: this.now() });
+    const expected = { workflowHash, datasetIds: gate.datasetIds, mcpMode: gate.candidateOptions.mcpMode ?? "strict" };
+    const sets = this.gateSets(gate);
+    const judgeJob = (job: JobView) => judgeReleaseGate(this.evidenceFor(job, gate, sets), gate.policy, { expected, requireApproval: gate.requireApproval, now: this.now() });
     if (replayRunId) {
       const job = this.options.loadJob(replayRunId);
       if (!job || job.kind !== "replay" || job.workflowId !== workflowId) throw new ReleaseError("Replay job not found", 404);
@@ -542,6 +886,8 @@ export class ReleaseService {
     gateReasons: string[];
     approval: Record<string, unknown> | null;
     expectedPrevious: number | null;
+    /** The baseline a gate publishes when it is turned on. */
+    baseline?: boolean;
   }): WorkflowRelease {
     const record = this.store.publishWorkflowVersion(
       {
@@ -580,7 +926,8 @@ export class ReleaseService {
         replayRunId: release.replayRunId,
         reason: release.reason,
         gateReasons: release.gateReasons,
-        approvalRequestId: input.approval?.requestId ?? null
+        approvalRequestId: input.approval?.requestId ?? null,
+        ...(input.baseline ? { baseline: true } : {})
       }
     });
     try {
@@ -606,6 +953,11 @@ export class ReleaseService {
       };
     }
     if (input.override && user.role !== "admin") throw new ReleaseError("Only admins can override the release gate", 403);
+    const conflicts = this.conflictReasons(user, workflowId, this.versionCandidate(workflowId, input.version).workflow);
+    if (conflicts.length > 0) {
+      // Not even an override: production routing would be ambiguous, whatever the gate says.
+      return { status: 409, verdict: "blocked", reasons: conflicts, canRequestApproval: false };
+    }
     if (!gate.enabled) {
       return {
         status: 200,
@@ -672,16 +1024,31 @@ export class ReleaseService {
     };
   }
 
-  /** Back to a version that was published before; the gate is skipped because that version was released once. */
+  /**
+   * Back to a version that was published before, with a reason (audited).
+   * The gate's replay check is skipped because that version was released
+   * once; on an enforced gate only an admin may roll back. The version must
+   * still have the hash it had when it was released (a workflow moved to
+   * another project, or created again under the same id, does not).
+   */
   rollback(user: SafeUser, workflowId: string, input: ReleaseRollbackInput): WorkflowRelease {
     this.requireAvailable();
     this.check(user, workflowId, "workflow:publish");
+    if (this.enforcedGateOf(workflowId) && user.role !== "admin") {
+      this.refuse(user, workflowId, "release.rollback.refused", "rollback", { version: input.version });
+      throw new ReleaseError("This workflow's release gate is enforced: only an admin can roll back", 403);
+    }
     const previous = this.store.getPublishedVersion(workflowId);
     if (previous === input.version) throw new ReleaseError(`Version ${input.version} is already published`, 409);
     if (!this.store.hasReleasedVersion(workflowId, input.version)) {
       throw new ReleaseError(`Version ${input.version} was never published, so it cannot be rolled back to; publish it instead`, 409);
     }
-    const { workflowHash } = this.versionCandidate(workflowId, input.version);
+    const { workflow, workflowHash } = this.versionCandidate(workflowId, input.version);
+    if (!this.store.listReleasedVersionHashes(workflowId, input.version).includes(workflowHash)) {
+      throw new ReleaseError(`Version ${input.version} no longer has the hash it was released with (the workflow moved project or was created again), so it cannot be rolled back to; publish it through the gate instead`, 409);
+    }
+    const conflicts = this.conflictReasons(user, workflowId, workflow);
+    if (conflicts.length > 0) throw new ReleaseError(conflicts.join(" "), 409);
     return this.commitRelease({ actor: user, workflowId, version: input.version, workflowHash, verdict: "rollback", replayRunId: null, reason: input.reason, gateReasons: [], approval: null, expectedPrevious: previous });
   }
 
@@ -701,8 +1068,16 @@ export class ReleaseService {
     requestReason: string | null;
     publishedVersion: number | null;
   }): ReleaseApprovalRequestRecord {
-    const existing = this.store.findPendingReleaseApprovalRequest(input.workflowId, input.version, input.workflowHash);
-    if (existing && !this.staleReason(existing) && !this.expired(existing)) return existing;
+    // Each requester has their own request (their reason, their name on it); stale and expired ones are closed first.
+    this.sweepExpired();
+    for (const existing of this.store.listPendingReleaseApprovalRequests(input.workflowId, input.version, input.workflowHash)) {
+      const stale = this.staleReason(existing);
+      if (stale) {
+        this.closeRequest(existing, "canceled", `Stale: ${stale}`, null);
+        continue;
+      }
+      if (sameIdentity({ id: existing.requestedByUserId, email: existing.requestedBy }, input.user)) return existing;
+    }
     const approvers: ReleaseApprovers = input.gate.approvers ?? releaseApproversSchema.parse({});
     const createdAt = this.now();
     const workflow = this.store.getWorkflow(input.workflowId);
@@ -778,6 +1153,23 @@ export class ReleaseService {
     return Boolean(record.expiresAt && Date.parse(record.expiresAt) <= this.now().getTime());
   }
 
+  /** Closes the release requests whose time ran out (lazily, on list and on request), audited as timed out. */
+  private sweepExpired(): void {
+    for (const record of this.store.timeOutExpiredReleaseApprovalRequests(this.now().toISOString())) {
+      this.options.audit({
+        category: "release",
+        eventType: "release.approval.timed_out",
+        action: "timeout",
+        outcome: "success",
+        actor: { type: "system", email: "system" },
+        resourceType: "workflow",
+        resourceId: record.workflowId,
+        projectId: this.projectOf(record.workflowId),
+        metadata: { requestId: record.id, version: record.version, workflowHash: record.workflowHash }
+      });
+    }
+  }
+
   /** Why approving this request now would publish something other than what was asked; null when it is still valid. */
   staleReason(record: ReleaseApprovalRequestRecord): string | null {
     let hash: string;
@@ -807,8 +1199,13 @@ export class ReleaseService {
       { id: user.id, email: user.email, role: user.role },
       { userId: record.requestedByUserId, email: record.requestedBy }
     );
-    if (check.allowed) return { allowed: true };
-    return { allowed: false, code: check.code, message: check.code === "self_approval" ? SELF_APPROVAL_MESSAGE : check.message };
+    if (!check.allowed) return { allowed: false, code: check.code, message: check.code === "self_approval" ? SELF_APPROVAL_MESSAGE : check.message };
+    // The person who saved the version is no more independent than the one who asked.
+    const author = this.store.getWorkflowVersion(record.workflowId, record.version)?.createdBy ?? null;
+    if (author && spec.allowSelfApproval !== true && sameIdentity({ id: author, email: author }, user)) {
+      return { allowed: false, code: "self_approval", message: AUTHOR_APPROVAL_MESSAGE };
+    }
+    return { allowed: true };
   }
 
   private toView(record: ReleaseApprovalRequestRecord, user: SafeUser): ReleaseApprovalRequestView {
@@ -848,8 +1245,9 @@ export class ReleaseService {
   /** Release requests of workflows the user can read, narrowed in SQL before the limit. */
   listRequests(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number }): ReleaseApprovalRequestView[] {
     if (!this.options.available) return [];
+    this.sweepExpired();
     const workflowIds = this.options.readableWorkflowIds(user);
-    const rows = this.store.listReleaseApprovalRequests({ ...filter, scope: workflowIds === null ? { all: true } : { workflowIds } });
+    const rows = this.store.listReleaseApprovalRequests({ ...filter, now: this.now().toISOString(), scope: workflowIds === null ? { all: true } : { workflowIds } });
     const views: ReleaseApprovalRequestView[] = [];
     for (const row of rows) {
       if (!this.options.access(user, row.workflowId, "workflow:read").ok) continue;
@@ -919,6 +1317,8 @@ export class ReleaseService {
       this.closeRequest(record, "canceled", `Stale: ${stale}`, user);
       throw new ReleaseError(`This release request is stale and was canceled: ${stale} Ask again.`, 409);
     }
+    const conflicts = this.conflictReasons(user, record.workflowId, this.versionCandidate(record.workflowId, record.version).workflow);
+    if (conflicts.length > 0) throw new ReleaseError(conflicts.join(" "), 409);
     const decidedAt = this.now().toISOString();
     const release = this.store.transaction(() => {
       const releaseId = `rel_${randomUUID()}`;

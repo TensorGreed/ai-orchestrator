@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { APPROVAL_MAX_TIMEOUT_MINUTES, APPROVAL_REASON_MAX_LENGTH, APPROVER_ROLE_VALUES } from "./approval-gate";
+import { evalScorerListSchema } from "./evals";
 import { REPLAY_MCP_MODES } from "./replay";
 
 /**
@@ -79,14 +80,24 @@ export const releaseApproversSchema = z
   .strict();
 export type ReleaseApprovers = z.output<typeof releaseApproversSchema>;
 
-/** Defaults for the replay jobs the gate asks for ("Run gate" in the publish dialog, `l2m release`). */
+/**
+ * The replay jobs the gate accepts ("Run gate" in the publish dialog, `l2m release`).
+ * A job counts only when it ran with exactly these settings: `mcpMode`
+ * defaults to strict, `compare` to recording (a `baseline_rerun` job is
+ * always acceptable, being stricter), `repeats` to 1, `aggregate` to all.
+ * `scorers` is the gate's own scorer list: unset means the job default
+ * (`status` and `json_equal` against the golden run), and a job that ran
+ * with any other run-level scorers is no proof. A case's own scorers belong
+ * to the golden set and are bound through the set snapshot.
+ */
 export const releaseCandidateOptionsSchema = z
   .object({
     mcpMode: z.enum(REPLAY_MCP_MODES).optional(),
     compare: z.enum(RELEASE_COMPARE_MODES).optional(),
     repeats: z.number().int().min(1).max(5).optional(),
     aggregate: z.enum(RELEASE_AGGREGATE_MODES).optional(),
-    maxCostUsd: z.number().positive().max(100_000).optional()
+    maxCostUsd: z.number().positive().max(100_000).optional(),
+    scorers: evalScorerListSchema.optional()
   })
   .strict();
 export type ReleaseCandidateOptions = z.output<typeof releaseCandidateOptionsSchema>;
@@ -213,6 +224,12 @@ export interface ReleaseGateCase {
   newGuardBlocks: number;
   /** When the golden run was saved. */
   recordingCreatedAt: string | null;
+  /**
+   * The case's run diff is missing or was truncated, so its cost, latency and
+   * guard verdicts are unknown: with a cost, latency or guard limit in the
+   * policy such a case counts as an error.
+   */
+  diffMissing?: boolean;
 }
 
 export interface ReleaseGateJob {
@@ -232,6 +249,16 @@ export interface ReleaseGateJob {
    * tested it as it ships, so it is no proof.
    */
   overrides?: string[];
+  /**
+   * The replay job's own server-computed eligibility (Phase 15.3). `false`
+   * blocks; a job without the field is judged by the gate's checks alone.
+   */
+  releaseEligible?: boolean | null;
+  releaseIneligibleReasons?: string[];
+  /** The job ran with run-level scorers other than the gate's own (or the gate's while it names none). */
+  scorerMismatch?: string | null;
+  /** Gate golden sets whose contents (cases, golden runs, case scorers) changed since the job was queued, or that the job holds no snapshot of. */
+  staleSets?: string[];
 }
 
 export interface ReleaseGateEvidence {
@@ -244,7 +271,7 @@ export interface ReleaseGateExpectation {
   workflowHash: string;
   /** The gate's golden sets: the job must cover all of them. */
   datasetIds: string[];
-  /** The gate's MCP mode: a strict gate refuses a lenient job. */
+  /** The gate's MCP mode (default strict): a strict gate refuses a lenient job. */
   mcpMode?: string;
 }
 
@@ -368,15 +395,31 @@ export function judgeReleaseGate(
   const covered = new Set(job.datasetIds);
   const missing = options.expected.datasetIds.filter((id) => !covered.has(id));
   if (missing.length > 0) reasons.push(`Replay job ${job.id} did not cover the gate's golden set${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`);
-  if (options.expected.mcpMode === "strict" && job.mcpMode && job.mcpMode !== "strict") {
+  if ((options.expected.mcpMode ?? "strict") === "strict" && job.mcpMode && job.mcpMode !== "strict") {
     reasons.push(`The gate replays MCP calls strictly; job ${job.id} used ${job.mcpMode}.`);
   }
   if (job.liveWrites) reasons.push(`Replay job ${job.id} allowed live write calls, which a gate run never may.`);
   if (job.overrides && job.overrides.length > 0) {
     reasons.push(`Replay job ${job.id} ran with settings the gate does not specify (${job.overrides.join(", ")}), so it does not test the version as it ships.`);
   }
+  if (job.releaseEligible !== undefined && job.releaseEligible !== null && job.releaseEligible !== true) {
+    const why = job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? ` (${job.releaseIneligibleReasons.join("; ")})` : "";
+    reasons.push(`Replay job ${job.id} is not eligible to prove a release${why}.`);
+  }
+  if (job.scorerMismatch) reasons.push(`Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);
+  if (job.staleSets && job.staleSets.length > 0) {
+    reasons.push(
+      `The golden set${job.staleSets.length === 1 ? "" : "s"} ${job.staleSets.join(", ")} changed after replay job ${job.id} was queued (cases, golden runs or case scorers): run the gate again.`
+    );
+  }
 
-  const stats = statsOf(evidence, policy, now);
+  // A case whose diff is missing cannot show it stays within a cost, latency or guard limit: it counts as an error.
+  const limited = policy.maxCostIncreasePct !== undefined || policy.maxP95LatencyIncreasePct !== undefined || policy.noNewGuardBlocks;
+  const judged: ReleaseGateEvidence = limited
+    ? { ...evidence, cases: evidence.cases.map((entry) => (entry.diffMissing && entry.status !== "skipped" ? { ...entry, status: "error" as const } : entry)) }
+    : evidence;
+
+  const stats = statsOf(judged, policy, now);
   if (stats.cases < policy.minCases) reasons.push(`Only ${stats.cases} case${stats.cases === 1 ? "" : "s"} judged; the gate needs at least ${policy.minCases}.`);
   if (stats.passRate < policy.minPassRate) {
     reasons.push(`Pass rate ${Math.round(stats.passRate * 1000) / 10}% is below the required ${Math.round(policy.minPassRate * 1000) / 10}%.`);
@@ -385,7 +428,7 @@ export function judgeReleaseGate(
     reasons.push(`${stats.regressions} regression${stats.regressions === 1 ? "" : "s"}; the gate allows ${policy.maxRegressions}.`);
   }
   for (const scorer of policy.requiredScorers) {
-    const failing = evidence.cases.filter((entry) => entry.status !== "skipped" && !entry.scorers.some((detail) => detail.type === scorer && detail.pass));
+    const failing = judged.cases.filter((entry) => entry.status !== "skipped" && !entry.scorers.some((detail) => detail.type === scorer && detail.pass));
     if (failing.length > 0) reasons.push(`Required scorer ${scorer} did not pass on ${failing.length} case${failing.length === 1 ? "" : "s"}.`);
   }
   if (policy.maxCostIncreasePct !== undefined && stats.costIncreasePct !== null && stats.costIncreasePct > policy.maxCostIncreasePct) {
@@ -434,11 +477,24 @@ export function releaseGateLoosening(before: ReleaseGateSettings, after: Release
   if (a.noNewGuardBlocks && !b.noNewGuardBlocks) reasons.push("allows new guard blocks");
   if (b.minCases < a.minCases) reasons.push("lowers the minimum number of cases");
   if (b.maxRecordingAgeDays > a.maxRecordingAgeDays) reasons.push("accepts older golden runs");
-  if (before.candidateOptions.mcpMode === "strict" && after.candidateOptions.mcpMode !== "strict") reasons.push("stops replaying MCP calls strictly");
+  const beforeMode = before.candidateOptions.mcpMode ?? "strict";
+  const afterMode = after.candidateOptions.mcpMode ?? "strict";
+  if (beforeMode === "strict" && afterMode !== "strict") reasons.push("stops replaying MCP calls strictly");
+  const AGGREGATE_RANK: Record<string, number> = { all: 2, majority: 1, any: 0 };
+  const beforeAggregate = before.candidateOptions.aggregate ?? "all";
+  const afterAggregate = after.candidateOptions.aggregate ?? "all";
+  if ((AGGREGATE_RANK[afterAggregate] ?? 0) < (AGGREGATE_RANK[beforeAggregate] ?? 0)) reasons.push("accepts a case that passes on fewer repeats");
+  if (afterAggregate !== "all" && (after.candidateOptions.repeats ?? 1) > (before.candidateOptions.repeats ?? 1)) reasons.push("gives a flaky case more tries to pass");
+  if (before.candidateOptions.compare === "baseline_rerun" && (after.candidateOptions.compare ?? "recording") !== "baseline_rerun") reasons.push("stops rerunning the baseline");
+  if (canonicalScorers(before.candidateOptions.scorers) !== canonicalScorers(after.candidateOptions.scorers)) reasons.push("changes the scorers the gate judges with");
   if (before.requireApproval && !after.requireApproval) reasons.push("stops requiring approval");
   const oldApprovers = before.approvers;
   const newApprovers = after.approvers;
-  if (oldApprovers) {
+  if (!oldApprovers && newApprovers) {
+    // No approvers: only an admin override could pass a blocked publish. Any approver list widens that.
+    reasons.push("widens who may approve");
+    if (newApprovers.allowSelfApproval) reasons.push("allows self-approval");
+  } else if (oldApprovers) {
     if (!newApprovers) reasons.push("removes the approvers");
     else {
       if (!oldApprovers.allowSelfApproval && newApprovers.allowSelfApproval) reasons.push("allows self-approval");
@@ -447,9 +503,58 @@ export function releaseGateLoosening(before: ReleaseGateSettings, after: Release
       const addedRoles = newApprovers.approverRoles.filter((role) => !oldApprovers.approverRoles.includes(role));
       const addedUsers = newApprovers.approverUsers.filter((entry) => !oldApprovers.approverUsers.some((old) => old.toLowerCase() === entry.toLowerCase()));
       if ((restricted && opened) || addedRoles.length > 0 || addedUsers.length > 0) reasons.push("widens who may approve");
+      if (newApprovers.timeoutMinutes > oldApprovers.timeoutMinutes) reasons.push("lets release requests wait longer");
     }
   }
   return reasons;
+}
+
+/** Stable JSON: object keys sorted, so equal settings compare equal whatever their key order. */
+export function releaseCanonicalJson(value: unknown): string {
+  if (value === undefined) return "null";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => releaseCanonicalJson(entry)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${releaseCanonicalJson(entry)}`).join(",")}}`;
+}
+
+/** A scorer list as the gate compares it: no list and an empty list are the same (the job default). */
+function canonicalScorers(scorers: readonly unknown[] | null | undefined): string {
+  return scorers && scorers.length > 0 ? releaseCanonicalJson(scorers) : "[]";
+}
+
+/** Whether a job's run-level scorers are exactly the gate's own (both empty means the job default). */
+export function releaseScorersMatch(gateScorers: readonly unknown[] | null | undefined, jobScorers: readonly unknown[] | null | undefined): boolean {
+  return canonicalScorers(gateScorers) === canonicalScorers(jobScorers);
+}
+
+function canonicalApprovers(approvers: ReleaseApprovers | null): string {
+  if (!approvers) return "null";
+  return releaseCanonicalJson({
+    approverRoles: [...approvers.approverRoles].sort(),
+    approverUsers: approvers.approverUsers.map((entry) => entry.toLowerCase()).sort(),
+    allowSelfApproval: approvers.allowSelfApproval,
+    timeoutMinutes: approvers.timeoutMinutes
+  });
+}
+
+/**
+ * What only an admin may change on an enforced gate: anything that loosens
+ * it (`releaseGateLoosening`), and any change at all to who approves (the
+ * approver list, self-approval, the request timeout) or to the candidate
+ * options (MCP mode, compare, repeats, aggregate, scorers, budget), since
+ * those decide what counts as passing. Empty when the change is allowed.
+ */
+export function releaseGateAdminOnlyChanges(before: ReleaseGateSettings, after: ReleaseGateSettings): string[] {
+  const reasons = releaseGateLoosening(before, after);
+  if (canonicalApprovers(before.approvers) !== canonicalApprovers(after.approvers) && !reasons.includes("widens who may approve")) {
+    reasons.push("changes who may approve");
+  }
+  const options = (value: ReleaseCandidateOptions) => releaseCanonicalJson({ ...value, mcpMode: value.mcpMode ?? "strict", scorers: value.scorers && value.scorers.length > 0 ? value.scorers : undefined });
+  if (options(before.candidateOptions) !== options(after.candidateOptions)) reasons.push("changes the replay job settings the gate accepts");
+  return [...new Set(reasons)];
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +583,20 @@ export interface ReleaseStateView {
   aheadBy: number;
   gateEnabled: boolean;
   gateEnforced: boolean;
+  /**
+   * The gate is on but there is no published version production can load
+   * (the workflow was deleted and created again with the same id): every
+   * production entry point refuses runs until a version is published.
+   */
+  productionRefused: boolean;
+  /** Whether the caller holds `workflow:publish` on this workflow (project roles included). */
+  canPublish: boolean;
+  /** Whether the caller may change the gate's settings (`workflow:write`; admin-only fields on an enforced gate aside). */
+  canEditGate: boolean;
 }
+
+/** Global roles that can hold `workflow:publish`, so the only ones worth naming as release approvers. */
+export const RELEASE_APPROVER_ROLE_CHOICES = ["admin", "builder"] as const;
 
 // ---------------------------------------------------------------------------
 // Release requests in the approvals inbox

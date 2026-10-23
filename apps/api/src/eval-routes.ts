@@ -84,6 +84,12 @@ export interface EvalRoutesDeps {
   sseHeartbeatMs: number;
   /** `strict` isolation: a dataset made before projects scoped datasets belongs to the default project. */
   strictIsolation: boolean;
+  /**
+   * Phase 15.4 — why this change to a golden set is refused (an enforced
+   * release gate uses the set: only admins remove cases, delete it or add a
+   * case with its own scorers); null when it is allowed.
+   */
+  goldenSetChangeDenial?: (user: SafeUser, datasetId: string, change: "remove_case" | "delete_set" | "add_case_with_scorers") => string | null;
 }
 
 const EVAL_RUN_ERROR_STATUS: Record<EvalRunError["code"], number> = { not_found: 404, invalid: 400, limit: 409 };
@@ -266,6 +272,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const access = datasetAccess(user, evals.getDataset(request.params.id), "workflow:write");
     if (!access.ok) return denyRunAccess(reply, access);
     const dataset = access.dataset;
+    const gateDenial = deps.goldenSetChangeDenial?.(user, dataset.id, "delete_set");
+    if (gateDenial) return denyRunAccess(reply, { status: 403, error: gateDenial });
     evals.deleteDataset(dataset.id);
     if (dataset.workflowId) {
       deps.audit(request, user, {
@@ -300,6 +308,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const access = datasetAccess(user, evals.getDataset(request.params.id), "workflow:write");
     if (!access.ok) return denyRunAccess(reply, access);
     const dataset = access.dataset;
+    const gateDenial = parsed.data.scorers && parsed.data.scorers.length > 0 ? deps.goldenSetChangeDenial?.(user, dataset.id, "add_case_with_scorers") : null;
+    if (gateDenial) return denyRunAccess(reply, { status: 403, error: gateDenial });
     // Checked for every dataset: a golden set against its workflow's project, any other against its own.
     const problem = dataset.workflowId
       ? judgeSecretProblem(user, parsed.data.scorers, dataset.workflowId)
@@ -348,6 +358,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       reply.code(400);
       return { error: problem };
     }
+    const gateDenial = parsed.data.scorers && parsed.data.scorers.length > 0 ? deps.goldenSetChangeDenial?.(user, dataset.id, "add_case_with_scorers") : null;
+    if (gateDenial) return denyRunAccess(reply, { status: 403, error: gateDenial });
     const fixture = evals.addGoldenRun({ datasetId: dataset.id, recording, ...(parsed.data.name ? { name: parsed.data.name } : {}), ...(parsed.data.scorers ? { scorers: parsed.data.scorers } : {}) });
     deps.audit(request, user, {
       eventType: "replay.golden_set.case_added",
@@ -373,6 +385,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       const access = datasetAccess(user, dataset, "workflow:write", "Fixture");
       if (!access.ok) return denyRunAccess(reply, access);
     }
+    const gateDenial = dataset ? deps.goldenSetChangeDenial?.(user, dataset.id, "remove_case") : null;
+    if (gateDenial) return denyRunAccess(reply, { status: 403, error: gateDenial });
     evals.deleteFixture(fixture.id);
     return { ok: true };
   });
