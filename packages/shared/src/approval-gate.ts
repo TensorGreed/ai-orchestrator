@@ -36,7 +36,13 @@ export const APPROVAL_REASON_MAX_LENGTH = 2_000;
 /** Largest serialised edits payload an approver may send. */
 export const APPROVAL_EDITS_MAX_BYTES = 65_536;
 
-const fieldKeySchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/, "Use a letter or underscore, then up to 63 letters, digits or underscores");
+/** Keys the gate's own output uses; an edit may not set them. */
+export const APPROVAL_GATE_RESERVED_FIELD_KEYS: ReadonlySet<string> = new Set(["approved", "approval"]);
+
+const fieldKeySchema = z
+  .string()
+  .regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/, "Use a letter, then up to 63 letters, digits or underscores")
+  .refine((key) => !APPROVAL_GATE_RESERVED_FIELD_KEYS.has(key), { message: "'approved' and 'approval' are set by the gate itself" });
 
 export const approvalGateFieldSchema = z.object({
   key: fieldKeySchema,

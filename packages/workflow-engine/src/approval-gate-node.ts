@@ -152,7 +152,12 @@ export function approvalGateOutcome(input: {
     throw new WorkflowError(message, ErrorCategory.NODE_CONFIG, false, { approval }, "Connect the gate's Rejected output to handle a rejection without failing the run.");
   }
   const item = itemFrom(input.merged, input.parentIds);
-  const values = decision.decision === "approve" ? decision.edits ?? {} : {};
+  // Only the gate's declared fields; engine routing keys are never taken from an edit.
+  const allowed = new Set(request.editableFields.map((field) => field.key));
+  const values =
+    decision.decision === "approve"
+      ? Object.fromEntries(Object.entries(decision.edits ?? {}).filter(([key]) => allowed.has(key) && !key.startsWith("_")))
+      : {};
   return {
     ...item,
     ...values,

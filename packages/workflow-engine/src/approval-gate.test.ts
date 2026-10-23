@@ -207,6 +207,20 @@ describe("approval gate node", () => {
     expect(failed.error).toBe("Approval timed out after 30 minutes with nobody deciding.");
   });
 
+  it("never takes routing keys or undeclared keys from the edits", async () => {
+    const { state } = await pauseGate();
+    const approved = await resumeWorkflowExecution(
+      { executionId: "exec-gate", state, decision: "approve", edits: { reply: "ok", _branchHandleFallback: "timed_out", _branchHandle: "rejected", extra: 1 } },
+      deps()
+    );
+    const output = last(approved, "gate")?.output as Record<string, any>;
+    expect(output).not.toHaveProperty("_branchHandleFallback");
+    expect(output).not.toHaveProperty("extra");
+    expect(output._branchHandle).toBe("approved");
+    expect(last(approved, "on_timed_out")?.status).toBe("skipped");
+    expect(last(approved, "on_rejected")?.status).toBe("skipped");
+  });
+
   it("does not take approved edits on a rejection", async () => {
     const { state } = await pauseGate();
     const rejected = await resumeWorkflowExecution({ executionId: "exec-gate", state, decision: "reject", reason: "x", edits: { reply: "sneaky" } }, deps());

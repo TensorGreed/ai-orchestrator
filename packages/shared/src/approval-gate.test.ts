@@ -31,6 +31,9 @@ describe("approval gate config", () => {
   it("refuses duplicate field keys, bad keys, unknown roles and timeouts past 30 days", () => {
     expect(approvalGateConfigSchema.safeParse({ editableFields: [{ key: "a" }, { key: "a" }] }).success).toBe(false);
     expect(approvalGateConfigSchema.safeParse({ editableFields: [{ key: "1bad" }] }).success).toBe(false);
+    for (const key of ["_branchHandle", "_branchHandleFallback", "__proto__", "approved", "approval"]) {
+      expect(approvalGateConfigSchema.safeParse({ editableFields: [{ key }] }).success).toBe(false);
+    }
     expect(approvalGateConfigSchema.safeParse({ approverRoles: ["owner"] }).success).toBe(false);
     expect(approvalGateConfigSchema.safeParse({ timeoutMinutes: 43_201 }).success).toBe(false);
     expect(approvalGateConfigSchema.safeParse({ timeoutMinutes: 0 }).success).toBe(false);
