@@ -99,6 +99,22 @@ export function checkStructuredContent(
   };
 }
 
+export type JsonSchemaCheck = { ok: true } | { ok: false; invalidSchema: true; errors: string[] } | { ok: false; invalidSchema: false; errors: string[] };
+
+/**
+ * Phase 15.2 — validate any JSON value against a JSON Schema (the eval
+ * `json_schema` scorer). Uses the same Ajv instance and validator cache as
+ * tool output checks; remote `$ref`s are never fetched. A schema Ajv cannot
+ * compile is reported as such instead of passing.
+ */
+export function validateJsonSchema(schema: Record<string, unknown>, value: unknown, maxErrors = 5): JsonSchemaCheck {
+  const validate = compile(schema);
+  if (!validate) return { ok: false, invalidSchema: true, errors: ["The schema could not be compiled."] };
+  if (validate(value)) return { ok: true };
+  const errors = (validate.errors ?? []).slice(0, maxErrors).map((entry) => `${entry.instancePath || "(root)"} ${entry.message ?? "is invalid"}`);
+  return { ok: false, invalidSchema: false, errors: errors.length > 0 ? errors : ["validation failed"] };
+}
+
 /** Text of the content blocks: one string for a single block, an array for several. */
 export function normalizeToolContent(rawContent: unknown): unknown {
   if (!Array.isArray(rawContent)) return undefined;
