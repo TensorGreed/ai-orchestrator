@@ -45,6 +45,25 @@ new project is open to every user until then. Use `strict` for deployments
 where teams must not see each other's work. The value is validated at startup
 (`role` or `strict`).
 
+### Switching an existing install to `strict`
+
+Under `strict` a non-admin sees nothing until they have a membership, and
+default-project secrets stop being shared with every project. Before you
+switch, as an admin:
+
+1. Add memberships for every non-admin who should keep working, including to
+   the default project for those who use it (`POST /api/projects/:id/members`,
+   or Projects in the UI). Admins always keep access, so you cannot lock
+   yourself out. If no user has any membership, the API logs a warning at
+   startup.
+2. Share each default-project secret to the projects whose workflows use it
+   (`POST /api/secrets/:id/shares` with `{ "projectId": "..." }`). Until then,
+   a run in another project fails with "belongs to another project". Do the
+   same for registry MCP servers assigned to the default project, or move
+   them to no project.
+3. Jobs already on the queue run as the user who queued them; a job whose user
+   has no access any more goes straight to the dead-letter queue.
+
 Every route that touches a workflow or its runs checks the workflow's project
 on top of the global role:
 
@@ -59,11 +78,12 @@ on top of the global role:
 | Save or delete a golden run / replay one | `workflow:write` / `workflow:execute` |
 | Read or search a knowledge base / ingest into one | `workflow:read` / `workflow:write` in the KB's project |
 | Read MCP cassettes (list, detail, export) | `workflow:read` on the recorded workflow |
-| Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`) |
+| Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and operators, except for queued runs, whose requests anyone who can read the workflow sees) |
 | Eval datasets and fixtures: list or read / create, add, delete | `workflow:read` / `workflow:write` in the dataset's project |
 | Compat webhook API (`/api/webhooks/execute`, `/stream`) | `workflow:execute` on the selected workflow |
-| Create a template from a workflow / use a template | `workflow:read` on the source / `workflow:write` in the target project |
-| Rename or delete a project, create or change a folder | `workflow:write` in that project |
+| Create a template from a workflow / use a template | `workflow:write` on the source / `workflow:write` in the target project |
+| Rename or delete a project | `project:manage` in that project (in `role` isolation, also a builder with no membership there) |
+| Create or change a folder | `workflow:write` in that project |
 | List, share, unshare or delete a secret | `secret:read` / `secret:write` in the secret's project |
 
 - Admins always pass.
@@ -90,10 +110,21 @@ on top of the global role:
 - Webhook endpoint and MCP toolset candidate lists only contain workflows the
   user can read. Recent MCP tool calls of runs the user cannot read keep their
   outcome but drop the workflow id and error text.
+- A project can only be deleted once it has no workflows and no secrets left
+  (`409` otherwise). Deleting it removes its folders, memberships, custom
+  roles and the shares into it, so a project created later with the same id
+  starts empty.
+- Running a workflow through an execute share needs `workflow:execute` in the
+  project it is shared to; a viewer there can see it but not run it.
 - API keys act as their owner, with the owner's memberships.
 - A job a user put on the queue records that user as `triggeredBy` (a
   `triggeredBy` in the request body is kept as `customData.requestedBy`), and
-  runs only if that user may still run the workflow when the job starts.
+  runs only if that user may still run the workflow when the job starts. If
+  not, the job goes straight to the dead-letter queue (no retries) and a
+  `queue.job_refused` audit event is recorded. The run uses that user's role
+  for the MCP tool policy and their `secret:use`, as a direct run does. MCP
+  elicitations from a queued run belong to the workflow: anyone with
+  `workflow:execute` on it may answer them.
 - Session-mode chat and form triggers only answer users who can read the
   workflow's project.
 
@@ -104,29 +135,41 @@ its own project, whichever trigger started it:
 
 - **Sub-workflows and error workflows.** An `execute_workflow` node or a
   `settings.errorWorkflowId` may only call a workflow in the same project, a
-  workflow with no project, a workflow shared to the caller's project with
-  `execute` access, or (when a signed-in user started the run) one that user
-  may execute. Anything else fails the node with "Sub-workflow 'id' is in
+  workflow with no project, or a workflow its owner shared to the caller's
+  project with `execute` access. Who started, approved or retried the run does
+  not matter: an admin approving a builder's paused run does not let it reach
+  another project. Anything else fails the node with "Sub-workflow 'id' is in
   another project and is not shared to this workflow's project with execute
   access"; a refused error workflow is skipped and logged. A workflow with no
   project counts as the default project when it calls others. A sub-workflow
-  runs with its own project's secrets, knowledge bases and session keys.
+  runs with its own project's secrets, knowledge bases and session keys; the
+  run's user carries over only to a child in the same project.
 - **Secrets.** A `secretRef` resolves only for a secret of the workflow's
-  project, of the default project (shared), or shared to the workflow's project
-  (`POST /api/secrets/:id/shares`). When a signed-in user started the run, they
-  also need `secret:use` in the workflow's project. Admins are exempt from
-  `secret:use`, not from the project rule. Provider, connector and MCP test and
-  discovery routes only resolve a secret the caller has `secret:use` for in the
-  secret's project or a project it is shared to.
+  project, shared to the workflow's project (`POST /api/secrets/:id/shares`),
+  or, in `role` isolation only, of the default project. In `strict` isolation a
+  default-project secret needs an explicit share like any other. When a
+  signed-in user started the run, they also need `secret:use` in the
+  workflow's project or in a project the workflow is shared to with `execute`.
+  Admins are exempt from `secret:use`, not from the project rule. Provider,
+  connector and MCP test and discovery routes only resolve a secret the caller
+  has `secret:use` for in the secret's project or a project it is shared to.
+- **Registry MCP servers.** A server assigned to a project can only be used by
+  that project's workflows ("MCP server 'id' belongs to another project");
+  servers with no project are deployment-wide, and default-project servers
+  count as shared in `role` isolation only. The server's own `secretRef`
+  follows the secret rules above.
 - **Session memory, the session tool cache and session artifacts** are stored
   per project: two projects that pick the same Simple Memory namespace and
   session id never see each other's messages or cached tool results. Rows
-  written before this scoping are still read, never written, by default-project
-  workflows and by a workflow under its own default namespace
-  (`<workflowId>:<nodeId>`); other projects stop seeing them.
+  written before this scoping are still read, never written, by a workflow
+  under its own exact default namespace (`<workflowId>:<nodeId>`) and, from
+  the default project, under any namespace that no workflow of another project
+  uses (as its default namespace or a literal custom one). Other projects stop
+  seeing them; rows are not migrated.
 - Deleting a workflow also deletes its versions, shares, queue and dead-letter
-  rows, eval runs, elicitations and legacy default-namespace session state, so
-  a new workflow that reuses the id inherits none of it.
+  rows, eval runs, elicitations and its legacy default-namespace session state
+  (exactly `<workflowId>:<nodeId>` for its nodes), so a new workflow that
+  reuses the id inherits none of it.
 
 Triggers without a user (production webhooks, schedules, chat and form
 triggers in public or bearer mode, the MCP gateway) are not checked against a
