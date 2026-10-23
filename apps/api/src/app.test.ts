@@ -235,6 +235,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     HA_LEASE_TTL_MS: 30000,
     HA_RENEW_INTERVAL_MS: 10000,
     NOTIFICATIONS_ENABLED: false,
+    NOTIFICATIONS_APPROVAL_EVENTS: true,
     NOTIFICATION_SMTP_PORT: 587,
     NOTIFICATION_SMTP_SECURE: false,
     // Phase 4.1/4.2 — rate limiting + helmet defaults for tests.
@@ -299,6 +300,8 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     EVAL_RUN_MAX_COST_USD: 5,
     EVAL_RESULT_MAX_BYTES: 262144,
     EVAL_RUN_RETENTION_DAYS: 90,
+    APPROVAL_SWEEP_INTERVAL_MS: 60_000,
+    APP_PUBLIC_URL: "",
     GUARD_AUTO_APPLY: true,
     MCP_SANDBOX_DEFAULT: "none",
     MCP_SANDBOX_REQUIRED: false,

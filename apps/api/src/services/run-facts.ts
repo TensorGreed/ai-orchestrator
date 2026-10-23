@@ -182,6 +182,11 @@ export function collectRunActivity(results: JsonRecord[], nodeById: Map<string, 
       approvals.push({ nodeId, decision: input.decision, actedBy: str(input.actedBy), reason: str(input.reason), decidedAt: str(result.startedAt) });
     }
     if (!output || consumed) continue;
+    // Phase 11.2 — an Approval Gate records its decision in its output.
+    const gateApproval = type === "approval_gate" ? asRecord(output.approval) : null;
+    if (gateApproval && (gateApproval.decision === "approve" || gateApproval.decision === "reject")) {
+      approvals.push({ nodeId, decision: gateApproval.decision, actedBy: str(gateApproval.actedBy), reason: str(gateApproval.reason), decidedAt: str(gateApproval.decidedAt) ?? str(result.startedAt) });
+    }
 
     const telemetry = asRecord(output._telemetry);
     const provider = asRecord(output._provider);

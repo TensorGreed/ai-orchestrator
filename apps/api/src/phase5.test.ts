@@ -26,6 +26,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     LOG_LEVEL: "warn",
     NOTIFICATIONS_ENABLED: false,
+    NOTIFICATIONS_APPROVAL_EVENTS: true,
     NOTIFICATION_SMTP_PORT: 587,
     NOTIFICATION_SMTP_SECURE: false,
     API_PORT: 0,
@@ -151,6 +152,8 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     EVAL_RUN_MAX_COST_USD: 5,
     EVAL_RESULT_MAX_BYTES: 262144,
     EVAL_RUN_RETENTION_DAYS: 90,
+    APPROVAL_SWEEP_INTERVAL_MS: 60_000,
+    APP_PUBLIC_URL: "",
     GUARD_AUTO_APPLY: true,
     MCP_SANDBOX_DEFAULT: "none",
     MCP_SANDBOX_REQUIRED: false,
