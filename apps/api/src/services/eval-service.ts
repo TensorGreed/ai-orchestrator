@@ -131,8 +131,11 @@ export interface EvalReplayDeps {
     actor: SafeUser;
     executionId: string;
   }) => Promise<ReplayRunResponse>;
-  /** The user a job runs as (tool policy subject), looked up again when the job starts. */
-  actorFor: (email: string) => SafeUser | null;
+  /**
+   * The user a job runs as (tool policy subject and project scope), looked up
+   * again for every case; null when they can no longer run the workflow.
+   */
+  actorFor: (email: string, workflowId: string) => SafeUser | null;
 }
 
 export interface EvalServiceOptions {
@@ -983,8 +986,8 @@ export class EvalService {
     const recording = replay.getRecording(recordingId);
     if (!recording) return { status: "error", recordingId, error: "The golden run for this case was deleted." };
     if (recording.workflowId !== workflowId) return { status: "error", recordingId, error: "The golden run for this case belongs to another workflow." };
-    const actor = replay.actorFor(job.actorEmail);
-    if (!actor) return { status: "error", recordingId, error: `The user who started this job (${job.actorEmail}) can no longer run replays.` };
+    const actor = replay.actorFor(job.actorEmail, workflowId);
+    if (!actor) return { status: "error", recordingId, error: `The user who started this job (${job.actorEmail}) can no longer run this workflow.` };
 
     const response = await replay.replayCase({
       recording,

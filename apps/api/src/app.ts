@@ -136,7 +136,7 @@ import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
-import { ReplayService } from "./services/replay-service.js";
+import { ReplayRunError, ReplayService } from "./services/replay-service.js";
 import { buildRunFacts } from "./services/run-facts.js";
 import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandbox.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
@@ -2851,17 +2851,22 @@ export function createApp(
   // for the Postgres-parity follow-up note.
   /**
    * Phase 15.2 — whether `user` may hand this secret to a judge running for a
-   * workflow in `projectId`: a non-internal secret owned by or shared to the
-   * project, and `secret:use` there (admins pass). Checked when a run starts
-   * and again for every judge call.
+   * workflow in `projectId`: a non-internal secret the project's runs can
+   * reach (the same rule as run-scope.ts: owned by the project, shared to it,
+   * or a default-project secret in `role` isolation), and `secret:use` there.
+   * Admins skip the `secret:use` check, never the project one. Checked when a
+   * run starts and again for every judge call.
    */
   const canUseJudgeSecret = (user: SafeUser, secretId: string, projectId: string): boolean => {
     const row = store.getSecret(secretId);
     if (!row || isInternalSecretProvider(row.provider)) return false;
-    if (user.role === "admin") return true;
     const owningProject = row.projectId ?? DEFAULT_PROJECT_ID;
-    const reachable = owningProject === projectId || rbacService.listSecretShares(secretId).some((share) => share.projectId === projectId);
-    return reachable && rbacService.can(user, projectId, "secret:use");
+    const reachable =
+      owningProject === projectId ||
+      (config.PROJECT_ISOLATION === "role" && owningProject === DEFAULT_PROJECT_ID) ||
+      store.listSecretsSharedToProject(projectId).includes(secretId);
+    if (!reachable) return false;
+    return user.role === "admin" || rbacService.can(user, projectId, "secret:use");
   };
 
   // Phase 9.5 / 15.2 — the LLM judge for judge scorers (faithfulness,
@@ -2880,9 +2885,9 @@ export function createApp(
     const context = judgeInput.context;
     const workflow = context ? store.getWorkflow(context.workflowId) : null;
     const projectId = workflow?.projectId ?? DEFAULT_PROJECT_ID;
+    const actor = context?.actorEmail ? evalPolicyActor(context.actorEmail) : null;
     if (judgeInput.secretRef) {
-      const actor = context?.actorEmail ? evalPolicyActor(context.actorEmail) : null;
-      if (!actor || !canUseJudgeSecret(actor, judgeInput.secretRef.secretId, projectId)) {
+      if (!workflow || !actor || !canUseJudgeSecret(actor, judgeInput.secretRef.secretId, projectId)) {
         throw new Error(`the judge's secret ${judgeInput.secretRef.secretId} cannot be used by the user who started this run in this workflow's project`);
       }
     } else if (!config.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS) {
@@ -2907,7 +2912,9 @@ export function createApp(
         },
         messages: [{ role: "user", content: judgeInput.prompt }]
       },
-      { resolveSecret: (ref) => secretService.resolveSecret(ref) }
+      // Secrets resolve in the workflow's project with the starting user's
+      // rights, like the run's own nodes; without a workflow nothing resolves.
+      { resolveSecret: workflow ? runScope.dependenciesFor(workflow, { actor }).resolveSecret : async () => undefined }
     );
     const usage = response.usage;
     const costUsd = usage
@@ -2974,10 +2981,25 @@ export function createApp(
     return input.mcp?.record ? mcpCassetteService.planRecording(mcpRegistry) : undefined;
   };
 
+  /**
+   * The user a background eval run or replay job runs as: the one who
+   * started it, looked up again for every case, as long as they may still run
+   * the workflow (the same rule as queued runs). The run then executes with
+   * their policy and project scope (run-scope.ts).
+   */
+  const evalRunActor = (email: string, workflowId: string): SafeUser | null => {
+    const actor = evalPolicyActor(email);
+    return actor && runAccess.workflow(actor, workflowId, "workflow:execute").ok ? actor : null;
+  };
+
   const evalService = new EvalService(store, async (input) => {
     const workflow = store.getWorkflow(input.workflowId);
     if (!workflow) {
       return { output: null, error: `Workflow not found: ${input.workflowId}` };
+    }
+    const policyActor = input.triggeredBy ? evalRunActor(input.triggeredBy, workflow.id) : null;
+    if (input.triggeredBy && !policyActor) {
+      return { output: null, error: `The user who started this run (${input.triggeredBy}) can no longer run this workflow.` };
     }
     const executionId = input.executionId ?? crypto.randomUUID();
     const fixtureRecord =
@@ -3000,7 +3022,7 @@ export function createApp(
         triggerType: "eval",
         triggeredBy: input.triggeredBy,
         // Eval runs are started by a signed-in builder; their email is recorded server-side.
-        policyActor: evalPolicyActor(input.triggeredBy),
+        policyActor,
         mcpPlan
       });
       const result = finishMcpCassettePlan(mcpPlan, executed, {
@@ -3079,8 +3101,14 @@ export function createApp(
         return { ...candidate, workflowHash: ReplayService.candidateHash(candidate.workflow) };
       },
       getRecording: (id) => store.getReplayRecording(id),
-      replayCase: ({ recording, candidate, request, actor, executionId }) => replayService.replay(recording, request, actor, { candidate, executionId }),
-      actorFor: (email) => evalPolicyActor(email)
+      // The candidate was resolved when the job started; it runs in the workflow's current project.
+      replayCase: ({ recording, candidate, request, actor, executionId }) => {
+        const current = store.getWorkflow(candidate.workflow.id);
+        if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
+        const scoped = { ...candidate, workflow: { ...candidate.workflow, projectId: current.projectId, folderId: current.folderId } };
+        return replayService.replay(recording, request, actor, { candidate: scoped, executionId });
+      },
+      actorFor: (email, workflowId) => evalRunActor(email, workflowId)
     },
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
@@ -4837,17 +4865,9 @@ export function createApp(
     store,
     evals: evalService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission),
-    canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission),
+    runAccess,
+    denyRunAccess,
     canUseSecret: canUseJudgeSecret,
-    // A cassette is readable when the user can read its workflow (cassettes without a workflow are anyone's, as in the MCP testing routes).
-    cassetteAllowed: (user, cassetteId) => {
-      const cassette = store.getMcpCassetteSummary(cassetteId);
-      if (!cassette) return false;
-      if (user.role === "admin" || !cassette.workflowId) return true;
-      const workflow = store.getWorkflow(cassette.workflowId);
-      return rbacService.canAccessWorkflow(user, workflow ? { id: workflow.id, projectId: workflow.projectId ?? undefined } : { id: cassette.workflowId, ...(cassette.projectId ? { projectId: cassette.projectId } : {}) }, "workflow:read");
-    },
     audit: (request, user, event) => audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS
   });
