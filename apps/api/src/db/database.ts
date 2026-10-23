@@ -3031,6 +3031,8 @@ export class SqliteStore {
       return (row ? toNumber(row.count) : 0) > 0;
     };
 
+    // Read before the row goes: its nodes name its legacy session namespaces.
+    const legacyNamespaces = (this.getWorkflow(id)?.nodes ?? []).map((node) => `${id}:${node.id}`);
     const hadForeignKeysEnabled = this.queryOne<{ enabled: number }>("PRAGMA foreign_keys")?.enabled;
     const foreignKeysWereOn = Number(hadForeignKeysEnabled) === 1;
 
@@ -3064,8 +3066,9 @@ export class SqliteStore {
       // Workflow ids are chosen by the client, so a new workflow can reuse a
       // deleted one's id. Nothing keyed by the old id may carry over to it:
       // versions, shares, queue and dead-letter rows, eval runs, elicitations,
-      // and session state under the old workflow's legacy default namespace
-      // (`<workflowId>:<nodeId>`, written before keys were project-scoped).
+      // and session state under the old workflow's legacy default namespaces
+      // (exactly `<workflowId>:<nodeId>` for its nodes, written before keys
+      // were project-scoped; a prefix match would also hit `<workflowId>:x`).
       if (hasTable("workflow_versions")) this.exec("DELETE FROM workflow_versions WHERE workflow_id = ?", [id]);
       if (hasTable("workflow_shares")) this.exec("DELETE FROM workflow_shares WHERE workflow_id = ?", [id]);
       if (hasTable("execution_queue")) this.exec("DELETE FROM execution_queue WHERE workflow_id = ?", [id]);
@@ -3075,9 +3078,11 @@ export class SqliteStore {
         this.exec("DELETE FROM eval_runs WHERE workflow_id = ?", [id]);
       }
       if (hasTable("mcp_elicitations")) this.exec("DELETE FROM mcp_elicitations WHERE workflow_id = ?", [id]);
-      const legacyPrefix = `${id}:`;
-      for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
-        if (hasTable(table)) this.exec(`DELETE FROM ${table} WHERE substr(namespace, 1, ?) = ?`, [legacyPrefix.length, legacyPrefix]);
+      if (legacyNamespaces.length > 0) {
+        const placeholders = legacyNamespaces.map(() => "?").join(", ");
+        for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
+          if (hasTable(table)) this.exec(`DELETE FROM ${table} WHERE namespace IN (${placeholders})`, legacyNamespaces);
+        }
       }
 
       this.exec("DELETE FROM workflows WHERE id = ?", [id]);

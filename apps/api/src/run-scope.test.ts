@@ -7,13 +7,19 @@ import type { Workflow } from "@ai-orchestrator/shared";
 import { createRunScope, projectSessionNamespace, type RunScopeDeps } from "./run-scope.js";
 import type { SafeUser } from "./services/auth-service.js";
 
-const workflow = (id: string, projectId?: string): Workflow => ({
+const workflow = (id: string, projectId?: string, nodes: Array<{ id: string; namespace?: string }> = []): Workflow => ({
   id,
   name: id,
   schemaVersion: "1.0.0",
   workflowVersion: 1,
   ...(projectId ? { projectId } : {}),
-  nodes: [],
+  nodes: nodes.map((node) => ({
+    id: node.id,
+    type: "local_memory",
+    name: node.id,
+    position: { x: 0, y: 0 },
+    config: node.namespace ? { namespace: node.namespace } : {}
+  })),
   edges: []
 });
 
@@ -23,10 +29,26 @@ function scopeFixture(overrides: Partial<RunScopeDeps> = {}) {
   const workflows: Record<string, Workflow> = {
     "a-1": workflow("a-1", "pa"),
     "a-2": workflow("a-2", "pa"),
-    "b-1": workflow("b-1", "pb"),
+    "b-1": workflow("b-1", "pb", [{ id: "agent" }]),
     "b-shared": workflow("b-shared", "pb"),
     "b-read-share": workflow("b-read-share", "pb"),
-    legacy: workflow("legacy")
+    legacy: workflow("legacy"),
+    team: workflow("team", "pa", [{ id: "mem" }]),
+    "team:agent": workflow("team:agent", "pb", [{ id: "node" }]),
+    "b-custom": workflow("b-custom", "pb", [{ id: "mem", namespace: "b-support" }])
+  };
+  const mcpServers: Record<string, string | null> = { "m-pb": "pb", "m-none": null, "m-default": "default" };
+  const mcpResolved: string[] = [];
+  // Which projects claim a legacy namespace, as app.ts builds it from the stored workflows.
+  const legacyOwners = (namespace: string) => {
+    const owners = new Set<string>();
+    for (const wf of Object.values(workflows)) {
+      for (const node of wf.nodes) {
+        const custom = (node.config as { namespace?: string }).namespace;
+        if (namespace === `${wf.id}:${node.id}` || namespace === custom) owners.add(wf.projectId ?? "default");
+      }
+    }
+    return [...owners];
   };
   const secrets: Record<string, string> = { "s-a": "pa", "s-b": "pb", "s-default": "default", "s-shared": "pb" };
   const memory = new Map<string, unknown[]>();
@@ -37,11 +59,17 @@ function scopeFixture(overrides: Partial<RunScopeDeps> = {}) {
     getWorkflow: (id) => workflows[id] ?? null,
     listWorkflowShares: (id) =>
       id === "b-shared" ? [{ projectId: "pa", accessLevel: "execute" }] : id === "b-read-share" ? [{ projectId: "pa", accessLevel: "read" }] : [],
-    // u-runner may execute anything in pb; nobody else may.
-    canExecuteWorkflow: (actor, target) => actor.id === "u-runner" && target.projectId === "pb",
     getSecretProjectId: (id) => secrets[id] ?? null,
     listSecretIdsSharedToProject: (projectId) => (projectId === "pa" ? ["s-shared"] : []),
-    canUseSecretsInProject: (actor) => actor.id !== "u-no-secrets",
+    // u-consumer may use secrets only in pa (where b-shared is shared to with execute).
+    canUseSecretsInProject: (actor, projectId) => actor.id !== "u-no-secrets" && (actor.id !== "u-consumer" || projectId === "pa"),
+    defaultSecretsShared: true,
+    getMcpServerProjectId: (id) => (id in mcpServers ? mcpServers[id] : undefined),
+    resolveRegisteredMcpServer: (id) => {
+      mcpResolved.push(id);
+      return { serverId: id, connection: {} } as never;
+    },
+    legacyNamespaceOwnerProjects: legacyOwners,
     resolveSecret: async (ref) => {
       resolved.push(ref!.secretId);
       return `value-of-${ref!.secretId}`;
@@ -66,7 +94,7 @@ function scopeFixture(overrides: Partial<RunScopeDeps> = {}) {
     },
     ...overrides
   };
-  return { scope: createRunScope(deps), workflows, memory, toolCalls, artifacts, resolved };
+  return { scope: createRunScope(deps), workflows, memory, toolCalls, artifacts, resolved, mcpResolved };
 }
 
 describe("run scope: sub-workflows and error workflows", () => {
@@ -82,12 +110,11 @@ describe("run scope: sub-workflows and error workflows", () => {
     expect(() => load("b-read-share")).toThrow(/another project/);
   });
 
-  it("a run started by a user may call a child that user can execute", () => {
+  it("the run's user never widens what it can call, not even an admin approving or retrying it", () => {
     const { scope, workflows } = scopeFixture();
-    expect(scope.dependenciesFor(workflows["a-1"]!, user("builder", "u-runner")).loadWorkflow("b-1")?.id).toBe("b-1");
-    expect(() => scope.dependenciesFor(workflows["a-1"]!, user("builder", "u-other")).loadWorkflow("b-1")).toThrow(/another project/);
-    // Without a user (webhook, schedule) only the project rules apply.
-    expect(() => scope.dependenciesFor(workflows["a-1"]!, null).loadWorkflow("b-1")).toThrow(/another project/);
+    expect(() => scope.dependenciesFor(workflows["a-1"]!, { actor: user("admin") }).loadWorkflow("b-1")).toThrow(/Sub-workflow 'b-1' is in another project/);
+    expect(() => scope.dependenciesFor(workflows["a-1"]!, { actor: null }).loadWorkflow("b-1")).toThrow(/another project/);
+    expect(scope.dependenciesFor(workflows["a-1"]!, { actor: user("admin") }).loadWorkflow("b-shared")?.id).toBe("b-shared");
   });
 
   it("a workflow without a project counts as the default project when it calls others", () => {
@@ -110,10 +137,10 @@ describe("run scope: sub-workflows and error workflows", () => {
 
   it("error workflows follow the same rule and report why they are not run", () => {
     const { scope, workflows } = scopeFixture();
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, null, "a-2")).toEqual({ workflow: workflows["a-2"] });
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, null, "b-1")).toEqual({ error: expect.stringMatching(/Error workflow 'b-1' is in another project/) });
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, null, "nope")).toEqual({ error: "Error workflow 'nope' was not found." });
-    expect(scope.errorWorkflowFor(workflows["a-1"]!, user("builder", "u-runner"), "b-1")).toEqual({ workflow: workflows["b-1"] });
+    expect(scope.errorWorkflowFor(workflows["a-1"]!, "a-2")).toEqual({ workflow: workflows["a-2"] });
+    expect(scope.errorWorkflowFor(workflows["a-1"]!, "b-1")).toEqual({ error: expect.stringMatching(/Error workflow 'b-1' is in another project/) });
+    expect(scope.errorWorkflowFor(workflows["a-1"]!, "nope")).toEqual({ error: "Error workflow 'nope' was not found." });
+    expect(scope.errorWorkflowFor(workflows["a-1"]!, "b-shared")).toEqual({ workflow: workflows["b-shared"] });
   });
 });
 
@@ -132,11 +159,67 @@ describe("run scope: secrets", () => {
 
   it("needs secret:use for the run's user, except admins", async () => {
     const { scope, workflows } = scopeFixture();
-    await expect(scope.dependenciesFor(workflows["a-1"]!, user("operator", "u-no-secrets")).resolveSecret({ secretId: "s-a" })).rejects.toThrow(
+    await expect(scope.dependenciesFor(workflows["a-1"]!, { actor: user("operator", "u-no-secrets") }).resolveSecret({ secretId: "s-a" })).rejects.toThrow(
       /Permission 'secret:use' is required/
     );
-    await expect(scope.dependenciesFor(workflows["a-1"]!, user("admin", "u-no-secrets")).resolveSecret({ secretId: "s-a" })).resolves.toBe("value-of-s-a");
-    await expect(scope.dependenciesFor(workflows["a-1"]!, user("builder")).resolveSecret({ secretId: "s-a" })).resolves.toBe("value-of-s-a");
+    await expect(scope.dependenciesFor(workflows["a-1"]!, { actor: user("admin", "u-no-secrets") }).resolveSecret({ secretId: "s-a" })).resolves.toBe("value-of-s-a");
+    await expect(scope.dependenciesFor(workflows["a-1"]!, { actor: user("builder") }).resolveSecret({ secretId: "s-a" })).resolves.toBe("value-of-s-a");
+  });
+
+  it("strict isolation: a default-project secret needs a share like any other", async () => {
+    const { scope, workflows } = scopeFixture({ defaultSecretsShared: false, listSecretIdsSharedToProject: (projectId) => (projectId === "pb" ? ["s-default"] : []) });
+    await expect(scope.dependenciesFor(workflows["a-1"]!).resolveSecret({ secretId: "s-default" })).rejects.toThrow(/belongs to another project/);
+    // The default project's own workflows keep it, and a share opens it to another project.
+    await expect(scope.dependenciesFor(workflows.legacy!).resolveSecret({ secretId: "s-default" })).resolves.toBe("value-of-s-default");
+    await expect(scope.dependenciesFor(workflows["b-1"]!).resolveSecret({ secretId: "s-default" })).resolves.toBe("value-of-s-default");
+  });
+
+  it("secret:use in a project the workflow is shared to with execute counts", async () => {
+    const { scope, workflows } = scopeFixture();
+    const consumer = user("builder", "u-consumer");
+    // b-shared (pb) is shared to pa with execute; u-consumer may use secrets only in pa.
+    await expect(scope.dependenciesFor(workflows["b-shared"]!, { actor: consumer }).resolveSecret({ secretId: "s-b" })).resolves.toBe("value-of-s-b");
+    // No execute share, no secret:use: refused.
+    await expect(scope.dependenciesFor(workflows["b-1"]!, { actor: consumer }).resolveSecret({ secretId: "s-b" })).rejects.toThrow(/secret:use/);
+    await expect(scope.dependenciesFor(workflows["b-read-share"]!, { actor: consumer }).resolveSecret({ secretId: "s-b" })).rejects.toThrow(/secret:use/);
+    // A user with secret:use nowhere still fails through the share.
+    await expect(scope.dependenciesFor(workflows["b-shared"]!, { actor: user("viewer", "u-no-secrets") }).resolveSecret({ secretId: "s-b" })).rejects.toThrow(/secret:use/);
+  });
+
+  it("the run's user carries over to a same-project child only", async () => {
+    const { scope, workflows } = scopeFixture();
+    const parent = scope.dependenciesFor(workflows["a-1"]!, { actor: user("operator", "u-no-secrets") });
+    // Same project: the user's missing secret:use still applies.
+    await expect(parent.scopeSubWorkflow(workflows["a-2"]!).resolveSecret!({ secretId: "s-a" })).rejects.toThrow(/secret:use/);
+    // Another project, reached through the owner's execute share: the share authorizes it.
+    await expect(parent.scopeSubWorkflow(workflows["b-shared"]!).resolveSecret!({ secretId: "s-b" })).resolves.toBe("value-of-s-b");
+  });
+});
+
+describe("run scope: registry MCP servers", () => {
+  it("a server with a project is usable only from that project; default-project servers follow the isolation mode", async () => {
+    const role = scopeFixture();
+    const fromA = role.scope.dependenciesFor(role.workflows["a-1"]!).resolveRegisteredMcpServer;
+    expect(() => fromA("m-pb")).toThrow("MCP server 'm-pb' belongs to another project, so workflows in this project cannot use it.");
+    expect(await fromA("m-none")).toMatchObject({ serverId: "m-none" });
+    expect(await fromA("m-default")).toMatchObject({ serverId: "m-default" });
+    expect(await role.scope.dependenciesFor(role.workflows["b-1"]!).resolveRegisteredMcpServer("m-pb")).toMatchObject({ serverId: "m-pb" });
+    expect(role.mcpResolved).toEqual(["m-none", "m-default", "m-pb"]);
+
+    const strict = scopeFixture({ defaultSecretsShared: false });
+    expect(() => strict.scope.dependenciesFor(strict.workflows["a-1"]!).resolveRegisteredMcpServer("m-default")).toThrow(/belongs to another project/);
+    expect(await strict.scope.dependenciesFor(strict.workflows.legacy!).resolveRegisteredMcpServer("m-default")).toMatchObject({ serverId: "m-default" });
+  });
+
+  it("a run's own resolver (a cassette plan) is used and passed to sub-workflows, under their project's rule", async () => {
+    const { scope, workflows, mcpResolved } = scopeFixture();
+    const planned: string[] = [];
+    const parent = scope.dependenciesFor(workflows["a-1"]!, { resolveRegisteredMcpServer: (id) => (planned.push(id), { serverId: `planned-${id}` } as never) });
+    expect(await parent.resolveRegisteredMcpServer("m-none")).toMatchObject({ serverId: "planned-m-none" });
+    const child = parent.scopeSubWorkflow(workflows["b-shared"]!);
+    expect(await child.resolveRegisteredMcpServer!("m-pb")).toMatchObject({ serverId: "planned-m-pb" });
+    expect(planned).toEqual(["m-none", "m-pb"]);
+    expect(mcpResolved).toEqual([]);
   });
 });
 
@@ -155,14 +238,36 @@ describe("run scope: session memory, tool cache and artifacts", () => {
     const { scope, workflows, memory } = scopeFixture();
     memory.set("support|s1", [{ role: "user", content: "legacy shared" }]);
     memory.set("b-1:agent|s1", [{ role: "user", content: "legacy of b-1" }]);
+    memory.set("b-1:other|s1", [{ role: "user", content: "not a node of b-1" }]);
     // From another project: neither the shared name nor someone else's default namespace.
     const a = scope.dependenciesFor(workflows["a-1"]!);
     expect(await a.memoryStore.loadMessages("support", "s1")).toEqual([]);
     expect(await a.memoryStore.loadMessages("b-1:agent", "s1")).toEqual([]);
-    // The workflow's own default namespace still reads its old memory.
-    expect(await scope.dependenciesFor(workflows["b-1"]!).memoryStore.loadMessages("b-1:agent", "s1")).toEqual([{ role: "user", content: "legacy of b-1" }]);
-    // Default-project workflows keep reading every legacy row (no change for single-project installs).
+    // The workflow's own default namespace still reads its old memory; only an exact node match counts.
+    const b = scope.dependenciesFor(workflows["b-1"]!);
+    expect(await b.memoryStore.loadMessages("b-1:agent", "s1")).toEqual([{ role: "user", content: "legacy of b-1" }]);
+    expect(await b.memoryStore.loadMessages("b-1:other", "s1")).toEqual([]);
+    // Default-project workflows keep reading legacy rows no other project claims (single-project installs see no change).
     expect(await scope.dependenciesFor(workflows.legacy!).memoryStore.loadMessages("support", "s1")).toEqual([{ role: "user", content: "legacy shared" }]);
+  });
+
+  it("a default-project workflow cannot read another project's legacy rows (N5)", async () => {
+    const { scope, workflows, memory } = scopeFixture();
+    memory.set("b-1:agent|s1", [{ role: "user", content: "B-private" }]);
+    memory.set("b-support|s1", [{ role: "user", content: "B custom namespace" }]);
+    const fromDefault = scope.dependenciesFor(workflows.legacy!);
+    expect(await fromDefault.memoryStore.loadMessages("b-1:agent", "s1")).toEqual([]);
+    expect(await fromDefault.memoryStore.loadMessages("b-support", "s1")).toEqual([]);
+  });
+
+  it("a workflow id that prefixes another's does not read its legacy rows (N5)", async () => {
+    const { scope, workflows, memory, toolCalls } = scopeFixture();
+    memory.set("team:agent:node|s1", [{ role: "user", content: "team-private" }]);
+    toolCalls.push({ id: "tc", namespace: "team:agent:node", sessionId: "s1", toolName: "t", args: {}, output: "x", createdAt: "2020-01-01T00:00:00.000Z" });
+    const team = scope.dependenciesFor(workflows.team!);
+    expect(await team.memoryStore.loadMessages("team:agent:node", "s1")).toEqual([]);
+    expect(await team.toolDataStore.listToolCalls({ namespace: "team:agent:node", sessionId: "s1" })).toEqual([]);
+    expect(await scope.dependenciesFor(workflows["team:agent"]!).memoryStore.loadMessages("team:agent:node", "s1")).toEqual([{ role: "user", content: "team-private" }]);
   });
 
   it("scopes the tool cache and artifacts the same way, and reports the caller's namespace", async () => {
@@ -177,9 +282,9 @@ describe("run scope: session memory, tool cache and artifacts", () => {
     expect((await a.toolDataStore.listToolCalls({ namespace: "cache", sessionId: "s1" })).map((row) => row.namespace)).toEqual(["cache"]);
     expect((await a.toolDataStore.getToolCall({ namespace: "cache", sessionId: "s1", id: saved.id }))?.output).toBe("secret result");
 
-    toolCalls.push({ id: "old", namespace: "a-1:agent", sessionId: "s1", toolName: "search", args: {}, output: "legacy", createdAt: "2020-01-01T00:00:00.000Z" });
-    expect((await a.toolDataStore.listToolCalls({ namespace: "a-1:agent", sessionId: "s1" })).map((row) => row.id)).toEqual(["old"]);
-    expect(await b.toolDataStore.getToolCall({ namespace: "a-1:agent", sessionId: "s1", id: "old" })).toBeNull();
+    toolCalls.push({ id: "old", namespace: "b-1:agent", sessionId: "s1", toolName: "search", args: {}, output: "legacy", createdAt: "2020-01-01T00:00:00.000Z" });
+    expect((await b.toolDataStore.listToolCalls({ namespace: "b-1:agent", sessionId: "s1" })).map((row) => row.id)).toEqual(["old"]);
+    expect(await a.toolDataStore.getToolCall({ namespace: "b-1:agent", sessionId: "s1", id: "old" })).toBeNull();
 
     await a.sessionArtifactStore.saveArtifact({ namespace: "art", sessionId: "s1", artifactKey: "k", value: 42 });
     expect(await b.sessionArtifactStore.loadArtifact({ namespace: "art", sessionId: "s1", artifactKey: "k" })).toBeNull();

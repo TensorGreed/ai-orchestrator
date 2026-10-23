@@ -1662,7 +1662,10 @@ export function createApp(
       variables: { ...projectVars, ...(input.workflow.variables ?? {}) }
     };
     const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
-    const scoped = runScope.dependenciesFor(mergedWorkflow, input.policyActor);
+    const scoped = runScope.dependenciesFor(mergedWorkflow, {
+      actor: input.policyActor,
+      resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer
+    });
     // The execution timeout aborts the run's signal, so it interrupts a
     // model call, MCP call or retry wait that is in flight instead of only
     // being checked between nodes. The reason marks it as a timeout, which
@@ -1720,7 +1723,6 @@ export function createApp(
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
           guard: guardService.runtimeFor({ executionId: input.executionId, workflowId: mergedWorkflow.id, projectId: mergedWorkflow.projectId ?? "default" }),
           replayNodeHook: input.replay?.hook,
-          resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer ?? resolveRegisteredMcpServer,
           loadMcpToolPolicy,
           // Phase 10.5 — resources, elicitation and list_changed notifications.
           mcpResourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
@@ -1775,15 +1777,17 @@ export function createApp(
               app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Notification send failed");
             });
             // Execute the designated error handler workflow: one in the same
-            // project, a shared one, or one the run's user may execute.
+            // project or one shared to it with execute.
             const failingWorkflow = payload.sourceWorkflowId === mergedWorkflow.id ? mergedWorkflow : store.getWorkflow(payload.sourceWorkflowId) ?? mergedWorkflow;
-            const errorTarget = runScope.errorWorkflowFor(failingWorkflow, input.policyActor, payload.errorWorkflowId);
+            const errorTarget = runScope.errorWorkflowFor(failingWorkflow, payload.errorWorkflowId);
             if ("error" in errorTarget) {
               app.log.warn({ errorWorkflowId: payload.errorWorkflowId, sourceWorkflowId: payload.sourceWorkflowId, reason: errorTarget.error }, "Error workflow not run");
               return;
             }
             const errorWf = errorTarget.workflow;
-            const errorScoped = runScope.dependenciesFor(errorWf, input.policyActor);
+            // Like a sub-workflow: the run's user carries over only within the same project.
+            const sameProject = (errorWf.projectId ?? DEFAULT_PROJECT_ID) === (failingWorkflow.projectId ?? DEFAULT_PROJECT_ID);
+            const errorScoped = runScope.dependenciesFor(errorWf, { actor: sameProject ? input.policyActor : null });
             try {
               await executeWorkflow(
                 {
@@ -1808,7 +1812,6 @@ export function createApp(
                   ...errorScoped,
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
-                  resolveRegisteredMcpServer,
                   loadMcpToolPolicy
                 }
               );
@@ -2630,15 +2633,49 @@ export function createApp(
     if (!usable) throw new Error(`Secret '${secretRef.secretId}' is not available to you.`);
     return secretService.resolveSecret(secretRef);
   };
+  // Which projects claim a pre-scoping session namespace: each workflow's
+  // default `<workflowId>:<nodeId>` and its literal custom namespaces. Only
+  // read when a run falls back to an unprefixed row; rebuilt when any
+  // workflow changes.
+  let legacyNamespaceIndex: { fingerprint: string; owners: Map<string, string[]> } | null = null;
+  const legacyNamespaceOwners = (): Map<string, string[]> => {
+    const items = store.listWorkflows();
+    const fingerprint = items.map((item) => `${item.id}|${item.updatedAt}|${item.workflowVersion}|${item.projectId ?? DEFAULT_PROJECT_ID}`).join("\n");
+    if (legacyNamespaceIndex?.fingerprint === fingerprint) return legacyNamespaceIndex.owners;
+    const owners = new Map<string, string[]>();
+    const claim = (namespace: string, projectId: string) => {
+      const list = owners.get(namespace) ?? [];
+      if (!list.includes(projectId)) list.push(projectId);
+      owners.set(namespace, list);
+    };
+    for (const item of items) {
+      const workflow = store.getWorkflow(item.id);
+      if (!workflow) continue;
+      const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
+      for (const node of workflow.nodes) {
+        claim(`${workflow.id}:${node.id}`, projectId);
+        const custom = (node.config as Record<string, unknown> | undefined)?.namespace;
+        if (typeof custom === "string" && custom.trim() && !custom.includes("{{")) claim(custom.trim(), projectId);
+      }
+    }
+    legacyNamespaceIndex = { fingerprint, owners };
+    return owners;
+  };
   // What a run can reach once it is going: sub-workflows, secrets, knowledge
   // bases and session state of its own project (see run-scope.ts).
   const runScope = createRunScope({
     getWorkflow: (id) => store.getWorkflow(id),
     listWorkflowShares: (workflowId) => store.listWorkflowShares(workflowId),
-    canExecuteWorkflow: (user, workflow) => runAccess.workflow(user, workflow.id, "workflow:execute").ok,
     getSecretProjectId: (secretId) => store.getSecret(secretId)?.projectId ?? null,
     listSecretIdsSharedToProject: (projectId) => store.listSecretsSharedToProject(projectId),
     canUseSecretsInProject: (user, projectId) => rbacService.can(user, projectId, "secret:use"),
+    defaultSecretsShared: config.PROJECT_ISOLATION === "role",
+    getMcpServerProjectId: (serverId) => {
+      const server = store.getMcpServer(serverId);
+      return server ? server.projectId : undefined;
+    },
+    resolveRegisteredMcpServer: (registryServerId) => resolveRegisteredMcpServer(registryServerId),
+    legacyNamespaceOwnerProjects: (namespace) => legacyNamespaceOwners().get(namespace) ?? [],
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
     knowledgeBaseStoreFor: (projectId) => knowledgeBaseStoreForRun(projectId),
     sessions: {
