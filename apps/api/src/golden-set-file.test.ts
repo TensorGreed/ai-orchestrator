@@ -590,14 +590,36 @@ describe("golden-set files: the importer and exporter do not trust what they car
     recording.cassette = plantedCassette();
     const notify = (recording.workflow.nodes as Array<{ id: string; config: Record<string, unknown> }>).find((node) => node.id === "notify")!;
     Object.assign(notify.config, planted(), { headers: { Authorization: `Bearer ${GH_TOKEN}` } });
-    recording.modelTape = { calls: [{ request: planted() }] };
-    recording.memorySeed = { note: PLANTED_SECRET, ...planted() };
+    const tapeHash = "a".repeat(64);
+    recording.modelTape = {
+      format: "l2m.model-tape",
+      version: 1,
+      recordedAt: "2026-10-01T00:00:00.000Z",
+      entries: [
+        {
+          nodeId: "agent",
+          iteration: 0,
+          seq: 1,
+          providerId: "openai",
+          model: "gpt-4o-mini",
+          requestHash: tapeHash,
+          request: { messages: [{ role: "user", content: PLANTED_SECRET, ...planted() }], tools: null, params: planted() },
+          response: { text: GH_TOKEN, ...planted() },
+          error: `failed ${PLANTED_SECRET}`,
+          at: 0,
+          durationMs: 1
+        }
+      ],
+      truncated: false,
+      bytes: 100
+    };
+    recording.memorySeed = { sessions: [{ namespace: "n", sessionId: "s", messages: [{ role: "user", content: PLANTED_SECRET, ...planted() }] }], truncated: false };
     recording.notes = "notes";
 
     const imported = await importFile(context, builder.cookie, rehash(raw));
     expect(imported.statusCode, imported.body).toBe(201);
     const body = imported.json<{ dataset: { id: string }; warnings: string[] }>();
-    expect(body.warnings.join(" ")).toContain("model tape or memory seed");
+    expect(body.warnings.join(" ")).not.toMatch(/tape/);
     expectNoNeedles(imported.body, "the import response");
     expectNoNeedles(storedRows(context, body.dataset.id), "the stored rows");
     // Structure survives the scrub: node ids and types, the cassette's match fields.
@@ -606,6 +628,11 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expect(stored.mcpCassette!.entries[0]).toMatchObject({ server: "registry:srv", method: "tools/call", name: "lookup" });
     expect(stored.mcpCassette!.entries[0]!.argsHash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(stored.nodes.label!.output)).toContain("visible");
+    // The model tape and memory seed are stored, scrubbed, and the tape's request hash survives the scrub.
+    expect(stored.capabilities).toMatchObject({ models: "tape", memory: "seeded" });
+    expect(stored.modelTape!.entries[0]!.requestHash).toBe(tapeHash);
+    expect(JSON.stringify(stored.modelTape)).toContain("visible");
+    expect(stored.memorySeed!.sessions[0]).toMatchObject({ namespace: "n", sessionId: "s" });
 
     const reexport = await call(context, "GET", `/api/eval/datasets/${body.dataset.id}/export`, builder.cookie);
     expect(reexport.statusCode).toBe(200);
