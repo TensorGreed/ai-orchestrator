@@ -96,6 +96,35 @@ describe("l2m replay run --set", () => {
     expect(await main(["replay", "run", "--set", "ds_1"], io([{ status: 400, body: { error: "These golden sets hold no golden runs to replay." } }]).cli)).toBe(EXIT_USAGE);
   });
 
+  it("exits 4 when a poll cannot reach the API or is refused with 403, never 2", async () => {
+    let calls = 0;
+    const flaky = io([{ status: 202, body: { run: job("queued") } }]);
+    const base = flaky.cli.fetch!;
+    flaky.cli.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      if (calls > 1) throw new Error("connect ECONNREFUSED");
+      return base(input, init);
+    }) as typeof fetch;
+    expect(await main(["replay", "run", "--set", "ds_1"], flaky.cli)).toBe(EXIT_INCOMPLETE);
+    expect(flaky.err()).toContain("Cannot reach http://l2m.test");
+    const refused = io([{ status: 202, body: { run: job("queued") } }, { status: 403, body: { error: "Insufficient permissions" } }]);
+    expect(await main(["replay", "run", "--set", "ds_1"], refused.cli)).toBe(EXIT_INCOMPLETE);
+    expect(refused.err()).toContain("403");
+  });
+
+  it("drops control characters from server text and says when the spend is a lower bound", async () => {
+    const results = [{ id: "r1", fixtureName: "Golden\u001b[31m 2", status: "fail", score: { pass: false, details: [{ type: "llm_judge", pass: false, reason: "bad\r\u001b[2Kfaked PASS" }] }, error: null }];
+    const run = job("completed", { pass: 1, fail: 1 }, results);
+    run.summary = { ...run.summary!, costUnknown: true, warnings: ["Some calls have no price\u0007"] };
+    const fake = io([{ status: 202, body: { run } }]);
+    expect(await main(["replay", "run", "--set", "ds_1"], fake.cli)).toBe(EXIT_FAILED);
+    expect(fake.out()).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    expect(fake.out()).toContain("fail Golden[31m 2");
+    expect(fake.out()).toContain("- llm_judge: bad[2Kfaked PASS");
+    expect(fake.out()).toContain("or more (some calls are unpriced)");
+    expect(fake.out()).toContain("warning: Some calls have no price");
+  });
+
   it("prints the job as JSON with the exit code", async () => {
     const fake = io([{ status: 202, body: { run: job("completed", { pass: 1 }) } }]);
     expect(await main(["replay", "run", "--set", "ds_1", "--json"], fake.cli)).toBe(EXIT_OK);

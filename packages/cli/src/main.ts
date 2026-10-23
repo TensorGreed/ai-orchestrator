@@ -544,20 +544,32 @@ function isRunView(value: unknown): value is EvalRunView & { results?: EvalCaseR
   return isObject(value) && typeof value.id === "string" && typeof value.status === "string";
 }
 
+/**
+ * Server text (run errors, case names, score reasons) can carry a replayed
+ * output's bytes; control characters are dropped so it cannot drive the
+ * terminal or a CI log (ANSI escapes, carriage returns).
+ */
+export function cleanServerText(value: unknown): string {
+  return String(value ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
 function formatJob(run: EvalRunView & { results?: EvalCaseResult[] }, code: number): string {
   const lines: string[] = [];
-  const candidate = run.candidate ? (run.candidate.kind === "version" ? `version ${run.candidate.version}` : "draft") : "candidate";
+  const candidate = run.candidate ? (run.candidate.kind === "version" ? `version ${cleanServerText(run.candidate.version)}` : "draft") : "candidate";
   const verdict = code === EXIT_OK ? "PASS" : code === EXIT_FAILED ? "FAIL" : "INCONCLUSIVE";
-  lines.push(`Replay job ${run.id} against the ${candidate}${run.candidate ? ` (${run.candidate.workflowHash.slice(0, 12)})` : ""}: ${verdict} (${run.status})`);
+  lines.push(`Replay job ${cleanServerText(run.id)} against the ${candidate}${run.candidate ? ` (${cleanServerText(run.candidate.workflowHash).slice(0, 12)})` : ""}: ${verdict} (${cleanServerText(run.status)})`);
   const summary = run.summary;
   if (summary) {
-    lines.push(`  ${summary.pass} passed, ${summary.fail} failed, ${summary.error} inconclusive${summary.skipped ? `, ${summary.skipped} skipped` : ""} of ${summary.total}; spent $${(summary.costUsd ?? 0).toFixed(4)}`);
+    lines.push(
+      `  ${summary.pass} passed, ${summary.fail} failed, ${summary.error} inconclusive${summary.skipped ? `, ${summary.skipped} skipped` : ""} of ${summary.total}; spent $${(summary.costUsd ?? 0).toFixed(4)}${summary.costUnknown ? " or more (some calls are unpriced)" : ""}`
+    );
+    for (const warning of summary.warnings ?? []) lines.push(`  warning: ${cleanServerText(warning)}`);
   }
-  if (run.error) lines.push(`  ${run.error}`);
+  if (run.error) lines.push(`  ${cleanServerText(run.error)}`);
   for (const result of run.results ?? []) {
     if (result.status === "pass") continue;
-    const failed = (result.score?.details ?? []).filter((detail) => !detail.pass).map((detail) => `${detail.type}: ${detail.reason}`);
-    lines.push(`  ${result.status} ${result.fixtureName ?? result.fixtureId}${result.error ? `: ${result.error}` : ""}`);
+    const failed = (result.score?.details ?? []).filter((detail) => !detail.pass).map((detail) => `${cleanServerText(detail.type)}: ${cleanServerText(detail.reason)}`);
+    lines.push(`  ${cleanServerText(result.status)} ${cleanServerText(result.fixtureName ?? result.fixtureId)}${result.error ? `: ${cleanServerText(result.error)}` : ""}`);
     for (const reason of failed) lines.push(`    - ${reason}`);
   }
   return lines.join("\n");
@@ -609,10 +621,10 @@ async function runReplayJob(args: ParsedArgs, io: CliIo, sets: string[]): Promis
   } catch (error) {
     if (error instanceof RequestError) {
       if (error.status === 400) {
-        write(io.stderr, `l2m: ${error.message}`);
+        write(io.stderr, `l2m: ${cleanServerText(error.message)}`);
         return EXIT_USAGE;
       }
-      write(io.stderr, `l2m: replay job is inconclusive: ${error.message}`);
+      write(io.stderr, `l2m: replay job is inconclusive: ${cleanServerText(error.message)}`);
       return EXIT_INCOMPLETE;
     }
     throw error;
