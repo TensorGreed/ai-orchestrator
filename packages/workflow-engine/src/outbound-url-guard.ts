@@ -243,6 +243,9 @@ export interface GuardedFetchOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** Credential headers dropped when a redirect leaves the original origin. */
+export const CROSS_ORIGIN_STRIPPED_HEADERS = ["authorization", "proxy-authorization", "cookie", "api-key", "x-api-key"] as const;
+
 /**
  * Like `fetch`, but every URL — the original and each redirect — is checked
  * against the policy first. Redirects are followed manually (`redirect:
@@ -261,9 +264,13 @@ export async function guardedFetch(url: string, init: RequestInit, options: Guar
     const location = response.headers.get("location");
     if (!location) return response;
     const next = new URL(location, currentUrl).toString();
-    // A cross-origin redirect drops the Authorization header, matching fetch's own behaviour.
+    // The redirect's own body is never read; release it so this hop's connection (and pinned Agent) can close.
+    await response.body?.cancel().catch(() => undefined);
+    // A cross-origin redirect drops credentials: Authorization (as fetch does) and the API-key and cookie headers vendors use.
     const nextHeaders = new Headers(currentInit.headers);
-    if (new URL(next).origin !== new URL(currentUrl).origin) nextHeaders.delete("authorization");
+    if (new URL(next).origin !== new URL(currentUrl).origin) {
+      for (const name of CROSS_ORIGIN_STRIPPED_HEADERS) nextHeaders.delete(name);
+    }
     currentUrl = next;
     // 303, or 301/302 on POST, becomes a GET without a body, as browsers do.
     const method = (currentInit.method ?? "GET").toUpperCase();

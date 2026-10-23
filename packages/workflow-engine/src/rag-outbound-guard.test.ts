@@ -95,3 +95,65 @@ describe("RAG endpoints from node config go through the outbound guard", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("a node-supplied RAG endpoint never receives the deployment's env API key (REREVIEW-A12 L-b)", () => {
+  const withoutSecret = (vectorStoreId: string, vectorStoreConfig: Record<string, unknown>, embedderId = "token-embedder") =>
+    workflow(
+      [
+        node("input", "text_input", { text: "find it" }),
+        node("rag", "rag_retrieve", { queryTemplate: "{{user_prompt}}", embedderId, vectorStoreId, vectorStoreConfig }),
+        node("output", "output")
+      ],
+      [edge("input", "rag"), edge("rag", "output")]
+    );
+  const ENV = { QDRANT_API_KEY: "ENV-QDRANT-KEY", OPENAI_API_KEY: "ENV-OPENAI-KEY", QDRANT_ENDPOINT: "https://env-qdrant.example.com" };
+  const saved: Record<string, string | undefined> = {};
+  const sentHeaders = (fetchSpy: ReturnType<typeof vi.fn>) =>
+    fetchSpy.mock.calls
+      .map((call) => {
+        const values: string[] = [];
+        new Headers(((call as unknown[])[1] as RequestInit | undefined)?.headers).forEach((value, name) => values.push(`${name}=${value}`));
+        return values.join(";");
+      })
+      .join(" ");
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const setEnv = () => {
+    for (const [key, value] of Object.entries(ENV)) {
+      saved[key] = process.env[key];
+      process.env[key] = value;
+    }
+  };
+
+  it("qdrant at a node endpoint is called without QDRANT_API_KEY", async () => {
+    setEnv();
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ result: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchSpy);
+    await executeWorkflow({ workflow: withoutSecret("qdrant-vector-store", { endpoint: "https://collector.example.net", collectionName: "c" }) }, deps(["93.184.216.34"]));
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(sentHeaders(fetchSpy)).not.toContain("ENV-QDRANT-KEY");
+  });
+
+  it("the OpenAI embedder at a node baseUrl is called without OPENAI_API_KEY", async () => {
+    setEnv();
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchSpy);
+    await executeWorkflow({ workflow: withoutSecret("in-memory-vector-store", { baseUrl: "https://collector.example.net/v1" }, "openai-embedder") }, deps(["93.184.216.34"]));
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(sentHeaders(fetchSpy)).not.toContain("ENV-OPENAI-KEY");
+  });
+
+  it("the deployment's own endpoint (env) still gets the env key", async () => {
+    setEnv();
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ result: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchSpy);
+    await executeWorkflow({ workflow: withoutSecret("qdrant-vector-store", { collectionName: "c" }) }, deps(["93.184.216.34"]));
+    expect(String((fetchSpy.mock.calls[0] as unknown[] | undefined)?.[0])).toMatch(/^https:\/\/env-qdrant\.example\.com\//);
+    expect(sentHeaders(fetchSpy)).toContain("ENV-QDRANT-KEY");
+  });
+});

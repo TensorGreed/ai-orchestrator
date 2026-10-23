@@ -3971,17 +3971,23 @@ async function executeNode(
       // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound guard.
       const nodeFetch = (key: "endpoint" | "baseUrl") =>
         typeof vectorStoreConfig[key] === "string" && String(vectorStoreConfig[key]).trim() ? guardedRagFetch(dependencies) : undefined;
+      // The deployment's env key only ever goes to the deployment's own endpoint. When the node names its own
+      // endpoint (or baseUrl), only the node's secret is sent there, or no key at all.
+      const ragKey = async (envName: string, endpointKey: "endpoint" | "baseUrl"): Promise<string | undefined> => {
+        const ref = config.embeddingSecretRef;
+        if (typeof ref === "object" && ref) return dependencies.resolveSecret(ref as SecretReference);
+        if (nodeFetch(endpointKey)) return undefined;
+        return process.env[envName];
+      };
 
       let embedder = dependencies.embeddingRegistry?.get(embedderId);
       if (!embedder) {
         if (embedderId === "token-embedder") embedder = new TokenEmbeddingAdapter();
         else if (embedderId === "openai-embedder") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.OPENAI_API_KEY;
+           const apiKey = await ragKey("OPENAI_API_KEY", "baseUrl");
            embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...vectorStoreConfig, fetcher: nodeFetch("baseUrl") });
         } else if (embedderId === "azure-openai-embedder") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.AZURE_OPENAI_API_KEY;
+           const apiKey = await ragKey("AZURE_OPENAI_API_KEY", "endpoint");
            const endpoint = typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_OPENAI_ENDPOINT;
            const deployment =
              typeof vectorStoreConfig.deployment === "string" && vectorStoreConfig.deployment.trim()
@@ -4028,8 +4034,7 @@ async function executeNode(
            const connStr = typeof connRef === "object" && connRef ? await dependencies.resolveSecret(connRef as SecretReference) : process.env.DATABASE_URL;
            store = new PGVectorStoreAdapter({ connectionString: connStr || "", tableName: typeof vectorStoreConfig.tableName === "string" ? vectorStoreConfig.tableName as string : "vectors" });
          } else if (vectorStoreId === "azure-ai-search-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.AZURE_AI_SEARCH_API_KEY;
+           const apiKey = await ragKey("AZURE_AI_SEARCH_API_KEY", "endpoint");
            store = new AzureAiSearchVectorStoreAdapter({
              fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_AI_SEARCH_ENDPOINT || "",
@@ -4042,11 +4047,7 @@ async function executeNode(
              apiKey: apiKey || ""
            });
          } else if (vectorStoreId === "qdrant-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey =
-             typeof apiKeyRef === "object" && apiKeyRef
-               ? await dependencies.resolveSecret(apiKeyRef as SecretReference)
-               : process.env.QDRANT_API_KEY;
+           const apiKey = await ragKey("QDRANT_API_KEY", "endpoint");
            const parsedFilter = (() => {
              const raw = vectorStoreConfig.filter;
              if (raw && typeof raw === "object" && !Array.isArray(raw)) {
@@ -4092,8 +4093,7 @@ async function executeNode(
              filter: parsedFilter
            });
          } else if (vectorStoreId === "chroma-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.CHROMA_API_KEY;
+           const apiKey = await ragKey("CHROMA_API_KEY", "endpoint");
            store = new ChromaVectorStoreAdapter({
              fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.CHROMA_ENDPOINT || "http://localhost:8000",
@@ -4101,8 +4101,7 @@ async function executeNode(
              apiKey: apiKey || undefined
            });
          } else if (vectorStoreId === "weaviate-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.WEAVIATE_API_KEY;
+           const apiKey = await ragKey("WEAVIATE_API_KEY", "endpoint");
            store = new WeaviateVectorStoreAdapter({
              fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.WEAVIATE_ENDPOINT || "http://localhost:8080",
@@ -4110,8 +4109,7 @@ async function executeNode(
              apiKey: apiKey || undefined
            });
          } else if (vectorStoreId === "redis-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.REDIS_API_KEY;
+           const apiKey = await ragKey("REDIS_API_KEY", "endpoint");
            store = new RedisVectorStoreAdapter({
              fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.REDIS_ENDPOINT || "http://localhost:6379",

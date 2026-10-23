@@ -149,6 +149,33 @@ describe("guardedFetch — redirects", () => {
     expect(await response.text()).toBe("done");
   });
 
+  it("a cross-origin redirect drops every credential header; a same-origin one keeps them (REREVIEW-A12 L-b)", async () => {
+    const seen: Record<string, Headers> = {};
+    let redirectBodyCancelled = false;
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      seen[url] = new Headers(init?.headers);
+      if (url === "https://public.example/a") {
+        const body = new ReadableStream({ cancel() { redirectBodyCancelled = true; } });
+        return new Response(body, { status: 302, headers: { location: "https://public.example/b" } });
+      }
+      if (url === "https://public.example/b") return new Response(null, { status: 307, headers: { location: "https://other.example/c" } });
+      return new Response("done", { status: 200 });
+    }) as unknown as typeof fetch;
+    const credentials = { authorization: "Bearer t", "api-key": "azure", "x-api-key": "qdrant", cookie: "s=1", "proxy-authorization": "Basic p", "x-trace": "keep" };
+    const multi = resolverFor({ "public.example": ["93.184.216.34"], "other.example": ["93.184.216.35"] });
+    const response = await guardedFetch("https://public.example/a", { headers: credentials }, { config: allow, resolver: multi, fetchImpl });
+    expect(response.status).toBe(200);
+    // Same origin: everything kept.
+    expect(seen["https://public.example/b"]!.get("api-key")).toBe("azure");
+    expect(seen["https://public.example/b"]!.get("authorization")).toBe("Bearer t");
+    // Cross origin: credentials gone, other headers kept.
+    const last = seen["https://other.example/c"]!;
+    for (const name of ["authorization", "api-key", "x-api-key", "cookie", "proxy-authorization"]) expect(last.get(name), name).toBeNull();
+    expect(last.get("x-trace")).toBe("keep");
+    // The redirect's unread body is released before the next hop.
+    expect(redirectBodyCancelled).toBe(true);
+  });
+
   it("refuses the first URL before any fetch when it is blocked", async () => {
     const fetchImpl = vi.fn(async () => new Response("x")) as unknown as typeof fetch;
     await expect(guardedFetch("file:///etc/passwd", {}, { config: allow, resolver, fetchImpl })).rejects.toBeInstanceOf(OutboundUrlBlockedError);
