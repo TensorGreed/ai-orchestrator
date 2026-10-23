@@ -612,6 +612,78 @@ describe("golden-set files: the importer and exporter do not trust what they car
     expectNoNeedles(reexport.body, "the export");
   });
 
+  it("runs one generic deep scrub over the whole file: a planted token and secret value in every name, note, description, scorer and object key never survive import, the response or export", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.secretService.createSecret({ name: "Known", provider: "slack", value: PLANTED_SECRET, projectId: "default" });
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const setId = await suite(context, builder.cookie, "wf-set", 1);
+    const raw = JSON.parse(JSON.stringify(await exportFile(context, builder.cookie, setId))) as GoldenSetFile;
+    const both = `tok ${GH_TOKEN} and ${PLANTED_SECRET}`;
+    raw.name = both;
+    raw.description = both;
+    raw.workflow.name = both;
+    const entry = raw.cases[0]!;
+    entry.name = both;
+    entry.scorers = [{ type: "contains", value: both } as never, { type: "status" } as never];
+    const recording = entry.recording as typeof entry.recording & Record<string, unknown>;
+    recording.name = both;
+    recording.notes = both;
+    recording.sourceTriggerType = both;
+    // Under `data` and `blob` (base64 payload keys) and as object keys, in a node output and in the input.
+    (recording.nodes.label as { output: unknown }).output = { data: `Bearer ${GH_TOKEN}`, blob: GH_TOKEN, [GH_TOKEN]: 1, [`k ${PLANTED_SECRET}`]: 2, keep: "visible" };
+    recording.input = { data: GH_TOKEN, [GH_TOKEN]: 1, keep: "visible" };
+    const imported = await importFile(context, builder.cookie, rehash(raw), { name: both });
+    expect(imported.statusCode, imported.body).toBe(201);
+    const body = imported.json<{ dataset: { id: string } }>();
+    expectNoNeedles(imported.body, "the import response");
+    expectNoNeedles(storedRows(context, body.dataset.id), "the stored rows");
+    const stored = context.store.getReplayRecording(context.store.listEvalFixtures(body.dataset.id)[0]!.recordingId!)!;
+    const output = stored.nodes.label!.output as Record<string, unknown>;
+    expect(Object.keys(output)).toEqual(expect.arrayContaining(["keep"]));
+    expect(Object.keys(output).filter((key) => key.startsWith("[REDACTED_KEY_"))).toHaveLength(2);
+    expect(output.keep).toBe("visible");
+    const reexport = await call(context, "GET", `/api/eval/datasets/${body.dataset.id}/export`, builder.cookie);
+    expect(reexport.statusCode, reexport.body).toBe(200);
+    expectNoNeedles(reexport.body, "the export");
+    // The scrubbed export imports again.
+    expect((await importFile(context, builder.cookie, reexport.json())).statusCode).toBe(201);
+  });
+
+  it("refuses to export a file over GOLDEN_SET_IMPORT_MAX_BYTES with 413", async () => {
+    const context = await createTestContext({ GOLDEN_SET_IMPORT_MAX_BYTES: "65536" });
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const setId = await suite(context, builder.cookie, "wf-set", 30);
+    const response = await call(context, "GET", `/api/eval/datasets/${setId}/export`, builder.cookie);
+    expect(response.statusCode, response.body.slice(0, 200)).toBe(413);
+    expect(response.json<{ error: string }>().error).toContain("GOLDEN_SET_IMPORT_MAX_BYTES");
+  });
+
+  it("requires a valid recordedAt not before 2000-01-01, naming the case", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const setId = await suite(context, builder.cookie, "wf-set", 2);
+    const file = await exportFile(context, builder.cookie, setId);
+    for (const recordedAt of ["0001-01-01T00:00:00.000Z", "1999-12-31T23:59:59.000Z"]) {
+      const old = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
+      old.cases[1]!.recording.recordedAt = recordedAt;
+      const refused = await importFile(context, builder.cookie, old);
+      expect(refused.statusCode, refused.body).toBe(400);
+      expect(refused.json<{ error: string }>().error).toContain(`Case 2 (${old.cases[1]!.name}): recordedAt`);
+    }
+    const garbage = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
+    garbage.cases[0]!.recording.recordedAt = "not a date";
+    expect((await importFile(context, builder.cookie, garbage)).statusCode).toBe(400);
+    const fine = JSON.parse(JSON.stringify(file)) as GoldenSetFile;
+    fine.cases[0]!.recording.recordedAt = "2000-01-01T00:00:00.000Z";
+    expect((await importFile(context, builder.cookie, fine)).statusCode).toBe(201);
+  });
+
   it("scrubs again on export: a stored row with planted values and a secret created after the run never leave", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");

@@ -19,7 +19,13 @@
  * refused before anything else looks at it. A file exported from another
  * workflow is refused unless the request sets `allowWorkflowMismatch`, and
  * then only recorded outputs of nodes whose id and type match the target are
- * kept. Every field of every case gets the full recording-time scrub
+ * kept. One generic deep scrub runs over the whole file first (every string
+ * anywhere, scorers, names and descriptions included; token-shaped or secret
+ * object keys become `[REDACTED_KEY_n]`), header and then case by case with a
+ * yield between cases; only scrubbed values are stored or echoed. A case's
+ * `recordedAt` must be a valid timestamp not before 2000-01-01. Export runs
+ * the same scrub and refuses (413) a file over the import limit. Every field
+ * of every case also gets the full recording-time scrub
  * (credential key names, token shapes, this deployment's secret values) and
  * loses its secret references (also judge scorers, whose credential the
  * importing user attaches afterwards); each case's workflow hash is
@@ -55,7 +61,7 @@ import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { AuditSigningService } from "./services/audit-signing-service.js";
-import { ReplayRecordingError, type PreparedImport, type ReplayRecordingService } from "./services/replay-recording-service.js";
+import { MIN_RECORDED_AT_MS, ReplayRecordingError, type PreparedImport, type ReplayRecordingService } from "./services/replay-recording-service.js";
 
 export interface GoldenSetFileRoutesDeps {
   app: FastifyInstance;
@@ -147,7 +153,15 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
     }
     const workflow = store.getWorkflow(dataset.workflowId);
     const scrubber = recordings.scrubber();
+    // One numbering of redacted object keys across the whole file.
+    const redactedKeys = new Map<string, string>();
     const cases: GoldenSetFile["cases"] = [];
+    const header = recordings.scrubFileValue(
+      { workflow: { id: dataset.workflowId, name: workflow?.name ?? "" }, name: dataset.name, description: dataset.description },
+      scrubber,
+      redactedKeys
+    );
+    let total = jsonBytes(header);
     let skipped = 0;
     for (const fixture of store.listEvalFixtures(dataset.id)) {
       const recording = fixture.recordingId ? store.getReplayRecording(fixture.recordingId) : null;
@@ -162,16 +176,31 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
         return { error: `Case ${JSON.stringify(fixture.name)} uses a golden run of another workflow; remove it from the golden set before exporting.` };
       }
       const { scorers } = withoutJudgeSecret((fixture.scorers as EvalScorerSpec[] | null) ?? undefined);
-      cases.push({ name: fixture.name, ...(scorers && scorers.length > 0 ? { scorers } : {}), recording: recordings.toFileRecording(recording, scrubber) });
+      // The generic deep scrub over everything the case carries, then the file hash of the scrubbed workflow.
+      const entry = recordings.scrubFileValue(
+        {
+          name: fixture.name,
+          ...(scorers && scorers.length > 0 ? { scorers } : {}),
+          recording: recordings.scrubFileRecording(recordings.toFileRecording(recording, scrubber), scrubber, redactedKeys, false)
+        },
+        scrubber,
+        redactedKeys
+      ) as GoldenSetFile["cases"][number];
+      total += jsonBytes(entry);
+      if (total > deps.maxFileBytes) {
+        reply.code(413);
+        return { error: `This golden set is over ${deps.maxFileBytes} bytes (GOLDEN_SET_IMPORT_MAX_BYTES), the largest file that can be imported again. Split it into smaller golden sets.` };
+      }
+      cases.push(entry);
       await yieldToEventLoop();
     }
     const exportedAt = new Date().toISOString();
     const file: Record<string, unknown> = {
       format: GOLDEN_SET_FILE_FORMAT,
       version: GOLDEN_SET_FILE_VERSION,
-      workflow: { id: dataset.workflowId, name: workflow?.name ?? "" },
-      name: dataset.name,
-      description: dataset.description,
+      workflow: header.workflow,
+      name: header.name,
+      description: header.description,
       exportedAt,
       exportedBy: user.email,
       cases
@@ -250,7 +279,16 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
         reply.code(413);
         return { error: `The file has ${header.data.cases.length} cases; at most ${maxCases} can be imported.` };
       }
-      const fileHeader = header.data;
+      // The generic deep scrub of everything outside the cases (each case follows below, one at a time):
+      // from here on only scrubbed values are used, stored or echoed. The signature is verified over the original bytes.
+      const scrubber = recordings.scrubber();
+      const redactedKeys = new Map<string, string>();
+      const { cases: rawCases, signature: rawSignature, ...headerFields } = header.data;
+      const fileHeader = {
+        ...recordings.scrubFileValue(headerFields, scrubber, redactedKeys),
+        ...(rawSignature ? { signature: rawSignature } : {}),
+        cases: rawCases
+      };
       const mismatch = fileHeader.workflow.id !== target.id;
       if (mismatch && !body.data.allowWorkflowMismatch) {
         reply.code(409);
@@ -275,7 +313,6 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       // Validation, scrub and serialise, case by case, outside the transaction.
       const caseLimit = Math.min(deps.maxCaseBytes, GOLDEN_SET_CASE_MAX_BYTES);
       const keepNodes = mismatch ? new Map(target.nodes.map((node) => [node.id, node.type])) : undefined;
-      const scrubber = recordings.scrubber();
       const prepared: Array<{ entry: GoldenSetFileCase; recording: PreparedImport; scorers: EvalScorerSpec[] | undefined }> = [];
       const droppedNodes = new Set<string>();
       let droppedJudgeSecrets = 0;
@@ -291,17 +328,30 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
             reply.code(400);
             return { error: `Not a valid l2m.golden-set file (${where}: ${issue?.message ?? "invalid"})`, details: parsedCase.error.issues.slice(0, 20) };
           }
-          const entry = parsedCase.data;
-          const size = jsonBytes(entry);
+          const original = parsedCase.data;
+          const caseName = recordings.scrubFileValue(original.name, scrubber, redactedKeys);
+          const size = jsonBytes(original);
           if (size > caseLimit) {
             reply.code(413);
-            return { error: `Case ${index + 1} (${entry.name}) is ${size} bytes; a case can be at most ${caseLimit} bytes.` };
+            return { error: `Case ${index + 1} (${caseName}) is ${size} bytes; a case can be at most ${caseLimit} bytes.` };
           }
           total += size;
           if (total > deps.maxFileBytes) {
             reply.code(413);
             return { error: `The file is over ${deps.maxFileBytes} bytes (GOLDEN_SET_IMPORT_MAX_BYTES).` };
           }
+          const claimedAt = Date.parse(original.recording.recordedAt);
+          if (!Number.isFinite(claimedAt) || claimedAt < MIN_RECORDED_AT_MS) {
+            reply.code(400);
+            return { error: `Case ${index + 1} (${caseName}): recordedAt must be a valid ISO timestamp not before 2000-01-01.` };
+          }
+          // Hash check on the file as sent, then the generic deep scrub of the whole case.
+          const entry = {
+            ...original,
+            name: caseName,
+            ...(original.scorers ? { scorers: recordings.scrubFileValue(original.scorers, scrubber, redactedKeys) } : {}),
+            recording: recordings.scrubFileRecording(original.recording, scrubber, redactedKeys)
+          };
           const recording = recordings.prepareImport(
             { workflowId: target.id, projectId, recording: entry.recording, name: entry.recording.name, sourceWorkflowId: fileHeader.workflow.id, ...(keepNodes ? { keepNodes } : {}) },
             scrubber
@@ -320,7 +370,7 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
         throw error;
       }
 
-      const name = body.data.name ?? fileHeader.name;
+      const name = body.data.name === undefined ? fileHeader.name : recordings.scrubFileValue(body.data.name, scrubber, redactedKeys);
       const datasetId = `ds_${randomUUID()}`;
       try {
         // Inserts only: everything expensive happened above.

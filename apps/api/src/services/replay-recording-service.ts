@@ -112,6 +112,9 @@ export interface PreparedImport {
  */
 const SCRUB_SHRINK_ALLOWANCE = 2;
 
+/** The earliest `recordedAt` an imported golden run may claim. */
+export const MIN_RECORDED_AT_MS = Date.UTC(2000, 0, 1);
+
 export class ReplayRecordingService {
   constructor(private readonly options: ReplayRecordingServiceOptions) {}
 
@@ -423,6 +426,55 @@ export class ReplayRecordingService {
   }
 
   /**
+   * One generic deep scrub for a value of a golden-set file, on import and on
+   * export: every string anywhere (no key is exempt, `data` and `blob`
+   * included) loses token shapes and this deployment's secret values, and an
+   * object key that is itself token-shaped or a secret value is replaced by
+   * a stable `[REDACTED_KEY_<n>]` (`keys` keeps the numbering across the
+   * whole file). Credential key names and secret references are handled by
+   * the per-field passes that follow.
+   */
+  scrubFileValue<T>(value: T, scrubber: SecretScrubber, keys: Map<string, string> = new Map()): T {
+    // Token shapes and secret values only: the secret service's redactor would blank hashes and long identifiers, which the per-field passes keep.
+    const text = (input: string): string => scrubber.text(scrubForCassette(input) as string);
+    const walk = (node: unknown, depth: number): unknown => {
+      if (typeof node === "string") return text(node);
+      if (depth > 100) return "[REDACTED]";
+      if (Array.isArray(node)) return node.map((entry) => walk(entry, depth + 1));
+      if (node && typeof node === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [name, nested] of Object.entries(node as Record<string, unknown>)) {
+          if (nested === undefined) continue;
+          let key = name;
+          if (text(name) !== name) {
+            key = keys.get(name) ?? `[REDACTED_KEY_${keys.size + 1}]`;
+            keys.set(name, key);
+          }
+          out[key] = walk(nested, depth + 1);
+        }
+        return out;
+      }
+      return node;
+    };
+    return walk(value, 0) as T;
+  }
+
+  /**
+   * A golden run from a golden-set file (one case's `recording`): its claimed
+   * workflow hash is checked against the workflow as the file carries it (unless `verifyHash` is false, for a row of this deployment),
+   * then the whole recording goes through the generic deep scrub, and the hash
+   * is taken again over the scrubbed workflow. Throws `invalid` on a mismatch.
+   */
+  scrubFileRecording(recording: GoldenSetFileRecording, scrubber: SecretScrubber, keys: Map<string, string>, verifyHash = true): GoldenSetFileRecording {
+    const claimedHash = sha256Hex(canonicalJson(recording.workflow));
+    if (verifyHash && claimedHash !== recording.workflowHash) {
+      throw new ReplayRecordingError(`The workflow hash ${JSON.stringify(recording.workflowHash.slice(0, 80))} does not match the workflow the case carries (${claimedHash.slice(0, 16)}...).`, "invalid");
+    }
+    const scrubbed = this.scrubFileValue(recording, scrubber, keys);
+    return { ...scrubbed, workflowHash: sha256Hex(canonicalJson(scrubbed.workflow)) };
+  }
+
+  /**
    * The full recording-time scrub plus secret-reference stripping, for a
    * value that came from outside (or is about to leave): credential key
    * names, token shapes and the deployment's secret values, and every
@@ -596,7 +648,10 @@ export class ReplayRecordingService {
     // The claimed recording time, never later than now: an old golden run stays old (accepted decision 3).
     const now = this.now();
     const claimed = Date.parse(file.recordedAt);
-    const recordedAt = new Date(Number.isFinite(claimed) ? Math.min(claimed, now.getTime()) : now.getTime()).toISOString();
+    if (!Number.isFinite(claimed) || claimed < MIN_RECORDED_AT_MS) {
+      throw new ReplayRecordingError("recordedAt must be a valid ISO timestamp not before 2000-01-01.", "invalid");
+    }
+    const recordedAt = new Date(Math.min(claimed, now.getTime())).toISOString();
     return {
       row: {
         id: `rec_${randomUUID()}`,

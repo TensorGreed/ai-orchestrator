@@ -53,7 +53,7 @@ const TOKEN_PATTERNS: RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g
 ];
 
-/** Keys that carry base64 payloads; value-shape redaction would destroy them. */
+/** Keys that carry base64 payloads; the caller's value redactor is not applied to them (token shapes still are). */
 const BINARY_KEYS = new Set(["blob", "data"]);
 
 const MAX_SCRUB_DEPTH = 40;
@@ -77,10 +77,12 @@ function scrubString(value: string, options: CassetteScrubOptions, binary: boole
   for (const secret of options.secrets ?? []) {
     if (secret && out.includes(secret)) out = out.split(secret).join(CASSETTE_REDACTED);
   }
-  if (binary) return out;
+  // Token shapes are removed everywhere, base64 payload fields included (`data` is a common key in outputs and configs).
   for (const pattern of TOKEN_PATTERNS) {
     out = out.replace(pattern, (match) => (/^bearer\s/i.test(match) ? `Bearer ${CASSETTE_REDACTED}` : CASSETTE_REDACTED));
   }
+  // The caller's redactor could blank a long base64 payload, so it skips those fields.
+  if (binary) return out;
   return options.redact ? options.redact(out) : out;
 }
 
