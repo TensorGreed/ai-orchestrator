@@ -61,6 +61,8 @@ export interface McpSamplingHandlerOptions {
   /** Receives every request's outcome; the node output keeps them under `_mcpSampling`. */
   trace: McpSamplingTraceEntry[];
   signal?: AbortSignal;
+  /** Phase 15.3 — the node whose MCP call asked for the sample (the model tape's call site). */
+  nodeId?: string;
 }
 
 export interface McpSamplingHandler {
@@ -222,7 +224,7 @@ export function createMcpSamplingHandler(options: McpSamplingHandlerOptions): Mc
       const adapter = options.providerRegistry.get(samplingProvider.providerId);
       const response = await adapter.generate(
         { provider: samplingProvider, messages: toChatMessages(request) },
-        { resolveSecret: options.resolveSecret, ...(options.signal ? { signal: options.signal } : {}) }
+        { resolveSecret: options.resolveSecret, ...(options.signal ? { signal: options.signal } : {}), ...(options.nodeId ? { callSite: { nodeId: options.nodeId } } : {}) }
       );
       requests += 1;
       usage = addUsage(usage, response.usage);

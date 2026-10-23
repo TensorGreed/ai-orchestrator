@@ -20,7 +20,7 @@ A cassette is a JSON document (`format: "l2m.mcp-cassette"`, `version: 1`) with,
 
 Each server is identified by its registry id (`registry:<id>`) or, for servers configured inline on a node, by its adapter plus a short hash of its endpoint or command (`inline:http_mcp:3f2a…`). Connection details themselves are not stored. The schema snapshot hash the server had when the run started is kept next to it.
 
-**Model calls are not recorded.** A replayed run calls your model again, so an agent can take a different path than it did when recorded. Use a deterministic model setting (temperature 0, or the `echo` provider in tests) when you need identical runs end to end.
+**Model calls are recorded but not replayed here.** A recorded run also stores its model calls (the model tape) and the session memory it first read in the cassette, but replaying a cassette on this page calls your model again, so an agent can take a different path than it did when recorded. Use a deterministic model setting (temperature 0, or the `echo` provider in tests) when you need identical runs end to end, or save the run as a [golden run](./golden-runs.md#model-tape-and-memory-seed) and replay it in a replay job with model calls from the tape.
 
 ### Secrets never reach a cassette
 
@@ -47,6 +47,8 @@ Cassettes are capped by `MCP_CASSETTE_MAX_BYTES` (default 5 MiB) and `MCP_CASSET
 ### Viewing a cassette
 
 Click the badge on the Runs page to open the cassette: every call in order with its server, duration and an error tag when it failed. Open a call to see its arguments and result. Discovery calls (`initialize`, `tools/list`) are hidden until you tick **Show discovery calls**. **Download** saves the cassette file for `l2m mcp mock --cassette`; admins can delete it.
+
+The model tape and the memory seed hold model prompts and answers and earlier sessions' chat history. They are scrubbed for secrets, not for personal data, so only users who may edit the workflow (`workflow:write`) see them: for a user who may only read it, `GET /api/mcp/cassettes/:id` leaves out each tape entry's `request` and `response` and the memory seed (the tape keeps one line per call: node, provider, model, timing), and says so in `cassette.omitted`. Downloading a cassette (`GET /api/mcp/cassettes/:id/export`) needs `workflow:write`.
 
 ### Replaying a run
 

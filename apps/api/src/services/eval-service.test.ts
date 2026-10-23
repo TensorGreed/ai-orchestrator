@@ -257,6 +257,26 @@ describe("replay jobs", () => {
     expect(run.progress!.spentUsd).toBe(1.2);
   });
 
+  it("repeats each case, combines the repeats by the aggregate rule and flags flaky cases", async () => {
+    const recordings = new Map(["rec_a"].map((id) => [id, recordingFor(id, { answer: id })]));
+    let calls = 0;
+    // pass, fail, pass: flaky; majority passes, all fails.
+    const deps = replayDeps(recordings, (recording) => (++calls % 3 === 2 ? { output: { answer: "changed" } } : { output: recording.facts.output }));
+    const svc = new EvalService(store, async () => ({ output: null }), undefined, { replay: deps });
+    const set = svc.createDataset({ name: "golden", workflowId: "wf" })!;
+    svc.addGoldenRun({ datasetId: set.id, recording: recordings.get("rec_a")! });
+    const actor = { id: "u1", email: "b@example.com", role: "builder" as const };
+    for (const [aggregate, status] of [["majority", "pass"], ["all", "fail"], ["any", "pass"]] as const) {
+      calls = 0;
+      const job = svc.enqueueReplayJob({ datasetIds: [set.id], repeats: 3, aggregate }, { workflowId: "wf", actor });
+      await svc.wait(job.id);
+      const run = svc.getRun(job.id)!;
+      expect(run.summary).toMatchObject({ total: 1, [status]: 1, flaky: 1, executions: 3 });
+      expect(run.results[0]).toMatchObject({ status, repeats: { total: 3, pass: 2, fail: 1, error: 0, aggregate, flaky: true } });
+      expect(run.summary!.costUsd).toBeCloseTo(0.03, 6);
+    }
+  });
+
   it("refuses sets of another workflow, sets without golden runs, and a missing candidate version", () => {
     const deps = replayDeps(new Map(), () => ({ output: null }));
     deps.resolveCandidate = (workflowId, request) => {

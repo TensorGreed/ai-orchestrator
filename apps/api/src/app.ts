@@ -24,7 +24,7 @@ import {
   type MCPExecutionContext,
   type McpSandboxPolicy
 } from "@ai-orchestrator/mcp-sdk";
-import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import { createDefaultProviderRegistry, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   agentWebhookPayloadSchema,
   MCP_POLICY_ROLES,
@@ -98,7 +98,7 @@ import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
-import { EVAL_RUN_STALE_MS, EvalService, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
+import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
@@ -1782,6 +1782,10 @@ export function createApp(
      * no notifications, no paused state, no elicitation prompts.
      */
     replay?: { hook: ReplayNodeHook; sandbox: ReplaySandbox };
+    /** Phase 15.3 — model calls answered from a golden run's model tape (a replay with `models: "replay"`). */
+    providerRegistry?: ProviderRegistry;
+    /** Phase 15.3 — a replay candidate's guard profile, evaluated in place of the bindings. */
+    guardProfileOverride?: { profileId: string; version?: number };
   }) => {
     const controller = input.executionId
       ? registerActiveExecution({
@@ -1839,7 +1843,8 @@ export function createApp(
           approvalDecision: input.approvalDecision
         },
         {
-          providerRegistry,
+          // Phase 15.3 — a recorded run records its model calls; a model replay answers them from the tape.
+          providerRegistry: input.providerRegistry ?? input.mcpPlan?.providerRegistry ?? providerRegistry,
           connectorRegistry,
           mcpRegistry: input.mcpPlan?.registry ?? mcpRegistry,
           agentRuntime,
@@ -1847,7 +1852,9 @@ export function createApp(
           // scoped to the workflow's project (run-scope.ts); a sub-workflow
           // gets its own project's scope through scopeSubWorkflow.
           ...scoped,
-          memoryStore: input.replay?.sandbox.memoryStore ?? scoped.memoryStore,
+          memoryStore:
+            input.replay?.sandbox.memoryStore ??
+            (input.mcpPlan?.memoryCapture && scoped.memoryStore ? input.mcpPlan.memoryCapture.wrap(scoped.memoryStore) : scoped.memoryStore),
           toolDataStore: input.replay?.sandbox.toolDataStore ?? scoped.toolDataStore,
           sessionArtifactStore: input.replay?.sandbox.sessionArtifactStore ?? scoped.sessionArtifactStore,
           // A replay never starts a sub-workflow (Execute Workflow nodes are stubbed).
@@ -1856,7 +1863,12 @@ export function createApp(
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
-          guard: guardService.runtimeFor({ executionId: input.executionId, workflowId: mergedWorkflow.id, projectId: mergedWorkflow.projectId ?? "default" }),
+          guard: guardService.runtimeFor({
+            executionId: input.executionId,
+            workflowId: mergedWorkflow.id,
+            projectId: mergedWorkflow.projectId ?? "default",
+            ...(input.guardProfileOverride ? { profileOverride: input.guardProfileOverride } : {})
+          }),
           replayNodeHook: input.replay?.hook,
           loadMcpToolPolicy,
           // Phase 10.5 — resources, elicitation and list_changed notifications.
@@ -2164,6 +2176,8 @@ export function createApp(
     triggeredBy?: string;
     requestInput?: unknown;
     customData?: Record<string, unknown>;
+    /** Phase 15.3 — a model replay's live calls: only they are recorded as usage (tape answers cost nothing). */
+    liveModelCalls?: Array<{ providerId: string; model: string; inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null }>;
   }) => {
     if (input.result.status === "waiting_approval") {
       app.log.info(
@@ -2263,7 +2277,8 @@ export function createApp(
         triggerType: input.triggerType ?? null,
         status: input.result.status,
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt) ?? 0,
-        nodeResults: nodeOutputs
+        nodeResults: nodeOutputs,
+        ...(input.liveModelCalls ? { liveModelCalls: input.liveModelCalls } : {})
       });
 
       // Phase 8.3 — fire budget alerts on threshold crossings. Debounced per
@@ -3038,7 +3053,7 @@ export function createApp(
       if (!record) throw new Error("Replay needs a cassetteId or an evalRunId.");
       return mcpCassetteService.planReplay(record, replay.mode ?? "strict", mcpRegistry, resolveRegisteredMcpServer);
     }
-    return input.mcp?.record ? mcpCassetteService.planRecording(mcpRegistry) : undefined;
+    return input.mcp?.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
   };
 
   /**
@@ -3047,9 +3062,10 @@ export function createApp(
    * the workflow (the same rule as queued runs). The run then executes with
    * their policy and project scope (run-scope.ts).
    */
-  const evalRunActor = (userId: string, email: string, workflowId: string): SafeUser | null => {
+  const evalRunActor = (userId: string, email: string, workflowId: string, permission: "workflow:execute" | "workflow:write" = "workflow:execute"): SafeUser | null => {
     const actor = evalPolicyActor(userId, email);
-    return actor && runAccess.workflow(actor, workflowId, "workflow:execute").ok ? actor : null;
+    if (!actor || !runAccess.workflow(actor, workflowId, "workflow:execute").ok) return null;
+    return permission === "workflow:execute" || runAccess.workflow(actor, workflowId, permission).ok ? actor : null;
   };
 
   const evalService = new EvalService(store, async (input) => {
@@ -3147,6 +3163,7 @@ export function createApp(
   }, evalLlmJudge, {
     concurrency: config.REPLAY_CONCURRENCY,
     maxCases: config.REPLAY_JOB_MAX_CASES,
+    maxExecutions: config.REPLAY_JOB_MAX_EXECUTIONS ?? REPLAY_JOB_MAX_EXECUTIONS_DEFAULT,
     defaultMaxCostUsd: config.REPLAY_JOB_DEFAULT_MAX_COST_USD,
     evalRunMaxCostUsd: config.EVAL_RUN_MAX_COST_USD,
     judgeCallCeilingUsd,
@@ -3156,19 +3173,28 @@ export function createApp(
     abortExecution: (executionId, reason) => activeExecutions.get(executionId)?.controller.abort(reason),
     // Phase 15.2 — replay jobs use the 15.1 replay machinery, built further down.
     replay: {
-      resolveCandidate: (workflowId, request) => {
-        const candidate = replayService.resolveWorkflowCandidate(workflowId, request);
-        return { ...candidate, workflowHash: ReplayService.candidateHash(candidate.workflow) };
-      },
+      // Phase 15.3 — the draft, a saved version or an inline workflow file, with the overrides applied.
+      resolveCandidate: (workflowId, request, context) => replayService.resolveJobCandidate(workflowId, request, context),
       getRecording: (id) => store.getReplayRecording(id),
       // The candidate was resolved when the job started; it runs in the workflow's current project.
-      replayCase: ({ recording, candidate, request, actor, executionId }) => {
+      replayCase: ({ recording, candidate, request, actor, executionId, models, overrides, baseline, role, repeatIndex }) => {
         const current = store.getWorkflow(candidate.workflow.id);
         if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
         const scoped = { ...candidate, workflow: { ...candidate.workflow, projectId: current.projectId, folderId: current.folderId } };
-        return replayService.replay(recording, request, actor, { candidate: scoped, executionId });
+        return replayService.replay(recording, request, actor, {
+          candidate: scoped,
+          executionId,
+          ...(models ? { models } : {}),
+          ...(overrides ? { overrides } : {}),
+          ...(baseline ? { baseline } : {}),
+          ...(role ? { role } : {}),
+          ...(repeatIndex !== undefined ? { repeatIndex } : {})
+        });
       },
-      actorFor: (userId, email, workflowId) => evalRunActor(userId, email, workflowId)
+      baselineFor: (recording) => replayService.baselineFor(recording),
+      priceCall: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
+      // Phase 15.3 — an inline or overridden candidate keeps needing workflow:write for every case.
+      actorFor: (userId, email, workflowId, permission) => evalRunActor(userId, email, workflowId, permission)
     },
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
@@ -7734,7 +7760,7 @@ export function createApp(
       customData: executionPayload.customData
     });
     // Phase 10.8 — "Record MCP calls": every MCP call of the run goes into a cassette.
-    const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry) : undefined;
+    const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
     const executed = await runWorkflowExecution({
       mcpPlan,
       policyActor: user,
@@ -7870,7 +7896,7 @@ export function createApp(
           }
         }
       });
-      const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry) : undefined;
+      const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
       const executed = await runWorkflowExecution({
         mcpPlan,
         policyActor: user,
@@ -11224,6 +11250,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     recordings: replayRecordingService,
     cassettes: mcpCassetteService,
     priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+    // Phase 15.3 — lenient model replays, live-read MCP servers and guard profile candidates.
+    providerRegistry,
+    liveReads: {
+      registry: mcpRegistry,
+      resolve: (registryServerId) => resolveRegisteredMcpServer(registryServerId),
+      // Read-only only when an admin marked the tool read-only in tool policy. A server's own
+      // annotations (readOnlyHint) are its claim, not proof: unmarked and unknown tools are writes.
+      isReadOnlyTool: ({ config, toolName }) => manualReadOnlyFor(store.listMcpToolClassifications(), config.registryServerId, toolName) === true
+    },
+    resolveGuardProfile: (override, context) =>
+      guardService.resolveProfileOverride(override, { workflowId: context.workflowId, projectId: context.projectId, isAdmin: context.actor?.role === "admin" }),
     execute: async (replay, actor) => {
       const storedInput = asRecord(replay.recording.input);
       const executed = await runWorkflowExecution({
@@ -11231,7 +11268,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // The workflow's pinned outputs are not part of the candidate under test.
         usePinnedData: false,
         mcpPlan: replay.mcpPlan,
-        replay: { hook: replay.plan.hook, sandbox: createReplaySandbox() },
+        replay: { hook: replay.plan.hook, sandbox: createReplaySandbox(replay.memorySeed) },
+        // Phase 15.3 — model calls from the golden run's tape, and the candidate's guard profile.
+        ...(replay.modelPlan ? { providerRegistry: replay.modelPlan.registry } : {}),
+        ...(replay.guardProfileOverride ? { guardProfileOverride: replay.guardProfileOverride } : {}),
         policyActor: actor,
         workflow: replay.workflow,
         customData: replay.customData,
@@ -11255,7 +11295,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         triggerType: REPLAY_TRIGGER_TYPE,
         triggeredBy: actor.email,
         requestInput: storedInput,
-        customData: replay.customData
+        customData: replay.customData,
+        ...(replay.modelPlan ? { liveModelCalls: replay.modelPlan.player.report().liveCalls ?? [] } : {})
       });
       return result;
     }

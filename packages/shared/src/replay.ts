@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { WorkflowNodeType } from "./types";
+import type { Workflow, WorkflowNode, WorkflowNodeType } from "./types";
 
 /**
  * Phase 15.1 — golden runs and replay: the shared contract.
@@ -329,10 +329,14 @@ export interface ReplayRecordedNode extends ReplayRecordedRun {
 export interface ReplayRecordingCapabilities {
   /** `cassette`: MCP calls are answered from a copied cassette; `none`: the source run was not recorded, so every MCP call fails in a replay. */
   mcp: "cassette" | "none";
-  /** Model calls run live in a replay. */
-  models: "live";
-  /** Session memory starts empty in a replay. */
-  memory: "empty";
+  /**
+   * `tape` (Phase 15.3): the source run recorded its model calls, so a replay
+   * job with `models: "replay"` can answer them without calling the model.
+   * `live`: no tape; model calls always run live.
+   */
+  models: "live" | "tape";
+  /** `seeded` (Phase 15.3): session memory starts as the source run found it; `empty`: it starts empty. */
+  memory: "empty" | "seeded";
   /** `captured`: the workflow as it ran was recorded with the run; `current`: the run predates that, so the workflow as saved when the golden run was made is kept instead. */
   workflowSource: "captured" | "current";
   /**
@@ -375,6 +379,8 @@ export interface ReplayRecordingDetail extends ReplayRecordingSummary {
   nodes: Record<string, ReplayRecordedNode>;
   /** Number of MCP calls in the copied cassette. */
   mcpCallCount: number;
+  /** Phase 15.3 — number of model calls on the copied model tape (0 without one). */
+  modelCallCount?: number;
 }
 
 /** Runs-page badge: the golden runs saved from an execution. */
@@ -477,7 +483,15 @@ export type ReplayHealthKind =
   | "blocked_load"
   | "diff_truncated"
   | "scrubbed_recording"
-  | "replay_error";
+  | "replay_error"
+  // Phase 15.3
+  | "no_model_tape"
+  | "model_unmatched"
+  | "model_live"
+  | "live_read"
+  | "mcp_live_read"
+  | "baseline_error"
+  | "budget";
 
 export interface ReplayHealthWarning {
   kind: ReplayHealthKind;
@@ -546,10 +560,489 @@ export function judgeReplayDiff(diff: RunDiff): ReplayJudgement {
 export interface ReplayRunResponse {
   recordingId: string;
   executionId: string;
-  candidate: { kind: "draft" | "version"; version: number | null; workflowHash: string };
+  candidate: { kind: "draft" | "version" | "inline"; version: number | null; workflowHash: string };
   status: string;
   diff: RunDiff;
   verdict: ReplayVerdict;
   reasons: string[];
   facts: RunFacts;
+  /**
+   * Phase 15.3 — set when model calls were answered from the golden run's
+   * model tape (`models: "replay"`). Tape answers cost nothing: their cost is
+   * left out of `facts` (their tokens stay, so the diff still compares
+   * them), and is shown here as what the recorded run spent on them.
+   */
+  modelTape?: ReplayModelTapeUsage;
+}
+
+/** Phase 15.3 — what a model replay answered from the tape, and what those calls cost when they were recorded. */
+export interface ReplayModelTapeUsage {
+  /** Model calls answered from the tape (no model was called). */
+  replayedCalls: number;
+  /** Model calls that went to the live model (lenient misses); priced in `facts`. */
+  liveCalls: number;
+  /** The recorded usage of the replayed calls. `costUsd` is null when none of them has a price. */
+  recordedUsage: { inputTokens: number; outputTokens: number; costUsd: number | null };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15.3 — candidates
+// ---------------------------------------------------------------------------
+
+/**
+ * A candidate is what a replay job tests: the draft, a saved version, or a
+ * workflow file (inline JSON, never saved), plus overrides. `applyCandidate`
+ * turns the workflow and the model overrides into the workflow that runs;
+ * the job's candidate hash is that workflow's hash. Guard, MCP and live-read
+ * overrides change how the replay runs, not the workflow, and are kept on
+ * the job next to the hash.
+ */
+
+/** How MCP calls to one server are answered in a replay. */
+export const REPLAY_SERVER_MODES = ["strict", "lenient", "live_read_only"] as const;
+export type ReplayServerMode = (typeof REPLAY_SERVER_MODES)[number];
+/** `live`: model calls run live; `replay`: they are answered from the golden run's model tape. */
+export const REPLAY_MODEL_MODES = ["live", "replay"] as const;
+export type ReplayModelMode = (typeof REPLAY_MODEL_MODES)[number];
+/** `recording`: compare with what the golden run recorded; `baseline_rerun`: also replay the golden run's own version in the same job and compare with that. */
+export const REPLAY_COMPARE_MODES = ["recording", "baseline_rerun"] as const;
+export type ReplayCompareMode = (typeof REPLAY_COMPARE_MODES)[number];
+/** How the repeats of one case make its result. */
+export const REPLAY_AGGREGATE_RULES = ["all", "majority", "any"] as const;
+export type ReplayAggregateRule = (typeof REPLAY_AGGREGATE_RULES)[number];
+export const REPLAY_REPEATS_MAX = 5;
+/** The largest inline candidate (a workflow file in the request), as JSON bytes: 2 MiB. */
+export const REPLAY_INLINE_WORKFLOW_MAX_BYTES = 2 * 1024 * 1024;
+/** Golden runs older than this are compared with a baseline rerun rather than with the recording (decision 3). */
+export const REPLAY_STALE_RECORDING_DAYS = 30;
+
+const idSchema = z.string().trim().min(1).max(200);
+
+export const replayModelOverrideSchema = z
+  .object({
+    /** A model node (LLM call or chat model) or an agent, supervisor or chain whose attached chat model is changed. Omitted: every node of `provider`. */
+    nodeId: idSchema.optional(),
+    /** Without `nodeId`: the provider whose nodes change. With it: the new provider (LLM Call nodes only). */
+    provider: z.string().trim().min(1).max(120).optional(),
+    model: z.string().trim().min(1).max(200),
+    /**
+     * The secret the node uses after the override. Required when the override
+     * changes the provider of a node that has a secret or a base URL (the old
+     * key must not go to another vendor); the user must be allowed to use it
+     * in the workflow's project.
+     */
+    secretRef: z.object({ secretId: idSchema }).strict().optional()
+  })
+  .strict()
+  .refine((value) => value.nodeId !== undefined || value.provider !== undefined, { message: "A model override names a node, a provider or both" });
+export type ReplayModelOverride = z.infer<typeof replayModelOverrideSchema>;
+
+export const replayCandidateOverridesSchema = z
+  .object({
+    models: z.array(replayModelOverrideSchema).max(50).optional(),
+    guardProfile: z.object({ profileId: idSchema, version: z.number().int().positive().optional() }).strict().optional(),
+    /** Per MCP server (registry server id, or the adapter id of an inline server). */
+    mcpServers: z
+      .record(idSchema, z.enum(REPLAY_SERVER_MODES))
+      .refine((value) => Object.keys(value).length <= 50, { message: "At most 50 MCP server modes" })
+      .optional(),
+    /** Nodes that run live instead of being answered from the recording: only types `REPLAY_LIVE_READ_POLICY` allows (400 otherwise). */
+    liveReadNodes: z.array(idSchema).max(100).optional()
+  })
+  .strict();
+export type ReplayCandidateOverrides = z.infer<typeof replayCandidateOverridesSchema>;
+
+/** The overrides that change something; undefined when there are none. */
+export function normaliseCandidateOverrides(overrides: ReplayCandidateOverrides | null | undefined): ReplayCandidateOverrides | undefined {
+  if (!overrides) return undefined;
+  const out: ReplayCandidateOverrides = {};
+  if (overrides.models && overrides.models.length > 0) out.models = overrides.models;
+  if (overrides.guardProfile) out.guardProfile = overrides.guardProfile;
+  if (overrides.mcpServers && Object.keys(overrides.mcpServers).length > 0) out.mcpServers = overrides.mcpServers;
+  if (overrides.liveReadNodes && overrides.liveReadNodes.length > 0) out.liveReadNodes = [...new Set(overrides.liveReadNodes)];
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export class ReplayCandidateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReplayCandidateError";
+  }
+}
+
+/** Chat model node types and the provider each one talks to (`llm_call` carries its own). */
+export const REPLAY_CHAT_MODEL_PROVIDERS: Readonly<Record<string, string | null>> = {
+  llm_call: null,
+  openai_chat_model: "openai",
+  anthropic_chat_model: "anthropic",
+  ollama_chat_model: "ollama",
+  openai_compatible_chat_model: "openai_compatible",
+  ai_gateway_chat_model: null,
+  azure_openai_chat_model: "azure_openai",
+  google_gemini_chat_model: "gemini"
+};
+
+const CHAT_MODEL_DEFAULTS: Readonly<Record<string, string>> = {
+  openai_chat_model: "gpt-4o-mini",
+  anthropic_chat_model: "claude-sonnet-5-5",
+  ollama_chat_model: "llama3.1",
+  google_gemini_chat_model: "gemini-2.5-flash"
+};
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function isChatModelNode(node: Pick<WorkflowNode, "type">): boolean {
+  return Object.prototype.hasOwnProperty.call(REPLAY_CHAT_MODEL_PROVIDERS, node.type);
+}
+
+/** The provider and model a chat model node calls, as the engine builds them; null when it is not configured. */
+export function chatModelOf(node: Pick<WorkflowNode, "type" | "config">): { providerId: string; model: string } | null {
+  const config = recordOf(node.config);
+  const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+  if (node.type === "llm_call") {
+    const provider = recordOf(config.provider);
+    return text(provider.providerId) && typeof provider.model === "string" ? { providerId: text(provider.providerId), model: provider.model } : null;
+  }
+  if (node.type === "ai_gateway_chat_model") {
+    const api = text(config.apiProvider);
+    return { providerId: api === "openai" || api === "anthropic" ? api : "openai_compatible", model: text(config.model) };
+  }
+  if (node.type === "azure_openai_chat_model") return text(config.deployment) ? { providerId: "azure_openai", model: text(config.deployment) } : null;
+  const providerId = REPLAY_CHAT_MODEL_PROVIDERS[node.type];
+  if (!providerId) return null;
+  return { providerId, model: text(config.model) || CHAT_MODEL_DEFAULTS[node.type] || "" };
+}
+
+/** The chat model nodes attached to a node's `chat_model` port. */
+function attachedChatModels(workflow: Pick<Workflow, "nodes" | "edges">, nodeId: string): WorkflowNode[] {
+  const byId = new Map(workflow.nodes.map((node) => [node.id, node]));
+  return workflow.edges
+    .filter((edge) => edge.source === nodeId && edge.sourceHandle === "chat_model")
+    .map((edge) => byId.get(edge.target))
+    .filter((node): node is WorkflowNode => Boolean(node && isChatModelNode(node)));
+}
+
+/**
+ * The model a node calls: its own for a model node, else the last chat
+ * model attached to it (the one the engine uses). Null when it calls none.
+ */
+export function effectiveModelFor(workflow: Pick<Workflow, "nodes" | "edges">, nodeId: string): { providerId: string; model: string } | null {
+  const node = workflow.nodes.find((entry) => entry.id === nodeId);
+  if (!node) return null;
+  if (isChatModelNode(node)) return chatModelOf(node);
+  const attached = attachedChatModels(workflow, nodeId);
+  const last = attached[attached.length - 1];
+  return last ? chatModelOf(last) : null;
+}
+
+function setModel(node: WorkflowNode, model: string, provider: string | undefined, secretRef?: { secretId: string }): WorkflowNode {
+  const config = { ...recordOf(node.config) };
+  if (node.type === "llm_call") {
+    const current = recordOf(config.provider);
+    const currentProvider = typeof current.providerId === "string" ? current.providerId.trim() : "";
+    const switching = Boolean(provider && provider !== currentProvider);
+    const hasSecret = Boolean(recordOf(current.secretRef).secretId);
+    const hasBaseUrl = typeof current.baseUrl === "string" && current.baseUrl.trim() !== "";
+    if (switching && (hasSecret || hasBaseUrl) && !secretRef) {
+      throw new ReplayCandidateError(
+        `Model override: node ${node.id} calls ${currentProvider || "its provider"} with ${hasSecret ? "its own secret" : "its own base URL"}; switching it to ${provider} needs the override to name the secret to use (secretRef), so the node's key is never sent to another provider.`
+      );
+    }
+    const next: Record<string, unknown> = { ...current, ...(provider ? { providerId: provider } : {}), model };
+    // A new provider does not inherit the old one's endpoint.
+    if (switching) delete next.baseUrl;
+    if (secretRef) next.secretRef = { secretId: secretRef.secretId };
+    config.provider = next;
+  } else {
+    if (secretRef) {
+      throw new ReplayCandidateError(`Model override: node ${node.id} is a ${node.type} node; a secretRef can only be given for an LLM Call node.`);
+    }
+    const current = chatModelOf(node);
+    if (provider && current && provider !== current.providerId) {
+      throw new ReplayCandidateError(
+        `Node ${node.id} is a ${node.type} node, which always calls ${current.providerId}; change its provider in the workflow, or override the model only.`
+      );
+    }
+    if (node.type === "azure_openai_chat_model") config.deployment = model;
+    else config.model = model;
+  }
+  return { ...node, config } as WorkflowNode;
+}
+
+/**
+ * The workflow a candidate runs: a copy of `workflow` with its model
+ * overrides applied, in order. A per-node override on an agent (or another
+ * node with a `chat_model` port) changes the chat model attached to it; a
+ * chat model shared by several nodes changes for all of them. A provider
+ * override changes every chat model of that provider. Throws
+ * `ReplayCandidateError` for an override that matches nothing.
+ */
+export function applyCandidate(workflow: Workflow, overrides: ReplayCandidateOverrides | null | undefined): Workflow {
+  const out: Workflow = JSON.parse(JSON.stringify(workflow)) as Workflow;
+  for (const override of overrides?.models ?? []) {
+    if (override.nodeId !== undefined) {
+      const node = out.nodes.find((entry) => entry.id === override.nodeId);
+      if (!node) throw new ReplayCandidateError(`Model override: the workflow has no node ${override.nodeId}.`);
+      const targets = isChatModelNode(node) ? [node] : attachedChatModels(out, node.id);
+      if (targets.length === 0) throw new ReplayCandidateError(`Model override: node ${override.nodeId} (${node.type}) has no model to change.`);
+      const ids = new Set(targets.map((target) => target.id));
+      out.nodes = out.nodes.map((entry) => (ids.has(entry.id) ? setModel(entry, override.model, override.provider, override.secretRef) : entry));
+      continue;
+    }
+    let matched = 0;
+    out.nodes = out.nodes.map((entry) => {
+      if (!isChatModelNode(entry) || chatModelOf(entry)?.providerId !== override.provider) return entry;
+      matched += 1;
+      return setModel(entry, override.model, undefined, override.secretRef);
+    });
+    if (matched === 0) throw new ReplayCandidateError(`Model override: no node of the workflow calls provider ${override.provider}.`);
+  }
+  return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// Phase 15.3 — which nodes may run live in a replay (`liveReadNodes`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a node type may run live in a replay when a candidate names it in
+ * `overrides.liveReadNodes`. This is a decision per node type, separate from
+ * the replay class: many `read` nodes are only classed that way so that they
+ * are always answered from the recording, and running them live is not safe.
+ *
+ *   safe      a pure read with no side effects (a list, get or search call)
+ *   get_only  safe only when its configuration makes it a read: an HTTP
+ *             Request node with `method: "GET"`
+ *   refused   never runs live: every trigger (a poll can consume a queue
+ *             item or run arbitrary SQL), every node that launches a browser
+ *             (Web Browse, PDF Output), Connector Source (connector-defined),
+ *             raw query nodes (SQL, SOQL), writes, models, code and the rest
+ *
+ * A type this table does not list is refused. The drift test in
+ * replay-live-read-drift.test.ts fails when a node type is added without a
+ * decision here, or when the set of types that may run live changes.
+ */
+export type ReplayLiveReadDecision = "safe" | "get_only" | "refused";
+
+/*
+ * Handlers checked for every entry that is not "refused" (a type stays on the
+ * list only if its handler writes nothing: no store, upsert, cache or file,
+ * and makes no paid call other than the read itself):
+ *   google_drive_source          executor.ts "google_drive_source" -> connector-sdk google-drive fetchData: GET list/export calls; its one POST is the OAuth token exchange
+ *   google_sheets_read           connectors/tier1.ts executeGoogleSheetsRead: one GET of the values range
+ *   notion_query_database        connectors/tier2.ts: POST /databases/:id/query, a read-only query endpoint
+ *   airtable_list_records        connectors/tier2.ts: GET of the records list
+ *   jira_search_issues           connectors/tier2.ts: POST /rest/api/3/search, a read-only search endpoint
+ *   hubspot_get_contact          connectors/tier2.ts: GET of one contact
+ *   aws_s3_get_object            connectors/tier2.ts: signed GET
+ *   aws_s3_list_objects          connectors/tier2.ts: signed GET (list)
+ *   google_calendar_list_events  connectors/tier2.ts: GET of the events list
+ *   http_request                 executor.ts "http_request": live only for a literal GET (no body is sent)
+ * Removed after review: rag_retrieve (its handler always upserts the documents
+ * into the vector store, and pays for embeddings, before it searches).
+ */
+export const REPLAY_LIVE_READ_POLICY: Readonly<Record<WorkflowNodeType, ReplayLiveReadDecision>> = {
+  schedule_trigger: "refused",
+  webhook_input: "refused",
+  manual_trigger: "refused",
+  form_trigger: "refused",
+  chat_trigger: "refused",
+  file_trigger: "refused",
+  rss_trigger: "refused",
+  sse_trigger: "refused",
+  mcp_server_trigger: "refused",
+  kafka_trigger: "refused",
+  rabbitmq_trigger: "refused",
+  mqtt_trigger: "refused",
+  sub_workflow_trigger: "refused",
+  error_trigger: "refused",
+  slack_trigger: "refused",
+  github_webhook_trigger: "refused",
+  stripe_webhook_trigger: "refused",
+  telegram_trigger: "refused",
+  discord_trigger: "refused",
+  imap_email_trigger: "refused",
+  google_sheets_trigger: "refused",
+  postgres_trigger: "refused",
+  redis_trigger: "refused",
+  google_drive_trigger: "refused",
+  text_input: "refused",
+  system_prompt: "refused",
+  user_prompt: "refused",
+  prompt_template: "refused",
+  loop_node: "refused",
+  merge_node: "refused",
+  set_node: "refused",
+  chat_intent_router: "refused",
+  helper_chat_response: "refused",
+  input_validator: "refused",
+  if_node: "refused",
+  switch_node: "refused",
+  try_catch: "refused",
+  filter_node: "refused",
+  stop_and_error: "refused",
+  noop_node: "refused",
+  aggregate_node: "refused",
+  split_out_node: "refused",
+  sort_node: "refused",
+  limit_node: "refused",
+  remove_duplicates_node: "refused",
+  summarize_node: "refused",
+  compare_datasets_node: "refused",
+  rename_keys_node: "refused",
+  edit_fields_node: "refused",
+  date_time_node: "refused",
+  crypto_node: "refused",
+  jwt_node: "refused",
+  xml_node: "refused",
+  html_node: "refused",
+  convert_to_file_node: "refused",
+  extract_from_file_node: "refused",
+  compression_node: "refused",
+  edit_image_node: "refused",
+  extract_citations: "refused",
+  document_chunker: "refused",
+  chart: "refused",
+  pdf_output: "refused",
+  output: "refused",
+  webhook_response: "refused",
+  sticky_note: "refused",
+  llm_call: "refused",
+  openai_chat_model: "refused",
+  anthropic_chat_model: "refused",
+  ollama_chat_model: "refused",
+  openai_compatible_chat_model: "refused",
+  ai_gateway_chat_model: "refused",
+  azure_openai_chat_model: "refused",
+  google_gemini_chat_model: "refused",
+  agent_orchestrator: "refused",
+  supervisor_node: "refused",
+  basic_llm_chain: "refused",
+  qa_chain: "refused",
+  summarization_chain: "refused",
+  information_extractor: "refused",
+  text_classifier: "refused",
+  sentiment_analysis: "refused",
+  ai_transform: "refused",
+  output_parser: "refused",
+  guard: "refused",
+  guard_protection: "refused",
+  output_guardrail: "refused",
+  mcp_tool: "refused",
+  code_node: "refused",
+  local_memory: "refused",
+  session_artifact_save: "refused",
+  session_artifact_load: "refused",
+  human_approval: "refused",
+  approval_gate: "refused",
+  wait_node: "refused",
+  web_browse: "refused",
+  connector_source: "refused",
+  google_drive_source: "safe",
+  rag_retrieve: "refused",
+  rerank: "refused",
+  embeddings_azure_openai: "refused",
+  google_sheets_read: "safe",
+  notion_query_database: "safe",
+  airtable_list_records: "safe",
+  jira_search_issues: "safe",
+  salesforce_query: "refused",
+  hubspot_get_contact: "safe",
+  aws_s3_get_object: "safe",
+  aws_s3_list_objects: "safe",
+  google_calendar_list_events: "safe",
+  http_request: "get_only",
+  azure_storage: "refused",
+  azure_cosmos_db: "refused",
+  azure_monitor_http: "refused",
+  azure_ai_search_vector_store: "refused",
+  qdrant_vector_store: "refused",
+  execute_workflow: "refused",
+  slack_send_message: "refused",
+  smtp_send_email: "refused",
+  google_sheets_append: "refused",
+  google_sheets_update: "refused",
+  postgres_query: "refused",
+  mysql_query: "refused",
+  mongo_operation: "refused",
+  redis_command: "refused",
+  github_action: "refused",
+  teams_send_message: "refused",
+  notion_create_page: "refused",
+  airtable_create_record: "refused",
+  airtable_update_record: "refused",
+  jira_create_issue: "refused",
+  salesforce_create_record: "refused",
+  hubspot_create_contact: "refused",
+  stripe_create_customer: "refused",
+  stripe_create_charge: "refused",
+  aws_s3_put_object: "refused",
+  telegram_send_message: "refused",
+  discord_send_message: "refused",
+  google_calendar_create_event: "refused",
+  twilio_send_sms: "refused"
+};
+
+/**
+ * Why a node may not run live in a replay, or null when it may. Unknown
+ * types (and prototype keys) are refused.
+ */
+export function replayLiveReadRefusal(node: { id?: string; type: string; config?: unknown }): string | null {
+  const label = `${node.id ? `node ${node.id} ` : ""}(${node.type})`;
+  if (!Object.prototype.hasOwnProperty.call(REPLAY_LIVE_READ_POLICY, node.type)) {
+    return `Live read: ${label} is not a node type that may run live in a replay.`;
+  }
+  const decision = REPLAY_LIVE_READ_POLICY[node.type as WorkflowNodeType];
+  if (decision === "safe") return null;
+  if (decision === "get_only") {
+    const config = node.config && typeof node.config === "object" ? (node.config as Record<string, unknown>) : {};
+    const method = typeof config.method === "string" ? config.method.trim().toUpperCase() : "";
+    return method === "GET" ? null : `Live read: ${label} runs live only as a GET request (it is ${method || "not set"}).`;
+  }
+  const nodeClass = replayNodeClass(node);
+  if (nodeClass === "write") return `Live read: ${label} can change external systems, and replays never run those live.`;
+  if (nodeClass === "trigger" || node.type.endsWith("_trigger")) return `Live read: ${label} is a trigger; triggers never run live in a replay (a poll can consume or change what it reads).`;
+  if (nodeClass === "read") return `Live read: ${label} is not on the list of reads that may run live in a replay.`;
+  return `Live read: ${label} is not an external read (it is a ${nodeClass} node).`;
+}
+/**
+ * Problems with `liveReadNodes`: a node that is not in the candidate, or
+ * whose type may not run live (`replayLiveReadRefusal`; writes, triggers and
+ * anything not on `REPLAY_LIVE_READ_POLICY` never run live in a replay).
+ */
+export function liveReadNodeProblems(workflow: Pick<Workflow, "nodes">, nodeIds: readonly string[]): string[] {
+  const problems: string[] = [];
+  for (const nodeId of nodeIds) {
+    const node = workflow.nodes.find((entry) => entry.id === nodeId);
+    if (!node) {
+      problems.push(`Live read: the workflow has no node ${nodeId}.`);
+      continue;
+    }
+    const refusal = replayLiveReadRefusal(node);
+    if (refusal) problems.push(refusal);
+  }
+  return problems;
+}
+
+/** One repeat of a case: its result and, for a baseline rerun, the baseline execution. */
+export type ReplayAttemptStatus = "pass" | "fail" | "error";
+
+/**
+ * A case's result from its repeats. `all`: any fail fails it, else any error
+ * makes it inconclusive. `majority`: more than half pass, else a fail fails
+ * it, else inconclusive. `any`: one pass is enough, else as `all`.
+ */
+export function aggregateReplayAttempts(statuses: readonly ReplayAttemptStatus[], rule: ReplayAggregateRule): ReplayAttemptStatus {
+  if (statuses.length === 0) return "error";
+  const pass = statuses.filter((status) => status === "pass").length;
+  const fail = statuses.filter((status) => status === "fail").length;
+  const error = statuses.length - pass - fail;
+  if (rule === "any" && pass > 0) return "pass";
+  if (rule === "majority" && pass * 2 > statuses.length) return "pass";
+  if (rule === "all" && fail === 0 && error === 0) return "pass";
+  if (fail > 0) return "fail";
+  return error > 0 ? "error" : "fail";
 }

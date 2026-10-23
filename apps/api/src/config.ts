@@ -105,6 +105,12 @@ const envSchema = z.object({
   REPLAY_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(2),
   REPLAY_JOB_MAX_CASES: z.coerce.number().int().min(1).max(5_000).default(200),
   REPLAY_JOB_DEFAULT_MAX_COST_USD: z.coerce.number().positive().max(100_000).default(5),
+  /**
+   * Phase 15.3 — the most executions one replay job may run (golden-run
+   * cases x repeats x 2 with a baseline rerun). A request over it is refused
+   * with a 400. Default 500 (applied where it is used).
+   */
+  REPLAY_JOB_MAX_EXECUTIONS: z.coerce.number().int().min(1).max(100_000).optional(),
   EVAL_RUN_MAX_COST_USD: z.coerce.number().positive().max(100_000).default(5),
   /** Phase 15.2 — a case output or run diff whose JSON is larger is stored as a truncation marker (scorers see it whole). */
   EVAL_RESULT_MAX_BYTES: z.coerce.number().int().min(1_024).max(16 * 1024 * 1024).default(262_144),

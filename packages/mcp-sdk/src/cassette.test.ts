@@ -285,3 +285,48 @@ describe("cassette replay", () => {
     expect(replayed).toEqual(live);
   });
 });
+
+describe("per-server replay modes (Phase 15.3)", () => {
+  it("live_read_only sends read-only tool calls to the live server and answers writes and unknown tools from the cassette", async () => {
+    const cassette = await recordCounting(async (registry, context) => {
+      await registry.get("counting").discoverTools(countingConfig, context);
+      await registry.get("counting").invokeTool("echo", { q: "a" }, countingConfig, context);
+      await registry.get("counting").invokeTool("write_row", { q: "a" }, countingConfig, context);
+    });
+    const live = countingRegistry();
+    const seen: Array<{ toolName: string; annotations?: Record<string, unknown> }> = [];
+    const { registry, player } = createReplayRegistry(cassette, {
+      mode: "strict",
+      serverModes: { srv_counting: "live_read_only" },
+      liveReads: live.registry,
+      isReadOnlyTool: ({ toolName, annotations }) => {
+        seen.push({ toolName, ...(annotations ? { annotations } : {}) });
+        return toolName === "echo";
+      }
+    });
+    const adapter = registry.get("counting");
+    const context = contextOf();
+    // A read goes live (the live adapter's own counter answers).
+    expect((await adapter.invokeTool("echo", { q: "new" }, countingConfig, context)).output).toEqual({ call: 1, args: { q: "new" } });
+    // A write is answered from the cassette, never live.
+    expect((await adapter.invokeTool("write_row", { q: "a" }, countingConfig, context)).output).toEqual({ call: 3, args: { q: "a" } });
+    await expect(adapter.invokeTool("write_row", { q: "other" }, countingConfig, context)).rejects.toThrow(McpCassetteMissError);
+    expect(live.adapter.calls).toBe(1);
+    expect(seen.map((entry) => entry.toolName)).toEqual(["echo", "write_row", "write_row"]);
+    expect(player.report("cas")).toMatchObject({ liveRead: 1, live: 0, unmatched: [expect.objectContaining({ name: "write_row" })] });
+  });
+
+  it("never calls live without a read-only verdict, and a per-server strict mode wins over the job's lenient one", async () => {
+    const cassette = await recordCounting(async (registry, context) => {
+      await registry.get("counting").invokeTool("echo", { q: "a" }, countingConfig, context);
+    });
+    const live = countingRegistry();
+    const noVerdict = createReplayRegistry(cassette, { serverModes: { srv_counting: "live_read_only" }, liveReads: live.registry });
+    await expect(noVerdict.registry.get("counting").invokeTool("echo", { q: "b" }, countingConfig, contextOf())).rejects.toThrow(McpCassetteMissError);
+    const strictServer = createReplayRegistry(cassette, { mode: "lenient", live: live.registry, serverModes: { counting: "strict" } });
+    const adapter = strictServer.registry.get("counting");
+    await adapter.invokeTool("echo", { q: "a" }, countingConfig, contextOf());
+    await expect(adapter.invokeTool("echo", { q: "a" }, countingConfig, contextOf())).rejects.toThrow(/more often than recorded/);
+    expect(live.adapter.calls).toBe(0);
+  });
+});

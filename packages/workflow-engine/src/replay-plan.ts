@@ -29,6 +29,7 @@ import {
   REPLAY_NODE_CLASSES,
   REPLAY_STUB_MARKER,
   REPLAY_TRUNCATED_MARKER,
+  replayLiveReadRefusal,
   replayNodeClass,
   type ReplayNodeClass,
   type ReplayRecordedNode,
@@ -56,7 +57,9 @@ export type ReplayNodeAction =
   /** Stubbed with a synthetic output: the recording has nothing usable for this node. */
   | "unrecorded_stub"
   /** Passed straight through (waits). */
-  | "pass_through";
+  | "pass_through"
+  /** Phase 15.3 — an external read the candidate asked to run live (`liveNodes`). */
+  | "live";
 
 export interface ReplayNodeDecision {
   nodeId: string;
@@ -94,6 +97,13 @@ export interface ReplayPlanOptions {
   recordedWorkflow?: Pick<Workflow, "nodes">;
   /** Applied to both sides' configuration before they are compared (the recorded side was scrubbed when saved). */
   normaliseConfig?: (config: unknown) => unknown;
+  /**
+   * Phase 15.3 — nodes to run live instead of answering from the recording.
+   * Only types `REPLAY_LIVE_READ_POLICY` allows ever run live (defence in
+   * depth: the API refuses the others first): a trigger, write, browser,
+   * code node, approval or unknown type named here is still stubbed.
+   */
+  liveNodes?: ReadonlySet<string>;
 }
 
 export interface ReplayPlan {
@@ -158,9 +168,12 @@ export function buildReplayPlan(
   const changedSince = (node: Pick<WorkflowNode, "id" | "type" | "config">): boolean =>
     Boolean(options.recordedWorkflow) && recordedFingerprints.get(node.id) !== fingerprint(node);
 
-  const decide = (node: Pick<WorkflowNode, "id" | "type" | "config">): { nodeClass: ReplayNodeClass; entry: ReplayRecordedNode | null; stub: ReplayNodeStub | null; recorded: boolean } => {
+  const decide = (
+    node: Pick<WorkflowNode, "id" | "type" | "config">
+  ): { nodeClass: ReplayNodeClass; entry: ReplayRecordedNode | null; stub: ReplayNodeStub | null; recorded: boolean; live?: boolean } => {
     const nodeClass = replayNodeClass({ type: node.type, config: node.config });
     if (nodeClass === "wait") return { nodeClass, entry: null, stub: { kind: "pass_through" }, recorded: false };
+    if (options.liveNodes?.has(node.id) && replayLiveReadRefusal(node) === null) return { nodeClass, entry: null, stub: null, recorded: false, live: true };
     const entry = recordedFor(recorded, node);
     if (nodeClass === "trigger") {
       // The trigger's recorded output is the run's input; an unrecorded trigger runs (triggers only read the run's own input).
@@ -180,6 +193,7 @@ export function buildReplayPlan(
     let action: ReplayNodeAction;
     if (decision.stub?.kind === "pass_through") action = "pass_through";
     else if (decision.stub) action = decision.recorded ? "recorded" : "unrecorded_stub";
+    else if (decision.live) action = "live";
     else action = decision.nodeClass === "mcp" ? "cassette" : "run";
     decisions.push({ nodeId: node.id, nodeType: node.type, nodeClass: decision.nodeClass, action });
     if (!known(node.type)) {

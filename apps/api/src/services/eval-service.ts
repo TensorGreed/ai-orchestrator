@@ -30,12 +30,46 @@
  * Token and latency aggregation pulls from the `_telemetry` blob the host
  * reads off node results; cost comes from the run facts (priced with the
  * deployment's price table) plus any LLM-judge calls.
+ *
+ * Phase 15.3 — a replay job's candidate can be an inline workflow plus
+ * overrides; its cases can run several times (`repeats`, combined by the
+ * `aggregate` rule) and next to a baseline rerun of the golden run's own
+ * version (`compare: "baseline_rerun"`), with model calls live or from the
+ * golden run's tape (`models`). A case is still one stored result: its
+ * status is the aggregate, its diff the deciding repeat with every repeat
+ * listed. The budget counts every execution of a case as it finishes, so a
+ * case stops between repeats (and between a baseline and its candidate)
+ * once the job's spend reaches the budget. `estimateReplayJob` says what a
+ * request would run and cost before it starts.
+ *
+ * Phase 15.3 review fixes:
+ *   - before each execution its estimated cost (the golden run's recorded
+ *     tokens at the models it will call) is reserved against what is left
+ *     of the budget; an execution that would not fit is skipped
+ *     (budget_exhausted) and the reservation is settled to the actual cost
+ *     afterwards. A job may run at most REPLAY_JOB_MAX_EXECUTIONS executions;
+ *   - model calls answered from a model tape cost nothing (budget, spend and
+ *     summary); their recorded cost is kept apart (`recordedCostUsd`);
+ *   - the job stores whether it can count as release proof
+ *     (`candidate.releaseEligible`, with the reasons when it cannot);
+ *   - a case that ran fewer repeats than asked for is an error, whatever
+ *     the repeats it did run said.
  */
 
+import { CASSETTE_REDACTED } from "@ai-orchestrator/mcp-sdk";
 import { randomUUID } from "node:crypto";
 import {
+  aggregateReplayAttempts,
+  effectiveModelFor,
   EVAL_JUDGE_CALLS_PER_CASE_MAX,
   EVAL_RUN_FINISHED_STATUSES,
+  REPLAY_STALE_RECORDING_DAYS,
+  replayJobReleaseIneligibleReasons,
+  type ReplayAttemptStatus,
+  type ReplayCandidateOverrides,
+  type ReplayCaseAttempt,
+  type ReplayCaseRepeats,
+  type ReplayJobEstimate,
   type EvalStoredTruncation,
   type EvalCaseDetail,
   type EvalCaseResult,
@@ -121,24 +155,68 @@ export interface EvalWorkflowExecutor {
   }>;
 }
 
+type CandidateKind = "draft" | "version" | "inline";
+
+/** Phase 15.3 — a candidate resolved once for a whole job. */
+export interface EvalReplayCandidate {
+  workflow: Workflow;
+  kind: CandidateKind;
+  version: number | null;
+  workflowHash: string;
+  /** The hash before model overrides. */
+  baseHash?: string;
+  overrides?: ReplayCandidateOverrides | null;
+  name?: string;
+  /** The guard profile override as it will run (version pinned when the job is created). */
+  guardProfile?: { profileId: string; version: number; hash: string } | null;
+}
+
+/** Phase 15.3 — the default of REPLAY_JOB_MAX_EXECUTIONS. */
+export const REPLAY_JOB_MAX_EXECUTIONS_DEFAULT = 500;
+
+/** Phase 15.3 — the marker in the reason a case or job stopped on its budget. */
+export const REPLAY_BUDGET_EXHAUSTED = "budget_exhausted";
+
 /** Phase 15.2 — what a replay job needs from the replay machinery (15.1). */
 export interface EvalReplayDeps {
   /** The candidate, resolved once when the job is created so every case runs the same workflow. */
-  resolveCandidate: (workflowId: string, request: { draft?: boolean; version?: number }) => { workflow: Workflow; kind: "draft" | "version"; version: number | null; workflowHash: string };
+  resolveCandidate: (
+    workflowId: string,
+    request: { draft?: boolean; version?: number; workflow?: Record<string, unknown>; overrides?: ReplayCandidateOverrides },
+    /** Phase 15.3 — who is asking (an admin may pin an older version of a bound guard profile). */
+    context?: { actor?: SafeUser | null }
+  ) => EvalReplayCandidate;
   getRecording: (id: string) => ReplayRecordingRecord | null;
   /** Replays one golden run against the candidate in the replay sandbox, as `actor`, with this execution id. */
   replayCase: (input: {
     recording: ReplayRecordingRecord;
-    candidate: { workflow: Workflow; kind: "draft" | "version"; version: number | null };
+    candidate: { workflow: Workflow; kind: CandidateKind; version: number | null };
     request: { mcpMode?: McpReplayMode; ignorePaths?: string[]; numberTolerance?: number };
     actor: SafeUser;
     executionId: string;
+    /** Phase 15.3 */
+    models?: "live" | "replay";
+    overrides?: ReplayCandidateOverrides | null;
+    /** Compare with this baseline run instead of the recording. */
+    baseline?: { facts: RunFacts; executionId: string };
+    role?: "candidate" | "baseline";
+    repeatIndex?: number;
   }) => Promise<ReplayRunResponse>;
   /**
-   * The user a job runs as (tool policy subject and project scope), looked up
-   * again for every case; null when they can no longer run the workflow.
+   * Phase 15.3 — the golden run's own workflow, for a baseline rerun.
+   * `source: "captured"` means the saved version is gone (or never existed)
+   * and only the scrubbed copy captured with the golden run is left.
    */
-  actorFor: (userId: string, email: string, workflowId: string) => SafeUser | null;
+  baselineFor?: (recording: ReplayRecordingRecord) => { workflow: Workflow; kind: CandidateKind; version: number | null; source?: "version" | "captured" };
+  /** Phase 15.3 — the price of one model call, for the estimate; null when the model has no price. */
+  priceCall?: (providerId: string, model: string, inputTokens: number, outputTokens: number) => number | null;
+  /**
+   * The user a job runs as (tool policy subject and project scope), looked up
+   * again for every case; null when they can no longer run the workflow, or
+   * no longer hold `permission` on it (Phase 15.3: an inline or overridden
+   * candidate needs `workflow:write` for every case, not only at the start).
+   */
+  actorFor: (userId: string, email: string, workflowId: string, permission?: "workflow:execute" | "workflow:write") => SafeUser | null;
 }
 
 export interface EvalServiceOptions {
@@ -146,6 +224,8 @@ export interface EvalServiceOptions {
   concurrency?: number;
   /** Most cases one run may have. Default 200. */
   maxCases?: number;
+  /** Phase 15.3 — most executions one replay job may run (REPLAY_JOB_MAX_EXECUTIONS). Default 500. */
+  maxExecutions?: number;
   /** A replay job's budget when the request names none, in USD. Default 5. */
   defaultMaxCostUsd?: number;
   /** An eval run's budget, in USD. Default 5. */
@@ -187,6 +267,17 @@ type Listener = (run: EvalRunView, done: boolean) => void;
 
 interface CaseOutcome {
   status: EvalCaseStatus;
+  /** Phase 15.3 — the case's repeats did not agree. */
+  flaky?: boolean;
+  /** Phase 15.3 — executions the case ran (repeats and baseline reruns). */
+  executions?: number;
+  /** Phase 15.3 — the case stopped early because the job reached its budget. */
+  budgetStop?: string;
+  /** Phase 15.3 — the case's repeat counts (stored with its score). */
+  repeats?: ReplayCaseRepeats;
+  /** Phase 15.3 — model calls answered from the tape, and what they cost when recorded. */
+  replayedModelCalls?: number;
+  recordedCostUsd?: number;
   /** A model or judge call of the case had no price. */
   costUnknown?: boolean;
   executionId?: string;
@@ -214,7 +305,33 @@ interface ActiveRun {
   /** Woken whenever a case finishes or the run is canceled (a case waiting for budget headroom). */
   caseWaiters: Array<() => void>;
   warnings: Set<string>;
+  /** Phase 15.3 — spend of executions that finished inside cases still running. */
+  inflightUsd: number;
+  /** Phase 15.3 — a case stopped on the budget; the run ends `failed` with this. */
+  budgetStop: string | null;
 }
+
+/** Phase 15.3 — what a running case may do besides its first execution. */
+interface CaseRunContext {
+  /** A fresh execution id the run can abort on cancel. */
+  nextExecutionId: () => string;
+  canceled: () => boolean;
+  /** Counts spend as soon as an execution (or a judge call, with `judge`) of the case finishes. */
+  spend: (usd: number, judge?: boolean) => void;
+  /**
+   * Phase 15.3 — holds `usd` (an execution's estimated cost) against what is
+   * left of the budget; false (nothing held) when it does not fit. Give it
+   * back with `release` once the execution has finished and its actual cost
+   * was spent.
+   */
+  reserve: (usd: number) => boolean;
+  release: (usd: number) => void;
+  /** The job has reached its budget. */
+  overBudget: () => boolean;
+  maxCostUsd: number | undefined;
+}
+
+type RunCaseFn = (spec: CaseSpec, executionId: string, context: CaseRunContext) => Promise<CaseOutcome>;
 
 interface CaseSpec {
   fixture: EvalFixtureRecord;
@@ -228,7 +345,20 @@ const UNPRICED_WARNING = "Some model or judge calls have no price in the price t
 interface ReplayJobContext {
   actorUserId: string;
   actorEmail: string;
-  candidate: { workflow: Workflow; kind: "draft" | "version"; version: number | null; workflowHash: string };
+  /** Phase 15.3 — an inline or overridden candidate: every case re-checks workflow:write. */
+  needsWrite: boolean;
+  candidate: EvalReplayCandidate;
+  options: ReplayJobOptions;
+  scorers: EvalScorerSpec[] | null;
+}
+
+/** Phase 15.3 — a validated replay job request, before it is stored and launched. */
+interface PreparedReplayJob {
+  datasetIds: string[];
+  fixtures: EvalFixtureRecord[];
+  /** Executions the job would run: golden-run cases x repeats (x 2 with a baseline rerun). */
+  executions: number;
+  candidate: EvalReplayCandidate;
   options: ReplayJobOptions;
   scorers: EvalScorerSpec[] | null;
 }
@@ -438,33 +568,28 @@ export class EvalService {
    * one candidate and scored. The sets must belong to `workflowId`.
    */
   enqueueReplayJob(request: ReplayJobRequest, context: { workflowId: string; actor: SafeUser }): EvalRunView {
-    const replay = this.options.replay;
-    if (!replay) throw new EvalRunError("Replay jobs are not available on this server.", "invalid");
-    const datasetIds = [...new Set(request.datasetIds)];
-    const fixtures: EvalFixtureRecord[] = [];
-    for (const datasetId of datasetIds) {
-      const dataset = this.store.getEvalDataset(datasetId);
-      if (!dataset) throw new EvalRunError(`Golden set not found: ${datasetId}`, "not_found");
-      if (dataset.workflowId !== context.workflowId) throw new EvalRunError(`Golden set ${datasetId} does not belong to this workflow.`, "invalid");
-      fixtures.push(...this.store.listEvalFixtures(datasetId));
+    const prepared = this.prepareReplayJob(request, context.workflowId, context.actor);
+    const { candidate, options, fixtures, datasetIds } = prepared;
+    const maxExecutions = this.maxExecutions();
+    if (prepared.executions > maxExecutions) {
+      throw new EvalRunError(
+        `This job would run ${prepared.executions} executions (golden-run cases x repeats${options.compare === "baseline_rerun" ? " x 2 for the baseline reruns" : ""}); a replay job can run at most ${maxExecutions} (REPLAY_JOB_MAX_EXECUTIONS). Use fewer repeats or cases.`,
+        "invalid"
+      );
     }
-    if (!fixtures.some((fixture) => fixture.recordingId)) throw new EvalRunError("These golden sets hold no golden runs to replay.", "invalid");
-    if (fixtures.length > this.options.maxCases) throw new EvalRunError(`These golden sets hold ${fixtures.length} cases; a replay job can have at most ${this.options.maxCases} (REPLAY_JOB_MAX_CASES).`, "limit");
-
-    let candidate: ReplayJobContext["candidate"];
-    try {
-      candidate = replay.resolveCandidate(context.workflowId, { ...(request.draft !== undefined ? { draft: request.draft } : {}), ...(request.version !== undefined ? { version: request.version } : {}) });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new EvalRunError(message, /not found|no longer exists/i.test(message) ? "not_found" : "invalid");
-    }
-    const options: ReplayJobOptions = {
-      mcpMode: request.mcpMode ?? "strict",
-      ...(request.ignorePaths && request.ignorePaths.length > 0 ? { ignorePaths: request.ignorePaths } : {}),
-      ...(request.numberTolerance !== undefined ? { numberTolerance: request.numberTolerance } : {}),
-      maxCostUsd: request.maxCostUsd ?? this.options.defaultMaxCostUsd
+    // Server-computed release proof: a release gate requires `releaseEligible` and never re-derives it.
+    const releaseIneligibleReasons = replayJobReleaseIneligibleReasons({ kind: candidate.kind, overrides: candidate.overrides ?? null }, options);
+    const jobCandidate: ReplayJobCandidate = {
+      kind: candidate.kind,
+      version: candidate.version,
+      workflowHash: candidate.workflowHash,
+      ...(candidate.baseHash !== undefined ? { baseHash: candidate.baseHash } : {}),
+      ...(candidate.overrides !== undefined ? { overrides: candidate.overrides } : {}),
+      ...(candidate.kind === "inline" && candidate.name ? { name: candidate.name } : {}),
+      ...(candidate.guardProfile ? { guardProfile: candidate.guardProfile } : {}),
+      releaseEligible: releaseIneligibleReasons.length === 0,
+      releaseIneligibleReasons
     };
-    const jobCandidate: ReplayJobCandidate = { kind: candidate.kind, version: candidate.version, workflowHash: candidate.workflowHash };
     const runId = `run_${randomUUID()}`;
     const progress = this.initialProgress(fixtures.length);
     this.store.createEvalRun({
@@ -484,14 +609,214 @@ export class EvalService {
       options: options as unknown as Record<string, unknown>,
       progress: progress as unknown as Record<string, unknown>
     });
-    const job: ReplayJobContext = { actorUserId: context.actor.id, actorEmail: context.actor.email, candidate, options, scorers: request.scorers && request.scorers.length > 0 ? request.scorers : null };
+    const job: ReplayJobContext = {
+      actorUserId: context.actor.id,
+      actorEmail: context.actor.email,
+      needsWrite: candidate.kind === "inline" || Boolean(candidate.overrides),
+      candidate,
+      options,
+      scorers: prepared.scorers
+    };
+    const repeats = options.repeats ?? 1;
     this.launch(
       runId,
-      fixtures.map((fixture) => this.caseSpec(fixture, job.scorers)),
-      (spec, executionId) => this.runReplayCase(job, runId, context.workflowId, spec, executionId),
+      fixtures.map((fixture) => this.caseSpec(fixture, job.scorers, repeats)),
+      (spec, executionId, caseContext) => this.runReplayCase(job, runId, context.workflowId, spec, executionId, caseContext),
       { maxCostUsd: options.maxCostUsd }
     );
     return this.view(this.store.getEvalRun(runId)!);
+  }
+
+  /**
+   * Phase 15.3 — what a replay job request would run and cost: cases,
+   * executions per case, model calls (none for calls a model tape answers)
+   * and USD (the golden runs' recorded tokens priced at the candidate's
+   * models, plus the most the judges can cost), with warnings. Validates the
+   * request exactly as `enqueueReplayJob` does; nothing is stored or run.
+   */
+  estimateReplayJob(request: ReplayJobRequest, context: { workflowId: string; actor?: SafeUser | null }): ReplayJobEstimate {
+    const replay = this.options.replay!;
+    const { candidate, options, fixtures, executions } = this.prepareReplayJob(request, context.workflowId, context.actor ?? null);
+    const repeats = options.repeats ?? 1;
+    const baseline = options.compare === "baseline_rerun";
+    const fromTape = options.models === "replay";
+    const warnings: string[] = [];
+    let cases = 0;
+    let modelCalls = 0;
+    let costUsd = 0;
+    let costUnknown = false;
+    let noTape = 0;
+    let stale = 0;
+    let changedModelCalls = 0;
+    let missing = 0;
+    let capturedBaselines = 0;
+    const nowMs = this.now().getTime();
+    for (const fixture of fixtures) {
+      if (!fixture.recordingId) continue;
+      const recording = replay.getRecording(fixture.recordingId);
+      if (!recording || recording.workflowId !== context.workflowId) {
+        missing += 1;
+        continue;
+      }
+      cases += 1;
+      const ageDays = (nowMs - Date.parse(recording.createdAt)) / 86_400_000;
+      if (Number.isFinite(ageDays) && ageDays > REPLAY_STALE_RECORDING_DAYS) stale += 1;
+      if (fromTape && !recording.modelTape) noTape += 1;
+      const own = this.executionEstimate(recording, candidate.workflow, options);
+      modelCalls += repeats * own.calls;
+      costUsd += repeats * own.usd;
+      changedModelCalls += own.changed;
+      if (own.unknown) costUnknown = true;
+      if (baseline) {
+        if (this.baselineSourceOf(recording) === "redacted") capturedBaselines += 1;
+        const rerun = this.executionEstimate(recording, null, options);
+        modelCalls += repeats * rerun.calls;
+        costUsd += repeats * rerun.usd;
+        if (rerun.unknown) costUnknown = true;
+      }
+    }
+    // The judges' worst case, as the runner reserves it.
+    for (const fixture of fixtures) {
+      if (!fixture.recordingId) continue;
+      const spec = this.caseSpec(fixture, this.normalisedScorers(request), repeats);
+      costUsd += spec.reserveUsd;
+      if (spec.reserveUnknown) costUnknown = true;
+    }
+    const handWritten = fixtures.filter((fixture) => !fixture.recordingId).length;
+    if (handWritten > 0) warnings.push(`${handWritten} hand-written case${handWritten === 1 ? " is" : "s are"} skipped: replay jobs replay golden runs only.`);
+    if (missing > 0) warnings.push(`${missing} case${missing === 1 ? "'s golden run was" : "s' golden runs were"} deleted; ${missing === 1 ? "it" : "they"} will be inconclusive.`);
+    if (noTape > 0) {
+      warnings.push(
+        `${noTape} of ${cases} golden run${cases === 1 ? " has" : "s have"} no model tape: with models "replay" ${noTape === 1 ? "that case is" : "those cases are"} inconclusive. Save golden runs from runs recorded with Record calls on, or replay with live models.`
+      );
+    }
+    if (fromTape && changedModelCalls > 0) {
+      warnings.push(
+        options.mcpMode === "lenient"
+          ? "The model overrides change model calls a tape cannot answer: those calls go to the live model (lenient)."
+          : "The model overrides change model calls a tape cannot answer: in strict mode those cases are inconclusive. Use live models, or lenient to let them call the live model."
+      );
+    }
+    if (capturedBaselines > 0) {
+      warnings.push(
+        `${capturedBaselines} golden run${capturedBaselines === 1 ? " has" : "s have"} no saved version to rerun, and the workflow captured with ${capturedBaselines === 1 ? "it" : "them"} had credentials scrubbed out, so ${capturedBaselines === 1 ? "that case is" : "those cases are"} inconclusive under a baseline rerun. Re-record ${capturedBaselines === 1 ? "this golden run" : "these golden runs"} from a saved version, or compare with the recording.`
+      );
+    }
+    if (!baseline && stale > 0) {
+      warnings.push(
+        `${stale} golden run${stale === 1 ? " is" : "s are"} more than ${REPLAY_STALE_RECORDING_DAYS} days old: compare with a baseline rerun so model drift since then is not blamed on the candidate.`
+      );
+    }
+    if (costUnknown) warnings.push("Some models have no price in the price table: the estimate leaves them out.");
+    const estimatedCostUsd = roundUsd(costUsd);
+    if (estimatedCostUsd > options.maxCostUsd) {
+      warnings.push(`The estimate ($${estimatedCostUsd.toFixed(4)}) is over the job's budget ($${options.maxCostUsd}): the job stops once it has spent the budget.`);
+    }
+    const maxExecutions = this.maxExecutions();
+    if (executions > maxExecutions) {
+      warnings.push(`The job would run ${executions} executions, more than REPLAY_JOB_MAX_EXECUTIONS (${maxExecutions}): starting it is refused. Use fewer repeats or cases.`);
+    }
+    return { cases, runsPerCase: repeats * (baseline ? 2 : 1), modelCallsEstimate: modelCalls, estimatedCostUsd, costUnknown, warnings, executions, maxExecutions };
+  }
+
+  private maxExecutions(): number {
+    return this.options.maxExecutions ?? REPLAY_JOB_MAX_EXECUTIONS_DEFAULT;
+  }
+
+  /** Phase 15.3 — where a golden run's baseline would come from: its saved version, else the scrubbed captured copy. */
+  private baselineSourceOf(recording: ReplayRecordingRecord): "version" | "captured" | "redacted" | "none" {
+    try {
+      const found = this.options.replay?.baselineFor?.(recording);
+      if (found?.source === "captured") return capturedWorkflowIsRedacted(found.workflow) ? "redacted" : "captured";
+      return "version";
+    } catch {
+      return "none";
+    }
+  }
+
+  /**
+   * Phase 15.3 — what one execution of a golden run is expected to cost:
+   * its recorded model calls priced at the models `workflow` calls (null:
+   * the recorded models, a baseline rerun). A call the tape answers costs
+   * nothing; with models "replay" only a lenient call the tape cannot answer
+   * (a changed model) goes live. `changed` counts calls the candidate makes
+   * on another model than the recording.
+   */
+  private executionEstimate(
+    recording: ReplayRecordingRecord,
+    workflow: Workflow | null,
+    options: Pick<ReplayJobOptions, "models" | "mcpMode">
+  ): { usd: number; calls: number; changed: number; unknown: boolean } {
+    const replay = this.options.replay!;
+    const fromTape = options.models === "replay";
+    const hasTape = Boolean(recording.modelTape);
+    let usd = 0;
+    let calls = 0;
+    let changed = 0;
+    let unknown = false;
+    // Without a tape a model replay is inconclusive before anything runs.
+    if (fromTape && !hasTape) return { usd, calls, changed, unknown };
+    for (const call of recording.facts.modelCalls) {
+      const target = (workflow ? effectiveModelFor(workflow, call.nodeId) : null) ?? { providerId: call.providerId, model: call.model };
+      const isChanged = target.providerId !== call.providerId || target.model !== call.model;
+      if (isChanged) changed += 1;
+      const live = !fromTape || (isChanged && options.mcpMode === "lenient");
+      if (!live) continue;
+      calls += 1;
+      if (call.inputTokens === null && call.outputTokens === null) continue;
+      const price = replay.priceCall ? replay.priceCall(target.providerId, target.model, call.inputTokens ?? 0, call.outputTokens ?? 0) : null;
+      if (price === null || !Number.isFinite(price)) unknown = true;
+      else usd += price;
+    }
+    return { usd: roundUsd(usd), calls, changed, unknown };
+  }
+
+  private normalisedScorers(request: ReplayJobRequest): EvalScorerSpec[] | null {
+    return request.scorers && request.scorers.length > 0 ? request.scorers : null;
+  }
+
+  /** Phase 15.3 — checks a replay job request and resolves its candidate, without storing anything. */
+  private prepareReplayJob(request: ReplayJobRequest, workflowId: string, actor: SafeUser | null = null): PreparedReplayJob {
+    const replay = this.options.replay;
+    if (!replay) throw new EvalRunError("Replay jobs are not available on this server.", "invalid");
+    const datasetIds = [...new Set(request.datasetIds)];
+    const fixtures: EvalFixtureRecord[] = [];
+    for (const datasetId of datasetIds) {
+      const dataset = this.store.getEvalDataset(datasetId);
+      if (!dataset) throw new EvalRunError(`Golden set not found: ${datasetId}`, "not_found");
+      if (dataset.workflowId !== workflowId) throw new EvalRunError(`Golden set ${datasetId} does not belong to this workflow.`, "invalid");
+      fixtures.push(...this.store.listEvalFixtures(datasetId));
+    }
+    if (!fixtures.some((fixture) => fixture.recordingId)) throw new EvalRunError("These golden sets hold no golden runs to replay.", "invalid");
+    if (fixtures.length > this.options.maxCases) throw new EvalRunError(`These golden sets hold ${fixtures.length} cases; a replay job can have at most ${this.options.maxCases} (REPLAY_JOB_MAX_CASES).`, "limit");
+    if (request.compare === "baseline_rerun" && !replay.baselineFor) throw new EvalRunError("Baseline reruns are not available on this server.", "invalid");
+
+    let candidate: EvalReplayCandidate;
+    try {
+      candidate = replay.resolveCandidate(workflowId, {
+        ...(request.draft !== undefined ? { draft: request.draft } : {}),
+        ...(request.version !== undefined ? { version: request.version } : {}),
+        ...(request.workflow !== undefined ? { workflow: request.workflow } : {}),
+        ...(request.overrides !== undefined ? { overrides: request.overrides } : {})
+      }, { actor });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: unknown }).code;
+      throw new EvalRunError(message, code === "not_found" || (code === undefined && /not found|no longer exists/i.test(message)) ? "not_found" : "invalid");
+    }
+    const options: ReplayJobOptions = {
+      mcpMode: request.mcpMode ?? "strict",
+      ...(request.ignorePaths && request.ignorePaths.length > 0 ? { ignorePaths: request.ignorePaths } : {}),
+      ...(request.numberTolerance !== undefined ? { numberTolerance: request.numberTolerance } : {}),
+      maxCostUsd: request.maxCostUsd ?? this.options.defaultMaxCostUsd,
+      models: request.models ?? "live",
+      compare: request.compare ?? "recording",
+      repeats: request.repeats ?? 1,
+      aggregate: request.aggregate ?? "all"
+    };
+    const goldenCases = fixtures.filter((fixture) => fixture.recordingId).length;
+    const executions = goldenCases * (options.repeats ?? 1) * (options.compare === "baseline_rerun" ? 2 : 1);
+    return { datasetIds, fixtures, executions, candidate, options, scorers: this.normalisedScorers(request) };
   }
 
   /** Resolves when the run has finished (immediately for a run this process is not running). */
@@ -634,7 +959,7 @@ export class EvalService {
   }
 
   /** A case and the judge spend to reserve for it (its own scorers, else the run's; default scorers never call a judge). */
-  private caseSpec(fixture: EvalFixtureRecord, runScorers: EvalScorerSpec[] | null | undefined): CaseSpec {
+  private caseSpec(fixture: EvalFixtureRecord, runScorers: EvalScorerSpec[] | null | undefined, repeats = 1): CaseSpec {
     let calls = 0;
     let reserveUsd = 0;
     let reserveUnknown = false;
@@ -647,10 +972,11 @@ export class EvalService {
       if (ceiling === null || !Number.isFinite(ceiling)) reserveUnknown = true;
       else reserveUsd += wanted * ceiling;
     }
-    return { fixture, reserveUsd: roundUsd(reserveUsd), reserveUnknown };
+    // Phase 15.3 — every repeat of a case is scored, so its judges are reserved once per repeat.
+    return { fixture, reserveUsd: roundUsd(reserveUsd * Math.max(1, repeats)), reserveUnknown };
   }
 
-  private launch(runId: string, cases: CaseSpec[], runCase: (spec: CaseSpec, executionId: string) => Promise<CaseOutcome>, limits: { maxCostUsd?: number } = {}): void {
+  private launch(runId: string, cases: CaseSpec[], runCase: RunCaseFn, limits: { maxCostUsd?: number } = {}): void {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
@@ -666,7 +992,9 @@ export class EvalService {
       progress: (record.progress as unknown as EvalRunProgress) ?? this.initialProgress(cases.length),
       summary: emptySummary(cases.length),
       caseWaiters: [],
-      warnings: new Set()
+      warnings: new Set(),
+      inflightUsd: 0,
+      budgetStop: null
     };
     this.active.set(runId, active);
     this.execute(active, cases, runCase, limits)
@@ -698,7 +1026,7 @@ export class EvalService {
     return new Promise((resolve) => active.caseWaiters.push(resolve));
   }
 
-  private async execute(active: ActiveRun, cases: CaseSpec[], runCase: (spec: CaseSpec, executionId: string) => Promise<CaseOutcome>, limits: { maxCostUsd?: number }): Promise<void> {
+  private async execute(active: ActiveRun, cases: CaseSpec[], runCase: RunCaseFn, limits: { maxCostUsd?: number }): Promise<void> {
     const heartbeat = setInterval(() => {
       if (active.canceled) return;
       active.progress = { ...active.progress, updatedAt: this.now().toISOString() };
@@ -708,26 +1036,31 @@ export class EvalService {
     const running: Array<Promise<void>> = [];
     let started = false;
     let budgetStop: string | null = null;
+    // Spend so far: recorded cases plus executions that finished inside cases still running (Phase 15.3).
+    const spentNow = () => roundUsd(active.progress.spentUsd + active.inflightUsd);
     // Judge spend reserved by the cases in flight.
     let reserved = 0;
+    // Phase 15.3 — the part of `reserved` already spent (counted in inflightUsd too), and execution estimates held.
+    let judgeConsumed = 0;
+    let executionsHeld = 0;
     try {
       for (const spec of cases) {
         await this.slots.acquire();
         const max = limits.maxCostUsd;
         if (max !== undefined) {
           // Wait for cases in flight to give back their reservations while this one does not fit.
-          while (!active.canceled && reserved > 0 && active.progress.spentUsd + reserved + spec.reserveUsd > max) await this.nextCaseDone(active);
+          while (!active.canceled && !active.budgetStop && reserved > 0 && spentNow() + reserved + spec.reserveUsd > max) await this.nextCaseDone(active);
         }
-        if (active.canceled) {
+        if (active.canceled || active.budgetStop) {
           this.slots.release();
           break;
         }
         if (max !== undefined) {
-          const spent = active.progress.spentUsd;
+          const spent = spentNow();
           if (spent >= max) {
-            budgetStop = `Stopped after ${active.progress.done} of ${cases.length} cases: the run spent $${spent.toFixed(4)} of its $${max} budget.`;
+            budgetStop = `Stopped after ${active.progress.done} of ${cases.length} cases (${REPLAY_BUDGET_EXHAUSTED}): the run spent $${spent.toFixed(4)} of its $${max} budget.`;
           } else if (spent + spec.reserveUsd > max) {
-            budgetStop = `Stopped after ${active.progress.done} of ${cases.length} cases: the next case's judge calls could cost up to $${spec.reserveUsd.toFixed(4)}, more than the $${(max - spent).toFixed(4)} left of the run's $${max} budget.`;
+            budgetStop = `Stopped after ${active.progress.done} of ${cases.length} cases (${REPLAY_BUDGET_EXHAUSTED}): the next case's judge calls could cost up to $${spec.reserveUsd.toFixed(4)}, more than the $${(max - spent).toFixed(4)} left of the run's $${max} budget.`;
           }
           if (budgetStop) {
             this.slots.release();
@@ -747,18 +1080,66 @@ export class EvalService {
         active.inFlight.add(executionId);
         active.progress = { ...active.progress, running: active.progress.running + 1 };
         reserved = roundUsd(reserved + spec.reserveUsd);
+        // Phase 15.3 — a case's later executions (repeats, baseline reruns) are abortable too, and count toward the budget at once.
+        const caseExecutions = [executionId];
+        let caseSpent = 0;
+        let caseJudgeSpent = 0;
+        let caseHeld = 0;
+        const consumedOf = () => Math.min(spec.reserveUsd, caseJudgeSpent);
+        const caseContext: CaseRunContext = {
+          nextExecutionId: () => {
+            const next = randomUUID();
+            caseExecutions.push(next);
+            active.inFlight.add(next);
+            return next;
+          },
+          canceled: () => active.canceled,
+          spend: (usd, judge) => {
+            if (!Number.isFinite(usd) || usd <= 0) return;
+            caseSpent = roundUsd(caseSpent + usd);
+            active.inflightUsd = roundUsd(active.inflightUsd + usd);
+            if (judge) {
+              const before = consumedOf();
+              caseJudgeSpent = roundUsd(caseJudgeSpent + usd);
+              judgeConsumed = roundUsd(judgeConsumed + consumedOf() - before);
+            }
+          },
+          reserve: (usd) => {
+            const amount = Number.isFinite(usd) && usd > 0 ? usd : 0;
+            if (max !== undefined) {
+              // Spent, plus judge reservations not spent yet, plus other executions' estimates still running.
+              const committed = spentNow() + Math.max(0, reserved - judgeConsumed) + executionsHeld;
+              if (committed + amount > max) return false;
+            }
+            executionsHeld = roundUsd(executionsHeld + amount);
+            caseHeld = roundUsd(caseHeld + amount);
+            return true;
+          },
+          release: (usd) => {
+            const amount = Math.min(caseHeld, Number.isFinite(usd) && usd > 0 ? usd : 0);
+            executionsHeld = Math.max(0, roundUsd(executionsHeld - amount));
+            caseHeld = Math.max(0, roundUsd(caseHeld - amount));
+          },
+          overBudget: () => max !== undefined && spentNow() >= max,
+          maxCostUsd: max
+        };
         running.push(
           (async () => {
             let outcome: CaseOutcome;
             try {
-              outcome = await runCase(spec, executionId);
+              outcome = await runCase(spec, executionId, caseContext);
             } catch (error) {
               outcome = { status: "error", error: error instanceof Error ? error.message : String(error), ...(spec.fixture.recordingId ? { recordingId: spec.fixture.recordingId } : {}) };
             } finally {
-              active.inFlight.delete(executionId);
+              for (const id of caseExecutions) active.inFlight.delete(id);
               this.slots.release();
             }
+            active.inflightUsd = Math.max(0, roundUsd(active.inflightUsd - caseSpent));
+            if (outcome.budgetStop && !active.budgetStop) active.budgetStop = outcome.budgetStop;
             reserved = Math.max(0, roundUsd(reserved - spec.reserveUsd));
+            judgeConsumed = Math.max(0, roundUsd(judgeConsumed - consumedOf()));
+            executionsHeld = Math.max(0, roundUsd(executionsHeld - caseHeld));
+            caseHeld = 0;
             try {
               this.record(active, spec, outcome);
             } catch (error) {
@@ -773,6 +1154,7 @@ export class EvalService {
     } finally {
       clearInterval(heartbeat);
     }
+    budgetStop = budgetStop ?? active.budgetStop;
     const summary = this.finishSummary(active);
     const progress = { ...active.progress, running: 0, updatedAt: this.now().toISOString() };
     active.progress = progress;
@@ -839,9 +1221,21 @@ export class EvalService {
     summary.costUsd = roundUsd((summary.costUsd ?? 0) + cost);
     summary.judgeCostUsd = roundUsd((summary.judgeCostUsd ?? 0) + (outcome.judgeCostUsd ?? 0));
     if (outcome.costUnknown) active.warnings.add(UNPRICED_WARNING);
+    if (outcome.flaky) summary.flaky = (summary.flaky ?? 0) + 1;
+    if (typeof outcome.executions === "number") summary.executions = (summary.executions ?? 0) + outcome.executions;
+    if (outcome.replayedModelCalls) summary.replayedModelCalls = (summary.replayedModelCalls ?? 0) + outcome.replayedModelCalls;
+    if (outcome.recordedCostUsd) summary.recordedCostUsd = roundUsd((summary.recordedCostUsd ?? 0) + outcome.recordedCostUsd);
 
     const error = outcome.error ? this.scrubText(outcome.error) : undefined;
-    const score = outcome.score ? { pass: outcome.score.pass, details: outcome.score.details.map((detail) => ({ ...detail, reason: this.scrubText(detail.reason) })) } : undefined;
+    const score = outcome.score
+      ? {
+          pass: outcome.score.pass,
+          details: outcome.score.details.map((detail) => ({ ...detail, reason: this.scrubText(detail.reason) })),
+          ...(outcome.repeats ? { repeats: outcome.repeats } : {})
+        }
+      : outcome.repeats
+        ? { pass: outcome.status === "pass", details: [], repeats: outcome.repeats }
+        : undefined;
     this.safely(() => {
       // The run was deleted with its golden set while this case ran: store nothing.
       if (!this.store.getEvalRun(active.runId)) return;
@@ -983,7 +1377,7 @@ export class EvalService {
     };
   }
 
-  private async runReplayCase(job: ReplayJobContext, runId: string, workflowId: string, spec: CaseSpec, executionId: string): Promise<CaseOutcome> {
+  private async runReplayCase(job: ReplayJobContext, runId: string, workflowId: string, spec: CaseSpec, executionId: string, context?: CaseRunContext): Promise<CaseOutcome> {
     const { fixture } = spec;
     const replay = this.options.replay!;
     if (!fixture.recordingId) {
@@ -993,22 +1387,237 @@ export class EvalService {
     const recording = replay.getRecording(recordingId);
     if (!recording) return { status: "error", recordingId, error: "The golden run for this case was deleted." };
     if (recording.workflowId !== workflowId) return { status: "error", recordingId, error: "The golden run for this case belongs to another workflow." };
-    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId);
-    if (!actor) return { status: "error", recordingId, error: `The user who started this job (${job.actorEmail}) can no longer run this workflow.` };
+    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute");
+    if (!actor) {
+      return {
+        status: "error",
+        recordingId,
+        error: job.needsWrite
+          ? `The user who started this job (${job.actorEmail}) can no longer edit this workflow (workflow:write), which a job with a workflow file or overrides needs for every case.`
+          : `The user who started this job (${job.actorEmail}) can no longer run this workflow.`
+      };
+    }
 
-    const response = await replay.replayCase({
-      recording,
-      candidate: { workflow: job.candidate.workflow, kind: job.candidate.kind, version: job.candidate.version },
-      request: { mcpMode: job.options.mcpMode, ...(job.options.ignorePaths ? { ignorePaths: job.options.ignorePaths } : {}), ...(job.options.numberTolerance !== undefined ? { numberTolerance: job.options.numberTolerance } : {}) },
-      actor,
-      executionId
-    });
+    const repeats = Math.max(1, job.options.repeats ?? 1);
+    const compareBaseline = job.options.compare === "baseline_rerun";
+    const models = job.options.models ?? "live";
+    const overrides = job.candidate.overrides ?? null;
+    const request = {
+      mcpMode: job.options.mcpMode,
+      ...(job.options.ignorePaths ? { ignorePaths: job.options.ignorePaths } : {}),
+      ...(job.options.numberTolerance !== undefined ? { numberTolerance: job.options.numberTolerance } : {})
+    };
+    let baselineCandidate: { workflow: Workflow; kind: CandidateKind; version: number | null } | null = null;
+    if (compareBaseline) {
+      try {
+        const found = replay.baselineFor!(recording);
+        if (found.source === "captured" && capturedWorkflowIsRedacted(found.workflow)) {
+          return {
+            status: "error",
+            recordingId,
+            error:
+              "The baseline rerun is inconclusive: this golden run has no saved version to rerun, and the workflow captured with it had credentials scrubbed out when it was saved, so it cannot be rerun as a fair baseline. Re-record this golden run from a saved version, or compare with the recording instead.",
+            executions: 0
+          };
+        }
+        baselineCandidate = found;
+      } catch (error) {
+        return { status: "error", recordingId, error: `No baseline to rerun: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+    // The baseline runs under the same replay settings; only the candidate gets its guard profile (and its model overrides are in its workflow).
+    const baselineOverrides = overrides && (overrides.mcpServers || overrides.liveReadNodes)
+      ? { ...(overrides.mcpServers ? { mcpServers: overrides.mcpServers } : {}), ...(overrides.liveReadNodes ? { liveReadNodes: overrides.liveReadNodes } : {}) }
+      : null;
+    // Phase 15.3 — what each execution is expected to cost, reserved against the budget before it starts.
+    const candidateEstimate = this.executionEstimate(recording, job.candidate.workflow, job.options).usd;
+    const baselineEstimate = compareBaseline ? this.executionEstimate(recording, null, job.options).usd : 0;
+
+    interface Attempt {
+      record: ReplayCaseAttempt;
+      outcome: CaseOutcome;
+    }
+    const attempts: Attempt[] = [];
+    let executions = 0;
+    let spentUsd = 0;
+    let judgeTotal = 0;
+    let costUnknown = false;
+    let budgetStop: string | undefined;
+    let replayedModelCalls = 0;
+    let recordedCostUsd = 0;
+    const spend = (usd: number | null | undefined, judge = false) => {
+      if (typeof usd !== "number" || !Number.isFinite(usd) || usd <= 0) return;
+      spentUsd = roundUsd(spentUsd + usd);
+      context?.spend(usd, judge);
+    };
+    const tapeUsage = (response: ReplayRunResponse) => {
+      if (!response.modelTape) return;
+      replayedModelCalls += response.modelTape.replayedCalls;
+      recordedCostUsd = roundUsd(recordedCostUsd + (response.modelTape.recordedUsage.costUsd ?? 0));
+    };
+    const stopReason = () =>
+      `Stopped this case after ${attempts.length} of ${repeats} repeat${repeats === 1 ? "" : "s"} (${REPLAY_BUDGET_EXHAUSTED}): the job reached its $${context?.maxCostUsd} budget.`;
+    const skipReason = (estimate: number) =>
+      `Skipped the rest of this case after ${attempts.length} of ${repeats} repeat${repeats === 1 ? "" : "s"} (${REPLAY_BUDGET_EXHAUSTED}): its next execution could cost about $${estimate.toFixed(6)}, more than is left of the job's $${context?.maxCostUsd} budget.`;
+    const nextId = () => (executions === 0 ? executionId : (context?.nextExecutionId() ?? randomUUID()));
+
+    for (let repeatIndex = 0; repeatIndex < repeats; repeatIndex += 1) {
+      if (executions > 0 && context) {
+        if (context.canceled()) break;
+        if (context.overBudget()) {
+          budgetStop = stopReason();
+          break;
+        }
+      }
+      let baseline: { facts: RunFacts; executionId: string } | undefined;
+      if (baselineCandidate) {
+        if (context && !context.reserve(baselineEstimate)) {
+          budgetStop = skipReason(baselineEstimate);
+          break;
+        }
+        const baselineId = nextId();
+        let baselineResponse: ReplayRunResponse;
+        try {
+          baselineResponse = await replay.replayCase({
+            recording,
+            candidate: baselineCandidate,
+            request,
+            actor,
+            executionId: baselineId,
+            models,
+            overrides: baselineOverrides,
+            role: "baseline",
+            repeatIndex
+          });
+        } finally {
+          context?.release(baselineEstimate);
+        }
+        executions += 1;
+        spend(baselineResponse.facts.totals.costUsd);
+        tapeUsage(baselineResponse);
+        if (modelCostIsUnknown(baselineResponse.facts)) costUnknown = true;
+        if (baselineResponse.verdict === "error") {
+          const reason = `The baseline rerun was inconclusive: ${baselineResponse.reasons.join(" ") || "it could not be judged."}`;
+          attempts.push({
+            record: { repeatIndex, status: "error", executionId: null, baselineExecutionId: baselineResponse.executionId, verdict: "error", reasons: [reason], costUsd: baselineResponse.facts.totals.costUsd },
+            outcome: { status: "error", recordingId, error: reason, executionId: baselineResponse.executionId }
+          });
+          continue;
+        }
+        baseline = { facts: baselineResponse.facts, executionId: baselineResponse.executionId };
+        if (context?.canceled()) break;
+        if (context?.overBudget()) {
+          budgetStop = stopReason();
+          break;
+        }
+      }
+
+      if (context && !context.reserve(candidateEstimate)) {
+        budgetStop = skipReason(candidateEstimate);
+        break;
+      }
+      let response: ReplayRunResponse;
+      try {
+        response = await replay.replayCase({
+          recording,
+          candidate: { workflow: job.candidate.workflow, kind: job.candidate.kind, version: job.candidate.version },
+          request,
+          actor,
+          executionId: nextId(),
+          models,
+          overrides,
+          ...(baseline ? { baseline } : {}),
+          role: "candidate",
+          repeatIndex
+        });
+      } finally {
+        context?.release(candidateEstimate);
+      }
+      executions += 1;
+      spend(response.facts.totals.costUsd);
+      tapeUsage(response);
+      const outcome = await this.scoreReplayAttempt(job, runId, workflowId, fixture, recording, response, baseline?.facts ?? null);
+      spend(outcome.judgeCostUsd, true);
+      judgeTotal = roundUsd(judgeTotal + (outcome.judgeCostUsd ?? 0));
+      if (outcome.costUnknown) costUnknown = true;
+      attempts.push({
+        record: {
+          repeatIndex,
+          status: outcome.status as ReplayAttemptStatus,
+          executionId: response.executionId,
+          baselineExecutionId: baseline?.executionId ?? null,
+          verdict: response.verdict,
+          reasons: response.reasons,
+          costUsd: outcome.costUsd ?? null
+        },
+        outcome
+      });
+    }
+
+    const tape = replayedModelCalls > 0 ? { replayedModelCalls, recordedCostUsd } : {};
+    if (attempts.length === 0) {
+      return { status: "error", recordingId, error: budgetStop ?? "The job was canceled before this case ran.", costUsd: spentUsd, executions, ...tape, ...(budgetStop ? { budgetStop } : {}) };
+    }
+    const statuses = attempts.map((attempt) => attempt.record.status);
+    const aggregate = job.options.aggregate ?? "all";
+    // Fewer repeats than asked for (the budget, a cancel) never decide a case: it is inconclusive.
+    const incomplete = attempts.length < repeats;
+    const status: ReplayAttemptStatus = incomplete ? "error" : aggregateReplayAttempts(statuses, aggregate);
+    const decisive = attempts.find((attempt) => attempt.record.status === status) ?? attempts[attempts.length - 1]!;
+    const flaky = attempts.length > 1 && new Set(statuses).size > 1;
+    const repeatCounts: ReplayCaseRepeats = {
+      total: attempts.length,
+      pass: statuses.filter((value) => value === "pass").length,
+      fail: statuses.filter((value) => value === "fail").length,
+      error: statuses.filter((value) => value === "error").length,
+      aggregate,
+      flaky
+    };
+    const several = repeats > 1 || compareBaseline;
+    const diff: ReplayCaseDiff | undefined = decisive.outcome.diff
+      ? {
+          ...decisive.outcome.diff,
+          ...(compareBaseline ? { compare: "baseline_rerun" as const, baselineExecutionId: decisive.record.baselineExecutionId } : {}),
+          ...(several ? { attempts: attempts.map((attempt) => attempt.record) } : {})
+        }
+      : undefined;
+    const incompleteReason = incomplete
+      ? budgetStop ?? `Only ${attempts.length} of ${repeats} repeats ran (the job was canceled), so the case is inconclusive.`
+      : undefined;
+    const error = incompleteReason ?? (status === "error" ? decisive.outcome.error ?? "The replay was inconclusive." : budgetStop);
+    return {
+      ...decisive.outcome,
+      status,
+      ...(diff ? { diff } : {}),
+      ...(error ? { error } : {}),
+      costUsd: spentUsd,
+      judgeCostUsd: judgeTotal,
+      costUnknown,
+      executions,
+      ...tape,
+      ...(several ? { repeats: repeatCounts } : {}),
+      ...(flaky ? { flaky } : {}),
+      ...(budgetStop ? { budgetStop } : {})
+    };
+  }
+
+  /** One replay of a case, scored against the recording (or the baseline rerun it was compared with). */
+  private async scoreReplayAttempt(
+    job: ReplayJobContext,
+    runId: string,
+    workflowId: string,
+    fixture: EvalFixtureRecord,
+    recording: ReplayRecordingRecord,
+    response: ReplayRunResponse,
+    baselineFacts: RunFacts | null
+  ): Promise<CaseOutcome> {
     const { facts, ...diff } = response;
+    const reference = baselineFacts ?? recording.facts;
     const modelCost = facts.totals.costUsd;
     const tokens = { input: facts.totals.inputTokens, output: facts.totals.outputTokens, total: facts.totals.totalTokens };
     const base = {
       executionId: response.executionId,
-      recordingId,
+      recordingId: recording.id,
       verdict: response.verdict,
       diff,
       output: facts.output,
@@ -1017,19 +1626,19 @@ export class EvalService {
     };
     const modelCostUnknown = modelCostIsUnknown(facts);
     if (response.verdict === "error") {
-      return { ...base, status: "error", error: response.reasons.join(" ") || "The replay was inconclusive.", costUsd: modelCost, costUnknown: modelCostUnknown };
+      return { ...base, status: "error", error: response.reasons.join(" ") || "The replay was inconclusive.", costUsd: modelCost, judgeCostUsd: 0, costUnknown: modelCostUnknown };
     }
     const fallback: EvalScorerSpec[] = [
-      { type: "status", expect: recording.facts.status },
+      { type: "status", expect: reference.status },
       { type: "json_equal", against: "baseline", ...(job.options.ignorePaths ? { ignorePaths: job.options.ignorePaths } : {}), ...(job.options.numberTolerance !== undefined ? { numberTolerance: job.options.numberTolerance } : {}) }
     ];
     const { score, judgeCostUsd, judgeCostUnknown } = await this.score(
       this.effectiveScorers(fixture, job.scorers, fallback),
       {
         output: facts.output,
-        expected: fixture.expected ?? recording.facts.output,
+        expected: fixture.expected ?? reference.output,
         fixtureInput: recording.input,
-        baseline: recording.facts,
+        baseline: reference,
         candidate: facts,
         ...(this.options.random ? { random: this.options.random } : {})
       },
@@ -1079,10 +1688,16 @@ export class EvalService {
       tokenOutput: result.tokenOutput,
       tokenTotal: result.tokenTotal,
       costUsd: result.costUsd,
-      verdict: (result.verdict as EvalCaseResult["verdict"]) ?? null
+      verdict: (result.verdict as EvalCaseResult["verdict"]) ?? null,
+      ...(score?.repeats && typeof score.repeats === "object" ? { repeats: score.repeats as ReplayCaseRepeats } : {})
     };
   }
 }
 
 // Re-export internals for tests.
 export const __test__ = __scorerTest__;
+
+/** Whether scrubbing left a redaction marker in a workflow captured with a golden run (so it cannot be rerun faithfully). */
+function capturedWorkflowIsRedacted(workflow: Workflow): boolean {
+  return JSON.stringify(workflow).includes(CASSETTE_REDACTED);
+}

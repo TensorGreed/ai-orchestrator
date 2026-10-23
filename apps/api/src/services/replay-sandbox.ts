@@ -6,11 +6,15 @@
  * replay and are dropped with it, knowledge-base writes are refused (reads
  * go to the real store; retrieval nodes are stubbed by the replay plan
  * anyway), and an MCP server's question for a person is declined at once.
+ *
+ * Phase 15.3: session memory can be seeded with what the golden run's
+ * sessions held when it started (its memory seed), so an agent with
+ * memory sees the same history it saw then.
  */
 
 import { randomUUID } from "node:crypto";
 import type { AgentSessionMemoryStore, AgentSessionToolDataStore, AgentSessionToolRecord } from "@ai-orchestrator/agent-runtime";
-import type { McpElicitationResult } from "@ai-orchestrator/shared";
+import type { McpElicitationResult, ModelMemorySeed } from "@ai-orchestrator/shared";
 import type { AgentSessionArtifactRecord, AgentSessionArtifactStore, KnowledgeBaseStore } from "@ai-orchestrator/workflow-engine";
 
 export const REPLAY_KB_WRITE_REFUSED = "Knowledge base writes are not allowed in a replay.";
@@ -28,8 +32,13 @@ export interface ReplaySandbox {
 
 const sessionKey = (namespace: string, sessionId: string) => `${namespace}\u0000${sessionId}`;
 
-export function createReplaySandbox(): ReplaySandbox {
+export function createReplaySandbox(seed?: ModelMemorySeed | null): ReplaySandbox {
   const memory = new Map<string, unknown[]>();
+  for (const session of seed?.sessions ?? []) {
+    if (typeof session.namespace === "string" && typeof session.sessionId === "string" && Array.isArray(session.messages)) {
+      memory.set(sessionKey(session.namespace, session.sessionId), structuredClone(session.messages));
+    }
+  }
   const toolCalls = new Map<string, AgentSessionToolRecord[]>();
   const artifacts = new Map<string, AgentSessionArtifactRecord>();
   let memoryWrites = 0;

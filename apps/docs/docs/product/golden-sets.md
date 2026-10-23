@@ -1,6 +1,6 @@
 # Golden sets, replay jobs and scorers
 
-A **golden set** is a regression suite for one workflow: a list of [golden runs](./golden-runs.md) (and, if you like, hand-written cases). A **replay job** replays every golden run in one or more sets against a candidate (the draft, or a saved version) in the background, scores each case and reports pass, fail or inconclusive per case. Use it before you ship a prompt, model, tool or workflow change: one job tells you which real runs the change breaks.
+A **golden set** is a regression suite for one workflow: a list of [golden runs](./golden-runs.md) (and, if you like, hand-written cases). A **replay job** replays every golden run in one or more sets against a candidate (the draft, a saved version or a workflow file, with optional overrides) in the background, scores each case and reports pass, fail or inconclusive per case. Use it before you ship a prompt, model, tool or workflow change: one job tells you which real runs the change breaks.
 
 Everything stays on your deployment. Replays use the deployment's own providers and secrets.
 
@@ -22,11 +22,14 @@ Deleting a golden run that a set uses does not remove the case: the next job rep
 
 **Run replay** on a set opens the job dialog:
 
-- **Candidate**: the draft (the workflow as saved now) or a saved version. The candidate is fixed when the job starts: saving the draft while the job runs does not change what it tests. The job records the candidate's workflow hash.
-- **MCP matching**: strict or lenient, as for a single replay.
+- **Candidate**: the draft (the workflow as saved now), a saved version or a workflow file, plus overrides. See [Candidates and comparison](#candidates-and-comparison). The candidate is fixed when the job starts: saving the draft while the job runs does not change what it tests. The job records the candidate's workflow hash.
+- **MCP matching**: strict or lenient, as for a single replay. It also decides what happens when a model call is not on the tape (below).
+- **Comparison**: live models or model calls from the tape, the recording or a baseline rerun, and repeats.
 - **Ignore paths** and **number tolerance** for the output comparison.
 - **Budget**: the most the job may spend on model and judge calls (default `REPLAY_JOB_DEFAULT_MAX_COST_USD`, 5 USD). See [Budgets](#budgets).
 - **Scorers** (below). Without any, each case is scored with `status` (the same status as the golden run) and `json_equal` against the golden run's output, which is the single-replay verdict.
+
+The dialog first asks the server for an **estimate** (`POST /api/replay/estimate`) and shows it: cases × runs per case, model calls, the estimated cost and any warnings. **Start** is only offered after that, and any change to the form asks for a new estimate.
 
 `POST /api/replay/runs` answers `202` straight away; the job runs in the background. The page shows progress as cases finish (done of total, running, spent), and every case with its scorers. Click a case to see its scores and the run diff (output, tool calls, totals, replay health), the same view as a single replay.
 
@@ -38,12 +41,61 @@ A case is:
 | --- | --- |
 | pass | every scorer passed |
 | fail | a scorer failed |
-| inconclusive | the replay could not be trusted (an unanswered MCP call, a node the golden run never saw, a changed code node, a cut recording, and the other reasons listed for a single replay), the golden run was deleted, or the replay could not run. Scorers do not run |
+| inconclusive | the replay could not be trusted (an unanswered MCP call, a model call the tape cannot answer in strict mode, a golden run without a model tape under model calls from the tape, a baseline rerun that was itself inconclusive, a node the golden run never saw, a changed code node, a cut recording, and the other reasons listed for a single replay), the golden run was deleted, or the replay could not run. Scorers do not run |
 | skipped | a hand-written case |
 
 The pass rate counts passed cases out of those not skipped.
 
 **Cancel** stops a queued or running job: no further cases start, and cases that are running are aborted. A job's status is one of `queued`, `running`, `completed`, `failed` (over budget), `canceled` or `interrupted`.
+
+### Candidates and comparison
+
+**Candidate.** One of:
+
+- the draft, or a saved version;
+- a **workflow file**: a workflow JSON, or an export file holding one (`{ workflow }`). It must be this workflow's (the same `id`; another workflow's file is refused with 400), it is validated like an import, it runs in the workflow's current project and folder, and it is never saved. The job records it as `candidate.kind: "inline"` with its name.
+
+**Overrides**, applied on top of the candidate:
+
+| Override | What it does |
+| --- | --- |
+| `models: [{ nodeId?, provider?, model, secretRef? }]` | Changes the model a node calls: an LLM Call node, a chat model node, or an agent or supervisor (its attached chat model). `provider` with a `nodeId` changes the provider of an LLM Call node; without a `nodeId` it changes every node of that provider. An override that matches nothing is refused (400). Switching the provider of a node that has its own secret or base URL is refused (400) unless the override names the secret to use (`secretRef: { secretId }`), so the node's key is never sent to another vendor; the new provider does not inherit the old base URL. The secret must be one you may use in the workflow's project, like any other secret reference |
+| `guardProfile: { profileId, version? }` | Evaluates the run with this guard profile instead of the workflow's and project's bindings. Without a `version` the latest version is resolved **once, when the job is created**, and every case runs it; the job stores the profile id, version and hash (`candidate.guardProfile`). A project's enforced profile still runs first unless it is a version of the same profile. A version older than the one a project or workflow binding applies to the workflow now (bindings apply a profile's latest version) is refused with 400 unless you are an admin. Guard verdicts name the profile and version used |
+| `mcpServers: { <server>: strict \| lenient \| live_read_only }` | MCP matching per registry server. `live_read_only` sends a tool call to the live server only when an admin marked that tool read-only in the [tool policy](./mcp-tool-policy.md); a server's own `readOnlyHint` annotation is its claim, not proof, so an unmarked or unknown tool counts as a write and is answered from the cassette. Resource reads (`resources/read`) and prompt reads (`prompts/get`) on a `live_read_only` server always go to the live server (they are reads by the MCP spec); every call that went live is counted and reported in the replay health (`mcp_live_read`) |
+| `liveReadNodes: [nodeId]` | Nodes that run live instead of being answered from the recording. Only node types on the live-read allow-list may (see below); any other node, or a node that is not there, is refused with 400 naming the node. Writes never run live in a replay |
+
+**Live-read allow-list.** A node may run live only when its type is a pure read with no side effects: Google Sheets Read, Notion Query Database, Airtable List Records, Jira Search Issues, HubSpot Get Contact, AWS S3 Get Object and List Objects, Google Calendar List Events, Google Drive Source, and HTTP Request with `method: "GET"`. Everything else is refused, including RAG Retrieve (it writes its documents into the vector store and pays for embeddings before it searches), every trigger (a polling trigger can pop a queue item or run arbitrary SQL), Web Browse and PDF Output (they launch a browser, whose pages can send any request), Connector Source (its behaviour is up to the connector), raw query nodes (SQL, SOQL), and node types this list does not know. Replay jobs may run longer than their share of the budget suggests: executions already running when the budget is crossed finish; a model with no price in the price table reserves nothing (the estimate shows `costUnknown`); and one case can occupy a worker slot for up to `repeats` x (1 + baseline) x the execution timeout. A live GET request can still carry data from upstream output to the host its URL names (the outbound guard still applies), so use live reads for data, not for checks. A job with live reads is never release proof. A non-admin may replay under another guard profile they can read; such a job is never release proof either.
+
+The candidate's workflow hash is computed after the model overrides, so a model swap is a different candidate; `baseHash` is the hash before them. Guard, MCP and live-read overrides change how the job replays, not the workflow, and are listed on the job page next to the candidate.
+
+**Model calls.** `models: "live"` (default) calls the models. `models: "replay"` answers every model call from the golden run's model tape, so a job that changes only the guard profile, or the output handling after a model, makes no model calls at all. A call that is not on the tape (a prompt changed, an earlier tool answer changed, a model override) follows the job's MCP matching: strict makes the case inconclusive and names the call; lenient reuses the last answer of a repeated call and sends a call the tape never saw to the live model, with a warning in the replay health. A golden run without a tape is inconclusive under `models: "replay"`.
+
+**Compare with.** `compare: "recording"` (default) compares each case with its golden run. `compare: "baseline_rerun"` first replays the golden run's own workflow (the saved version it ran, else the workflow captured with it) under the same settings, then the candidate, and compares the two runs: drift since the golden run was recorded (a model that answers differently today, data read live) shows up in both and is not blamed on the candidate. The baseline gets the same MCP and live-read overrides and the same model mode, but not the candidate's guard profile or model overrides. A baseline rerun that is itself inconclusive makes that repeat inconclusive.
+
+**Repeats.** `repeats` (1–5, default 1) runs each case that many times (each with its own baseline rerun when comparing with one), and `aggregate` decides the case: `all` (default; every repeat passes), `majority` or `any`. An inconclusive repeat counts against `all` and `majority`. A case that ran fewer repeats than asked for (the budget stopped it, or the job was canceled) is **inconclusive**, whatever the repeats it did run said. A case whose repeats disagree is marked **flaky**. A case stays one result: its status is the aggregate, its diff is the first repeat with that status, and the case view lists every repeat with its execution and baseline execution. The case's tokens and duration are those of that deciding repeat; its cost is every repeat's. The summary counts flaky cases (`flaky`) and executions (`executions`).
+
+**Baseline without a saved version.** A baseline rerun replays the saved version the golden run ran. When that version was pruned, or the golden run was of an unsaved draft, the workflow captured with the golden run is rerun instead, as long as nothing was scrubbed out of it. When it holds a `[REDACTED]` marker (an inline credential was removed when it was saved), it cannot be rerun faithfully: the case is inconclusive, the reason says to re-record this golden run, and the estimate warns about it. Credentials kept as secret references do not count as scrubbed.
+
+Starting a job with a workflow file or any override needs edit access to the workflow (`workflow:write`), not just run access: it is a change to the workflow, even if it is never saved. The access is checked again before every case: a user who loses edit access while the job runs gets the remaining cases inconclusive. A workflow file is at most 2 MiB (`REPLAY_INLINE_WORKFLOW_MAX_BYTES`); a larger one is refused with 400.
+
+**Model calls from the tape cost nothing.** A call answered from a model tape counts $0 toward the budget, the job's spend and its summary cost, and is not recorded as a usage event. What those calls cost when they were recorded is shown apart: `summary.replayedModelCalls` and `summary.recordedCostUsd` on the job, and `modelTape: { replayedCalls, liveCalls, recordedUsage }` on each case's replay. A lenient call that went to the live model is priced and counted as usual.
+
+### Release proof
+
+When a job is created the server records whether it can count as proof for publishing its `workflowHash`: `candidate.releaseEligible` (boolean) and `candidate.releaseIneligibleReasons` (strings; empty when eligible). A job is eligible only when the candidate is the draft or a saved version (not a workflow file), it has no overrides of any kind (models, guard profile, MCP server modes, live reads), `models` is `live` and `mcpMode` is `strict`. `releaseEligible` does not cover the comparison settings: the release gate checks those against its own options. A release gate requires `releaseEligible === true` in addition to its own checks and never works it out from the options; jobs made before this field have none and are judged by the gate's own checks. The job page shows the result and the reasons.
+
+### Estimate
+
+`POST /api/replay/estimate` takes the same body as `POST /api/replay/runs`, checks it the same way (and with the same access rules), runs nothing, and answers:
+
+```json
+{ "cases": 12, "runsPerCase": 6, "modelCallsEstimate": 72, "estimatedCostUsd": 0.41, "costUnknown": false, "warnings": [], "executions": 72, "maxExecutions": 500 }
+```
+
+- `runsPerCase` is repeats × 2 with a baseline rerun. `executions` is cases × `runsPerCase`; a job over `maxExecutions` (`REPLAY_JOB_MAX_EXECUTIONS`, default 500) is refused with 400 when started, and the estimate warns about it.
+- `modelCallsEstimate` counts the golden runs' recorded model calls for every run; calls a tape will answer count as none.
+- `estimatedCostUsd` prices the golden runs' recorded tokens at the candidate's models (and the recorded models for baselines) with the deployment's price table, plus the most the judges can cost. `costUnknown` is true when a model has no price; the estimate then leaves it out.
+- `warnings` says, for example, that some golden runs have no tape, that model overrides cannot be answered from a tape, that golden runs are over 30 days old and a baseline rerun would be fairer, that a baseline would have to rerun a captured workflow with credentials scrubbed out, that the job is over `REPLAY_JOB_MAX_EXECUTIONS`, or that the estimate is over the job's budget.
 
 ### Running in the background
 
@@ -55,10 +107,11 @@ Eval runs and replay jobs are stored in SQLite only: on Postgres the API boots a
 
 ### Budgets
 
-Every replay job and eval run has a budget: a replay job's `maxCostUsd` (default `REPLAY_JOB_DEFAULT_MAX_COST_USD`), and `EVAL_RUN_MAX_COST_USD` (default 5 USD) for every eval run. Spend is the model calls of the replayed or live runs plus the judge calls.
+Every replay job and eval run has a budget: a replay job's `maxCostUsd` (default `REPLAY_JOB_DEFAULT_MAX_COST_USD`), and `EVAL_RUN_MAX_COST_USD` (default 5 USD) for every eval run. Spend is the model calls of the replayed or live runs, every repeat and baseline rerun included, plus the judge calls.
 
 - Before a case starts, the most its judge calls could cost (each call priced at the longest judge prompt plus `EVAL_JUDGE_MAX_TOKENS` of reply) is reserved against the budget. A case whose reservation does not fit waits for running cases to finish; when it still does not fit, no further cases start and the run ends as **failed** with the reason. Judge calls can therefore never take a run over its budget.
-- A case's own model calls are not known before it runs. A run stops scheduling once its spend reaches the budget, so it can go over by at most the model spend of the cases still running (up to `REPLAY_CONCURRENCY` of them).
+- Before each execution of a replay job (each repeat and each baseline rerun), its estimated model cost (the golden run's recorded tokens at the models it will call; $0 for calls a tape answers) is reserved against what is left of the budget, next to the judge reservations and the other executions in flight. An execution that does not fit is skipped (`budget_exhausted` in the case's error and the job's), the case is inconclusive, and the job ends **failed**. After the execution its reservation is settled to what it really cost. The judges of every repeat are reserved before the case starts.
+- So a job goes over its budget only by how much the executions in flight cost more than their recorded tokens (a candidate with longer prompts or answers, more agent iterations, or a model with no price). A job also runs at most `REPLAY_JOB_MAX_EXECUTIONS` executions (default 500).
 - A model or judge call whose model has no price in the price table is not counted as $0: the run's spend is marked as a lower bound (shown with a `+`), and the run carries a warning that the budget cannot stop on those calls.
 - One case makes at most 50 judge calls across all of its scorers; the next call fails the scorer with "judge call limit reached".
 - Every judge call is recorded as a usage event (`triggerType: eval_judge`) of the workflow's project, so it shows on the usage pages and counts toward project budgets.
@@ -112,7 +165,8 @@ Access uses the same project authorization as runs (see [Authentication and RBAC
 - `POST /api/eval/datasets` (builder; `{ name, description?, workflowId?, projectId? }`; with `workflowId` it is a golden set in the workflow's project)
 - `POST /api/eval/datasets/:id/recordings` (builder; `{ recordingId, name?, scorers? }`; `201 { fixture }`; 409 when the golden run is already in the set)
 - `GET /api/eval/datasets/:id/fixtures`, `DELETE /api/eval/datasets/:id`, `DELETE /api/eval/fixtures/:id`
-- `POST /api/replay/runs` (builder; `{ datasetIds, draft? | version?, mcpMode?, ignorePaths?, numberTolerance?, scorers?, maxCostUsd? }`; `202 { run }`; 400 for a set without golden runs or a judge secret you cannot use; 404 for a set that is missing or another workflow's; 409 over `REPLAY_JOB_MAX_CASES`)
+- `POST /api/replay/runs` (builder; `{ datasetIds, draft? | version? | workflow?, overrides?, models?, compare?, repeats?, aggregate?, mcpMode?, ignorePaths?, numberTolerance?, scorers?, maxCostUsd? }`; `202 { run }`; 400 for a set without golden runs, a judge or model override secret you cannot use, a workflow file of another workflow, over 2 MiB or that fails validation, an override that matches nothing, a provider switch without a `secretRef`, a guard profile or version that does not exist (or older than a binding applies, for a non-admin), a node in `liveReadNodes` that is not on the allow-list, or more than `REPLAY_JOB_MAX_EXECUTIONS` executions; 403 for a workflow file or overrides without edit access; 404 for a set that is missing or another workflow's; 409 over `REPLAY_JOB_MAX_CASES`; 501 on Postgres). The run's `candidate` carries `releaseEligible`, `releaseIneligibleReasons` and, with a guard override, `guardProfile: { profileId, version, hash }`
+- `POST /api/replay/estimate` (builder; the same body and checks; `{ cases, runsPerCase, modelCallsEstimate, estimatedCostUsd, costUnknown, warnings, executions, maxExecutions }`; nothing runs; 501 on Postgres)
 - `POST /api/eval/runs` (builder; `{ datasetId, workflowId, scorers?, record?, replay? }`; `202 { run, runId }`; 400 for invalid scorers, a judge secret you cannot use, or a golden set of another workflow or with only golden runs; 404 for a dataset, workflow, cassette or eval run you cannot read; 409 for a cassette or eval run of another workflow; 409 over `REPLAY_JOB_MAX_CASES`. With `?wait=true` every refusal of the runner is a 400, as before)
 - `GET /api/replay/runs?workflowId=&datasetId=` (viewer)
 - `GET /api/replay/runs/:id` (viewer; `{ run }` with candidate, options, progress, summary and case results without diffs)
@@ -144,6 +198,7 @@ l2m replay run --set ds_… --version 12 --max-cost 2 --timeout 900
 | `REPLAY_CONCURRENCY` | 2 | Cases running at once across all replay jobs and eval runs of one API process |
 | `REPLAY_JOB_MAX_CASES` | 200 | Most cases in one job or eval run |
 | `REPLAY_JOB_DEFAULT_MAX_COST_USD` | 5 | A replay job's budget when the request names none |
+| `REPLAY_JOB_MAX_EXECUTIONS` | 500 | Most executions one replay job may run (cases × repeats, × 2 with a baseline rerun) |
 | `EVAL_RUN_MAX_COST_USD` | 5 | Every eval run's budget |
 | `EVAL_RESULT_MAX_BYTES` | 262144 | Largest case output or run diff stored as is (JSON bytes) |
 | `EVAL_RUN_RETENTION_DAYS` | 90 | Finished eval runs and replay jobs older than this are deleted, checked every `EXECUTION_HISTORY_PRUNE_INTERVAL_MS`; the newest run of every set, and its newest finished one, are always kept. 0 keeps them forever |
@@ -153,7 +208,9 @@ l2m replay run --set ds_… --version 12 --max-cost 2 --timeout 900
 
 ## Not covered yet
 
-- Candidates are the draft or a saved version only: no workflow file from git, no per-node model or guard-profile overrides, and model calls always run live (no model tape). Each case runs once (no repeats for flaky cases), and every case is compared with its recording, not with a fresh baseline rerun. There is no cost estimate before a job starts; the budget only stops it, and the model spend of the cases in flight can take it over (see [Budgets](#budgets)).
+- A workflow file is uploaded in the dialog or sent in the request; the job does not read it from git.
+- The estimate prices the golden runs' recorded tokens: a candidate whose prompts are much longer or shorter costs more or less than estimated. The budget reserves that estimate before each execution, so only the difference of the executions in flight can take a job over it (see [Budgets](#budgets)).
+- Golden runs recorded before this release have no model tape; record new ones to replay model calls.
 - Interrupted jobs are not resumed; start them again.
 - Eval runs and replay jobs need the SQLite store; Postgres has no eval storage yet.
 - Judge prompt framing reduces, but cannot rule out, a judge being steered by the output it grades.

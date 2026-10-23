@@ -59,7 +59,8 @@ export interface ResolvedGuardProfile extends GuardProfileRef {
 
 /** Profiles that apply to a run's agent traffic, resolved by the API from project and workflow bindings. */
 export interface GuardRunResolution {
-  source: "enforced" | "workflow" | "project" | "instance" | "none";
+  /** `candidate` (Phase 15.3): a replay ran a candidate guard profile in place of the bindings. */
+  source: "enforced" | "workflow" | "project" | "instance" | "candidate" | "none";
   /** The project's enforced profile; always evaluated first and never replaced. */
   enforced?: ResolvedGuardProfile;
   /** Evaluated in order for agents without a guard port (enforced first when set). Empty = no automatic guard. */

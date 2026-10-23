@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { buildReplayJobRequest, candidateLabel, caseStatusLabel, emptyReplayJobForm, formatSpend, formatUsd, jobCounts, jobWarnings, parseIgnorePaths, shortHash, statusTone, type ReplayJobForm } from "./replay-jobs";
+import type { Workflow } from "@ai-orchestrator/shared";
+import {
+  buildReplayJobRequest,
+  candidateLabel,
+  caseStatusLabel,
+  comparisonLabel,
+  emptyReplayJobForm,
+  formatSpend,
+  formatUsd,
+  jobCounts,
+  jobWarnings,
+  modelNodesOf,
+  overrideLines,
+  parseCandidateFile,
+  parseIgnorePaths,
+  readNodesOf,
+  releaseProofLine,
+  shortHash,
+  statusTone,
+  type ReplayJobForm
+} from "./replay-jobs";
 
 function form(patch: (draft: ReplayJobForm) => void = () => undefined): ReplayJobForm {
   const value = emptyReplayJobForm();
@@ -120,5 +140,152 @@ describe("labels", () => {
     expect(jobWarnings({ summary, progress })).toEqual(["W"]);
     expect(formatSpend(jobCounts({ summary, progress: null }))).toBe(`${formatUsd(0.3)}+`);
     expect(jobWarnings({ summary: { ...summary, warnings: undefined }, progress: null })).toEqual([]);
+  });
+});
+
+describe("replay candidates (Phase 15.3)", () => {
+  const workflow = {
+    id: "wf",
+    name: "W",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [
+      { id: "agent_1", type: "agent_orchestrator", name: "Agent", position: { x: 0, y: 0 }, config: {} },
+      { id: "model", type: "llm_call", name: "Model", position: { x: 0, y: 0 }, config: { provider: { providerId: "openai", model: "gpt-4o-mini" } } },
+      { id: "summary", type: "llm_call", name: "Summary", position: { x: 0, y: 0 }, config: { provider: { providerId: "anthropic", model: "claude-haiku" } } },
+      { id: "sheet", type: "google_sheets_read", name: "Sheet", position: { x: 0, y: 0 }, config: {} },
+      { id: "slack", type: "slack_send_message", name: "Slack", position: { x: 0, y: 0 }, config: {} }
+    ],
+    edges: [{ id: "e", source: "agent_1", sourceHandle: "chat_model", target: "model" }]
+  } as Workflow;
+
+  it("lists the nodes a candidate can change: models through their agent, reads only for live reads", () => {
+    expect(modelNodesOf(workflow)).toEqual([
+      { id: "agent_1", name: "Agent", providerId: "openai", model: "gpt-4o-mini" },
+      { id: "summary", name: "Summary", providerId: "anthropic", model: "claude-haiku" }
+    ]);
+    expect(readNodesOf(workflow)).toEqual([{ id: "sheet", name: "Sheet" }]);
+  });
+
+  it("builds overrides, the comparison and repeats; leaves defaults out", () => {
+    const result = buildReplayJobRequest(
+      ["set_1"],
+      form((draft) => {
+        draft.modelOverrides = [
+          { nodeId: "agent_1", provider: "", model: " gpt-5-mini " },
+          { nodeId: "", provider: "anthropic", model: "claude-sonnet" },
+          { nodeId: "", provider: "", model: "" }
+        ];
+        draft.guardProfileId = "strict";
+        draft.mcpServers = { srv: "live_read_only" };
+        draft.liveReadNodes = ["sheet", "sheet"];
+        draft.models = "replay";
+        draft.compare = "baseline_rerun";
+        draft.repeats = "3";
+        draft.aggregate = "any";
+      })
+    );
+    expect(result).toEqual({
+      ok: true,
+      request: {
+        datasetIds: ["set_1"],
+        draft: true,
+        overrides: {
+          models: [
+            { nodeId: "agent_1", model: "gpt-5-mini" },
+            { provider: "anthropic", model: "claude-sonnet" }
+          ],
+          guardProfile: { profileId: "strict" },
+          mcpServers: { srv: "live_read_only" },
+          liveReadNodes: ["sheet"]
+        },
+        models: "replay",
+        compare: "baseline_rerun",
+        repeats: 3,
+        aggregate: "any",
+        mcpMode: "strict"
+      }
+    });
+    // One repeat sends no aggregate.
+    expect(buildReplayJobRequest(["set_1"], form((draft) => void (draft.aggregate = "any")))).toEqual({ ok: true, request: { datasetIds: ["set_1"], draft: true, mcpMode: "strict" } });
+  });
+
+  it("rejects incomplete overrides, bad repeats and a missing file", () => {
+    const error = (patch: (draft: ReplayJobForm) => void) => {
+      const result = buildReplayJobRequest(["set_1"], form(patch));
+      return result.ok ? null : result.error;
+    };
+    expect(error((draft) => void (draft.modelOverrides = [{ nodeId: "agent_1", provider: "", model: "" }]))).toMatch(/needs a model/);
+    expect(error((draft) => void (draft.modelOverrides = [{ nodeId: "", provider: "", model: "x" }]))).toMatch(/node or a provider/);
+    expect(error((draft) => void (draft.repeats = "6"))).toMatch(/at most 5/);
+    expect(error((draft) => void (draft.repeats = "1.5"))).toMatch(/whole number/);
+    expect(error((draft) => void (draft.guardProfileVersion = "2"))).toMatch(/Pick a guard profile/);
+    expect(error((draft) => void (draft.candidate = "file"))).toMatch(/Choose a workflow file/);
+  });
+
+  it("reads a workflow file or an export holding one, for this workflow only", () => {
+    const text = JSON.stringify(workflow);
+    expect(parseCandidateFile("w.json", text, "wf")).toMatchObject({ ok: true, file: { name: "w.json", workflow: { id: "wf" } } });
+    expect(parseCandidateFile("e.json", JSON.stringify({ workflow }), "wf")).toMatchObject({ ok: true, file: { workflow: { id: "wf" } } });
+    expect(parseCandidateFile("w.json", text, "other")).toMatchObject({ ok: false, error: expect.stringContaining("is for workflow wf") });
+    expect(parseCandidateFile("x.json", "{", "wf")).toMatchObject({ ok: false, error: "x.json is not JSON." });
+    expect(parseCandidateFile("x.json", "{}", "wf")).toMatchObject({ ok: false, error: "x.json is not a workflow file." });
+    const built = buildReplayJobRequest(["s"], form((draft) => {
+      draft.candidate = "file";
+      draft.candidateFile = { name: "w.json", workflow: workflow as unknown as Record<string, unknown> };
+    }));
+    expect(built.ok && built.request.workflow).toEqual(workflow);
+    expect(built.ok && "draft" in built.request).toBe(false);
+  });
+
+  it("labels inline candidates, overrides and the comparison", () => {
+    expect(candidateLabel({ kind: "inline", version: null, workflowHash: "h", name: "v2.json" })).toBe("file: v2.json");
+    expect(
+      overrideLines({
+        kind: "draft",
+        version: null,
+        workflowHash: "h",
+        overrides: { models: [{ provider: "openai", model: "gpt-5" }, { nodeId: "n", provider: "anthropic", model: "c" }], guardProfile: { profileId: "p" }, mcpServers: { s: "live_read_only" }, liveReadNodes: ["a", "b"] }
+      })
+    ).toEqual(["Model for every openai node: gpt-5", "Model on n: anthropic/c", "Guard profile p (latest)", "MCP s: live reads only", "Live reads: a, b"]);
+    expect(overrideLines({ kind: "draft", version: null, workflowHash: "h" })).toEqual([]);
+    expect(comparisonLabel({ mcpMode: "strict", maxCostUsd: 5 })).toBe("live models · vs recording");
+  });
+
+  it("offers only allow-listed reads for live reads: never triggers, browsers or non-GET requests", () => {
+    const reads = {
+      ...workflow,
+      nodes: [
+        ...workflow.nodes,
+        { id: "redis", type: "redis_trigger", name: "Queue", position: { x: 0, y: 0 }, config: {} },
+        { id: "pg", type: "postgres_trigger", name: "Poll", position: { x: 0, y: 0 }, config: {} },
+        { id: "browse", type: "web_browse", name: "Browse", position: { x: 0, y: 0 }, config: {} },
+        { id: "pdf", type: "pdf_output", name: "PDF", position: { x: 0, y: 0 }, config: { renderMode: "html" } },
+        { id: "post", type: "http_request", name: "Post", position: { x: 0, y: 0 }, config: { method: "POST" } },
+        { id: "get", type: "http_request", name: "Get", position: { x: 0, y: 0 }, config: { method: "GET" } }
+      ]
+    } as Workflow;
+    expect(readNodesOf(reads)).toEqual([
+      { id: "sheet", name: "Sheet" },
+      { id: "get", name: "Get" }
+    ]);
+  });
+
+  it("sends a model override's secret by reference", () => {
+    const result = buildReplayJobRequest(
+      ["set_1"],
+      form((draft) => {
+        draft.modelOverrides = [{ nodeId: "model", provider: "anthropic", model: "claude-sonnet", secretId: "sec_1" }];
+      })
+    );
+    expect(result.ok && result.request.overrides?.models).toEqual([{ nodeId: "model", provider: "anthropic", model: "claude-sonnet", secretRef: { secretId: "sec_1" } }]);
+  });
+
+  it("says whether a job is release proof, and why not", () => {
+    expect(releaseProofLine(null)).toBeNull();
+    expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h", releaseEligible: true, releaseIneligibleReasons: [] })).toEqual({ eligible: true, text: "Eligible as release proof (the gate also checks its own settings).", reasons: [] });
+    expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h", releaseEligible: false, releaseIneligibleReasons: ["Lenient"] })).toMatchObject({ eligible: false, reasons: ["Lenient"] });
+    // Jobs from before the field: not proof.
+    expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h" })!.eligible).toBe(false);
   });
 });

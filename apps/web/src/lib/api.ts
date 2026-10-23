@@ -44,6 +44,7 @@ import type {
   ReplayCaseDiff,
   ReplayJobCandidate,
   ReplayJobOptions,
+  ReplayJobEstimate,
   ReplayJobRequest,
   ToolSequenceMode
 } from "@ai-orchestrator/shared";
@@ -2459,6 +2460,7 @@ export type {
   ReplayCaseDiff,
   ReplayJobCandidate,
   ReplayJobOptions,
+  ReplayJobEstimate,
   ReplayJobRequest,
   ToolSequenceMode
 };
@@ -2584,6 +2586,11 @@ export async function addGoldenRunToSet(datasetId: string, payload: { recordingI
 
 export async function startReplayJob(payload: ReplayJobRequest) {
   return apiRequest<{ run: EvalRunView }>("/api/replay/runs", { method: "POST", body: JSON.stringify(payload) });
+}
+
+/** Phase 15.3 — what a replay job would run and cost; checked like starting it, nothing runs. */
+export async function estimateReplayJob(payload: ReplayJobRequest) {
+  return apiRequest<ReplayJobEstimate>("/api/replay/estimate", { method: "POST", body: JSON.stringify(payload) });
 }
 
 export async function fetchReplayJobs(filter: { workflowId?: string; datasetId?: string; limit?: number } = {}) {

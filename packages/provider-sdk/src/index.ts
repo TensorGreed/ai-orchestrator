@@ -10,6 +10,7 @@ import { AzureOpenAIProviderAdapter } from "./providers/azure-openai";
 export * from "./types";
 export * from "./registry";
 export * from "./resilient-fetch";
+export * from "./model-tape";
 export * from "./providers/echo";
 export * from "./providers/openai-compatible";
 export * from "./providers/openai";

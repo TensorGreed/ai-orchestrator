@@ -57,7 +57,8 @@ import {
   goldenSetCreateSchema,
   replayJobRequestSchema,
   type EvalRunView,
-  type EvalScorerSpec
+  type EvalScorerSpec,
+  type ReplayJobRequest
 } from "@ai-orchestrator/shared";
 import type { EvalDatasetRecord, SqliteStore } from "./db/database.js";
 import type { RunAccess, RunAccessDenial } from "./run-access.js";
@@ -580,37 +581,81 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
   // Replay jobs
   // ---------------------------------------------------------------------------
 
-  app.post<{ Body: unknown }>("/api/replay/runs", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return reply;
-    const parsed = replayJobRequestSchema.safeParse(request.body ?? {});
+  /**
+   * The checks a replay job request passes before it is run or estimated:
+   * the body, the golden sets (readable, all of one workflow), the right to
+   * run that workflow and, for a candidate that is not a saved draft or
+   * version (an inline workflow file, or any override), the right to edit it
+   * (Phase 15.3), and the scorers' references.
+   */
+  const checkReplayJobRequest = (
+    user: SafeUser,
+    body: unknown,
+    reply: FastifyReply
+  ): { ok: true; request: ReplayJobRequest; workflowId: string } | { ok: false; response: unknown } => {
+    const parsed = replayJobRequestSchema.safeParse(body ?? {});
     if (!parsed.success) {
       reply.code(400);
-      return { error: "Invalid replay job", details: parsed.error.issues };
+      return { ok: false, response: { error: "Invalid replay job", details: parsed.error.issues } };
     }
     const firstAccess = datasetAccess(user, evals.getDataset(parsed.data.datasetIds[0]!), "workflow:read", "Golden set");
-    if (!firstAccess.ok) return denyRunAccess(reply, firstAccess);
+    if (!firstAccess.ok) return { ok: false, response: denyRunAccess(reply, firstAccess) };
     const first = firstAccess.dataset;
     if (!first.workflowId) {
       reply.code(400);
-      return { error: "This dataset is not a golden set: replay jobs need sets made for a workflow." };
+      return { ok: false, response: { error: "This dataset is not a golden set: replay jobs need sets made for a workflow." } };
     }
     const workflowId = first.workflowId;
     const workflowAccess = runAccess.workflow(user, workflowId, "workflow:execute", "Golden set");
-    if (!workflowAccess.ok) return denyRunAccess(reply, workflowAccess);
+    if (!workflowAccess.ok) return { ok: false, response: denyRunAccess(reply, workflowAccess) };
+    // An unsaved candidate is a change to the workflow, so it needs the right to make one.
+    if (parsed.data.workflow !== undefined || parsed.data.overrides !== undefined) {
+      const writeAccess = runAccess.workflow(user, workflowId, "workflow:write", "Golden set");
+      if (!writeAccess.ok) {
+        if (writeAccess.status === 403) {
+          reply.code(403);
+          return { ok: false, response: { error: "Replaying an uploaded workflow or a candidate with overrides needs permission to edit this workflow (workflow:write)." } };
+        }
+        return { ok: false, response: denyRunAccess(reply, writeAccess) };
+      }
+    }
     // Every set must be this workflow's before anything about its cases (names, secret ids) is read.
     for (const datasetId of parsed.data.datasetIds) {
       const dataset = evals.getDataset(datasetId);
-      if (!dataset || dataset.workflowId !== workflowId) return notFound(reply, "Golden set");
+      if (!dataset || dataset.workflowId !== workflowId) return { ok: false, response: notFound(reply, "Golden set") };
     }
     const scorerProblem = runScorerProblem(user, parsed.data.scorers, [...new Set(parsed.data.datasetIds)], workflowId);
     if (scorerProblem) {
       reply.code(400);
-      return { error: scorerProblem };
+      return { ok: false, response: { error: scorerProblem } };
     }
+    // Phase 15.3 — a model override's secret is used like any other: the user must be allowed to use it in this workflow's project.
+    for (const override of parsed.data.overrides?.models ?? []) {
+      if (override.secretRef && !deps.canUseSecret(user, override.secretRef.secretId, store.getWorkflow(workflowId) ?? { id: workflowId })) {
+        reply.code(400);
+        return { ok: false, response: { error: `The model override's secret ${override.secretRef.secretId} was not found or cannot be used in this workflow's project.` } };
+      }
+    }
+    return { ok: true, request: parsed.data, workflowId };
+  };
+
+  // Golden runs, golden sets and replay jobs are SQLite-only in this release.
+  const replayStoreReady = typeof (store as unknown as { getReplayRecording?: unknown }).getReplayRecording === "function";
+  const replayUnavailable = (reply: FastifyReply) => {
+    reply.code(501);
+    return { error: "Replay jobs need the SQLite store in this release." };
+  };
+
+  app.post<{ Body: unknown }>("/api/replay/runs", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return reply;
+    if (!replayStoreReady) return replayUnavailable(reply);
+    const checked = checkReplayJobRequest(user, request.body, reply);
+    if (!checked.ok) return checked.response;
+    const { workflowId } = checked;
     let run: EvalRunView;
     try {
-      run = evals.enqueueReplayJob(parsed.data, { workflowId, actor: user });
+      run = evals.enqueueReplayJob(checked.request, { workflowId, actor: user });
     } catch (error) {
       return evalRunError(reply, error);
     }
@@ -625,6 +670,20 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     });
     reply.code(202);
     return { run };
+  });
+
+  // Phase 15.3 — what a replay job would run and cost, checked exactly like starting it; nothing runs.
+  app.post<{ Body: unknown }>("/api/replay/estimate", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return reply;
+    if (!replayStoreReady) return replayUnavailable(reply);
+    const checked = checkReplayJobRequest(user, request.body, reply);
+    if (!checked.ok) return checked.response;
+    try {
+      return evals.estimateReplayJob(checked.request, { workflowId: checked.workflowId, actor: user });
+    } catch (error) {
+      return evalRunError(reply, error);
+    }
   });
 
   app.get<{ Querystring: { workflowId?: string; datasetId?: string; limit?: string } }>("/api/replay/runs", async (request, reply) => {

@@ -138,7 +138,8 @@ export interface GuardProfileVersionView {
 
 /** One level of the binding chain, as the UI and run traces show it. */
 export interface GuardBindingLevel {
-  level: "project" | "workflow" | "instance" | "port";
+  /** `candidate` (Phase 15.3): a replay's guard profile override. */
+  level: "project" | "workflow" | "instance" | "port" | "candidate";
   mode: GuardBindingMode | "auto" | "off";
   profileId?: string | null;
   version?: number | null;
@@ -154,7 +155,7 @@ export interface GuardProfileRef {
 /** The profiles applied to agent traffic for a workflow run, in evaluation order. */
 export interface GuardResolutionView {
   /** Where the effective profile came from. */
-  source: "enforced" | "workflow" | "project" | "instance" | "none";
+  source: "enforced" | "workflow" | "project" | "instance" | "candidate" | "none";
   enforced?: GuardProfileRef | null;
   /** Profiles evaluated in order; the enforced one always first. */
   stack: GuardProfileRef[];

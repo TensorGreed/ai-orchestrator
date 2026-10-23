@@ -92,6 +92,14 @@ export interface GuardRunContext {
   executionId?: string;
   workflowId: string;
   projectId?: string | null;
+  /**
+   * Phase 15.3 — a replay candidate's guard profile (latest version when
+   * `version` is absent), evaluated in place of the workflow's and project's
+   * bindings. A project's enforced profile still runs first, unless the
+   * override is a version of that same profile (then the override replaces
+   * it). Verdicts record the override's profile id, version and hash.
+   */
+  profileOverride?: { profileId: string; version?: number };
 }
 
 export class GuardService {
@@ -334,7 +342,55 @@ export class GuardService {
    * Profiles stack: the most severe action wins and rewrites chain, so
    * anything after the enforced profile can only tighten it.
    */
-  resolveRun(context: { workflowId: string; projectId?: string | null }): GuardRunResolution {
+  /** Phase 15.3 — why a guard profile override cannot run, or null when it can. */
+  profileOverrideProblem(override: { profileId: string; version?: number }): string | null {
+    const record = this.store.getGuardProfile(override.profileId);
+    if (!record) return `Guard profile ${override.profileId} was not found.`;
+    if (!this.loadProfile(override.profileId, override.version)) {
+      return override.version !== undefined
+        ? `Version ${override.version} of guard profile ${override.profileId} was not found.`
+        : `Guard profile ${override.profileId} has no usable version.`;
+    }
+    return null;
+  }
+
+  /**
+   * Phase 15.3 — a replay job's guard profile override, resolved once for
+   * the whole job: the version that will run (the latest one now when the
+   * override names none) and its hash. Refused when the profile or version
+   * does not exist, or, for a user who is not an admin, when it is an older
+   * version of a profile the workflow's project or workflow binding applies
+   * now (bindings always apply the latest version): a builder cannot replay
+   * under a weaker copy of the profile an admin bound.
+   */
+  resolveProfileOverride(
+    override: { profileId: string; version?: number },
+    context: { workflowId: string; projectId?: string | null; isAdmin: boolean }
+  ): { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string } {
+    const problem = this.profileOverrideProblem(override);
+    if (problem) return { ok: false, problem };
+    const resolved = this.loadProfile(override.profileId, override.version)!;
+    if (!context.isAdmin) {
+      const project = this.getBinding("project", context.projectId ?? "default");
+      const workflow = this.getBinding("workflow", context.workflowId);
+      const bound = [
+        project.mode === "enforced" || project.mode === "override" ? { level: "project", mode: project.mode, profileId: project.profileId } : null,
+        workflow.mode === "override" ? { level: "workflow", mode: workflow.mode, profileId: workflow.profileId } : null
+      ].filter((entry) => entry && entry.profileId === resolved.profileId);
+      const current = bound.length > 0 ? this.loadProfile(resolved.profileId) : undefined;
+      if (current && resolved.version < current.version) {
+        const where = bound.map((entry) => `the ${entry!.level} binding (${entry!.mode})`).join(" and ");
+        return {
+          ok: false,
+          problem: `Guard profile ${resolved.profileId} version ${resolved.version} is older than version ${current.version}, which ${where} applies to this workflow now. Only an admin can replay under an older version of a bound profile.`
+        };
+      }
+    }
+    return { ok: true, profile: { profileId: resolved.profileId, version: resolved.version, hash: resolved.hash } };
+  }
+
+  resolveRun(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"] }): GuardRunResolution {
+    if (context.profileOverride) return this.resolveOverride(context.profileOverride, context.projectId ?? "default");
     const projectId = context.projectId ?? "default";
     const project = this.getBinding("project", projectId);
     const workflow = this.getBinding("workflow", context.workflowId);
@@ -359,6 +415,21 @@ export class GuardService {
     return { source, ...(enforced ? { enforced } : {}), stack, chain };
   }
 
+  /** The resolution for a candidate profile: the project's enforced floor (unless it is the same profile), then the candidate. */
+  private resolveOverride(override: NonNullable<GuardRunContext["profileOverride"]>, projectId: string): GuardRunResolution {
+    const candidate = this.loadProfile(override.profileId, override.version);
+    if (!candidate) throw new GuardNotFoundError(this.profileOverrideProblem(override) ?? `Guard profile '${override.profileId}' not found`);
+    const project = this.getBinding("project", projectId);
+    const enforcedRaw = project.mode === "enforced" && project.profileId ? this.loadProfile(project.profileId) : undefined;
+    const enforced = enforcedRaw && enforcedRaw.profileId !== candidate.profileId ? enforcedRaw : undefined;
+    const chain: GuardBindingLevel[] = [
+      { level: "project", mode: project.mode, profileId: project.profileId, ...(enforced ? { version: enforced.version } : {}) },
+      { level: "candidate", mode: "override", profileId: candidate.profileId, version: candidate.version }
+    ];
+    const stack = enforced && enforced.hash !== candidate.hash ? [enforced, candidate] : [candidate];
+    return { source: "candidate", ...(enforced ? { enforced } : {}), stack, chain };
+  }
+
   resolutionView(resolution: GuardRunResolution): GuardResolutionView {
     const ref = (entry: ResolvedGuardProfile): GuardProfileRef => ({ profileId: entry.profileId, version: entry.version, hash: entry.hash, ...(entry.name ? { name: entry.name } : {}) });
     return { source: resolution.source, enforced: resolution.enforced ? ref(resolution.enforced) : null, stack: resolution.stack.map(ref), chain: resolution.chain };
@@ -366,9 +437,11 @@ export class GuardService {
 
   /** The engine's guard dependencies for one run. */
   runtimeFor(context: GuardRunContext): GuardRuntimeDependencies {
+    const override = context.profileOverride;
     return {
       resolveRun: () => this.resolveRun(context),
-      loadProfile: (profileId) => this.loadProfile(profileId),
+      // A guard port naming the candidate's profile gets the candidate's version too.
+      loadProfile: (profileId) => (override && override.profileId === profileId ? this.loadProfile(profileId, override.version) : this.loadProfile(profileId)),
       vault: this.vault,
       onVerdict: (event) => this.recordVerdict(event, context)
     };

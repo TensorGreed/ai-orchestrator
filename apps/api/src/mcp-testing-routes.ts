@@ -40,7 +40,7 @@ import { collectRegistryUsages } from "./mcp-control-plane-routes.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
-import { acceptedSnapshotFor, buildSnapshotFile } from "./services/mcp-cassette-service.js";
+import { acceptedSnapshotFor, buildSnapshotFile, cassetteSummaryView } from "./services/mcp-cassette-service.js";
 import { serverConfigFromRecord } from "./services/mcp-probe-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
 
@@ -172,14 +172,18 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
       reply.code(access.status);
       return { error: access.error };
     }
-    return { cassette };
+    // Phase 15.3 — the model tape (prompts and answers) and memory seed (earlier sessions' chat history) are
+    // scrubbed for secrets, not for personal data: only users who may edit the workflow see them in full.
+    const full = cassette && deps.runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:write", "Cassette").ok;
+    return { cassette: cassette && !full ? cassetteSummaryView(cassette) : cassette };
   });
 
   app.get<{ Params: { id: string } }>("/api/mcp/cassettes/:id/export", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
     const record = store.getMcpCassette(request.params.id);
-    const access = deps.runAccess.run(user, record && { id: record.id, workflowId: record.workflowId ?? "" }, "workflow:read", "Cassette");
+    // Phase 15.3 — the export is the whole cassette (model tape and memory seed included): it needs workflow:write.
+    const access = deps.runAccess.run(user, record && { id: record.id, workflowId: record.workflowId ?? "" }, "workflow:write", "Cassette");
     if (!access.ok || !record) {
       reply.code(access.ok ? 404 : access.status);
       return { error: access.ok ? "Cassette not found" : access.error };

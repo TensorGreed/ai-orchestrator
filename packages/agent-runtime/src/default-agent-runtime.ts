@@ -1097,7 +1097,8 @@ ${effectiveSystemPrompt}`;
               {
                 resolveSecret: context.resolveSecret,
                 ...(context.signal ? { signal: context.signal } : {}),
-                ...(context.onProviderRetry ? { onRetry: context.onProviderRetry } : {})
+                ...(context.onProviderRetry ? { onRetry: context.onProviderRetry } : {}),
+                callSite: { ...(context.callSite?.nodeId ? { nodeId: context.callSite.nodeId } : {}), iteration }
               }
             );
             emit({
@@ -1131,6 +1132,10 @@ ${effectiveSystemPrompt}`;
             const errorMsg = llmError.message.toLowerCase();
             const isQuotaError = errorMsg.includes("quota") || errorMsg.includes("billing") || errorMsg.includes("limit: 0") || errorMsg.includes("rate_limit_exceeded");
             if (isQuotaError) {
+              break;
+            }
+            // A replay's model tape had no answer: the same call misses again, so it is not retried.
+            if ((llmError as Error & { code?: unknown }).code === "MODEL_TAPE_MISS") {
               break;
             }
             if (llmAttempt < LLM_RETRY_MAX) {

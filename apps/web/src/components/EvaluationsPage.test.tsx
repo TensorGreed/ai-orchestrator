@@ -21,6 +21,10 @@ vi.mock("../lib/api", async () => {
     fetchSecrets: vi.fn(),
     fetchDefinitions: vi.fn(),
     startReplayJob: vi.fn(),
+    estimateReplayJob: vi.fn(),
+    fetchWorkflow: vi.fn(),
+    fetchGuardProfiles: vi.fn(),
+    fetchMcpServers: vi.fn(),
     fetchReplayJobs: vi.fn(),
     fetchReplayJob: vi.fn(),
     fetchReplayJobCase: vi.fn(),
@@ -163,7 +167,29 @@ beforeEach(() => {
   vi.mocked(api.fetchReplayJobs).mockResolvedValue({ runs: [job()] });
   vi.mocked(api.fetchReplayJob).mockResolvedValue({ run: { ...job(), results: [caseResult(), caseResult({ id: "res_2", fixtureName: "Exchange baseline", status: "pass", verdict: "pass" })] } });
   vi.mocked(api.subscribeEvalRun).mockReturnValue(() => undefined);
+  vi.mocked(api.fetchWorkflow).mockResolvedValue(candidateWorkflow() as never);
+  vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [{ id: "strict", name: "Strict support", builtIn: false, latestVersion: 2, hash: "h", createdAt: "", updatedAt: "" }], autoApply: false, builtInId: "default" });
+  vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [{ id: "srv_docs", name: "Docs" }], adapters: [], defaultProbeIntervalMs: 0 } as never);
+  vi.mocked(api.estimateReplayJob).mockResolvedValue({ cases: 1, runsPerCase: 1, modelCallsEstimate: 1, estimatedCostUsd: 0.002, costUnknown: false, warnings: [] });
 });
+
+/** wf-1 with an agent (chat model attached), a read node and a write node. */
+function candidateWorkflow() {
+  return {
+    id: "wf-1",
+    name: "Support triage",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [
+      { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+      { id: "agent_1", type: "agent_orchestrator", name: "Triage agent", position: { x: 0, y: 0 }, config: {} },
+      { id: "model", type: "llm_call", name: "Model", position: { x: 0, y: 0 }, config: { provider: { providerId: "openai", model: "gpt-4o-mini" } } },
+      { id: "sheet", type: "google_sheets_read", name: "Orders sheet", position: { x: 0, y: 0 }, config: {} },
+      { id: "slack", type: "slack_send_message", name: "Notify", position: { x: 0, y: 0 }, config: {} }
+    ],
+    edges: [{ id: "e1", source: "agent_1", sourceHandle: "chat_model", target: "model" }]
+  };
+}
 
 describe("EvaluationsPage — golden sets", () => {
   it("lists golden sets only, with their workflow and golden-run count", async () => {
@@ -245,7 +271,11 @@ describe("EvaluationsPage — golden sets", () => {
     await within(dialog).findByRole("option", { name: "Judge key · openai" });
     await user.selectOptions(within(dialog).getByRole("combobox", { name: "Credentials (secret)" }), "sec_judge");
     await user.selectOptions(within(dialog).getByRole("combobox", { name: "Provider" }), "openai");
-    await user.click(within(dialog).getByRole("button", { name: "Replay 1 case" }));
+    await user.click(within(dialog).getByRole("button", { name: "Estimate 1 case" }));
+    // The estimate comes first; nothing starts until it is confirmed.
+    expect(await within(dialog).findByRole("region", { name: "Estimate" })).toHaveTextContent("1 model call");
+    expect(api.startReplayJob).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "Start 1 run" }));
     await waitFor(() =>
       expect(api.startReplayJob).toHaveBeenCalledWith({
         datasetIds: ["set_1"],
@@ -261,6 +291,82 @@ describe("EvaluationsPage — golden sets", () => {
     );
     expect(await screen.findByRole("progressbar", { name: "Cases done" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Replay jobs" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("replays a model swap with a guard profile, MCP and read overrides, a baseline rerun and repeats, after the estimate", async () => {
+    vi.mocked(api.startReplayJob).mockResolvedValue({ run: job({ id: "job_new", status: "queued", summary: null }) });
+    vi.mocked(api.fetchReplayJob).mockResolvedValue({ run: { ...job({ id: "job_new", status: "queued", summary: null }), results: [] } });
+    vi.mocked(api.estimateReplayJob).mockResolvedValue({
+      cases: 1,
+      runsPerCase: 6,
+      modelCallsEstimate: 6,
+      estimatedCostUsd: 0.012,
+      costUnknown: true,
+      warnings: ["Some models have no price in the price table: the estimate leaves them out."],
+      executions: 6,
+      maxExecutions: 500
+    });
+    const user = renderPage();
+    await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
+    await user.click(await screen.findByRole("button", { name: "Run replay" }));
+    const dialog = await screen.findByRole("dialog", { name: "Run replay" });
+    await user.click(await within(dialog).findByRole("button", { name: "Add model override" }));
+    expect(within(dialog).getByRole("combobox", { name: "Model override 1 node" })).toHaveValue("agent_1");
+    await user.type(within(dialog).getByRole("textbox", { name: "Model override 1 model" }), "gpt-5-mini");
+    await within(dialog).findByRole("option", { name: "Strict support" });
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Guard profile" }), "strict");
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Guard profile version" }), "1");
+    await user.selectOptions(await within(dialog).findByRole("combobox", { name: "MCP mode for Docs" }), "live_read_only");
+    // Only read nodes can run live.
+    expect(within(dialog).queryByRole("checkbox", { name: "Notify" })).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("checkbox", { name: "Orders sheet" }));
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Compare with" }), "baseline_rerun");
+    await user.clear(within(dialog).getByRole("textbox", { name: "Repeats" }));
+    await user.type(within(dialog).getByRole("textbox", { name: "Repeats" }), "3");
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Aggregate" }), "majority");
+    await user.click(within(dialog).getByRole("button", { name: "Estimate 1 case" }));
+    const estimate = await within(dialog).findByRole("region", { name: "Estimate" });
+    expect(estimate).toHaveTextContent("6 model calls");
+    expect(estimate).toHaveTextContent("$0.012+");
+    expect(estimate).toHaveTextContent("no price in the price table");
+    expect(estimate).toHaveTextContent("6 executions of 500 allowed");
+    const expected = {
+      datasetIds: ["set_1"],
+      draft: true,
+      overrides: {
+        models: [{ nodeId: "agent_1", model: "gpt-5-mini" }],
+        guardProfile: { profileId: "strict", version: 1 },
+        mcpServers: { srv_docs: "live_read_only" },
+        liveReadNodes: ["sheet"]
+      },
+      compare: "baseline_rerun",
+      repeats: 3,
+      aggregate: "majority",
+      mcpMode: "strict"
+    };
+    expect(api.estimateReplayJob).toHaveBeenCalledWith(expected);
+    // A change after the estimate asks for a new one.
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Model calls" }), "replay");
+    expect(within(dialog).queryByRole("region", { name: "Estimate" })).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Estimate 1 case" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Start 6 runs" }));
+    await waitFor(() => expect(api.startReplayJob).toHaveBeenCalledWith({ ...expected, models: "replay" }));
+  });
+
+  it("takes a workflow file of the same workflow as the candidate, and refuses another workflow's", async () => {
+    const user = renderPage();
+    await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
+    await user.click(await screen.findByRole("button", { name: "Run replay" }));
+    const dialog = await screen.findByRole("dialog", { name: "Run replay" });
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Candidate" }), "file");
+    const input = within(dialog).getByLabelText("Workflow file");
+    await user.upload(input, new File([JSON.stringify({ ...candidateWorkflow(), id: "wf-other" })], "other.json", { type: "application/json" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("is for workflow wf-other");
+    const file = { workflow: { ...candidateWorkflow(), name: "Triage v2" } };
+    await user.upload(input, new File([JSON.stringify(file)], "triage-v2.json", { type: "application/json" }));
+    expect(await within(dialog).findByText("Replaying triage-v2.json.")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Estimate 1 case" }));
+    await waitFor(() => expect(api.estimateReplayJob).toHaveBeenCalledWith({ datasetIds: ["set_1"], workflow: file.workflow, mcpMode: "strict" }));
   });
 
   it("closes the dialog with Escape", async () => {
@@ -302,6 +408,57 @@ describe("EvaluationsPage — replay jobs", () => {
     expect(within(drawer).getByText("answer changed")).toBeInTheDocument();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "Refund baseline" })).not.toBeInTheDocument();
+  });
+
+  it("shows a job's candidate overrides, comparison and each repeat of a case", async () => {
+    const candidateJob = job({
+      candidate: {
+        kind: "inline",
+        version: null,
+        workflowHash: "beefbeefbeef0000",
+        baseHash: "aaaa",
+        name: "Triage v2",
+        overrides: { models: [{ nodeId: "agent_1", model: "gpt-5-mini" }], guardProfile: { profileId: "strict", version: 2 } },
+        guardProfile: { profileId: "strict", version: 2, hash: "cafecafecafe0000" },
+        releaseEligible: false,
+        releaseIneligibleReasons: ["The candidate is a workflow file, not the draft or a saved version."]
+      },
+      options: { mcpMode: "strict", maxCostUsd: 5, models: "replay", compare: "baseline_rerun", repeats: 3, aggregate: "majority" },
+      summary: { ...job().summary!, replayedModelCalls: 6, recordedCostUsd: 0.0123 }
+    });
+    const repeated = caseResult({ status: "pass", verdict: "pass", repeats: { total: 3, pass: 2, fail: 1, error: 0, aggregate: "majority", flaky: true } });
+    vi.mocked(api.fetchReplayJobs).mockResolvedValue({ runs: [candidateJob] });
+    vi.mocked(api.fetchReplayJob).mockResolvedValue({ run: { ...candidateJob, results: [repeated] } });
+    const attempts = [0, 1, 2].map((repeatIndex) => ({
+      repeatIndex,
+      status: repeatIndex === 1 ? ("fail" as const) : ("pass" as const),
+      executionId: `ex-c${repeatIndex}`,
+      baselineExecutionId: `ex-b${repeatIndex}`,
+      verdict: repeatIndex === 1 ? ("fail" as const) : ("pass" as const),
+      reasons: repeatIndex === 1 ? ["Output changed at 1 path (answer)"] : [],
+      costUsd: 0.002
+    }));
+    vi.mocked(api.fetchReplayJobCase).mockResolvedValue({ result: { ...repeated, output: {}, replay: { ...replayDiff, compare: "baseline_rerun", baselineExecutionId: "ex-b0", attempts } } });
+    const user = renderPage();
+    await user.click(screen.getByRole("tab", { name: "Replay jobs" }));
+    await user.click(await screen.findByRole("button", { name: "Replay job job_1" }));
+    expect(await screen.findByText("file: Triage v2")).toBeInTheDocument();
+    expect(screen.getByText("models from tape · vs baseline rerun · 3× (majority)")).toBeInTheDocument();
+    const overrides = screen.getByRole("region", { name: "Candidate overrides" });
+    expect(within(overrides).getByText("Model on agent_1: gpt-5-mini")).toBeInTheDocument();
+    expect(within(overrides).getByText("Guard profile strict v2")).toBeInTheDocument();
+    const proof = screen.getByRole("region", { name: "Release proof" });
+    expect(proof).toHaveTextContent("Not release proof.");
+    expect(proof).toHaveTextContent("workflow file");
+    expect(proof).toHaveTextContent("Guard profile strict v2");
+    expect(screen.getByRole("region", { name: "Progress" })).toHaveTextContent("6 model calls from the tape (recorded cost $0.012, not spent)");
+    const row = await screen.findByRole("button", { name: /Open case Refund baseline/ });
+    expect(within(row).getByText("2 of 3 repeats passed · flaky")).toBeInTheDocument();
+    await user.click(row);
+    const drawer = await screen.findByRole("dialog", { name: "Refund baseline" });
+    expect(await within(drawer).findByText(/each against its own baseline rerun/)).toBeInTheDocument();
+    expect(within(drawer).getByText("baseline ex-b1")).toBeInTheDocument();
+    expect(within(drawer).getByText("Output changed at 1 path (answer)")).toBeInTheDocument();
   });
 
   it("explains a case without a replay diff", async () => {

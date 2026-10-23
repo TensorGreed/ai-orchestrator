@@ -6,7 +6,10 @@
  * pruning and saved-version pruning can never take it away: the workflow
  * as it ran (from the run context captured when the run finished, else
  * the workflow as saved now), the trigger input, every node's last result,
- * the normalised run facts and the run's MCP cassette.
+ * the normalised run facts and the run's MCP cassette. Phase 15.3: when
+ * the run recorded its model calls, the model tape and memory seed stored
+ * with its cassette are copied too (into their own columns), so a replay
+ * can answer model calls and start from the same session memory.
  *
  * Secrets: everything is scrubbed before it is stored, twice over. First
  * the cassette scrubber removes credential-named keys and token shapes,
@@ -23,6 +26,8 @@ import {
   canonicalJson,
   REPLAY_TRUNCATED_MARKER,
   type McpCassette,
+  type ModelMemorySeed,
+  type ModelTape,
   type ReplayRecordedNode,
   type ReplayRecordedRun,
   type ReplayRecordingCapabilities,
@@ -283,7 +288,13 @@ export class ReplayRecordingService {
 
     const inputJson = scrubbedInput === null ? null : this.serialise(scrubbedInput, scrubber);
     const factsJson = this.serialise(scrubbedFacts, scrubber);
-    const fixedBytes = byteLength(factsJson) + (inputJson ? byteLength(inputJson) : 0) + byteLength(workflowJson);
+    // Phase 15.3 — the model tape and memory seed travel in the cassette row; the golden run keeps them apart.
+    const { models: rawTape, memorySeed: rawSeed, ...mcpOnly } = cassetteRecord?.cassette ?? ({} as Partial<McpCassette>);
+    const cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(mcpOnly) as McpCassette) : null;
+    const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
+    // The MCP cassette counts toward REPLAY_RECORDING_MAX_BYTES with the rest: it cannot be cut (a cut cassette
+    // answers wrongly), so the node outputs give way to it, and a run whose fixed parts do not fit is refused.
+    const fixedBytes = byteLength(factsJson) + (inputJson ? byteLength(inputJson) : 0) + byteLength(workflowJson) + (cassetteJson ? byteLength(cassetteJson) : 0);
     if (fixedBytes > this.options.maxBytes) throw new ReplayRecordingError(this.tooLargeMessage(), "too_large");
     let truncated = false;
     let nodesJson = this.serialise(scrubbedNodes, scrubber);
@@ -307,9 +318,31 @@ export class ReplayRecordingService {
       if (fixedBytes + byteLength(nodesJson) > this.options.maxBytes) throw new ReplayRecordingError(this.tooLargeMessage(), "too_large");
     }
 
-    const cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(cassetteRecord.cassette) as McpCassette) : null;
-    const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
-    const bytes = fixedBytes + byteLength(nodesJson) + (cassetteJson ? byteLength(cassetteJson) : 0);
+    let modelTape: ModelTape | null = rawTape ? (scrubber.tree(rawTape) as ModelTape) : null;
+    let modelTapeJson = modelTape ? this.serialise(modelTape, scrubber) : null;
+    let memorySeed: ModelMemorySeed | null = rawSeed ? (scrubber.tree(rawSeed) as ModelMemorySeed) : null;
+    let memorySeedJson = memorySeed ? this.serialise(memorySeed, scrubber) : null;
+    // Phase 15.3 — the tape and the seed count toward REPLAY_RECORDING_MAX_BYTES with the node outputs. What does
+    // not fit is cut: the tape keeps its first calls (`truncated: true`), then the seed keeps the sessions that fit.
+    const left = this.options.maxBytes - fixedBytes - byteLength(nodesJson);
+    if (modelTape && modelTapeJson && byteLength(modelTapeJson) > left) {
+      const cut = this.cutTape(modelTape, left, scrubber);
+      modelTape = cut.tape;
+      modelTapeJson = cut.json;
+      truncated = true;
+    }
+    const leftForSeed = left - (modelTapeJson ? byteLength(modelTapeJson) : 0);
+    if (memorySeed && memorySeedJson && byteLength(memorySeedJson) > leftForSeed) {
+      const cut = this.cutSeed(memorySeed, leftForSeed, scrubber);
+      memorySeed = cut.seed;
+      memorySeedJson = cut.json;
+      truncated = true;
+    }
+    const bytes =
+      fixedBytes +
+      byteLength(nodesJson) +
+      (modelTapeJson ? byteLength(modelTapeJson) : 0) +
+      (memorySeedJson ? byteLength(memorySeedJson) : 0);
     this.checkBudgets(history.workflowId, bytes);
 
     return store.saveReplayRecording({
@@ -328,12 +361,44 @@ export class ReplayRecordingService {
       nodeOutputsJson: nodesJson,
       factsJson,
       mcpCassetteJson: cassetteJson,
-      capabilities: { mcp: cassette ? "cassette" : "none", models: "live", memory: "empty", workflowSource, scrubbed },
+      modelTapeJson,
+      memorySeedJson,
+      capabilities: { mcp: cassette ? "cassette" : "none", models: modelTape ? "tape" : "live", memory: memorySeed ? "seeded" : "empty", workflowSource, scrubbed },
       bytes,
       truncated,
       createdAt: this.now().toISOString(),
       createdBy
     });
+  }
+
+  /** The longest prefix of the tape (in call order) that fits in `maxBytes`, marked truncated. */
+  private cutTape(tape: ModelTape, maxBytes: number, scrubber: SecretScrubber): { tape: ModelTape; json: string } {
+    const entries = [...tape.entries].sort((a, b) => a.seq - b.seq);
+    const empty: ModelTape = { ...tape, entries: [], truncated: true, bytes: 0 };
+    let used = jsonBytes(empty) + 64;
+    const kept: ModelTape["entries"] = [];
+    for (const entry of entries) {
+      const size = jsonBytes(entry) + 1;
+      if (used + size > maxBytes) break;
+      used += size;
+      kept.push(entry);
+    }
+    const cut: ModelTape = { ...tape, entries: kept, truncated: true, bytes: jsonBytes(kept) };
+    return { tape: cut, json: this.serialise(cut, scrubber) };
+  }
+
+  /** The sessions of the seed that fit in `maxBytes`, marked truncated. */
+  private cutSeed(seed: ModelMemorySeed, maxBytes: number, scrubber: SecretScrubber): { seed: ModelMemorySeed; json: string } {
+    let used = jsonBytes({ sessions: [], truncated: true }) + 8;
+    const kept: ModelMemorySeed["sessions"] = [];
+    for (const session of seed.sessions) {
+      const size = jsonBytes(session) + 1;
+      if (used + size > maxBytes) continue;
+      used += size;
+      kept.push(session);
+    }
+    const cut: ModelMemorySeed = { sessions: kept, truncated: true };
+    return { seed: cut, json: this.serialise(cut, scrubber) };
   }
 
   private tooLargeMessage(): string {
@@ -366,8 +431,12 @@ export class ReplayRecordingService {
 
   /** What the API returns for one golden run: no captured workflow or raw cassette. */
   static detail(record: ReplayRecordingRecord): ReplayRecordingDetail {
-    const { capturedWorkflow: _workflow, mcpCassette, ...rest } = record;
-    return { ...rest, mcpCallCount: mcpCassette?.entries.filter((entry) => entry.method === "tools/call").length ?? 0 };
+    const { capturedWorkflow: _workflow, mcpCassette, modelTape, memorySeed: _seed, ...rest } = record;
+    return {
+      ...rest,
+      mcpCallCount: mcpCassette?.entries.filter((entry) => entry.method === "tools/call").length ?? 0,
+      modelCallCount: modelTape?.entries.length ?? 0
+    };
   }
 
   /** The node types the golden run's workflow had, for the replay plan. */

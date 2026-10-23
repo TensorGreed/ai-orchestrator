@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpPrompt, McpResource, McpResourceTemplate, McpServerCapabilities, McpToolAnnotations } from "./types";
+import { modelMemorySeedSchema, modelTapeSchema, type ModelMemorySeed, type ModelTape } from "./model-tape";
 
 // ---------------------------------------------------------------------------
 // Phase 10.8 — MCP testing and reliability: cassettes (record and replay),
@@ -94,8 +95,23 @@ export interface McpCassette {
   truncated: boolean;
   /** Serialized size of `entries`, in bytes. */
   bytes: number;
-  /** Model calls are not part of a cassette; replays call the model live. */
-  llm: "not_recorded";
+  /**
+   * `not_recorded`: the run's model calls were not recorded, so replays call
+   * the model live. `tape` (Phase 15.3): `models` holds the run's model tape
+   * and `memorySeed` the session memory it started from.
+   */
+  llm: "not_recorded" | "tape";
+  /** Phase 15.3 — the run's model calls, recorded with its MCP calls. */
+  models?: ModelTape;
+  /** Phase 15.3 — session memory as the run first read it. */
+  memorySeed?: ModelMemorySeed;
+  /**
+   * Phase 15.3 — set on a cassette read by a user who may read the workflow
+   * but not edit it: the model tape's request and response bodies and the
+   * memory seed are left out (the tape keeps one summary line per call).
+   * Users with workflow:write get the full cassette and its export.
+   */
+  omitted?: { modelTapeBodies: boolean; memorySeedSessions: number | null; reason: string };
 }
 
 export type McpCassetteSource = "manual" | "eval" | "replay" | "import";
@@ -131,6 +147,8 @@ export interface McpReplayReport {
   reused: number;
   /** Calls sent to the live server (lenient only). */
   live: number;
+  /** Phase 15.3 — read-only calls sent to a `live_read_only` server's live server. */
+  liveRead?: number;
   unmatched: Array<{ server: string; method: McpCassetteMethod; name?: string; reason: string }>;
 }
 
@@ -189,7 +207,9 @@ export const mcpCassetteSchema = z.object({
     .max(100_000),
   truncated: z.boolean(),
   bytes: z.number().int().nonnegative(),
-  llm: z.literal("not_recorded")
+  llm: z.enum(["not_recorded", "tape"]),
+  models: modelTapeSchema.optional(),
+  memorySeed: modelMemorySeedSchema.optional()
 });
 
 export interface McpSnapshotFileTool {
