@@ -257,4 +257,43 @@ test.describe("golden journeys", () => {
     await checklist.getByRole("button", { name: "Dismiss import checklist" }).click();
     await expect(checklist).toBeHidden();
   });
+  test("publishes a saved version: production runs it while the draft moves on", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const workflowId = `wf-e2e-release-${stamp}`;
+    const hookPath = `e2e-release-${stamp}`;
+    const workflow = (answer: string) => ({
+      id: workflowId,
+      name: `E2E Release ${stamp}`,
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position: { x: 80, y: 180 }, config: { path: hookPath, method: "POST" } },
+        { id: "out", type: "output", name: "Output", position: { x: 380, y: 180 }, config: { responseTemplate: answer, outputKey: "result" } }
+      ],
+      edges: [{ id: "edge-1", source: "hook", target: "out" }]
+    });
+    expect((await page.request.post("/api/workflows", { data: workflow("first") })).ok()).toBeTruthy();
+    expect((await page.request.put(`/api/workflows/${workflowId}`, { data: workflow("second") })).ok()).toBeTruthy();
+
+    // Open the editor on the workflow and publish v1 from the version pill.
+    await page.reload();
+    await page.getByLabel("Workflow", { exact: true }).selectOption(workflowId);
+    await sidebarItem(page, "Editor").click();
+    const pill = page.getByRole("button", { name: /^Release:/ });
+    await expect(pill).toHaveText(/v2 · not published/);
+    await pill.click();
+    const dialog = page.getByRole("dialog", { name: "Publish to production" });
+    await dialog.getByLabel("Version").selectOption("1");
+    await expect(dialog.getByText("No release gate", { exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: "Publish v1" }).click();
+    await expect(dialog.getByText(/Published v1/)).toBeVisible();
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(pill).toHaveText(/v1 live · draft \+1/);
+
+    const prod = await page.request.post(`${API_URL}/webhook/${hookPath}`, { data: {} });
+    expect(await prod.json()).toMatchObject({ output: { result: "first" } });
+    const draft = await page.request.post(`${API_URL}/webhook-test/${hookPath}`, { data: {} });
+    expect(await draft.json()).toMatchObject({ output: { result: "second" } });
+  });
 });
