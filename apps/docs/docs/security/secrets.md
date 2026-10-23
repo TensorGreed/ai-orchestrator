@@ -10,8 +10,17 @@
 
 ## API
 
-- `POST /api/secrets`
-- `GET /api/secrets`
+- `POST /api/secrets` (needs `secret:write` in the target project)
+- `GET /api/secrets` (lists secrets you have `secret:read` for, in their project or a project they are shared to)
+- `DELETE /api/secrets/:id`, `POST /api/secrets/:id/shares`, `DELETE /api/secrets/:id/shares/:projectId` (need `secret:write` in the secret's project)
+
+## Project scope
+
+A secret belongs to a project (the default project when none is given). A
+running workflow can use secrets of its own project, of the default project,
+and secrets shared to its project. A run started by a signed-in user also needs
+that user to hold `secret:use` in the workflow's project. See
+[Authentication and RBAC](./auth-rbac.md#what-a-running-workflow-can-reach).
 
 ## Creating secrets
 

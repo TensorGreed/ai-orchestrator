@@ -55,6 +55,9 @@ Notes:
 
 - Cache tools are injected automatically when `session_id` is present.
 - Reuse depends on stable `session_id` and memory namespace.
+- Memory, cached tool calls and session artifacts are stored per project, so
+  workflows in different projects never share them even with the same
+  namespace and `session_id`.
 - Cached payloads are stored in SQLite table `session_tool_cache`.
 
 ## Mid-turn clarification (`agent_clarify`)
