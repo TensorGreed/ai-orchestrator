@@ -26,6 +26,7 @@ export const openApiSpec = {
     { name: "MCP", description: "MCP tool discovery" },
     { name: "Guard", description: "Guard profiles, bindings, verdict events and Security page counts" },
     { name: "Audit bundles", description: "Signed run manifests, audit bundle export and the deployment signing keys" },
+    { name: "Evals", description: "Eval datasets, golden sets, eval runs, replay jobs and their per-case scores and diffs" },
     { name: "Git", description: "Git source control sync" },
     { name: "Audit", description: "Audit log and export" },
     { name: "Observability", description: "Health, metrics, traces, SLOs" },
@@ -1708,6 +1709,129 @@ export const openApiSpec = {
           "404": { description: "Golden run or version not found" }
         }
       }
+    },
+    "/api/eval/datasets": {
+      get: {
+        tags: ["Evals"],
+        summary: "Datasets and golden sets you can read (viewers). A golden set has a workflowId.",
+        parameters: [
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "projectId", in: "query", required: false, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "{ datasets: [{ id, name, workflowId, projectId, fixtureCount, goldenRunCount, ... }] }" } }
+      },
+      post: {
+        tags: ["Evals"],
+        summary: "Create a dataset; with workflowId it is a golden set in that workflow's project (builders with write access)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["name"], properties: { name: { type: "string", maxLength: 120 }, description: { type: "string" }, workflowId: { type: "string" }, projectId: { type: "string" } } } } }
+        },
+        responses: { "200": { description: "{ dataset }" }, "400": { description: "Invalid request" }, "403": { description: "No write access to the workflow or project" } }
+      }
+    },
+    "/api/eval/datasets/{id}/recordings": {
+      post: {
+        tags: ["Evals"],
+        summary: "Add a golden run of the set's workflow as a case; its recorded output is the expected value (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["recordingId"], properties: { recordingId: { type: "string" }, name: { type: "string" }, scorers: { type: "array", items: { type: "object" } } } } } }
+        },
+        responses: { "201": { description: "{ fixture }" }, "400": { description: "Not a golden set, or an invalid scorer" }, "404": { description: "Set or golden run not found" }, "409": { description: "Already in the set" } }
+      }
+    },
+    "/api/eval/runs": {
+      post: {
+        tags: ["Evals"],
+        summary: "Queue an eval run over a dataset; it runs in the background (builders with execute access). ?wait=true waits and answers 200 { ok, runId, summary } (deprecated, kept for one release).",
+        parameters: [{ name: "wait", in: "query", required: false, schema: { type: "boolean" } }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["datasetId", "workflowId"], properties: { datasetId: { type: "string" }, workflowId: { type: "string" }, scorers: { type: "array", items: { type: "object" } }, record: { type: "boolean" }, replay: { type: "object" } } } } }
+        },
+        responses: { "202": { description: "{ run, runId }" }, "200": { description: "With ?wait=true: { ok, runId, summary }" }, "400": { description: "Invalid request, unknown dataset, empty dataset or too many cases" }, "403": { description: "No access" } }
+      },
+      get: {
+        tags: ["Evals"],
+        summary: "Eval runs and replay jobs of the workflows you can read (viewers)",
+        parameters: [
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "datasetId", in: "query", required: false, schema: { type: "string" } },
+          { name: "kind", in: "query", required: false, schema: { type: "string", enum: ["eval", "replay"] } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", maximum: 500 } }
+        ],
+        responses: { "200": { description: "{ runs }" } }
+      }
+    },
+    "/api/eval/runs/{id}": {
+      get: { tags: ["Evals"], summary: "One run with its case results (viewers)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "run with results" }, "404": { description: "Not found" } } }
+    },
+    "/api/eval/runs/{id}/cancel": {
+      post: { tags: ["Evals"], summary: "Cancel a queued or running run: no further cases start and running executions are aborted (builders)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "{ run }" }, "409": { description: "Already finished" } } }
+    },
+    "/api/eval/runs/{id}/events": {
+      get: {
+        tags: ["Evals"],
+        summary: "Server-sent events: `progress` after every case and `done` when the run finishes, each { type, run } (viewers)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "SSE stream", content: { "text/event-stream": { schema: { type: "string" } } } } }
+      }
+    },
+    "/api/replay/runs": {
+      post: {
+        tags: ["Evals"],
+        summary: "Queue a replay job: every golden run in the sets is replayed against the draft or a saved version and scored (builders with execute access)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["datasetIds"],
+                properties: {
+                  datasetIds: { type: "array", minItems: 1, maxItems: 10, items: { type: "string" } },
+                  draft: { type: "boolean" },
+                  version: { type: "integer", minimum: 1 },
+                  mcpMode: { type: "string", enum: ["strict", "lenient"] },
+                  ignorePaths: { type: "array", items: { type: "string" } },
+                  numberTolerance: { type: "number", minimum: 0 },
+                  scorers: { type: "array", maxItems: 20, items: { type: "object", description: "json_equal, json_schema, text_similarity, tool_sequence, status, no_new_guard_blocks, budget, llm_judge (secretRef), and the eval scorers" } },
+                  maxCostUsd: { type: "number", exclusiveMinimum: 0 }
+                }
+              }
+            }
+          }
+        },
+        responses: { "202": { description: "{ run }" }, "400": { description: "Invalid request, not a golden set, no golden runs, or a judge secret that cannot be used" }, "403": { description: "No execute access" }, "404": { description: "Set or version not found" }, "409": { description: "More cases than REPLAY_JOB_MAX_CASES" } }
+      },
+      get: {
+        tags: ["Evals"],
+        summary: "Replay jobs of the workflows you can read (viewers)",
+        parameters: [
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "datasetId", in: "query", required: false, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "{ runs }" } }
+      }
+    },
+    "/api/replay/runs/{id}": {
+      get: { tags: ["Evals"], summary: "One replay job: candidate, options, progress, summary and case results without diffs (viewers)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "{ run }" }, "404": { description: "Not found" } } }
+    },
+    "/api/replay/runs/{id}/results/{resultId}": {
+      get: {
+        tags: ["Evals"],
+        summary: "One case with its scores and run diff (viewers)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "resultId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "{ result }" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/replay/runs/{id}/cancel": {
+      post: { tags: ["Evals"], summary: "Cancel a replay job (builders)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "{ run }" }, "409": { description: "Already finished" } } }
     },
     "/api/mcp/servers/{id}/tools/{toolName}/classification": {
       put: {
