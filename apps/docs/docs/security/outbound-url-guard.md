@@ -5,7 +5,8 @@ Nodes that fetch a URL the workflow author or upstream data supplies —
 **PDF** node in HTML-render mode (including every sub-resource and WebSocket
 the page opens), and **RAG** endpoints set on a node (a vector store's
 `endpoint`, an embedder's `baseUrl`, the Azure OpenAI embeddings node's
-`endpoint`) — run that URL through a shared guard before any request leaves
+`endpoint`), plus the **RSS** trigger's feed URL and the **SSE** trigger's
+stream URL — run that URL through a shared guard before any request leaves
 the host. This
 blocks server-side request forgery (SSRF) and local-file reads through those
 nodes.
@@ -27,7 +28,9 @@ MCP HTTP servers are out of scope here; they have their own connection policy.
 
 The host is resolved and **every** address it resolves to is classified, so a
 name that points at a blocked address is refused. Redirects are re-checked hop
-by hop, and the browser-based nodes check each sub-resource the page requests,
+by hop. A redirect to another origin drops the credential headers
+`Authorization`, `Proxy-Authorization`, `Cookie`, `api-key` and `x-api-key`,
+and the browser-based nodes check each sub-resource the page requests,
 not just the first document. WebSockets a page opens (`ws:` / `wss:`) get the
 same host check; a refused socket is closed before it connects. A refused URL
 fails the node at once and is not retried.
@@ -36,8 +39,14 @@ fails the node at once and is not retried.
 marks; they are decoded locally and never fetched. Each one is capped at 2 MB
 (encoded). Other `data:` URLs and `file:` loads are refused.
 
-**DNS rebinding.** For HTTP Request, the Chart node and node-configured RAG
-endpoints, the connection is pinned. The socket's own DNS lookup goes through the guard: the name is
+**Credentials and node-supplied RAG endpoints.** When a RAG node names its own
+`endpoint` or `baseUrl`, only the node's own secret (`embeddingSecretRef`) is
+sent there. The deployment's environment keys (`OPENAI_API_KEY`,
+`QDRANT_API_KEY` and the like) only ever go to the deployment's own endpoints,
+so a workflow author cannot point a node at their own server to collect them.
+
+**DNS rebinding.** For HTTP Request, the Chart node, node-configured RAG
+endpoints and the RSS and SSE triggers, the connection is pinned. The socket's own DNS lookup goes through the guard: the name is
 resolved once at connect time, every address is checked, and the socket can
 only connect to an address that passed. A name that answers a public address
 to the first check and a metadata or private address a moment later is
@@ -53,6 +62,12 @@ the `Host` header are unchanged.
 
 ## What is not covered
 
+- **HTTP proxies.** The pinned fetches connect directly and ignore
+  `HTTP_PROXY`, `HTTPS_PROXY` and `NODE_USE_ENV_PROXY`. On a host whose only
+  way out is through a proxy, HTTP Request, Chart `data.url`, node RAG
+  endpoints and the RSS/SSE triggers cannot reach the internet. Proxy support
+  is not implemented: with a proxy, the proxy resolves the name, so the
+  connection could not be pinned to the vetted address.
 - **Browser-based nodes are not pinned.** Web Browse and the HTML-render PDF
   path check each request and WebSocket at route time, but Chromium then
   resolves the name itself. A short-TTL rebinding name can still pass the check and connect

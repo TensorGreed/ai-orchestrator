@@ -25,15 +25,39 @@ copy of the data. Every evaluation is bounded:
 
 | Limit | Setting |
 |---|---|
-| Time | `EXPRESSION_TIMEOUT_MS` (default 1000 ms). Covers loops and catastrophic regular expressions. |
-| Memory | `EXPRESSION_MEMORY_MB` (default 64 MB). An allocation loop fails inside the sandbox instead of growing the API's heap. |
+| Time | `EXPRESSION_TIMEOUT_MS` (default 1000 ms) per expression. Covers loops and catastrophic regular expressions. |
+| Template budget | `EXPRESSION_TEMPLATE_BUDGET_MS` (default 5000 ms) for all the expressions of one template together, so a field with hundreds of slow `{{ }}` cannot hold the API for hundreds of seconds. A single expression always gets at least `EXPRESSION_TIMEOUT_MS`. |
+| Memory | `EXPRESSION_MEMORY_MB` (default 64 MB). Both one large allocation and many small ones fail with `out of memory` inside the sandbox instead of growing the API's memory. |
+| Result size | `EXPRESSION_MAX_RESULT_MB` (default 8 MB, as JSON). A larger result is an error. |
 | Stack | A fixed 192 KB QuickJS stack. Deep recursion is a catchable `stack overflow`. |
 
-Some inputs, such as an expression nested tens of thousands of levels deep,
-exhaust the host's native stack inside the WebAssembly call before QuickJS's
-own check fires. The evaluation fails with a sandbox error. That WebAssembly
-instance is retired and a pre-loaded spare takes over, so the next evaluation
-works.
+QuickJS's own allocation limit misses much of what many small strings cost, so
+the sandbox also measures the WebAssembly instance's memory while the code runs
+and stops it once that has grown by more than the limit. WebAssembly memory
+never shrinks: an instance that has grown past 256 MB (or past the largest
+memory limit in use, if that is higher) is replaced by a fresh one after the
+session, which releases the memory.
+
+An expression that throws or times out renders as an empty value, as it always
+has. A failure of the **sandbox itself** never does: the node fails with an
+`expression sandbox error` instead, so an IF or Switch node never branches on
+a value that silently lost its expression, and an empty value never reaches a
+URL, request body or prompt. That covers three cases:
+
+- **An instance crashed on this expression.** Some inputs, such as a result
+  nested thousands of levels deep or source nested tens of thousands of
+  levels deep, exhaust the host's native stack inside the WebAssembly call
+  before QuickJS's own check fires. The instance is retired and a pre-loaded
+  spare takes over, so other evaluations keep working. This error is not
+  retryable.
+- **No instance was ready.** Four spares are kept loaded, and new ones load in
+  the background in a few milliseconds. If they ever run out, the error is
+  marked retryable: run the workflow again or enable Retry on Fail on the node.
+- **The workflow's circuit breaker is open.** A workflow (or, for the
+  expression preview and the Code node tester, a user) whose code retires
+  three instances within a minute has its expressions and in-process code
+  refused for five minutes. The refusal does not touch the shared pool, so one
+  author cannot keep it empty for everyone else.
 
 The expression feature set is unchanged: `$input`, `$json`, `$node()`,
 `$workflow`, `$execution`, `$vars`, `$env` (a curated subset, never the real
@@ -72,11 +96,30 @@ to pinned images (a tag or digest, never `latest`) that have `node` /
 ### JavaScript in process
 
 JavaScript runs in the same QuickJS WebAssembly sandbox as expressions, with
-one fresh runtime per input item. It is bounded by the node's `timeout`, by
-`CODE_SANDBOX_MEMORY_MB` (default 256 MB) and by the same stack limit.
+one fresh runtime per input item. It is bounded by:
+
+- the node's `timeout`, clamped to `CODE_SANDBOX_MAX_TIMEOUT_MS` (default
+  30000 ms). A node set to run once per item may not exceed four times that
+  for all its items together; such a node is refused before it starts;
+- `CODE_SANDBOX_MEMORY_MB` (default 256 MB), measured the same way as for
+  expressions;
+- `CODE_SANDBOX_MAX_RESULT_MB` (default 32 MB) for the results and logs of all
+  the node's items together;
+- the same stack limit.
+
 `input`, `console.*` logs, `await` and the `return` value behave as in the
 container. One difference: the container runs on Node (V8, with `Intl`), while
 in-process runs on QuickJS (no `Intl`).
+
+::: warning In-process JavaScript blocks the API while it runs
+QuickJS runs synchronously on the API's event loop, so while an in-process
+code node runs, the API serves no other request. The timeout ceiling is what
+bounds that: with the defaults, one node can hold the API for up to 30 s, and a
+per-item node for up to 120 s. Lower `CODE_SANDBOX_MAX_TIMEOUT_MS` if code
+nodes are short, or use the container plan, which runs code in another
+process. Moving in-process code into a worker thread was considered; it is not
+done in this release.
+:::
 
 ### Python on the host
 
@@ -84,7 +127,9 @@ in-process runs on QuickJS (no `Intl`).
 Without a container, a Python code node runs as a **host subprocess**. It gets
 `python -I` (isolated mode), an explicit minimal environment (the API's own
 variables are not passed in), a scratch working directory, and a hard kill of
-its process group on timeout. None of that is isolation. Anyone who can author
+its process group on timeout. A process the code detaches with `setsid` leaves
+that group and survives the kill; the run itself still finishes when Python
+exits. None of that is isolation. Anyone who can author
 a workflow can make it:
 
 - run any OS command as the API user;
@@ -115,7 +160,11 @@ What you can do about it, from strongest to weakest:
    world-readable files, so check the permissions on the database and `.env`.
    This needs the API to hold `CAP_SETUID`, `CAP_SETGID` and `CAP_CHOWN` (for
    example, running as root inside a container); otherwise Python code nodes
-   fail with a configuration error.
+   fail with a configuration error that names the missing capabilities. When
+   only the uid is set, the gid defaults to the same number, so the child does
+   not keep the API's primary group. A dedicated uid also lets an operator
+   kill anything host Python left behind (`pkill -u <uid>`), including
+   processes it detached with `setsid`.
 4. **Know where the key is visible.** `/proc/<pid>/environ` shows the
    environment the API process was started with (docker `-e`, systemd
    `Environment=`, a shell `export`). Removing the variable later does not
@@ -148,6 +197,10 @@ then fails with a configuration error, and the Code node tester
 | `CODE_SANDBOX_PIDS_LIMIT` | `128` | Container process ceiling. |
 | `CODE_SANDBOX_STARTUP_MS` | `8000` | Extra time for a container to start, on top of the code's own timeout (ms). |
 | `CODE_SANDBOX_PYTHON_IN_PROCESS` | `allow` | `deny` refuses Python code nodes when there is no container plan. |
-| `CODE_SANDBOX_PYTHON_UID` / `CODE_SANDBOX_PYTHON_GID` | unset | Run host Python as this uid / gid. |
+| `CODE_SANDBOX_PYTHON_UID` / `CODE_SANDBOX_PYTHON_GID` | unset | Run host Python as this uid / gid (the gid defaults to the uid). |
+| `CODE_SANDBOX_MAX_TIMEOUT_MS` | `30000` | Ceiling on an in-process JavaScript code node's timeout (100 to 300000 ms); a per-item node may not exceed four times it in all. |
+| `CODE_SANDBOX_MAX_RESULT_MB` | `32` | Largest result (results and logs of all items) an in-process JavaScript code node may return (MB). |
 | `EXPRESSION_TIMEOUT_MS` | `1000` | Time limit for one `{{ }}` or Sort expression (ms). |
-| `EXPRESSION_MEMORY_MB` | `64` | Heap limit for one expression evaluation (MB). |
+| `EXPRESSION_TEMPLATE_BUDGET_MS` | `5000` | Time budget for all the expressions of one template together (ms). |
+| `EXPRESSION_MEMORY_MB` | `64` | Memory limit for one expression evaluation (MB). |
+| `EXPRESSION_MAX_RESULT_MB` | `8` | Largest result one expression may return (MB, as JSON). |
