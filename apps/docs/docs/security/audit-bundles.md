@@ -170,12 +170,12 @@ Run actions a person starts are written to the audit log (category `execution`, 
 
 | Event | When |
 | --- | --- |
-| `execution.started` | A manual run or streamed run is started from the editor or the API. Webhook and schedule runs are not logged here. |
+| `execution.started` | A manual, streamed or queued run is started from the editor or the API (`metadata.triggerType` is `manual`, `manual_stream` or `queue`). Webhook and schedule runs are not logged here. |
 | `execution.retried` | A failed run is retried from history (`metadata.sourceExecutionId`). |
 | `execution.replayed` | A run is replayed from its recorded MCP calls. Golden-run replays are logged as `replay.run`. |
-| `execution.cancelled` | A running or waiting run is cancelled. |
+| `execution.cancel_requested` | A person cancels a running or waiting run. When the run was still executing, it also ends with `execution.canceled` from the system. |
 | `execution.audit_bundle.export` | A run's audit bundle is downloaded. |
 
-Run history cannot be deleted one run at a time, so there is no per-run delete event; retention pruning is logged on its own.
+Run history cannot be deleted one run at a time, so there is no per-run delete event; retention pruning is written to the server log, not the audit log.
 
-When the server restarts, runs still recorded as running are marked `error` with "interrupted: the server stopped while this run was in progress", and the count is logged. Runs waiting for approval are kept, and so are runs the job queue still owns. With `HA_ENABLED=true` only runs older than `WORKFLOW_EXECUTION_TIMEOUT_MS` plus a minute are touched, because another replica may own a newer run. `QUEUE_STUCK_JOB_TIMEOUT_MS` (default `600000`) is raised to the run time limit plus a minute when set lower, so a job that is still executing is not picked up twice.
+When the server restarts, runs still recorded as running are marked `error` with "interrupted: the server stopped while this run was in progress", and the count is logged. Runs waiting for approval are kept, and so are runs the job queue still owns. With `HA_ENABLED=true` or a Postgres database, only runs older than the longest a run may last (24 hours) plus a minute are touched, because another instance may own a newer run, so on those setups orphaned runs are cleaned up after up to about 24 hours. Webhook-only instances (`WORKER_MODE=webhook`) never reconcile. `QUEUE_STUCK_JOB_TIMEOUT_MS` (default `600000`) is raised to the run time limit plus a minute when set lower, so a job that is still executing is not picked up twice. A job that carries its own `executionTimeoutMs` is not treated as stuck before that limit (up to 24 hours) plus a minute has passed. The setting is validated at startup.

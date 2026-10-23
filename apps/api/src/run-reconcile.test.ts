@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Workflow } from "@ai-orchestrator/shared";
+import { MCP_CASSETTE_FORMAT, MCP_CASSETTE_VERSION, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
@@ -187,20 +187,23 @@ describe("queue stuck-job sweeper", () => {
   });
 });
 
+describe("QUEUE_STUCK_JOB_TIMEOUT_MS", () => {
+  it("is validated like the other settings", () => {
+    const env = baseEnv("/tmp/unused");
+    expect(() => parseConfig({ ...env, QUEUE_STUCK_JOB_TIMEOUT_MS: "abc" })).toThrow(/Invalid environment configuration/);
+    expect(parseConfig({ ...env, QUEUE_STUCK_JOB_TIMEOUT_MS: "900000" }).QUEUE_STUCK_JOB_TIMEOUT_MS).toBe(900_000);
+    expect(parseConfig(env).QUEUE_STUCK_JOB_TIMEOUT_MS).toBeUndefined();
+  });
+});
+
 describe("run audit events", () => {
-  it("records started, retried, replayed and cancelled for user-initiated actions", async () => {
+  it("records started, queued, retried, replayed and cancel-requested for user-initiated actions", async () => {
     const { store, dir } = await makeStore();
-    const config = parseConfig({
-      LOG_LEVEL: "warn",
-      SEED_SAMPLE_WORKFLOWS: "false",
-      SECRET_MASTER_KEY_BASE64: crypto.randomBytes(32).toString("base64"),
-      COOKIE_SECURE: "false",
-      RATE_LIMIT_ENABLED: "false",
-      MCP_PROBE_INTERVAL_MS: "0",
-      GIT_SYNC_WORKDIR: path.join(dir, "sync")
-    });
+    const config = parseConfig(baseEnv(dir));
     const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-    const app = createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), authService);
+    // Not started, so no sweeper or poller runs; the enqueue route only needs the service to exist.
+    const queueService = new QueueService(store, {});
+    const app = createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), authService, undefined, queueService);
     await app.ready();
     try {
       authService.register({ email: "builder@example.com", password: "builder-Pass-123!", role: "builder" });
@@ -225,7 +228,7 @@ describe("run audit events", () => {
       const created = await app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: workflow as unknown as Record<string, unknown> });
       expect(created.statusCode).toBeLessThan(300);
 
-      const run = await app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/execute`, headers: { cookie }, payload: {} });
+      const run = await app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/execute`, headers: { cookie }, payload: { input: { secretish: "s3cr3t" } } });
       const runId = (run.json() as { executionId: string }).executionId;
 
       const failed = crypto.randomUUID();
@@ -233,17 +236,42 @@ describe("run audit events", () => {
       const retry = await app.inject({ method: "POST", url: `/api/executions/${failed}/retry`, headers: { cookie }, payload: {} });
       expect(retry.statusCode).toBeLessThan(500);
 
+      const queued = await app.inject({ method: "POST", url: `/api/workflows/${workflow.id}/enqueue`, headers: { cookie }, payload: { triggerType: "something_else" } });
+      expect(queued.statusCode).toBe(200);
+
+      const recorded = crypto.randomUUID();
+      store.saveExecutionHistory({ id: recorded, workflowId: workflow.id, status: "success", startedAt: new Date().toISOString() });
+      store.saveMcpCassette({
+        id: "cassette-1",
+        executionId: recorded,
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        projectId: null,
+        source: "manual",
+        cassette: { format: MCP_CASSETTE_FORMAT, version: MCP_CASSETTE_VERSION, recordedAt: new Date().toISOString(), servers: [], entries: [], truncated: false, bytes: 0, llm: "not_recorded" },
+        createdBy: null
+      });
+      const replay = await app.inject({ method: "POST", url: `/api/executions/${recorded}/replay`, headers: { cookie }, payload: {} });
+      expect(replay.statusCode).toBeLessThan(500);
+
       const running = crypto.randomUUID();
       store.saveExecutionHistory({ id: running, workflowId: workflow.id, status: "running", startedAt: new Date().toISOString() });
       const cancel = await app.inject({ method: "POST", url: `/api/executions/${running}/cancel`, headers: { cookie }, payload: {} });
       expect(cancel.statusCode).toBe(200);
 
-      const events = store.listAuditLogs({ pageSize: 100 } as never) as { items: Array<{ eventType: string; metadata: Record<string, unknown> }> };
+      const events = store.listAuditLogs({ pageSize: 100 }) as { items: Array<{ eventType: string; metadata: Record<string, unknown> }> };
       const types = events.items.map((item) => item.eventType);
       expect(types).toContain("execution.started");
       expect(types).toContain("execution.retried");
-      expect(types).toContain("execution.cancelled");
-      const started = events.items.find((item) => item.eventType === "execution.started")!;
+      expect(types).toContain("execution.cancel_requested");
+      expect(types).toContain("execution.replayed");
+      expect(types).not.toContain("execution.cancelled");
+      const replayed = events.items.find((item) => item.eventType === "execution.replayed")!;
+      expect(replayed.metadata.cassetteId).toBe("cassette-1");
+      const queuedEvent = events.items.find((item) => item.eventType === "execution.started" && item.metadata.triggerType === "queue");
+      expect(queuedEvent).toBeTruthy();
+      expect(JSON.stringify(events.items)).not.toContain("s3cr3t");
+      const started = events.items.find((item) => item.eventType === "execution.started" && item.metadata.triggerType === "manual")!;
       expect(started.metadata.executionId).toBe(runId);
       expect(events.items.find((item) => item.eventType === "execution.retried")!.metadata.sourceExecutionId).toBe(failed);
     } finally {

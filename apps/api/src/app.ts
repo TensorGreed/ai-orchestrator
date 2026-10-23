@@ -3085,14 +3085,14 @@ export function createApp(
   const auditRunAction = (
     request: { ip?: string; headers: Record<string, unknown> },
     user: SafeUser,
-    eventType: "execution.started" | "execution.retried" | "execution.replayed" | "execution.cancelled",
+    eventType: "execution.started" | "execution.retried" | "execution.replayed" | "execution.cancel_requested",
     run: { executionId: string; workflowId: string; projectId?: string | null },
     metadata: Record<string, unknown> = {}
   ) => {
     audit(request, user, {
       category: "execution",
       eventType,
-      action: eventType === "execution.cancelled" ? "cancel" : "execute",
+      action: eventType === "execution.cancel_requested" ? "cancel" : "execute",
       outcome: "success",
       resourceType: "workflow",
       resourceId: run.workflowId,
@@ -7913,7 +7913,7 @@ export function createApp(
     auditRunAction(
       request,
       user,
-      "execution.cancelled",
+      "execution.cancel_requested",
       { executionId: execution.id, workflowId: execution.workflowId, projectId: store.getWorkflow(execution.workflowId)?.projectId },
       { abortedActiveRun: Boolean(active), previousStatus: execution.status }
     );
@@ -10863,6 +10863,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             : undefined,
           priority: typeof body.priority === "number" ? body.priority : 0
         });
+
+        auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "queue" });
 
         const depth = queueService.getDepth();
         return { queued: true, executionId, queueDepth: depth };
