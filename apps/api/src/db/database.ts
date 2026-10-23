@@ -1639,6 +1639,136 @@ export interface ApprovalRequestInsert {
 /** Which requests a user may list: every one (admins) or those of the workflows they can read now. */
 export type ApprovalReadScope = { all: true } | { all?: false; workflowIds: string[] };
 
+/** Phase 15.4 — a workflow's release gate settings. */
+export interface ReleaseGateRecord {
+  workflowId: string;
+  enabled: boolean;
+  enforced: boolean;
+  datasetIds: string[];
+  candidateOptions: Record<string, unknown>;
+  policy: Record<string, unknown>;
+  requireApproval: boolean;
+  approvers: Record<string, unknown> | null;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+/** Phase 15.4 — one release: the published version moved to `version`. */
+export interface WorkflowReleaseRecord {
+  id: string;
+  workflowId: string;
+  version: number;
+  workflowHash: string;
+  previousVersion: number | null;
+  replayRunId: string | null;
+  verdict: string;
+  reason: string | null;
+  gateReasons: string[];
+  approval: Record<string, unknown> | null;
+  publishedAt: string;
+  publishedBy: string | null;
+  publishedByUserId: string | null;
+}
+
+/** Phase 15.4 — a request to publish a version, decided in the approvals inbox. */
+export interface ReleaseApprovalRequestRecord {
+  id: string;
+  workflowId: string;
+  workflowName: string | null;
+  projectId: string;
+  version: number;
+  workflowHash: string;
+  replayRunId: string | null;
+  /** `policy`: the gate sends every publish to approvers; `blocked`: the publish was blocked and sent with a reason. */
+  origin: "policy" | "blocked";
+  gateReasons: string[];
+  /** The gate's `updated_at` when asked: a gate changed since makes the request stale. */
+  gateUpdatedAt: string | null;
+  publishedVersionAtRequest: number | null;
+  spec: Record<string, unknown>;
+  status: string;
+  requestReason: string | null;
+  requestedByUserId: string | null;
+  requestedBy: string | null;
+  expiresAt: string | null;
+  decidedByUserId: string | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  decisionReason: string | null;
+  releaseId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function mapReleaseGateRow(row: Record<string, unknown>): ReleaseGateRecord {
+  const approvers = row.approvers_json ? parseJsonObject(row.approvers_json) : null;
+  return {
+    workflowId: String(row.workflow_id),
+    enabled: Number(row.enabled) === 1,
+    enforced: Number(row.enforced) === 1,
+    datasetIds: parseJsonArray(row.dataset_ids_json),
+    candidateOptions: parseJsonObject(row.candidate_options_json),
+    policy: parseJsonObject(row.policy_json),
+    requireApproval: Number(row.require_approval) === 1,
+    approvers,
+    updatedAt: String(row.updated_at),
+    updatedBy: nullableText(row.updated_by)
+  };
+}
+
+function mapWorkflowReleaseRow(row: Record<string, unknown>): WorkflowReleaseRecord {
+  return {
+    id: String(row.id),
+    workflowId: String(row.workflow_id),
+    version: Number(row.version),
+    workflowHash: String(row.workflow_hash),
+    previousVersion: nullableNumber(row.previous_version),
+    replayRunId: nullableText(row.replay_run_id),
+    verdict: String(row.verdict),
+    reason: nullableText(row.reason),
+    gateReasons: parseJsonArray(row.gate_reasons_json),
+    approval: row.approval_json ? parseJsonObject(row.approval_json) : null,
+    publishedAt: String(row.published_at),
+    publishedBy: nullableText(row.published_by),
+    publishedByUserId: nullableText(row.published_by_user_id)
+  };
+}
+
+function mapReleaseApprovalRequestRow(row: Record<string, unknown>): ReleaseApprovalRequestRecord {
+  return {
+    id: String(row.id),
+    workflowId: String(row.workflow_id),
+    workflowName: nullableText(row.workflow_name),
+    projectId: String(row.project_id),
+    version: Number(row.version),
+    workflowHash: String(row.workflow_hash),
+    replayRunId: nullableText(row.replay_run_id),
+    origin: row.origin === "policy" ? "policy" : "blocked",
+    gateReasons: parseJsonArray(row.gate_reasons_json),
+    gateUpdatedAt: nullableText(row.gate_updated_at),
+    publishedVersionAtRequest: nullableNumber(row.published_version_at_request),
+    spec: parseJsonObject(row.spec_json),
+    status: String(row.status),
+    requestReason: nullableText(row.request_reason),
+    requestedByUserId: nullableText(row.requested_by_user_id),
+    requestedBy: nullableText(row.requested_by),
+    expiresAt: nullableText(row.expires_at),
+    decidedByUserId: nullableText(row.decided_by_user_id),
+    decidedBy: nullableText(row.decided_by),
+    decidedAt: nullableText(row.decided_at),
+    decisionReason: nullableText(row.decision_reason),
+    releaseId: nullableText(row.release_id),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
+  };
+}
+
 type ApprovalRequestRow = Record<string, unknown>;
 
 function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
@@ -3057,6 +3187,68 @@ export class SqliteStore {
     this.exec(`CREATE INDEX IF NOT EXISTS idx_eval_runs_kind ON eval_runs(kind, workflow_id, started_at DESC)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_eval_runs_status ON eval_runs(status)`);
 
+    // Phase 15.4 (migration 33) — release gate and publish. NULL published_version: the draft runs everywhere.
+    this.ensureColumn("workflows", "published_version", "INTEGER");
+    this.ensureColumn("workflow_versions", "pinned", "INTEGER NOT NULL", "0");
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS release_gates (
+        workflow_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        enforced INTEGER NOT NULL DEFAULT 0,
+        dataset_ids_json TEXT NOT NULL,
+        candidate_options_json TEXT,
+        policy_json TEXT NOT NULL,
+        require_approval INTEGER NOT NULL DEFAULT 0,
+        approvers_json TEXT,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT
+      );
+      CREATE TABLE IF NOT EXISTS workflow_releases (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        workflow_hash TEXT NOT NULL,
+        previous_version INTEGER,
+        replay_run_id TEXT,
+        verdict TEXT NOT NULL,
+        reason TEXT,
+        gate_reasons_json TEXT,
+        approval_json TEXT,
+        published_at TEXT NOT NULL,
+        published_by TEXT,
+        published_by_user_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_releases_workflow ON workflow_releases(workflow_id, published_at DESC);
+      CREATE TABLE IF NOT EXISTS release_approval_requests (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        project_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        workflow_hash TEXT NOT NULL,
+        replay_run_id TEXT,
+        origin TEXT NOT NULL,
+        gate_reasons_json TEXT,
+        gate_updated_at TEXT,
+        published_version_at_request INTEGER,
+        spec_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        request_reason TEXT,
+        requested_by_user_id TEXT,
+        requested_by TEXT,
+        expires_at TEXT,
+        decided_by_user_id TEXT,
+        decided_by TEXT,
+        decided_at TEXT,
+        decision_reason TEXT,
+        release_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_release_approval_requests_workflow ON release_approval_requests(workflow_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_release_approval_requests_status ON release_approval_requests(status, created_at DESC);
+    `);
+
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
@@ -3356,6 +3548,10 @@ export class SqliteStore {
         this.exec("DELETE FROM eval_runs WHERE workflow_id = ?", [id]);
       }
       if (hasTable("mcp_elicitations")) this.exec("DELETE FROM mcp_elicitations WHERE workflow_id = ?", [id]);
+      // Phase 15.4 — the gate, releases and release requests point at versions deleted above; the audit log keeps the trail.
+      for (const table of ["release_gates", "workflow_releases", "release_approval_requests"]) {
+        if (hasTable(table)) this.exec(`DELETE FROM ${table} WHERE workflow_id = ?`, [id]);
+      }
       if (legacyNamespaces.length > 0) {
         const placeholders = legacyNamespaces.map(() => "?").join(", ");
         for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
@@ -7151,10 +7347,14 @@ export class SqliteStore {
     this.persist();
   }
 
+  /**
+   * Keeps the newest `keep` versions. Phase 15.4: pinned versions (published
+   * now or released before) are never pruned and do not count against `keep`.
+   */
   pruneWorkflowVersions(workflowId: string, keep: number): number {
     if (keep <= 0) return 0;
     const toDelete = this.queryAll<{ id: string }>(
-      `SELECT id FROM workflow_versions WHERE workflow_id = ? ORDER BY version DESC LIMIT -1 OFFSET ?`,
+      `SELECT id FROM workflow_versions WHERE workflow_id = ? AND pinned = 0 ORDER BY version DESC LIMIT -1 OFFSET ?`,
       [workflowId, keep]
     );
     if (toDelete.length === 0) return 0;
@@ -7171,6 +7371,204 @@ export class SqliteStore {
       [workflowId]
     );
     return row && row.max_version !== null ? toNumber(row.max_version) : 0;
+  }
+
+  // Phase 15.4 — release gate and publish.
+
+  /** The version production traffic runs, or null when nothing is published (the draft runs everywhere). */
+  getPublishedVersion(workflowId: string): number | null {
+    const row = this.queryOne<{ published_version: number | null }>(`SELECT published_version FROM workflows WHERE id = ?`, [workflowId]);
+    return row ? nullableNumber(row.published_version) : null;
+  }
+
+  isWorkflowVersionPinned(workflowId: string, version: number): boolean {
+    const row = this.queryOne<{ pinned: number }>(`SELECT pinned FROM workflow_versions WHERE workflow_id = ? AND version = ?`, [workflowId, version]);
+    return Number(row?.pinned ?? 0) === 1;
+  }
+
+  getReleaseGate(workflowId: string): ReleaseGateRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM release_gates WHERE workflow_id = ?`, [workflowId]);
+    return row ? mapReleaseGateRow(row) : null;
+  }
+
+  upsertReleaseGate(record: ReleaseGateRecord): ReleaseGateRecord {
+    this.exec(
+      `INSERT INTO release_gates (workflow_id, enabled, enforced, dataset_ids_json, candidate_options_json, policy_json, require_approval, approvers_json, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workflow_id) DO UPDATE SET
+         enabled = excluded.enabled,
+         enforced = excluded.enforced,
+         dataset_ids_json = excluded.dataset_ids_json,
+         candidate_options_json = excluded.candidate_options_json,
+         policy_json = excluded.policy_json,
+         require_approval = excluded.require_approval,
+         approvers_json = excluded.approvers_json,
+         updated_at = excluded.updated_at,
+         updated_by = excluded.updated_by`,
+      [
+        record.workflowId,
+        record.enabled ? 1 : 0,
+        record.enforced ? 1 : 0,
+        JSON.stringify(record.datasetIds),
+        JSON.stringify(record.candidateOptions),
+        JSON.stringify(record.policy),
+        record.requireApproval ? 1 : 0,
+        record.approvers ? JSON.stringify(record.approvers) : null,
+        record.updatedAt,
+        record.updatedBy
+      ]
+    );
+    return this.getReleaseGate(record.workflowId)!;
+  }
+
+  listWorkflowReleases(workflowId: string, limit = 100): WorkflowReleaseRecord[] {
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM workflow_releases WHERE workflow_id = ? ORDER BY published_at DESC, id DESC LIMIT ?`,
+      [workflowId, Math.max(1, Math.min(500, limit))]
+    ).map(mapWorkflowReleaseRow);
+  }
+
+  /** Whether `version` was published before (by any release, a rollback included). */
+  hasReleasedVersion(workflowId: string, version: number): boolean {
+    return Boolean(this.queryOne<{ id: string }>(`SELECT id FROM workflow_releases WHERE workflow_id = ? AND version = ? LIMIT 1`, [workflowId, version]));
+  }
+
+  /**
+   * Moves the published version and records the release, in one transaction:
+   * the version is pinned (exempt from retention). Refused (null) when the
+   * published version is no longer `expectedPrevious` (another publish got
+   * there first) or the version row is gone.
+   */
+  publishWorkflowVersion(release: Omit<WorkflowReleaseRecord, "previousVersion">, expectedPrevious: number | null): WorkflowReleaseRecord | null {
+    return this.transaction(() => {
+      const current = this.getPublishedVersion(release.workflowId);
+      if (current !== expectedPrevious) return null;
+      const pinned = this.db.prepare(`UPDATE workflow_versions SET pinned = 1 WHERE workflow_id = ? AND version = ?`).run(release.workflowId, release.version);
+      if (pinned.changes === 0) return null;
+      this.db.prepare(`UPDATE workflows SET published_version = ? WHERE id = ?`).run(release.version, release.workflowId);
+      this.db
+        .prepare(
+          `INSERT INTO workflow_releases (id, workflow_id, version, workflow_hash, previous_version, replay_run_id, verdict, reason, gate_reasons_json, approval_json, published_at, published_by, published_by_user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          release.id,
+          release.workflowId,
+          release.version,
+          release.workflowHash,
+          current,
+          release.replayRunId,
+          release.verdict,
+          release.reason,
+          JSON.stringify(release.gateReasons),
+          release.approval ? JSON.stringify(release.approval) : null,
+          release.publishedAt,
+          release.publishedBy,
+          release.publishedByUserId
+        );
+      return { ...release, previousVersion: current };
+    });
+  }
+
+  /** Newest replay jobs that tested exactly this workflow hash. */
+  listReplayRunIdsForHash(workflowId: string, workflowHash: string, limit = 20): string[] {
+    return this.queryAll<{ id: string }>(
+      `SELECT id FROM eval_runs WHERE kind = 'replay' AND workflow_id = ? AND workflow_hash = ? ORDER BY started_at DESC, id DESC LIMIT ?`,
+      [workflowId, workflowHash, Math.max(1, Math.min(200, limit))]
+    ).map((row) => toString(row.id));
+  }
+
+  insertReleaseApprovalRequest(record: ReleaseApprovalRequestRecord): ReleaseApprovalRequestRecord {
+    this.exec(
+      `INSERT INTO release_approval_requests (
+         id, workflow_id, workflow_name, project_id, version, workflow_hash, replay_run_id, origin, gate_reasons_json, gate_updated_at,
+         published_version_at_request, spec_json, status, request_reason, requested_by_user_id, requested_by, expires_at,
+         decided_by_user_id, decided_by, decided_at, decision_reason, release_id, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        record.id,
+        record.workflowId,
+        record.workflowName,
+        record.projectId,
+        record.version,
+        record.workflowHash,
+        record.replayRunId,
+        record.origin,
+        JSON.stringify(record.gateReasons),
+        record.gateUpdatedAt,
+        record.publishedVersionAtRequest,
+        JSON.stringify(record.spec),
+        record.status,
+        record.requestReason,
+        record.requestedByUserId,
+        record.requestedBy,
+        record.expiresAt,
+        record.decidedByUserId,
+        record.decidedBy,
+        record.decidedAt,
+        record.decisionReason,
+        record.releaseId,
+        record.createdAt,
+        record.updatedAt
+      ]
+    );
+    return this.getReleaseApprovalRequest(record.id)!;
+  }
+
+  getReleaseApprovalRequest(id: string): ReleaseApprovalRequestRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM release_approval_requests WHERE id = ?`, [id]);
+    return row ? mapReleaseApprovalRequestRow(row) : null;
+  }
+
+  findPendingReleaseApprovalRequest(workflowId: string, version: number, workflowHash: string): ReleaseApprovalRequestRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(
+      `SELECT * FROM release_approval_requests WHERE workflow_id = ? AND version = ? AND workflow_hash = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
+      [workflowId, version, workflowHash]
+    );
+    return row ? mapReleaseApprovalRequestRow(row) : null;
+  }
+
+  listReleaseApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number; scope?: ApprovalReadScope }): ReleaseApprovalRequestRecord[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filter.status === "pending") clauses.push(`status = 'pending'`);
+    if (filter.status === "decided") clauses.push(`status <> 'pending'`);
+    if (filter.workflowId) {
+      clauses.push(`workflow_id = ?`);
+      params.push(filter.workflowId);
+    }
+    if (filter.scope && !filter.scope.all) {
+      const ids = filter.scope.workflowIds;
+      if (ids.length === 0) return [];
+      clauses.push(`workflow_id IN (${ids.map(() => "?").join(", ")})`);
+      params.push(...ids);
+    }
+    const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
+    const order = filter.status === "decided" ? "COALESCE(decided_at, updated_at) DESC" : "created_at DESC";
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM release_approval_requests ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY ${order}, id DESC LIMIT ${limit}`,
+      params
+    ).map(mapReleaseApprovalRequestRow);
+  }
+
+  /** Records a decision on a pending request; false when it was no longer pending. */
+  decideReleaseApprovalRequest(input: {
+    id: string;
+    status: "approved" | "rejected" | "canceled" | "timed_out";
+    decidedByUserId?: string | null;
+    decidedBy?: string | null;
+    decisionReason?: string | null;
+    releaseId?: string | null;
+  }): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE release_approval_requests
+         SET status = ?, decided_by_user_id = ?, decided_by = ?, decided_at = ?, decision_reason = ?, release_id = ?, updated_at = ?
+         WHERE id = ? AND status = 'pending'`
+      )
+      .run(input.status, input.decidedByUserId ?? null, input.decidedBy ?? null, now, input.decisionReason ?? null, input.releaseId ?? null, now, input.id);
+    return result.changes > 0;
   }
 
   // Git config (singleton row keyed by literal 'default')
