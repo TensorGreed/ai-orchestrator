@@ -140,6 +140,8 @@ export interface McpReplayReport {
   reused: number;
   /** Calls sent to the live server (lenient only). */
   live: number;
+  /** Phase 15.3 — read-only calls sent to a `live_read_only` server's live server. */
+  liveRead?: number;
   unmatched: Array<{ server: string; method: McpCassetteMethod; name?: string; reason: string }>;
 }
 

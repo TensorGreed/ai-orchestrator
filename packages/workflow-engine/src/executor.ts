@@ -570,7 +570,8 @@ function createNodeMcpContext(
     serverConfigs: options.serverConfigs,
     ...(options.evaluatePolicy ? { evaluatePolicy: options.evaluatePolicy } : {}),
     trace: sampling,
-    ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {})
+    ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
+    nodeId
   });
   const context: MCPExecutionContext = {
     resolveSecret: dependencies.resolveSecret,
@@ -693,6 +694,8 @@ function providerCallContext(
   return {
     resolveSecret: dependencies.resolveSecret,
     ...(dependencies.abortSignal ? { signal: dependencies.abortSignal } : {}),
+    // Phase 15.3 — the model tape keys calls by the node that made them.
+    ...(nodeId ? { callSite: { nodeId } } : {}),
     ...(logger || (nodeId && dependencies.activityRecorder)
       ? {
           onRetry: (info: ResilientFetchRetryInfo) => {
@@ -5298,6 +5301,7 @@ async function executeNode(
           {
             providerRegistry: dependencies.providerRegistry,
             resolveSecret: dependencies.resolveSecret,
+            callSite: { nodeId: node.id },
             memoryStore: dependencies.memoryStore,
             toolDataStore: dependencies.toolDataStore,
             ...(guardSession ? { guard: guardSession.hooks } : {}),

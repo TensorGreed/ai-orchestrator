@@ -1097,7 +1097,8 @@ ${effectiveSystemPrompt}`;
               {
                 resolveSecret: context.resolveSecret,
                 ...(context.signal ? { signal: context.signal } : {}),
-                ...(context.onProviderRetry ? { onRetry: context.onProviderRetry } : {})
+                ...(context.onProviderRetry ? { onRetry: context.onProviderRetry } : {}),
+                callSite: { ...(context.callSite?.nodeId ? { nodeId: context.callSite.nodeId } : {}), iteration }
               }
             );
             emit({

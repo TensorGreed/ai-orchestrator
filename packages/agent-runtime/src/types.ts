@@ -20,6 +20,8 @@ export type AgentRuntimeEvent =
 export interface AgentRuntimeContext {
   providerRegistry: ProviderRegistry;
   resolveSecret: (secretRef?: { secretId: string }) => Promise<string | undefined>;
+  /** Phase 15.3 — the node running the agent; each model call adds its iteration (the model tape's call site). */
+  callSite?: { nodeId?: string };
   memoryStore?: AgentSessionMemoryStore;
   toolDataStore?: AgentSessionToolDataStore;
   /** Phase 12.1 — guard hooks run inside the loop when the agent is guarded. */

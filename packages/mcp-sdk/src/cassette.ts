@@ -419,11 +419,27 @@ const LIST_METHODS = new Set<McpCassetteMethod>([
   "prompts/list"
 ]);
 
+/** Phase 15.3 — how one server's calls are answered; `live_read_only` sends read-only tool calls and reads to the live server. */
+export type McpCassetteServerMode = McpReplayMode | "live_read_only";
+
 export interface McpCassettePlayerOptions {
   mode?: McpReplayMode;
   /** Registry for calls the cassette never saw. Used in lenient mode only; omit it to keep replay offline. */
   live?: MCPRegistry;
   redact?: (value: string) => string;
+  /**
+   * Phase 15.3 — per-server modes, keyed by registry server id (else the
+   * adapter id of an inline server). A `live_read_only` server answers
+   * tools/call of read-only tools, resources/read and prompts/get from
+   * `liveReads` (the live server), every other tool call from the cassette
+   * (strict), and catalog lists from the cassette with the live server as
+   * the fallback.
+   */
+  serverModes?: Record<string, McpCassetteServerMode>;
+  /** Registry for `live_read_only` servers' live calls. */
+  liveReads?: MCPRegistry;
+  /** Is this tool read-only? Unknown tools are writes. Without it no tool call goes live. */
+  isReadOnlyTool?: (input: { config: MCPServerConfig; toolName: string; annotations?: Record<string, unknown> }) => boolean;
 }
 
 function matchKey(server: string, method: McpCassetteMethod, name: string | undefined, argsHash: string): string {
@@ -437,6 +453,7 @@ export class McpCassettePlayer {
   private matched = 0;
   private reused = 0;
   private live = 0;
+  private liveRead = 0;
   private readonly unmatched: McpReplayReport["unmatched"] = [];
 
   constructor(
@@ -457,6 +474,40 @@ export class McpCassettePlayer {
     return this.mode === "lenient" ? this.options.live : undefined;
   }
 
+  /** Phase 15.3 — the registry `live_read_only` servers read from. */
+  get liveReadRegistry(): MCPRegistry | undefined {
+    return this.options.liveReads;
+  }
+
+  /** The mode of the server a call goes to (Phase 15.3 per-server modes), else the player's. */
+  modeFor(config: MCPServerConfig): McpCassetteServerMode {
+    const modes = this.options.serverModes;
+    if (!modes) return this.mode;
+    const byRegistry = config.registryServerId ? modes[config.registryServerId] : undefined;
+    return byRegistry ?? modes[config.serverId] ?? this.mode;
+  }
+
+  /** The recorded annotations of a tool, from the server's recorded tools/list answer. */
+  private recordedAnnotations(server: string, toolName: string): Record<string, unknown> | undefined {
+    for (const entry of this.cassette.entries) {
+      if (entry.server !== server || entry.method !== "tools/list" || !Array.isArray(entry.result)) continue;
+      const tool = (entry.result as Array<Record<string, unknown>>).find((candidate) => candidate && candidate.name === toolName);
+      if (tool && tool.annotations && typeof tool.annotations === "object") return tool.annotations as Record<string, unknown>;
+    }
+    return undefined;
+  }
+
+  /** A `live_read_only` server's call that goes to the live server: a read-only tool call or a read. */
+  private goesLive(method: McpCassetteMethod, server: string, config: MCPServerConfig, name: string | undefined): boolean {
+    if (method === "resources/read" || method === "prompts/get") return true;
+    if (method !== "tools/call" || name === undefined || !this.options.isReadOnlyTool) return false;
+    try {
+      return this.options.isReadOnlyTool({ config, toolName: name, annotations: this.recordedAnnotations(server, name) }) === true;
+    } catch {
+      return false;
+    }
+  }
+
   /** The cassette's answer for a call, or the live server's in lenient mode. */
   async answer<T>(input: {
     method: McpCassetteMethod;
@@ -474,13 +525,22 @@ export class McpCassettePlayer {
     const key = matchKey(server, input.method, name, hashCassetteArgs(scrubbedArgs));
     const candidates = this.byKey.get(key) ?? [];
     const position = this.cursor.get(key) ?? 0;
+    const mode = this.modeFor(input.config);
+
+    if (mode === "live_read_only" && input.live && this.goesLive(input.method, server, input.config, name)) {
+      const readAdapter = this.options.liveReads?.tryGet(input.config.serverId);
+      if (readAdapter) {
+        this.liveRead += 1;
+        return input.live(readAdapter);
+      }
+    }
 
     let entry: McpCassetteEntry | undefined;
     if (position < candidates.length) {
       entry = candidates[position];
       this.cursor.set(key, position + 1);
       this.matched += 1;
-    } else if (candidates.length > 0 && (LIST_METHODS.has(input.method) || this.mode === "lenient")) {
+    } else if (candidates.length > 0 && (LIST_METHODS.has(input.method) || mode === "lenient")) {
       entry = candidates[candidates.length - 1];
       if (LIST_METHODS.has(input.method)) this.matched += 1;
       else this.reused += 1;
@@ -491,8 +551,17 @@ export class McpCassettePlayer {
       return structuredClone(entry.result) as T;
     }
 
+    if (mode === "live_read_only" && input.live && LIST_METHODS.has(input.method)) {
+      // A catalog the cassette never saw is a read: the live server answers it.
+      const readAdapter = this.options.liveReads?.tryGet(input.config.serverId);
+      if (readAdapter) {
+        this.liveRead += 1;
+        return input.live(readAdapter);
+      }
+    }
+
     const reason = this.describeMiss(server, input.method, name, candidates.length);
-    const liveAdapter = this.liveRegistry?.tryGet(input.config.serverId);
+    const liveAdapter = mode === "lenient" ? this.liveRegistry?.tryGet(input.config.serverId) : undefined;
     if (liveAdapter && input.live) {
       this.live += 1;
       return input.live(liveAdapter);
@@ -523,6 +592,7 @@ export class McpCassettePlayer {
       matched: this.matched,
       reused: this.reused,
       live: this.live,
+      ...(this.liveRead > 0 ? { liveRead: this.liveRead } : {}),
       unmatched: [...this.unmatched]
     };
   }
@@ -591,8 +661,9 @@ function replayAdapter(definition: MCPServerDefinition, player: McpCassettePlaye
         }
       }),
     closeSessions: async (context) => {
-      // Lenient replays may have opened live sessions in this context.
+      // Lenient and live-read replays may have opened live sessions in this context.
       await player.liveRegistry?.tryGet(definition.id)?.closeSessions?.(context);
+      await player.liveReadRegistry?.tryGet(definition.id)?.closeSessions?.(context);
     }
   };
 }
@@ -608,9 +679,13 @@ export function createReplayRegistry(
 ): { registry: MCPRegistry; player: McpCassettePlayer } {
   const player = new McpCassettePlayer(cassette, options);
   const registry = new MCPRegistry();
-  const ids = new Set<string>([...(options.live?.list().map((adapter) => adapter.definition.id) ?? []), ...cassette.servers.map((server) => server.adapterId)]);
+  const ids = new Set<string>([
+    ...(options.live?.list().map((adapter) => adapter.definition.id) ?? []),
+    ...(options.liveReads?.list().map((adapter) => adapter.definition.id) ?? []),
+    ...cassette.servers.map((server) => server.adapterId)
+  ]);
   for (const id of ids) {
-    registry.register(replayAdapter(replayDefinition(id, options.live?.tryGet(id)?.definition), player));
+    registry.register(replayAdapter(replayDefinition(id, options.live?.tryGet(id)?.definition ?? options.liveReads?.tryGet(id)?.definition), player));
   }
   return { registry, player };
 }

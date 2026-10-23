@@ -286,6 +286,29 @@ describe("replay plan", () => {
   });
 });
 
+describe("live read nodes (Phase 15.3)", () => {
+  it("runs a named read live and keeps stubbing writes, code and approvals named with it", () => {
+    const workflow = chain([
+      node("start", "manual_trigger"),
+      node("sheet", "google_sheets_read"),
+      node("slack", "slack_send_message"),
+      node("code", "code_node", { code: "return 1;" }),
+      node("approve", "human_approval")
+    ]);
+    const rec = recorded([
+      { nodeId: "sheet", nodeType: "google_sheets_read", output: { rows: [] } },
+      { nodeId: "slack", nodeType: "slack_send_message", output: { ok: true } },
+      { nodeId: "code", nodeType: "code_node", output: { result: 1 } },
+      { nodeId: "approve", nodeType: "human_approval", output: { decision: "approve" } }
+    ]);
+    const plan = buildReplayPlan(workflow, rec, { liveNodes: new Set(["sheet", "slack", "code", "approve"]) });
+    expect(plan.decisions.find((decision) => decision.nodeId === "sheet")?.action).toBe("live");
+    expect(plan.hook(node("sheet", "google_sheets_read"))).toBeNull();
+    for (const id of ["slack", "code", "approve"]) expect(plan.decisions.find((decision) => decision.nodeId === id)?.action).toBe("recorded");
+    expect(plan.hook(node("slack", "slack_send_message"))).toEqual({ kind: "output", output: { ok: true } });
+  });
+});
+
 describe("recorded stubs that no longer match the candidate", () => {
   const loopWorkflow = (code: string) =>
     chain([

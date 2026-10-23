@@ -18,6 +18,16 @@ export interface ProviderExecutionContext {
   signal?: AbortSignal;
   /** Called before each retry backoff wait (no request data is included). */
   onRetry?: (info: ResilientFetchRetryInfo) => void;
+  /**
+   * Phase 15.3 — where the call comes from: the node and, in an agent loop,
+   * the iteration. Adapters ignore it; the model tape keys calls by it.
+   */
+  callSite?: ProviderCallSite;
+}
+
+export interface ProviderCallSite {
+  nodeId?: string;
+  iteration?: number;
 }
 
 export interface ProviderCallRequest {
