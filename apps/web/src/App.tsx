@@ -5080,6 +5080,7 @@ function StudioApp() {
               onCancelExecution={(executionId) => handleCancelExecution(executionId)}
               onReplayCassette={canManageWorkflows ? (executionId, mode) => handleReplayCassette(executionId, mode) : undefined}
               canDeleteCassettes={authUser?.role === "admin"}
+              canManageGoldenRuns={canManageWorkflows}
             />
           )}
 

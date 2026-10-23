@@ -15,8 +15,11 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  MCP_CASSETTE_FORMAT,
+  MCP_CASSETTE_VERSION,
   MCP_SNAPSHOT_FILE_FORMAT,
   MCP_SNAPSHOT_FILE_VERSION,
+  type McpCassette,
   type McpCassetteRecord,
   type McpCassetteSource,
   type McpCassetteSummary,
@@ -152,6 +155,36 @@ export class McpCassetteService {
       );
     };
     return { registry, resolveRegisteredMcpServer, player, cassetteId: record.id };
+  }
+
+  /**
+   * Phase 15.1 — a replay registry for a golden run's copied cassette that
+   * never reaches a live server, in either mode: `lenient` only lets a call
+   * made more often than recorded reuse its last answer. A run without a
+   * cassette gets an empty one, so every
+   * MCP call fails instead of going live.
+   */
+  planOfflineReplay(cassette: McpCassette | null, mode: McpReplayMode, cassetteId: string): McpCassetteRunPlan {
+    const tape: McpCassette = cassette ?? {
+      format: MCP_CASSETTE_FORMAT,
+      version: MCP_CASSETTE_VERSION,
+      recordedAt: new Date(0).toISOString(),
+      servers: [],
+      entries: [],
+      truncated: false,
+      bytes: 0,
+      llm: "not_recorded"
+    };
+    const { registry, player } = createReplayRegistry(tape, { mode, redact: this.options.redact });
+    const recorded = new Map(tape.servers.filter((server) => server.registryServerId).map((server) => [server.registryServerId!, server] as const));
+    const resolveRegisteredMcpServer = async (registryServerId: string): Promise<MCPServerConfig> => {
+      const server = recorded.get(registryServerId);
+      if (!server) {
+        throw new Error(`Golden run replay: the recording has no calls to registry server ${registryServerId}, and replays never call a live server.`);
+      }
+      return { serverId: server.adapterId, registryServerId, ...(server.label ? { label: server.label } : {}), connection: {} };
+    };
+    return { registry, resolveRegisteredMcpServer, player, cassetteId };
   }
 
   /** Store what a recorded run captured. Returns null when there was nothing to record into. */

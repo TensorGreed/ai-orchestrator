@@ -1630,6 +1630,85 @@ export const openApiSpec = {
         }
       }
     },
+    "/api/replay/recordings": {
+      get: {
+        tags: ["Executions"],
+        summary: "Golden runs of the workflows you can read, newest first (viewers)",
+        parameters: [
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", default: 50, maximum: 500 } },
+          { name: "offset", in: "query", required: false, schema: { type: "integer", default: 0 } }
+        ],
+        responses: { "200": { description: "{ items, total }" }, "403": { description: "No access to the workflow" } }
+      },
+      post: {
+        tags: ["Executions"],
+        summary: "Save a finished execution as a golden run: its input, node results, run facts and MCP cassette are copied and scrubbed of secrets (builders)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["executionId", "name"],
+                properties: { executionId: { type: "string" }, name: { type: "string", maxLength: 200 }, notes: { type: "string", maxLength: 2000 } }
+              }
+            }
+          }
+        },
+        responses: {
+          "201": { description: "{ recording }" },
+          "403": { description: "No write access to the workflow" },
+          "404": { description: "Execution not found" },
+          "409": { description: "The run has not finished, is itself a replay, is already saved as a golden run, or the workflow's golden runs (or all golden runs in the deployment) are over the count or byte limit" },
+          "413": { description: "The run is larger than REPLAY_RECORDING_MAX_BYTES" }
+        }
+      }
+    },
+    "/api/replay/recordings/{id}": {
+      get: {
+        tags: ["Executions"],
+        summary: "One golden run: input, recorded node results and run facts (viewers)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ recording }" }, "404": { description: "Not found" } }
+      },
+      delete: {
+        tags: ["Executions"],
+        summary: "Delete a golden run (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Deleted" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/replay/recordings/{id}/replay": {
+      post: {
+        tags: ["Executions"],
+        summary:
+          "Replay a golden run against the draft or a saved version with every external read and write answered from the recording, then diff the result (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  draft: { type: "boolean" },
+                  version: { type: "integer", minimum: 1 },
+                  mcpMode: { type: "string", enum: ["strict", "lenient"], default: "strict" },
+                  ignorePaths: { type: "array", maxItems: 32, items: { type: "string", maxLength: 128, description: "Glob over output paths; at most eight ** segments" } },
+                  numberTolerance: { type: "number", minimum: 0 }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "{ recordingId, executionId, candidate, status, diff, verdict: pass | fail | error, reasons, facts }" },
+          "400": { description: "Invalid request" },
+          "404": { description: "Golden run or version not found" }
+        }
+      }
+    },
     "/api/mcp/servers/{id}/tools/{toolName}/classification": {
       put: {
         tags: ["MCP"],

@@ -197,6 +197,23 @@ const envSchema = z.object({
       message: "AUDIT_SIGNING_KEY_BASE64 must be base64 of exactly 32 bytes"
     })
     .optional(),
+  /**
+   * Phase 15.1 — golden runs: the largest recording (input, node outputs and
+   * run facts; the copied MCP cassette has its own MCP_CASSETTE_MAX_BYTES)
+   * and how many one workflow may keep. Golden runs are never pruned, so
+   * the 501st is refused rather than an older one dropped. One run can be
+   * saved once.
+   */
+  REPLAY_RECORDING_MAX_BYTES: z.coerce.number().int().min(16_384).max(268_435_456).default(4_194_304),
+  REPLAY_RECORDINGS_MAX_PER_WORKFLOW: z.coerce.number().int().min(1).max(100_000).default(500),
+  /** Phase 15.1 — total bytes one workflow's golden runs may use (recordings plus their copied cassettes). */
+  REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW: z.coerce.number().int().min(16_384).max(17_179_869_184).default(268_435_456),
+  /**
+   * Phase 15.1 — total bytes all golden runs in the deployment may use
+   * (1 GiB). A builder can create workflows freely, so the per-workflow
+   * budget alone does not bound storage.
+   */
+  REPLAY_RECORDINGS_MAX_TOTAL_BYTES: z.coerce.number().int().min(16_384).max(1_099_511_627_776).default(1_073_741_824),
   /** Phase 11.1 — largest audit bundle (zip) the API exports, in bytes. */
   AUDIT_BUNDLE_MAX_BYTES: z.coerce.number().int().min(1_024).max(2_147_483_647).default(104_857_600),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),

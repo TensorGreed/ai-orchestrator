@@ -83,7 +83,9 @@ import {
   convertExternalWorkflow,
   ExternalWorkflowImportError,
   type ChunkOptions,
-  type EmbeddingAdapter
+  type EmbeddingAdapter,
+  type KnowledgeBaseStore,
+  type ReplayNodeHook
 } from "@ai-orchestrator/workflow-engine";
 import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
 import { SqliteStore, type McpServerRecord } from "./db/database";
@@ -126,6 +128,10 @@ import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
+import { registerReplayRoutes } from "./replay-routes.js";
+import { ReplayRecordingService } from "./services/replay-recording-service.js";
+import { ReplayService } from "./services/replay-service.js";
+import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandbox.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
 import { environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
@@ -173,6 +179,14 @@ interface Tier1IntegrationSpec {
   category: string;
   logoPath: string;
   nodeTypes: string[];
+}
+
+/** Phase 15.1 — the trigger type of a golden-run replay. */
+const REPLAY_TRIGGER_TYPE = "replay";
+
+/** Phase 15.1 — the knowledge-base store a run uses: in a replay, writes are refused. */
+function replayKnowledgeBaseStore(sandbox: ReplaySandbox | undefined, store: KnowledgeBaseStore): KnowledgeBaseStore {
+  return sandbox ? sandbox.wrapKnowledgeBaseStore(store) : store;
 }
 
 const TIER1_INTEGRATIONS: Tier1IntegrationSpec[] = [
@@ -1536,8 +1550,11 @@ export function createApp(
       store.saveExecutionHistory(record);
       if (meta.phase === "final") {
         pruneExecutionHistory("write");
-        const status = meta.status === "success" ? "success" : meta.status === "canceled" ? "canceled" : "error";
-        metricsService.recordExecution(status, record.durationMs ?? 0);
+        // Phase 15.1 — replays are experiments, not traffic: they stay out of execution metrics and SLOs.
+        if (meta.triggerType !== REPLAY_TRIGGER_TYPE) {
+          const status = meta.status === "success" ? "success" : meta.status === "canceled" ? "canceled" : "error";
+          metricsService.recordExecution(status, record.durationMs ?? 0);
+        }
         metricsService.setActiveExecutions(activeExecutions.size);
       }
       return true;
@@ -1610,6 +1627,12 @@ export function createApp(
     hooks?: WorkflowExecutionEventHooks;
     /** Phase 10.8 — record this run's MCP calls, or answer them from a cassette. */
     mcpPlan?: McpCassetteRunPlan;
+    /**
+     * Phase 15.1 — a golden-run replay: stubbed nodes answered by the plan's
+     * hook, session state in the sandbox's own stores, no error workflow,
+     * no notifications, no paused state, no elicitation prompts.
+     */
+    replay?: { hook: ReplayNodeHook; sandbox: ReplaySandbox };
   }) => {
     const controller = input.executionId
       ? registerActiveExecution({
@@ -1667,13 +1690,13 @@ export function createApp(
           connectorRegistry,
           mcpRegistry: input.mcpPlan?.registry ?? mcpRegistry,
           agentRuntime,
-          memoryStore: {
+          memoryStore: input.replay?.sandbox.memoryStore ?? {
             loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
             saveMessages: async (namespace, sessionId, messages) => {
               store.saveSessionMemory(namespace, sessionId, messages);
             }
           },
-          toolDataStore: {
+          toolDataStore: input.replay?.sandbox.toolDataStore ?? {
             saveToolCall: async (payload) =>
               store.saveSessionToolCall({
                 namespace: payload.namespace,
@@ -1699,7 +1722,7 @@ export function createApp(
                 id: payload.id
               })
           },
-          sessionArtifactStore: {
+          sessionArtifactStore: input.replay?.sandbox.sessionArtifactStore ?? {
             saveArtifact: async (payload) =>
               store.saveSessionArtifact({
                 namespace: payload.namespace,
@@ -1714,11 +1737,12 @@ export function createApp(
                 artifactKey: payload.artifactKey
               })
           },
-          loadWorkflow: (workflowId) => store.getWorkflow(workflowId) ?? undefined,
+          // A replay never starts a sub-workflow (Execute Workflow nodes are stubbed).
+          loadWorkflow: input.replay ? undefined : (workflowId) => store.getWorkflow(workflowId) ?? undefined,
           // Phase 9.1 — built-in persistent vector store. The SqliteStore
           // implements the minimal KnowledgeBaseStore interface declared in
           // workflow-engine/rag-adapters.ts.
-          knowledgeBaseStore: {
+          knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, {
             addKnowledgeBaseChunks: (input) =>
               store.addKnowledgeBaseChunks({
                 knowledgeBaseId: input.knowledgeBaseId,
@@ -1731,15 +1755,18 @@ export function createApp(
               const kb = store.getKnowledgeBase(id);
               return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
             }
-          },
+          }),
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
           guard: guardService.runtimeFor({ executionId: input.executionId, workflowId: mergedWorkflow.id, projectId: mergedWorkflow.projectId ?? "default" }),
+          replayNodeHook: input.replay?.hook,
           resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer ?? resolveRegisteredMcpServer,
           loadMcpToolPolicy,
           // Phase 10.5 — resources, elicitation and list_changed notifications.
           mcpResourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
-          onMcpListChanged: (event) => mcpProbeService.onListChanged(event),
-          onMcpElicitation: input.executionId
+          onMcpListChanged: input.replay ? undefined : (event) => mcpProbeService.onListChanged(event),
+          onMcpElicitation: input.replay
+            ? input.replay.sandbox.onMcpElicitation
+            : input.executionId
             ? (elicitation) =>
                 mcpElicitationService.ask({
                   request: { message: elicitation.message, requestedSchema: elicitation.requestedSchema },
@@ -1757,7 +1784,7 @@ export function createApp(
                   signal: runController.signal
                 })
             : undefined,
-          persistPausedExecution: async (paused) => {
+          persistPausedExecution: input.replay ? undefined : async (paused) => {
             store.saveWorkflowExecutionState({
               id: paused.executionId,
               workflowId: paused.workflowId,
@@ -1772,7 +1799,8 @@ export function createApp(
               state: paused.state
             });
           },
-          triggerErrorWorkflow: async (payload) => {
+          // Phase 15.1 — a replay never fires the error workflow or its notifications.
+          triggerErrorWorkflow: input.replay ? undefined : async (payload) => {
             // Fire-and-forget: execute the error workflow + send notifications
             notificationService.notify({
               type: "execution.failure",
@@ -2127,9 +2155,11 @@ export function createApp(
       });
 
       // Phase 8.3 — fire budget alerts on threshold crossings. Debounced per
-      // (budget, period, severity) so users don't get spammed.
+      // (budget, period, severity) so users don't get spammed. Phase 15.1 — a
+      // replay's spend is recorded above, but a replay sends no notifications:
+      // the next real run that is over the threshold fires the alert.
       try {
-        budgetService.recordExecution({
+        if (input.triggerType !== REPLAY_TRIGGER_TYPE) budgetService.recordExecution({
           executionId: input.executionId,
           workflowId: input.workflow.id,
           projectId: input.workflow.projectId ?? null,
@@ -2157,8 +2187,11 @@ export function createApp(
       );
     }
 
-    // Phase 10.1 — one mcp_tool_calls row per MCP tool call in this run.
-    recordMcpToolCalls(input.executionId, input.workflow, input.result.nodeResults);
+    // Phase 10.1 — one mcp_tool_calls row per MCP tool call in this run. A
+    // replay's calls were answered from a recording, not by the servers.
+    if (input.triggerType !== REPLAY_TRIGGER_TYPE) {
+      recordMcpToolCalls(input.executionId, input.workflow, input.result.nodeResults);
+    }
 
     app.log.info(
       {
@@ -7592,11 +7625,14 @@ export function createApp(
     });
     // Phase 10.8 — runs recorded with "Record MCP calls" carry a cassette badge.
     const badges = store.mcpCassetteBadgesForExecutions(history.items.map((item) => item.id));
+    // Phase 15.1 — runs saved as golden runs carry a golden badge.
+    const golden = store.replayGoldenBadgesForExecutions(history.items.map((item) => item.id));
     return {
       ...history,
       items: history.items.map((item) => {
         const badge = badges.get(item.id);
-        return badge ? { ...item, mcpCassette: badge } : item;
+        const goldenBadge = golden.get(item.id);
+        return { ...item, ...(badge ? { mcpCassette: badge } : {}), ...(goldenBadge ? { goldenRuns: goldenBadge } : {}) };
       })
     };
   });
@@ -10601,6 +10637,72 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
   registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), audit: (request, user, event) => audit(request, user, event) });
+
+  // Phase 15.1 — golden runs and replay.
+  const replayRecordingService = new ReplayRecordingService({
+    store,
+    secrets: secretService,
+    environmentSecretValues: () => environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
+    redact: (value) => {
+      const redacted = secretService.redact(value);
+      return typeof redacted === "string" ? redacted : value;
+    },
+    priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+    maxBytes: config.REPLAY_RECORDING_MAX_BYTES,
+    maxPerWorkflow: config.REPLAY_RECORDINGS_MAX_PER_WORKFLOW,
+    maxBytesPerWorkflow: config.REPLAY_RECORDINGS_MAX_BYTES_PER_WORKFLOW,
+    maxTotalBytes: config.REPLAY_RECORDINGS_MAX_TOTAL_BYTES
+  });
+  const replayService = new ReplayService({
+    store,
+    recordings: replayRecordingService,
+    cassettes: mcpCassetteService,
+    priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens),
+    execute: async (replay, actor) => {
+      const storedInput = asRecord(replay.recording.input);
+      const executed = await runWorkflowExecution({
+        ...replayRunInputFor(replay.recording.sourceTriggerType, storedInput),
+        // The workflow's pinned outputs are not part of the candidate under test.
+        usePinnedData: false,
+        mcpPlan: replay.mcpPlan,
+        replay: { hook: replay.plan.hook, sandbox: createReplaySandbox() },
+        policyActor: actor,
+        workflow: replay.workflow,
+        customData: replay.customData,
+        executionId: replay.executionId,
+        triggerType: REPLAY_TRIGGER_TYPE,
+        triggeredBy: actor.email,
+        hooks: createProgressTrackingHooks({
+          executionId: replay.executionId,
+          workflow: replay.workflow,
+          triggerType: REPLAY_TRIGGER_TYPE,
+          triggeredBy: actor.email,
+          requestInput: storedInput,
+          customData: replay.customData
+        })
+      });
+      const result = finishMcpCassettePlan(replay.mcpPlan, executed, { executionId: replay.executionId, workflow: replay.workflow, source: "replay", createdBy: actor.email });
+      persistExecutionHistory({
+        executionId: replay.executionId,
+        workflow: replay.workflow,
+        result,
+        triggerType: REPLAY_TRIGGER_TYPE,
+        triggeredBy: actor.email,
+        requestInput: storedInput,
+        customData: replay.customData
+      });
+      return result;
+    }
+  });
+  registerReplayRoutes({
+    app,
+    store,
+    recordings: replayRecordingService,
+    replays: replayService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission),
+    audit: (request, user, event) => audit(request, user, event)
+  });
 
   registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
 

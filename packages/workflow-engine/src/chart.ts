@@ -28,6 +28,7 @@
 import * as vega from "vega";
 import * as vegaLite from "vega-lite";
 import type { TopLevelSpec } from "vega-lite";
+import { REPLAY_BLOCKED_LOAD_MARKER } from "@ai-orchestrator/shared";
 
 export interface ChartRenderOptions {
   /** Vega-Lite top-level spec. Use {@link injectData} to merge data at runtime. */
@@ -48,6 +49,12 @@ export interface ChartRenderOptions {
    * consistent branding across many charts.
    */
   config?: Record<string, unknown>;
+  /**
+   * Refuse every data load (`data.url`, image URLs, files). Golden-run
+   * replays render charts this way, so a replay never contacts a URL the
+   * spec names. The render fails instead of drawing a chart without data.
+   */
+  offline?: boolean;
 }
 
 export interface ChartRenderResult {
@@ -79,10 +86,15 @@ export async function renderChart(options: ChartRenderOptions): Promise<ChartRen
     throw new Error(`vega-lite compile failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  let blocked = false;
+  const offlineError = () =>
+    new Error(`A replay never loads chart data from a URL or file; this chart needs one, so the replay cannot judge it (${REPLAY_BLOCKED_LOAD_MARKER}).`);
+
   let view: vega.View;
   try {
     const runtime = vega.parse(vegaSpec, options.config);
-    view = new vega.View(runtime, { renderer: "none" });
+    const loader = options.offline ? offlineLoader(() => (blocked = true)) : linkSafeLoader(vega.loader());
+    view = new vega.View(runtime, { renderer: "none", loader });
   } catch (err) {
     throw new Error(`vega parse failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -91,16 +103,55 @@ export async function renderChart(options: ChartRenderOptions): Promise<ChartRen
   try {
     svg = await view.toSVG();
   } catch (err) {
+    if (blocked) throw offlineError();
     throw new Error(`vega render failed: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     view.finalize();
   }
+  // Vega logs a failed load and draws without the data; offline, that is a failure.
+  if (blocked) throw offlineError();
 
   return {
     svg,
     dataUrl: `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`,
     resolvedSpec: merged
   };
+}
+
+/**
+ * Vega's SVG renderer resolves a mark's `href` through `loader.sanitize` in a
+ * promise nobody awaits, and a refused link (for example `javascript:`) ends
+ * as an unhandled rejection that terminates Node. A link is never a load, so
+ * a refused one is dropped (`href: null`) instead of rejected.
+ */
+function linkSafeLoader(base: vega.Loader): vega.Loader {
+  const sanitize = base.sanitize.bind(base);
+  base.sanitize = (async (uri: string, options?: { context?: string }) => {
+    try {
+      return await sanitize(uri, options as never);
+    } catch (error) {
+      if (options?.context === "href") return { href: null };
+      throw error;
+    }
+  }) as vega.Loader["sanitize"];
+  return base;
+}
+
+/**
+ * A Vega loader that refuses every load and reports that it did. Links
+ * (`href`) are not loads: they are resolved by the default loader's
+ * `sanitize`, which does no I/O, so a replayed chart draws the same links as
+ * the live run.
+ */
+function offlineLoader(onBlocked: () => void): vega.Loader {
+  const links = linkSafeLoader(vega.loader());
+  const refuse = async (): Promise<never> => {
+    onBlocked();
+    throw new Error(REPLAY_BLOCKED_LOAD_MARKER);
+  };
+  const sanitize = async (uri: string, options?: { context?: string }) =>
+    options?.context === "href" ? links.sanitize(uri, options as never) : refuse();
+  return { options: {}, load: refuse, sanitize, http: refuse, file: refuse } as unknown as vega.Loader;
 }
 
 /**

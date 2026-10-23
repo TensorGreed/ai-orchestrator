@@ -45,23 +45,19 @@ import {
   type McpCatalogEntry,
   type PreparedZip,
   type RunManifest,
-  type RunManifestApproval,
-  type RunManifestCitation,
   type RunManifestGuardExtension,
   type RunManifestMcpServer,
   type RunManifestModelCall,
   type RunManifestNode,
-  type RunManifestPrompt,
   type RunManifestToolCall,
-  type RunManifestToolOutcome,
   type RunManifestView,
   type Workflow
 } from "@ai-orchestrator/shared";
-import { parseMcpRuntimeRejection } from "@ai-orchestrator/mcp-sdk";
 import type { ExecutionManifestRecord, McpServerRecord, SqliteStore } from "../db/database.js";
 import type { AuditSigningService } from "./audit-signing-service.js";
 import { findCatalogEntryForCommand, packageSpecOf } from "./mcp-catalog.js";
 import { REDACTED, SecretScrubber } from "./audit-scrub.js";
+import { collectRunActivity, priceModelCall } from "./run-facts.js";
 import type { SecretService } from "./secret-service.js";
 
 export { REDACTED };
@@ -75,17 +71,6 @@ export const AUDIT_BUNDLE_REDACTIONS_PATH = "redactions.json";
 const IN_PROGRESS_STATUSES = new Set(["running", "pending", "queued", "waiting_approval"]);
 
 const SENSITIVE_KEY = /(api[-_]?key|token|password|passwd|secret|authorization|private[-_]?key|client[-_]?secret|credential|cookie)/i;
-const LLM_NODE_TYPES = new Set([
-  "llm_call",
-  "openai_chat_model",
-  "anthropic_chat_model",
-  "ollama_chat_model",
-  "openai_compatible_chat_model",
-  "ai_gateway_chat_model",
-  "azure_openai_chat_model"
-]);
-const AGENT_NODE_TYPES = new Set(["agent_orchestrator", "supervisor_node"]);
-const MAX_WORKER_DEPTH = 4;
 const RENDERED_OUTPUT_TYPES: Record<string, string> = {
   "application/pdf": "pdf",
   "image/png": "png",
@@ -224,7 +209,7 @@ function pretty(value: unknown): Uint8Array {
 }
 
 /** The workflow fields that define what runs; timestamps and run-time pins are left out. */
-function workflowForHash(workflow: Workflow): Record<string, unknown> {
+export function workflowForHash(workflow: Workflow): Record<string, unknown> {
   const sanitized = sanitizeConfig({
     id: workflow.id,
     name: workflow.name,
@@ -238,18 +223,6 @@ function workflowForHash(workflow: Workflow): Record<string, unknown> {
     edges: workflow.edges
   });
   return JSON.parse(canonicalJson(sanitized)) as Record<string, unknown>;
-}
-
-function classifyToolOutcome(error: unknown, ok: boolean): RunManifestToolOutcome {
-  if (ok) return "ok";
-  const rejection = parseMcpRuntimeRejection(error);
-  if (rejection === "rate_limited") return "rate_limited";
-  if (rejection === "concurrency_limited") return "concurrency_limited";
-  if (rejection === "circuit_open") return "breaker_rejected";
-  const text = typeof error === "string" ? error : "";
-  if (/was blocked by the guard/i.test(text)) return "guard_blocked";
-  if (/is blocked by policy|counts as a write tool|no-write|not allowed by (the )?(tool )?policy/i.test(text)) return "policy_blocked";
-  return "error";
 }
 
 function isFinished(history: HistoryRecord): boolean {
@@ -492,11 +465,8 @@ export class AuditBundleService {
     for (const node of workflowNodes) nodes.push(describeNode(node.id, node.type, node.name ?? node.id, node.config, lastResult.get(node.id)));
     for (const [id, result] of lastResult) if (!nodeById.has(id)) nodes.push(describeNode(id, "unknown", id, {}, result));
 
-    const modelCalls: RunManifestModelCall[] = [];
-    const toolCalls: RunManifestToolCall[] = [];
-    const prompts: RunManifestPrompt[] = [];
-    const citations: RunManifestCitation[] = [];
-    const approvals: RunManifestApproval[] = [];
+    const activity = collectRunActivity(results, nodeById);
+    const { prompts, citations, approvals } = activity;
 
     const providerParameters = (provider: JsonRecord | null): Record<string, unknown> => {
       if (!provider) return {};
@@ -507,173 +477,37 @@ export class AuditBundleService {
       }
       return (asRecord(sanitizeConfig(out)) ?? {}) as Record<string, unknown>;
     };
-    const pushModelCall = (nodeId: string, iteration: number | null, providerId: string, model: string, provider: JsonRecord | null, usage: JsonRecord | null, latencyMs: number | null) => {
-      const inputTokens = num(usage?.inputTokens);
-      const outputTokens = num(usage?.outputTokens);
-      const cachedInputTokens = num(usage?.cachedInputTokens);
-      const costUsd = inputTokens !== null || outputTokens !== null ? this.options.priceTurn(providerId, model, inputTokens ?? 0, outputTokens ?? 0, cachedInputTokens ?? 0) : null;
-      modelCalls.push({ nodeId, iteration, providerId, model, parameters: providerParameters(provider), inputTokens, outputTokens, cachedInputTokens, costUsd, latencyMs });
-    };
-
-    const scanAgentTools = (output: JsonRecord, nodeId: string, depth: number) => {
-      const steps = Array.isArray(output.steps) ? output.steps : [];
-      const attribution = asRecord(output._mcpTools) ?? {};
-      for (const rawStep of steps) {
-        const step = asRecord(rawStep);
-        if (!step) continue;
-        const iteration = num(step.iteration);
-        const requested = new Map<string, unknown>();
-        for (const call of Array.isArray(step.requestedTools) ? step.requestedTools : []) {
-          const entry = asRecord(call);
-          if (entry && typeof entry.id === "string") requested.set(entry.id, entry.arguments ?? entry.args);
-        }
-        for (const rawResult of Array.isArray(step.toolResults) ? step.toolResults : []) {
-          const result = asRecord(rawResult);
-          if (!result) continue;
-          const exposed = str(result.toolName);
-          const target = exposed ? asRecord(attribution[exposed]) : null;
-          if (target) {
-            const registryServerId = str(target.registryServerId);
-            const server = serverFor(registryServerId);
-            const adapterId = str(target.adapterId);
-            const toolCallId = str(result.toolCallId);
-            const error = result.error;
-            toolCalls.push({
-              nodeId,
-              iteration,
-              toolCallId,
-              toolName: str(target.toolName) ?? exposed!,
-              adapterId,
-              registryServerId,
-              serverIdentity: AuditBundleService.identityLabel(server, adapterId),
-              schemaSnapshotHash: server?.snapshotHash ?? null,
-              argsDigest: digestOf(toolCallId ? requested.get(toolCallId) : undefined),
-              resultDigest: digestOf(result.output),
-              outcome: classifyToolOutcome(error, error === undefined || error === null || error === ""),
-              startedAt: str(result.startedAt),
-              durationMs: num(result.durationMs)
-            });
-          }
-          const nested = asRecord(result.output);
-          if (nested && depth < MAX_WORKER_DEPTH && Array.isArray(nested.steps)) scanAgentTools(nested, nodeId, depth + 1);
-        }
-      }
-    };
-
-    for (const result of results) {
-      const nodeId = result.nodeId as string;
-      const node = nodeById.get(nodeId);
-      const type = node?.type ?? "";
-      const config = asRecord(node?.config) ?? {};
-      const output = asRecord(result.output);
-      const input = asRecord(result.input);
-      const status = str(result.status);
-      const consumed = output?.reason === "attachment_consumed_by_agent";
-
-      // Approval decisions recorded when a paused run was resumed.
-      if (input && (input.decision === "approve" || input.decision === "reject")) {
-        approvals.push({ nodeId, decision: input.decision, actedBy: str(input.actedBy), reason: str(input.reason), decidedAt: str(result.startedAt) });
-      }
-      if (!output || consumed) continue;
-
-      const telemetry = asRecord(output._telemetry);
-      const provider = asRecord(output._provider);
-      if (AGENT_NODE_TYPES.has(type) || Array.isArray(output.steps)) {
-        const providerId = str(telemetry?.providerId) ?? str(provider?.providerId);
-        const model = str(telemetry?.model) ?? str(provider?.model);
-        const steps = (Array.isArray(output.steps) ? output.steps : []).map(asRecord).filter((step): step is JsonRecord => Boolean(step));
-        if (providerId && model) {
-          if (steps.length > 0) {
-            for (const step of steps) pushModelCall(nodeId, num(step.iteration), providerId, model, provider, asRecord(step.usage), num(step.latencyMs));
-          } else if (telemetry) {
-            pushModelCall(nodeId, null, providerId, model, provider, asRecord(telemetry.usage), num(telemetry.latencyMs));
-          }
-        }
-        scanAgentTools(output, nodeId, 0);
-        const messages = Array.isArray(output.messages) ? output.messages.map(asRecord) : [];
-        const systemMessage = messages.find((message) => message?.role === "system");
-        const userMessage = messages.find((message) => message?.role === "user");
-        const systemTemplate = str(config.systemPromptTemplate) ?? str(config.systemPrompt);
-        const userTemplate = str(config.userPromptTemplate) ?? str(config.userPrompt) ?? str(config.promptTemplate);
-        const renderedSystem = typeof systemMessage?.content === "string" ? systemMessage.content : null;
-        const renderedUser = typeof userMessage?.content === "string" ? userMessage.content : null;
-        if (systemTemplate || renderedSystem) prompts.push({ nodeId, role: "system", template: systemTemplate, rendered: renderedSystem });
-        if (userTemplate || renderedUser) prompts.push({ nodeId, role: "user", template: userTemplate, rendered: renderedUser });
-      } else if (LLM_NODE_TYPES.has(type) || telemetry) {
-        const providerId = str(telemetry?.providerId) ?? str(provider?.providerId);
-        const model = str(telemetry?.model) ?? str(provider?.model);
-        if (providerId && model) pushModelCall(nodeId, null, providerId, model, provider, asRecord(telemetry?.usage), num(telemetry?.latencyMs));
-        if (LLM_NODE_TYPES.has(type)) {
-          const promptKey = str(config.promptKey) ?? "prompt";
-          const systemKey = str(config.systemPromptKey) ?? "system_prompt";
-          const renderedUser = str(input?.[promptKey]) ?? str(input?.user_prompt);
-          const renderedSystem = str(input?.[systemKey]);
-          const userTemplate = str(config.userPromptTemplate) ?? str(config.promptTemplate) ?? str(config.userPrompt);
-          const systemTemplate = str(config.systemPromptTemplate) ?? str(config.systemPrompt);
-          if (systemTemplate || renderedSystem) prompts.push({ nodeId, role: "system", template: systemTemplate, rendered: renderedSystem });
-          if (userTemplate || renderedUser) prompts.push({ nodeId, role: "user", template: userTemplate, rendered: renderedUser });
-        }
-      }
-
-      // Direct MCP Tool nodes that ran.
-      const request = asRecord(output.invocation_request);
-      if (type === "mcp_tool" && (request || status === "error")) {
-        const registryServerId = str(request?.registry_server_id) ?? str(config.registryServerId);
-        const server = serverFor(registryServerId);
-        const adapterId = str(request?.server_id) ?? str(config.serverId) ?? server?.adapterId ?? null;
-        toolCalls.push({
-          nodeId,
-          iteration: null,
-          toolCallId: null,
-          toolName: str(request?.tool_name) ?? str(output.tool_name) ?? str(config.toolName) ?? "unknown",
-          adapterId,
-          registryServerId,
-          serverIdentity: AuditBundleService.identityLabel(server, adapterId),
-          schemaSnapshotHash: server?.snapshotHash ?? null,
-          argsDigest: digestOf(request?.tool_args),
-          resultDigest: digestOf(output.tool_output),
-          outcome: classifyToolOutcome(result.error, status === "success"),
-          startedAt: str(result.startedAt),
-          durationMs: num(result.durationMs)
-        });
-      }
-
-      // RAG: cited chunks, and the documents a retrieval node returned.
-      const cited = Array.isArray(output.citations) ? output.citations : [];
-      for (const raw of cited) {
-        const citation = asRecord(raw);
-        if (!citation) continue;
-        citations.push({
-          nodeId,
-          marker: str(citation.marker),
-          index: num(citation.index),
-          chunkId: str(citation.chunkId),
-          sourceId: str(citation.sourceId),
-          knowledgeBaseId: str(citation.knowledgeBaseId),
-          score: num(citation.rerankerScore) ?? num(citation.similarityScore),
-          retrievalMode: str(citation.retrievalMode),
-          textDigest: typeof citation.text === "string" ? sha256Hex(citation.text) : null
-        });
-      }
-      if (cited.length === 0 && (type === "rag_retrieve" || typeof output.citationInstructions === "string") && Array.isArray(output.documents)) {
-        output.documents.forEach((raw, index) => {
-          const document = asRecord(raw);
-          if (!document) return;
-          const metadata = asRecord(document.metadata) ?? {};
-          citations.push({
-            nodeId,
-            marker: null,
-            index: index + 1,
-            chunkId: str(metadata.chunkId) ?? str(document.id),
-            sourceId: str(metadata.sourceId),
-            knowledgeBaseId: str(metadata.knowledgeBaseId),
-            score: num(metadata.rerankerScore) ?? num(metadata.similarityScore),
-            retrievalMode: str(asRecord(metadata.retrieval)?.mode),
-            textDigest: typeof document.text === "string" ? sha256Hex(document.text) : null
-          });
-        });
-      }
-    }
+    const modelCalls: RunManifestModelCall[] = activity.modelCalls.map((call) => ({
+      nodeId: call.nodeId,
+      iteration: call.iteration,
+      providerId: call.providerId,
+      model: call.model,
+      parameters: providerParameters(call.provider),
+      inputTokens: num(call.usage?.inputTokens),
+      outputTokens: num(call.usage?.outputTokens),
+      cachedInputTokens: num(call.usage?.cachedInputTokens),
+      costUsd: priceModelCall(call, this.options.priceTurn),
+      latencyMs: call.latencyMs
+    }));
+    const toolCalls: RunManifestToolCall[] = activity.toolCalls.map((call) => {
+      const server = serverFor(call.registryServerId);
+      const adapterId = call.adapterId ?? (call.source === "node" ? (server?.adapterId ?? null) : null);
+      return {
+        nodeId: call.nodeId,
+        iteration: call.iteration,
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        adapterId,
+        registryServerId: call.registryServerId,
+        serverIdentity: AuditBundleService.identityLabel(server, adapterId),
+        schemaSnapshotHash: server?.snapshotHash ?? null,
+        argsDigest: digestOf(call.args),
+        resultDigest: digestOf(call.result),
+        outcome: call.outcome,
+        startedAt: call.startedAt,
+        durationMs: call.durationMs
+      };
+    });
 
     // Guard verdicts (Phase 12.7): no evidence, no matched content.
     const guardEvents = store.listGuardEventsForExecution(history.id);

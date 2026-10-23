@@ -5,6 +5,7 @@ import { McpCassetteViewer } from "./McpCassetteViewer";
 import { McpElicitationForm } from "./McpElicitationForm";
 import { GuardTracePanel } from "./GuardTracePanel";
 import { AuditBundlePanel } from "./AuditBundlePanel";
+import { GoldenRunViewer, GoldenStarIcon, SaveGoldenRunDialog } from "./GoldenRunPanel";
 
 /** Phase 10.5 — how often the Runs page looks for server questions waiting on a person. */
 const ELICITATION_POLL_MS = 5000;
@@ -106,7 +107,11 @@ interface ExecutionHistoryPanelProps {
   onReplayCassette?: (executionId: string, mode: McpReplayMode) => Promise<void> | void;
   /** Admins may delete cassettes from the viewer. */
   canDeleteCassettes?: boolean;
+  /** Phase 15.1 — builders save finished runs as golden runs and replay them; everyone else only opens them. */
+  canManageGoldenRuns?: boolean;
 }
+
+const GOLDEN_SOURCE_BLOCKED = new Set(["running", "pending", "queued", "waiting_approval"]);
 
 const TOKENISED_STATUSES = new Set([
   "success",
@@ -191,10 +196,13 @@ export function ExecutionHistoryPanel({
   onCancelExecution,
   onReplayFromNode,
   onReplayCassette,
-  canDeleteCassettes = false
+  canDeleteCassettes = false,
+  canManageGoldenRuns = false
 }: ExecutionHistoryPanelProps) {
   const [expandedTraceKey, setExpandedTraceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<{ cassetteId: string; executionId: string } | null>(null);
+  const [saveGolden, setSaveGolden] = useState<ExecutionHistorySummary | null>(null);
+  const [goldenId, setGoldenId] = useState<string | null>(null);
   const toggleTraceRow = useCallback((key: string) => {
     setExpandedTraceKey((current) => (current === key ? null : key));
   }, []);
@@ -375,6 +383,21 @@ export function ExecutionHistoryPanel({
                             <span className="sr-only"> MCP calls recorded</span>
                           </span>
                         ))}
+                      {item.goldenRuns && (
+                        <button
+                          type="button"
+                          className="golden-badge"
+                          title={`Saved as ${item.goldenRuns.count} golden run${item.goldenRuns.count === 1 ? "" : "s"}. Open the latest.`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setGoldenId(item.goldenRuns!.latestId);
+                          }}
+                        >
+                          <GoldenStarIcon />
+                          golden{item.goldenRuns.count > 1 ? ` ${item.goldenRuns.count}` : ""}
+                          <span className="sr-only"> run, open it</span>
+                        </button>
+                      )}
                     </td>
                     <td>
                       <StatusPill status={item.status} statusColors={statusColors} />
@@ -412,6 +435,18 @@ export function ExecutionHistoryPanel({
                           }}
                         >
                           Replay
+                        </button>
+                      )}
+                      {canManageGoldenRuns && !GOLDEN_SOURCE_BLOCKED.has(item.status) && item.completedAt && item.triggerType !== "replay" && !item.goldenRuns && (
+                        <button
+                          className="pg-btn small"
+                          title="Keep this run as a golden run to replay changes against"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSaveGolden(item);
+                          }}
+                        >
+                          Save as golden
                         </button>
                       )}
                       {canCancel && (
@@ -540,6 +575,20 @@ export function ExecutionHistoryPanel({
           </table>
         </div>
       )}
+      {saveGolden && (
+        <SaveGoldenRunDialog
+          executionId={saveGolden.id}
+          workflowName={saveGolden.workflowName ?? saveGolden.workflowId}
+          hasCassette={Boolean(saveGolden.mcpCassette)}
+          onClose={() => setSaveGolden(null)}
+          onSaved={(recordingId) => {
+            setSaveGolden(null);
+            setGoldenId(recordingId);
+            onRefresh();
+          }}
+        />
+      )}
+      {goldenId && <GoldenRunViewer recordingId={goldenId} canReplay={canManageGoldenRuns} onClose={() => setGoldenId(null)} onChanged={onRefresh} />}
       {viewer && (
         <McpCassetteViewer
           cassetteId={viewer.cassetteId}
