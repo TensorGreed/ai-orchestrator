@@ -19,6 +19,7 @@ import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
 import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
+import { projectSessionNamespace } from "./run-scope.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
 import { SecretService } from "./services/secret-service.js";
 
@@ -484,7 +485,7 @@ describe("golden runs with side effects stubbed", () => {
     const run = await call(context, "POST", "/api/workflows/wf-agent/execute", builder.cookie, { session_id: "sess-1" });
     expect(run.json<{ status: string }>().status).toBe("success");
     // The model leaked the key into its answer; the stored execution is what golden runs copy from.
-    const memoryBefore = context.store.loadSessionMemory("golden-mem", "sess-1");
+    const memoryBefore = context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1");
     expect(memoryBefore.length).toBeGreaterThan(0);
 
     const golden = await saveGolden(context, builder.cookie, run.json<{ executionId: string }>().executionId);
@@ -502,7 +503,7 @@ describe("golden runs with side effects stubbed", () => {
     expect(model.calls()).toBeGreaterThan(callsBefore);
     expect(result.verdict, JSON.stringify(result.reasons)).toBe("pass");
     expect(JSON.stringify(result)).not.toContain(PLANTED);
-    expect(context.store.loadSessionMemory("golden-mem", "sess-1")).toEqual(memoryBefore);
+    expect(context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1")).toEqual(memoryBefore);
 
     // Failing candidate: no error workflow.
     context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, { codeThrows: true }));
@@ -510,7 +511,7 @@ describe("golden runs with side effects stubbed", () => {
     expect(broken.status).toBe("error");
     await sleep(300);
     expect(counter.count("/error")).toBe(0);
-    expect(context.store.loadSessionMemory("golden-mem", "sess-1")).toEqual(memoryBefore);
+    expect(context.store.loadSessionMemory(projectSessionNamespace("default", "golden-mem"), "sess-1")).toEqual(memoryBefore);
   });
 
   it("records a replay's model spend but never sends a budget alert from it", async () => {

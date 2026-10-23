@@ -497,7 +497,7 @@ describe("guard security review fixes", () => {
     const hidden = (await call(context, "POST", "/api/workflows/wf-hidden/execute", admin.cookie, { user_prompt: "hello" })).json<RunResult>();
     await call(context, "POST", "/api/workflows/wf-visible/execute", admin.cookie, { user_prompt: "hello" });
 
-    expect((await call(context, "GET", `/api/executions/${hidden.executionId}/guard-events`, builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "GET", `/api/executions/${hidden.executionId}/guard-events`, builder.cookie)).statusCode).toBe(404);
     const listed = (await call(context, "GET", "/api/guard/events", builder.cookie)).json<{ events: GuardEventView[]; total: number }>();
     expect(listed.events.map((event) => event.workflowId)).toEqual(["wf-visible"]);
     expect(listed.total).toBe(1);

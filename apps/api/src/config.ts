@@ -38,6 +38,12 @@ const envSchema = z.object({
   SESSION_TTL_HOURS: z.coerce.number().int().positive().default(168),
   COOKIE_SECURE: booleanFromEnv.default(false),
   AUTH_ALLOW_PUBLIC_REGISTER: booleanFromEnv.default(false),
+  // How a non-admin with no membership in a project is treated there:
+  // `role` falls back to their global role (the historical behaviour),
+  // `strict` gives them no access, so they only see projects they belong to.
+  // Default-project secrets and MCP servers are shared with every project in
+  // `role` only; in `strict` they need an explicit share.
+  PROJECT_ISOLATION: z.enum(["role", "strict"]).default("role"),
   BOOTSTRAP_ADMIN_EMAIL: z.string().email().optional(),
   BOOTSTRAP_ADMIN_PASSWORD: z.string().min(8).optional(),
   OPENAI_API_KEY: z.string().optional(),

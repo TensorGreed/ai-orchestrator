@@ -183,6 +183,7 @@ async function createTestContext(overrides: Partial<AppConfig> = {}): Promise<Te
     SESSION_TTL_HOURS: 24,
     COOKIE_SECURE: false,
     AUTH_ALLOW_PUBLIC_REGISTER: false,
+    PROJECT_ISOLATION: "role",
     BOOTSTRAP_ADMIN_EMAIL: undefined,
     BOOTSTRAP_ADMIN_PASSWORD: undefined,
     OPENAI_API_KEY: undefined,

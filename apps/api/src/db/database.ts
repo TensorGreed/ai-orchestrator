@@ -51,6 +51,7 @@ import {
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
+import { ProjectNotEmptyError } from "./store-errors.js";
 
 type BindParams = unknown[];
 
@@ -3031,6 +3032,8 @@ export class SqliteStore {
       return (row ? toNumber(row.count) : 0) > 0;
     };
 
+    // Read before the row goes: its nodes name its legacy session namespaces.
+    const legacyNamespaces = (this.getWorkflow(id)?.nodes ?? []).map((node) => `${id}:${node.id}`);
     const hadForeignKeysEnabled = this.queryOne<{ enabled: number }>("PRAGMA foreign_keys")?.enabled;
     const foreignKeysWereOn = Number(hadForeignKeysEnabled) === 1;
 
@@ -3059,6 +3062,28 @@ export class SqliteStore {
       if (hasTable("guard_events")) {
         this.exec("DELETE FROM guard_events WHERE workflow_id = ?", [id]);
         this.exec("DELETE FROM guard_bindings WHERE scope = 'workflow' AND scope_id = ?", [id]);
+      }
+
+      // Workflow ids are chosen by the client, so a new workflow can reuse a
+      // deleted one's id. Nothing keyed by the old id may carry over to it:
+      // versions, shares, queue and dead-letter rows, eval runs, elicitations,
+      // and session state under the old workflow's legacy default namespaces
+      // (exactly `<workflowId>:<nodeId>` for its nodes, written before keys
+      // were project-scoped; a prefix match would also hit `<workflowId>:x`).
+      if (hasTable("workflow_versions")) this.exec("DELETE FROM workflow_versions WHERE workflow_id = ?", [id]);
+      if (hasTable("workflow_shares")) this.exec("DELETE FROM workflow_shares WHERE workflow_id = ?", [id]);
+      if (hasTable("execution_queue")) this.exec("DELETE FROM execution_queue WHERE workflow_id = ?", [id]);
+      if (hasTable("execution_queue_dlq")) this.exec("DELETE FROM execution_queue_dlq WHERE workflow_id = ?", [id]);
+      if (hasTable("eval_runs")) {
+        if (hasTable("eval_results")) this.exec("DELETE FROM eval_results WHERE run_id IN (SELECT id FROM eval_runs WHERE workflow_id = ?)", [id]);
+        this.exec("DELETE FROM eval_runs WHERE workflow_id = ?", [id]);
+      }
+      if (hasTable("mcp_elicitations")) this.exec("DELETE FROM mcp_elicitations WHERE workflow_id = ?", [id]);
+      if (legacyNamespaces.length > 0) {
+        const placeholders = legacyNamespaces.map(() => "?").join(", ");
+        for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
+          if (hasTable(table)) this.exec(`DELETE FROM ${table} WHERE namespace IN (${placeholders})`, legacyNamespaces);
+        }
       }
 
       this.exec("DELETE FROM workflows WHERE id = ?", [id]);
@@ -3927,6 +3952,8 @@ export class SqliteStore {
     pageSize?: number;
     status?: string;
     workflowId?: string;
+    /** Only runs of these workflows; an empty list matches nothing. */
+    workflowIds?: string[];
     triggerType?: string;
     startedFrom?: string;
     startedTo?: string;
@@ -3963,6 +3990,14 @@ export class SqliteStore {
     if (input.workflowId) {
       whereParts.push("workflow_id = ?");
       whereParams.push(input.workflowId);
+    }
+    if (input.workflowIds) {
+      if (input.workflowIds.length === 0) {
+        whereParts.push("1 = 0");
+      } else {
+        whereParts.push(`workflow_id IN (${input.workflowIds.map(() => "?").join(", ")})`);
+        whereParams.push(...input.workflowIds);
+      }
     }
     if (input.triggerType) {
       whereParts.push("trigger_type = ?");
@@ -4439,7 +4474,8 @@ export class SqliteStore {
     this.persist();
   }
 
-  markQueueItemFailed(id: string, error: string): void {
+  /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
+  markQueueItemFailed(id: string, error: string, options: { retryable?: boolean } = {}): void {
     const now = new Date().toISOString();
     const row = this.queryOne<ExecutionQueueRow>(
       `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue WHERE id = ?`,
@@ -4452,7 +4488,7 @@ export class SqliteStore {
     const attempts = toNumber(row.attempts) + 1;
     const maxAttempts = toNumber(row.max_attempts);
 
-    if (attempts >= maxAttempts) {
+    if (attempts >= maxAttempts || options.retryable === false) {
       // Move to DLQ
       const dlqId = randomUUID();
       this.exec(
@@ -4559,7 +4595,7 @@ export class SqliteStore {
     };
   }
 
-  listDlqItems(limit = 50): Array<{
+  listDlqItems(limit = 50, workflowIds?: string[]): Array<{
     id: string;
     originalId: string;
     workflowId: string;
@@ -4568,12 +4604,15 @@ export class SqliteStore {
     finalError: string;
     failedAt: string;
   }> {
+    if (workflowIds && workflowIds.length === 0) return [];
+    const scope = workflowIds ? `WHERE workflow_id IN (${workflowIds.map(() => "?").join(", ")})` : "";
     const rows = this.queryAll<ExecutionQueueDlqRow>(
       `SELECT id, original_id, workflow_id, workflow_name, attempts, final_error, failed_at
        FROM execution_queue_dlq
+       ${scope}
        ORDER BY failed_at DESC
        LIMIT ?`,
-      [limit]
+      [...(workflowIds ?? []), limit]
     );
 
     return rows.map((row) => ({
@@ -4701,14 +4740,25 @@ export class SqliteStore {
     }
     const existing = this.getProject(id);
     if (!existing) return false;
-    // Move anything belonging to this project back to the default before delete.
-    this.exec(`UPDATE workflows SET project_id = ?, folder_id = NULL WHERE project_id = ?`, [
-      DEFAULT_PROJECT_ID,
-      id
-    ]);
-    this.exec(`UPDATE secrets SET project_id = ? WHERE project_id = ?`, [DEFAULT_PROJECT_ID, id]);
+    // Never move a project's workflows or secrets into the default project:
+    // that would hand them to everyone who can use the default project.
+    const count = (table: string) => toNumber(this.queryOne<{ count: number }>(`SELECT COUNT(*) as count FROM ${table} WHERE project_id = ?`, [id])?.count ?? 0);
+    const counts = { workflows: count("workflows"), secrets: count("secrets"),
+      knowledgeBases: count("knowledge_bases"),
+      mcpServers: count("mcp_servers"),
+      evalDatasets: count("eval_datasets")
+    };
+    if (Object.values(counts).some((value) => value > 0)) throw new ProjectNotEmptyError(counts);
     this.exec(`DELETE FROM folders WHERE project_id = ?`, [id]);
+    // Variables are project configuration; they must not revive with a re-created id.
+    this.exec(`DELETE FROM variables WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = ?`, [id]);
+    // Memberships, roles and shares of a deleted project must not come back
+    // to life if a project with the same id is created later.
+    this.exec(`DELETE FROM user_project_roles WHERE project_id = ?`, [id]);
+    this.exec(`DELETE FROM custom_roles WHERE project_id = ?`, [id]);
+    this.exec(`DELETE FROM workflow_shares WHERE project_id = ?`, [id]);
+    this.exec(`DELETE FROM secret_shares WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM projects WHERE id = ?`, [id]);
     this.persist();
     return true;
@@ -5120,6 +5170,11 @@ export class SqliteStore {
   // ---------------------------------------------------------------------------
   // Phase 5.2 — Project-level roles
   // ---------------------------------------------------------------------------
+
+  countProjectMemberships(): number {
+    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) as count FROM user_project_roles`);
+    return row ? toNumber(row.count) : 0;
+  }
 
   listProjectMembers(projectId: string): Array<{
     userId: string;
@@ -7121,6 +7176,11 @@ export class SqliteStore {
     }));
   }
 
+  getEvalFixtureDatasetId(id: string): string | null {
+    const row = this.queryOne<{ dataset_id: string }>(`SELECT dataset_id FROM eval_fixtures WHERE id = ?`, [id]);
+    return row ? toString(row.dataset_id) : null;
+  }
+
   deleteEvalFixture(id: string): boolean {
     this.exec(`DELETE FROM eval_fixtures WHERE id = ?`, [id]);
     const row = this.queryOne<{ count: number }>("SELECT changes() as count");
@@ -7168,7 +7228,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  listEvalRuns(options: { datasetId?: string; workflowId?: string; limit?: number } = {}): Array<{
+  listEvalRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; limit?: number } = {}): Array<{
     id: string; datasetId: string; workflowId: string; workflowName: string | null;
     status: string; startedAt: string; completedAt: string | null;
     triggeredBy: string | null; summary: Record<string, unknown> | null; error: string | null;
@@ -7177,6 +7237,11 @@ export class SqliteStore {
     const params: BindParams = [];
     if (options.datasetId) { clauses.push("dataset_id = ?"); params.push(options.datasetId); }
     if (options.workflowId) { clauses.push("workflow_id = ?"); params.push(options.workflowId); }
+    // Project scope: only runs of these workflows (an empty list matches nothing).
+    if (options.workflowIds) {
+      clauses.push(options.workflowIds.length > 0 ? `workflow_id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");
+      params.push(...options.workflowIds);
+    }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const limit = Math.max(1, Math.min(500, options.limit ?? 100));
     const rows = this.queryAll<{
@@ -9386,12 +9451,17 @@ export class SqliteStore {
     ).map(mapMcpCassetteSummary);
   }
 
-  listMcpCassettes(options: { workflowId?: string; projectId?: string; evalRunId?: string; limit?: number; offset?: number } = {}): {
+  listMcpCassettes(options: { workflowId?: string; projectId?: string; evalRunId?: string; workflowIds?: string[]; limit?: number; offset?: number } = {}): {
     items: McpCassetteSummary[];
     total: number;
   } {
     const where: string[] = [];
     const params: Array<string | number> = [];
+    // Project scope: only cassettes of these workflows (an empty list matches nothing).
+    if (options.workflowIds) {
+      where.push(options.workflowIds.length > 0 ? `workflow_id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");
+      params.push(...options.workflowIds);
+    }
     if (options.workflowId) {
       where.push("workflow_id = ?");
       params.push(options.workflowId);

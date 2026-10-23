@@ -71,6 +71,15 @@ const GLOBAL_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   viewer: ["workflow:read", "secret:read"]
 };
 
+/**
+ * The startup warning for strict isolation with no memberships at all: only
+ * admins can see anything until they add members. Null when there is none.
+ */
+export function strictIsolationStartupWarning(isolation: ProjectIsolationMode, membershipCount: number): string | null {
+  if (isolation !== "strict" || membershipCount > 0) return null;
+  return "PROJECT_ISOLATION=strict is on and no user has a project membership: only admins can see anything. Add members (including to the default project) under Projects.";
+}
+
 export function isProjectRole(value: string): value is ProjectRole {
   return value === "project_admin" || value === "editor" || value === "viewer";
 }
@@ -83,8 +92,17 @@ export interface ProjectMembership {
   permissions: Permission[];
 }
 
+/**
+ * `role`: a user with no membership in a project gets their global role
+ * there. `strict`: they get nothing, so only memberships grant access.
+ */
+export type ProjectIsolationMode = "role" | "strict";
+
 export class RbacService {
-  constructor(private readonly store: SqliteStore) {}
+  constructor(
+    private readonly store: SqliteStore,
+    private readonly isolation: ProjectIsolationMode = "role"
+  ) {}
 
   // --- Project memberships -------------------------------------------------
 
@@ -225,13 +243,15 @@ export class RbacService {
    * Rules:
    *  - Global admins always get every permission.
    *  - Otherwise: use the user's explicit project membership if present.
-   *  - Otherwise: fall back to the user's global role mapped to a coarse permission set
-   *    (this preserves backwards-compatible behaviour for users without per-project roles).
+   *  - Otherwise, in `role` isolation: fall back to the user's global role mapped to a coarse
+   *    permission set (backwards-compatible behaviour for users without per-project roles).
+   *  - Otherwise, in `strict` isolation: no permissions.
    */
   effectivePermissions(user: SafeUser, projectId: string): Permission[] {
     if (user.role === "admin") return [...ALL_PERMISSIONS];
     const membership = this.getMembership(user.id, projectId);
     if (membership) return membership.permissions;
+    if (this.isolation === "strict") return [];
     return [...GLOBAL_ROLE_PERMISSIONS[user.role]];
   }
 
@@ -272,10 +292,11 @@ export class RbacService {
     const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
     if (this.can(user, owningProject, permission)) return true;
 
-    // Check if the workflow is shared to any of the user's projects.
+    // Check if the workflow is shared to any of the user's projects. Running
+    // it through an execute share needs execute in that project, not only read.
     const shares = this.store.listWorkflowShares(workflow.id);
     for (const share of shares) {
-      if (!this.can(user, share.projectId, "workflow:read")) continue;
+      if (!this.can(user, share.projectId, permission === "workflow:execute" ? "workflow:execute" : "workflow:read")) continue;
       if (permission === "workflow:read") return true;
       if (permission === "workflow:execute" && share.accessLevel === "execute") return true;
     }

@@ -37,6 +37,7 @@ import {
 } from "@ai-orchestrator/mcp-sdk";
 import type { McpServerRecord, SqliteStore } from "./db/database.js";
 import { collectRegistryUsages } from "./mcp-control-plane-routes.js";
+import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { acceptedSnapshotFor, buildSnapshotFile } from "./services/mcp-cassette-service.js";
@@ -52,6 +53,8 @@ export interface McpTestingDeps {
   loadMcpToolPolicy: () => { rules: McpToolPolicyRule[]; classifications: McpToolClassificationOverride[] };
   resolveToolPolicySubject: (workflowId: string) => McpToolPolicySubject;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** Project scope: cassettes follow the workflow they were recorded for. */
+  runAccess: RunAccess;
   audit: (event: AuditEventInput) => void;
   redact: (value: string) => string;
 }
@@ -154,6 +157,7 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
       workflowId: str(query.workflowId),
       projectId: str(query.projectId),
       evalRunId: str(query.evalRunId),
+      workflowIds: deps.runAccess.readableWorkflowIds(user) ?? undefined,
       ...(Number.isFinite(limit) ? { limit } : {}),
       ...(Number.isFinite(offset) ? { offset } : {})
     });
@@ -163,9 +167,10 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
     const cassette = store.getMcpCassette(request.params.id);
-    if (!cassette) {
-      reply.code(404);
-      return { error: "Cassette not found" };
+    const access = deps.runAccess.run(user, cassette && { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:read", "Cassette");
+    if (!access.ok) {
+      reply.code(access.status);
+      return { error: access.error };
     }
     return { cassette };
   });
@@ -174,9 +179,10 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
     const record = store.getMcpCassette(request.params.id);
-    if (!record) {
-      reply.code(404);
-      return { error: "Cassette not found" };
+    const access = deps.runAccess.run(user, record && { id: record.id, workflowId: record.workflowId ?? "" }, "workflow:read", "Cassette");
+    if (!access.ok || !record) {
+      reply.code(access.ok ? 404 : access.status);
+      return { error: access.ok ? "Cassette not found" : access.error };
     }
     reply.header("content-disposition", `attachment; filename="${record.id}.json"`);
     return record.cassette;

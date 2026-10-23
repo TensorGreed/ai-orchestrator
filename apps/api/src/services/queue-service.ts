@@ -12,6 +12,8 @@ export interface QueuedExecutionPayload {
   sessionId?: string;
   triggerType?: string;
   triggeredBy?: string;
+  /** The signed-in user who enqueued the job; their access is checked again when it runs. */
+  enqueuedByUserId?: string;
   executionTimeoutMs?: number;
   customData?: Record<string, unknown>;
 }
@@ -32,6 +34,18 @@ export function resolveStuckJobTimeoutMs(stuckJobTimeoutMs: number, executionTim
 }
 
 export type ExecutionHandler = (payload: QueuedExecutionPayload) => Promise<void>;
+
+/**
+ * A job that can never succeed by retrying (for example, the user who queued
+ * it may no longer run the workflow). It goes straight to the dead-letter
+ * queue instead of spending its remaining attempts.
+ */
+export class NonRetryableQueueError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonRetryableQueueError";
+  }
+}
 
 export class QueueService {
   private readonly store: SqliteStore;
@@ -131,7 +145,7 @@ export class QueueService {
     return this.store.getQueueDepth();
   }
 
-  listDlq(limit?: number): Array<{
+  listDlq(limit?: number, workflowIds?: string[]): Array<{
     id: string;
     originalId: string;
     workflowId: string;
@@ -140,7 +154,7 @@ export class QueueService {
     finalError: string;
     failedAt: string;
   }> {
-    return this.store.listDlqItems(limit);
+    return this.store.listDlqItems(limit, workflowIds);
   }
 
   private poll(): void {
@@ -200,7 +214,7 @@ export class QueueService {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[queue] Job ${item.id} failed: ${errorMessage}`);
       try {
-        this.store.markQueueItemFailed(item.id, errorMessage);
+        this.store.markQueueItemFailed(item.id, errorMessage, { retryable: !(error instanceof NonRetryableQueueError) });
       } catch (persistError) {
         console.error("[queue] Failed to mark item as failed", persistError);
       }

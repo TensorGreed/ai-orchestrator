@@ -7,9 +7,10 @@
  *   DELETE /api/replay/recordings/:id          (builder)
  *   POST   /api/replay/recordings/:id/replay   replay it against the draft or a saved version and diff (builder)
  *
- * Access follows the workflow: reading needs `workflow:read` on it, saving
- * and deleting need `workflow:write`, replaying needs `workflow:execute`
- * (admins always pass). Golden runs of a deleted workflow are deleted with it.
+ * Access follows the workflow (see run-access.ts): reading needs
+ * `workflow:read` on it, saving and deleting need `workflow:write`, replaying
+ * needs `workflow:execute` (admins always pass). A user who cannot read the
+ * workflow gets 404. Golden runs of a deleted workflow are deleted with it.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -19,8 +20,7 @@ import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { ReplayRecordingError, ReplayRecordingService } from "./services/replay-recording-service.js";
 import { ReplayRunError, type ReplayService } from "./services/replay-service.js";
-
-type WorkflowPermission = "workflow:read" | "workflow:write" | "workflow:execute";
+import type { RunAccess, RunAccessDenial } from "./run-access.js";
 
 export interface ReplayRoutesDeps {
   app: FastifyInstance;
@@ -28,7 +28,7 @@ export interface ReplayRoutesDeps {
   recordings: ReplayRecordingService;
   replays: ReplayService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
-  canAccessWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }, permission: WorkflowPermission) => boolean;
+  runAccess: RunAccess;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
 }
 
@@ -42,20 +42,11 @@ const RECORDING_STATUS: Record<ReplayRecordingError["code"], number> = {
 };
 
 export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
-  const { app, store, recordings, replays, requireRole } = deps;
+  const { app, store, recordings, replays, requireRole, runAccess } = deps;
 
-  /** The workflow a golden run or execution belongs to, if the user may act on it this way. */
-  const workflowAccess = (user: SafeUser, workflowId: string, permission: WorkflowPermission): "ok" | "forbidden" | "missing" => {
-    const workflow = store.getWorkflow(workflowId);
-    if (user.role === "admin") return "ok";
-    if (!workflow) return "missing";
-    return deps.canAccessWorkflow(user, workflow, permission) ? "ok" : "forbidden";
-  };
-
-  /** Non-admins get the same answer whether the workflow is not theirs or no longer exists. */
-  const denyAccess = (reply: FastifyReply, what: string) => {
-    reply.code(403);
-    return { error: `Insufficient permissions for this ${what}` };
+  const deny = (reply: FastifyReply, denial: RunAccessDenial) => {
+    reply.code(denial.status);
+    return { error: denial.error };
   };
 
   app.post<{ Body: unknown }>("/api/replay/recordings", async (request, reply) => {
@@ -66,13 +57,9 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
       reply.code(400);
       return { error: "Invalid golden run", details: parsed.error.issues };
     }
-    const history = store.getExecutionHistory(parsed.data.executionId);
-    if (!history) {
-      reply.code(404);
-      return { error: "Execution not found" };
-    }
-    const access = workflowAccess(user, history.workflowId, "workflow:write");
-    if (access !== "ok") return denyAccess(reply, "execution");
+    const access = runAccess.run(user, store.getExecutionHistory(parsed.data.executionId), "workflow:write");
+    if (!access.ok) return deny(reply, access);
+    const history = access.run;
     try {
       const recording = recordings.create(parsed.data, user.email);
       deps.audit(request, user, {
@@ -102,17 +89,13 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     const limit = Number(request.query.limit);
     const offset = Number(request.query.offset);
     const paging = { limit: Number.isFinite(limit) ? limit : 50, offset: Number.isFinite(offset) ? offset : 0 };
+    // Admins also see golden runs of a workflow id that is gone; everyone else only readable workflows.
+    const readable = runAccess.readableWorkflowIds(user);
     if (workflowId) {
-      const access = workflowAccess(user, workflowId, "workflow:read");
-      if (access !== "ok") return denyAccess(reply, "workflow");
+      if (readable !== null && !readable.includes(workflowId)) return { items: [], total: 0 };
       return store.listReplayRecordings({ workflowId, ...paging });
     }
-    if (user.role === "admin") return store.listReplayRecordings(paging);
-    const readable = store
-      .listWorkflows()
-      .filter((workflow) => deps.canAccessWorkflow(user, { id: workflow.id, projectId: workflow.projectId ?? undefined }, "workflow:read"))
-      .map((workflow) => workflow.id);
-    return store.listReplayRecordings({ workflowIds: readable, ...paging });
+    return store.listReplayRecordings(readable === null ? paging : { workflowIds: readable, ...paging });
   });
 
   app.get<{ Params: { id: string } }>("/api/replay/recordings/:id", async (request, reply) => {
@@ -123,8 +106,8 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
       reply.code(404);
       return { error: "Golden run not found" };
     }
-    const access = workflowAccess(user, record.workflowId, "workflow:read");
-    if (access !== "ok") return denyAccess(reply, "golden run");
+    const access = runAccess.run(user, record, "workflow:read", "Golden run");
+    if (!access.ok) return deny(reply, access);
     return { recording: ReplayRecordingService.detail(record) };
   });
 
@@ -136,8 +119,8 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
       reply.code(404);
       return { error: "Golden run not found" };
     }
-    const access = workflowAccess(user, summary.workflowId, "workflow:write");
-    if (access !== "ok") return denyAccess(reply, "golden run");
+    const access = runAccess.run(user, summary, "workflow:write", "Golden run");
+    if (!access.ok) return deny(reply, access);
     store.deleteReplayRecording(summary.id);
     deps.audit(request, user, {
       eventType: "replay.recording.deleted",
@@ -164,8 +147,8 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
       reply.code(404);
       return { error: "Golden run not found" };
     }
-    const access = workflowAccess(user, record.workflowId, "workflow:execute");
-    if (access !== "ok") return denyAccess(reply, "golden run");
+    const access = runAccess.run(user, record, "workflow:execute", "Golden run");
+    if (!access.ok) return deny(reply, access);
     try {
       const result = await replays.replay(record, parsed.data, user);
       deps.audit(request, user, {

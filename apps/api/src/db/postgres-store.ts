@@ -4,6 +4,7 @@ import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@
 import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
 import { runMigrations } from "./migrations.js";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
+import { ProjectNotEmptyError } from "./store-errors.js";
 
 export interface PostgresStoreConfig {
   host: string;
@@ -252,8 +253,20 @@ export class PostgresStore {
   }
 
   async deleteWorkflow(id: string): Promise<boolean> {
+    // Read before the row goes: its nodes name its legacy session namespaces.
+    const legacyNamespaces = ((await this.getWorkflow(id))?.nodes ?? []).map((node) => `${id}:${node.id}`);
     await this.execute(`DELETE FROM execution_history WHERE workflow_id = $1`, [id]);
     await this.execute(`DELETE FROM workflow_executions WHERE workflow_id = $1`, [id]);
+    // A re-created workflow with the same id must not inherit the old one's
+    // queue rows or its legacy default-namespace session state (exactly
+    // `<workflowId>:<nodeId>` for its nodes).
+    await this.execute(`DELETE FROM execution_queue WHERE workflow_id = $1`, [id]);
+    await this.execute(`DELETE FROM execution_queue_dlq WHERE workflow_id = $1`, [id]);
+    if (legacyNamespaces.length > 0) {
+      for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
+        await this.execute(`DELETE FROM ${table} WHERE namespace = ANY($1::text[])`, [legacyNamespaces]);
+      }
+    }
     const result = await this.pool.query(`DELETE FROM workflows WHERE id = $1`, [id]);
     return (result.rowCount ?? 0) > 0;
   }
@@ -444,12 +457,22 @@ export class PostgresStore {
     }
     const existing = await this.getProject(id);
     if (!existing) return false;
-    await this.execute(`UPDATE workflows SET project_id = $1, folder_id = NULL WHERE project_id = $2`, [
-      DEFAULT_PROJECT_ID,
-      id
-    ]);
-    await this.execute(`UPDATE secrets SET project_id = $1 WHERE project_id = $2`, [DEFAULT_PROJECT_ID, id]);
+    // Never move a project's workflows or secrets into the default project.
+    const count = async (table: string) =>
+      toNum((await this.queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM ${table} WHERE project_id = $1`, [id]))?.count ?? 0);
+    const counts = { workflows: await count("workflows"), secrets: await count("secrets"),
+      knowledgeBases: await count("knowledge_bases"),
+      mcpServers: await count("mcp_servers"),
+      evalDatasets: await count("eval_datasets")
+    };
+    if (Object.values(counts).some((value) => value > 0)) throw new ProjectNotEmptyError(counts);
     await this.execute(`DELETE FROM folders WHERE project_id = $1`, [id]);
+    await this.execute(`DELETE FROM variables WHERE project_id = $1`, [id]);
+    await this.execute(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = $1`, [id]);
+    // Memberships, roles and shares must not revive with a re-created id.
+    for (const table of ["user_project_roles", "custom_roles", "workflow_shares", "secret_shares"]) {
+      await this.execute(`DELETE FROM ${table} WHERE project_id = $1`, [id]);
+    }
     await this.execute(`DELETE FROM projects WHERE id = $1`, [id]);
     return true;
   }
@@ -1258,6 +1281,7 @@ export class PostgresStore {
     pageSize?: number;
     status?: string;
     workflowId?: string;
+    workflowIds?: string[];
     triggerType?: string;
     startedFrom?: string;
     startedTo?: string;
@@ -1295,6 +1319,14 @@ export class PostgresStore {
     if (input.workflowId) {
       whereParts.push(`workflow_id = $${paramIdx++}`);
       whereParams.push(input.workflowId);
+    }
+    if (input.workflowIds) {
+      if (input.workflowIds.length === 0) {
+        whereParts.push("1 = 0");
+      } else {
+        whereParts.push(`workflow_id IN (${input.workflowIds.map(() => `$${paramIdx++}`).join(", ")})`);
+        whereParams.push(...input.workflowIds);
+      }
     }
     if (input.triggerType) {
       whereParts.push(`trigger_type = $${paramIdx++}`);
@@ -1714,7 +1746,8 @@ export class PostgresStore {
     );
   }
 
-  async markQueueItemFailed(id: string, error: string): Promise<void> {
+  /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
+  async markQueueItemFailed(id: string, error: string, options: { retryable?: boolean } = {}): Promise<void> {
     const now = new Date().toISOString();
     const row = await this.queryOne<{
       id: string;
@@ -1732,7 +1765,7 @@ export class PostgresStore {
     const attempts = toNum(row.attempts) + 1;
     const maxAttempts = toNum(row.max_attempts);
 
-    if (attempts >= maxAttempts) {
+    if (attempts >= maxAttempts || options.retryable === false) {
       const dlqId = randomUUID();
       await this.execute(
         `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)
@@ -1822,7 +1855,7 @@ export class PostgresStore {
     };
   }
 
-  async listDlqItems(limit = 50): Promise<Array<{
+  async listDlqItems(limit = 50, workflowIds?: string[]): Promise<Array<{
     id: string;
     originalId: string;
     workflowId: string;
@@ -1831,6 +1864,8 @@ export class PostgresStore {
     finalError: string;
     failedAt: string;
   }>> {
+    if (workflowIds && workflowIds.length === 0) return [];
+    const scope = workflowIds ? `WHERE workflow_id IN (${workflowIds.map((_, index) => `$${index + 1}`).join(", ")})` : "";
     const rows = await this.query<{
       id: string;
       original_id: string;
@@ -1842,9 +1877,10 @@ export class PostgresStore {
     }>(
       `SELECT id, original_id, workflow_id, workflow_name, attempts, final_error, failed_at
        FROM execution_queue_dlq
+       ${scope}
        ORDER BY failed_at DESC
-       LIMIT $1`,
-      [limit]
+       LIMIT $${(workflowIds?.length ?? 0) + 1}`,
+      [...(workflowIds ?? []), limit]
     );
     return rows.map((row) => ({
       id: toStr(row.id),

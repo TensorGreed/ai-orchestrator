@@ -9,8 +9,8 @@
  *
  * Who may read a manifest or export a bundle: anyone who may read the
  * execution (viewer and up) and the workflow it belongs to; runs of a
- * workflow that no longer exists are admin-only. Runs still in progress
- * are refused with 409.
+ * workflow that no longer exists are admin-only, and runs of a workflow the
+ * user cannot read answer 404. Runs still in progress are refused with 409.
  */
 
 import { Readable } from "node:stream";
@@ -20,6 +20,7 @@ import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { AuditBundleError, type AuditBundleService } from "./services/audit-bundle-service.js";
 import { AuditSigningKeyError, type AuditSigningService } from "./services/audit-signing-service.js";
+import type { RunAccess } from "./run-access.js";
 
 export interface AuditBundleRoutesDeps {
   app: FastifyInstance;
@@ -27,7 +28,7 @@ export interface AuditBundleRoutesDeps {
   bundles: AuditBundleService;
   signing: AuditSigningService;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
-  canAccessWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }, permission: "workflow:read" | "workflow:write") => boolean;
+  runAccess: RunAccess;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
 }
 
@@ -40,16 +41,6 @@ const STATUS_BY_CODE: Record<AuditBundleError["code"], number> = {
 
 export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
   const { app, store, bundles, signing, requireRole } = deps;
-
-  /** The execution's workflow must be readable by the user; a deleted workflow's runs are admin-only. */
-  const canReadExecution = (user: SafeUser, executionId: string): "ok" | "not_found" | "forbidden" => {
-    const history = store.getExecutionHistory(executionId);
-    if (!history) return "not_found";
-    if (user.role === "admin") return "ok";
-    const workflow = store.getWorkflow(history.workflowId);
-    if (!workflow) return "forbidden";
-    return deps.canAccessWorkflow(user, workflow, "workflow:read") ? "ok" : "forbidden";
-  };
 
   const fail = (reply: FastifyReply, error: unknown) => {
     if (error instanceof AuditBundleError) {
@@ -66,13 +57,10 @@ export function registerAuditBundleRoutes(deps: AuditBundleRoutesDeps): void {
   const guard = async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply): Promise<SafeUser | null> => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return null;
-    const access = canReadExecution(user, request.params.id);
-    if (access === "not_found") {
-      reply.code(404).send({ error: "Execution not found" });
-      return null;
-    }
-    if (access === "forbidden") {
-      reply.code(403).send({ error: "Insufficient permissions for this execution" });
+    // Readable workflow required (404 otherwise); a deleted workflow's runs are admin-only.
+    const access = deps.runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:read");
+    if (!access.ok) {
+      reply.code(access.status).send({ error: access.error });
       return null;
     }
     return user;

@@ -3715,7 +3715,7 @@ function StudioApp() {
         return;
       }
       const target = projectById.get(projectId);
-      if (!window.confirm(`Delete project '${target?.name ?? projectId}'? Its workflows/secrets move back to the default project.`)) {
+      if (!window.confirm(`Delete project '${target?.name ?? projectId}'? It must have no workflows, secrets, knowledge bases, MCP servers or eval datasets left; its variables, members and shares are removed. its members and shares are removed.`)) {
         return;
       }
       try {
@@ -4340,10 +4340,12 @@ function StudioApp() {
       setError(null);
       setSecretMessage(null);
       setSecretWarnings([]);
+      // Saved in the project the Secrets page is showing.
       const created = await createSecret({
         name: secretName.trim(),
         provider: secretPayload.provider,
-        value: secretPayload.value
+        value: secretPayload.value,
+        ...(activeProjectId ? { projectId: activeProjectId } : {})
       });
       setSecretWarnings(created.warnings ?? []);
       await refreshSecrets();
@@ -4358,6 +4360,7 @@ function StudioApp() {
       setSecretBusy(false);
     }
   }, [
+    activeProjectId,
     handleApiError,
     refreshSecrets,
     secretConnectionString,

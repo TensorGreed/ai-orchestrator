@@ -36,6 +36,7 @@ import type { z } from "zod";
 import type { AppConfig } from "./config.js";
 import type { SqliteStore } from "./db/database.js";
 import type { AuditEventInput } from "./services/audit-service.js";
+import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
 import { withDelegatedUser } from "@ai-orchestrator/mcp-sdk";
@@ -113,6 +114,8 @@ export interface McpGatewayDeps {
   redact: (value: string) => string;
   resolveRegisteredMcpServer: (registryServerId: string) => MCPServerConfig;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** Project scope: toolset candidates only list workflows the user can read. */
+  runAccess: RunAccess;
   /** Audit with the signed-in admin as actor. */
   auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
   /** Audit with an MCP client as actor. */
@@ -1096,7 +1099,10 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     const workflows: Array<{ id: string; name: string; projectId: string | null; tools: string[] }> = [];
+    const readable = deps.runAccess.readableWorkflowIds(user);
+    const readableIds = readable && new Set(readable);
     for (const summary of store.listWorkflows()) {
+      if (readableIds && !readableIds.has(summary.id)) continue;
       const workflow = store.getWorkflow(summary.id);
       if (!workflow) continue;
       const tools = workflow.nodes
