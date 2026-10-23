@@ -3715,7 +3715,7 @@ function StudioApp() {
         return;
       }
       const target = projectById.get(projectId);
-      if (!window.confirm(`Delete project '${target?.name ?? projectId}'? It must have no workflows or secrets left; its members and shares are removed.`)) {
+      if (!window.confirm(`Delete project '${target?.name ?? projectId}'? It must have no workflows, secrets, knowledge bases, MCP servers or eval datasets left; its variables, members and shares are removed. its members and shares are removed.`)) {
         return;
       }
       try {

@@ -4743,9 +4743,15 @@ export class SqliteStore {
     // Never move a project's workflows or secrets into the default project:
     // that would hand them to everyone who can use the default project.
     const count = (table: string) => toNumber(this.queryOne<{ count: number }>(`SELECT COUNT(*) as count FROM ${table} WHERE project_id = ?`, [id])?.count ?? 0);
-    const counts = { workflows: count("workflows"), secrets: count("secrets") };
-    if (counts.workflows > 0 || counts.secrets > 0) throw new ProjectNotEmptyError(counts);
+    const counts = { workflows: count("workflows"), secrets: count("secrets"),
+      knowledgeBases: count("knowledge_bases"),
+      mcpServers: count("mcp_servers"),
+      evalDatasets: count("eval_datasets")
+    };
+    if (Object.values(counts).some((value) => value > 0)) throw new ProjectNotEmptyError(counts);
     this.exec(`DELETE FROM folders WHERE project_id = ?`, [id]);
+    // Variables are project configuration; they must not revive with a re-created id.
+    this.exec(`DELETE FROM variables WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = ?`, [id]);
     // Memberships, roles and shares of a deleted project must not come back
     // to life if a project with the same id is created later.

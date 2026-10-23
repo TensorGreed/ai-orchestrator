@@ -460,9 +460,14 @@ export class PostgresStore {
     // Never move a project's workflows or secrets into the default project.
     const count = async (table: string) =>
       toNum((await this.queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM ${table} WHERE project_id = $1`, [id]))?.count ?? 0);
-    const counts = { workflows: await count("workflows"), secrets: await count("secrets") };
-    if (counts.workflows > 0 || counts.secrets > 0) throw new ProjectNotEmptyError(counts);
+    const counts = { workflows: await count("workflows"), secrets: await count("secrets"),
+      knowledgeBases: await count("knowledge_bases"),
+      mcpServers: await count("mcp_servers"),
+      evalDatasets: await count("eval_datasets")
+    };
+    if (Object.values(counts).some((value) => value > 0)) throw new ProjectNotEmptyError(counts);
     await this.execute(`DELETE FROM folders WHERE project_id = $1`, [id]);
+    await this.execute(`DELETE FROM variables WHERE project_id = $1`, [id]);
     await this.execute(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = $1`, [id]);
     // Memberships, roles and shares must not revive with a re-created id.
     for (const table of ["user_project_roles", "custom_roles", "workflow_shares", "secret_shares"]) {
