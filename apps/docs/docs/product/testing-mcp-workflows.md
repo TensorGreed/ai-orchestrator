@@ -48,6 +48,8 @@ Cassettes are capped by `MCP_CASSETTE_MAX_BYTES` (default 5 MiB) and `MCP_CASSET
 
 Click the badge on the Runs page to open the cassette: every call in order with its server, duration and an error tag when it failed. Open a call to see its arguments and result. Discovery calls (`initialize`, `tools/list`) are hidden until you tick **Show discovery calls**. **Download** saves the cassette file for `l2m mcp mock --cassette`; admins can delete it.
 
+The model tape and the memory seed hold model prompts and answers and earlier sessions' chat history. They are scrubbed for secrets, not for personal data, so only users who may edit the workflow (`workflow:write`) see them: for a user who may only read it, `GET /api/mcp/cassettes/:id` leaves out each tape entry's `request` and `response` and the memory seed (the tape keeps one line per call: node, provider, model, timing), and says so in `cassette.omitted`. Downloading a cassette (`GET /api/mcp/cassettes/:id/export`) needs `workflow:write`.
+
 ### Replaying a run
 
 **Replay** on the Runs page (or in the cassette viewer) runs the execution again with the same input, answering MCP calls from its cassette, and opens the result in the editor. Through the API: `POST /api/executions/:id/replay` with `{ "mode": "strict" | "lenient", "cassetteId"? }`. The replay is a new execution with trigger type `mcp_replay`; its result carries `mcpReplay`:

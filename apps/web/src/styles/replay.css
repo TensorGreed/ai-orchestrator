@@ -1074,6 +1074,10 @@ button.evals-row:focus-visible {
   background: var(--bg-elev-2);
 }
 
+.replay-estimate-numbers .is-over {
+  color: var(--err);
+}
+
 .replay-estimate-numbers {
   display: flex;
   flex-wrap: wrap;

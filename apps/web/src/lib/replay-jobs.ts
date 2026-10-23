@@ -4,7 +4,7 @@ import {
   LLM_JUDGE_VOTES_MAX,
   REPLAY_IGNORE_PATHS_MAX,
   REPLAY_REPEATS_MAX,
-  replayNodeClass,
+  replayLiveReadRefusal,
   type EvalRunView,
   type ReplayAggregateRule,
   type ReplayCandidateOverrides,
@@ -47,6 +47,8 @@ export interface ReplayModelOverrideRow {
   nodeId: string;
   provider: string;
   model: string;
+  /** The secret an LLM Call node uses after a provider switch (by reference; required when the node has its own key or base URL). */
+  secretId?: string;
 }
 
 export interface ReplayCandidateFile {
@@ -237,7 +239,8 @@ export function overridesFromForm(form: ReplayJobForm): { ok: true; overrides: R
     if (!model && !provider && !nodeId) continue;
     if (!model) return { ok: false, error: "Each model override needs a model." };
     if (!nodeId && !provider) return { ok: false, error: "A model override needs a node or a provider." };
-    models.push({ ...(nodeId ? { nodeId } : {}), ...(provider ? { provider } : {}), model });
+    const secretId = row.secretId?.trim() ?? "";
+    models.push({ ...(nodeId ? { nodeId } : {}), ...(provider ? { provider } : {}), model, ...(secretId ? { secretRef: { secretId } } : {}) });
   }
   const version = optionalNumber(form.guardProfileVersion, "Guard profile version", { min: 1, integer: true });
   if (!version.ok) return version;
@@ -287,10 +290,22 @@ export function modelNodesOf(workflow: Pick<Workflow, "nodes" | "edges"> | null)
   return out;
 }
 
-/** Nodes that read external data and may run live in a replay (never writes). */
+/**
+ * Nodes that may run live in a replay: only the pure reads on the shared
+ * allow-list (`REPLAY_LIVE_READ_POLICY`), never triggers, browsers, raw
+ * queries or writes. The server checks the same list.
+ */
 export function readNodesOf(workflow: Pick<Workflow, "nodes"> | null): Array<{ id: string; name: string }> {
   if (!workflow) return [];
-  return workflow.nodes.filter((node) => replayNodeClass(node) === "read").map((node) => ({ id: node.id, name: node.name || node.id }));
+  return workflow.nodes.filter((node) => replayLiveReadRefusal(node) === null).map((node) => ({ id: node.id, name: node.name || node.id }));
+}
+
+/** Phase 15.3 — whether a job counts as release proof, and why not, for the job page. */
+export function releaseProofLine(candidate: ReplayJobCandidate | null): { eligible: boolean; text: string; reasons: string[] } | null {
+  if (!candidate) return null;
+  if (candidate.releaseEligible === true) return { eligible: true, text: "Counts as release proof for this hash.", reasons: [] };
+  const reasons = candidate.releaseIneligibleReasons ?? [];
+  return { eligible: false, text: "Not release proof.", reasons: reasons.length > 0 ? reasons : ["This job was made before release proof was recorded."] };
 }
 
 /** `draft`, `v3` or `file: name`. */

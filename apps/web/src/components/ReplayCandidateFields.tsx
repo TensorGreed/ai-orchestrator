@@ -24,6 +24,8 @@ interface ReplayCandidateFieldsProps {
   versions: WorkflowVersionSummary[];
   form: ReplayJobForm;
   update: (patch: Partial<ReplayJobForm>) => void;
+  /** Secrets the user may pick for a model override that switches provider (by reference only). */
+  secrets?: Array<{ id: string; name: string; provider: string }>;
 }
 
 interface Option {
@@ -43,7 +45,7 @@ function readText(file: Blob): Promise<string> {
   });
 }
 
-export function ReplayCandidateFields({ workflowId, projectId, versions, form, update }: ReplayCandidateFieldsProps) {
+export function ReplayCandidateFields({ workflowId, projectId, versions, form, update, secrets = [] }: ReplayCandidateFieldsProps) {
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [profiles, setProfiles] = useState<Array<Option & { latestVersion: number }>>([]);
   const [servers, setServers] = useState<Option[]>([]);
@@ -157,6 +159,21 @@ export function ReplayCandidateFields({ workflowId, projectId, versions, form, u
               </select>
               <input aria-label={`Model override ${index + 1} provider`} placeholder={row.nodeId ? "Same provider" : "Provider id"} value={row.provider} onChange={(event) => setRow(index, { provider: event.target.value })} />
               <input aria-label={`Model override ${index + 1} model`} placeholder="Model" value={row.model} onChange={(event) => setRow(index, { model: event.target.value })} />
+              {row.nodeId && row.provider.trim() && (
+                <select
+                  aria-label={`Model override ${index + 1} secret`}
+                  title="A node with its own key or base URL needs the secret to use with the new provider; its old key is never sent to another provider."
+                  value={row.secretId ?? ""}
+                  onChange={(event) => setRow(index, { secretId: event.target.value })}
+                >
+                  <option value="">Node's own credentials</option>
+                  {secrets.map((secret) => (
+                    <option key={secret.id} value={secret.id}>
+                      {secret.name} · {secret.provider}
+                    </option>
+                  ))}
+                </select>
+              )}
               <button type="button" className="pg-btn ghost small" aria-label={`Remove model override ${index + 1}`} onClick={() => update({ modelOverrides: form.modelOverrides.filter((_, at) => at !== index) })}>
                 Remove
               </button>
@@ -227,7 +244,9 @@ export function ReplayCandidateFields({ workflowId, projectId, versions, form, u
         {readNodes.length > 0 && (
           <div className="replay-override-block">
             <span className="pg-eyebrow">Read live</span>
-            <p className="golden-note">These nodes read data; checked ones read it live instead of the golden run's answer. Nodes that write are never run live.</p>
+            <p className="golden-note">
+              These nodes only read data; checked ones read it live instead of the golden run's answer. Triggers, browsers, raw queries and nodes that write are never run live. A job with live reads is not release proof.
+            </p>
             {readNodes.map((node) => (
               <label key={node.id} className="evals-check">
                 <input
@@ -295,6 +314,12 @@ export function ReplayEstimatePanel({ estimate }: { estimate: ReplayJobEstimate 
           {formatUsd(estimate.estimatedCostUsd)}
           {estimate.costUnknown ? "+" : ""}
         </span>
+        {estimate.executions !== undefined && (
+          <span className={estimate.maxExecutions !== undefined && estimate.executions > estimate.maxExecutions ? "is-over" : undefined}>
+            <strong>{estimate.executions}</strong> execution{estimate.executions === 1 ? "" : "s"}
+            {estimate.maxExecutions !== undefined ? ` of ${estimate.maxExecutions} allowed` : ""}
+          </span>
+        )}
       </p>
       {estimate.warnings.map((warning) => (
         <div key={warning} className="golden-note is-warn">

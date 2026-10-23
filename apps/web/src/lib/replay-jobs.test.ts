@@ -15,6 +15,7 @@ import {
   parseCandidateFile,
   parseIgnorePaths,
   readNodesOf,
+  releaseProofLine,
   shortHash,
   statusTone,
   type ReplayJobForm
@@ -249,5 +250,42 @@ describe("replay candidates (Phase 15.3)", () => {
     ).toEqual(["Model for every openai node: gpt-5", "Model on n: anthropic/c", "Guard profile p (latest)", "MCP s: live reads only", "Live reads: a, b"]);
     expect(overrideLines({ kind: "draft", version: null, workflowHash: "h" })).toEqual([]);
     expect(comparisonLabel({ mcpMode: "strict", maxCostUsd: 5 })).toBe("live models · vs recording");
+  });
+
+  it("offers only allow-listed reads for live reads: never triggers, browsers or non-GET requests", () => {
+    const reads = {
+      ...workflow,
+      nodes: [
+        ...workflow.nodes,
+        { id: "redis", type: "redis_trigger", name: "Queue", position: { x: 0, y: 0 }, config: {} },
+        { id: "pg", type: "postgres_trigger", name: "Poll", position: { x: 0, y: 0 }, config: {} },
+        { id: "browse", type: "web_browse", name: "Browse", position: { x: 0, y: 0 }, config: {} },
+        { id: "pdf", type: "pdf_output", name: "PDF", position: { x: 0, y: 0 }, config: { renderMode: "html" } },
+        { id: "post", type: "http_request", name: "Post", position: { x: 0, y: 0 }, config: { method: "POST" } },
+        { id: "get", type: "http_request", name: "Get", position: { x: 0, y: 0 }, config: { method: "GET" } }
+      ]
+    } as Workflow;
+    expect(readNodesOf(reads)).toEqual([
+      { id: "sheet", name: "Sheet" },
+      { id: "get", name: "Get" }
+    ]);
+  });
+
+  it("sends a model override's secret by reference", () => {
+    const result = buildReplayJobRequest(
+      ["set_1"],
+      form((draft) => {
+        draft.modelOverrides = [{ nodeId: "model", provider: "anthropic", model: "claude-sonnet", secretId: "sec_1" }];
+      })
+    );
+    expect(result.ok && result.request.overrides?.models).toEqual([{ nodeId: "model", provider: "anthropic", model: "claude-sonnet", secretRef: { secretId: "sec_1" } }]);
+  });
+
+  it("says whether a job is release proof, and why not", () => {
+    expect(releaseProofLine(null)).toBeNull();
+    expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h", releaseEligible: true, releaseIneligibleReasons: [] })).toEqual({ eligible: true, text: "Counts as release proof for this hash.", reasons: [] });
+    expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h", releaseEligible: false, releaseIneligibleReasons: ["Lenient"] })).toMatchObject({ eligible: false, reasons: ["Lenient"] });
+    // Jobs from before the field: not proof.
+    expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h" })!.eligible).toBe(false);
   });
 });

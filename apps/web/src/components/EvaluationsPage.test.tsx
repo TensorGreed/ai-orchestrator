@@ -302,7 +302,9 @@ describe("EvaluationsPage — golden sets", () => {
       modelCallsEstimate: 6,
       estimatedCostUsd: 0.012,
       costUnknown: true,
-      warnings: ["Some models have no price in the price table: the estimate leaves them out."]
+      warnings: ["Some models have no price in the price table: the estimate leaves them out."],
+      executions: 6,
+      maxExecutions: 500
     });
     const user = renderPage();
     await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
@@ -327,6 +329,7 @@ describe("EvaluationsPage — golden sets", () => {
     expect(estimate).toHaveTextContent("6 model calls");
     expect(estimate).toHaveTextContent("$0.012+");
     expect(estimate).toHaveTextContent("no price in the price table");
+    expect(estimate).toHaveTextContent("6 executions of 500 allowed");
     const expected = {
       datasetIds: ["set_1"],
       draft: true,
@@ -409,8 +412,19 @@ describe("EvaluationsPage — replay jobs", () => {
 
   it("shows a job's candidate overrides, comparison and each repeat of a case", async () => {
     const candidateJob = job({
-      candidate: { kind: "inline", version: null, workflowHash: "beefbeefbeef0000", baseHash: "aaaa", name: "Triage v2", overrides: { models: [{ nodeId: "agent_1", model: "gpt-5-mini" }], guardProfile: { profileId: "strict", version: 2 } } },
-      options: { mcpMode: "strict", maxCostUsd: 5, models: "replay", compare: "baseline_rerun", repeats: 3, aggregate: "majority" }
+      candidate: {
+        kind: "inline",
+        version: null,
+        workflowHash: "beefbeefbeef0000",
+        baseHash: "aaaa",
+        name: "Triage v2",
+        overrides: { models: [{ nodeId: "agent_1", model: "gpt-5-mini" }], guardProfile: { profileId: "strict", version: 2 } },
+        guardProfile: { profileId: "strict", version: 2, hash: "cafecafecafe0000" },
+        releaseEligible: false,
+        releaseIneligibleReasons: ["The candidate is a workflow file, not the draft or a saved version."]
+      },
+      options: { mcpMode: "strict", maxCostUsd: 5, models: "replay", compare: "baseline_rerun", repeats: 3, aggregate: "majority" },
+      summary: { ...job().summary!, replayedModelCalls: 6, recordedCostUsd: 0.0123 }
     });
     const repeated = caseResult({ status: "pass", verdict: "pass", repeats: { total: 3, pass: 2, fail: 1, error: 0, aggregate: "majority", flaky: true } });
     vi.mocked(api.fetchReplayJobs).mockResolvedValue({ runs: [candidateJob] });
@@ -433,6 +447,11 @@ describe("EvaluationsPage — replay jobs", () => {
     const overrides = screen.getByRole("region", { name: "Candidate overrides" });
     expect(within(overrides).getByText("Model on agent_1: gpt-5-mini")).toBeInTheDocument();
     expect(within(overrides).getByText("Guard profile strict v2")).toBeInTheDocument();
+    const proof = screen.getByRole("region", { name: "Release proof" });
+    expect(proof).toHaveTextContent("Not release proof.");
+    expect(proof).toHaveTextContent("workflow file");
+    expect(proof).toHaveTextContent("Guard profile strict v2");
+    expect(screen.getByRole("region", { name: "Progress" })).toHaveTextContent("6 model calls from the tape (recorded cost $0.012, not spent)");
     const row = await screen.findByRole("button", { name: /Open case Refund baseline/ });
     expect(within(row).getByText("2 of 3 repeats passed · flaky")).toBeInTheDocument();
     await user.click(row);

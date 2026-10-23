@@ -46,6 +46,7 @@ import {
   jobCounts,
   jobWarnings,
   overrideLines,
+  releaseProofLine,
   shortHash,
   statusTone,
   type ReplayJobForm
@@ -735,7 +736,7 @@ export function RunReplayDialog({ set, workflowId, caseCount, onClose, onStarted
             void submit();
           }}
         >
-          <ReplayCandidateFields workflowId={workflowId} projectId={set.projectId} versions={versions} form={form} update={update} />
+          <ReplayCandidateFields workflowId={workflowId} projectId={set.projectId} versions={versions} form={form} update={update} secrets={secrets} />
           <div className="evals-form-grid">
             <label title="Strict answers each recorded MCP call once. Lenient reuses the last answer when the candidate repeats a call more often than recorded. Neither reaches a live server.">
               <span>MCP calls</span>
@@ -1194,6 +1195,27 @@ function ReplayJobDetailView({ jobId, workflowNames, setNames, canEdit, onBack }
           </ul>
         </section>
       )}
+      {releaseProofLine(job.candidate) && (
+        <section className="pg-card evals-card" aria-label="Release proof">
+          <span className="pg-eyebrow">Release proof</span>
+          <p className={`golden-note${releaseProofLine(job.candidate)!.eligible ? "" : " is-warn"}`}>{releaseProofLine(job.candidate)!.text}</p>
+          {releaseProofLine(job.candidate)!.reasons.length > 0 && (
+            <ul className="replay-override-list">
+              {releaseProofLine(job.candidate)!.reasons.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          )}
+          {job.candidate?.guardProfile && (
+            <p className="golden-meta">
+              <span>
+                Guard profile {job.candidate.guardProfile.profileId} v{job.candidate.guardProfile.version}
+              </span>
+              <span className="mono-cell">{shortHash(job.candidate.guardProfile.hash, 12)}</span>
+            </p>
+          )}
+        </section>
+      )}
       {job.error && <div className="golden-note is-warn">{job.error}</div>}
       {jobWarnings(job).map((warning) => (
         <div key={warning} className="golden-note is-warn" role="status">
@@ -1210,6 +1232,9 @@ function ReplayJobDetailView({ jobId, workflowNames, setNames, canEdit, onBack }
           <span className="mono-cell">
             spent {formatSpend(counts)}
             {budget !== null ? ` of ${formatUsd(budget)}` : ""}
+            {job.summary?.replayedModelCalls
+              ? ` · ${job.summary.replayedModelCalls} model call${job.summary.replayedModelCalls === 1 ? "" : "s"} from the tape (recorded cost ${formatUsd(job.summary.recordedCostUsd ?? 0)}, not spent)`
+              : ""}
           </span>
         </div>
         <div
