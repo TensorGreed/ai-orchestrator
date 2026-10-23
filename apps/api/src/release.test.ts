@@ -781,3 +781,456 @@ describe("the MCP gateway", () => {
     expect(text).not.toContain("tool-draft");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review fixes (H1-H3, M1-M8, L1-L7, contract addendum)
+// ---------------------------------------------------------------------------
+
+const rawDb = (context: TestContext) => (context.store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Saves the draft and snapshots it as `actor`'s version, as the save route does. */
+function saveAs(context: TestContext, workflow: Workflow, actorId: string): number {
+  const saved = context.store.upsertWorkflow(workflow, { createdBy: actorId });
+  return new WorkflowVersionService(context.store).snapshot({ workflow: saved, createdBy: actorId, changeNote: "test" }).version;
+}
+
+describe("enforced gates: only admins weaken them", () => {
+  it("a builder cannot add themselves as approver or allow self-approval (H1); the version's author cannot approve its release (L7)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const author = await login(context, "builder", "author");
+    const lead = await login(context, "builder", "lead");
+    save(context, hookWorkflow("wf-h1", "v1"));
+    await enableGate(context, admin.cookie, "wf-h1", { enforced: true });
+    const put = (body: Record<string, unknown>) => call(context, "PUT", "/api/workflows/wf-h1/release-gate", builder.cookie, { enabled: true, datasetIds: ["set-wf-h1"], ...body });
+    // The exact sequence from the review: self as approver with self-approval on an enforced gate without approvers.
+    const selfAdd = await put({ approvers: { approverUsers: [builder.email], allowSelfApproval: true } });
+    expect(selfAdd.statusCode, selfAdd.body).toBe(403);
+    expect(selfAdd.json<{ error: string }>().error).toMatch(/self-approval/);
+    expect((await put({ approvers: { approverUsers: [builder.email] } })).statusCode).toBe(403);
+    expect((await put({ approvers: {} })).statusCode).toBe(403);
+    // Self-approval is the admin's call on an unenforced gate too.
+    save(context, hookWorkflow("wf-l7", "v1"));
+    await enableGate(context, builder.cookie, "wf-l7", { approvers: { approverRoles: ["builder"] } });
+    expect((await call(context, "PUT", "/api/workflows/wf-l7/release-gate", builder.cookie, { enabled: true, datasetIds: ["set-wf-l7"], approvers: { approverRoles: ["builder"], allowSelfApproval: true } })).statusCode).toBe(403);
+    expect(auditTypes(context)).toContain("release.gate.update_refused");
+
+    // The author saves a version; a colleague asks to publish it; the author may not approve it, another builder may.
+    const version = saveAs(context, hookWorkflow("wf-l7", "authored"), author.id);
+    const asked = await call(context, "POST", "/api/workflows/wf-l7/publish", builder.cookie, { version, requestApproval: { reason: "please" } });
+    expect(asked.statusCode, asked.body).toBe(202);
+    const id = asked.json<{ approvalRequestId: string }>().approvalRequestId;
+    const byAuthor = await call(context, "POST", `/api/approvals/${id}/approve`, author.cookie, {});
+    expect(byAuthor.statusCode).toBe(403);
+    expect(byAuthor.json<{ error: string }>().error).toMatch(/You saved this version/);
+    const view = (await call(context, "GET", "/api/approvals", author.cookie)).json<{ items: ReleaseApprovalRequestView[] }>().items.find((entry) => entry.id === id)!;
+    expect(view).toMatchObject({ canDecide: false });
+    expect((await call(context, "POST", `/api/approvals/${id}/approve`, lead.cookie, {})).statusCode).toBe(200);
+  });
+
+  it("any change to the candidate options is admin-only on an enforced gate (M2)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-m2", "v1"));
+    await enableGate(context, admin.cookie, "wf-m2", { enforced: true });
+    for (const candidateOptions of [{ repeats: 5, aggregate: "any" }, { compare: "recording", mcpMode: "lenient" }, { scorers: [{ type: "status" }] }, { maxCostUsd: 50 }]) {
+      const response = await call(context, "PUT", "/api/workflows/wf-m2/release-gate", builder.cookie, { enabled: true, datasetIds: ["set-wf-m2"], candidateOptions });
+      expect(response.statusCode, JSON.stringify(candidateOptions)).toBe(403);
+      expect(response.json<{ error: string }>().error).toMatch(/only admins/);
+    }
+    // Naming the default (strict) changes nothing, and an admin may change anything.
+    expect((await call(context, "PUT", "/api/workflows/wf-m2/release-gate", builder.cookie, { enabled: true, datasetIds: ["set-wf-m2"], candidateOptions: { mcpMode: "strict" } })).statusCode).toBe(200);
+    expect((await call(context, "PUT", "/api/workflows/wf-m2/release-gate", admin.cookie, { enabled: true, datasetIds: ["set-wf-m2"], candidateOptions: { repeats: 3, aggregate: "majority" } })).statusCode).toBe(200);
+  });
+
+  it("rollback on an enforced gate is the admin's, with a reason; elsewhere it needs workflow:publish and a reason (M5)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const v1 = save(context, hookWorkflow("wf-m5", "one"));
+    await enableGate(context, admin.cookie, "wf-m5", { enforced: true });
+    const v2 = save(context, hookWorkflow("wf-m5", "two"));
+    expect((await call(context, "POST", "/api/workflows/wf-m5/publish", admin.cookie, { version: v2, override: { reason: "test" } })).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows/wf-m5/rollback", builder.cookie, { version: v1, reason: "back" })).statusCode).toBe(403);
+    expect((await call(context, "POST", "/api/workflows/wf-m5/rollback", admin.cookie, { version: v1 })).statusCode).toBe(400);
+    const rolled = await call(context, "POST", "/api/workflows/wf-m5/rollback", admin.cookie, { version: v1, reason: "Incident 7" });
+    expect(rolled.statusCode, rolled.body).toBe(200);
+    expect(rolled.json<{ release: WorkflowRelease }>().release).toMatchObject({ verdict: "rollback", reason: "Incident 7" });
+    expect(auditTypes(context)).toEqual(expect.arrayContaining(["release.rollback.refused", "release.rolled_back"]));
+  });
+
+  it("removing cases from, deleting, or adding scored cases to an enforced gate's golden set is admin-only; adding a plain case is fine and makes older jobs stale (M4)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-m4", "v1"));
+    await enableGate(context, admin.cookie, "wf-m4", { enforced: true });
+    const v2 = save(context, hookWorkflow("wf-m4", "v2"));
+    const hash = await versionHash(context, builder.cookie, "wf-m4", v2);
+    const job = seedJob(context, { workflowId: "wf-m4", datasetIds: ["set-wf-m4"], version: v2, hash, statuses: ["pass", "pass", "pass"] });
+    const preview = async () => (await call(context, "GET", `/api/workflows/wf-m4/publish-preview?version=${v2}&replayRunId=${job}`, builder.cookie)).json<{ preview: { verdict: string; reasons: string[] } }>().preview;
+    expect((await preview()).verdict).toBe("passed");
+    const [first] = context.store.listEvalFixtures("set-wf-m4");
+    expect((await call(context, "DELETE", `/api/eval/fixtures/${first!.id}`, builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "DELETE", "/api/eval/datasets/set-wf-m4", builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "POST", "/api/eval/datasets/set-wf-m4/fixtures", builder.cookie, { name: "Always passes", input: {}, scorers: [{ type: "status" }] })).statusCode).toBe(403);
+    expect(context.store.listEvalFixtures("set-wf-m4")).toHaveLength(3);
+    expect(auditTypes(context)).toContain("release.golden_set_change.refused");
+    // Adding a plain case is allowed, and the job no longer proves anything.
+    expect((await call(context, "POST", "/api/eval/datasets/set-wf-m4/fixtures", builder.cookie, { name: "New case", input: {} })).statusCode).toBe(200);
+    const stale = await preview();
+    expect(stale.verdict).toBe("blocked");
+    expect(stale.reasons.join()).toMatch(/set-wf-m4 changed after replay job/);
+    // An admin may remove a case.
+    expect((await call(context, "DELETE", `/api/eval/fixtures/${first!.id}`, admin.cookie)).statusCode).toBe(200);
+  });
+});
+
+describe("what counts as passing is the gate's call", () => {
+  it("a job with its own always-pass scorers is no proof unless the gate names exactly those scorers (H2)", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-h2", "v1"));
+    await enableGate(context, builder.cookie, "wf-h2");
+    const v2 = save(context, hookWorkflow("wf-h2", "v2"));
+    const hash = await versionHash(context, builder.cookie, "wf-h2", v2);
+    const alwaysPass = [{ type: "regex", pattern: ".*" }];
+    seedJob(context, { workflowId: "wf-h2", datasetIds: ["set-wf-h2"], version: v2, hash, statuses: ["pass", "pass", "pass"], scorers: alwaysPass });
+    const refused = await call(context, "POST", "/api/workflows/wf-h2/publish", builder.cookie, { version: v2 });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json<{ reasons: string[] }>().reasons.join()).toMatch(/ran with its own scorers \(regex\)/);
+    // A gate that names its scorers refuses a job with the defaults, and accepts one with exactly its own.
+    await enableGate(context, builder.cookie, "wf-h2", { candidateOptions: { scorers: [{ type: "status" }] } });
+    const defaults = seedJob(context, { workflowId: "wf-h2", datasetIds: ["set-wf-h2"], version: v2, hash, statuses: ["pass", "pass", "pass"] });
+    expect((await call(context, "POST", "/api/workflows/wf-h2/publish", builder.cookie, { version: v2, replayRunId: defaults })).json<{ reasons: string[] }>().reasons.join()).toMatch(/default scorers/);
+    const own = seedJob(context, { workflowId: "wf-h2", datasetIds: ["set-wf-h2"], version: v2, hash, statuses: ["pass", "pass", "pass"], scorers: [{ type: "status" }] });
+    expect((await call(context, "POST", "/api/workflows/wf-h2/publish", builder.cookie, { version: v2, replayRunId: own })).statusCode).toBe(200);
+  });
+
+  it("requires releaseEligible when a job carries it (contract addendum)", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-elig", "v1"));
+    await enableGate(context, builder.cookie, "wf-elig");
+    const v2 = save(context, hookWorkflow("wf-elig", "v2"));
+    const hash = await versionHash(context, builder.cookie, "wf-elig", v2);
+    const job = seedJob(context, { workflowId: "wf-elig", datasetIds: ["set-wf-elig"], version: v2, hash, statuses: ["pass", "pass", "pass"] });
+    rawDb(context).prepare("UPDATE eval_runs SET candidate_json = ? WHERE id = ?").run(JSON.stringify({ kind: "version", version: v2, workflowHash: hash, releaseEligible: false, releaseIneligibleReasons: ["a guard profile override"] }), job);
+    const refused = await call(context, "POST", "/api/workflows/wf-elig/publish", builder.cookie, { version: v2, replayRunId: job });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json<{ reasons: string[] }>().reasons.join()).toMatch(/not eligible to prove a release \(a guard profile override\)/);
+    rawDb(context).prepare("UPDATE eval_runs SET candidate_json = ? WHERE id = ?").run(JSON.stringify({ kind: "version", version: v2, workflowHash: hash, releaseEligible: true, releaseIneligibleReasons: [] }), job);
+    expect((await call(context, "POST", "/api/workflows/wf-elig/publish", builder.cookie, { version: v2, replayRunId: job })).statusCode).toBe(200);
+  });
+
+  it("accepts a baseline_rerun job with a golden run older than 30 days, and refuses a recording comparison of it (M3)", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    context.store.upsertWorkflow(hookWorkflow("wf-m3", "v1"));
+    // A real golden run, recorded from a run of the draft, then aged to 40 days.
+    const run = await call(context, "POST", "/api/workflows/wf-m3/execute", builder.cookie, {});
+    const recording = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "Old golden run" });
+    expect(recording.statusCode, recording.body).toBe(201);
+    const recordingId = recording.json<{ recording: { id: string } }>().recording.id;
+    rawDb(context).prepare("UPDATE replay_recordings SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 40 * 86_400_000).toISOString(), recordingId);
+    save(context, hookWorkflow("wf-m3", "v1"));
+    await enableGate(context, builder.cookie, "wf-m3", { policy: { minCases: 1 } });
+    const v2 = save(context, hookWorkflow("wf-m3", "v2"));
+    const hash = await versionHash(context, builder.cookie, "wf-m3", v2);
+    const aged = (compare?: string) => {
+      const id = seedJob(context, { workflowId: "wf-m3", datasetIds: ["set-wf-m3"], version: v2, hash, statuses: ["pass"], ...(compare ? { options: { compare } } : {}) });
+      rawDb(context).prepare("UPDATE eval_results SET recording_id = ? WHERE run_id = ?").run(recordingId, id);
+      return id;
+    };
+    const recordingJob = aged();
+    const old = await call(context, "POST", "/api/workflows/wf-m3/publish", builder.cookie, { version: v2, replayRunId: recordingJob });
+    expect(old.statusCode).toBe(409);
+    expect(old.json<{ reasons: string[] }>().reasons.join()).toMatch(/40 days old.*baseline_rerun/);
+    // The gate does not name compare; a baseline rerun is stricter and passes.
+    const rerun = await call(context, "POST", "/api/workflows/wf-m3/publish", builder.cookie, { version: v2, replayRunId: aged("baseline_rerun") });
+    expect(rerun.statusCode, rerun.body).toBe(200);
+  });
+
+  it("judges only the gate's own sets, every job for the hash, and counts a case without a diff as an error (L4, L5, L6)", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-low", "v1"));
+    await enableGate(context, builder.cookie, "wf-low");
+    const extra = goldenSet(context, "wf-low", "set-wf-low-extra");
+    const v2 = save(context, hookWorkflow("wf-low", "v2"));
+    const hash = await versionHash(context, builder.cookie, "wf-low", v2);
+    // L6: failing cases of a set the gate does not use do not count.
+    const pooled = seedJob(context, { workflowId: "wf-low", datasetIds: ["set-wf-low", extra], version: v2, hash, statuses: ["pass", "pass", "pass"] });
+    for (let index = 0; index < 3; index += 1) {
+      context.store.createEvalFixture({ id: `fx_extra_${index}`, datasetId: extra, name: `Extra ${index}`, input: {} });
+      context.store.recordEvalResult({ id: `res_extra_${index}`, runId: pooled, fixtureId: `fx_extra_${index}`, status: "fail", score: { pass: false, details: [] }, diff: plainDiff });
+    }
+    const pooledPreview = (await call(context, "GET", `/api/workflows/wf-low/publish-preview?version=${v2}&replayRunId=${pooled}`, builder.cookie)).json<{ preview: { verdict: string; stats: { cases: number } } }>().preview;
+    expect(pooledPreview).toMatchObject({ verdict: "passed", stats: { cases: 3 } });
+    // L5: a case whose diff is missing is an error under the default guard limit.
+    const blind = seedJob(context, { workflowId: "wf-low", datasetIds: ["set-wf-low"], version: v2, hash, statuses: ["pass", "pass", "pass"], diff: null });
+    const blindPreview = (await call(context, "GET", `/api/workflows/wf-low/publish-preview?version=${v2}&replayRunId=${blind}`, builder.cookie)).json<{ preview: { verdict: string; stats: { error: number } } }>().preview;
+    expect(blindPreview).toMatchObject({ verdict: "blocked", stats: { error: 3 } });
+    // L4: an older passing job is found behind more than 20 newer failing ones.
+    await sleep(5);
+    for (let index = 0; index < 22; index += 1) seedJob(context, { workflowId: "wf-low", datasetIds: ["set-wf-low"], version: v2, hash, statuses: ["fail", "fail", "fail"] });
+    const published = await call(context, "POST", "/api/workflows/wf-low/publish", builder.cookie, { version: v2 });
+    expect(published.statusCode, published.body).toBe(200);
+    expect(published.json<{ release: WorkflowRelease }>().release.replayRunId).toBe(pooled);
+  });
+});
+
+describe("gates outlive their workflow; turning one on publishes a baseline", () => {
+  it("delete needs an admin on an enforced gate; a workflow created again under the id inherits the gate and fails closed (H3)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const original = hookWorkflow("wf-h3", "reviewed");
+    save(context, original);
+    await enableGate(context, admin.cookie, "wf-h3", { enforced: true });
+    expect(await prodHook(context, "hook-wf-h3")).toMatchObject({ status: 200, output: { result: "reviewed" } });
+    const refused = await call(context, "DELETE", "/api/workflows/wf-h3", builder.cookie);
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json<{ error: string }>().error).toMatch(/enforced release gate/);
+    expect(auditTypes(context)).toContain("release.workflow_delete.refused");
+    expect((await call(context, "DELETE", "/api/workflows/wf-h3", admin.cookie)).statusCode).toBe(200);
+    expect(context.store.getReleaseGate("wf-h3")).toMatchObject({ enabled: true, enforced: true });
+    expect(context.store.listWorkflowReleases("wf-h3").length).toBeGreaterThan(0);
+
+    // Re-import the same id with an edited output: the gate is still there, and production refuses runs.
+    const edited = hookWorkflow("wf-h3", "unreviewed");
+    const imported = await call(context, "POST", "/api/workflows/import", builder.cookie, { workflow: edited });
+    expect(imported.statusCode, imported.body).toBe(200);
+    expect((await call(context, "GET", "/api/workflows/wf-h3/release-gate", builder.cookie)).json<{ gate: ReleaseGateView }>().gate).toMatchObject({ enabled: true, enforced: true });
+    expect((await prodHook(context, "hook-wf-h3")).status).toBe(404);
+    expect(await testHook(context, "hook-wf-h3")).toMatchObject({ output: { result: "unreviewed" } });
+    expect((await call(context, "GET", "/api/workflows/wf-h3/release-state", builder.cookie)).json<{ state: { productionRefused: boolean } }>().state.productionRefused).toBe(true);
+    // The builder cannot turn the gate off, and saving a version does not publish it.
+    expect((await call(context, "PUT", "/api/workflows/wf-h3/release-gate", builder.cookie, { enabled: false })).statusCode).toBe(403);
+    const saved = await call(context, "PUT", "/api/workflows/wf-h3", builder.cookie, edited);
+    expect(saved.statusCode, saved.body).toBe(200);
+    const version = context.store.maxWorkflowVersionNumber("wf-h3");
+    expect((await call(context, "POST", "/api/workflows/wf-h3/publish", builder.cookie, { version })).statusCode).toBe(409);
+    // The old release of this version number had another hash: no rollback to it.
+    const back = await call(context, "POST", "/api/workflows/wf-h3/rollback", admin.cookie, { version: 1, reason: "restore" });
+    expect(back.statusCode).toBe(409);
+    expect((await prodHook(context, "hook-wf-h3")).status).toBe(404);
+    // An admin override with a reason is one way back to production.
+    expect((await call(context, "POST", "/api/workflows/wf-h3/publish", admin.cookie, { version, override: { reason: "Reviewed by hand" } })).statusCode).toBe(200);
+    expect(await prodHook(context, "hook-wf-h3")).toMatchObject({ status: 200, output: { result: "unreviewed" } });
+  });
+
+  it("turning a gate on publishes the version production already runs as the baseline, and never breaks production", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-base", "one"));
+    const v2 = save(context, hookWorkflow("wf-base", "two"));
+    expect(context.store.getPublishedVersion("wf-base")).toBeNull();
+    await enableGate(context, builder.cookie, "wf-base");
+    expect(context.store.getPublishedVersion("wf-base")).toBe(v2);
+    const [baseline] = (await call(context, "GET", "/api/workflows/wf-base/releases", builder.cookie)).json<{ releases: WorkflowRelease[] }>().releases;
+    expect(baseline).toMatchObject({ version: v2, verdict: "ungated", publishedBy: builder.email });
+    expect(baseline!.reason).toMatch(/Baseline/);
+    expect(await prodHook(context, "hook-wf-base")).toMatchObject({ output: { result: "two" } });
+    const audit = context.store.listAuditLogs({ eventType: "release.published", pageSize: 5 }).items[0]!;
+    expect(JSON.stringify(audit.metadata)).toContain('"baseline":true');
+
+    // A draft saved without a version (an import) is snapshotted first, so the baseline is what production ran.
+    context.store.upsertWorkflow(hookWorkflow("wf-unsaved", "draft-only"));
+    await enableGate(context, builder.cookie, "wf-unsaved");
+    expect(context.store.getPublishedVersion("wf-unsaved")).toBe(1);
+    expect(await prodHook(context, "hook-wf-unsaved")).toMatchObject({ output: { result: "draft-only" } });
+
+    // A gate turned on over a published version keeps it; turning it off and on again does not publish the draft.
+    const v1 = save(context, hookWorkflow("wf-kept", "published"));
+    expect((await call(context, "POST", "/api/workflows/wf-kept/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    save(context, hookWorkflow("wf-kept", "newer draft"));
+    await enableGate(context, builder.cookie, "wf-kept");
+    expect(context.store.getPublishedVersion("wf-kept")).toBe(v1);
+  });
+});
+
+describe("production paths cannot be taken over (M1)", () => {
+  it("refuses to save, import or duplicate a path a published or gated workflow uses, and refuses to publish while paths collide", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const v1 = save(context, hookWorkflow("wf-owner", "owner", "default", "shared-path"));
+    expect((await call(context, "POST", "/api/workflows/wf-owner/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    const thief = hookWorkflow("wf-thief", "thief", "default", "shared-path");
+    const created = await call(context, "POST", "/api/workflows", builder.cookie, thief);
+    expect(created.statusCode).toBe(409);
+    expect(created.json<{ error: string }>().error).toMatch(/Webhook path "shared-path" is already used by workflow "Release wf-owner" \(wf-owner\)/);
+    expect((await call(context, "POST", "/api/workflows/import", builder.cookie, { workflow: thief })).statusCode).toBe(409);
+    expect((await call(context, "POST", "/api/workflows/wf-owner/duplicate", builder.cookie, { name: "Copy" })).statusCode).toBe(409);
+    expect(context.store.getWorkflow("wf-thief")).toBeNull();
+    expect(await prodHook(context, "shared-path")).toMatchObject({ output: { result: "owner" } });
+    // Saving the owner itself is fine.
+    expect((await call(context, "PUT", "/api/workflows/wf-owner", builder.cookie, hookWorkflow("wf-owner", "owner 2", "default", "shared-path"))).statusCode).toBe(200);
+
+    // Two ungated workflows that already share a path (from before this release): neither may be published or gated.
+    context.store.upsertWorkflow(hookWorkflow("wf-a", "a", "default", "old-shared"));
+    context.store.upsertWorkflow(hookWorkflow("wf-b", "b", "default", "old-shared"));
+    const va = save(context, hookWorkflow("wf-a", "a", "default", "old-shared"));
+    const blocked = await call(context, "POST", "/api/workflows/wf-a/publish", builder.cookie, { version: va });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/old-shared.*wf-b/);
+    const enable = await call(context, "PUT", "/api/workflows/wf-a/release-gate", builder.cookie, { enabled: true, datasetIds: [goldenSetId(context, "wf-a")] });
+    expect(enable.statusCode).toBe(409);
+    expect(context.store.getReleaseGate("wf-a")).toBeNull();
+  });
+});
+
+describe("API-key callers and retries (M7)", () => {
+  it("an API-key caller of /execute runs the published version; the editor runs the draft; a retry runs what the failed run ran", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const v1 = save(context, hookWorkflow("wf-m7", "published"));
+    expect((await call(context, "POST", "/api/workflows/wf-m7/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    save(context, hookWorkflow("wf-m7", "draft"));
+    const key = (await call(context, "POST", "/api/auth/api-keys", builder.cookie, { name: "CI" })).json<{ key: string }>().key;
+    const viaKey = await context.app.inject({ method: "POST", url: "/api/workflows/wf-m7/execute", headers: { authorization: `Bearer ${key}` }, payload: {} });
+    expect(viaKey.statusCode, viaKey.body).toBe(200);
+    expect(viaKey.json<{ output: unknown }>().output).toMatchObject({ result: "published" });
+    const streamed = await context.app.inject({ method: "POST", url: "/api/workflows/wf-m7/execute/stream", headers: { authorization: `Bearer ${key}` }, payload: {} });
+    expect(streamed.body).toContain("published");
+    expect(streamed.body).not.toContain('"result":"draft"');
+    expect((await call(context, "POST", "/api/workflows/wf-m7/execute", builder.cookie, {})).json<{ output: unknown }>().output).toMatchObject({ result: "draft" });
+
+    // A production run records its version; retrying it (once it failed) runs that version again.
+    const production = viaKey.json<{ executionId: string }>().executionId;
+    expect(context.store.getExecutionRelease(production)).toEqual({ channel: "production", version: v1 });
+    rawDb(context).prepare("UPDATE execution_history SET status = 'error' WHERE id = ?").run(production);
+    const retried = await call(context, "POST", `/api/executions/${production}/retry`, builder.cookie, {});
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(JSON.stringify(retried.json())).toContain("published");
+    expect(JSON.stringify(retried.json())).not.toContain('"result":"draft"');
+  });
+});
+
+describe("release requests: expiry and duplicates (L1, L2)", () => {
+  it("an expired request is closed and listed as decided; a second requester gets their own request and stale ones are closed", async () => {
+    const context = await createTestContext();
+    const first = await login(context, "builder", "first");
+    const second = await login(context, "builder", "second");
+    const lead = await login(context, "admin", "lead");
+    save(context, hookWorkflow("wf-req", "v1"));
+    await enableGate(context, first.cookie, "wf-req", { approvers: { approverRoles: ["admin"] } });
+    const version = save(context, hookWorkflow("wf-req", "v2"));
+    const ask = async (who: { cookie: string }, reason: string) =>
+      (await call(context, "POST", "/api/workflows/wf-req/publish", who.cookie, { version, requestApproval: { reason } })).json<{ approvalRequestId: string }>().approvalRequestId;
+    const a = await ask(first, "first reason");
+    const b = await ask(second, "second reason");
+    expect(b).not.toBe(a);
+    expect(await ask(first, "again")).toBe(a);
+    const pending = (await call(context, "GET", "/api/approvals?status=pending", lead.cookie)).json<{ items: ReleaseApprovalRequestView[] }>().items;
+    expect(pending.filter((entry) => entry.kind === "release").map((entry) => entry.requestReason).sort()).toEqual(["first reason", "second reason"]);
+
+    rawDb(context).prepare("UPDATE release_approval_requests SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 60_000).toISOString(), a);
+    const afterExpiry = (await call(context, "GET", "/api/approvals?status=pending", lead.cookie)).json<{ items: ReleaseApprovalRequestView[] }>().items;
+    expect(afterExpiry.map((entry) => entry.id)).toEqual([b]);
+    const decided = (await call(context, "GET", "/api/approvals?status=decided", lead.cookie)).json<{ items: ReleaseApprovalRequestView[] }>().items;
+    expect(decided.find((entry) => entry.id === a)).toMatchObject({ status: "timed_out" });
+    expect(context.store.getReleaseApprovalRequest(a)!.status).toBe("timed_out");
+    expect(auditTypes(context)).toContain("release.approval.timed_out");
+
+    // The gate changes: asking again closes the stale request and makes a new one.
+    await enableGate(context, first.cookie, "wf-req", { approvers: { approverRoles: ["admin"] }, policy: { minCases: 4 } });
+    const c = await ask(second, "after the change");
+    expect(c).not.toBe(b);
+    expect(context.store.getReleaseApprovalRequest(b)!.status).toBe("canceled");
+  });
+});
+
+describe("a real replay job proves a release (M8)", () => {
+  /** start → label → output: deterministic, no external calls. */
+  const labelled = (answer: string, label = "Label"): Workflow =>
+    ({
+      id: "wf-real",
+      name: "Real gate",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+        { id: "label", type: "set_node", name: label, position: { x: 150, y: 0 }, config: { assignments: [{ key: "answer", valueTemplate: answer }] } },
+        { id: "output", type: "output", name: "Output", position: { x: 300, y: 0 }, config: { responseTemplate: "answer {{results.label.answer}}" } }
+      ],
+      edges: [
+        { id: "e1", source: "start", target: "label" },
+        { id: "e2", source: "label", target: "output" }
+      ]
+    }) as Workflow;
+
+  async function goldenRun(context: TestContext, cookie: string, name: string): Promise<string> {
+    const run = await call(context, "POST", "/api/workflows/wf-real/execute", cookie, {});
+    expect(run.statusCode, run.body).toBe(200);
+    const saved = await call(context, "POST", "/api/replay/recordings", cookie, { executionId: run.json<{ executionId: string }>().executionId, name });
+    expect(saved.statusCode, saved.body).toBe(201);
+    return saved.json<{ recording: { id: string } }>().recording.id;
+  }
+
+  async function runJob(context: TestContext, cookie: string, body: Record<string, unknown>): Promise<EvalRunView & { results: Array<{ status: string }> }> {
+    const started = await call(context, "POST", "/api/replay/runs", cookie, body);
+    expect(started.statusCode, started.body).toBe(202);
+    const id = started.json<{ run: EvalRunView }>().run.id;
+    const until = Date.now() + 30_000;
+    for (;;) {
+      const run = (await call(context, "GET", `/api/replay/runs/${id}`, cookie)).json<{ run: EvalRunView & { results: Array<{ status: string }> } }>().run;
+      if (!["queued", "running"].includes(run.status)) return run;
+      if (Date.now() > until) throw new Error(`Job ${id} still ${run.status}`);
+      await sleep(50);
+    }
+  }
+
+  it("runs a job through the replay-job API, waits for it and publishes with it; a failing job, one with an extra scorer and a stale one are refused", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    context.store.upsertWorkflow(labelled("forty-two"));
+    const recordings = [await goldenRun(context, builder.cookie, "Golden 1"), await goldenRun(context, builder.cookie, "Golden 2"), await goldenRun(context, builder.cookie, "Golden 3")];
+    const created = await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Release suite", workflowId: "wf-real" });
+    const setId = created.json<{ dataset: { id: string } }>().dataset.id;
+    for (const recordingId of recordings) expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId })).statusCode).toBe(201);
+    const enabled = await call(context, "PUT", "/api/workflows/wf-real/release-gate", builder.cookie, { enabled: true, datasetIds: [setId] });
+    expect(enabled.statusCode, enabled.body).toBe(200);
+    const baseline = context.store.getPublishedVersion("wf-real");
+    expect(baseline).toBe(1);
+
+    // A refactor that keeps the answer: a real job passes and proves it.
+    const good = save(context, labelled("forty-two", "Answer"));
+    const passing = await runJob(context, builder.cookie, { datasetIds: [setId], version: good });
+    expect(passing.status).toBe("completed");
+    expect(passing.results.map((result) => result.status)).toEqual(["pass", "pass", "pass"]);
+    const published = await call(context, "POST", "/api/workflows/wf-real/publish", builder.cookie, { version: good, replayRunId: passing.id });
+    expect(published.statusCode, published.body).toBe(200);
+    expect(published.json<{ release: WorkflowRelease }>().release).toMatchObject({ version: good, verdict: "passed", replayRunId: passing.id });
+
+    // A regression: the real job fails, and the publish is blocked with its regressions.
+    const bad = save(context, labelled("forty-three", "Answer"));
+    const failing = await runJob(context, builder.cookie, { datasetIds: [setId], version: bad });
+    expect(failing.results.every((result) => result.status === "fail")).toBe(true);
+    const blocked = await call(context, "POST", "/api/workflows/wf-real/publish", builder.cookie, { version: bad });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/3 regressions/);
+
+    // The same regression with an extra scorer the gate does not name passes its cases, and is still no proof.
+    const lenient = await runJob(context, builder.cookie, { datasetIds: [setId], version: bad, scorers: [{ type: "status" }] });
+    expect(lenient.results.every((result) => result.status === "pass")).toBe(true);
+    const scorerRefused = await call(context, "POST", "/api/workflows/wf-real/publish", builder.cookie, { version: bad, replayRunId: lenient.id });
+    expect(scorerRefused.statusCode).toBe(409);
+    expect(scorerRefused.json<{ reasons: string[] }>().reasons.join()).toMatch(/its own scorers \(status\)/);
+
+    // A passing job whose set gained a golden run since it was queued is stale.
+    const fresh = save(context, labelled("forty-two", "Answer again"));
+    const before = await runJob(context, builder.cookie, { datasetIds: [setId], version: fresh });
+    expect(before.status).toBe("completed");
+    const extra = await goldenRun(context, builder.cookie, "Golden 4");
+    expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, builder.cookie, { recordingId: extra })).statusCode).toBe(201);
+    const stale = await call(context, "POST", "/api/workflows/wf-real/publish", builder.cookie, { version: fresh, replayRunId: before.id });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json<{ reasons: string[] }>().reasons.join()).toMatch(/changed after replay job/);
+    expect(context.store.getPublishedVersion("wf-real")).toBe(good);
+  });
+});
