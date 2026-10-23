@@ -1146,7 +1146,7 @@ describe("production paths belong to what serves production (M1, N1, N2)", () =>
     expect(context.store.getPublishedVersion("wf-a")).toBe(1);
   });
 
-  it("only an active ungated workflow claims its saved paths; activating onto a claimed path, publishing or gating a collision are refused", async () => {
+  it("every ungated workflow claims its saved paths, active or not; publishing or gating a collision is refused", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
     // Two ungated workflows that already share a path (from before this release): each still saves, neither may be published or gated.
@@ -1161,14 +1161,19 @@ describe("production paths belong to what serves production (M1, N1, N2)", () =>
     expect(enable.statusCode).toBe(409);
     expect(context.store.getReleaseGate("wf-x")).toBeNull();
 
-    // A new ungated workflow cannot take an active one's path; a deactivated ungated workflow claims nothing.
+    // A new ungated workflow cannot take another ungated workflow's path, even a deactivated one's:
+    // deactivating an ungated workflow leaves its webhook serving production.
     save(context, hookWorkflow("wf-live", "live", "default", "live-path"));
     expect((await call(context, "POST", "/api/workflows", builder.cookie, hookWorkflow("wf-new", "new", "default", "live-path"))).statusCode).toBe(409);
     expect((await call(context, "POST", "/api/workflows/wf-live/deactivate", builder.cookie, {})).statusCode).toBe(200);
-    expect((await call(context, "POST", "/api/workflows", builder.cookie, hookWorkflow("wf-new", "new", "default", "live-path"))).statusCode).toBe(200);
-    const activate = await call(context, "POST", "/api/workflows/wf-live/activate", builder.cookie, {});
-    expect(activate.statusCode).toBe(409);
-    expect(activate.json<{ error: string }>().error).toMatch(/live-path.*wf-new/);
+    expect(await prodHook(context, "live-path")).toMatchObject({ status: 200, output: { result: "live" } });
+    const taken = await call(context, "POST", "/api/workflows", builder.cookie, hookWorkflow("wf-new", "new", "default", "live-path"));
+    expect(taken.statusCode).toBe(409);
+    expect(taken.json<{ error: string }>().error).toMatch(/live-path.*wf-live/);
+    expect(context.store.getWorkflow("wf-new")).toBeFalsy();
+    // The deactivated owner itself still saves, and activates again.
+    expect((await call(context, "PUT", "/api/workflows/wf-live", builder.cookie, { ...context.store.getWorkflow("wf-live")!, name: "Live renamed" })).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows/wf-live/activate", builder.cookie, {})).statusCode).toBe(200);
   });
 
   it("git pull refuses only the workflow that would take a served path, with its reason; the rest import (N1)", async () => {
@@ -1457,6 +1462,49 @@ describe("API keys and retries (N4, N5)", () => {
     expect(retried.statusCode, retried.body).toBe(200);
     expect(JSON.stringify(retried.json())).toContain("three");
     expect(context.store.getExecutionRelease(retried.json<{ executionId: string }>().executionId)).toEqual({ channel: "production", version: v3 });
+  });
+});
+
+describe("execute channels and fail-closed retries", () => {
+  it("a session cannot ask /execute for production; every run records its channel; a gated run whose channel went unrecorded retries the published version", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const v1 = save(context, hookWorkflow("wf-fc", "published"));
+    expect((await call(context, "POST", "/api/workflows/wf-fc/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    const gate = await call(context, "PUT", "/api/workflows/wf-fc/release-gate", builder.cookie, { enabled: true, datasetIds: [goldenSetId(context, "wf-fc")] });
+    expect(gate.statusCode, gate.body).toBe(200);
+    save(context, hookWorkflow("wf-fc", "draft"));
+
+    // The editor (a session) runs the draft and cannot ask for production.
+    const asked = await call(context, "POST", "/api/workflows/wf-fc/execute?channel=production", builder.cookie, {});
+    expect(asked.statusCode).toBe(400);
+    const editorRun = await call(context, "POST", "/api/workflows/wf-fc/execute", builder.cookie, {});
+    expect(editorRun.json<{ output: unknown }>().output).toMatchObject({ result: "draft" });
+    const editorId = editorRun.json<{ executionId: string }>().executionId;
+    expect(context.store.getExecutionRelease(editorId)).toEqual({ channel: "draft", version: null });
+
+    // A recorded editor run retries the draft.
+    rawDb(context).prepare("UPDATE execution_history SET status = 'error' WHERE id = ?").run(editorId);
+    const draftRetry = await call(context, "POST", `/api/executions/${editorId}/retry`, builder.cookie, {});
+    expect(draftRetry.statusCode, draftRetry.body).toBe(200);
+    expect(JSON.stringify(draftRetry.json())).toContain("draft");
+
+    // The same run with its channel lost retries as production on the gated workflow: the published version.
+    rawDb(context).prepare("UPDATE execution_history SET release_channel = NULL, release_version = NULL WHERE id = ?").run(editorId);
+    const unknownRetry = await call(context, "POST", `/api/executions/${editorId}/retry`, builder.cookie, {});
+    expect(unknownRetry.statusCode, unknownRetry.body).toBe(200);
+    expect(JSON.stringify(unknownRetry.json())).toContain("published");
+    expect(JSON.stringify(unknownRetry.json())).not.toContain("\"draft\"");
+    expect(context.store.getExecutionRelease(unknownRetry.json<{ executionId: string }>().executionId)).toEqual({ channel: "production", version: v1 });
+
+    // Without a gate an unrecorded run retries the draft, as before releases.
+    const plain = save(context, hookWorkflow("wf-fc-plain", "plain-draft"));
+    expect(plain).toBeGreaterThan(0);
+    const plainRun = (await call(context, "POST", "/api/workflows/wf-fc-plain/execute", builder.cookie, {})).json<{ executionId: string }>().executionId;
+    rawDb(context).prepare("UPDATE execution_history SET status = 'error', release_channel = NULL WHERE id = ?").run(plainRun);
+    const plainRetry = await call(context, "POST", `/api/executions/${plainRun}/retry`, builder.cookie, {});
+    expect(plainRetry.statusCode, plainRetry.body).toBe(200);
+    expect(JSON.stringify(plainRetry.json())).toContain("plain-draft");
   });
 });
 

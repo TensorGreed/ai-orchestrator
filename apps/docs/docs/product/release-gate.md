@@ -14,7 +14,7 @@ Nothing changes for a workflow that was never published: every entry point runs 
 | `POST /api/workflows/:id/execute` and `/execute/stream` called with an API key (`Authorization: Bearer`) | the published version; the draft with `?channel=draft` when the key's user has `workflow:write` on the workflow |
 | The execution queue | the published version when the job runs |
 | A sub-workflow called from any of the above | the child's published version (its draft when it was never published) |
-| A retry | the failed run's channel: a production run is retried as production runs now (the version published today, never a superseded or rolled-back one), a draft run on the current draft |
+| A retry | the failed run's channel: a production run is retried as production runs now (the version published today, never a superseded or rolled-back one), a draft run on the current draft. A run whose channel was not recorded (history from before releases, or a record that failed to save) is retried as production on a gated workflow, never on the draft |
 | The editor (**Run**, `/execute` with a signed-in session), `/webhook-test/:path`, the manual trigger, eval runs, replays | the draft, or the candidate a replay names |
 
 Scripts and CI that call `/execute` with an API key therefore get production behaviour once the workflow is published. To test a change you just saved, add `?channel=draft` (needs `workflow:write`), call `/webhook-test/`, or run from the editor.
@@ -37,10 +37,9 @@ The SQLite and Postgres code paths behave the same for workflows without a gate;
 A webhook path, form path or MCP Server Trigger path is claimed by what actually serves production on it:
 
 - a gated workflow claims the paths of its **published version**; its draft claims nothing, so you can move a gated workflow's draft to any path and save it;
-- an active workflow without a gate claims the paths of its published version when it has one, otherwise those of its saved workflow;
-- a deactivated workflow without a gate claims nothing.
+- a workflow without a gate, active or deactivated, claims the paths of its published version when it has one, otherwise those of its saved workflow. Deactivating an ungated workflow only unregisters its schedules and triggers, so its webhooks, forms and MCP triggers keep serving production and keep their paths.
 
-A save (create, update, import, external import, restore, move, activate) is refused with `409` only when it would put an active ungated workflow on a path another workflow claims. The message names that workflow when you can read it, and says "another workflow" otherwise. A path a workflow already claimed before the save never blocks it, so two workflows that shared a path before this release can both still be saved. Publishing, turning a gate on (its baseline), rollback and approving a release are refused while the version's paths are claimed by another workflow; an admin override does not skip this. Webhook paths compare without case and regardless of method, form and MCP trigger paths without case.
+A save (create, update, import, external import, restore, move, activate) is refused with `409` only when it would put an ungated workflow on a path another workflow claims. The message names that workflow when you can read it, and says "another workflow" otherwise. A path a workflow already claimed before the save never blocks it, so two workflows that shared a path before this release can both still be saved. Publishing, turning a gate on (its baseline), rollback and approving a release are refused while the version's paths are claimed by another workflow; an admin override does not skip this. Webhook paths compare without case and regardless of method, form and MCP trigger paths without case.
 
 **Duplicate**, **use a template** and **import a shared link** never answer `409` for a path: each trigger path another workflow already uses gets `-copy`, then `-copy-2`, `-copy-3` and so on. New webhook, form and MCP trigger nodes added in the editor get a default path with a short random suffix; saved workflows keep their paths.
 

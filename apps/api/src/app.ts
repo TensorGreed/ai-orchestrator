@@ -1753,9 +1753,15 @@ export function createApp(
     }
   };
 
-  /** Phase 15.4 — production runs in flight and the published version each runs (null: no published version, the draft). */
+  /**
+   * Phase 15.4 — runs in flight, the channel each runs on and, for
+   * production, the published version (null: no published version, the
+   * draft). Every run's history records its channel, so a retry can tell an
+   * editor run from a production one; a run whose channel went unrecorded
+   * retries fail closed (see the retry route).
+   */
   // Bounded: a run whose history is never persisted must not grow it forever.
-  const productionRunVersions = new Map<string, number | null>();
+  const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
 
   const runWorkflowExecution = async (input: {
     workflow: Workflow;
@@ -1827,9 +1833,9 @@ export function createApp(
     const channel: ReleaseChannel = input.channel ?? "draft";
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
     // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
-    if (input.executionId && channel === "production" && !input.replay) {
-      if (productionRunVersions.size >= 5_000) productionRunVersions.delete(productionRunVersions.keys().next().value!);
-      productionRunVersions.set(input.executionId, releaseVersion);
+    if (input.executionId && !input.replay) {
+      if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
+      runReleases.set(input.executionId, { channel, version: releaseVersion });
     }
     const controller = input.executionId
       ? registerActiveExecution({
@@ -1960,7 +1966,7 @@ export function createApp(
               state: sealToolResults(secretService, channel === "production" ? { ...paused.state, releaseChannel: "production", releaseVersion } : paused.state)
             });
             // The paused state carries the version now; the resume records it again.
-            productionRunVersions.delete(paused.executionId);
+            runReleases.delete(paused.executionId);
             // Phase 11.2 — who may decide, when it expires; audited and notified.
             if (!approvalsSupported) return;
             try {
@@ -2266,11 +2272,11 @@ export function createApp(
       status: input.result.status
     });
 
-    const ranOn = productionRunVersions.get(input.executionId);
-    productionRunVersions.delete(input.executionId);
+    const ranOn = runReleases.get(input.executionId);
+    runReleases.delete(input.executionId);
     if (persisted && ranOn !== undefined && releaseService.available) {
       try {
-        store.setExecutionRelease(input.executionId, "production", ranOn);
+        store.setExecutionRelease(input.executionId, ranOn.channel, ranOn.version);
       } catch (error) {
         app.log.warn({ executionId: input.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record the published version a run ran");
       }
@@ -3794,12 +3800,12 @@ export function createApp(
     workflowId: string
   ): { channel: ReleaseChannel } | { ok: false; status: 400 | 403 | 404; error: string } => {
     const asked = asRecord(request.query).channel;
-    if (asked !== undefined && asked !== "draft" && asked !== "production") {
-      return { ok: false, status: 400, error: "channel must be draft or production" };
+    if (asked !== undefined && asked !== "draft") {
+      return { ok: false, status: 400, error: "channel can only be draft" };
     }
     const viaKey = Boolean(authenticateApiKey(request.headers as Record<string, unknown>));
-    if (!viaKey) return { channel: asked === "production" ? "production" : "draft" };
-    if (asked !== "draft") return { channel: "production" };
+    if (!viaKey) return { channel: "draft" };
+    if (asked === undefined) return { channel: "production" };
     const write = runAccess.workflow(user, workflowId, "workflow:write");
     if (!write.ok) return { ok: false, status: write.status, error: "Running the draft with an API key (channel=draft) needs workflow:write on the workflow." };
     return { channel: "draft" };
@@ -8502,8 +8508,14 @@ export function createApp(
     // Phase 15.4 — a retry runs on the failed run's channel. A production run is retried as production runs now:
     // the version published today (never a superseded or rolled-back one, nor the draft once a version is
     // published), and not at all while a gated workflow is deactivated. An editor run retries the draft.
+    // A run whose channel went unrecorded (older history, a record that failed to save, a run that fell out of
+    // the in-flight bookkeeping) fails closed: on a gated workflow it retries as production, never the draft.
     const ranOn = releaseService.available ? store.getExecutionRelease(sourceExecution.id) : null;
-    const retryChannel: ReleaseChannel = ranOn?.channel === "production" ? "production" : "draft";
+    const retryChannel: ReleaseChannel = ranOn
+      ? ranOn.channel
+      : releaseService.available && store.getReleaseGate(sourceExecution.workflowId)?.enabled
+        ? "production"
+        : "draft";
     const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);
     if (!workflow) return productionMissing(reply, sourceExecution.workflowId);
 

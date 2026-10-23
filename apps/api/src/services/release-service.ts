@@ -619,15 +619,17 @@ export class ReleaseService {
   /**
    * The production paths a workflow claims: those of what actually serves
    * its production traffic. A gated workflow claims its published version's
-   * paths (its draft claims nothing); an active ungated workflow claims its
-   * published version's paths when it has one, else its saved workflow's; a
-   * deactivated ungated workflow claims nothing. `draft` stands in for the
-   * saved workflow (a save being checked).
+   * paths (its draft claims nothing); an ungated workflow, active or not,
+   * claims its published version's paths when it has one, else its saved
+   * workflow's: deactivating an ungated workflow only unregisters schedules
+   * and triggers, so its webhooks, forms and MCP triggers keep serving
+   * production. `draft` stands in for the saved workflow (a save being
+   * checked).
    */
   private claimedKeys(workflowId: string, draft?: Workflow | null): ProductionRoutingKey[] {
     const saved = draft === undefined ? this.store.getWorkflow(workflowId) : draft;
     const gateOn = Boolean(this.store.getReleaseGate(workflowId)?.enabled);
-    if (!gateOn && (!saved || isWorkflowDeactivated(saved))) return [];
+    if (!gateOn && !saved) return [];
     const published = this.store.getPublishedVersion(workflowId);
     if (published !== null) {
       try {
@@ -695,7 +697,7 @@ export class ReleaseService {
   }
 
   /**
-   * Why saving `workflow` would put an active ungated workflow on a
+   * Why saving `workflow` would put an ungated workflow on a
    * production path another workflow claims; null when it would not. A gated
    * workflow's draft claims nothing, so it always saves (its publish is
    * checked instead), and a path the workflow already claimed before this
