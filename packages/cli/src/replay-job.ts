@@ -12,7 +12,7 @@
  * status poll with 400), 2 usage (also flags the API refuses with 400 when the
  * job is started), 4 inconclusive (a case could not be judged, the job did
  * not complete, or a request failed: unreachable, timed out, 401, 403, 404
- * or 5xx). Exit 4 for failed requests is the Phase 15.2 behaviour and is
+ * or 5xx). Exit 4 for failed requests is long-standing behaviour and is
  * kept so existing pipelines do not change meaning.
  *
  * Every request gives up after 60 s, or what is left of --timeout if that
@@ -21,11 +21,20 @@
  */
 import {
   REPLAY_IGNORE_PATHS_MAX,
+  REPLAY_AGGREGATE_RULES,
+  REPLAY_COMPARE_MODES,
+  REPLAY_INLINE_WORKFLOW_MAX_BYTES,
   REPLAY_MCP_MODES,
+  REPLAY_MODEL_MODES,
+  REPLAY_SERVER_MODES,
+  REPLAY_REPEATS_MAX,
   replayIgnorePathSchema,
   replayJobExitCode,
   type EvalCaseResult,
-  type EvalRunView
+  type EvalRunView,
+  type ReplayCandidateOverrides,
+  type ReplayJobEstimate,
+  type ReplayJobRequest
 } from "@ai-orchestrator/shared";
 import { apiGetWithRetry, apiRequest, apiTarget, cleanServerText, isObject, readJsonFile, REQUEST_TIMEOUT_MS, RequestError, write, writePrivateFile, type ApiTarget, type CliIo } from "./api";
 import { listFlag, oneFlag, UsageError, type ParsedArgs } from "./args";
@@ -74,13 +83,14 @@ export function replayFlags(args: ParsedArgs): ReplayFlags {
 // --- the job request ---------------------------------------------------------
 
 /** Flags that only a replay job (`--set`) understands. */
-export const JOB_ONLY_FLAGS = ["file", "model", "provider-model", "guard-profile", "mcp-server", "live-read", "models", "compare", "repeats", "aggregate", "max-cost", "timeout", "junit"];
+export const JOB_ONLY_FLAGS = ["file", "model", "provider-model", "model-secret", "guard-profile", "mcp-server", "live-read", "models", "compare", "repeats", "aggregate", "max-cost", "timeout", "junit"];
 export const JOB_ONLY_BOOLEANS = ["estimate", "no-wait", "wait"];
 
-const MCP_SERVER_MODES = ["strict", "lenient", "live_read_only"] as const;
-const MODELS_MODES = ["live", "replay"] as const;
-const COMPARE_MODES = ["recording", "baseline_rerun"] as const;
-const AGGREGATE_MODES = ["all", "majority", "any"] as const;
+// The enums are the API's own (packages/shared replay.ts), so a value the server adds is one the CLI accepts.
+const MCP_SERVER_MODES = REPLAY_SERVER_MODES;
+const MODELS_MODES = REPLAY_MODEL_MODES;
+const COMPARE_MODES = REPLAY_COMPARE_MODES;
+const AGGREGATE_MODES = REPLAY_AGGREGATE_RULES;
 
 /** `left=right`, both non-empty. */
 function pair(flag: string, value: string): [string, string] {
@@ -98,29 +108,32 @@ function oneOf<T extends string>(args: ParsedArgs, flag: string, allowed: readon
   return value as T;
 }
 
-interface JobModelOverride {
-  nodeId?: string;
-  provider?: string;
-  model: string;
-}
+type JobModelOverride = NonNullable<ReplayCandidateOverrides["models"]>[number];
 
-interface JobOverrides {
-  models?: JobModelOverride[];
-  guardProfile?: { profileId: string; version?: number };
-  mcpServers?: Record<string, string>;
-  liveReadNodes?: string[];
-}
-
-function jobOverrides(args: ParsedArgs): JobOverrides | undefined {
-  const overrides: JobOverrides = {};
+function jobOverrides(args: ParsedArgs): ReplayCandidateOverrides | undefined {
+  const overrides: ReplayCandidateOverrides = {};
   const models: JobModelOverride[] = [];
+  // --model-secret <nodeId or provider>=<secretId>: the secret a model override uses (the API requires one when the provider changes).
+  const secrets = new Map<string, string>();
+  for (const value of args.values.get("model-secret") ?? []) {
+    const [key, secretId] = pair("model-secret", value);
+    secrets.set(key, secretId);
+  }
+  const used = new Set<string>();
   for (const value of args.values.get("model") ?? []) {
     const [nodeId, model] = pair("model", value);
-    models.push({ nodeId, model });
+    const secretId = secrets.get(nodeId);
+    if (secretId) used.add(nodeId);
+    models.push({ nodeId, model, ...(secretId ? { secretRef: { secretId } } : {}) });
   }
   for (const value of args.values.get("provider-model") ?? []) {
     const [provider, model] = pair("provider-model", value);
-    models.push({ provider, model });
+    const secretId = secrets.get(provider);
+    if (secretId) used.add(provider);
+    models.push({ provider, model, ...(secretId ? { secretRef: { secretId } } : {}) });
+  }
+  for (const key of secrets.keys()) {
+    if (!used.has(key)) throw new UsageError(`--model-secret ${JSON.stringify(key.slice(0, 60))} matches no --model node or --provider-model provider`);
   }
   if (models.length > 0) overrides.models = models;
   const guard = oneFlag(args, "guard-profile");
@@ -132,11 +145,11 @@ function jobOverrides(args: ParsedArgs): JobOverrides | undefined {
     if (versionText !== undefined && (!/^\d+$/.test(versionText) || Number(versionText) <= 0)) throw new UsageError("--guard-profile version must be a positive whole number");
     overrides.guardProfile = { profileId, ...(versionText !== undefined ? { version: Number(versionText) } : {}) };
   }
-  const servers: Record<string, string> = {};
+  const servers: Record<string, (typeof REPLAY_SERVER_MODES)[number]> = {};
   for (const value of args.values.get("mcp-server") ?? []) {
     const [id, mode] = pair("mcp-server", value);
     if (!(MCP_SERVER_MODES as readonly string[]).includes(mode)) throw new UsageError(`--mcp-server mode must be ${MCP_SERVER_MODES.join(", ")}`);
-    servers[id] = mode;
+    servers[id] = mode as (typeof REPLAY_SERVER_MODES)[number];
   }
   if (Object.keys(servers).length > 0) overrides.mcpServers = servers;
   const live = listFlag(args, "live-read");
@@ -149,12 +162,16 @@ function inlineWorkflow(args: ParsedArgs): Record<string, unknown> | undefined {
   const file = oneFlag(args, "file");
   if (file === undefined) return undefined;
   const parsed = readJsonFile(file);
-  if (!isObject(parsed) || !Array.isArray(parsed.nodes)) throw new UsageError(`${file} is not a workflow (a JSON object with nodes and edges)`);
+  // The API takes a workflow, or an export file holding one under `workflow`.
+  const holdsWorkflow = isObject(parsed) && !Array.isArray(parsed.nodes) && isObject(parsed.workflow) && Array.isArray(parsed.workflow.nodes);
+  if (!isObject(parsed) || (!Array.isArray(parsed.nodes) && !holdsWorkflow)) throw new UsageError(`${file} is not a workflow (a JSON object with nodes and edges)`);
+  const bytes = Buffer.byteLength(JSON.stringify(parsed), "utf8");
+  if (bytes > REPLAY_INLINE_WORKFLOW_MAX_BYTES) throw new UsageError(`${file} is ${bytes} bytes; the API takes a candidate workflow of at most ${REPLAY_INLINE_WORKFLOW_MAX_BYTES} bytes (2 MiB)`);
   return parsed;
 }
 
 /** The POST body of `/api/replay/runs` and `/api/replay/estimate` for these flags. */
-export function jobRequestBody(args: ParsedArgs, sets: string[]): Record<string, unknown> {
+export function jobRequestBody(args: ParsedArgs, sets: string[]): ReplayJobRequest {
   const { version, mcpMode, ignorePaths, numberTolerance } = replayFlags(args);
   const workflow = inlineWorkflow(args);
   if (workflow && (args.booleans.has("draft") || version !== undefined)) throw new UsageError("--file is the candidate: do not combine it with --draft or --version");
@@ -167,7 +184,7 @@ export function jobRequestBody(args: ParsedArgs, sets: string[]): Record<string,
   const repeatsFlag = oneFlag(args, "repeats");
   let repeats: number | undefined;
   if (repeatsFlag !== undefined) {
-    if (!/^\d+$/.test(repeatsFlag.trim()) || Number(repeatsFlag) < 1 || Number(repeatsFlag) > 5) throw new UsageError("--repeats must be a whole number from 1 to 5");
+    if (!/^\d+$/.test(repeatsFlag.trim()) || Number(repeatsFlag) < 1 || Number(repeatsFlag) > REPLAY_REPEATS_MAX) throw new UsageError(`--repeats must be a whole number from 1 to ${REPLAY_REPEATS_MAX}`);
     repeats = Number(repeatsFlag);
   }
   const models = oneOf(args, "models", MODELS_MODES);
@@ -182,11 +199,11 @@ export function jobRequestBody(args: ParsedArgs, sets: string[]): Record<string,
     ...(compare ? { compare } : {}),
     ...(repeats !== undefined ? { repeats } : {}),
     ...(aggregate ? { aggregate } : {}),
-    ...(mcpMode ? { mcpMode } : {}),
+    ...(mcpMode ? { mcpMode: mcpMode as ReplayJobRequest["mcpMode"] } : {}),
     ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
     ...(numberTolerance !== undefined ? { numberTolerance } : {}),
     ...(maxCostUsd !== undefined ? { maxCostUsd } : {})
-  };
+  } as ReplayJobRequest;
 }
 
 /** What a 400 means for the person at the terminal: the API's text, and which request fields this server does not know. */
@@ -195,7 +212,7 @@ export function rejectedMessage(error: RequestError): string {
   const unknown = details.flatMap((issue) => (isObject(issue) && issue.code === "unrecognized_keys" && Array.isArray(issue.keys) ? issue.keys.map(String) : []));
   const base = cleanServerText(error.message);
   if (unknown.length === 0) return base;
-  return `${base}\n  This server does not support: ${unknown.map(cleanServerText).join(", ")}. Inline workflows (--file), overrides, --models, --compare, --repeats, --aggregate and --estimate need a server with replay candidates (Phase 15.3); upgrade the server or leave those flags out.`;
+  return `${base}\n  This server does not support: ${unknown.map(cleanServerText).join(", ")}. It is older than this CLI; upgrade the server or leave those flags out.`;
 }
 
 // --- output ------------------------------------------------------------------
@@ -225,6 +242,11 @@ export function formatJob(run: JobView, code: number): string {
     for (const warning of summary.warnings ?? []) lines.push(`  warning: ${cleanServerText(warning)}`);
   }
   if (run.error) lines.push(`  ${cleanServerText(run.error)}`);
+  // Whether the job can count as release proof; only a server with release gates says (older jobs carry no flag).
+  if (run.candidate?.releaseEligible === false) {
+    lines.push("  not release proof: a release gate will not accept this job");
+    for (const reason of run.candidate.releaseIneligibleReasons ?? []) lines.push(`    - ${cleanServerText(reason)}`);
+  } else if (run.candidate?.releaseEligible === true) lines.push("  release eligible: a release gate may accept this job");
   for (const result of run.results ?? []) {
     if (result.status === "pass") continue;
     const failed = (result.score?.details ?? []).filter((detail) => !detail.pass).map((detail) => `${cleanServerText(detail.type)}: ${cleanServerText(detail.reason)}`);
@@ -310,21 +332,13 @@ function requestFailed(args: ParsedArgs, io: CliIo, error: RequestError, what: s
 
 // --- replay run --set ---------------------------------------------------------
 
-interface JobEstimate {
-  cases: number;
-  runsPerCase?: number;
-  modelCallsEstimate?: number;
-  estimatedCostUsd?: number | null;
-  costUnknown?: boolean;
-  warnings?: string[];
-}
-
-function formatEstimate(estimate: JobEstimate): string {
+function formatEstimate(estimate: Partial<ReplayJobEstimate> & { cases: number }): string {
   const lines = [
     `Estimate: ${estimate.cases} case${estimate.cases === 1 ? "" : "s"}${estimate.runsPerCase ? `, ${estimate.runsPerCase} run${estimate.runsPerCase === 1 ? "" : "s"} each` : ""}` +
       `${typeof estimate.modelCallsEstimate === "number" ? `, about ${estimate.modelCallsEstimate} model calls` : ""}` +
       `${typeof estimate.estimatedCostUsd === "number" ? `, about $${estimate.estimatedCostUsd.toFixed(4)}${estimate.costUnknown ? " or more (some calls are unpriced)" : ""}` : estimate.costUnknown ? ", cost unknown (unpriced models)" : ""}`
   ];
+  if (typeof estimate.executions === "number") lines.push(`  ${estimate.executions} executions${typeof estimate.maxExecutions === "number" ? ` (a job may run at most ${estimate.maxExecutions})` : ""}`);
   for (const warning of estimate.warnings ?? []) lines.push(`  warning: ${cleanServerText(warning)}`);
   return lines.join("\n");
 }
@@ -340,16 +354,16 @@ export async function runReplayJob(args: ParsedArgs, io: CliIo, sets: string[]):
     try {
       const estimate = await apiRequest<unknown>(target, "POST", "/api/replay/estimate", body, { timeoutMs: requestTimeout });
       if (!isObject(estimate) || typeof estimate.cases !== "number") {
-        write(io.stderr, "l2m: the estimate is inconclusive: the API's answer is not an estimate (does the server have the estimate route, Phase 15.3?)");
+        write(io.stderr, "l2m: the estimate is inconclusive: the API's answer is not an estimate (is the CLI the same version as the API?)");
         return EXIT_INCOMPLETE;
       }
       if (args.booleans.has("json")) io.stdout.write(`${JSON.stringify(estimate, null, 2)}\n`);
-      else write(io.stdout, formatEstimate(estimate as unknown as JobEstimate));
+      else write(io.stdout, formatEstimate(estimate as Partial<ReplayJobEstimate> & { cases: number }));
       return EXIT_OK;
     } catch (error) {
       if (error instanceof RequestError) {
-        if (error.status === 404 || error.status === 405) {
-          write(io.stderr, "l2m: this server has no estimate route; --estimate needs a server with replay candidates (Phase 15.3).");
+        if (error.status === 404 && isObject(error.body) && error.body.error === "Not Found") {
+          write(io.stderr, "l2m: this server has no estimate route; --estimate needs a server that supports replay estimates.");
           return EXIT_USAGE;
         }
         if (error.status === 400) {

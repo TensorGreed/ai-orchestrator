@@ -94,6 +94,7 @@ const USAGE = `Usage:
   l2m replay run --set <goldenSetId>... [--draft | --version <n> | --file <workflow.json>]
                  [--mcp strict|lenient] [--ignore-path <glob>]... [--number-tolerance <n>]
                  [--model <nodeId>=<model>]... [--provider-model <provider>=<model>]...
+                 [--model-secret <nodeId or provider>=<secretId>]...
                  [--guard-profile <id>[@<version>]] [--mcp-server <id>=strict|lenient|live_read_only]...
                  [--live-read <nodeId>]... [--models live|replay] [--compare recording|baseline_rerun]
                  [--repeats <1-5>] [--aggregate all|majority|any] [--max-cost <usd>]
@@ -128,7 +129,7 @@ with 400 when the request is made),
 not complete: canceled, over budget, interrupted or past --timeout), or
 release publish needs approval. replay run and replay status also exit 4
 when a request fails (unreachable, no answer, 401, 403, 404, 5xx): that is
-the Phase 15.2 behaviour, kept so existing pipelines keep their meaning.
+long-standing behaviour, kept so existing pipelines keep their meaning.
 release publish: 0 published, 1 blocked by the gate or failed, 4 needs approval.
 golden export, import and verify: request failures exit 1.
 `;

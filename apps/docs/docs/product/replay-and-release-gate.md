@@ -1,14 +1,11 @@
 # Replay in CI and the release gate
 
-This page shows how a pipeline tests a workflow file from git against the golden sets on your deployment, fails the build on a regression, uploads a JUnit report and, when your deployment has a release gate, publishes the version that passed. It also describes the golden-set file you can keep in git or move between deployments.
+This page shows how a pipeline tests a workflow file from git against the golden sets on your deployment, fails the build on a regression, uploads a JUnit report and, when the workflow has a release gate, publishes the version that passed. It also describes the golden-set file you can keep in git or move between deployments.
 
 Everything runs against your own deployment's API. Nothing here calls an outside service.
 
-::: info Server versions
-`replay run --set`, `replay status`, the JUnit report and golden-set files work with any server that has [golden sets and replay jobs](./golden-sets.md). Three parts need newer servers:
-
-- **Overrides, `--file`, `--models`, `--compare`, `--repeats`, `--aggregate` and `--estimate`** need the replay-candidates release (Phase 15.3). An older server answers 400 for a request field it does not know and the CLI exits 2 and names the field.
-- **`l2m release publish`** needs the release-gate release (Phase 15.4). On an older server the publish route does not exist and the command exits 1.
+::: info What the server must have
+`replay run --set` with overrides, `--file`, `--models`, `--compare`, `--repeats`, `--aggregate` and `--estimate` needs a server with replay candidates, and `l2m release publish` needs a server with release gates. A server without them answers 400 for a request field it does not know (the CLI exits 2 and names the field) or has no publish route (exit 1). Release gates and golden-set import and export need the SQLite store; on Postgres those routes answer 501.
 :::
 
 ## Set up the CLI
@@ -30,7 +27,9 @@ Every request gives up after 60 seconds (`golden export` and `golden import`, an
 
 ## Recipe: test a workflow file against the golden sets
 
-Keep the workflow's JSON (the export of the workflow) in git. On every pull request, replay the golden sets with that file as the candidate. Nothing is saved on the server: the file is a candidate for this one job.
+Keep the workflow's JSON (the export of the workflow, or the workflow itself) in git. On every pull request, replay the golden sets with that file as the candidate. Nothing is saved on the server: the file is a candidate for this one job. The file must be for the same workflow id as the golden sets and at most 2 MiB; the key needs edit access (`workflow:write`) to the workflow, because an uploaded candidate is a change to it.
+
+A job on a workflow file, or with any override, shows whether it can count as release proof. The report ends with `not release proof: a release gate will not accept this job` and the reasons the server gives, or `release eligible` when it can; `--json` and the JUnit file carry the same (`releaseEligible`, `releaseIneligibleReasons`). A release gate publishes only what a job on a saved version proved, so to publish, save the version and replay `--version <n>` (see the publish recipe).
 
 ```bash
 #!/usr/bin/env sh
@@ -58,7 +57,7 @@ The step waits for the job (polling every two seconds), prints the failing cases
 | 2 | Usage error, including unknown flags, or flags or a workflow file the API rejects (HTTP 400) when the job is started | Fail the build; fix the step |
 | 4 | Inconclusive: a case could not be judged, no case passed, the job did not complete (canceled, over budget, interrupted), it outlived `--timeout`; or a request failed: the API could not be reached or did not answer in time (after the retries for polls), or answered 401, 403, 404 or 5xx | Fail the build; a replay that proves nothing is not a pass |
 
-`replay run --set` and `replay status` exit 4, not 1, when a request fails. That is how these commands behaved before (Phase 15.2), and it is kept so a pipeline that already reads the codes keeps its meaning. `release publish` and the `golden` commands exit 1 for a failed request.
+`replay run --set` and `replay status` exit 4, not 1, when a request fails. That is how these commands have always behaved, and it is kept so a pipeline that already reads the codes keeps its meaning. `release publish` and the `golden` commands exit 1 for a failed request.
 
 A pipeline that only distinguishes pass from fail treats every non-zero exit as a failed build, which is the safe default.
 
@@ -83,6 +82,7 @@ l2m replay run --set "$GOLDEN_SET_ID" --file workflows/support-bot.json \
 | --- | --- |
 | `--model <nodeId>=<model>` | Use another model for one node (repeatable) |
 | `--provider-model <provider>=<model>` | Use another model for every node of a provider (repeatable) |
+| `--model-secret <nodeId or provider>=<secretId>` | The secret a model override uses (repeatable); the server requires one when an override changes the provider of a node that has a secret. You need permission to use it in the workflow's project |
 | `--guard-profile <id>[@<version>]` | Run with a guard profile, optionally a specific version |
 | `--mcp-server <id>=strict\|lenient\|live_read_only` | How one MCP server is answered (repeatable) |
 | `--live-read <nodeId>` | Let a read-class node call its system live (repeatable) |
@@ -99,6 +99,7 @@ Live write calls are never allowed in a replay job; the server refuses an overri
 ```bash
 l2m replay run --set "$GOLDEN_SET_ID" --file workflows/support-bot.json --repeats 3 --estimate
 # Estimate: 12 cases, 3 runs each, about 48 model calls, about $0.8400
+#   36 executions (a job may run at most 2000)
 ```
 
 Use it to fail fast when a job would exceed what the pipeline may spend. `--max-cost` still stops the job itself at its budget.
@@ -116,20 +117,23 @@ l2m replay status run_… --wait --timeout 1800 --junit reports/l2m-replay.xml
 
 ## Recipe: publish the version that passed
 
-When the workflow has a release gate (see the server note above), publish from the pipeline after the replay passed:
+When the workflow has a release gate, publish from the pipeline after a replay of the saved version passed. The gate binds to the exact hash of a saved version and to a passing job on it, so replay the version rather than a file:
 
 ```bash
-l2m release publish "$WORKFLOW_ID" --version 12 --run "$REPLAY_RUN_ID"
+l2m replay run --set "$GOLDEN_SET_ID" --version 12 --json > job.json || exit $?
+l2m release publish "$WORKFLOW_ID" --version 12 --run "$(jq -r .id job.json)"
 ```
+
+A job on a workflow file or with overrides, models served from the tape or lenient MCP is never accepted by a release gate; the job's `releaseEligible` says so. The gate also checks the job's comparison settings (ignored paths, scorers, repeats and the rest) against its own candidate options.
 
 | Server answer | Exit code | Output |
 | --- | --- | --- |
 | 200, published | 0 | The version and the gate's verdict |
-| 202, the policy needs approval | 4 | The approval request id; the request is decided in the approvals inbox and nothing is published yet |
-| 409, blocked by the gate | 1 | The reasons |
+| 202, the policy needs approval | 4 | The approval request id and the reasons; the request is decided in the approvals inbox and nothing is published yet |
+| 409, blocked by the gate | 1 | The reasons, the job that was judged, and a hint to use `--request-approval` when the gate allows it |
 | Anything else (403, 404, unreachable) | 1 | The API's error |
 
-`--hash <workflowHash>` pins the exact candidate hash the replay passed on; `--run <replayRunId>` names the job to use. A blocked publish can be sent to the gate's approvers with `--request-approval "<reason>"`, and an admin can override the gate with `--override-reason "<reason>"` (the two cannot be combined). Both reasons are kept in the audit log.
+`--hash <workflowHash>` pins the exact candidate hash the replay passed on (64 hex characters, the job's `candidate.workflowHash`); `--run <replayRunId>` names the job to use. A blocked publish can be sent to the gate's approvers with `--request-approval "<reason>"`, and an admin can override the gate with `--override-reason "<reason>"` (the two cannot be combined). Both reasons are kept in the audit log.
 
 ## Golden-set files
 
@@ -168,7 +172,7 @@ The API routes behind the commands:
 | `name`, `description` | The golden set's |
 | `exportedAt`, `exportedBy` | When and by whom |
 | `cases[]` | `name`, optional `scorers`, and the `recording` |
-| `cases[].recording` | `name`, `notes`, `sourceStatus`, `sourceTriggerType`, `recordedAt` (when the run was recorded), `origin` (`recorded`, or `imported` for a golden run that itself came from a file) and `sourceWorkflowId` for imported ones, `workflowHash` (sha256 of the canonical JSON of `workflow` exactly as the file carries it), `workflowSavedVersion`, `workflow` (the workflow as it ran, scrubbed), `input`, `nodes` (every node's recorded result), `facts` (the run's normalised facts), `cassette` (the MCP cassette or `null`), `truncated`, `scrubbed`, and `modelTape` / `memorySeed` when the exporting deployment has them |
+| `cases[].recording` | `name`, `notes`, `sourceStatus`, `sourceTriggerType`, `recordedAt` (when the run was recorded), `origin` (`recorded`, or `imported` for a golden run that itself came from a file) and `sourceWorkflowId` for imported ones, `workflowHash` (sha256 of the canonical JSON of `workflow` exactly as the file carries it), `workflowSavedVersion`, `workflow` (the workflow as it ran, scrubbed), `input`, `nodes` (every node's recorded result), `facts` (the run's normalised facts), `cassette` (the MCP cassette or `null`), `truncated`, `scrubbed`, and `modelTape` / `memorySeed` when the golden run has them |
 | `signature` | Optional: `algorithm` (`Ed25519`), `keyId`, `publicKey`, `signedAt`, `signature` |
 
 Scorers belong to a case. A judge scorer's credential reference is not part of the file.
@@ -182,13 +186,13 @@ The exporter and the importer both treat the file as untrusted, and run the same
 - **No secret references.** `secretRef`, `secretId`, `…SecretRef` / `…SecretId` (such as `authSecretId`) and `credentialId` / `credentialRef` keys are removed from every field, not only the workflow. A judge scorer imported from a file has no `secretRef`; the import says so in `warnings`, and a user attaches a credential before the judge can run.
 - **No forged hash.** The importer recomputes each case's workflow hash from the workflow it carries and refuses a file whose claimed hash does not match. The golden run stores the hash of the workflow as stored after the import scrub.
 - **Nothing partial.** The importer checks the nesting depth (at most 64 levels), the schema, each MCP cassette, the number of cases (at most `REPLAY_JOB_MAX_CASES`, 200 by default, and never more than 500), the size of each case (at most `REPLAY_RECORDING_MAX_BYTES`) and of the file (`GOLDEN_SET_IMPORT_MAX_BYTES`); an export that would be over `GOLDEN_SET_IMPORT_MAX_BYTES` is refused with 413 (split the golden set), so it never builds a file the import would refuse. Each case's `recordedAt` must be a valid ISO timestamp not before 2000-01-01 (otherwise 400 naming the case), and the workflow's golden-run storage limits. The checks and the scrub run case by case, letting other requests through between cases; then one transaction creates the golden set and every golden run. If anything fails, nothing is created.
-- **A model tape or memory seed is not stored** by a server that has no place for it; the import lists it in `warnings`.
+- **The model tape and memory seed are checked and scrubbed like the rest.** They must match the model tape and memory seed formats (otherwise 400), planted secret values in them are replaced, and the tape's request hashes are kept so a replay can still find its entries. A golden run imported with a tape can be replayed with `--models replay`. When the target workflow has no node with the same id as a tape entry, that entry is dropped, the tape is marked truncated and the import says so in `warnings`.
 
 A file exported from another workflow is refused (409) unless the request sets `allowWorkflowMismatch` (`--allow-other-workflow`). Then recorded outputs are kept only for nodes whose id and type both match a node of the target; the others are dropped and named in `warnings`, and a replay stubs those nodes without a recording.
 
 ### Imported golden runs
 
-A golden run created from a file is marked `origin: "imported"` (in `capabilities` of the golden-run API views, and as an "imported" badge in the golden-run viewer and the golden-set page), with the source workflow id and the import time. Its `createdAt` is the `recordedAt` the file claims, never later than the import, so a rule that looks at the age of golden runs, such as the release gate's (Phase 15.4) use of `baseline_rerun` for golden runs older than 30 days, treats an old file as old. Exporting an imported golden run again keeps `origin: "imported"`.
+A golden run created from a file is marked `origin: "imported"` (in `capabilities` of the golden-run API views, and as an "imported" badge in the golden-run viewer and the golden-set page), with the source workflow id and the import time. Its `createdAt` is the `recordedAt` the file claims, never later than the import, so a rule that looks at the age of golden runs, such as the release gate's use of `baseline_rerun` for golden runs older than 30 days, treats an old file as old. Exporting an imported golden run again keeps `origin: "imported"`.
 
 An imported golden run carries no secret references and a replay never reports a credential change for it (a known behaviour of imported recordings). When a replay compares the candidate's node configurations with it, secret references are left out on both sides. For a golden run recorded on the deployment they are compared: a candidate that points a write node at another credential is reported as a changed configuration.
 

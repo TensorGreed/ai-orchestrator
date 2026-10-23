@@ -316,7 +316,7 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       const prepared: Array<{ entry: GoldenSetFileCase; recording: PreparedImport; scorers: EvalScorerSpec[] | undefined }> = [];
       const droppedNodes = new Set<string>();
       let droppedJudgeSecrets = 0;
-      let ignoredTapes = 0;
+      let droppedTapeEntries = 0;
       let total = jsonBytes({ ...fileHeader, cases: [] });
       try {
         for (const [index, rawCase] of fileHeader.cases.entries()) {
@@ -359,7 +359,7 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
           for (const nodeId of recording.droppedNodes) droppedNodes.add(nodeId);
           const { scorers, dropped } = withoutJudgeSecret(entry.scorers);
           droppedJudgeSecrets += dropped;
-          if (entry.recording.modelTape !== undefined || entry.recording.memorySeed !== undefined) ignoredTapes += 1;
+          droppedTapeEntries += recording.droppedTapeEntries;
           prepared.push({ entry, recording, scorers });
         }
       } catch (error) {
@@ -414,8 +414,8 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       if (droppedJudgeSecrets > 0) {
         warnings.push(`${droppedJudgeSecrets} judge scorer${droppedJudgeSecrets === 1 ? "" : "s"} lost the credential reference: attach one before running the judge.`);
       }
-      if (ignoredTapes > 0) {
-        warnings.push(`${ignoredTapes} case${ignoredTapes === 1 ? "" : "s"} carried a model tape or memory seed, which this server does not store; they were not imported.`);
+      if (droppedTapeEntries > 0) {
+        warnings.push(`${droppedTapeEntries} recorded model call${droppedTapeEntries === 1 ? "" : "s"} were dropped because ${target.id} has no node with the same id and type; those tapes are marked truncated.`);
       }
       const dataset = store.getEvalDataset(datasetId);
       deps.audit(request, user, {

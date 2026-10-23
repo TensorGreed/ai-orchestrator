@@ -148,9 +148,9 @@ export const goldenSetFileRecordingSchema = z.object({
   facts: runFactsSchema,
   /** The run's MCP cassette, or null when it was not recorded. Checked against the cassette format on import. */
   cassette: z.unknown().nullable(),
-  /** A recorded model tape, when the exporting deployment has one. Carried as is; ignored by a deployment that has none. */
+  /** The golden run's model tape (`modelTapeSchema`), when it has one. Checked against the tape format and scrubbed on import. */
   modelTape: z.unknown().optional(),
-  /** Session memory seeded at the start of the run, when the exporting deployment has it. */
+  /** Session memory seeded at the start of the run (`modelMemorySeedSchema`), when the run had any. */
   memorySeed: z.unknown().optional(),
   /** Some node outputs were cut to fit the recording size limit. */
   truncated: z.boolean().optional(),

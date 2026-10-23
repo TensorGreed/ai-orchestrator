@@ -26,6 +26,8 @@ import {
   canonicalJson,
   REPLAY_TRUNCATED_MARKER,
   type McpCassette,
+  modelMemorySeedSchema,
+  modelTapeSchema,
   type ModelMemorySeed,
   type ModelTape,
   type McpCassetteEntry,
@@ -102,6 +104,8 @@ export interface PreparedImport {
   input: unknown;
   /** Recorded nodes left out because the target has no node with the same id and type. */
   droppedNodes: string[];
+  /** Model tape entries left out because they belong to a node the target does not have. */
+  droppedTapeEntries: number;
 }
 
 /**
@@ -471,7 +475,26 @@ export class ReplayRecordingService {
       throw new ReplayRecordingError(`The workflow hash ${JSON.stringify(recording.workflowHash.slice(0, 80))} does not match the workflow the case carries (${claimedHash.slice(0, 16)}...).`, "invalid");
     }
     const scrubbed = this.scrubFileValue(recording, scrubber, keys);
+    if (recording.modelTape !== undefined && recording.modelTape !== null) scrubbed.modelTape = ReplayRecordingService.keepTapeHashes(recording.modelTape, scrubbed.modelTape);
     return { ...scrubbed, workflowHash: sha256Hex(canonicalJson(scrubbed.workflow)) };
+  }
+
+  /**
+   * A scrubbed model tape gets its request hashes back. A hash is 64 hex
+   * characters, which the token-shape scrub blanks; a replay finds a tape
+   * entry by it, so a blanked hash would make the whole tape unusable. A
+   * hash holds no secret: it is a digest of the request.
+   */
+  private static keepTapeHashes(original: unknown, scrubbed: unknown): unknown {
+    const before = asRecord(original)?.entries;
+    const after = asRecord(scrubbed)?.entries;
+    if (!Array.isArray(before) || !Array.isArray(after)) return scrubbed;
+    before.forEach((entry, index) => {
+      const hash = asRecord(entry)?.requestHash;
+      const target = asRecord(after[index]);
+      if (target && typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash)) target.requestHash = hash;
+    });
+    return scrubbed;
   }
 
   /**
@@ -573,6 +596,8 @@ export class ReplayRecordingService {
       nodes,
       facts: this.scrubFacts(stripSecretReferences(record.facts), scrubber),
       cassette: record.mcpCassette ? this.scrubCassette(record.mcpCassette, scrubber) : null,
+      ...(record.modelTape ? { modelTape: ReplayRecordingService.keepTapeHashes(record.modelTape, this.scrubForFile(record.modelTape, scrubber)) } : {}),
+      ...(record.memorySeed ? { memorySeed: this.scrubForFile(record.memorySeed, scrubber) } : {}),
       truncated: record.truncated,
       ...(record.capabilities.scrubbed ? { scrubbed: record.capabilities.scrubbed } : {})
     };
@@ -619,6 +644,26 @@ export class ReplayRecordingService {
         else droppedNodes.push(nodeId);
       }
     }
+    // The model tape and memory seed: validated against their formats, then scrubbed like the rest. A tape entry of a node the target does not have is left out and the tape marked truncated.
+    let modelTape: ModelTape | null = null;
+    let droppedTapeEntries = 0;
+    if (file.modelTape !== undefined && file.modelTape !== null) {
+      const parsed = modelTapeSchema.safeParse(file.modelTape);
+      if (!parsed.success) throw new ReplayRecordingError(`The model tape is not valid: ${parsed.error.issues[0]?.message ?? "invalid"} (${parsed.error.issues[0]?.path.join(".") ?? ""}).`, "invalid");
+      let tape = parsed.data as ModelTape;
+      if (input.keepNodes) {
+        const kept = tape.entries.filter((entry) => entry.nodeId === null || input.keepNodes!.has(entry.nodeId));
+        droppedTapeEntries = tape.entries.length - kept.length;
+        if (droppedTapeEntries > 0) tape = { ...tape, entries: kept, truncated: true, bytes: jsonBytes(kept) };
+      }
+      modelTape = ReplayRecordingService.keepTapeHashes(tape, this.scrubForFile(tape, scrubber)) as ModelTape;
+    }
+    let memorySeed: ModelMemorySeed | null = null;
+    if (file.memorySeed !== undefined && file.memorySeed !== null) {
+      const parsed = modelMemorySeedSchema.safeParse(file.memorySeed);
+      if (!parsed.success) throw new ReplayRecordingError(`The memory seed is not valid: ${parsed.error.issues[0]?.message ?? "invalid"} (${parsed.error.issues[0]?.path.join(".") ?? ""}).`, "invalid");
+      memorySeed = this.scrubForFile(parsed.data as unknown as ModelMemorySeed, scrubber);
+    }
     const nodes = this.scrubForFile(recordedNodes, scrubber);
     const facts = this.scrubFacts(stripSecretReferences(file.facts as RunFacts), scrubber);
     const scrubbedInput = file.input === undefined || file.input === null ? null : this.scrubForFile(file.input, scrubber);
@@ -643,7 +688,16 @@ export class ReplayRecordingService {
     const factsJson = this.serialise(facts, scrubber);
     const nodesJson = this.serialise(nodes, scrubber);
     const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
-    const bytes = byteLength(workflowJson) + (inputJson ? byteLength(inputJson) : 0) + byteLength(factsJson) + byteLength(nodesJson) + (cassetteJson ? byteLength(cassetteJson) : 0);
+    const modelTapeJson = modelTape ? this.serialise(modelTape, scrubber) : null;
+    const memorySeedJson = memorySeed ? this.serialise(memorySeed, scrubber) : null;
+    const bytes =
+      byteLength(workflowJson) +
+      (inputJson ? byteLength(inputJson) : 0) +
+      byteLength(factsJson) +
+      byteLength(nodesJson) +
+      (cassetteJson ? byteLength(cassetteJson) : 0) +
+      (modelTapeJson ? byteLength(modelTapeJson) : 0) +
+      (memorySeedJson ? byteLength(memorySeedJson) : 0);
     if (bytes > this.options.maxBytes) throw new ReplayRecordingError(`${this.tooLargeMessage()} The recording is ${bytes} bytes.`, "too_large");
     // The claimed recording time, never later than now: an old golden run stays old (accepted decision 3).
     const now = this.now();
@@ -670,10 +724,12 @@ export class ReplayRecordingService {
         nodeOutputsJson: nodesJson,
         factsJson,
         mcpCassetteJson: cassetteJson,
+        modelTapeJson,
+        memorySeedJson,
         capabilities: {
           mcp: cassette ? "cassette" : "none",
-          models: "live",
-          memory: "empty",
+          models: modelTape ? "tape" : "live",
+          memory: memorySeed ? "seeded" : "empty",
           workflowSource: "captured",
           scrubbed,
           origin: "imported",
@@ -686,7 +742,8 @@ export class ReplayRecordingService {
         createdAt: recordedAt
       },
       input: scrubbedInput === null ? null : (JSON.parse(inputJson!) as unknown),
-      droppedNodes
+      droppedNodes,
+      droppedTapeEntries
     };
   }
 

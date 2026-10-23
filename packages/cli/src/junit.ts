@@ -79,7 +79,9 @@ export function buildJunit(input: JunitInput): string {
     ? [
         `      <property name="run" value="${esc(run.id)}"/>`,
         `      <property name="status" value="${esc(run.status)}"/>`,
-        ...(run.candidate ? [`      <property name="candidate" value="${esc(run.candidate.kind)}"/>`, `      <property name="workflowHash" value="${esc(run.candidate.workflowHash)}"/>`] : [])
+        ...(run.candidate ? [`      <property name="candidate" value="${esc(run.candidate.kind)}"/>`, `      <property name="workflowHash" value="${esc(run.candidate.workflowHash)}"/>`] : []),
+        ...(typeof run.candidate?.releaseEligible === "boolean" ? [`      <property name="releaseEligible" value="${run.candidate.releaseEligible}"/>`] : []),
+        ...(run.candidate?.releaseIneligibleReasons ?? []).map((reason) => `      <property name="releaseIneligibleReason" value="${esc(reason)}"/>`)
       ].join("\n")
     : "";
   return [

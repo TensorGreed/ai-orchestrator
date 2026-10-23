@@ -5,7 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { goldenSetSignedBytes, type EvalCaseResult, type EvalRunView, type GoldenSetFile } from "@ai-orchestrator/shared";
+import {
+  goldenSetSignedBytes,
+  releasePublishInputSchema,
+  replayJobRequestSchema,
+  type EvalCaseResult,
+  type EvalRunView,
+  type GoldenSetFile,
+  type ReplayJobEstimate,
+  type WorkflowRelease
+} from "@ai-orchestrator/shared";
 import { EXIT_FAILED, EXIT_INCOMPLETE, EXIT_OK, EXIT_USAGE, main, type CliIo } from "./main";
 import { buildJunit } from "./junit";
 
@@ -20,6 +29,11 @@ function harness(replies: Reply[]) {
   stderr.on("data", (chunk: Buffer) => (err += chunk.toString()));
   const requests: Array<{ method: string; url: string; body: unknown; auth: string | null }> = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    // A request the API's own schema would refuse fails the test: the fake server is as strict as the real one.
+    const url = String(input);
+    const sent = init?.body ? JSON.parse(String(init.body)) : null;
+    if (/\/api\/replay\/(runs|estimate)$/.test(url) && init?.method === "POST") replayJobRequestSchema.parse(sent);
+    if (/\/api\/workflows\/[^/]+\/publish$/.test(url)) releasePublishInputSchema.parse(sent);
     requests.push({ method: init?.method ?? "GET", url: String(input), body: init?.body ? JSON.parse(String(init.body)) : null, auth: new Headers(init?.headers).get("authorization") });
     const reply = replies[Math.min(requests.length - 1, replies.length - 1)]!;
     if (reply.status === 0) throw new Error("connect ECONNREFUSED");
@@ -53,7 +67,7 @@ function job(status: string, counts: { pass?: number; fail?: number; error?: num
     triggeredBy: "ci@example.com",
     summary: finished ? { total: pass + fail + error, pass, fail, error, passRate: 0, totalTokenInput: 0, totalTokenOutput: 0, totalTokenTotal: 0, totalDurationMs: 0, avgDurationMs: 0, costUsd: 0.5 } : null,
     progress: finished ? null : { total: 3, done: 1, running: 1, pass: 1, fail: 0, error: 0, skipped: 0 },
-    candidate: { kind: "inline", workflowHash: "c".repeat(64) } as unknown as EvalRunView["candidate"],
+    candidate: { kind: "inline", version: null, workflowHash: "c".repeat(64), baseHash: "d".repeat(64), name: "Support bot", releaseEligible: false, releaseIneligibleReasons: ["The candidate is a workflow file, not the draft or a saved version."] },
     options: null,
     error: status === "failed" ? "Stopped: over budget." : null,
     results
@@ -136,7 +150,7 @@ describe("l2m replay run --set: the candidate file and overrides", () => {
     fs.writeFileSync(workflowFile, JSON.stringify({ nodes: [] }));
     expect(await main(["replay", "run", "--set", "ds_1", "--file", workflowFile, "--model", "a=b"], fake.cli)).toBe(EXIT_USAGE);
     expect(fake.err()).toContain("does not support: workflow, overrides");
-    expect(fake.err()).toContain("Phase 15.3");
+    expect(fake.err()).toContain("older than this CLI");
     // A plain 400 keeps the API's own text.
     const plain = harness([{ status: 400, body: { error: "Invalid replay job" } }]);
     expect(await main(["replay", "run", "--set", "ds_1"], plain.cli)).toBe(EXIT_USAGE);
@@ -188,10 +202,11 @@ describe("l2m replay run --set: the candidate file and overrides", () => {
 
 describe("l2m replay run --estimate", () => {
   it("calls the estimate route with the same body and does not start a job", async () => {
-    const fake = harness([{ status: 200, body: { cases: 12, runsPerCase: 2, modelCallsEstimate: 48, estimatedCostUsd: 0.84, costUnknown: false, warnings: ["2 cases have no model tape"], extra: 1 } }]);
+    const fake = harness([{ status: 200, body: { cases: 12, runsPerCase: 2, modelCallsEstimate: 48, estimatedCostUsd: 0.84, costUnknown: false, warnings: ["2 cases have no model tape"], executions: 24, maxExecutions: 2000, extra: 1 } satisfies ReplayJobEstimate & { extra: number } }]);
     expect(await main(["replay", "run", "--set", "ds_1", "--estimate", "--repeats", "2", "--models", "live"], fake.cli)).toBe(EXIT_OK);
     expect(fake.requests).toEqual([{ method: "POST", url: "http://l2m.test/api/replay/estimate", auth: "Bearer key-1", body: { datasetIds: ["ds_1"], draft: true, models: "live", repeats: 2 } }]);
     expect(fake.out()).toContain("Estimate: 12 cases, 2 runs each, about 48 model calls, about $0.8400");
+    expect(fake.out()).toContain("24 executions (a job may run at most 2000)");
     expect(fake.out()).toContain("warning: 2 cases have no model tape");
     const json = harness([{ status: 200, body: { cases: 1 } }]);
     expect(await main(["replay", "run", "--set", "ds_1", "--estimate", "--json"], json.cli)).toBe(EXIT_OK);
@@ -199,9 +214,14 @@ describe("l2m replay run --estimate", () => {
   });
 
   it("exits 2 on a server without the route, 4 on an unreadable answer or a failed request", async () => {
-    const old = harness([{ status: 404, body: { error: "Route POST:/api/replay/estimate not found" } }]);
+    // Fastify's answer for a route that does not exist.
+    const old = harness([{ status: 404, body: { message: "Route POST:/api/replay/estimate not found", error: "Not Found", statusCode: 404 } }]);
     expect(await main(["replay", "run", "--set", "ds_1", "--estimate"], old.cli)).toBe(EXIT_USAGE);
-    expect(old.err()).toContain("Phase 15.3");
+    expect(old.err()).toContain("no estimate route");
+    // A missing golden set is the API's own 404: inconclusive, not a missing route.
+    const missing = harness([{ status: 404, body: { error: "Golden set not found" } }]);
+    expect(await main(["replay", "run", "--set", "ds_1", "--estimate"], missing.cli)).toBe(EXIT_INCOMPLETE);
+    expect(missing.err()).toContain("Golden set not found");
     expect(await main(["replay", "run", "--set", "ds_1", "--estimate"], harness([{ status: 200, body: { hello: 1 } }]).cli)).toBe(EXIT_INCOMPLETE);
     expect(await main(["replay", "run", "--set", "ds_1", "--estimate"], harness([{ status: 500, body: { error: "x" } }]).cli)).toBe(EXIT_INCOMPLETE);
     expect(await main(["replay", "run", "--set", "ds_1", "--estimate"], harness([{ status: 400, body: { error: "Invalid" } }]).cli)).toBe(EXIT_USAGE);
@@ -222,6 +242,8 @@ describe("JUnit output", () => {
             <property name="status" value="completed"/>
             <property name="candidate" value="inline"/>
             <property name="workflowHash" value="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"/>
+            <property name="releaseEligible" value="false"/>
+            <property name="releaseIneligibleReason" value="The candidate is a workflow file, not the draft or a saved version."/>
           </properties>
           <testcase classname="l2m.replay.wf-1" name="Greeting" time="0.250"/>
           <testcase classname="l2m.replay.wf-1" name="Refund &lt;case&gt; &amp; &quot;quote&quot;" time="1.500">
@@ -291,23 +313,39 @@ describe("l2m replay status", () => {
 
 describe("l2m release publish", () => {
   it("publishes (200 -> 0)", async () => {
-    const fake = harness([{ status: 200, body: { release: { version: 4, verdict: "passed" } } }]);
-    expect(await main(["release", "publish", "wf-1", "--version", "4", "--hash", "abc", "--run", "run_9"], fake.cli)).toBe(EXIT_OK);
-    expect(fake.requests[0]).toEqual({ method: "POST", url: "http://l2m.test/api/workflows/wf-1/publish", auth: "Bearer key-1", body: { version: 4, workflowHash: "abc", replayRunId: "run_9" } });
+    const release: WorkflowRelease = {
+      id: "rel_1",
+      workflowId: "wf-1",
+      version: 4,
+      workflowHash: "a".repeat(64),
+      previousVersion: 3,
+      replayRunId: "run_9",
+      verdict: "passed",
+      reason: null,
+      gateReasons: [],
+      approval: null,
+      publishedAt: "2026-10-24T08:00:00.000Z",
+      publishedBy: "ci@example.com"
+    };
+    const fake = harness([{ status: 200, body: { release } }]);
+    expect(await main(["release", "publish", "wf-1", "--version", "4", "--hash", "a".repeat(64), "--run", "run_9"], fake.cli)).toBe(EXIT_OK);
+    expect(fake.requests[0]).toEqual({ method: "POST", url: "http://l2m.test/api/workflows/wf-1/publish", auth: "Bearer key-1", body: { version: 4, workflowHash: "a".repeat(64), replayRunId: "run_9" } });
     expect(fake.out()).toContain("Published version 4 of workflow wf-1 (passed)");
   });
 
   it("exits 4 with the request id when the publish needs approval", async () => {
-    const fake = harness([{ status: 202, body: { verdict: "needs_approval", approvalRequestId: "apr_7" } }]);
+    const fake = harness([{ status: 202, body: { verdict: "needs_approval", approvalRequestId: "apr_7", reasons: ["The gate requires approval for every publish."] } }]);
     expect(await main(["release", "publish", "wf-1", "--version", "4", "--request-approval", "ship it"], fake.cli)).toBe(EXIT_INCOMPLETE);
     expect(fake.requests[0]!.body).toEqual({ version: 4, requestApproval: { reason: "ship it" } });
     expect(fake.out()).toContain("request apr_7");
+    expect(fake.out()).toContain("- The gate requires approval for every publish.");
   });
 
   it("exits 1 with the reasons when the gate blocks, and for any other failure", async () => {
-    const blocked = harness([{ status: 409, body: { verdict: "blocked", reasons: ["no passing replay for this hash", "2 cases failed"], canRequestApproval: true } }]);
+    const blocked = harness([{ status: 409, body: { verdict: "blocked", reasons: ["no passing replay for this hash", "2 cases failed"], replayRunId: "run_3", canRequestApproval: true } }]);
     expect(await main(["release", "publish", "wf-1", "--version", "4", "--override-reason", "hotfix"], blocked.cli)).toBe(EXIT_FAILED);
     expect(blocked.requests[0]!.body).toEqual({ version: 4, override: { reason: "hotfix" } });
+    expect(blocked.out()).toContain("(replay job run_3)");
     expect(blocked.out()).toContain("- no passing replay for this hash");
     expect(blocked.out()).toContain("--request-approval");
     const forbidden = harness([{ status: 403, body: { error: "Only admins can override" } }]);
@@ -315,7 +353,7 @@ describe("l2m release publish", () => {
     expect(forbidden.err()).toContain("Only admins can override");
     const old = harness([{ status: 404, body: { error: "not found" } }]);
     expect(await main(["release", "publish", "wf-1", "--version", "4"], old.cli)).toBe(EXIT_FAILED);
-    expect(old.err()).toContain("Phase 15.4");
+    expect(old.err()).toContain("release gates");
     expect(await main(["release", "publish", "wf-1", "--version", "4"], harness([{ status: 0 }]).cli)).toBe(EXIT_FAILED);
   });
 
@@ -326,7 +364,9 @@ describe("l2m release publish", () => {
       ["release", "publish", "wf-1", "--version", "0"],
       ["release", "publish", "wf-1", "--version", "x"],
       ["release", "publish", "wf-1", "--version", "2", "--override-reason", "a", "--request-approval", "b"],
-      ["release", "publish", "wf-1", "--version", "2", "--override-reason", " "]
+      ["release", "publish", "wf-1", "--version", "2", "--override-reason", " "],
+      ["release", "publish", "wf-1", "--version", "2", "--hash", "abc"],
+      ["release", "publish", "wf-1", "--version", "2", "--request-approval", "x".repeat(2001)]
     ]) {
       const fake = harness([{ status: 200, body: {} }]);
       expect(await main(argv, fake.cli), argv.join(" ")).toBe(EXIT_USAGE);
@@ -615,5 +655,58 @@ describe("l2m golden import --allow-other-workflow", () => {
     expect(await main(["golden", "import", file, "--workflow", "wf-2"], refused.cli)).toBe(EXIT_FAILED);
     expect(refused.requests[0]!.body).not.toHaveProperty("allowWorkflowMismatch");
     expect(refused.err()).toContain("exported from workflow wf-1");
+  });
+});
+
+describe("l2m replay: what the server's job view carries", () => {
+  it("prints whether the job is release proof, and why not, in the report, the status and the JUnit file", async () => {
+    const junit = path.join(dir, "junit.xml");
+    const fake = harness([{ status: 202, body: { run: job("completed", { pass: 2 }) } }]);
+    expect(await main(["replay", "run", "--set", "ds_1", "--junit", junit], fake.cli)).toBe(EXIT_OK);
+    expect(fake.out()).toContain("not release proof: a release gate will not accept this job");
+    expect(fake.out()).toContain("- The candidate is a workflow file, not the draft or a saved version.");
+    const xml = fs.readFileSync(junit, "utf8");
+    expect(xml).toContain('<property name="releaseEligible" value="false"/>');
+    expect(xml).toContain('<property name="releaseIneligibleReason" value="The candidate is a workflow file, not the draft or a saved version."/>');
+
+    const eligible = job("completed", { pass: 2 });
+    eligible.candidate = { kind: "draft", version: null, workflowHash: "e".repeat(64), releaseEligible: true, releaseIneligibleReasons: [] };
+    const status = harness([{ status: 200, body: { run: eligible } }]);
+    expect(await main(["replay", "status", "run_1"], status.cli)).toBe(EXIT_OK);
+    expect(status.out()).toContain("release eligible: a release gate may accept this job");
+
+    // A job from before the field existed says nothing about it.
+    const old = job("completed", { pass: 2 });
+    old.candidate = { kind: "version", version: 2, workflowHash: "f".repeat(64) };
+    const legacy = harness([{ status: 200, body: { run: old } }]);
+    expect(await main(["replay", "status", "run_1"], legacy.cli)).toBe(EXIT_OK);
+    expect(legacy.out()).not.toContain("release");
+  });
+
+  it("sends the secret a model override uses, and refuses a --model-secret that matches no override", async () => {
+    const fake = harness([{ status: 202, body: { run: job("completed", { pass: 1 }) } }]);
+    expect(await main(["replay", "run", "--set", "ds_1", "--model", "agent=gpt-5", "--provider-model", "azure=gpt-5", "--model-secret", "agent=sec_1", "--model-secret", "azure=sec_2"], fake.cli)).toBe(EXIT_OK);
+    expect((fake.requests[0]!.body as { overrides: unknown }).overrides).toEqual({
+      models: [
+        { nodeId: "agent", model: "gpt-5", secretRef: { secretId: "sec_1" } },
+        { provider: "azure", model: "gpt-5", secretRef: { secretId: "sec_2" } }
+      ]
+    });
+    const stray = harness([{ status: 202, body: { run: job("completed", { pass: 1 }) } }]);
+    expect(await main(["replay", "run", "--set", "ds_1", "--model", "agent=gpt-5", "--model-secret", "writer=sec_1"], stray.cli)).toBe(EXIT_USAGE);
+    expect(stray.requests).toHaveLength(0);
+  });
+
+  it("takes a workflow export file as the candidate, as the API does", async () => {
+    const file = path.join(dir, "export.json");
+    fs.writeFileSync(file, JSON.stringify({ format: "l2m.workflow", workflow: { id: "wf-1", name: "Support bot", nodes: [{ id: "a" }], edges: [] } }));
+    const fake = harness([{ status: 202, body: { run: job("completed", { pass: 1 }) } }]);
+    expect(await main(["replay", "run", "--set", "ds_1", "--file", file], fake.cli)).toBe(EXIT_OK);
+    expect((fake.requests[0]!.body as { workflow: { workflow: unknown } }).workflow.workflow).toMatchObject({ id: "wf-1" });
+    const notWorkflow = path.join(dir, "other.json");
+    fs.writeFileSync(notWorkflow, JSON.stringify({ hello: 1 }));
+    const bad = harness([{ status: 202, body: { run: job("completed", { pass: 1 }) } }]);
+    expect(await main(["replay", "run", "--set", "ds_1", "--file", notWorkflow], bad.cli)).toBe(EXIT_USAGE);
+    expect(bad.requests).toHaveLength(0);
   });
 });
