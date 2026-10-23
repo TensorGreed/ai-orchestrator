@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallSite } from "@ai-orchestrator/provider-sdk";
+import { ModelTapeMissError, ProviderRegistry, type LLMProviderAdapter, type ProviderCallSite } from "@ai-orchestrator/provider-sdk";
 import { DefaultAgentRuntime } from "./default-agent-runtime";
 
 /** Phase 15.3 — every model call of the loop names its node and iteration, so the model tape can key it. */
@@ -30,5 +30,28 @@ describe("agent runtime call sites", () => {
       { nodeId: "agent_1", iteration: 1 },
       { nodeId: "agent_1", iteration: 2 }
     ]);
+  });
+
+  it("does not retry a model tape miss", async () => {
+    let calls = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      definition: { id: "tape", label: "Tape", supportsTools: false, configSchema: {} },
+      async generate() {
+        calls += 1;
+        throw new ModelTapeMissError("no recorded answer");
+      }
+    });
+    const started = Date.now();
+    // Whether the loop throws or ends on the error, it calls the model once and does not wait to retry.
+    await new DefaultAgentRuntime()
+      .run(
+        { provider: { providerId: "tape", model: "m" }, systemPrompt: "s", userPrompt: "u", tools: [], maxIterations: 1, toolCallingEnabled: false },
+        { tools: [], invokeTool: async () => ({}) },
+        { providerRegistry: registry, resolveSecret: async () => undefined }
+      )
+      .catch(() => null);
+    expect(calls).toBe(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

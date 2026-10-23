@@ -305,7 +305,14 @@ export function createModelTapeRecordingRegistry(base: ProviderRegistry, recorde
 // ---------------------------------------------------------------------------
 
 /** Thrown for a model call the tape cannot answer in strict mode. */
+/** The `code` of a model tape miss. */
+export const MODEL_TAPE_MISS_CODE = "MODEL_TAPE_MISS";
+
 export class ModelTapeMissError extends Error {
+  /** A miss is deterministic: callers must not retry it (the agent loop checks this code). */
+  readonly code = MODEL_TAPE_MISS_CODE;
+  readonly retryable = false;
+
   constructor(message: string) {
     super(message);
     this.name = "ModelTapeMissError";

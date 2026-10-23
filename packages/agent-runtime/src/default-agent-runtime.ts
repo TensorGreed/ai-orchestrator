@@ -1134,6 +1134,10 @@ ${effectiveSystemPrompt}`;
             if (isQuotaError) {
               break;
             }
+            // A replay's model tape had no answer: the same call misses again, so it is not retried.
+            if ((llmError as Error & { code?: unknown }).code === "MODEL_TAPE_MISS") {
+              break;
+            }
             if (llmAttempt < LLM_RETRY_MAX) {
               const delay = LLM_RETRY_BASE_DELAY_MS * Math.pow(2, llmAttempt);
               emit({

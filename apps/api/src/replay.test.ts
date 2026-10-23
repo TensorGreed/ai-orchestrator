@@ -301,7 +301,7 @@ describe("golden runs with side effects stubbed", () => {
       sourceExecutionId: recordedRun.executionId,
       sourceStatus: "success",
       truncated: false,
-      capabilities: { mcp: "cassette", models: "live", memory: "empty" }
+      capabilities: { mcp: "cassette", models: "tape", memory: "empty" }
     });
 
     const list = await call(context, "GET", "/api/replay/recordings?workflowId=wf-golden", viewer.cookie);
