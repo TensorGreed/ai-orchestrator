@@ -1762,15 +1762,33 @@ export class PostgresStore {
     }
   }
 
-  async requeueStuckItems(stuckAfterMs = 600_000): Promise<number> {
+  async requeueStuckItems(stuckAfterMs = 600_000, excludeIds: string[] = []): Promise<number> {
     const stuckBefore = new Date(Date.now() - stuckAfterMs).toISOString();
     const now = new Date().toISOString();
     const result = await this.pool.query(
       `UPDATE execution_queue SET status = 'pending', started_at = NULL, updated_at = $1
-       WHERE status = 'running' AND started_at <= $2`,
-      [now, stuckBefore]
+       WHERE status = 'running' AND started_at <= $2 AND NOT (id = ANY($3::text[]))`,
+      [now, stuckBefore, excludeIds]
     );
     return result.rowCount ?? 0;
+  }
+
+  async reconcileOrphanedExecutions(input: {
+    error: string;
+    startedBefore?: string;
+  }): Promise<Array<{ id: string; workflowId: string }>> {
+    const completedAt = new Date().toISOString();
+    const result = await this.pool.query(
+      `UPDATE execution_history
+       SET status = 'error', completed_at = $1, error = $2,
+           duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM ($4::timestamptz - started_at::timestamptz)) * 1000)::bigint)
+       WHERE status = 'running'
+         AND ($3::text IS NULL OR started_at < $3)
+         AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))
+       RETURNING id, workflow_id`,
+      [completedAt, input.error, input.startedBefore ?? null, completedAt]
+    );
+    return result.rows.map((row: { id: string; workflow_id: string }) => ({ id: row.id, workflowId: row.workflow_id }));
   }
 
   async getQueueDepth(): Promise<{ pending: number; running: number; dlq: number }> {

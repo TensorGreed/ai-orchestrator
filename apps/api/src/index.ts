@@ -50,7 +50,11 @@ async function bootstrap() {
   const runsBackgroundWorkers = config.WORKER_MODE === "all" || config.WORKER_MODE === "worker";
   const schedulerService = runsBackgroundWorkers ? new SchedulerService(store) : undefined;
   const queueService = runsBackgroundWorkers
-    ? new QueueService(store, { concurrency: Number(process.env.QUEUE_CONCURRENCY) || 5 })
+    ? new QueueService(store, {
+        concurrency: Number(process.env.QUEUE_CONCURRENCY) || 5,
+        stuckJobTimeoutMs: Number(process.env.QUEUE_STUCK_JOB_TIMEOUT_MS) || undefined,
+        executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
+      })
     : undefined;
   const triggerService = runsBackgroundWorkers ? new TriggerService(store) : undefined;
   const app = createApp(

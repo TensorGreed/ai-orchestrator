@@ -19,6 +19,16 @@ export interface QueueServiceConfig {
   concurrency?: number;
   pollIntervalMs?: number;
   stuckJobTimeoutMs?: number;
+  /** The run time limit; a job is never treated as stuck before this plus a margin has passed. */
+  executionTimeoutMs?: number;
+}
+
+/** Margin on top of the run time limit before a running job counts as stuck. */
+export const STUCK_JOB_MARGIN_MS = 60_000;
+
+/** A running job can legitimately take the whole run time limit, so the stuck threshold must exceed it. */
+export function resolveStuckJobTimeoutMs(stuckJobTimeoutMs: number, executionTimeoutMs: number): number {
+  return Math.max(stuckJobTimeoutMs, executionTimeoutMs + STUCK_JOB_MARGIN_MS);
 }
 
 export type ExecutionHandler = (payload: QueuedExecutionPayload) => Promise<void>;
@@ -27,6 +37,7 @@ export class QueueService {
   private readonly store: SqliteStore;
   private readonly config: Required<QueueServiceConfig>;
   private running = 0;
+  private readonly inFlight = new Set<string>();
   private handler: ExecutionHandler | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private stuckTimer: NodeJS.Timeout | null = null;
@@ -37,7 +48,8 @@ export class QueueService {
     this.config = {
       concurrency: config.concurrency ?? 5,
       pollIntervalMs: config.pollIntervalMs ?? 1000,
-      stuckJobTimeoutMs: config.stuckJobTimeoutMs ?? 600_000
+      stuckJobTimeoutMs: resolveStuckJobTimeoutMs(config.stuckJobTimeoutMs ?? 600_000, config.executionTimeoutMs ?? 0),
+      executionTimeoutMs: config.executionTimeoutMs ?? 0
     };
   }
 
@@ -57,7 +69,7 @@ export class QueueService {
     // Check for stuck items every 60 seconds
     this.stuckTimer = setInterval(() => {
       try {
-        const requeued = this.store.requeueStuckItems(this.config.stuckJobTimeoutMs);
+        const requeued = this.store.requeueStuckItems(this.config.stuckJobTimeoutMs, [...this.inFlight]);
         if (requeued > 0) {
           console.info(`[queue] Re-queued ${requeued} stuck job(s)`);
         }
@@ -133,6 +145,7 @@ export class QueueService {
 
     for (const item of items) {
       this.running++;
+      this.inFlight.add(item.id);
       void this.executeItem(item);
     }
   }
@@ -143,6 +156,7 @@ export class QueueService {
     const handler = this.handler;
     if (!handler) {
       this.running--;
+      this.inFlight.delete(item.id);
       try {
         this.store.markQueueItemFailed(item.id, "No handler registered");
       } catch {
@@ -165,6 +179,7 @@ export class QueueService {
       }
     } finally {
       this.running--;
+      this.inFlight.delete(item.id);
     }
   }
 }

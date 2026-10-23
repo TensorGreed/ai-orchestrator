@@ -163,3 +163,19 @@ Only the deployment's public key, obtained through a channel you trust, proves w
 | `POST /api/audit/signing-keys/rotate` | admin | `201 { key, keys }`; 409 when the key comes from `AUDIT_SIGNING_KEY_BASE64` |
 
 The `signature` on the manifest response is an Ed25519 signature over the canonical JSON of `{ format: "l2m.run-manifest-attestation", version: 1, executionId, manifestDigest, keyId, signedAt }`, so a manifest fetched on its own can be checked against the listed public keys too.
+
+## Run audit events and restarts
+
+Run actions a person starts are written to the audit log (category `execution`, resource type `workflow`, `metadata.executionId` set):
+
+| Event | When |
+| --- | --- |
+| `execution.started` | A manual run or streamed run is started from the editor or the API. Webhook and schedule runs are not logged here. |
+| `execution.retried` | A failed run is retried from history (`metadata.sourceExecutionId`). |
+| `execution.replayed` | A run is replayed from its recorded MCP calls. Golden-run replays are logged as `replay.run`. |
+| `execution.cancelled` | A running or waiting run is cancelled. |
+| `execution.audit_bundle.export` | A run's audit bundle is downloaded. |
+
+Run history cannot be deleted one run at a time, so there is no per-run delete event; retention pruning is logged on its own.
+
+When the server restarts, runs still recorded as running are marked `error` with "interrupted: the server stopped while this run was in progress", and the count is logged. Runs waiting for approval are kept, and so are runs the job queue still owns. With `HA_ENABLED=true` only runs older than `WORKFLOW_EXECUTION_TIMEOUT_MS` plus a minute are touched, because another replica may own a newer run. `QUEUE_STUCK_JOB_TIMEOUT_MS` (default `600000`) is raised to the run time limit plus a minute when set lower, so a job that is still executing is not picked up twice.
