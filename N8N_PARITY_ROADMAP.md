@@ -482,9 +482,9 @@ L2M the one governed MCP hub that every AI client in an organisation points at.
 - [x] Export "audit bundle" (zip: manifest, node I/O, trace, logs, rendered outputs) from the Runs page and via `GET /api/executions/:id/bundle`; a stored manifest is pruned once it is past the audit-log retention and its execution history is gone
 
 ### 11.2 Approval gates
-- [ ] `approval_gate` node: pauses the run, records who may approve (role/user), optional timeout and fallback branch; resumes through the existing wait/resume plumbing
-- [ ] Approvals inbox page and notifications through the existing notification channels; approve/reject from the Runs page with a reason that lands in the manifest
-- [ ] Agent-level gate: require approval before any tool classified as a write tool is called (configurable per workflow)
+- [x] `approval_gate` node: pauses the run, records who may approve (role/user), optional timeout and fallback branch; resumes through the existing wait/resume plumbing — also project-scoped approvers, no self-approval by default, approve-with-edits, gates inside sync sub-workflows, a leader-only timeout sweeper with startup expiry, and resumes on the execution queue; not inside Loop node bodies
+- [x] Approvals inbox page and notifications through the existing notification channels; approve/reject from the Runs page with a reason that lands in the manifest — decisions are audited as `approval.*`; the Runs page links a waiting run to the inbox
+- [x] Agent-level gate: require approval before any tool classified as a write tool is called (configurable per workflow) — the approval covers one call (node, server, tool, arguments); direct MCP Tool nodes are not gated by the setting
 
 ## Phase 12: L2M Guard — security proxy for AI traffic
 

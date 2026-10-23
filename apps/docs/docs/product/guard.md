@@ -28,7 +28,7 @@ The node has three outputs:
 - **blocked** carries only the verdict summary.
 - **review** carries only the verdict summary. When nothing is connected to `review`, the item goes to `blocked`.
 
-When a rule asks for approval (`require_approval`), the run pauses the same way a Human Approval node does. The request appears under Approvals with the message from the node and masked evidence. Approving sends the rewritten item to `pass`; rejecting sends the summary to `blocked`.
+When a rule asks for approval (`require_approval`), the run pauses the same way a Human Approval node does. The request appears in the [approvals inbox](./approvals.md) with the message from the node and masked evidence. Approving sends the rewritten item to `pass`; rejecting sends the summary to `blocked`.
 
 ### Guard port on agents
 

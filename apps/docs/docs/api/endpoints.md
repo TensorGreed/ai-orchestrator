@@ -194,6 +194,14 @@ See [Golden runs and replay](../product/golden-runs.md).
 - `DELETE /api/replay/recordings/:id` (builder; audited as `replay.recording.deleted`)
 - `POST /api/replay/recordings/:id/replay` (builder; `{ draft?, version?, mcpMode?, ignorePaths? (up to 32, 128 characters, eight ** each), numberTolerance? }`; a version runs under the workflow's current project; `{ recordingId, executionId, candidate, status, diff, verdict, reasons, facts }`; audited as `replay.run`)
 
+## Approvals
+
+See [Approval gates](../product/approvals.md).
+
+- `GET /api/approvals?status=pending|decided|all&workflowId=&executionId=&limit=` (viewer; `{ items }` limited to workflows the user can read; each item has `requestId`, `id` (the execution id), `kind`, `status`, `message`, approvers, `editableFields` with proposed values, `path`, `expiresAt`, the decision fields and `canDecide` / `cannotDecideReason`)
+- `POST /api/approvals/:id/approve` (`:id` is the execution id; `{ reason?, edits?, requestId? }`; needs execute access to the workflow's project and a matching approver; `200` with the run result, `202 { queued: true }` with the execution queue, `400` for invalid edits (`details: [{ key, message }]`), `403` for self-approval, a non-approver or no project access, `404` when nothing is pending or the workflow is not visible, `409` when already decided or `requestId` is not the current request; audited as `approval.decided`)
+- `POST /api/approvals/:id/reject` (`{ reason?, requestId? }`; the reason is required for Approval Gates that require one and for write-tool approvals; same responses)
+
 ## Secrets
 
 - `POST /api/secrets` (`{ id, name, provider, projectId, source, warnings }`; `warnings` is non-blocking and never contains the value: it flags a value that equals a word run manifests keep, such as a status)
