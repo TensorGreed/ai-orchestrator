@@ -2927,6 +2927,61 @@ describe("Phase 1.1 — Sub-Workflow Execution (execute_workflow node)", () => {
     expect(execNode?.status).toBe("success");
   });
 
+  it("scopeSubWorkflow: the child runs with the dependencies scoped to it", async () => {
+    const childWorkflow = {
+      id: "scoped-child",
+      name: "Scoped Child",
+      schemaVersion: "1.0.0" as const,
+      workflowVersion: 1,
+      projectId: "child-project",
+      nodes: [
+        makeNode("c1", "text_input", { text: "child" }),
+        makeNode("c2", "output", { responseTemplate: "{{text}}" })
+      ],
+      edges: [makeEdge("c1", "c2")]
+    };
+    const parentWorkflow = makeWorkflow(
+      [
+        makeNode("p1", "execute_workflow", { workflowId: "scoped-child", mode: "sync" }),
+        makeNode("p2", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("p1", "p2")]
+    );
+    const scoped: string[] = [];
+    const result = await executeWorkflow(
+      { workflow: parentWorkflow },
+      makeDeps({
+        loadWorkflow: (id) => (id === "scoped-child" ? childWorkflow : undefined),
+        scopeSubWorkflow: (workflow) => {
+          scoped.push(`${workflow.id}@${workflow.projectId}`);
+          return { resolveSecret: async () => "child-secret" };
+        }
+      })
+    );
+    expect(result.status).toBe("success");
+    expect(scoped).toEqual(["scoped-child@child-project"]);
+  });
+
+  it("a loader that refuses a sub-workflow fails the node with its message", async () => {
+    const parentWorkflow = makeWorkflow(
+      [
+        makeNode("p1", "execute_workflow", { workflowId: "other-project-wf", mode: "sync" }),
+        makeNode("p2", "output", { responseTemplate: "{{result}}" })
+      ],
+      [makeEdge("p1", "p2")]
+    );
+    const result = await executeWorkflow(
+      { workflow: parentWorkflow },
+      makeDeps({
+        loadWorkflow: () => {
+          throw new Error("Sub-workflow 'other-project-wf' is in another project");
+        }
+      })
+    );
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("is in another project");
+  });
+
   it("async mode: returns enqueued immediately without child result", async () => {
     const childWorkflow = {
       id: "async-child",

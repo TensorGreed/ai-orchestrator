@@ -128,7 +128,17 @@ export interface WorkflowExecutionDependencies {
   memoryStore?: AgentSessionMemoryStore;
   toolDataStore?: AgentSessionToolDataStore;
   sessionArtifactStore?: AgentSessionArtifactStore;
+  /**
+   * Loads an Execute Workflow node's target. Returns undefined for an
+   * unknown id; may throw to refuse one the run is not allowed to call.
+   */
   loadWorkflow?: (workflowId: string) => Workflow | undefined;
+  /**
+   * Dependencies scoped to a sub-workflow (its own project's secrets,
+   * knowledge bases, session stores, guard and sub-workflow loader). Applied
+   * on top of the parent's dependencies when an Execute Workflow node runs.
+   */
+  scopeSubWorkflow?: (workflow: Workflow) => Partial<WorkflowExecutionDependencies>;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
   /**
    * Phase 10.1 — resolves an MCP server registry entry to the adapter,
@@ -3409,6 +3419,9 @@ async function executeNode(
         throw new Error(`Sub-workflow '${workflowId}' was not found.`);
       }
 
+      const childDependencies: WorkflowExecutionDependencies = dependencies.scopeSubWorkflow
+        ? { ...dependencies, ...dependencies.scopeSubWorkflow(targetWorkflow) }
+        : dependencies;
       const mode = config.mode === "async" ? "async" : "sync";
       const inputMapping = toRecord(config.inputMapping);
       const mappedInput: Record<string, unknown> = {};
@@ -3437,7 +3450,7 @@ async function executeNode(
             toolPolicySubject: context.toolPolicySubject,
             callStack: [...context.callStack]
           },
-          dependencies
+          childDependencies
         ).catch(() => {
           // Intentionally ignored — async sub-workflow errors do not propagate
         });
@@ -3453,7 +3466,7 @@ async function executeNode(
           toolPolicySubject: context.toolPolicySubject,
           callStack: [...context.callStack]
         },
-        dependencies
+        childDependencies
       );
 
       if (childResult.status === "error") {
