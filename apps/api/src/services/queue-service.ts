@@ -12,6 +12,8 @@ export interface QueuedExecutionPayload {
   sessionId?: string;
   triggerType?: string;
   triggeredBy?: string;
+  /** The signed-in user who enqueued the job; their access is checked again when it runs. */
+  enqueuedByUserId?: string;
   executionTimeoutMs?: number;
   customData?: Record<string, unknown>;
 }

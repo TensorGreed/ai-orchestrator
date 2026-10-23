@@ -3061,6 +3061,25 @@ export class SqliteStore {
         this.exec("DELETE FROM guard_bindings WHERE scope = 'workflow' AND scope_id = ?", [id]);
       }
 
+      // Workflow ids are chosen by the client, so a new workflow can reuse a
+      // deleted one's id. Nothing keyed by the old id may carry over to it:
+      // versions, shares, queue and dead-letter rows, eval runs, elicitations,
+      // and session state under the old workflow's legacy default namespace
+      // (`<workflowId>:<nodeId>`, written before keys were project-scoped).
+      if (hasTable("workflow_versions")) this.exec("DELETE FROM workflow_versions WHERE workflow_id = ?", [id]);
+      if (hasTable("workflow_shares")) this.exec("DELETE FROM workflow_shares WHERE workflow_id = ?", [id]);
+      if (hasTable("execution_queue")) this.exec("DELETE FROM execution_queue WHERE workflow_id = ?", [id]);
+      if (hasTable("execution_queue_dlq")) this.exec("DELETE FROM execution_queue_dlq WHERE workflow_id = ?", [id]);
+      if (hasTable("eval_runs")) {
+        if (hasTable("eval_results")) this.exec("DELETE FROM eval_results WHERE run_id IN (SELECT id FROM eval_runs WHERE workflow_id = ?)", [id]);
+        this.exec("DELETE FROM eval_runs WHERE workflow_id = ?", [id]);
+      }
+      if (hasTable("mcp_elicitations")) this.exec("DELETE FROM mcp_elicitations WHERE workflow_id = ?", [id]);
+      const legacyPrefix = `${id}:`;
+      for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
+        if (hasTable(table)) this.exec(`DELETE FROM ${table} WHERE substr(namespace, 1, ?) = ?`, [legacyPrefix.length, legacyPrefix]);
+      }
+
       this.exec("DELETE FROM workflows WHERE id = ?", [id]);
 
       const changesRow = this.queryOne<{ count: number }>("SELECT changes() as count");
@@ -9415,11 +9434,6 @@ export class SqliteStore {
   } {
     const where: string[] = [];
     const params: Array<string | number> = [];
-    // Project scope: only cassettes of these workflows (an empty list matches nothing).
-    if (options.workflowIds) {
-      where.push(options.workflowIds.length > 0 ? `workflow_id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");
-      params.push(...options.workflowIds);
-    }
     // Project scope: only cassettes of these workflows (an empty list matches nothing).
     if (options.workflowIds) {
       where.push(options.workflowIds.length > 0 ? `workflow_id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");

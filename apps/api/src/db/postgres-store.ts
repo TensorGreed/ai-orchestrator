@@ -254,6 +254,13 @@ export class PostgresStore {
   async deleteWorkflow(id: string): Promise<boolean> {
     await this.execute(`DELETE FROM execution_history WHERE workflow_id = $1`, [id]);
     await this.execute(`DELETE FROM workflow_executions WHERE workflow_id = $1`, [id]);
+    // A re-created workflow with the same id must not inherit the old one's
+    // queue rows or its legacy default-namespace session state.
+    await this.execute(`DELETE FROM execution_queue WHERE workflow_id = $1`, [id]);
+    await this.execute(`DELETE FROM execution_queue_dlq WHERE workflow_id = $1`, [id]);
+    for (const table of ["session_memory", "session_tool_cache", "session_artifacts"]) {
+      await this.execute(`DELETE FROM ${table} WHERE substr(namespace, 1, $1) = $2`, [id.length + 1, `${id}:`]);
+    }
     const result = await this.pool.query(`DELETE FROM workflows WHERE id = $1`, [id]);
     return (result.rowCount ?? 0) > 0;
   }
