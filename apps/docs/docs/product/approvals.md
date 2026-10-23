@@ -57,10 +57,10 @@ A gate cannot be the body of a Loop node: loop bodies run inline and cannot paus
 A gate is a separation-of-duties control, so whoever can start a run cannot step around it:
 
 - A gate's output never comes from pinned data or from `nodeOutputs` sent with a run. A workflow with a pinned gate does not validate, the pin route refuses an Approval Gate (`400`), and the editor offers no **Pin output** for one.
-- A run that would start after a gate is refused before any node runs: `startNodeId` or a single-node run of a node downstream of a gate, on `/api/workflows/:id/execute` and on `/api/executions/:id/retry`, fails with "This run would start after Approval Gate '…'. Start at or before the gate." Starting at the gate itself is allowed; it pauses as usual.
+- A run that would start after a gate is refused before any node runs: `startNodeId` or a single-node run of a node downstream of a gate, on `/api/workflows/:id/execute` and on `/api/executions/:id/retry`, fails with "This run would start after Approval Gate '…'. Start at or before the gate." The check covers every node the run would execute, not just the start node: starting on a sibling branch that merges below the gate, or at a worker or other node attached to an agent below the gate, is refused too. Starting at the gate itself is allowed; it pauses as usual.
 - [Replays](./golden-runs.md) are the exception: they answer a gate from the decision the golden run recorded.
 
-Human Approval nodes keep their earlier behaviour here (pins and start nodes work as before).
+Human Approval nodes keep their earlier behaviour here (pins and start nodes work as before). A pinned Human Approval node makes validation report a `human_approval_pinned` warning, because runs then skip the pause. Human Approval is not a separation-of-duties control: use an Approval Gate when the person who runs the workflow must not be able to approve or skip it.
 
 ### Approve with edits
 
@@ -117,7 +117,7 @@ A gate inside a sub-workflow called by a sync **Execute Workflow** node pauses t
 Limits:
 
 - Only the top-level run is saved. The sub-workflow's paused state travels inside the parent's, and the sub-workflow resumes with the definition it had when it paused.
-- If the sub-workflow fails after it resumes and the Execute Workflow node has retries, a retry starts the sub-workflow from the beginning, so it asks for approval again; the decision is never reused for the retry.
+- If the sub-workflow fails after it resumes and the Execute Workflow node has retries, a retry starts the sub-workflow from the beginning, so it asks for approval again; the decision is never reused for the retry. A rejection or a timeout is final: it is never retried, and only a failure after an approval is retried from the beginning.
 - An **async** Execute Workflow node starts its sub-workflow without waiting; a gate there pauses that sub-workflow as a separate run of its own.
 
 ## Approval before write tools
@@ -140,7 +140,7 @@ A workflow can require approval before any of its agents calls an MCP **write** 
 
 For this gate a tool is read-only only when an admin marked it read-only in the tool policy (the MCP servers page). The server's own `readOnlyHint` annotation is not trusted here: any server, including an inline one nobody reviewed, can label `delete_records` read-only. Every other tool, including one without annotations, counts as a write tool. (A server that claims both `readOnlyHint: true` and `destructiveHint: true` counts as a write tool everywhere, the [No write tools](./mcp-tool-policy.md#no-write-tools) setting included.)
 
-Before the agent calls a write tool, the run pauses. The request shows the tool, its server and a preview of the arguments (up to 2,000 characters). The approval covers one call: this agent node, this server and tool and these exact arguments. Approving runs the agent node again; the approved call runs once and its result is kept in the paused run. When the agent pauses again for its next write tool and that one is approved, the next re-run answers the earlier call from its stored result and never calls the tool again. If the model repeats an approved call with the same arguments within one re-run, or asks for the tool with other arguments, the run asks again. Rejecting fails the agent node with the reason. A timeout rejects. Supervisor workers follow the same setting (the approval is keyed to the worker node); a sub-workflow follows its own.
+Before the agent calls a write tool, the run pauses. The request shows the tool, its server and a preview of the arguments (up to 2,000 characters). The approval covers one call: this agent node, this server and tool and these exact arguments. Approving runs the agent node again; the approved call runs once and its result is kept in the paused run (redacted for known secrets; a result over 256 KB is not kept, and the run asks again instead of answering from a truncated one). When the agent pauses again for its next write tool and that one is approved, the next re-run answers the earlier call from its stored result and never calls the tool again. If the model repeats an approved call with the same arguments within one re-run, or asks for the tool with other arguments, the run asks again. Rejecting fails the agent node with the reason. A timeout rejects. Supervisor workers follow the same setting (the approval is keyed to the worker node); a sub-workflow follows its own.
 
 The gate applies to tools reached through an agent's tool port. A direct **MCP Tool** node is not gated by this setting; put an Approval Gate before it.
 
@@ -173,6 +173,8 @@ If the API stops after a decision but before the resumed run is saved, the run s
 
 - at startup, at once on a single instance (`HA_ENABLED=false`);
 - on every sweep, with or without the queue: with the queue when no queue item for that resume is waiting or running (after a one-minute grace); without the queue once the claim is older than `WORKFLOW_EXECUTION_TIMEOUT_MS` plus a margin, so a resume still running on another instance is never started twice.
+
+A queued resume is tried once; when it fails the request goes back to pending and can be decided again, and the resume always applies the decision stored on the request, never one carried by an older queue item.
 
 Resumes are **at-least-once**: a recovered resume runs the nodes after the gate again, so a side effect there can happen twice if the API stopped mid-resume.
 
