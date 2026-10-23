@@ -1,5 +1,20 @@
 import { z } from "zod";
-import { REPLAY_MCP_MODES, replayIgnorePathSchema, REPLAY_IGNORE_PATHS_MAX, type ReplayRunResponse } from "./replay";
+import {
+  REPLAY_AGGREGATE_RULES,
+  REPLAY_COMPARE_MODES,
+  REPLAY_MCP_MODES,
+  REPLAY_MODEL_MODES,
+  REPLAY_REPEATS_MAX,
+  replayCandidateOverridesSchema,
+  replayIgnorePathSchema,
+  REPLAY_IGNORE_PATHS_MAX,
+  type ReplayAggregateRule,
+  type ReplayAttemptStatus,
+  type ReplayCandidateOverrides,
+  type ReplayCompareMode,
+  type ReplayModelMode,
+  type ReplayRunResponse
+} from "./replay";
 import { checkRegexSafety, jsonSchemaRegexProblem } from "./regex-safety";
 
 /**
@@ -218,12 +233,28 @@ export interface EvalRunSummary {
   costUnknown?: boolean;
   /** Phase 15.2 — what the reader should know about the numbers (an unpriced model, a budget estimate). */
   warnings?: string[];
+  /** Phase 15.3 — cases whose repeats did not all agree (a 2 of 3 pass reads as flaky, whatever the rule made of it). */
+  flaky?: number;
+  /** Phase 15.3 — executions the job ran: candidate repeats plus baseline reruns. */
+  executions?: number;
 }
 
+/**
+ * The candidate a replay job ran. `workflowHash` is the hash of the
+ * workflow after the model overrides (`applyCandidate`): the hash a release
+ * gate binds to. `baseHash` is the hash before them (the draft, version or
+ * file as given). `overrides` is everything the job changed on top.
+ */
 export interface ReplayJobCandidate {
-  kind: "draft" | "version";
+  kind: "draft" | "version" | "inline";
   version: number | null;
   workflowHash: string;
+  /** Phase 15.3 — the hash before overrides; equal to `workflowHash` without model overrides. */
+  baseHash?: string;
+  /** Phase 15.3 */
+  overrides?: ReplayCandidateOverrides | null;
+  /** Phase 15.3 — an inline candidate's workflow name (it may differ from the saved one). */
+  name?: string;
 }
 
 /** Replay-job options kept on the run. */
@@ -232,6 +263,34 @@ export interface ReplayJobOptions {
   ignorePaths?: string[];
   numberTolerance?: number;
   maxCostUsd: number;
+  /** Phase 15.3 — absent on jobs made before 15.3, which ran models live, compared with the recording, once. */
+  models?: ReplayModelMode;
+  compare?: ReplayCompareMode;
+  repeats?: number;
+  aggregate?: ReplayAggregateRule;
+}
+
+/** Phase 15.3 — how a case's repeats went (on a case result). */
+export interface ReplayCaseRepeats {
+  total: number;
+  pass: number;
+  fail: number;
+  error: number;
+  aggregate: ReplayAggregateRule;
+  /** The repeats did not all agree. */
+  flaky: boolean;
+}
+
+/** Phase 15.3 — one repeat of a replay case (in the case diff). */
+export interface ReplayCaseAttempt {
+  repeatIndex: number;
+  status: ReplayAttemptStatus;
+  executionId: string | null;
+  /** The baseline rerun of this repeat (`compare: "baseline_rerun"`). */
+  baselineExecutionId: string | null;
+  verdict: ReplayRunResponse["verdict"] | null;
+  reasons: string[];
+  costUsd: number | null;
 }
 
 export interface EvalRunView {
@@ -269,10 +328,22 @@ export interface EvalCaseResult {
   costUsd: number | null;
   /** Replay cases: the replay verdict, without the diff (fetch the case for it). */
   verdict: ReplayRunResponse["verdict"] | null;
+  /** Phase 15.3 — set when the job repeated cases. */
+  repeats?: ReplayCaseRepeats | null;
 }
 
-/** One replayed case with its run diff: what the case diff drawer shows. */
-export type ReplayCaseDiff = Omit<ReplayRunResponse, "facts">;
+/**
+ * One replayed case with its run diff: what the case diff drawer shows. With
+ * repeats, the diff is the first repeat that decided the case's result;
+ * `attempts` lists them all. With a baseline rerun, the diff compares the
+ * candidate with the baseline run, not with the recording.
+ */
+export type ReplayCaseDiff = Omit<ReplayRunResponse, "facts"> & {
+  /** Phase 15.3 */
+  compare?: ReplayCompareMode;
+  baselineExecutionId?: string | null;
+  attempts?: ReplayCaseAttempt[];
+};
 
 /**
  * What is stored in place of a case output or run diff whose JSON is over
@@ -295,11 +366,37 @@ export interface EvalCaseDetail extends EvalCaseResult {
   replayTruncated?: EvalStoredTruncation;
 }
 
+/**
+ * A replay job request (`POST /api/replay/runs`, and `POST /api/replay/estimate`
+ * for its estimate). The candidate is the draft (default), a saved `version`,
+ * or an inline `workflow` (a workflow file, for the same workflow id;
+ * validated like an import and never saved), plus `overrides`.
+ *
+ * Phase 15.3:
+ *   - `models`: `live` (default) calls the models; `replay` answers them from
+ *     each golden run's model tape (a case whose golden run has no tape is
+ *     inconclusive). `mcpMode` also sets how tape misses are handled: `strict`
+ *     fails the case, `lenient` calls the live model and reports it.
+ *   - `compare`: `recording` (default) compares with what the golden run
+ *     recorded; `baseline_rerun` also replays the golden run's own version
+ *     under the same settings and compares with that (two executions a repeat).
+ *   - `repeats` (1 to 5) and `aggregate` (`all`, `majority`, `any`): how many
+ *     times each case runs and how the repeats make its result.
+ * The budget (`maxCostUsd`) covers every repeat, baseline rerun and judge call.
+ */
 export const replayJobRequestSchema = z
   .object({
     datasetIds: z.array(z.string().trim().min(1).max(200)).min(1).max(10),
     draft: z.boolean().optional(),
     version: z.number().int().positive().optional(),
+    /** Phase 15.3 — an inline candidate: a workflow JSON (or an export file with `workflow`). */
+    workflow: z.record(z.string(), z.unknown()).optional(),
+    /** Phase 15.3 */
+    overrides: replayCandidateOverridesSchema.optional(),
+    models: z.enum(REPLAY_MODEL_MODES).optional(),
+    compare: z.enum(REPLAY_COMPARE_MODES).optional(),
+    repeats: z.number().int().min(1).max(REPLAY_REPEATS_MAX).optional(),
+    aggregate: z.enum(REPLAY_AGGREGATE_RULES).optional(),
     mcpMode: z.enum(REPLAY_MCP_MODES).optional(),
     ignorePaths: z.array(replayIgnorePathSchema).max(REPLAY_IGNORE_PATHS_MAX).optional(),
     numberTolerance: z.number().min(0).max(1e9).optional(),
@@ -309,8 +406,26 @@ export const replayJobRequestSchema = z
     maxCostUsd: z.number().positive().max(100_000).optional()
   })
   .strict()
-  .refine((value) => !(value.draft === true && value.version !== undefined), { message: "Choose the draft or a version, not both" });
+  .refine((value) => !(value.draft === true && value.version !== undefined), { message: "Choose the draft or a version, not both" })
+  .refine((value) => !(value.workflow !== undefined && (value.draft === true || value.version !== undefined)), {
+    message: "An inline workflow is the candidate: leave out draft and version"
+  });
 export type ReplayJobRequest = z.infer<typeof replayJobRequestSchema>;
+
+/** Phase 15.3 — `POST /api/replay/estimate`: what a replay job request would run and cost, before it runs. */
+export interface ReplayJobEstimate {
+  /** Golden-run cases the job would replay (hand-written cases are skipped). */
+  cases: number;
+  /** Executions per case: repeats, times two with a baseline rerun. */
+  runsPerCase: number;
+  /** Model calls the job would make, from what the golden runs recorded (0 for calls answered from a model tape). */
+  modelCallsEstimate: number;
+  /** The golden runs' recorded tokens priced at the candidate's models, plus the most the judges can cost. */
+  estimatedCostUsd: number;
+  /** Some model has no price: `estimatedCostUsd` leaves it out. */
+  costUnknown: boolean;
+  warnings: string[];
+}
 
 /** A golden set: an eval dataset tied to a workflow. */
 export const goldenSetCreateSchema = z

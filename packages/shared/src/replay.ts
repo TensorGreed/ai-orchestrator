@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { WorkflowNodeType } from "./types";
+import type { Workflow, WorkflowNode, WorkflowNodeType } from "./types";
 
 /**
  * Phase 15.1 — golden runs and replay: the shared contract.
@@ -329,10 +329,14 @@ export interface ReplayRecordedNode extends ReplayRecordedRun {
 export interface ReplayRecordingCapabilities {
   /** `cassette`: MCP calls are answered from a copied cassette; `none`: the source run was not recorded, so every MCP call fails in a replay. */
   mcp: "cassette" | "none";
-  /** Model calls run live in a replay. */
-  models: "live";
-  /** Session memory starts empty in a replay. */
-  memory: "empty";
+  /**
+   * `tape` (Phase 15.3): the source run recorded its model calls, so a replay
+   * job with `models: "replay"` can answer them without calling the model.
+   * `live`: no tape; model calls always run live.
+   */
+  models: "live" | "tape";
+  /** `seeded` (Phase 15.3): session memory starts as the source run found it; `empty`: it starts empty. */
+  memory: "empty" | "seeded";
   /** `captured`: the workflow as it ran was recorded with the run; `current`: the run predates that, so the workflow as saved when the golden run was made is kept instead. */
   workflowSource: "captured" | "current";
   /**
@@ -375,6 +379,8 @@ export interface ReplayRecordingDetail extends ReplayRecordingSummary {
   nodes: Record<string, ReplayRecordedNode>;
   /** Number of MCP calls in the copied cassette. */
   mcpCallCount: number;
+  /** Phase 15.3 — number of model calls on the copied model tape (0 without one). */
+  modelCallCount?: number;
 }
 
 /** Runs-page badge: the golden runs saved from an execution. */
@@ -477,7 +483,15 @@ export type ReplayHealthKind =
   | "blocked_load"
   | "diff_truncated"
   | "scrubbed_recording"
-  | "replay_error";
+  | "replay_error"
+  // Phase 15.3
+  | "no_model_tape"
+  | "model_unmatched"
+  | "model_live"
+  | "live_read"
+  | "mcp_live_read"
+  | "baseline_error"
+  | "budget";
 
 export interface ReplayHealthWarning {
   kind: ReplayHealthKind;
@@ -552,4 +566,236 @@ export interface ReplayRunResponse {
   verdict: ReplayVerdict;
   reasons: string[];
   facts: RunFacts;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 15.3 — candidates
+// ---------------------------------------------------------------------------
+
+/**
+ * A candidate is what a replay job tests: the draft, a saved version, or a
+ * workflow file (inline JSON, never saved), plus overrides. `applyCandidate`
+ * turns the workflow and the model overrides into the workflow that runs;
+ * the job's candidate hash is that workflow's hash. Guard, MCP and live-read
+ * overrides change how the replay runs, not the workflow, and are kept on
+ * the job next to the hash.
+ */
+
+/** How MCP calls to one server are answered in a replay. */
+export const REPLAY_SERVER_MODES = ["strict", "lenient", "live_read_only"] as const;
+export type ReplayServerMode = (typeof REPLAY_SERVER_MODES)[number];
+/** `live`: model calls run live; `replay`: they are answered from the golden run's model tape. */
+export const REPLAY_MODEL_MODES = ["live", "replay"] as const;
+export type ReplayModelMode = (typeof REPLAY_MODEL_MODES)[number];
+/** `recording`: compare with what the golden run recorded; `baseline_rerun`: also replay the golden run's own version in the same job and compare with that. */
+export const REPLAY_COMPARE_MODES = ["recording", "baseline_rerun"] as const;
+export type ReplayCompareMode = (typeof REPLAY_COMPARE_MODES)[number];
+/** How the repeats of one case make its result. */
+export const REPLAY_AGGREGATE_RULES = ["all", "majority", "any"] as const;
+export type ReplayAggregateRule = (typeof REPLAY_AGGREGATE_RULES)[number];
+export const REPLAY_REPEATS_MAX = 5;
+/** Golden runs older than this are compared with a baseline rerun rather than with the recording (decision 3). */
+export const REPLAY_STALE_RECORDING_DAYS = 30;
+
+const idSchema = z.string().trim().min(1).max(200);
+
+export const replayModelOverrideSchema = z
+  .object({
+    /** A model node (LLM call or chat model) or an agent, supervisor or chain whose attached chat model is changed. Omitted: every node of `provider`. */
+    nodeId: idSchema.optional(),
+    /** Without `nodeId`: the provider whose nodes change. With it: the new provider (LLM Call nodes only). */
+    provider: z.string().trim().min(1).max(120).optional(),
+    model: z.string().trim().min(1).max(200)
+  })
+  .strict()
+  .refine((value) => value.nodeId !== undefined || value.provider !== undefined, { message: "A model override names a node, a provider or both" });
+export type ReplayModelOverride = z.infer<typeof replayModelOverrideSchema>;
+
+export const replayCandidateOverridesSchema = z
+  .object({
+    models: z.array(replayModelOverrideSchema).max(50).optional(),
+    guardProfile: z.object({ profileId: idSchema, version: z.number().int().positive().optional() }).strict().optional(),
+    /** Per MCP server (registry server id, or the adapter id of an inline server). */
+    mcpServers: z
+      .record(idSchema, z.enum(REPLAY_SERVER_MODES))
+      .refine((value) => Object.keys(value).length <= 50, { message: "At most 50 MCP server modes" })
+      .optional(),
+    /** Read-class nodes (`replayNodeClass` is `read`) that run live instead of being answered from the recording. */
+    liveReadNodes: z.array(idSchema).max(100).optional()
+  })
+  .strict();
+export type ReplayCandidateOverrides = z.infer<typeof replayCandidateOverridesSchema>;
+
+/** The overrides that change something; undefined when there are none. */
+export function normaliseCandidateOverrides(overrides: ReplayCandidateOverrides | null | undefined): ReplayCandidateOverrides | undefined {
+  if (!overrides) return undefined;
+  const out: ReplayCandidateOverrides = {};
+  if (overrides.models && overrides.models.length > 0) out.models = overrides.models;
+  if (overrides.guardProfile) out.guardProfile = overrides.guardProfile;
+  if (overrides.mcpServers && Object.keys(overrides.mcpServers).length > 0) out.mcpServers = overrides.mcpServers;
+  if (overrides.liveReadNodes && overrides.liveReadNodes.length > 0) out.liveReadNodes = [...new Set(overrides.liveReadNodes)];
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export class ReplayCandidateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReplayCandidateError";
+  }
+}
+
+/** Chat model node types and the provider each one talks to (`llm_call` carries its own). */
+export const REPLAY_CHAT_MODEL_PROVIDERS: Readonly<Record<string, string | null>> = {
+  llm_call: null,
+  openai_chat_model: "openai",
+  anthropic_chat_model: "anthropic",
+  ollama_chat_model: "ollama",
+  openai_compatible_chat_model: "openai_compatible",
+  ai_gateway_chat_model: null,
+  azure_openai_chat_model: "azure_openai",
+  google_gemini_chat_model: "gemini"
+};
+
+const CHAT_MODEL_DEFAULTS: Readonly<Record<string, string>> = {
+  openai_chat_model: "gpt-4o-mini",
+  anthropic_chat_model: "claude-sonnet-5-5",
+  ollama_chat_model: "llama3.1",
+  google_gemini_chat_model: "gemini-2.5-flash"
+};
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function isChatModelNode(node: Pick<WorkflowNode, "type">): boolean {
+  return Object.prototype.hasOwnProperty.call(REPLAY_CHAT_MODEL_PROVIDERS, node.type);
+}
+
+/** The provider and model a chat model node calls, as the engine builds them; null when it is not configured. */
+export function chatModelOf(node: Pick<WorkflowNode, "type" | "config">): { providerId: string; model: string } | null {
+  const config = recordOf(node.config);
+  const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+  if (node.type === "llm_call") {
+    const provider = recordOf(config.provider);
+    return text(provider.providerId) && typeof provider.model === "string" ? { providerId: text(provider.providerId), model: provider.model } : null;
+  }
+  if (node.type === "ai_gateway_chat_model") {
+    const api = text(config.apiProvider);
+    return { providerId: api === "openai" || api === "anthropic" ? api : "openai_compatible", model: text(config.model) };
+  }
+  if (node.type === "azure_openai_chat_model") return text(config.deployment) ? { providerId: "azure_openai", model: text(config.deployment) } : null;
+  const providerId = REPLAY_CHAT_MODEL_PROVIDERS[node.type];
+  if (!providerId) return null;
+  return { providerId, model: text(config.model) || CHAT_MODEL_DEFAULTS[node.type] || "" };
+}
+
+/** The chat model nodes attached to a node's `chat_model` port. */
+function attachedChatModels(workflow: Pick<Workflow, "nodes" | "edges">, nodeId: string): WorkflowNode[] {
+  const byId = new Map(workflow.nodes.map((node) => [node.id, node]));
+  return workflow.edges
+    .filter((edge) => edge.source === nodeId && edge.sourceHandle === "chat_model")
+    .map((edge) => byId.get(edge.target))
+    .filter((node): node is WorkflowNode => Boolean(node && isChatModelNode(node)));
+}
+
+/**
+ * The model a node calls: its own for a model node, else the last chat
+ * model attached to it (the one the engine uses). Null when it calls none.
+ */
+export function effectiveModelFor(workflow: Pick<Workflow, "nodes" | "edges">, nodeId: string): { providerId: string; model: string } | null {
+  const node = workflow.nodes.find((entry) => entry.id === nodeId);
+  if (!node) return null;
+  if (isChatModelNode(node)) return chatModelOf(node);
+  const attached = attachedChatModels(workflow, nodeId);
+  const last = attached[attached.length - 1];
+  return last ? chatModelOf(last) : null;
+}
+
+function setModel(node: WorkflowNode, model: string, provider: string | undefined): WorkflowNode {
+  const config = { ...recordOf(node.config) };
+  if (node.type === "llm_call") {
+    config.provider = { ...recordOf(config.provider), ...(provider ? { providerId: provider } : {}), model };
+  } else {
+    const current = chatModelOf(node);
+    if (provider && current && provider !== current.providerId) {
+      throw new ReplayCandidateError(
+        `Node ${node.id} is a ${node.type} node, which always calls ${current.providerId}; change its provider in the workflow, or override the model only.`
+      );
+    }
+    if (node.type === "azure_openai_chat_model") config.deployment = model;
+    else config.model = model;
+  }
+  return { ...node, config } as WorkflowNode;
+}
+
+/**
+ * The workflow a candidate runs: a copy of `workflow` with its model
+ * overrides applied, in order. A per-node override on an agent (or another
+ * node with a `chat_model` port) changes the chat model attached to it; a
+ * chat model shared by several nodes changes for all of them. A provider
+ * override changes every chat model of that provider. Throws
+ * `ReplayCandidateError` for an override that matches nothing.
+ */
+export function applyCandidate(workflow: Workflow, overrides: ReplayCandidateOverrides | null | undefined): Workflow {
+  const out: Workflow = JSON.parse(JSON.stringify(workflow)) as Workflow;
+  for (const override of overrides?.models ?? []) {
+    if (override.nodeId !== undefined) {
+      const node = out.nodes.find((entry) => entry.id === override.nodeId);
+      if (!node) throw new ReplayCandidateError(`Model override: the workflow has no node ${override.nodeId}.`);
+      const targets = isChatModelNode(node) ? [node] : attachedChatModels(out, node.id);
+      if (targets.length === 0) throw new ReplayCandidateError(`Model override: node ${override.nodeId} (${node.type}) has no model to change.`);
+      const ids = new Set(targets.map((target) => target.id));
+      out.nodes = out.nodes.map((entry) => (ids.has(entry.id) ? setModel(entry, override.model, override.provider) : entry));
+      continue;
+    }
+    let matched = 0;
+    out.nodes = out.nodes.map((entry) => {
+      if (!isChatModelNode(entry) || chatModelOf(entry)?.providerId !== override.provider) return entry;
+      matched += 1;
+      return setModel(entry, override.model, undefined);
+    });
+    if (matched === 0) throw new ReplayCandidateError(`Model override: no node of the workflow calls provider ${override.provider}.`);
+  }
+  return out;
+}
+
+/** Problems with `liveReadNodes`: a node that is not in the candidate, or that is not a read (writes never run live in a replay). */
+export function liveReadNodeProblems(workflow: Pick<Workflow, "nodes">, nodeIds: readonly string[]): string[] {
+  const problems: string[] = [];
+  for (const nodeId of nodeIds) {
+    const node = workflow.nodes.find((entry) => entry.id === nodeId);
+    if (!node) {
+      problems.push(`Live read: the workflow has no node ${nodeId}.`);
+      continue;
+    }
+    const nodeClass = replayNodeClass(node);
+    if (nodeClass !== "read") {
+      problems.push(
+        nodeClass === "write"
+          ? `Live read: node ${nodeId} (${node.type}) can change external systems, and replays never run those live.`
+          : `Live read: node ${nodeId} (${node.type}) is not an external read (it is a ${nodeClass} node).`
+      );
+    }
+  }
+  return problems;
+}
+
+/** One repeat of a case: its result and, for a baseline rerun, the baseline execution. */
+export type ReplayAttemptStatus = "pass" | "fail" | "error";
+
+/**
+ * A case's result from its repeats. `all`: any fail fails it, else any error
+ * makes it inconclusive. `majority`: more than half pass, else a fail fails
+ * it, else inconclusive. `any`: one pass is enough, else as `all`.
+ */
+export function aggregateReplayAttempts(statuses: readonly ReplayAttemptStatus[], rule: ReplayAggregateRule): ReplayAttemptStatus {
+  if (statuses.length === 0) return "error";
+  const pass = statuses.filter((status) => status === "pass").length;
+  const fail = statuses.filter((status) => status === "fail").length;
+  const error = statuses.length - pass - fail;
+  if (rule === "any" && pass > 0) return "pass";
+  if (rule === "majority" && pass * 2 > statuses.length) return "pass";
+  if (rule === "all" && fail === 0 && error === 0) return "pass";
+  if (fail > 0) return "fail";
+  return error > 0 ? "error" : "fail";
 }
