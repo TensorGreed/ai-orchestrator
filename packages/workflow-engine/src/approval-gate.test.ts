@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
-import { createDefaultMCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
+import { classifyMcpTool, createDefaultMCPRegistry, type MCPServerAdapter } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
 import {
   resolvePendingApproval,
@@ -13,7 +13,7 @@ import {
   type WorkflowNode
 } from "@ai-orchestrator/shared";
 import { executeWorkflow, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
-import { writeToolApprovalKey } from "./approval-gate-node";
+import { writeToolApprovalKey, writeToolGateSkips } from "./approval-gate-node";
 import { buildReplayPlan } from "./replay-plan";
 import { validateWorkflowGraph } from "./validation";
 
@@ -71,9 +71,20 @@ function crmAdapter(invoked: Array<Record<string, unknown>>): MCPServerAdapter {
   } as unknown as MCPServerAdapter;
 }
 
-function deps(input: { paused?: WorkflowExecutionState[]; workflows?: Workflow[]; provider?: LLMProviderAdapter; invoked?: Array<Record<string, unknown>> } = {}): WorkflowExecutionDependencies {
+function deps(
+  input: {
+    paused?: WorkflowExecutionState[];
+    workflows?: Workflow[];
+    provider?: LLMProviderAdapter;
+    providers?: LLMProviderAdapter[];
+    invoked?: Array<Record<string, unknown>>;
+    /** Admin read-only marks, for tools on the `crm_registry` registry server. */
+    readOnlyTools?: string[];
+  } = {}
+): WorkflowExecutionDependencies {
   const providerRegistry = new ProviderRegistry();
   if (input.provider) providerRegistry.register(input.provider);
+  for (const provider of input.providers ?? []) providerRegistry.register(provider);
   const mcpRegistry = createDefaultMCPRegistry();
   mcpRegistry.register(crmAdapter(input.invoked ?? []));
   return {
@@ -85,7 +96,19 @@ function deps(input: { paused?: WorkflowExecutionState[]; workflows?: Workflow[]
     loadWorkflow: (id) => input.workflows?.find((entry) => entry.id === id),
     persistPausedExecution: async (paused) => {
       input.paused?.push(paused.state);
-    }
+    },
+    resolveRegisteredMcpServer: (id: string) => {
+      if (id !== "crm_registry") throw new Error(`unknown registry server ${id}`);
+      return { serverId: "crm-mcp", label: "CRM", connection: {} };
+    },
+    ...(input.readOnlyTools
+      ? {
+          loadMcpToolPolicy: () => ({
+            rules: [],
+            classifications: input.readOnlyTools!.map((toolName) => ({ registryServerId: "crm_registry", toolName, readOnly: true }))
+          })
+        }
+      : {})
   };
 }
 
@@ -340,7 +363,7 @@ describe("agent-level gate before MCP write tools", () => {
     expect(handoff?.kind === "rerun" ? handoff.approvalKey : "").toBe(writeToolApprovalKey("agent", "crm-mcp", "update_contact", args));
     expect(first.output).toMatchObject({ timeoutMinutes: 15, approvalMessage: "Agent 'CRM agent' wants to call the write tool 'update_contact' on 'crm-mcp'." });
     const details = resolvePendingApproval(paused[0]!).details!;
-    expect(details).toMatchObject({ toolName: "update_contact", classification: "unknown", arguments: "{\"email\":\"ana@example.org\"}" });
+    expect(details).toMatchObject({ toolName: "update_contact", classification: "not_marked_read_only", arguments: "{\"email\":\"ana@example.org\"}" });
 
     const approved = await resumeWorkflowExecution({ executionId: "exec-tool", state: paused[0]!, decision: "approve", actedBy: "admin@example.com" }, deps({ provider: provider(), invoked }));
     expect(approved.status).toBe("success");
@@ -364,11 +387,13 @@ describe("agent-level gate before MCP write tools", () => {
     expect(resolvePendingApproval(again[0]!).details).toMatchObject({ arguments: "{\"email\":\"someone.else@example.org\"}" });
   });
 
-  it("lets read-only tools through and does nothing when the setting is off", async () => {
+  it("lets tools an admin marked read-only through and does nothing when the setting is off", async () => {
     const invoked: Array<Record<string, unknown>> = [];
+    const registryAgent = agentWorkflow("find_contact");
+    registryAgent.nodes = registryAgent.nodes.map((entry) => (entry.id === "tool" ? { ...entry, config: { registryServerId: "crm_registry", toolName: "find_contact" } } : entry));
     const readOnly = await executeWorkflow(
-      { workflow: agentWorkflow("find_contact"), executionId: "exec-ro", webhookPayload: { user_prompt: "Find" } },
-      deps({ provider: new ToolThenAnswerProvider("crm-mcp__find_contact", () => ({ q: "ana" })), invoked })
+      { workflow: registryAgent, executionId: "exec-ro", webhookPayload: { user_prompt: "Find" } },
+      deps({ provider: new ToolThenAnswerProvider("crm-mcp__find_contact", () => ({ q: "ana" })), invoked, readOnlyTools: ["find_contact"] })
     );
     expect(readOnly.status).toBe("success");
     const off = await executeWorkflow(
@@ -403,5 +428,235 @@ describe("Human Approval timeouts and replays", () => {
     expect(persistPausedExecution).not.toHaveBeenCalled();
     expect(last(result, "on_rejected")?.status).toBe("success");
     expect(last(result, "on_approved")?.status).toBe("skipped");
+  });
+});
+
+/** Calls the scripted tool calls in order, one per model turn, then answers. */
+class ScriptedToolsProvider implements LLMProviderAdapter {
+  readonly definition: LLMProviderAdapter["definition"];
+  constructor(
+    private readonly steps: Array<{ name: string; args: Record<string, unknown> }>,
+    id = "scripted"
+  ) {
+    this.definition = { id, label: id, supportsTools: true, configSchema: {} } as LLMProviderAdapter["definition"];
+  }
+  async generate(request: ProviderCallRequest) {
+    const done = request.messages.filter((message) => message.role === "tool").length;
+    const step = this.steps[done];
+    if (step && request.tools?.some((tool) => tool.name === step.name)) {
+      return { content: "Calling a tool.", toolCalls: [{ id: `call-${done}`, name: step.name, arguments: step.args }] };
+    }
+    return { content: "All done.", toolCalls: [] };
+  }
+}
+
+function writeAgentWorkflow(settings: Workflow["settings"] = { writeToolApproval: { enabled: true } }) {
+  return workflow(
+    "wf-writes",
+    [
+      node("in", "webhook_input"),
+      node("agent", "agent_orchestrator", { maxIterations: 6, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}" }, "Payments agent"),
+      node("model", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+      node("tool", "mcp_tool", { serverId: "crm-mcp", toolName: "__all__" }),
+      node("out", "output")
+    ],
+    [
+      { source: "in", target: "agent" },
+      { source: "agent", target: "out" },
+      { source: "agent", sourceHandle: "chat_model", target: "model" },
+      { source: "agent", sourceHandle: "tool", target: "tool" }
+    ],
+    { settings }
+  );
+}
+
+describe("write-tool gate: each approved call runs once", () => {
+  it("runs write A once when the agent then calls write B and both are approved", async () => {
+    const invoked: Array<Record<string, unknown>> = [];
+    const provider = new ScriptedToolsProvider([
+      { name: "crm-mcp__update_contact", args: { email: "a@example.org" } },
+      { name: "crm-mcp__update_contact", args: { email: "b@example.org" } }
+    ]);
+    const firstPause: WorkflowExecutionState[] = [];
+    const first = await executeWorkflow({ workflow: writeAgentWorkflow(), executionId: "exec-ab", webhookPayload: { user_prompt: "Pay" } }, deps({ paused: firstPause, provider, invoked }));
+    expect(first.status).toBe("waiting_approval");
+    expect(invoked).toHaveLength(0);
+
+    // Approve A: A runs, then the agent asks for B.
+    const secondPause: WorkflowExecutionState[] = [];
+    const second = await resumeWorkflowExecution({ executionId: "exec-ab", state: firstPause[0]!, decision: "approve" }, deps({ paused: secondPause, provider, invoked }));
+    expect(second.status).toBe("waiting_approval");
+    expect(invoked).toEqual([{ tool: "update_contact", email: "a@example.org" }]);
+    expect(resolvePendingApproval(secondPause[0]!).details).toMatchObject({ arguments: "{\"email\":\"b@example.org\"}" });
+    // A's approval was used up; its result is kept for the next re-run.
+    expect(secondPause[0]!.approvedHandoffKeys ?? []).toHaveLength(0);
+    expect(Object.keys(secondPause[0]!.approvedToolResults ?? {})).toEqual([writeToolApprovalKey("agent", "crm-mcp", "update_contact", { email: "a@example.org" })]);
+
+    // Approve B: A is answered from its stored result, B runs once.
+    const done = await resumeWorkflowExecution({ executionId: "exec-ab", state: secondPause[0]!, decision: "approve" }, deps({ provider, invoked }));
+    expect(done.status).toBe("success");
+    expect(invoked).toEqual([
+      { tool: "update_contact", email: "a@example.org" },
+      { tool: "update_contact", email: "b@example.org" }
+    ]);
+  });
+
+  it("asks again when the model repeats an approved call in the same re-run", async () => {
+    const invoked: Array<Record<string, unknown>> = [];
+    const same = { name: "crm-mcp__update_contact", args: { email: "a@example.org" } };
+    const provider = new ScriptedToolsProvider([same, same]);
+    const firstPause: WorkflowExecutionState[] = [];
+    await executeWorkflow({ workflow: writeAgentWorkflow(), executionId: "exec-aa", webhookPayload: { user_prompt: "Pay" } }, deps({ paused: firstPause, provider, invoked }));
+    const secondPause: WorkflowExecutionState[] = [];
+    const second = await resumeWorkflowExecution({ executionId: "exec-aa", state: firstPause[0]!, decision: "approve" }, deps({ paused: secondPause, provider, invoked }));
+    // The approval covered one call: the repeat pauses for a new one.
+    expect(second.status).toBe("waiting_approval");
+    expect(invoked).toHaveLength(1);
+    const done = await resumeWorkflowExecution({ executionId: "exec-aa", state: secondPause[0]!, decision: "approve" }, deps({ provider, invoked }));
+    expect(done.status).toBe("success");
+    expect(invoked).toHaveLength(2);
+  });
+
+  it("pauses the supervisor when its worker calls a write tool, keyed to the worker, and runs the call once", async () => {
+    const invoked: Array<Record<string, unknown>> = [];
+    const boss = new ScriptedToolsProvider([{ name: "delegate_to_Clerk", args: { task_prompt: "Update Ana" } }], "boss");
+    const clerk = new ScriptedToolsProvider([{ name: "crm-mcp__update_contact", args: { email: "ana@example.org" } }], "clerk");
+    const wf = workflow(
+      "wf-sup",
+      [
+        node("in", "webhook_input"),
+        node("sup", "supervisor_node", { maxIterations: 3, userPromptTemplate: "{{user_prompt}}" }, "Supervisor"),
+        node("sup_model", "llm_call", { provider: { providerId: "boss", model: "m" } }),
+        node("worker", "agent_orchestrator", { maxIterations: 3, toolCallingEnabled: true, userPromptTemplate: "{{user_prompt}}" }, "Clerk"),
+        node("worker_model", "llm_call", { provider: { providerId: "clerk", model: "m" } }),
+        node("worker_tool", "mcp_tool", { serverId: "crm-mcp", toolName: "update_contact" }),
+        node("out", "output")
+      ],
+      [
+        { source: "in", target: "sup" },
+        { source: "sup", target: "out" },
+        { source: "sup", sourceHandle: "chat_model", target: "sup_model" },
+        { source: "sup", sourceHandle: "worker", target: "worker" },
+        { source: "worker", sourceHandle: "chat_model", target: "worker_model" },
+        { source: "worker", sourceHandle: "tool", target: "worker_tool" }
+      ],
+      { settings: { writeToolApproval: { enabled: true } } }
+    );
+    const paused: WorkflowExecutionState[] = [];
+    const first = await executeWorkflow({ workflow: wf, executionId: "exec-sup", webhookPayload: { user_prompt: "Fix Ana" } }, deps({ paused, providers: [boss, clerk], invoked }));
+    expect(first.status).toBe("waiting_approval");
+    expect(paused[0]!.waitingNodeId).toBe("sup");
+    const handoff = paused[0]!.approvalHandoff;
+    expect(handoff?.kind === "rerun" ? handoff.approvalKey : "").toBe(writeToolApprovalKey("worker", "crm-mcp", "update_contact", { email: "ana@example.org" }));
+    expect(invoked).toHaveLength(0);
+    const done = await resumeWorkflowExecution({ executionId: "exec-sup", state: paused[0]!, decision: "approve" }, deps({ providers: [boss, clerk], invoked }));
+    expect(done.status).toBe("success");
+    expect(invoked).toEqual([{ tool: "update_contact", email: "ana@example.org" }]);
+  });
+
+  it("does not trust a server's own read-only annotation, and destructive wins over read-only", async () => {
+    // An inline server labels find_contact read-only: without an admin mark it still asks.
+    const spoofed = await executeWorkflow(
+      { workflow: writeAgentWorkflow(), executionId: "exec-spoof", webhookPayload: { user_prompt: "Find" } },
+      deps({ provider: new ScriptedToolsProvider([{ name: "crm-mcp__find_contact", args: { q: "ana" } }]) })
+    );
+    expect(spoofed.status).toBe("waiting_approval");
+    expect(writeToolGateSkips({ readOnly: true, source: "annotation" })).toBe(false);
+    expect(writeToolGateSkips({ readOnly: false, source: "unknown" })).toBe(false);
+    expect(writeToolGateSkips({ readOnly: true, source: "manual" })).toBe(true);
+    expect(classifyMcpTool({ annotations: { readOnlyHint: true, destructiveHint: true } }).readOnly).toBe(false);
+  });
+});
+
+describe("nothing skips an Approval Gate", () => {
+  const send = () => gateWorkflow(GATE);
+
+  it("ignores a pinned gate output: the run still pauses at the gate", async () => {
+    const paused: WorkflowExecutionState[] = [];
+    const pinned = { ...send(), pinnedData: { gate: { approved: true, _branchHandle: "approved" } } };
+    const viaWorkflow = await executeWorkflow({ workflow: pinned, executionId: "exec-pin", webhookPayload: { user_prompt: "Ana" } }, deps({ paused }));
+    // The pinned gate is a validation error, so the run never reaches the node after it.
+    expect(viaWorkflow.status).not.toBe("success");
+    expect(last(viaWorkflow, "on_approved")?.status).not.toBe("success");
+    expect(validateWorkflowGraph(pinned).issues.map((issue) => issue.code)).toContain("approval_gate_pinned");
+
+    const viaRequest = await executeWorkflow(
+      { workflow: send(), executionId: "exec-pin-2", webhookPayload: { user_prompt: "Ana" }, pinnedData: { gate: { approved: true, _branchHandle: "approved" } } },
+      deps({ paused })
+    );
+    expect(viaRequest.status).toBe("waiting_approval");
+    expect(last(viaRequest, "on_approved")).toBeUndefined();
+  });
+
+  it("ignores a seeded gate output", async () => {
+    const result = await executeWorkflow(
+      { workflow: send(), executionId: "exec-seed", webhookPayload: { user_prompt: "Ana" }, nodeOutputs: { gate: { approved: true, _branchHandle: "approved" } } },
+      deps({ paused: [] })
+    );
+    expect(result.status).toBe("waiting_approval");
+    expect(last(result, "on_approved")).toBeUndefined();
+  });
+
+  it("refuses a start node or a single-node run below the gate, and allows starting at the gate", async () => {
+    for (const runMode of ["workflow", "single_node"] as const) {
+      const result = await executeWorkflow(
+        { workflow: send(), executionId: `exec-start-${runMode}`, startNodeId: "on_approved", runMode, nodeOutputs: { gate: { approved: true, _branchHandle: "approved" } } },
+        deps({ paused: [] })
+      );
+      expect(result.status).toBe("error");
+      expect(result.error).toBe("This run would start after Approval Gate 'gate'. Start at or before the gate.");
+      expect(result.nodeResults).toHaveLength(0);
+    }
+    const atGate = await executeWorkflow({ workflow: send(), executionId: "exec-start-gate", startNodeId: "gate", nodeOutputs: { draft: { reply: "x" } } }, deps({ paused: [] }));
+    expect(atGate.status).toBe("waiting_approval");
+  });
+
+  it("keeps answering gates from the recording in a replay, pins included", async () => {
+    const wf = { ...send(), pinnedData: undefined };
+    const recorded: Record<string, ReplayRecordedNode> = {
+      gate: { nodeId: "gate", nodeType: "approval_gate", status: "success", output: { reply: "Dear Ana", approved: true, approval: { decision: "approve", outcome: "approved" }, _branchHandle: "approved" } } as ReplayRecordedNode
+    };
+    const plan = buildReplayPlan(wf, recorded);
+    const result = await executeWorkflow(
+      { workflow: wf, executionId: "exec-replay-start", startNodeId: "on_approved", nodeOutputs: { gate: recorded.gate!.output } },
+      { ...deps(), replayNodeHook: plan.hook }
+    );
+    expect(result.status).toBe("success");
+  });
+});
+
+describe("approval pauses with retries and loops", () => {
+  it("restarts a resumed child on retry of the Execute Workflow node, so it asks again", async () => {
+    const child = workflow(
+      "wf-child-fails",
+      [node("start", "manual_trigger"), node("gate", "approval_gate", { message: "Child asks" }), node("check", "input_validator", { onFail: "error", rules: [{ field: "missing_field", check: "required" }] }), node("out", "output")],
+      [{ source: "start", target: "gate" }, { source: "gate", sourceHandle: "approved", target: "check" }, { source: "check", target: "out" }]
+    );
+    const parent = workflow(
+      "wf-parent-retry",
+      [node("start", "manual_trigger"), { ...node("call", "execute_workflow", { workflowId: "wf-child-fails" }), errorConfig: { retryOnFail: true, maxRetries: 1, retryIntervalMs: 1 } }, node("out", "output")],
+      [{ source: "start", target: "call" }, { source: "call", target: "out" }]
+    );
+    const paused: WorkflowExecutionState[] = [];
+    const first = await executeWorkflow({ workflow: parent, executionId: "exec-retry" }, deps({ paused, workflows: [child] }));
+    expect(first.error).toBeUndefined();
+    const again: WorkflowExecutionState[] = [];
+    const resumed = await resumeWorkflowExecution({ executionId: "exec-retry", state: paused[0]!, decision: "approve", actedBy: "lead" }, deps({ paused: again, workflows: [child] }));
+    // The approved child failed after the gate; the retry starts it again and its gate asks again.
+    expect(resumed.status).toBe("waiting_approval");
+    expect(again).toHaveLength(1);
+    expect(resolvePendingApproval(again[0]!).nodeId).toBe("gate");
+  });
+
+  it("fails a Loop body that asks for approval with a clear message", async () => {
+    const child = workflow("wf-loop-child", [node("start", "manual_trigger"), node("gate", "approval_gate", {}), node("out", "output")], [{ source: "start", target: "gate" }, { source: "gate", sourceHandle: "approved", target: "out" }]);
+    const looped = workflow(
+      "wf-loop-call",
+      [node("start", "manual_trigger"), node("loop", "loop_node", { inputKey: "items", itemVariable: "item" }), node("call", "execute_workflow", { workflowId: "wf-loop-child" }), node("out", "output")],
+      [{ source: "start", target: "loop" }, { source: "loop", target: "call" }, { source: "loop", target: "out" }]
+    );
+    const result = await executeWorkflow({ workflow: looped, executionId: "exec-loop", input: { items: [1] } }, deps({ paused: [], workflows: [child] }));
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("Approvals cannot pause inside a Loop body");
   });
 });

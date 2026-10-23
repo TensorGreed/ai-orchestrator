@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  APPROVAL_DEFAULT_TIMEOUT_MINUTES,
   approvalGateConfigSchema,
   ErrorCategory,
   WorkflowError,
@@ -8,6 +9,7 @@ import {
   type ApprovalEditableField,
   type ApprovalGateOutputHandle,
   type ApprovalRequestSpec,
+  type McpToolClassification,
   type WriteToolApprovalSettings
 } from "@ai-orchestrator/shared";
 import { ApprovalHandoffSignal, type ApprovalHandoffRequest } from "./approval-handoff";
@@ -207,7 +209,7 @@ export function writeToolApprovalPause(input: {
   if (preview.length > ARGUMENT_PREVIEW_CHARS) preview = `${preview.slice(0, ARGUMENT_PREVIEW_CHARS)}…`;
   return {
     message: `Agent '${input.nodeName}' wants to call the write tool '${input.toolName}' on '${input.serverLabel}'.`,
-    timeoutMinutes: input.settings.timeoutMinutes ?? 60,
+    timeoutMinutes: input.settings.timeoutMinutes ?? APPROVAL_DEFAULT_TIMEOUT_MINUTES,
     handoff: { kind: "rerun", source: "agent_tool_gate", approvalKey, request: writeToolApprovalRequest(input.settings) },
     details: {
       toolName: input.toolName,
@@ -216,4 +218,87 @@ export function writeToolApprovalPause(input: {
       arguments: preview
     }
   };
+}
+
+/**
+ * Whether the write-tool gate lets a call through without asking. Server
+ * annotations are hints from the server and are not trusted here (any MCP
+ * server, an unreviewed inline one included, can label `delete_records`
+ * read-only): only an admin's read-only mark in the tool policy counts.
+ * Every other tool, unknown ones included, is a write tool.
+ */
+export function writeToolGateSkips(classification: McpToolClassification): boolean {
+  return classification.source === "manual" && classification.readOnly;
+}
+
+/**
+ * Phase 11.2 — what the write-tool gate remembers across re-runs of an agent
+ * node. An approval is single use: the first matching call takes it, runs
+ * the tool and stores the result. A later re-run of the node (it paused
+ * again for the next write call) answers that call from the stored result
+ * and never calls the tool again. Results are kept per approval key in call
+ * order, so the n-th identical call of a re-run gets the n-th result, and a
+ * call beyond the stored ones needs a new approval.
+ */
+export class WriteToolCallLedger {
+  private readonly results: Map<string, unknown[]>;
+
+  constructor(
+    private readonly approvedKeys: Set<string>,
+    stored?: Record<string, unknown> | null
+  ) {
+    this.results = new Map();
+    for (const [key, value] of Object.entries(stored ?? {})) {
+      if (Array.isArray(value)) this.results.set(key, [...value]);
+    }
+  }
+
+  /** One execution of an agent node (shared with the workers it delegates to). */
+  session(): WriteToolCallSession {
+    const replayed = new Map<string, number>();
+    return {
+      replay: (key) => {
+        const stored = this.results.get(key) ?? [];
+        const used = replayed.get(key) ?? 0;
+        if (used >= stored.length) return { hit: false };
+        replayed.set(key, used + 1);
+        return { hit: true, result: stored[used] };
+      },
+      takeApproval: (key) => this.approvedKeys.delete(key),
+      record: (key, result) => {
+        const stored = this.results.get(key) ?? [];
+        stored.push(toJsonSafe(result));
+        this.results.set(key, stored);
+        replayed.set(key, stored.length);
+      }
+    };
+  }
+
+  /** For the paused state; undefined when nothing is stored. */
+  toState(): Record<string, unknown[]> | undefined {
+    if (this.results.size === 0) return undefined;
+    return Object.fromEntries([...this.results.entries()].map(([key, value]) => [key, [...value]]));
+  }
+
+  clear(): void {
+    this.results.clear();
+  }
+}
+
+export interface WriteToolCallSession {
+  /** The stored result for this key's next call in this execution, when an earlier run already made it. */
+  replay(key: string): { hit: true; result: unknown } | { hit: false };
+  /** Takes the one-time approval for this key; false when there is none. */
+  takeApproval(key: string): boolean;
+  /** Stores the result of an approved call. */
+  record(key: string, result: unknown): void;
+}
+
+function toJsonSafe(value: unknown): unknown {
+  if (value === undefined) return null;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return String(value);
+  }
 }

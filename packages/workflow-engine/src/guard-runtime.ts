@@ -30,6 +30,7 @@ import {
   type TokenVaultStorage
 } from "@ai-orchestrator/guard-sdk";
 import {
+  APPROVAL_DEFAULT_TIMEOUT_MINUTES,
   GUARD_BUILTIN_PROFILE_ID,
   GUARD_EFFECTIVE_PROFILE_REF,
   defaultGuardLabels,
@@ -358,8 +359,11 @@ export async function createAgentGuardSession(input: {
   let profiles: ResolvedGuardProfile[];
   let resolution: GuardRunResolution;
   let source: GuardRunResolution["source"] | "port";
+  // Phase 11.2 — how long a guard hand-off waits: the port guard node's timeout, else one day.
+  let handoffTimeoutMinutes = APPROVAL_DEFAULT_TIMEOUT_MINUTES;
   if (input.portGuardNode) {
     const config = parseGuardNodeConfig(input.portGuardNode);
+    handoffTimeoutMinutes = config.timeoutMinutes;
     ({ profiles, resolution } = await resolveGuardNodeProfiles(scope.guard, config, protectionBindingsFromNodes(input.protectionNodes)));
     source = "port";
   } else {
@@ -425,7 +429,7 @@ export async function createAgentGuardSession(input: {
           const message = `Guard ${result.action === "review" ? "review" : "approval"} needed on ${check.channel.replace("_", " ")}${tool ? ` (${tool.toolName})` : ""}: ${describeGuardVerdict(result)}`;
           pendingApproval = {
             message,
-            timeoutMinutes: 60,
+            timeoutMinutes: handoffTimeoutMinutes,
             handoff: { kind: "rerun", source: "agent_guard", approvalKey: key },
             details: { channel: check.channel, iteration: check.iteration, verdicts: result.verdicts }
           };

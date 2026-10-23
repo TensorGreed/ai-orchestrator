@@ -212,8 +212,9 @@ export interface WorkflowSettings {
   noWriteTools?: boolean;
   /**
    * Phase 11.2 — agents in this workflow pause for a person's approval
-   * before they call an MCP write tool (a tool that is not read-only by an
-   * admin override or its `readOnlyHint`; unknown counts as write).
+   * before they call an MCP write tool. Server annotations are not trusted
+   * here: a tool is read-only for this gate only when an admin marked it
+   * read-only in the tool policy; every other tool counts as a write tool.
    */
   writeToolApproval?: WriteToolApprovalSettings;
 }
@@ -470,6 +471,13 @@ export interface WorkflowExecutionState {
    * carry an approval.
    */
   approvedHandoffKeys?: string[];
+  /**
+   * Phase 11.2 — results of write-tool calls a person approved, keyed by the
+   * call's approval key, in call order. A re-run of the agent answers those
+   * calls from here instead of calling the tool again, so an approved call
+   * runs once. Written only by the engine; cleared when the node succeeds.
+   */
+  approvedToolResults?: Record<string, unknown[]>;
 }
 
 /**

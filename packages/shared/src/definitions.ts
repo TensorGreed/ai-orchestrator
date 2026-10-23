@@ -1323,7 +1323,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       profileId: "effective",
       channel: "prompt",
       inputField: "user_prompt",
-      timeoutMinutes: 60
+      timeoutMinutes: 1440
     }
   },
   {

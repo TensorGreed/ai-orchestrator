@@ -713,6 +713,14 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           issues.push({ code: "invalid_approval_gate_config", message: `Approval Gate ${issue.path.join(".") || "config"}: ${issue.message}`, nodeId: node.id });
         }
       }
+      // A pinned gate output would skip the person who must decide.
+      if (workflow.pinnedData && Object.prototype.hasOwnProperty.call(workflow.pinnedData, node.id)) {
+        issues.push({
+          code: "approval_gate_pinned",
+          message: "An Approval Gate cannot have pinned data: its output only comes from a person's decision. Unpin it.",
+          nodeId: node.id
+        });
+      }
       // Loop bodies run inline and cannot be paused and resumed part-way.
       const inLoop = workflow.edges.some((edge) => edge.target === node.id && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node");
       if (inLoop) {

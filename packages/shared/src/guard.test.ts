@@ -14,7 +14,7 @@ import { workflowNodeSchema } from "./schemas";
 describe("guard node schemas", () => {
   it("fills defaults for the guard node and rejects unknown channels", () => {
     const config = guardNodeConfigSchema.parse({});
-    expect(config).toEqual({ profileId: "effective", channel: "prompt", inputField: "user_prompt", timeoutMinutes: 60 });
+    expect(config).toEqual({ profileId: "effective", channel: "prompt", inputField: "user_prompt", timeoutMinutes: 1440 });
     expect(guardNodeConfigSchema.safeParse({ channel: "everything" }).success).toBe(false);
     expect(guardNodeConfigSchema.parse({ channel: "tool_result", profileOverride: { shadow: { block: true } } }).profileOverride).toEqual({ shadow: { block: true } });
   });

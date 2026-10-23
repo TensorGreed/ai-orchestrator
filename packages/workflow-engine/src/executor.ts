@@ -112,7 +112,14 @@ import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orches
 import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
-import { approvalGateOutcome, approvalGatePause, writeToolApprovalPause } from "./approval-gate-node";
+import {
+  approvalGateOutcome,
+  approvalGatePause,
+  writeToolApprovalPause,
+  writeToolGateSkips,
+  WriteToolCallLedger,
+  type WriteToolCallSession
+} from "./approval-gate-node";
 import type { ReplayNodeHook, ReplayNodeStub } from "./replay-plan";
 import {
   builtInGuardProfile,
@@ -372,6 +379,10 @@ interface NodeRuntimeContext {
   approvedHandoffKeys?: ReadonlySet<string>;
   /** Phase 11.2 — set only for the node a resumed run paused at (an Approval Gate or a sync Execute Workflow). */
   resumeDecision?: NodeResumeDecision;
+  /** Phase 11.2 — the run's approved write-tool calls and their stored results. */
+  writeToolCalls?: WriteToolCallLedger;
+  /** Phase 11.2 — the agent execution a worker runs inside, so the worker shares its replay position. */
+  writeToolSession?: WriteToolCallSession;
   recordAttachmentUsage?: (usage: {
     attachedNodeId: string;
     usedByNodeId: string;
@@ -5170,6 +5181,7 @@ async function executeNode(
             : undefined;
         let workerPendingApproval: ApprovalHandoffRequest | undefined;
         let toolGatePendingApproval: ApprovalHandoffRequest | undefined;
+        const writeToolSession = context.writeToolSession ?? context.writeToolCalls?.session();
 
         emitNodeActivity(dependencies, node.id, {
           kind: "resolved_input",
@@ -5218,6 +5230,7 @@ async function executeNode(
                 
                   const workerContext: NodeRuntimeContext = {
                      ...context,
+                     ...(writeToolSession ? { writeToolSession } : {}),
                      globals: { ...context.globals, user_prompt: String(args.task_prompt ?? "") },
                      parentOutputs: { ...context.parentOutputs },
                      callStack: [...context.callStack, node.id]
@@ -5241,6 +5254,7 @@ async function executeNode(
                const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
                // Phase 11.2 — the workflow's write-tool gate: a person approves this exact call first.
                const writeGate = context.workflow.settings?.writeToolApproval;
+               let approvedCallKey: string | undefined;
                if (writeGate?.enabled && resolvedEntry && !dependencies.replayNodeHook) {
                  const classification = toolPolicy
                    ? toolPolicy.evaluate({
@@ -5250,7 +5264,7 @@ async function executeNode(
                        ...(resolvedEntry.annotations ? { annotations: resolvedEntry.annotations } : {})
                      }).classification
                    : classifyMcpTool({ annotations: resolvedEntry.annotations });
-                 if (!classification.readOnly) {
+                 if (!writeToolGateSkips(classification)) {
                    const serverKey = resolvedEntry.registryServerId ?? resolvedEntry.serverId;
                    const pause = writeToolApprovalPause({
                      settings: writeGate,
@@ -5260,18 +5274,25 @@ async function executeNode(
                      serverLabel: serverKey,
                      toolName: resolvedEntry.originalName,
                      args,
-                     classificationSource: classification.source
+                     classificationSource: classification.source === "manual" ? "manual" : "not_marked_read_only"
                    });
-                   if (pause.handoff.kind === "rerun" && !context.approvedHandoffKeys?.has(pause.handoff.approvalKey)) {
+                   const approvalKey = pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : undefined;
+                   // An approved call already ran in an earlier re-run: answer from its result.
+                   const replayed = approvalKey ? writeToolSession?.replay(approvalKey) : undefined;
+                   if (replayed?.hit) return replayed.result as Awaited<ReturnType<typeof resolvedTools.invokeByExposedName>>;
+                   if (!approvalKey || !writeToolSession?.takeApproval(approvalKey)) {
                      toolGatePendingApproval = pause;
                      throw new AgentGuardInterrupt("approval_required", "tool_arguments", 0, pause.message);
                    }
+                   approvedCallKey = approvalKey;
                  }
                }
                // Phase 10.5 — each tool call gets a fresh sampling budget.
                const originalName = resolvedEntry?.originalName ?? toolName;
                agentMcp.samplingHandler.beginCall(originalName);
-               return resolvedTools.invokeByExposedName(toolName, args);
+               const toolResult = await resolvedTools.invokeByExposedName(toolName, args);
+               if (approvedCallKey) writeToolSession?.record(approvedCallKey, toolResult);
+               return toolResult;
             }
           },
           {
@@ -6182,9 +6203,13 @@ async function executeNodeWithRetry(
   }
 
   let lastError: Error | undefined;
+  // Phase 11.2 — a resume decision is used by the first attempt only: a
+  // retry of an Execute Workflow node whose resumed child failed starts the
+  // child again (and it asks again), instead of resuming it twice.
+  const { resumeDecision: _firstAttemptOnly, ...retryContext } = context;
   for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
     try {
-      const output = await executeNode(node, context, dependencies);
+      const output = await executeNode(node, attempt === 1 ? context : retryContext, dependencies);
       return { output, attempts: attempt };
     } catch (error) {
       // Phase 12.1 — a guard block or an approval pause is a decision, not a transient failure.
@@ -6279,6 +6304,20 @@ function collectReachableFromRoots(
     }
   }
   return reachable;
+}
+
+/** The first Approval Gate found upstream of `nodeId` on execution edges (the node itself excluded). */
+function upstreamApprovalGate(nodeId: string, incomingExecution: Map<string, string[]>, gateIds: ReadonlySet<string>): string | undefined {
+  const seen = new Set<string>([nodeId]);
+  const queue = [...(incomingExecution.get(nodeId) ?? [])];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    if (gateIds.has(current)) return current;
+    queue.push(...(incomingExecution.get(current) ?? []));
+  }
+  return undefined;
 }
 
 function serializeNodeOutputs(nodeOutputs: Map<string, unknown>): Record<string, unknown> {
@@ -6465,6 +6504,27 @@ async function executeWorkflowRun(
     }
   }
 
+  // Phase 11.2 — an Approval Gate is a separation-of-duties control: a run
+  // that may start must not be able to skip it. A start node or single-node
+  // run below a gate is refused (replays answer gates from the recording).
+  const enforceApprovalGates = !dependencies.replayNodeHook && !request.resumeState;
+  const approvalGateIds = new Set(workflow.nodes.filter((entry) => entry.type === "approval_gate").map((entry) => entry.id));
+  if (enforceApprovalGates && explicitStartNodeId && approvalGateIds.size > 0) {
+    const skippedGate = upstreamApprovalGate(explicitStartNodeId, graphIndexes.incomingExecution, approvalGateIds);
+    if (skippedGate) {
+      const error = WorkflowError.nodeConfig(`This run would start after Approval Gate '${skippedGate}'. Start at or before the gate.`);
+      return {
+        workflowId: workflow.id,
+        status: "error",
+        startedAt,
+        completedAt: nowIso(),
+        executionId: request.executionId,
+        nodeResults: [],
+        error: error.message
+      };
+    }
+  }
+
   const globals: Record<string, unknown> = request.resumeState
     ? toRecord(request.resumeState.globals)
     : {
@@ -6486,6 +6546,7 @@ async function executeWorkflowRun(
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
   const approvedHandoffKeys = approvedHandoffKeysFromState(request.resumeState);
+  const writeToolCalls = new WriteToolCallLedger(approvedHandoffKeys, request.resumeState?.approvedToolResults);
   const customData = request.resumeState
     ? toRecord(globals.execution_custom_data)
     : toRecord(request.customData);
@@ -6503,7 +6564,14 @@ async function executeWorkflowRun(
     : deserializeNodeOutputs(toRecord(request.nodeOutputs));
   const workflowPinnedData = toRecord(workflow.pinnedData);
   const requestPinnedData = request.pinnedData === undefined ? workflowPinnedData : toRecord(request.pinnedData);
-  const pinnedData = request.usePinnedData === false ? {} : requestPinnedData;
+  const pinnedData = request.usePinnedData === false ? {} : { ...requestPinnedData };
+  if (enforceApprovalGates) {
+    // A gate's output only ever comes from a person's decision, never from pins or seeded outputs.
+    for (const gateId of approvalGateIds) {
+      delete pinnedData[gateId];
+      nodeOutputs.delete(gateId);
+    }
+  }
   if (!request.resumeState) {
     for (const [nodeId, output] of Object.entries(pinnedData)) {
       nodeOutputs.set(nodeId, output);
@@ -6952,7 +7020,8 @@ async function executeWorkflowRun(
       finalOutput,
       ...(toolPolicySubject ? { toolPolicySubject } : {}),
       ...(pause.handoff ? { approvalHandoff: pause.handoff } : {}),
-      ...(approvedHandoffKeys.size > 0 ? { approvedHandoffKeys: [...approvedHandoffKeys] } : {})
+      ...(approvedHandoffKeys.size > 0 ? { approvedHandoffKeys: [...approvedHandoffKeys] } : {}),
+      ...(writeToolCalls.toState() ? { approvedToolResults: writeToolCalls.toState() } : {})
     };
 
     if (dependencies.persistPausedExecution) {
@@ -7342,11 +7411,13 @@ async function executeWorkflowRun(
                   callStack,
                   toolPolicySubject,
                   approvedHandoffKeys,
+                  writeToolCalls,
                   recordAttachmentUsage
                 },
                 dependencies
               );
               approvedHandoffKeys.clear();
+              writeToolCalls.clear();
 
               iterationOutputs[childNode.id] = childOutput;
               nodeOutputs.set(childNode.id, childOutput);
@@ -7372,7 +7443,13 @@ async function executeWorkflowRun(
                 input: childInput,
                 output: childOutput
               });
-            } catch (childError) {
+            } catch (caughtChildError) {
+              // Phase 11.2 — loop bodies run inline and cannot pause part-way.
+              const childError = isApprovalHandoffSignal(caughtChildError)
+                ? WorkflowError.nodeConfig(
+                    `Approvals cannot pause inside a Loop body: '${childNode.id}' asked for approval ("${caughtChildError.message}"). Move the approval before or after the Loop node.`
+                  )
+                : caughtChildError;
               const childErrorMessage = childError instanceof Error ? childError.message : "Loop iteration failed";
               nodeResults.push({
                 nodeId: childNode.id,
@@ -7467,6 +7544,7 @@ async function executeWorkflowRun(
           callStack,
           toolPolicySubject,
           approvedHandoffKeys,
+          writeToolCalls,
           ...(resumeDecision ? { resumeDecision } : {}),
           recordAttachmentUsage
         },
@@ -7474,6 +7552,7 @@ async function executeWorkflowRun(
       );
       // Single use: a granted approval covers the re-run of the node it paused, not later nodes or runs.
       approvedHandoffKeys.clear();
+      writeToolCalls.clear();
 
       nodeOutputs.set(node.id, output);
 
