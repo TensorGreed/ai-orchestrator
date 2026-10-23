@@ -11,7 +11,7 @@
  *       IF nodes down the wrong branch.
  *   L-e one template could hold the event loop for N x the expression timeout.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
@@ -24,6 +24,7 @@ import {
   QUICKJS_STACK_BYTES,
   SANDBOX_BREAKER_MESSAGE,
   quickJsActiveHeapBytes,
+  recycleQuickJsInstanceForTesting,
   quickJsRecycledInstances,
   quickJsRetiredInstances,
   quickJsSandboxReady,
@@ -54,6 +55,11 @@ afterEach(async () => {
 });
 
 describe("N1: memory is bounded for many small allocations, results are capped, timeouts are clamped", () => {
+  // Each memory test starts on a fresh instance, whatever earlier tests left in the heap.
+  beforeEach(async () => {
+    await recycleQuickJsInstanceForTesting();
+  });
+
   it("the heap measurement this relies on is available (tripwire for a quickjs-emscripten upgrade)", () => {
     expect(quickJsActiveHeapBytes()).toBeGreaterThanOrEqual(16 * MB);
   });
