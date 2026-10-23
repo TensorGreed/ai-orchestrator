@@ -131,7 +131,7 @@ export class QueueService {
     return this.store.getQueueDepth();
   }
 
-  listDlq(limit?: number): Array<{
+  listDlq(limit?: number, workflowIds?: string[]): Array<{
     id: string;
     originalId: string;
     workflowId: string;
@@ -140,7 +140,7 @@ export class QueueService {
     finalError: string;
     failedAt: string;
   }> {
-    return this.store.listDlqItems(limit);
+    return this.store.listDlqItems(limit, workflowIds);
   }
 
   private poll(): void {

@@ -1258,6 +1258,7 @@ export class PostgresStore {
     pageSize?: number;
     status?: string;
     workflowId?: string;
+    workflowIds?: string[];
     triggerType?: string;
     startedFrom?: string;
     startedTo?: string;
@@ -1295,6 +1296,14 @@ export class PostgresStore {
     if (input.workflowId) {
       whereParts.push(`workflow_id = $${paramIdx++}`);
       whereParams.push(input.workflowId);
+    }
+    if (input.workflowIds) {
+      if (input.workflowIds.length === 0) {
+        whereParts.push("1 = 0");
+      } else {
+        whereParts.push(`workflow_id IN (${input.workflowIds.map(() => `$${paramIdx++}`).join(", ")})`);
+        whereParams.push(...input.workflowIds);
+      }
     }
     if (input.triggerType) {
       whereParts.push(`trigger_type = $${paramIdx++}`);
@@ -1822,7 +1831,7 @@ export class PostgresStore {
     };
   }
 
-  async listDlqItems(limit = 50): Promise<Array<{
+  async listDlqItems(limit = 50, workflowIds?: string[]): Promise<Array<{
     id: string;
     originalId: string;
     workflowId: string;
@@ -1831,6 +1840,8 @@ export class PostgresStore {
     finalError: string;
     failedAt: string;
   }>> {
+    if (workflowIds && workflowIds.length === 0) return [];
+    const scope = workflowIds ? `WHERE workflow_id IN (${workflowIds.map((_, index) => `$${index + 1}`).join(", ")})` : "";
     const rows = await this.query<{
       id: string;
       original_id: string;
@@ -1842,9 +1853,10 @@ export class PostgresStore {
     }>(
       `SELECT id, original_id, workflow_id, workflow_name, attempts, final_error, failed_at
        FROM execution_queue_dlq
+       ${scope}
        ORDER BY failed_at DESC
-       LIMIT $1`,
-      [limit]
+       LIMIT $${(workflowIds?.length ?? 0) + 1}`,
+      [...(workflowIds ?? []), limit]
     );
     return rows.map((row) => ({
       id: toStr(row.id),

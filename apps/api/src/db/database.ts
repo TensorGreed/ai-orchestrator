@@ -3927,6 +3927,8 @@ export class SqliteStore {
     pageSize?: number;
     status?: string;
     workflowId?: string;
+    /** Only runs of these workflows; an empty list matches nothing. */
+    workflowIds?: string[];
     triggerType?: string;
     startedFrom?: string;
     startedTo?: string;
@@ -3963,6 +3965,14 @@ export class SqliteStore {
     if (input.workflowId) {
       whereParts.push("workflow_id = ?");
       whereParams.push(input.workflowId);
+    }
+    if (input.workflowIds) {
+      if (input.workflowIds.length === 0) {
+        whereParts.push("1 = 0");
+      } else {
+        whereParts.push(`workflow_id IN (${input.workflowIds.map(() => "?").join(", ")})`);
+        whereParams.push(...input.workflowIds);
+      }
     }
     if (input.triggerType) {
       whereParts.push("trigger_type = ?");
@@ -4559,7 +4569,7 @@ export class SqliteStore {
     };
   }
 
-  listDlqItems(limit = 50): Array<{
+  listDlqItems(limit = 50, workflowIds?: string[]): Array<{
     id: string;
     originalId: string;
     workflowId: string;
@@ -4568,12 +4578,15 @@ export class SqliteStore {
     finalError: string;
     failedAt: string;
   }> {
+    if (workflowIds && workflowIds.length === 0) return [];
+    const scope = workflowIds ? `WHERE workflow_id IN (${workflowIds.map(() => "?").join(", ")})` : "";
     const rows = this.queryAll<ExecutionQueueDlqRow>(
       `SELECT id, original_id, workflow_id, workflow_name, attempts, final_error, failed_at
        FROM execution_queue_dlq
+       ${scope}
        ORDER BY failed_at DESC
        LIMIT ?`,
-      [limit]
+      [...(workflowIds ?? []), limit]
     );
 
     return rows.map((row) => ({
