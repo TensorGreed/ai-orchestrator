@@ -13,7 +13,7 @@ import {
   type WorkflowNode
 } from "@ai-orchestrator/shared";
 import { executeWorkflow, resumeWorkflowExecution, type WorkflowExecutionDependencies } from "./executor";
-import { writeToolApprovalKey, writeToolGateSkips } from "./approval-gate-node";
+import { MAX_STORED_TOOL_RESULT_CHARS, WriteToolCallLedger, writeToolApprovalKey, writeToolGateSkips } from "./approval-gate-node";
 import { buildReplayPlan } from "./replay-plan";
 import { validateWorkflowGraph } from "./validation";
 
@@ -611,6 +611,79 @@ describe("nothing skips an Approval Gate", () => {
     expect(atGate.status).toBe("waiting_approval");
   });
 
+  it("warns, without failing validation, when a Human Approval node is pinned", () => {
+    const wf = workflow(
+      "wf-human-pin",
+      [node("in", "manual_trigger"), node("ask", "human_approval", { approvalMessage: "ok?", timeoutMinutes: 30 }), node("out", "output")],
+      [{ source: "in", target: "ask" }, { source: "ask", target: "out" }],
+      { pinnedData: { ask: { approved: true } } }
+    );
+    const result = validateWorkflowGraph(wf);
+    expect(result.issues).toEqual([expect.objectContaining({ code: "human_approval_pinned", nodeId: "ask", severity: "warning" })]);
+    expect(result.valid).toBe(true);
+  });
+
+  it("keeps an oversized approved tool result out of the paused state and asks again", () => {
+    const ledger = new WriteToolCallLedger(new Set(["k"]));
+    const session = ledger.session();
+    session.record("k", { blob: "x".repeat(MAX_STORED_TOOL_RESULT_CHARS + 1) });
+    expect(JSON.stringify(ledger.toState())).not.toContain("xxxx");
+    expect(ledger.session().replay("k")).toEqual({ hit: false });
+    const small = new WriteToolCallLedger(new Set());
+    small.session().record("k", { ok: true });
+    expect(small.session().replay("k")).toEqual({ hit: true, result: { ok: true } });
+  });
+
+  it("refuses a start node on a branch that merges below the gate", async () => {
+    const merge = workflow(
+      "wf-merge",
+      [node("in", "manual_trigger"), node("x", "noop_node"), node("gate", "approval_gate", { message: "ok?" }), node("send", "output", { responseTemplate: "SENT" })],
+      [{ source: "in", target: "gate" }, { source: "gate", sourceHandle: "approved", target: "send" }, { source: "in", target: "x" }, { source: "x", target: "send" }]
+    );
+    for (const runMode of ["workflow", "single_node"] as const) {
+      const result = await executeWorkflow({ workflow: merge, executionId: `exec-merge-${runMode}`, startNodeId: runMode === "workflow" ? "x" : "send", runMode }, deps({ paused: [] }));
+      expect(result.status).toBe("error");
+      expect(result.error).toContain("Approval Gate 'gate'");
+      expect(result.nodeResults).toHaveLength(0);
+    }
+    const unrelated = workflow(
+      "wf-merge-side",
+      [node("in", "manual_trigger"), node("x", "noop_node"), node("y", "noop_node"), node("gate", "approval_gate", { message: "ok?" }), node("send", "output")],
+      [{ source: "in", target: "gate" }, { source: "gate", sourceHandle: "approved", target: "send" }, { source: "in", target: "x" }, { source: "x", target: "y" }]
+    );
+    const side = await executeWorkflow({ workflow: unrelated, executionId: "exec-side", startNodeId: "x" }, deps({ paused: [] }));
+    expect(side.status).toBe("success");
+    const viaStart = await executeWorkflow({ workflow: merge, executionId: "exec-merge-in" }, deps({ paused: [] }));
+    expect(viaStart.status).toBe("waiting_approval");
+  });
+
+  it("refuses starting at a worker attached below the gate", async () => {
+    const team = workflow(
+      "wf-team",
+      [
+        node("in", "manual_trigger"),
+        node("gate", "approval_gate", { message: "ok?" }),
+        node("sup", "supervisor_node", { maxIterations: 2 }),
+        node("w", "agent_orchestrator", { userPromptTemplate: "x", maxIterations: 2 }),
+        node("w_model", "llm_call", { provider: { providerId: "scripted", model: "x" } }),
+        node("out", "output")
+      ],
+      [
+        { source: "in", target: "gate" },
+        { source: "gate", sourceHandle: "approved", target: "sup" },
+        { source: "sup", sourceHandle: "worker", target: "w" },
+        { source: "w", sourceHandle: "chat_model", target: "w_model" },
+        { source: "sup", target: "out" }
+      ]
+    );
+    for (const runMode of ["workflow", "single_node"] as const) {
+      const result = await executeWorkflow({ workflow: team, executionId: `exec-worker-${runMode}`, startNodeId: "w", runMode }, deps({ paused: [] }));
+      expect(result.status).toBe("error");
+      expect(result.error).toContain("Approval Gate 'gate'");
+      expect(result.nodeResults).toHaveLength(0);
+    }
+  });
+
   it("keeps answering gates from the recording in a replay, pins included", async () => {
     const wf = { ...send(), pinnedData: undefined };
     const recorded: Record<string, ReplayRecordedNode> = {
@@ -646,6 +719,26 @@ describe("approval pauses with retries and loops", () => {
     expect(resumed.status).toBe("waiting_approval");
     expect(again).toHaveLength(1);
     expect(resolvePendingApproval(again[0]!).nodeId).toBe("gate");
+  });
+
+  it("does not retry a rejected child gate: a rejection is final", async () => {
+    const child = workflow(
+      "wf-child-reject",
+      [node("start", "manual_trigger"), node("pre", "set_node", { assignments: [{ key: "pre", valueTemplate: "ran" }] }), node("gate", "approval_gate", { message: "Child asks" }), node("out", "output")],
+      [{ source: "start", target: "pre" }, { source: "pre", target: "gate" }, { source: "gate", sourceHandle: "approved", target: "out" }]
+    );
+    const parent = workflow(
+      "wf-parent-reject",
+      [node("start", "manual_trigger"), { ...node("call", "execute_workflow", { workflowId: "wf-child-reject" }), errorConfig: { retryOnFail: true, maxRetries: 2, retryIntervalMs: 1 } }, node("out", "output")],
+      [{ source: "start", target: "call" }, { source: "call", target: "out" }]
+    );
+    const paused: WorkflowExecutionState[] = [];
+    const first = await executeWorkflow({ workflow: parent, executionId: "exec-reject" }, deps({ paused, workflows: [child] }));
+    expect(first.status).toBe("waiting_approval");
+    const rejected = await resumeWorkflowExecution({ executionId: "exec-reject", state: paused[0]!, decision: "reject", actedBy: "lead", reason: "No" }, deps({ paused, workflows: [child] }));
+    expect(rejected.status).toBe("error");
+    // No second pause: the child was not restarted by the retry.
+    expect(paused).toHaveLength(1);
   });
 
   it("fails a Loop body that asks for approval with a clear message", async () => {

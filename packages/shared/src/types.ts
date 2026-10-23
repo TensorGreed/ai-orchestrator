@@ -542,6 +542,8 @@ export interface WorkflowValidationIssue {
   message: string;
   nodeId?: string;
   edgeId?: string;
+  /** A "warning" does not make the workflow invalid. Absent means "error". */
+  severity?: "error" | "warning";
 }
 
 export interface WorkflowValidationResult {

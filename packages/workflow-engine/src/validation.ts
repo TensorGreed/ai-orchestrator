@@ -690,6 +690,15 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     }
 
     if (node.type === "human_approval") {
+      // A pin answers the pause on production runs, and Human Approval has no approver rules to protect.
+      if (workflow.pinnedData && Object.prototype.hasOwnProperty.call(workflow.pinnedData, node.id)) {
+        issues.push({
+          code: "human_approval_pinned",
+          message: "This Human Approval node has pinned data, so runs skip the pause. Unpin it to ask a person.",
+          nodeId: node.id,
+          severity: "warning"
+        });
+      }
       if (typeof config.approvalMessage !== "string" || !config.approvalMessage.trim()) {
         issues.push({
           code: "missing_human_approval_message",
@@ -1288,7 +1297,7 @@ export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationR
   }
 
   return {
-    valid: issues.length === 0,
+    valid: issues.every((issue) => issue.severity === "warning"),
     issues,
     orderedNodeIds: topology.order
   };

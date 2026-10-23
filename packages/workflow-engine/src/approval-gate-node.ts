@@ -262,12 +262,14 @@ export class WriteToolCallLedger {
         const used = replayed.get(key) ?? 0;
         if (used >= stored.length) return { hit: false };
         replayed.set(key, used + 1);
+        // An oversized result was not kept: ask again rather than answer with a truncated one.
+        if (isOmittedToolResult(stored[used])) return { hit: false };
         return { hit: true, result: stored[used] };
       },
       takeApproval: (key) => this.approvedKeys.delete(key),
       record: (key, result) => {
         const stored = this.results.get(key) ?? [];
-        stored.push(toJsonSafe(result));
+        stored.push(boundedToolResult(toJsonSafe(result)));
         this.results.set(key, stored);
         replayed.set(key, stored.length);
       }
@@ -292,6 +294,20 @@ export interface WriteToolCallSession {
   takeApproval(key: string): boolean;
   /** Stores the result of an approved call. */
   record(key: string, result: unknown): void;
+}
+
+/** Largest approved tool result kept in a paused state (serialized characters). */
+export const MAX_STORED_TOOL_RESULT_CHARS = 256 * 1024;
+
+const OMITTED_TOOL_RESULT = "__approvalToolResultOmitted";
+
+function isOmittedToolResult(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as Record<string, unknown>)[OMITTED_TOOL_RESULT] === true;
+}
+
+function boundedToolResult(value: unknown): unknown {
+  const size = JSON.stringify(value)?.length ?? 0;
+  return size > MAX_STORED_TOOL_RESULT_CHARS ? { [OMITTED_TOOL_RESULT]: true, chars: size } : value;
 }
 
 function toJsonSafe(value: unknown): unknown {

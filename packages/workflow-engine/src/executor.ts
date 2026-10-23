@@ -6219,7 +6219,9 @@ async function executeNodeWithRetry(
         isMcpToolPolicyBlock(error) ||
         isGuardBlockedError(error) ||
         isApprovalHandoffSignal(error) ||
-        isApprovalDecisionError(error)
+        isApprovalDecisionError(error) ||
+        // A rejection or timeout is final: the resumed child must not restart and ask again.
+        (context.resumeDecision?.nodeId === node.id && context.resumeDecision.decision !== "approve")
       ) {
         throw error;
       }
@@ -6306,16 +6308,31 @@ function collectReachableFromRoots(
   return reachable;
 }
 
-/** The first Approval Gate found upstream of `nodeId` on execution edges (the node itself excluded). */
-function upstreamApprovalGate(nodeId: string, incomingExecution: Map<string, string[]>, gateIds: ReadonlySet<string>): string | undefined {
-  const seen = new Set<string>([nodeId]);
-  const queue = [...(incomingExecution.get(nodeId) ?? [])];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    if (seen.has(current)) continue;
-    seen.add(current);
-    if (gateIds.has(current)) return current;
-    queue.push(...(incomingExecution.get(current) ?? []));
+/**
+ * The first Approval Gate that will not run but whose downstream (execution
+ * edges, plus agent attachments of every visited node) contains a node that will.
+ */
+function skippedApprovalGate(
+  gateIds: ReadonlySet<string>,
+  willRun: ReadonlySet<string>,
+  outgoingExecution: Map<string, string[]>,
+  attachmentsBySource: Map<string, Map<AgentAttachmentHandle, string[]>>
+): string | undefined {
+  for (const gateId of gateIds) {
+    if (willRun.has(gateId)) continue;
+    const seen = new Set<string>([gateId]);
+    const queue = [gateId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const next = [...(outgoingExecution.get(current) ?? [])];
+      for (const targets of attachmentsBySource.get(current)?.values() ?? []) next.push(...targets);
+      for (const target of next) {
+        if (seen.has(target)) continue;
+        if (willRun.has(target)) return gateId;
+        seen.add(target);
+        queue.push(target);
+      }
+    }
   }
   return undefined;
 }
@@ -6510,7 +6527,7 @@ async function executeWorkflowRun(
   const enforceApprovalGates = !dependencies.replayNodeHook && !request.resumeState;
   const approvalGateIds = new Set(workflow.nodes.filter((entry) => entry.type === "approval_gate").map((entry) => entry.id));
   if (enforceApprovalGates && explicitStartNodeId && approvalGateIds.size > 0) {
-    const skippedGate = upstreamApprovalGate(explicitStartNodeId, graphIndexes.incomingExecution, approvalGateIds);
+    const skippedGate = skippedApprovalGate(approvalGateIds, new Set(nodeOrder), graphIndexes.outgoingExecution, graphIndexes.attachmentsBySource);
     if (skippedGate) {
       const error = WorkflowError.nodeConfig(`This run would start after Approval Gate '${skippedGate}'. Start at or before the gate.`);
       return {
