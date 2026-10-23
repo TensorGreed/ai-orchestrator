@@ -14,11 +14,20 @@ Saving copies, into separate storage:
 - the trigger input;
 - every node's result (for a node in a loop, the result of each iteration, in order);
 - the run facts used for comparison: status, output, path, tool calls, model calls, tokens, cost and guard verdicts;
-- the run's MCP cassette, if the run was recorded with **Record MCP calls**.
+- the run's MCP cassette, if the run was recorded with **Record MCP calls**;
+- with that cassette, the run's **model tape** (every model call it made, and its answer) and **memory seed** (what session memory held for each session the run read, before the run changed it).
 
 A golden run is not removed by execution-history retention (`EXECUTION_HISTORY_RETENTION_DAYS`), cassette pruning or saved-version pruning. It is kept until you delete it, or until its workflow is deleted.
 
 **Record MCP calls** before you save a run whose workflow uses MCP tools. Without a cassette, a replay cannot answer MCP calls and is inconclusive.
+
+### Model tape and memory seed
+
+Recording a run records its model calls too. Each entry is keyed by the node that made the call, the agent loop iteration, the provider, the model and the SHA-256 of the canonical, scrubbed request (messages, tools and sampling settings; never the endpoint or the credential). The answer is scrubbed like a cassette entry: the provider's own key, every deployment secret and credential-shaped strings are replaced before anything is stored. A streamed call is stored as its complete answer.
+
+The tape is stored inside the cassette row, so it gets the cassette's limits (`MCP_CASSETTE_MAX_BYTES` and `MCP_CASSETTE_MAX_CALLS`, applied to the tape on its own; a tape that hits them is marked truncated and stops recording) and is deleted with it (cassettes are pruned with execution history, `EXECUTION_HISTORY_RETENTION_DAYS`). The memory seed is capped at `MCP_CASSETTE_MAX_BYTES` too. Saving the run as a golden run copies both, scrubbed again, and they count toward the golden run's size. A golden run's detail shows how many model calls its tape holds (`modelCallCount`) and its capabilities say `models: "tape"` and `memory: "seeded"` when it has them.
+
+A [replay job](./golden-sets.md#candidates-and-comparison) with model calls **from the tape** answers each model call from it instead of calling the model, and starts session memory from the seed. A golden run saved from a run recorded before this release, or without **Record MCP calls**, has no tape: under model calls from the tape its cases are inconclusive straight away, and nothing runs.
 
 ### Secrets
 
@@ -40,12 +49,12 @@ The candidate runs on the golden run's input. Each node is classified by type:
 | --- | --- | --- |
 | Logic | Set, If, Switch, Merge, Sort, Output, Webhook Response | Runs, including the expressions in its fields (sandboxed; see below) |
 | Chart | Chart | Runs from inline data; a chart that needs a data URL or file is not loaded, and the replay is inconclusive |
-| Model | LLM Call, Agent Orchestrator, Supervisor, Output Parser (it can ask the model to repair its output) | Runs live |
+| Model | LLM Call, Agent Orchestrator, Supervisor, Output Parser (it can ask the model to repair its output) | Runs live; in a replay job with model calls from the tape, answered from the golden run's model tape |
 | Guard | Guard nodes and agent guard bindings | Runs |
 | MCP | MCP Tool, agent tools | Answered from the copied cassette only |
 | Code | Code node (JavaScript and Python) | Answered from the recording; never runs |
 | External write | Slack, email, HTTP Request, database and queue writes, connectors that write, vector-store upserts, Execute Workflow | Answered from the recording; never runs |
-| External read | Polling triggers, RAG retrieval, web browse, connector reads, PDF Output in HTML mode (Chromium loads whatever the page links to) | Answered from the recording; never runs |
+| External read | Polling triggers, RAG retrieval, web browse, connector reads, PDF Output in HTML mode (Chromium loads whatever the page links to) | Answered from the recording; a replay job can list read nodes to run live instead |
 | Approval, wait | Human Approval, Wait | Skipped: approvals take the recorded decision, waits pass through |
 | Unknown | A node type this version does not know | Treated as an external write |
 
@@ -59,7 +68,7 @@ Code nodes are answered from the recording because neither runtime is cut off fr
 
 Expressions inside the nodes that do run are evaluated as in any run: `{{ }}` templates in prompts, Set and Output fields, If conditions and agent prompts, and Sort node expressions. These run in an isolated realm with no host access — no `process`, `require`, `fetch`, timers or file system, and a time limit — so an expression cannot reach the network or disk, in a replay or anywhere else. See [Code nodes and expressions](/security/code-execution) for how that sandbox works.
 
-Replays never write to deployment state: session memory, the session tool cache and session artifacts live in memory for the replay and are thrown away, knowledge-base writes are refused, MCP elicitation requests are declined, the error workflow and failure notifications are not fired, budget alerts are not sent (a replay's live model spend still counts toward budgets, so the next real run over a threshold sends the alert), and replays stay out of execution metrics and MCP tool-call telemetry. Pinned node data on the workflow is ignored. The replay itself is stored as a run with trigger type `replay`.
+Replays never write to deployment state: session memory (which starts from the golden run's memory seed when it has one, else empty), the session tool cache and session artifacts live in memory for the replay and are thrown away, knowledge-base writes are refused, MCP elicitation requests are declined, the error workflow and failure notifications are not fired, budget alerts are not sent (a replay's live model spend still counts toward budgets, so the next real run over a threshold sends the alert), and replays stay out of execution metrics and MCP tool-call telemetry. Pinned node data on the workflow is ignored. The replay itself is stored as a run with trigger type `replay`.
 
 ### MCP matching
 

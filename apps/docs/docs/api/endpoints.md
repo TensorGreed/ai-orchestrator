@@ -135,6 +135,7 @@ See [Testing MCP workflows](../product/testing-mcp-workflows.md).
 - `GET /api/mcp/cassettes/:id/export` (builder; the `l2m.mcp-cassette` file)
 - `DELETE /api/mcp/cassettes/:id` (admin; audit event `mcp_cassette.deleted`)
 - `POST /api/executions/:id/replay` (builder; `{ mode?, cassetteId? }` → run result with `executionId` and `mcpReplay: { cassetteId, mode, matched, reused, live, unmatched[] }`; a strict replay with unmatched calls has status `error`)
+- `POST /api/replay/estimate` (builder) takes a replay job request and answers what it would run and cost (`{ cases, runsPerCase, modelCallsEstimate, estimatedCostUsd, costUnknown, warnings }`) without running it; replay jobs take workflow files, overrides, model calls from the tape, baseline reruns and repeats. See [Candidates and comparison](../product/golden-sets.md#candidates-and-comparison)
 - `POST /api/eval/runs` answers `202 { run, runId }` and runs in the background (`?wait=true` keeps the old blocking `200` for one release); golden sets, replay jobs and scorers are in [Golden sets and replay jobs](../product/golden-sets.md)
 - `POST /api/eval/runs` gains `record: true` (one cassette per fixture) and `replay: { evalRunId? | cassetteId?, mode? }` (400 when combined with `record`, 404 for a cassette or eval run whose workflow you cannot read); `GET /api/eval/runs` adds `mcpCassettes`
 - `GET /api/mcp/servers/:id/snapshot/export` (builder; the accepted snapshot as an `l2m.mcp-snapshot` file with resources and prompts; 409 before the first snapshot)

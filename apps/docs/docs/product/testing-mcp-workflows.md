@@ -20,7 +20,7 @@ A cassette is a JSON document (`format: "l2m.mcp-cassette"`, `version: 1`) with,
 
 Each server is identified by its registry id (`registry:<id>`) or, for servers configured inline on a node, by its adapter plus a short hash of its endpoint or command (`inline:http_mcp:3f2a…`). Connection details themselves are not stored. The schema snapshot hash the server had when the run started is kept next to it.
 
-**Model calls are not recorded.** A replayed run calls your model again, so an agent can take a different path than it did when recorded. Use a deterministic model setting (temperature 0, or the `echo` provider in tests) when you need identical runs end to end.
+**Model calls are recorded but not replayed here.** A recorded run also stores its model calls (the model tape) and the session memory it first read in the cassette, but replaying a cassette on this page calls your model again, so an agent can take a different path than it did when recorded. Use a deterministic model setting (temperature 0, or the `echo` provider in tests) when you need identical runs end to end, or save the run as a [golden run](./golden-runs.md#model-tape-and-memory-seed) and replay it in a replay job with model calls from the tape.
 
 ### Secrets never reach a cassette
 
