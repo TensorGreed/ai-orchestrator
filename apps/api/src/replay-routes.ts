@@ -40,7 +40,8 @@ const RECORDING_STATUS: Record<ReplayRecordingError["code"], number> = {
   not_allowed: 409,
   duplicate: 409,
   limit: 409,
-  too_large: 413
+  too_large: 413,
+  invalid: 400
 };
 
 export function registerReplayRoutes(deps: ReplayRoutesDeps): void {

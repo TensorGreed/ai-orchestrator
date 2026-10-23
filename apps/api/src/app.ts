@@ -136,6 +136,8 @@ import { registerGuardRoutes } from "./guard-routes.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerEvalRoutes } from "./eval-routes.js";
+import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
+import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerReleaseRoutes } from "./release-routes.js";
 import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
@@ -11536,6 +11538,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       });
       return result;
     }
+  });
+  // Phase 15.5 — golden-set files (SQLite only: Postgres answers 501).
+  registerGoldenSetFileRoutes({
+    app,
+    store,
+    recordings: replayRecordingService,
+    signing: auditSigningService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    runAccess,
+    audit: (request, user, event) => audit(request, user, event),
+    available: !((store as object) instanceof PostgresStore),
+    maxFileBytes: GOLDEN_SET_FILE_DEFAULT_MAX_BYTES,
+    maxCaseBytes: config.REPLAY_RECORDING_MAX_BYTES,
+    maxCases: config.REPLAY_JOB_MAX_CASES
   });
   registerReplayRoutes({
     app,

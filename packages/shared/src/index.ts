@@ -16,3 +16,4 @@ export * from "./evals";
 export * from "./regex-safety";
 export * from "./approval-gate";
 export * from "./release";
+export * from "./golden-set-file";
