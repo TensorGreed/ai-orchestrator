@@ -1478,6 +1478,7 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE eval_datasets ADD COLUMN IF NOT EXISTS workflow_id TEXT;
       ALTER TABLE eval_fixtures ADD COLUMN IF NOT EXISTS recording_id TEXT;
       ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'eval';
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS triggered_by_user_id TEXT;
       ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS dataset_ids_json TEXT;
       ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS candidate_json TEXT;
       ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS workflow_hash TEXT;
@@ -1508,6 +1509,7 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE eval_runs DROP COLUMN IF EXISTS workflow_hash;
       ALTER TABLE eval_runs DROP COLUMN IF EXISTS candidate_json;
       ALTER TABLE eval_runs DROP COLUMN IF EXISTS dataset_ids_json;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS triggered_by_user_id;
       ALTER TABLE eval_runs DROP COLUMN IF EXISTS kind;
       ALTER TABLE eval_fixtures DROP COLUMN IF EXISTS recording_id;
       ALTER TABLE eval_datasets DROP COLUMN IF EXISTS workflow_id;

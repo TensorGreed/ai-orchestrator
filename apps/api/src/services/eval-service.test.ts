@@ -73,8 +73,8 @@ describe("eval runs in the background", () => {
     const svc = new EvalService(store, executor, undefined, { concurrency: 2 });
     const a = datasetWith(svc, 4);
     const b = datasetWith(svc, 3);
-    const first = svc.enqueueRun({ datasetId: a.id, workflowId: "wf" });
-    const second = svc.enqueueRun({ datasetId: b.id, workflowId: "wf" });
+    const first = svc.enqueueRun({ datasetId: a.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    const second = svc.enqueueRun({ datasetId: b.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     expect(first.status).toBe("queued");
     expect(first.kind).toBe("eval");
     expect(first.progress).toMatchObject({ total: 4, done: 0 });
@@ -94,7 +94,7 @@ describe("eval runs in the background", () => {
   it("rejects a dataset over the case limit", () => {
     const svc = new EvalService(store, async () => ({ output: null }), undefined, { maxCases: 2 });
     const dataset = datasetWith(svc, 3);
-    expect(() => svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" })).toThrow(/at most 2/);
+    expect(() => svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" })).toThrow(/at most 2/);
   });
 
   it("cancels: queued cases never start and running executions are aborted", async () => {
@@ -108,7 +108,7 @@ describe("eval runs in the background", () => {
     };
     const svc = new EvalService(store, executor, undefined, { concurrency: 1, abortExecution: (id) => aborted.push(id) });
     const dataset = datasetWith(svc, 3);
-    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     await sleep(5);
     expect(svc.getRunView(run.id)!.status).toBe("running");
     const canceled = svc.cancel(run.id)!;
@@ -149,7 +149,7 @@ describe("eval runs in the background", () => {
       return { executionId: input.executionId, output: null };
     });
     const dataset = datasetWith(svc, 2);
-    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     await sleep(5);
     svc.shutdown();
     gate.resolve();
@@ -160,7 +160,7 @@ describe("eval runs in the background", () => {
   it("startRun still waits and returns the summary", async () => {
     const svc = new EvalService(store, async (input) => ({ executionId: input.executionId, output: input.fixtureInput }));
     const dataset = datasetWith(svc, 2);
-    const result = await svc.startRun({ datasetId: dataset.id, workflowId: "wf" });
+    const result = await svc.startRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     expect(result.summary).toMatchObject({ total: 2, pass: 2 });
   });
 });
@@ -211,7 +211,7 @@ describe("replay jobs", () => {
           facts: candidateFacts
         };
       },
-      actorFor: (email) => ({ id: "u1", email, role: "builder" })
+      actorFor: (_userId, email) => ({ id: "u1", email, role: "builder" })
     };
   }
 
@@ -295,7 +295,7 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
     });
     const dataset = svc.createDataset({ name: "set" })!;
     for (let index = 0; index < 10; index += 1) svc.addFixture({ datasetId: dataset.id, name: `case-${index}`, input: {}, scorers: [judgeSpec] });
-    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com" });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     await svc.wait(run.id);
     const done = svc.getRun(run.id)!;
     // Two reservations of $0.40 fit in $1; a third waits for one to come back.
@@ -316,7 +316,7 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
         await sleep(10);
         return { recordingId: recording.id, executionId, candidate: { kind: "draft", version: null, workflowHash: "h" }, status: "success", diff: {} as ReplayRunResponse["diff"], verdict: "pass", reasons: [], facts: facts({ ok: true }, 0.6) };
       },
-      actorFor: (email) => ({ id: "u1", email, role: "builder" })
+      actorFor: (_userId, email) => ({ id: "u1", email, role: "builder" })
     };
     const svc = new EvalService(store, async () => ({ output: null }), undefined, { concurrency: 3, replay });
     const set = svc.createDataset({ name: "golden", workflowId: "wf" })!;
@@ -336,7 +336,7 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
     const svc = new EvalService(store, async (input) => ({ executionId: input.executionId, output: input.fixtureInput, facts: { ...facts({}), modelCalls: [{ nodeId: "a", iteration: null, providerId: "x", model: "y", inputTokens: 1, outputTokens: 1, costUsd: null, latencyMs: 1 }] } }), async () => ({ content: '{"score":1}', costUsd: null }), { judgeCallCeilingUsd: () => null });
     const dataset = svc.createDataset({ name: "set" })!;
     svc.addFixture({ datasetId: dataset.id, name: "a", input: {}, scorers: [judgeSpec] });
-    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     await svc.wait(run.id);
     const done = svc.getRun(run.id)!;
     expect(done.status).toBe("completed");
@@ -354,7 +354,7 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
     const dataset = svc.createDataset({ name: "set" })!;
     const many = Array.from({ length: 11 }, () => ({ ...judgeSpec, votes: 5 }));
     svc.addFixture({ datasetId: dataset.id, name: "a", input: {}, scorers: many });
-    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com" });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     await svc.wait(run.id);
     expect(contexts).toHaveLength(50);
     expect(contexts[0]).toMatchObject({ runId: run.id, workflowId: "wf", actorEmail: "b@example.com", executionId: expect.any(String) });
@@ -392,7 +392,7 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
       const warnings: string[] = [];
       const svc = new EvalService(flaky, async (input) => ({ executionId: input.executionId, output: input.fixtureInput }), undefined, { logger: { warn: (message) => warnings.push(message) } });
       const dataset = datasetWith(svc, 2);
-      const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" });
+      const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
       await svc.wait(run.id);
       await sleep(20);
       expect(svc.isActive(run.id)).toBe(false);
@@ -411,8 +411,8 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
       await gate.promise;
       return { executionId: input.executionId, output: input.fixtureInput };
     }, undefined, { concurrency: 1 });
-    const holder = svc.enqueueRun({ datasetId: datasetWith(svc, 1).id, workflowId: "wf" });
-    const waiting = svc.enqueueRun({ datasetId: datasetWith(svc, 2).id, workflowId: "wf" });
+    const holder = svc.enqueueRun({ datasetId: datasetWith(svc, 1).id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
+    const waiting = svc.enqueueRun({ datasetId: datasetWith(svc, 2).id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     await sleep(5);
     expect(svc.cancel(waiting.id)!.status).toBe("canceled");
     gate.resolve();
@@ -430,7 +430,7 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
     });
     const dataset = svc.createDataset({ name: "set" })!;
     svc.addFixture({ datasetId: dataset.id, name: "a", input: {}, scorers: [{ type: "contains", path: "text", needle: "the needle" }, { type: "contains", path: "text", needle: "hunter2" }] });
-    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com", triggeredByUserId: "u1" });
     await svc.wait(run.id);
     const result = svc.getRun(run.id)!.results[0]!;
     expect(result.score!.details[0]!.pass).toBe(true);

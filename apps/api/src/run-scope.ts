@@ -48,6 +48,9 @@ type ToolCallRecord = Awaited<ReturnType<ToolDataStore["saveToolCall"]>>;
 type ToolCallSummary = Awaited<ReturnType<ToolDataStore["listToolCalls"]>>[number];
 type ArtifactRecord = NonNullable<Awaited<ReturnType<AgentSessionArtifactStore["loadArtifact"]>>>;
 
+/** Where a secret is used from: a workflow, or just a project (no workflow, so no shares). */
+export type SecretScope = { id?: string; projectId?: string | null };
+
 export interface RunScopeDeps {
   getWorkflow: (id: string) => Workflow | null | undefined;
   /** Workflow shares as stored: which project gets which access level. */
@@ -132,27 +135,33 @@ export function createRunScope(deps: RunScopeDeps) {
 
   // `secret:use` where the workflow lives, or where it is shared to with
   // execute: an execute share is how another project's users run it.
-  const actorMayUseSecrets = (workflow: Workflow, actor: SafeUser) =>
+  const actorMayUseSecrets = (workflow: SecretScope, actor: SafeUser) =>
     deps.canUseSecretsInProject(actor, workflow.projectId ?? DEFAULT_PROJECT_ID) ||
-    deps
-      .listWorkflowShares(workflow.id)
+    (workflow.id ? deps.listWorkflowShares(workflow.id) : [])
       .some((share) => share.accessLevel === "execute" && deps.canUseSecretsInProject(actor, share.projectId));
+
+  /**
+   * Why a run of `workflow` as `actor` may not use this secret, or null when
+   * it may (or the secret does not exist, which resolves to nothing).
+   */
+  const secretProblem = (workflow: SecretScope, actor: SafeUser | null | undefined, secretId: string): string | null => {
+    const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
+    const secretProject = deps.getSecretProjectId(secretId);
+    if (secretProject === null) return null;
+    const visible =
+      secretProject === projectId || sharedFromDefault(secretProject) || deps.listSecretIdsSharedToProject(projectId).includes(secretId);
+    if (!visible) return `Secret '${secretId}' belongs to another project and is not shared to this workflow's project.`;
+    if (actor && actor.role !== "admin" && !actorMayUseSecrets(workflow, actor)) {
+      return `Permission 'secret:use' is required in this workflow's project to use secret '${secretId}'.`;
+    }
+    return null;
+  };
 
   const resolveSecretFor = (workflow: Workflow, actor: SafeUser | null | undefined) => async (secretRef?: SecretReference) => {
     if (!secretRef?.secretId) return undefined;
-    const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
-    const secretProject = deps.getSecretProjectId(secretRef.secretId);
-    if (secretProject === null) return undefined;
-    const visible =
-      secretProject === projectId ||
-      sharedFromDefault(secretProject) ||
-      deps.listSecretIdsSharedToProject(projectId).includes(secretRef.secretId);
-    if (!visible) {
-      throw new Error(`Secret '${secretRef.secretId}' belongs to another project and is not shared to this workflow's project.`);
-    }
-    if (actor && actor.role !== "admin" && !actorMayUseSecrets(workflow, actor)) {
-      throw new Error(`Permission 'secret:use' is required in this workflow's project to use secret '${secretRef.secretId}'.`);
-    }
+    if (deps.getSecretProjectId(secretRef.secretId) === null) return undefined;
+    const problem = secretProblem(workflow, actor, secretRef.secretId);
+    if (problem) throw new Error(problem);
     return deps.resolveSecret(secretRef);
   };
 
@@ -244,6 +253,15 @@ export function createRunScope(deps: RunScopeDeps) {
 
   return {
     dependenciesFor,
+    /**
+     * May a run of `workflow` as `actor` use this secret? The same rules a
+     * run's own nodes follow (project visibility, then `secret:use` in the
+     * workflow's project or where it is shared to with execute). False when
+     * the secret does not exist.
+     */
+    canUseSecretFor(workflow: SecretScope, actor: SafeUser, secretId: string): boolean {
+      return deps.getSecretProjectId(secretId) !== null && secretProblem(workflow, actor, secretId) === null;
+    },
     /** The error workflow `failing` may hand its failure to, or a reason it may not. */
     errorWorkflowFor(failing: Workflow, errorWorkflowId: string): { workflow: Workflow } | { error: string } {
       try {

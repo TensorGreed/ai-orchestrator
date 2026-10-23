@@ -2880,6 +2880,7 @@ export class SqliteStore {
     this.ensureColumn("eval_datasets", "workflow_id", "TEXT");
     this.ensureColumn("eval_fixtures", "recording_id", "TEXT");
     this.ensureColumn("eval_runs", "kind", "TEXT NOT NULL", "'eval'");
+    this.ensureColumn("eval_runs", "triggered_by_user_id", "TEXT");
     this.ensureColumn("eval_runs", "dataset_ids_json", "TEXT");
     this.ensureColumn("eval_runs", "candidate_json", "TEXT");
     this.ensureColumn("eval_runs", "workflow_hash", "TEXT");
@@ -7315,7 +7316,7 @@ export class SqliteStore {
 
   createEvalRun(input: {
     id: string; datasetId: string; workflowId: string; workflowName?: string;
-    triggeredBy?: string; scorers?: Array<Record<string, unknown>>;
+    triggeredBy?: string; triggeredByUserId?: string; scorers?: Array<Record<string, unknown>>;
     /** Phase 15.2 */
     kind?: "eval" | "replay";
     status?: string;
@@ -7329,12 +7330,12 @@ export class SqliteStore {
     const now = new Date().toISOString();
     this.exec(
       `INSERT INTO eval_runs (id, dataset_id, workflow_id, workflow_name, status, started_at,
-                               triggered_by, scorers_json, kind, dataset_ids_json, candidate_json,
+                               triggered_by, triggered_by_user_id, scorers_json, kind, dataset_ids_json, candidate_json,
                                workflow_hash, workflow_version, options_json, progress_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id, input.datasetId, input.workflowId, input.workflowName ?? null,
-        input.status ?? "running", now, input.triggeredBy ?? null,
+        input.status ?? "running", now, input.triggeredBy ?? null, input.triggeredByUserId ?? null,
         input.scorers && input.scorers.length > 0 ? JSON.stringify(input.scorers) : null,
         input.kind ?? "eval",
         input.datasetIds ? JSON.stringify(input.datasetIds) : null,

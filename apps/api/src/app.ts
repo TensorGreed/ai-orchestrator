@@ -146,7 +146,7 @@ import { GuardService } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError } from "./db/store-errors.js";
-import { createRunScope } from "./run-scope.js";
+import { createRunScope, type SecretScope } from "./run-scope.js";
 import {
   CODE_SANDBOX_INITIALISING,
   resolveCodeSandboxPlan,
@@ -2851,22 +2851,16 @@ export function createApp(
   // for the Postgres-parity follow-up note.
   /**
    * Phase 15.2 — whether `user` may hand this secret to a judge running for a
-   * workflow in `projectId`: a non-internal secret the project's runs can
-   * reach (the same rule as run-scope.ts: owned by the project, shared to it,
-   * or a default-project secret in `role` isolation), and `secret:use` there.
-   * Admins skip the `secret:use` check, never the project one. Checked when a
-   * run starts and again for every judge call.
+   * workflow (or, without one, in a project): a non-internal secret the run
+   * could reach and `secret:use`, by the same rules a run's own nodes follow
+   * (run-scope.ts, execute shares included). Admins skip the `secret:use`
+   * check, never the project one. Checked when a run starts and again for
+   * every judge call.
    */
-  const canUseJudgeSecret = (user: SafeUser, secretId: string, projectId: string): boolean => {
+  const canUseJudgeSecret = (user: SafeUser, secretId: string, scope: SecretScope): boolean => {
     const row = store.getSecret(secretId);
     if (!row || isInternalSecretProvider(row.provider)) return false;
-    const owningProject = row.projectId ?? DEFAULT_PROJECT_ID;
-    const reachable =
-      owningProject === projectId ||
-      (config.PROJECT_ISOLATION === "role" && owningProject === DEFAULT_PROJECT_ID) ||
-      store.listSecretsSharedToProject(projectId).includes(secretId);
-    if (!reachable) return false;
-    return user.role === "admin" || rbacService.can(user, projectId, "secret:use");
+    return runScope.canUseSecretFor(scope, user, secretId);
   };
 
   // Phase 9.5 / 15.2 — the LLM judge for judge scorers (faithfulness,
@@ -2885,9 +2879,9 @@ export function createApp(
     const context = judgeInput.context;
     const workflow = context ? store.getWorkflow(context.workflowId) : null;
     const projectId = workflow?.projectId ?? DEFAULT_PROJECT_ID;
-    const actor = context?.actorEmail ? evalPolicyActor(context.actorEmail) : null;
+    const actor = context?.actorUserId && context.actorEmail ? evalPolicyActor(context.actorUserId, context.actorEmail) : null;
     if (judgeInput.secretRef) {
-      if (!workflow || !actor || !canUseJudgeSecret(actor, judgeInput.secretRef.secretId, projectId)) {
+      if (!workflow || !actor || !canUseJudgeSecret(actor, judgeInput.secretRef.secretId, workflow)) {
         throw new Error(`the judge's secret ${judgeInput.secretRef.secretId} cannot be used by the user who started this run in this workflow's project`);
       }
     } else if (!config.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS) {
@@ -2914,7 +2908,15 @@ export function createApp(
       },
       // Secrets resolve in the workflow's project with the starting user's
       // rights, like the run's own nodes; without a workflow nothing resolves.
-      { resolveSecret: workflow ? runScope.dependenciesFor(workflow, { actor }).resolveSecret : async () => undefined }
+      // A secret that resolves to nothing fails the call: the adapter would
+      // otherwise fall back to the server's provider keys.
+      {
+        resolveSecret: async (secretRef) => {
+          const value = workflow ? await runScope.dependenciesFor(workflow, { actor }).resolveSecret(secretRef) : undefined;
+          if (secretRef?.secretId && !value) throw new Error(`the judge's secret ${secretRef.secretId} has no value to use`);
+          return value;
+        }
+      }
     );
     const usage = response.usage;
     const costUsd = usage
@@ -2950,9 +2952,11 @@ export function createApp(
       0
     );
 
-  const evalPolicyActor = (email: string | undefined): SafeUser | null => {
-    const found = email ? store.getUserByEmail(email) : null;
-    if (!found || !MCP_POLICY_ROLES.includes(found.role as McpPolicyRole)) return null;
+  // The starting user, found by id; a deleted user whose email a new account
+  // took over is not the same user.
+  const evalPolicyActor = (userId: string, email: string): SafeUser | null => {
+    const found = store.getUserById(userId);
+    if (!found || found.email.toLowerCase() !== email.toLowerCase() || !MCP_POLICY_ROLES.includes(found.role as McpPolicyRole)) return null;
     return { id: found.id, email: found.email, role: found.role as UserRole };
   };
 
@@ -2983,12 +2987,12 @@ export function createApp(
 
   /**
    * The user a background eval run or replay job runs as: the one who
-   * started it, looked up again for every case, as long as they may still run
+   * started it (by id, with the same email), looked up again for every case, as long as they may still run
    * the workflow (the same rule as queued runs). The run then executes with
    * their policy and project scope (run-scope.ts).
    */
-  const evalRunActor = (email: string, workflowId: string): SafeUser | null => {
-    const actor = evalPolicyActor(email);
+  const evalRunActor = (userId: string, email: string, workflowId: string): SafeUser | null => {
+    const actor = evalPolicyActor(userId, email);
     return actor && runAccess.workflow(actor, workflowId, "workflow:execute").ok ? actor : null;
   };
 
@@ -2997,8 +3001,8 @@ export function createApp(
     if (!workflow) {
       return { output: null, error: `Workflow not found: ${input.workflowId}` };
     }
-    const policyActor = input.triggeredBy ? evalRunActor(input.triggeredBy, workflow.id) : null;
-    if (input.triggeredBy && !policyActor) {
+    const policyActor = evalRunActor(input.triggeredByUserId, input.triggeredBy, workflow.id);
+    if (!policyActor) {
       return { output: null, error: `The user who started this run (${input.triggeredBy}) can no longer run this workflow.` };
     }
     const executionId = input.executionId ?? crypto.randomUUID();
@@ -3021,7 +3025,7 @@ export function createApp(
         directInput: { trigger_type: "eval", eval_run_id: input.runId, eval_fixture_name: input.fixtureName, ...fixtureRecord },
         triggerType: "eval",
         triggeredBy: input.triggeredBy,
-        // Eval runs are started by a signed-in builder; their email is recorded server-side.
+        // Eval runs are started by a signed-in builder, looked up again for every case.
         policyActor,
         mcpPlan
       });
@@ -3029,7 +3033,7 @@ export function createApp(
         executionId,
         workflow,
         source: "eval",
-        createdBy: input.triggeredBy ?? null,
+        createdBy: input.triggeredBy,
         evalRunId: input.runId,
         fixtureId: input.fixtureId
       });
@@ -3108,7 +3112,7 @@ export function createApp(
         const scoped = { ...candidate, workflow: { ...candidate.workflow, projectId: current.projectId, folderId: current.folderId } };
         return replayService.replay(recording, request, actor, { candidate: scoped, executionId });
       },
-      actorFor: (email, workflowId) => evalRunActor(email, workflowId)
+      actorFor: (userId, email, workflowId) => evalRunActor(userId, email, workflowId)
     },
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
@@ -4869,7 +4873,8 @@ export function createApp(
     denyRunAccess,
     canUseSecret: canUseJudgeSecret,
     audit: (request, user, event) => audit(request, user, event),
-    sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS
+    sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
+    strictIsolation: config.PROJECT_ISOLATION === "strict"
   });
 
   app.get("/widget.js", async (_request, reply) => {

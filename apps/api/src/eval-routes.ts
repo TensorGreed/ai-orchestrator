@@ -30,8 +30,10 @@
  *     admin-only.
  *   - A dataset without a workflow follows its project (`workflow:read` /
  *     `workflow:write` there). One with neither (made before projects scoped
- *     datasets) is readable by builders and admins, and writing to it needs
- *     `workflow:write` in the default project.
+ *     datasets) is readable by builders and admins in `role` isolation; in
+ *     `strict` isolation it counts as a default-project dataset for reads and
+ *     writes. New datasets without a workflow or project are stored in the
+ *     default project.
  *   - Lists are narrowed to readable workflows and projects before the limit.
  *   - An eval run needs `workflow:execute` on the workflow and read access to
  *     the dataset; a cassette or eval run it replays MCP answers from must be
@@ -48,6 +50,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  DEFAULT_PROJECT_ID,
   EVAL_RUN_FINISHED_STATUSES,
   evalScorerListSchema,
   goldenSetAddRecordingSchema,
@@ -74,10 +77,12 @@ export interface EvalRoutesDeps {
   runAccess: RunAccess;
   /** Answers a run-access denial with its status and error. */
   denyRunAccess: (reply: FastifyReply, denial: { status: number; error: string }) => { error: string };
-  /** Whether `user` may hand this secret to a judge running for a workflow in `projectId`. */
-  canUseSecret: (user: SafeUser, secretId: string, projectId: string) => boolean;
+  /** Whether `user` may hand this secret to a judge running for this workflow (or, without one, in this project). */
+  canUseSecret: (user: SafeUser, secretId: string, scope: { id?: string; projectId?: string | null }) => boolean;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
   sseHeartbeatMs: number;
+  /** `strict` isolation: a dataset made before projects scoped datasets belongs to the default project. */
+  strictIsolation: boolean;
 }
 
 const EVAL_RUN_ERROR_STATUS: Record<EvalRunError["code"], number> = { not_found: 404, invalid: 400, limit: 409 };
@@ -121,7 +126,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
 
   /**
    * A dataset follows its workflow (a golden set), else its project; one with
-   * neither is readable by builders and written to as the default project's.
+   * neither is the default project's in strict isolation, else readable by
+   * builders and written to as the default project's.
    */
   const datasetAccess = (
     user: SafeUser,
@@ -135,12 +141,16 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       const access = runAccess.workflow(user, dataset.workflowId, permission, what);
       return access.ok ? { ok: true, dataset } : access;
     }
-    if (!dataset.projectId && permission === "workflow:read") {
+    if (!dataset.projectId && permission === "workflow:read" && !deps.strictIsolation) {
       return user.role === "builder" ? { ok: true, dataset } : { ok: false, status: 404, error: `${what} not found` };
     }
     const access = runAccess.project(user, dataset.projectId, permission, what);
     return access.ok ? { ok: true, dataset } : access;
   };
+
+  /** The project a dataset is in now: a golden set follows its workflow, which may have moved. */
+  const datasetProjectId = (dataset: EvalDatasetRecord): string | null =>
+    dataset.workflowId ? (store.getWorkflow(dataset.workflowId)?.projectId ?? DEFAULT_PROJECT_ID) : dataset.projectId;
 
   const notFound = (reply: FastifyReply, what: string) => denyRunAccess(reply, { status: 404, error: `${what} not found` });
 
@@ -151,16 +161,16 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
   };
 
   /** Judge scorers name a provider secret by reference; the user must be allowed to use it in this project. */
-  const judgeSecretProblemInProject = (user: SafeUser, scorers: EvalScorerSpec[] | undefined | null, projectId: string): string | null => {
+  const judgeSecretProblemFor = (user: SafeUser, scorers: EvalScorerSpec[] | undefined | null, scope: { id?: string; projectId?: string | null }): string | null => {
     for (const scorer of scorers ?? []) {
       if (scorer.type !== "llm_judge" || !scorer.secretRef) continue;
-      if (!deps.canUseSecret(user, scorer.secretRef.secretId, projectId)) return `The judge's secret ${scorer.secretRef.secretId} was not found or cannot be used in this workflow's project.`;
+      if (!deps.canUseSecret(user, scorer.secretRef.secretId, scope)) return `The judge's secret ${scorer.secretRef.secretId} was not found or cannot be used in this workflow's project.`;
     }
     return null;
   };
 
   const judgeSecretProblem = (user: SafeUser, scorers: EvalScorerSpec[] | undefined | null, workflowId: string): string | null =>
-    judgeSecretProblemInProject(user, scorers, store.getWorkflow(workflowId)?.projectId ?? "default");
+    judgeSecretProblemFor(user, scorers, store.getWorkflow(workflowId) ?? { id: workflowId });
 
   /** The first judge secret problem of the request's scorers or of any case in these datasets. */
   const runScorerProblem = (user: SafeUser, scorers: EvalScorerSpec[] | undefined | null, datasetIds: string[], workflowId: string): string | null => {
@@ -196,10 +206,13 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const projects = runAccess.readableProjectIds(user);
     const readableWorkflows = workflows && new Set(workflows);
     const readableProjects = projects && new Set(projects);
-    const datasets = evals.listDatasets({ projectId, workflowId }).filter((dataset) => {
+    // The project filter is applied here, not in SQL, so golden sets match the project their workflow is in now.
+    const datasets = evals.listDatasets({ workflowId }).filter((dataset) => {
+      const inProject = datasetProjectId(dataset) ?? (deps.strictIsolation ? DEFAULT_PROJECT_ID : null);
+      if (projectId && inProject !== projectId) return false;
       if (user.role === "admin") return true;
       if (dataset.workflowId) return Boolean(readableWorkflows?.has(dataset.workflowId));
-      if (dataset.projectId) return Boolean(readableProjects?.has(dataset.projectId));
+      if (inProject) return Boolean(readableProjects?.has(inProject));
       return user.role === "builder";
     });
     return { datasets };
@@ -218,16 +231,17 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       const access = runAccess.workflow(user, parsed.data.workflowId, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       // A golden set lives in its workflow's project.
-      projectId = access.workflow.projectId ?? "default";
+      projectId = access.workflow.projectId ?? DEFAULT_PROJECT_ID;
     } else {
-      // No project means the default project's.
+      // No project means the default project's, and the dataset is stored there.
+      projectId = projectId ?? DEFAULT_PROJECT_ID;
       const access = runAccess.project(user, projectId, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
     }
     const dataset = evals.createDataset({
       name: parsed.data.name,
       ...(parsed.data.description ? { description: parsed.data.description } : {}),
-      ...(projectId ? { projectId } : {}),
+      projectId,
       ...(parsed.data.workflowId ? { workflowId: parsed.data.workflowId } : {}),
       createdBy: user.email
     });
@@ -238,7 +252,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
         action: "create",
         resourceType: "golden_set",
         resourceId: dataset.id,
-        projectId: dataset.projectId,
+        projectId: datasetProjectId(dataset),
         metadata: { datasetId: dataset.id, workflowId: dataset.workflowId }
       });
     }
@@ -259,7 +273,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
         action: "delete",
         resourceType: "golden_set",
         resourceId: dataset.id,
-        projectId: dataset.projectId,
+        projectId: datasetProjectId(dataset),
         metadata: { datasetId: dataset.id, workflowId: dataset.workflowId }
       });
     }
@@ -288,7 +302,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     // Checked for every dataset: a golden set against its workflow's project, any other against its own.
     const problem = dataset.workflowId
       ? judgeSecretProblem(user, parsed.data.scorers, dataset.workflowId)
-      : judgeSecretProblemInProject(user, parsed.data.scorers, dataset.projectId ?? "default");
+      : judgeSecretProblemFor(user, parsed.data.scorers, { projectId: dataset.projectId });
     if (problem) {
       reply.code(400);
       return { error: problem };
@@ -340,7 +354,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       action: "update",
       resourceType: "golden_set",
       resourceId: dataset.id,
-      projectId: dataset.projectId,
+      projectId: datasetProjectId(dataset),
       metadata: { datasetId: dataset.id, recordingId: recording.id, fixtureId: fixture?.id ?? null }
     });
     reply.code(201);
@@ -432,6 +446,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       workflowId,
       ...(scorers.data ? { scorers: scorers.data } : {}),
       triggeredBy: user.email,
+      triggeredByUserId: user.id,
       ...(mcpOptions.data.record ? { recordMcp: true } : {}),
       ...(mcpOptions.data.replay ? { replayMcp: mcpOptions.data.replay } : {})
     };
@@ -505,6 +520,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       action: "cancel",
       resourceType: existing.kind === "replay" ? "replay_job" : "eval_run",
       resourceId: existing.id,
+      projectId: store.getWorkflow(existing.workflowId)?.projectId ?? DEFAULT_PROJECT_ID,
       metadata: { runId: existing.id, workflowId: existing.workflowId }
     });
     return { run };

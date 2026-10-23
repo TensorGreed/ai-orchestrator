@@ -60,7 +60,8 @@ export interface EvalJudgeResponse {
 export interface EvalJudgeContext {
   runId: string;
   workflowId: string;
-  /** The user who started the run; a `secretRef` must still be usable by them in the workflow's project. */
+  /** The user who started the run (id and email must still match); a `secretRef` must still be usable by them in the workflow's project. */
+  actorUserId: string | null;
   actorEmail: string | null;
   /** The case's execution, when it ran one. */
   executionId?: string;

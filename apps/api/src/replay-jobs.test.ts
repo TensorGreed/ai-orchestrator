@@ -813,6 +813,262 @@ describe("project authorization on golden sets, replay jobs and eval runs", () =
   }, 60_000);
 });
 
+describe("authorization review fixes", () => {
+  type Loss = "locked out of the project" | "demoted to viewer" | "deleted" | "replaced by a new account with the same email";
+
+  const lose = (context: TestContext, userId: string, email: string, loss: Loss) => {
+    if (loss === "locked out of the project") {
+      context.store.upsertCustomRole({ id: "none-default", projectId: "default", name: "No access", permissions: [] });
+      context.store.upsertProjectRole({ userId, projectId: "default", role: "custom", customRoleId: "none-default" });
+    } else if (loss === "demoted to viewer") {
+      context.store.updateUserRole(userId, "viewer");
+    } else {
+      context.store.deleteUser(userId);
+      if (loss === "replaced by a new account with the same email") {
+        context.authService.register({ email, password: "replacement-Pass-123!", role: "builder" });
+      }
+    }
+  };
+
+  const losses: Loss[] = ["locked out of the project", "demoted to viewer", "deleted", "replaced by a new account with the same email"];
+
+  for (const loss of losses) {
+    for (const kind of ["replay job", "eval run"] as const) {
+      it(`${kind}: the user ${loss} while it is queued or running; the remaining cases fail and nothing more runs`, async () => {
+        // One case at a time and a slow model: the first case is in flight when access changes.
+        const model = await startModel("hello", 400);
+        const context = await createTestContext({ REPLAY_CONCURRENCY: "1" });
+        const admin = await login(context, "admin");
+        const builder = await login(context, "builder");
+        const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: JUDGE_KEY });
+        context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+        let runId: string;
+        let before: number;
+        if (kind === "replay job") {
+          const setId = await goldenSet(context, builder.cookie, "wf-agent", await goldenRuns(context, builder.cookie, "wf-agent", 3));
+          before = model.auth.length;
+          const started = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId] });
+          expect(started.statusCode, started.body).toBe(202);
+          runId = started.json<{ run: EvalRunView }>().run.id;
+        } else {
+          const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain" })).json<{ dataset: { id: string } }>().dataset;
+          for (const name of ["a", "b", "c"]) await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name, input: {} });
+          before = model.auth.length;
+          const started = await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-agent" });
+          expect(started.statusCode, started.body).toBe(202);
+          runId = started.json<{ runId: string }>().runId;
+        }
+        // The first case has reached the model; every later case starts after the change.
+        const until = Date.now() + 15_000;
+        while (model.auth.length === before && Date.now() < until) await sleep(5);
+        expect(model.auth.length - before).toBe(1);
+        lose(context, builder.id, "builder@example.com", loss);
+
+        const finished = await (kind === "replay job" ? waitForJob(context, admin.cookie, runId) : waitForEvalRunAs(context, admin.cookie, runId));
+        expect(finished.results).toHaveLength(3);
+        const refused = finished.results.filter((result) => result.error?.includes("can no longer run this workflow"));
+        expect(refused).toHaveLength(2);
+        expect(refused.every((result) => result.status === "error")).toBe(true);
+        // Only the case that was already running reached the model; the other two never executed.
+        expect(model.auth.length - before).toBe(1);
+      }, 60_000);
+    }
+  }
+
+  const waitForEvalRunAs = async (context: TestContext, cookie: string, runId: string) => {
+    const until = Date.now() + 20_000;
+    for (;;) {
+      const run = (await call(context, "GET", `/api/eval/runs/${runId}`, cookie)).json<EvalRunView & { results: EvalCaseResult[] }>();
+      if (!["queued", "running"].includes(run.status)) return run;
+      if (Date.now() > until) throw new Error(`Eval run ${runId} still ${run.status}`);
+      await sleep(50);
+    }
+  };
+
+  it("makes no judge call for the cases after the starting user lost access", async () => {
+    const judge = await startModel('{"score": 1}', 300);
+    const context = await createTestContext({ EVAL_JUDGE_ENABLED: "true", EVAL_JUDGE_BASE_URL: judge.baseUrl, REPLAY_CONCURRENCY: "1" });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const secret = context.secretService.createSecret({ name: "Judge key", provider: "openai", value: JUDGE_KEY });
+    const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain" })).json<{ dataset: { id: string } }>().dataset;
+    for (const name of ["a", "b", "c"]) await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name, input: {} });
+    const scorers = [{ type: "llm_judge", rubric: "r", providerId: "openai", secretRef: { secretId: secret.secretId } }];
+    const started = await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set", scorers });
+    expect(started.statusCode, started.body).toBe(202);
+    const until = Date.now() + 15_000;
+    while (judge.auth.length === 0 && Date.now() < until) await sleep(5);
+    context.store.deleteUser(builder.id);
+    const finished = await waitForEvalRunAs(context, admin.cookie, started.json<{ runId: string }>().runId);
+    expect(finished.results.filter((result) => result.error?.includes("can no longer run this workflow"))).toHaveLength(2);
+    expect(judge.auth).toHaveLength(1);
+    expect(counter.count("/slack")).toBe(1);
+  }, 60_000);
+
+  it("stores the starting user's id on the run", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain" })).json<{ dataset: { id: string } }>().dataset;
+    await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name: "a", input: {} });
+    const started = await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set" });
+    const runId = started.json<{ runId: string }>().runId;
+    await waitForEvalRunAs(context, builder.cookie, runId);
+    const db = new Database(context.dbPath, { readonly: true });
+    try {
+      expect(db.prepare("SELECT triggered_by, triggered_by_user_id FROM eval_runs WHERE id = ?").get(runId)).toEqual({ triggered_by: "builder@example.com", triggered_by_user_id: builder.id });
+    } finally {
+      db.close();
+    }
+  }, 30_000);
+
+  it("fails a judge whose secret resolves to nothing instead of falling back to the server's provider keys", async () => {
+    const judge = await startModel('{"score": 1}');
+    const context = await createTestContext({ EVAL_JUDGE_ENABLED: "true", EVAL_JUDGE_BASE_URL: judge.baseUrl, OPENAI_API_KEY: "sk-env-key-should-never-be-sent-0000" });
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const empty = context.secretService.createSecret({ name: "Empty key", provider: "openai", value: "" });
+    const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain" })).json<{ dataset: { id: string } }>().dataset;
+    const scorer = { type: "llm_judge", rubric: "r", providerId: "openai", secretRef: { secretId: empty.secretId } };
+    expect((await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name: "a", input: {}, scorers: [scorer] })).statusCode).toBe(200);
+    const waited = await call(context, "POST", "/api/eval/runs?wait=true", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set" });
+    expect(waited.statusCode, waited.body).toBe(200);
+    const run = (await call(context, "GET", `/api/eval/runs/${waited.json<{ runId: string }>().runId}`, builder.cookie)).json<EvalRunView & { results: EvalCaseResult[] }>();
+    expect(run.results[0]!.score!.details[0]).toMatchObject({ pass: false, reason: expect.stringContaining("has no value") });
+    expect(judge.auth).toHaveLength(0);
+  }, 30_000);
+
+  it("strict: a judge may use a secret of the project a workflow is shared from when it is shared with execute", async () => {
+    const judge = await startModel('{"score": 1}');
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict", EVAL_JUDGE_ENABLED: "true", EVAL_JUDGE_BASE_URL: judge.baseUrl });
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertProject({ id: "pa", name: "Owner" });
+    context.store.upsertProject({ id: "pb", name: "Consumer" });
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "pb", role: "editor" });
+    context.store.upsertWorkflow({ ...setWorkflow(counter.base, "v1", "pa"), id: "wf-a" });
+    const key = context.secretService.createSecret({ name: "Owner key", provider: "openai", value: JUDGE_KEY, projectId: "pa" }).secretId;
+    const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain", projectId: "pb" })).json<{ dataset: { id: string } }>().dataset;
+    await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name: "a", input: {} });
+    const scorers = [{ type: "llm_judge", rubric: "r", providerId: "openai", secretRef: { secretId: key } }];
+    context.store.upsertWorkflowShare({ workflowId: "wf-a", projectId: "pb", accessLevel: "execute" });
+    const started = await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-a", scorers });
+    expect(started.statusCode, started.body).toBe(202);
+    const finished = await waitForEvalRunAs(context, builder.cookie, started.json<{ runId: string }>().runId);
+    expect(finished.summary).toMatchObject({ total: 1, error: 0 });
+    expect(judge.auth).toEqual([`Bearer ${JUDGE_KEY}`]);
+  }, 30_000);
+
+  it("strict: datasets without a project belong to the default project, for reads too", async () => {
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
+    const teamUser = await login(context, "builder", "teamer");
+    const defaultUser = await login(context, "builder", "defaulter");
+    context.store.upsertProject({ id: "team", name: "Team" });
+    context.store.upsertProjectRole({ userId: teamUser.id, projectId: "team", role: "editor" });
+    context.store.upsertProjectRole({ userId: defaultUser.id, projectId: "default", role: "editor" });
+    // One from before projects scoped datasets (no project), one created through the API without a project.
+    context.store.createEvalDataset({ id: "ds_legacy", name: "Legacy" });
+    context.store.createEvalFixture({ id: "fix_legacy", datasetId: "ds_legacy", name: "l", input: { secretish: "payroll-data" } });
+    const created = await call(context, "POST", "/api/eval/datasets", defaultUser.cookie, { name: "Fresh" });
+    expect(created.statusCode, created.body).toBe(200);
+    const fresh = created.json<{ dataset: { id: string; projectId: string } }>().dataset;
+    expect(fresh.projectId).toBe("default");
+    expect((await call(context, "POST", `/api/eval/datasets/${fresh.id}/fixtures`, defaultUser.cookie, { name: "f", input: { secretish: "payroll-data" } })).statusCode).toBe(200);
+
+    const idsFor = async (cookie: string) => (await call(context, "GET", "/api/eval/datasets", cookie)).json<{ datasets: Array<{ id: string }> }>().datasets.map((dataset) => dataset.id);
+    expect(await idsFor(teamUser.cookie)).toEqual([]);
+    for (const id of ["ds_legacy", fresh.id]) {
+      expect((await call(context, "GET", `/api/eval/datasets/${id}/fixtures`, teamUser.cookie)).statusCode).toBe(404);
+      expect((await call(context, "GET", `/api/eval/datasets/${id}/fixtures`, defaultUser.cookie)).statusCode).toBe(200);
+    }
+    expect((await idsFor(defaultUser.cookie)).sort()).toEqual(["ds_legacy", fresh.id].sort());
+    // The project filter treats the legacy dataset as the default project's too.
+    expect((await call(context, "GET", "/api/eval/datasets?projectId=default", defaultUser.cookie)).json<{ datasets: unknown[] }>().datasets).toHaveLength(2);
+  }, 30_000);
+
+  it("role isolation: a dataset without a project stays readable by builders", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    context.store.createEvalDataset({ id: "ds_legacy", name: "Legacy" });
+    expect((await call(context, "GET", "/api/eval/datasets/ds_legacy/fixtures", builder.cookie)).statusCode).toBe(200);
+    const created = await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Fresh" });
+    expect(created.json<{ dataset: { projectId: string } }>().dataset.projectId).toBe("default");
+  }, 30_000);
+
+  it("golden sets follow their workflow's current project in the project filter and the audit events", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const counter = await startCounter();
+    context.store.upsertProject({ id: "moved", name: "Moved" });
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const set = (await call(context, "POST", "/api/eval/datasets", admin.cookie, { name: "Suite", workflowId: "wf-set" })).json<{ dataset: { id: string } }>().dataset;
+    context.store.upsertWorkflow({ ...setWorkflow(counter.base), projectId: "moved" });
+    const inProject = async (projectId: string) =>
+      (await call(context, "GET", `/api/eval/datasets?projectId=${projectId}`, admin.cookie)).json<{ datasets: Array<{ id: string }> }>().datasets.map((dataset) => dataset.id);
+    expect(await inProject("moved")).toEqual([set.id]);
+    expect(await inProject("default")).toEqual([]);
+    // Deleting the set audits the project its workflow is in now.
+    expect((await call(context, "DELETE", `/api/eval/datasets/${set.id}`, admin.cookie)).statusCode).toBe(200);
+    const events = context.store.listAuditLogs({ eventType: "replay.golden_set.deleted" }).items;
+    expect(events.map((event) => event.projectId)).toEqual(["moved"]);
+  }, 30_000);
+
+  it("records the project on the cancel audit event", async () => {
+    const model = await startModel("hello", 300);
+    const context = await createTestContext({ REPLAY_CONCURRENCY: "1" });
+    const builder = await login(context, "builder");
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: JUDGE_KEY });
+    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    const setId = await goldenSet(context, builder.cookie, "wf-agent", await goldenRuns(context, builder.cookie, "wf-agent", 2));
+    const started = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId] });
+    const runId = started.json<{ run: EvalRunView }>().run.id;
+    expect((await call(context, "POST", `/api/replay/runs/${runId}/cancel`, builder.cookie)).statusCode).toBe(200);
+    const events = context.store.listAuditLogs({ eventType: "replay.job.canceled" }).items;
+    expect(events.map((event) => event.projectId)).toEqual(["default"]);
+  }, 30_000);
+
+  it("eval runs: a cassette of another workflow is 409, an unreadable or missing one is 404; a replay job result of another run is 404", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    context.store.upsertWorkflow({ ...setWorkflow(counter.base), id: "wf-sibling" });
+    context.store.saveMcpCassette({
+      id: "cas_sibling",
+      executionId: null,
+      workflowId: "wf-sibling",
+      workflowName: "Sibling",
+      projectId: "default",
+      source: "manual",
+      cassette: { format: "l2m.mcp-cassette", version: 1, recordedAt: new Date().toISOString(), servers: [], entries: [], truncated: false, bytes: 0, llm: "not_recorded" } as never,
+      createdBy: null
+    });
+    const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain" })).json<{ dataset: { id: string } }>().dataset;
+    await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name: "a", input: {} });
+    const replayFrom = (cassetteId: string) => call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set", replay: { cassetteId } });
+    const sibling = await replayFrom("cas_sibling");
+    expect(sibling.statusCode).toBe(409);
+    expect(sibling.json<{ error: string }>().error).toContain("different workflow");
+    const missing = await replayFrom("cas_missing");
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json<{ error: string }>().error).toBe("Cassette not found");
+
+    // A result id belongs to its own run: asking for it through another job is a 404.
+    const setId = await goldenSet(context, builder.cookie, "wf-set", await goldenRuns(context, builder.cookie, "wf-set", 1));
+    const first = (await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId] })).json<{ run: EvalRunView }>().run;
+    const second = (await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId] })).json<{ run: EvalRunView }>().run;
+    const firstDone = await waitForJob(context, builder.cookie, first.id);
+    await waitForJob(context, builder.cookie, second.id);
+    const resultId = firstDone.results[0]!.id;
+    expect((await call(context, "GET", `/api/replay/runs/${first.id}/results/${resultId}`, builder.cookie)).statusCode).toBe(200);
+    expect((await call(context, "GET", `/api/replay/runs/${second.id}/results/${resultId}`, builder.cookie)).statusCode).toBe(404);
+  }, 60_000);
+});
+
 describe("migration 31", () => {
   it("adds the golden-set and replay-job columns in Postgres DDL with a down path", () => {
     const migration = MIGRATIONS.find((entry) => entry.version === 31)!;
@@ -822,6 +1078,7 @@ describe("migration 31", () => {
       "ALTER TABLE eval_fixtures ADD COLUMN IF NOT EXISTS recording_id TEXT",
       "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'eval'",
       "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS progress_json TEXT",
+      "ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS triggered_by_user_id TEXT",
       "ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS diff_json TEXT",
       "ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION",
       "idx_eval_runs_kind"
@@ -838,7 +1095,7 @@ describe("migration 31", () => {
       const columns = (table: string) => (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name);
       expect(columns("eval_datasets")).toContain("workflow_id");
       expect(columns("eval_fixtures")).toContain("recording_id");
-      expect(columns("eval_runs")).toEqual(expect.arrayContaining(["kind", "dataset_ids_json", "candidate_json", "workflow_hash", "workflow_version", "options_json", "progress_json"]));
+      expect(columns("eval_runs")).toEqual(expect.arrayContaining(["kind", "triggered_by_user_id", "dataset_ids_json", "candidate_json", "workflow_hash", "workflow_version", "options_json", "progress_json"]));
       expect(columns("eval_results")).toEqual(expect.arrayContaining(["recording_id", "verdict", "diff_json", "cost_usd"]));
     } finally {
       db.close();

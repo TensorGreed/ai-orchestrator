@@ -73,7 +73,9 @@ export interface EvalRunRequest {
    * neither set provides one.
    */
   scorers?: ScorerSpec[];
-  triggeredBy?: string;
+  /** The starting user: every case runs as them, looked up again by id (with this email) each time. */
+  triggeredBy: string;
+  triggeredByUserId: string;
   /** Phase 10.8 — record each fixture's MCP calls into a cassette. */
   recordMcp?: boolean;
   /**
@@ -105,7 +107,8 @@ export interface EvalWorkflowExecutor {
     runId: string;
     /** Phase 15.2 — the id the execution must use, so a cancel can abort it. Generated when omitted. */
     executionId?: string;
-    triggeredBy?: string;
+    triggeredBy: string;
+    triggeredByUserId: string;
     mcp?: { record?: boolean; replay?: EvalMcpReplay };
   }): Promise<{
     executionId?: string;
@@ -135,7 +138,7 @@ export interface EvalReplayDeps {
    * The user a job runs as (tool policy subject and project scope), looked up
    * again for every case; null when they can no longer run the workflow.
    */
-  actorFor: (email: string, workflowId: string) => SafeUser | null;
+  actorFor: (userId: string, email: string, workflowId: string) => SafeUser | null;
 }
 
 export interface EvalServiceOptions {
@@ -223,6 +226,7 @@ interface CaseSpec {
 const UNPRICED_WARNING = "Some model or judge calls have no price in the price table: the spend shown leaves them out, and the budget cannot stop on them.";
 
 interface ReplayJobContext {
+  actorUserId: string;
   actorEmail: string;
   candidate: { workflow: Workflow; kind: "draft" | "version"; version: number | null; workflowHash: string };
   options: ReplayJobOptions;
@@ -409,6 +413,7 @@ export class EvalService {
       workflowId: request.workflowId,
       ...(workflow?.name ? { workflowName: workflow.name } : {}),
       triggeredBy: request.triggeredBy,
+      triggeredByUserId: request.triggeredByUserId,
       scorers: request.scorers as Array<Record<string, unknown>> | undefined,
       progress: progress as unknown as Record<string, unknown>
     });
@@ -471,6 +476,7 @@ export class EvalService {
       workflowId: context.workflowId,
       workflowName: candidate.workflow.name,
       triggeredBy: context.actor.email,
+      triggeredByUserId: context.actor.id,
       scorers: request.scorers as Array<Record<string, unknown>> | undefined,
       candidate: jobCandidate as unknown as Record<string, unknown>,
       workflowHash: candidate.workflowHash,
@@ -478,7 +484,7 @@ export class EvalService {
       options: options as unknown as Record<string, unknown>,
       progress: progress as unknown as Record<string, unknown>
     });
-    const job: ReplayJobContext = { actorEmail: context.actor.email, candidate, options, scorers: request.scorers && request.scorers.length > 0 ? request.scorers : null };
+    const job: ReplayJobContext = { actorUserId: context.actor.id, actorEmail: context.actor.email, candidate, options, scorers: request.scorers && request.scorers.length > 0 ? request.scorers : null };
     this.launch(
       runId,
       fixtures.map((fixture) => this.caseSpec(fixture, job.scorers)),
@@ -942,6 +948,7 @@ export class EvalService {
       runId,
       executionId,
       triggeredBy: request.triggeredBy,
+      triggeredByUserId: request.triggeredByUserId,
       ...(request.recordMcp || request.replayMcp
         ? { mcp: { ...(request.recordMcp ? { record: true } : {}), ...(request.replayMcp ? { replay: request.replayMcp } : {}) } }
         : {})
@@ -961,7 +968,7 @@ export class EvalService {
         candidate: exec.facts ?? null,
         ...(this.options.random ? { random: this.options.random } : {})
       },
-      { runId, workflowId: request.workflowId, actorEmail: request.triggeredBy ?? null, ...(exec.executionId ? { executionId: exec.executionId } : {}) }
+      { runId, workflowId: request.workflowId, actorUserId: request.triggeredByUserId, actorEmail: request.triggeredBy, ...(exec.executionId ? { executionId: exec.executionId } : {}) }
     );
     return {
       status: score.pass ? "pass" : "fail",
@@ -986,7 +993,7 @@ export class EvalService {
     const recording = replay.getRecording(recordingId);
     if (!recording) return { status: "error", recordingId, error: "The golden run for this case was deleted." };
     if (recording.workflowId !== workflowId) return { status: "error", recordingId, error: "The golden run for this case belongs to another workflow." };
-    const actor = replay.actorFor(job.actorEmail, workflowId);
+    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId);
     if (!actor) return { status: "error", recordingId, error: `The user who started this job (${job.actorEmail}) can no longer run this workflow.` };
 
     const response = await replay.replayCase({
@@ -1026,7 +1033,7 @@ export class EvalService {
         candidate: facts,
         ...(this.options.random ? { random: this.options.random } : {})
       },
-      { runId, workflowId, actorEmail: job.actorEmail, executionId: response.executionId }
+      { runId, workflowId, actorUserId: job.actorUserId, actorEmail: job.actorEmail, executionId: response.executionId }
     );
     return { ...base, status: score.pass ? "pass" : "fail", score, costUsd: roundUsd((modelCost ?? 0) + judgeCostUsd), judgeCostUsd, costUnknown: modelCostUnknown || judgeCostUnknown };
   }
