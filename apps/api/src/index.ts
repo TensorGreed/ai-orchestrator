@@ -52,7 +52,7 @@ async function bootstrap() {
   const queueService = runsBackgroundWorkers
     ? new QueueService(store, {
         concurrency: Number(process.env.QUEUE_CONCURRENCY) || 5,
-        stuckJobTimeoutMs: Number(process.env.QUEUE_STUCK_JOB_TIMEOUT_MS) || undefined,
+        stuckJobTimeoutMs: config.QUEUE_STUCK_JOB_TIMEOUT_MS,
         executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
       })
     : undefined;

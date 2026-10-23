@@ -23,6 +23,9 @@ const envSchema = z.object({
   WEB_ORIGIN: z.string().default("http://localhost:5173"),
   API_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   WORKFLOW_EXECUTION_TIMEOUT_MS: z.coerce.number().int().positive().default(300000),
+  // Re-queue a queue job still running after this long; QueueService raises it to the run time limit + 60s.
+  // Optional (no default) so hand-built AppConfig objects in tests still typecheck; QueueService defaults it to 600000.
+  QUEUE_STUCK_JOB_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
   // How often a streamed run (SSE) sends a `: ping` comment while nothing else
   // is sent. The web client treats 45s without any bytes as a lost connection,
   // so keep this well below that.
