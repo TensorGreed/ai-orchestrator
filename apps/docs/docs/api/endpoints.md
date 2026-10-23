@@ -195,9 +195,20 @@ See [Golden runs and replay](../product/golden-runs.md).
 - `DELETE /api/replay/recordings/:id` (builder; audited as `replay.recording.deleted`)
 - `POST /api/replay/recordings/:id/replay` (builder; `{ draft?, version?, mcpMode?, ignorePaths? (up to 32, 128 characters, eight ** each), numberTolerance? }`; a version runs under the workflow's current project; `{ recordingId, executionId, candidate, status, diff, verdict, reasons, facts }`; audited as `replay.run`)
 
+## Releases
+
+See [Release gate and publish](../product/release-gate.md). Every route answers `404` for a workflow the user cannot read and `403` when they may not act on it; on the Postgres store, `501`.
+
+- `GET /api/workflows/:id/release-gate` (viewer; `{ gate }`)
+- `PUT /api/workflows/:id/release-gate` (`workflow:write`; only admins enforce a gate, lift enforcement or loosen an enforced one; `400` for a golden set of another workflow; audited as `release.gate.updated`)
+- `POST /api/workflows/:id/publish` (`workflow:publish`; `{ version, workflowHash?, replayRunId?, override?: { reason } (admins), requestApproval?: { reason } }`; `200 { release }`, `202 { verdict: "needs_approval", approvalRequestId }`, `409 { verdict: "blocked", reasons, replayRunId?, canRequestApproval }`; `409` for a hash mismatch; audited as `release.published`, `release.overridden` or `release.blocked`)
+- `GET /api/workflows/:id/releases` (viewer; `{ releases, publishedVersion }`)
+- `POST /api/workflows/:id/rollback` (`workflow:publish`; `{ version, reason }`; only to a version published before; `409` when it is already live; audited as `release.rolled_back`)
+- `GET /api/workflows/:id/release-state`, `GET /api/workflows/:id/publish-preview?version=` (viewer)
+
 ## Approvals
 
-See [Approval gates](../product/approvals.md).
+See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) appear in the same list with `kind: "release"` and an `id` starting `rar_`; deciding one publishes the version (`{ request, release }`). A filter by `executionId` lists no release requests.
 
 - `GET /api/approvals?status=pending|decided|all&workflowId=&executionId=&limit=` (viewer; `{ items }` limited to workflows the user can read, filtered before the limit; `404` when `workflowId` or `executionId` names a workflow or run the user cannot read, or one that does not exist; each item has `requestId`, `id` (the execution id), `kind`, `status`, `message`, approvers, `editableFields` with proposed values, `path`, `expiresAt`, the decision fields and `canDecide` / `cannotDecideReason`)
 - `POST /api/approvals/:id/approve` (`:id` is the execution id; `{ reason?, edits?, requestId? }`; needs execute access to the workflow's project (and to every workflow along a sub-workflow path) and a matching approver; `200` with the run result, `202 { queued: true }` with the execution queue, `400` for invalid edits (`details: [{ key, message }]`), `403` for self-approval, a non-approver or no project access, `404` when nothing is pending or the run is not visible (checked first), `409` when already decided, expired, or `requestId` is not the current request, `503` when the resume could not start (the request is pending again; decide again); audited as `approval.decided`)
