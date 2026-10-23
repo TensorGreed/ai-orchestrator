@@ -1512,6 +1512,8 @@ const AUDIT_CATEGORIES = [
   "project",
   "rbac",
   "sharing",
+  "approval",
+  "release",
   "system"
 ];
 

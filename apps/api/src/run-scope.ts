@@ -26,13 +26,19 @@
  *     from the default project, a namespace no workflow of another project
  *     claims.
  *
+ * Phase 15.4 — a run carries its release channel: a production run (a
+ * production webhook, a schedule, the MCP gateway...) loads the published
+ * version of each sub-workflow and error workflow it calls, a draft run (the
+ * editor, a manual run, `/webhook-test/`) loads the drafts. Without a
+ * published version both load the draft.
+ *
  * A sub-workflow gets its own scope (its project's secrets, knowledge bases
  * and session keys) through the engine's `scopeSubWorkflow` hook. The run's
  * user carries over only to a child in the same project; a child in another
  * project runs on its owner's execute share, not on the user.
  */
 
-import { DEFAULT_PROJECT_ID, type MCPServerConfig, type SecretReference, type Workflow } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, type MCPServerConfig, type ReleaseChannel, type SecretReference, type Workflow } from "@ai-orchestrator/shared";
 import type {
   AgentSessionArtifactStore,
   KnowledgeBaseStore,
@@ -53,6 +59,8 @@ export type SecretScope = { id?: string; projectId?: string | null };
 
 export interface RunScopeDeps {
   getWorkflow: (id: string) => Workflow | null | undefined;
+  /** Phase 15.4 — the version an entry point on `channel` runs; without it every channel loads the draft. */
+  getRunnableWorkflow?: (id: string, channel: ReleaseChannel) => Workflow | null | undefined;
   /** Workflow shares as stored: which project gets which access level. */
   listWorkflowShares: (workflowId: string) => Array<{ projectId: string; accessLevel: string }>;
   /** The secret's project (the default project when it has none), or null if it does not exist. */
@@ -106,6 +114,8 @@ export interface RunScopeOptions {
   actor?: SafeUser | null;
   /** Registry server lookup for this run (a cassette plan's, for recorded runs); inherited by sub-workflows. */
   resolveRegisteredMcpServer?: McpServerResolver;
+  /** Phase 15.4 — the run's release channel (default `draft`); inherited by sub-workflows. */
+  channel?: ReleaseChannel;
 }
 
 /** The stored key for a namespace in a project. The length prefix keeps it unambiguous. */
@@ -118,8 +128,8 @@ export function createRunScope(deps: RunScopeDeps) {
    * May `caller` load `targetId` as a sub-workflow or error workflow? Only the
    * projects decide, never the run's user. Throws a clear error when not.
    */
-  const loadWorkflowFor = (caller: Workflow, purpose: "Sub-workflow" | "Error workflow") => (targetId: string): Workflow | undefined => {
-    const target = deps.getWorkflow(targetId);
+  const loadWorkflowFor = (caller: Workflow, purpose: "Sub-workflow" | "Error workflow", channel: ReleaseChannel = "draft") => (targetId: string): Workflow | undefined => {
+    const target = channel === "production" && deps.getRunnableWorkflow ? deps.getRunnableWorkflow(targetId, "production") : deps.getWorkflow(targetId);
     if (!target) return undefined;
     if (!target.projectId) return target;
     const callerProject = caller.projectId ?? DEFAULT_PROJECT_ID;
@@ -236,13 +246,15 @@ export function createRunScope(deps: RunScopeDeps) {
     const actor = options.actor ?? null;
     const baseMcpResolver = options.resolveRegisteredMcpServer ?? deps.resolveRegisteredMcpServer;
     const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
+    const channel = options.channel ?? "draft";
     return {
-      loadWorkflow: loadWorkflowFor(workflow, "Sub-workflow"),
+      loadWorkflow: loadWorkflowFor(workflow, "Sub-workflow", channel),
       // The user's own secret:use counts only for a child in this project.
       scopeSubWorkflow: (child) =>
         dependenciesFor(child, {
           actor: (child.projectId ?? DEFAULT_PROJECT_ID) === projectId ? actor : null,
-          resolveRegisteredMcpServer: baseMcpResolver
+          resolveRegisteredMcpServer: baseMcpResolver,
+          channel
         }),
       resolveSecret: resolveSecretFor(workflow, actor),
       resolveRegisteredMcpServer: mcpServerResolverFor(workflow, baseMcpResolver),
@@ -263,9 +275,9 @@ export function createRunScope(deps: RunScopeDeps) {
       return deps.getSecretProjectId(secretId) !== null && secretProblem(workflow, actor, secretId) === null;
     },
     /** The error workflow `failing` may hand its failure to, or a reason it may not. */
-    errorWorkflowFor(failing: Workflow, errorWorkflowId: string): { workflow: Workflow } | { error: string } {
+    errorWorkflowFor(failing: Workflow, errorWorkflowId: string, channel: ReleaseChannel = "draft"): { workflow: Workflow } | { error: string } {
       try {
-        const workflow = loadWorkflowFor(failing, "Error workflow")(errorWorkflowId);
+        const workflow = loadWorkflowFor(failing, "Error workflow", channel)(errorWorkflowId);
         return workflow ? { workflow } : { error: `Error workflow '${errorWorkflowId}' was not found.` };
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) };

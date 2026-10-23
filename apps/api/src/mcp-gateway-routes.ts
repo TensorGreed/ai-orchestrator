@@ -136,6 +136,12 @@ export interface McpGatewayDeps {
   }) => Promise<GatewayWorkflowRunOutcome>;
   /** Abort a running workflow execution. */
   cancelExecution: (executionId: string, reason: string) => void;
+  /**
+   * Phase 15.4 — the workflow gateway clients see and call: the published
+   * version when there is one (gateway calls are production traffic), else
+   * the draft. The admin API (toolset members, candidates) reads drafts.
+   */
+  loadProductionWorkflow?: (id: string) => Workflow | null;
 }
 
 interface AuthenticatedClient {
@@ -313,8 +319,16 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     return { auth, toolset };
   };
 
+  const productionWorkflow = (id: string): Workflow | null => (deps.loadProductionWorkflow ? deps.loadProductionWorkflow(id) : store.getWorkflow(id));
+  const catalogStore = {
+    getWorkflow: productionWorkflow,
+    listMcpServers: () => store.listMcpServers(),
+    getMcpToolSnapshot: (id: string) => store.getMcpToolSnapshot(id),
+    listMcpToolPolicies: () => store.listMcpToolPolicies(),
+    listMcpToolClassifications: (registryServerId?: string) => store.listMcpToolClassifications(registryServerId)
+  };
   const catalogFor = (toolset: McpToolset, role: McpPolicyRole): GatewayCatalog =>
-    buildGatewayCatalog({ toolset, role, store });
+    buildGatewayCatalog({ toolset, role, store: catalogStore });
 
   const shouldAuditReadOnly = (session: GatewaySession, toolName: string): boolean => {
     const mode = config.MCP_GATEWAY_AUDIT_READ_ONLY_CALLS;
@@ -508,7 +522,7 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   }): Promise<McpCallToolResult> => {
     const { session, auth, toolset, tool, args, executionId } = input;
     const startedAt = new Date();
-    const workflow = store.getWorkflow(tool.workflowId);
+    const workflow = productionWorkflow(tool.workflowId);
     let outcome: GatewayWorkflowRunOutcome;
     if (!workflow) {
       outcome = { status: "error", error: `Workflow '${tool.workflowName}' no longer exists.` };

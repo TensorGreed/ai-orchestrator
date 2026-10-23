@@ -16,6 +16,7 @@ export type AuditCategory =
   | "rbac"
   | "sharing"
   | "approval"
+  | "release"
   | "system";
 
 export interface AuditActor {
