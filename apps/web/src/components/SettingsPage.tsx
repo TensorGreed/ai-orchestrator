@@ -92,6 +92,9 @@ import {
   type EvalRun,
   type EvalResult,
   type EvalScorerSpec,
+  type EvalRunProgress,
+  isEvalRunActive,
+  subscribeEvalRun,
   fetchUsageTotals,
   fetchUsageRollup,
   fetchRecentUsage,
@@ -4026,7 +4029,7 @@ function EvalDatasetDetail({
             disabled={busy || !selectedWorkflow || !fixtures || fixtures.length === 0 || (mcpMode === "replay" && !replayRunId)}
             onClick={handleStartRun}
           >
-            {busy ? "Running…" : `Run ${fixtures?.length ?? 0} fixtures`}
+            {busy ? "Starting…" : `Run ${fixtures?.length ?? 0} fixtures`}
           </button>
         </div>
         <fieldset style={{ marginTop: 12, padding: "8px 12px", border: "1px solid var(--panel-border)", borderRadius: 6 }}>
@@ -4126,19 +4129,63 @@ function EvalRunDetail({ runId, onBack }: { runId: string; onBack: () => void })
   const [run, setRun] = useState<(EvalRun & { results: EvalResult[] }) | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [progress, setProgress] = useState<EvalRunProgress | null>(null);
+
+  // Phase 15.2 — runs are queued and finish in the background: follow a
+  // queued or running one until it is done, then load its results.
   useEffect(() => {
-    void fetchEvalRun(runId).then(setRun).catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+    let cancelled = false;
+    let unsubscribe: (() => void) | null = null;
+    const load = () =>
+      fetchEvalRun(runId)
+        .then((loaded) => {
+          if (cancelled) return;
+          setRun(loaded);
+          setProgress(loaded.progress ?? null);
+          if (isEvalRunActive(loaded) && !unsubscribe) {
+            unsubscribe = subscribeEvalRun(
+              runId,
+              (event) => {
+                if (cancelled) return;
+                setProgress(event.run.progress ?? null);
+                setRun((current) => (current ? { ...current, status: event.run.status } : current));
+                if (event.type === "done") void load();
+              },
+              { poll: (id) => fetchEvalRun(id) }
+            );
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load");
+        });
+    void load();
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, [runId]);
 
   if (error) return <div className="error-banner">{error}</div>;
   if (!run) return <div className="settings-loading">Loading run…</div>;
+  const active = isEvalRunActive(run);
 
   return (
     <div className="settings-section">
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <button type="button" className="header-btn" onClick={onBack}>← Back</button>
         <h3 style={{ margin: 0 }}>Eval run</h3>
+        <span className="status-pill" data-status={active ? "running" : run.status === "completed" ? "success" : "error"}>{run.status}</span>
       </div>
+
+      {active && (
+        <div className="settings-card" role="status" aria-live="polite">
+          <h4>In progress</h4>
+          <p className="settings-help">
+            {progress ? `${progress.done} of ${progress.total} fixtures done${progress.running > 0 ? `, ${progress.running} running` : ""}.` : "Queued; waiting for a free slot."}
+          </p>
+        </div>
+      )}
+      {run.error && <div className="error-banner">{run.error}</div>}
 
       {run.summary && (
         <div className="settings-card">

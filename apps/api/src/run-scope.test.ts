@@ -186,6 +186,21 @@ describe("run scope: secrets", () => {
     await expect(scope.dependenciesFor(workflows["b-shared"]!, { actor: user("viewer", "u-no-secrets") }).resolveSecret({ secretId: "s-b" })).rejects.toThrow(/secret:use/);
   });
 
+  it("canUseSecretFor applies the same rules without resolving anything", () => {
+    const { scope, workflows, resolved } = scopeFixture();
+    const consumer = user("builder", "u-consumer");
+    expect(scope.canUseSecretFor(workflows["b-shared"]!, consumer, "s-b")).toBe(true);
+    expect(scope.canUseSecretFor(workflows["b-1"]!, consumer, "s-b")).toBe(false);
+    expect(scope.canUseSecretFor(workflows["a-1"]!, consumer, "s-b")).toBe(false);
+    expect(scope.canUseSecretFor(workflows["a-1"]!, user("admin", "u-admin"), "s-a")).toBe(true);
+    expect(scope.canUseSecretFor(workflows["a-1"]!, user("builder", "u-no-secrets"), "s-a")).toBe(false);
+    expect(scope.canUseSecretFor(workflows["a-1"]!, consumer, "s-missing")).toBe(false);
+    // A project alone (no workflow, so no shares).
+    expect(scope.canUseSecretFor({ projectId: "pa" }, consumer, "s-a")).toBe(true);
+    expect(scope.canUseSecretFor({ projectId: "pb" }, consumer, "s-b")).toBe(false);
+    expect(resolved).toEqual([]);
+  });
+
   it("the run's user carries over to a same-project child only", async () => {
     const { scope, workflows } = scopeFixture();
     const parent = scope.dependenciesFor(workflows["a-1"]!, { actor: user("operator", "u-no-secrets") });

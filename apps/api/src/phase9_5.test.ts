@@ -183,6 +183,8 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     const result = await svc.startRun({
       datasetId: dataset.id,
       workflowId: "wf",
+      triggeredBy: "b@example.com",
+      triggeredByUserId: "u1",
       scorers: [
         { type: "context_precision", threshold: 0.5 } as ScorerSpec,
         { type: "context_recall", threshold: 0.5 } as ScorerSpec
@@ -216,6 +218,8 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     const result = await svc.startRun({
       datasetId: dataset.id,
       workflowId: "wf",
+      triggeredBy: "b@example.com",
+      triggeredByUserId: "u1",
       scorers: [
         { type: "faithfulness" } as ScorerSpec,
         { type: "answer_relevance" } as ScorerSpec
@@ -253,6 +257,8 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     const result = await svc.startRun({
       datasetId: dataset.id,
       workflowId: "wf3",
+      triggeredBy: "b@example.com",
+      triggeredByUserId: "u1",
       scorers: [{ type: "faithfulness", threshold: 0.6 } as ScorerSpec]
     });
 
@@ -290,6 +296,8 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     const result = await svc.startRun({
       datasetId: dataset.id,
       workflowId: "wf4",
+      triggeredBy: "b@example.com",
+      triggeredByUserId: "u1",
       scorers: [{ type: "answer_relevance", threshold: 0.6 } as ScorerSpec]
     });
     const run = svc.getRun(result.runId)!;
@@ -310,6 +318,8 @@ describe("Phase 9.5 — RAG-specific eval scorers", () => {
     const result = await svc.startRun({
       datasetId: dataset.id,
       workflowId: "wf5",
+      triggeredBy: "b@example.com",
+      triggeredByUserId: "u1",
       scorers: [{ type: "answer_relevance" } as ScorerSpec]
     });
     const run = svc.getRun(result.runId)!;

@@ -98,7 +98,8 @@ import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
-import { EvalService, type EvalWorkflowExecutor, type ScorerSpec } from "./services/eval-service";
+import { EVAL_RUN_STALE_MS, EvalService, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
+import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { NonRetryableQueueError, QueueService } from "./services/queue-service";
@@ -133,8 +134,10 @@ import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
+import { registerEvalRoutes } from "./eval-routes.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
-import { ReplayService } from "./services/replay-service.js";
+import { ReplayRunError, ReplayService } from "./services/replay-service.js";
+import { buildRunFacts } from "./services/run-facts.js";
 import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandbox.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
 import { environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
@@ -143,7 +146,7 @@ import { GuardService } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError } from "./db/store-errors.js";
-import { createRunScope } from "./run-scope.js";
+import { createRunScope, type SecretScope } from "./run-scope.js";
 import {
   CODE_SANDBOX_INITIALISING,
   resolveCodeSandboxPlan,
@@ -1531,10 +1534,32 @@ export function createApp(
     }
   };
 
+  // Phase 15.2 — finished eval runs and replay jobs, on the same timer. The
+  // newest run of every set is kept; a store without eval storage skips it.
+  const pruneEvalRuns = (reason: "startup" | "interval") => {
+    const retentionDays = config.EVAL_RUN_RETENTION_DAYS;
+    const evalStore = store as unknown as { pruneEvalRuns?: (input: { before: string }) => number };
+    if (retentionDays <= 0 || typeof evalStore.pruneEvalRuns !== "function") return 0;
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    try {
+      const deleted = evalStore.pruneEvalRuns({ before: cutoff });
+      if (deleted > 0) app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned eval runs and replay jobs");
+      return deleted;
+    } catch (error) {
+      app.log.warn(
+        { cutoff, retentionDays, reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
+        "Failed to prune eval runs and replay jobs"
+      );
+      return 0;
+    }
+  };
+
   pruneExecutionHistory("startup");
-  const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0
+  pruneEvalRuns("startup");
+  const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0 || config.EVAL_RUN_RETENTION_DAYS > 0
     ? setInterval(() => {
         pruneExecutionHistory("interval");
+        pruneEvalRuns("interval");
       }, config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS)
     : null;
   if (retentionTimer) {
@@ -2824,36 +2849,114 @@ export function createApp(
   // as the per-fixture executor so eval runs share routing, telemetry, and
   // history with regular runs. SQLite-only — see /docs/extensions/eval-framework
   // for the Postgres-parity follow-up note.
-  // Phase 9.5 — LLM-judge for RAG-specific scorers (faithfulness, answer_relevance).
-  // Wired only when EVAL_JUDGE_ENABLED to avoid surprise costs; scorers
-  // surface a clear "no judge wired" error when they're requested without
-  // this. Per-scorer overrides take precedence over the default config.
-  const evalLlmJudge = config.EVAL_JUDGE_ENABLED
-    ? async (judgeInput: { prompt: string; providerId?: string; model?: string }): Promise<string> => {
-        const providerId = judgeInput.providerId ?? config.EVAL_JUDGE_PROVIDER_ID;
-        const adapter = providerRegistry.tryGet(providerId);
-        if (!adapter) {
-          throw new Error(`eval judge provider "${providerId}" is not registered`);
-        }
-        const response = await adapter.generate(
-          {
-            provider: {
-              providerId,
-              model: judgeInput.model ?? config.EVAL_JUDGE_MODEL,
-              temperature: config.EVAL_JUDGE_TEMPERATURE,
-              maxTokens: config.EVAL_JUDGE_MAX_TOKENS
-            },
-            messages: [{ role: "user", content: judgeInput.prompt }]
-          },
-          { resolveSecret: (ref) => secretService.resolveSecret(ref) }
-        );
-        return response.content ?? "";
-      }
-    : undefined;
+  /**
+   * Phase 15.2 — whether `user` may hand this secret to a judge running for a
+   * workflow (or, without one, in a project): a non-internal secret the run
+   * could reach and `secret:use`, by the same rules a run's own nodes follow
+   * (run-scope.ts, execute shares included). Admins skip the `secret:use`
+   * check, never the project one. Checked when a run starts and again for
+   * every judge call.
+   */
+  const canUseJudgeSecret = (user: SafeUser, secretId: string, scope: SecretScope): boolean => {
+    const row = store.getSecret(secretId);
+    if (!row || isInternalSecretProvider(row.provider)) return false;
+    return runScope.canUseSecretFor(scope, user, secretId);
+  };
 
-  const evalPolicyActor = (email: string | undefined): SafeUser | null => {
-    const found = email ? store.getUserByEmail(email) : null;
-    if (!found || !MCP_POLICY_ROLES.includes(found.role as McpPolicyRole)) return null;
+  // Phase 9.5 / 15.2 — the LLM judge for judge scorers (faithfulness,
+  // answer_relevance, llm_judge). EVAL_JUDGE_ENABLED=false turns every judge
+  // call off. A judge authenticates with its scorer's secretRef, which must
+  // still be usable by the run's user in the workflow's project when the
+  // call is made; without one it may use the provider's environment keys
+  // only when the operator set EVAL_JUDGE_ALLOW_ENV_CREDENTIALS. Judge calls
+  // are priced with the deployment's price table (null when the model has no
+  // price), counted into the run's cost and recorded as usage events of the
+  // workflow's project.
+  const evalLlmJudge: EvalLlmJudge = async (judgeInput) => {
+    if (!config.EVAL_JUDGE_ENABLED) {
+      throw new Error("LLM judges are turned off on this server (EVAL_JUDGE_ENABLED=false)");
+    }
+    const context = judgeInput.context;
+    const workflow = context ? store.getWorkflow(context.workflowId) : null;
+    const projectId = workflow?.projectId ?? DEFAULT_PROJECT_ID;
+    const actor = context?.actorUserId && context.actorEmail ? evalPolicyActor(context.actorUserId, context.actorEmail) : null;
+    if (judgeInput.secretRef) {
+      if (!workflow || !actor || !canUseJudgeSecret(actor, judgeInput.secretRef.secretId, workflow)) {
+        throw new Error(`the judge's secret ${judgeInput.secretRef.secretId} cannot be used by the user who started this run in this workflow's project`);
+      }
+    } else if (!config.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS) {
+      throw new Error("the judge has no secretRef: give the scorer one, or the operator can set EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true to use this server's provider keys");
+    }
+    const providerId = judgeInput.providerId ?? config.EVAL_JUDGE_PROVIDER_ID;
+    const adapter = providerRegistry.tryGet(providerId);
+    if (!adapter) {
+      throw new Error(`eval judge provider "${providerId}" is not registered`);
+    }
+    const model = judgeInput.model ?? config.EVAL_JUDGE_MODEL;
+    const startedAt = Date.now();
+    const response = await adapter.generate(
+      {
+        provider: {
+          providerId,
+          model,
+          temperature: judgeInput.temperature ?? config.EVAL_JUDGE_TEMPERATURE,
+          maxTokens: config.EVAL_JUDGE_MAX_TOKENS,
+          ...(judgeInput.secretRef ? { secretRef: judgeInput.secretRef } : {}),
+          ...(config.EVAL_JUDGE_BASE_URL && providerId === config.EVAL_JUDGE_PROVIDER_ID ? { baseUrl: config.EVAL_JUDGE_BASE_URL } : {})
+        },
+        messages: [{ role: "user", content: judgeInput.prompt }]
+      },
+      // Secrets resolve in the workflow's project with the starting user's
+      // rights, like the run's own nodes; without a workflow nothing resolves.
+      // A secret that resolves to nothing fails the call: the adapter would
+      // otherwise fall back to the server's provider keys.
+      {
+        resolveSecret: async (secretRef) => {
+          const value = workflow ? await runScope.dependenciesFor(workflow, { actor }).resolveSecret(secretRef) : undefined;
+          if (secretRef?.secretId && !value) throw new Error(`the judge's secret ${secretRef.secretId} has no value to use`);
+          return value;
+        }
+      }
+    );
+    const usage = response.usage;
+    const costUsd = usage
+      ? usageService.estimateCostUsd(providerId, model, usage.inputTokens ?? 0, usage.outputTokens ?? 0, usage.cachedInputTokens ?? 0)
+      : null;
+    if (context) {
+      try {
+        usageService.recordExecution({
+          executionId: context.executionId ?? context.runId,
+          workflowId: context.workflowId,
+          workflowName: workflow?.name ?? null,
+          userEmail: context.actorEmail,
+          projectId,
+          triggerType: "eval_judge",
+          status: "success",
+          durationMs: Date.now() - startedAt,
+          nodeResults: { judge: { _telemetry: { providerId, model, usage: usage ?? {}, llmCallCount: 1 } } }
+        });
+      } catch (error) {
+        app.log.warn({ runId: context.runId, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record judge usage");
+      }
+    }
+    return { content: response.content ?? "", costUsd };
+  };
+
+  /** The most one judge call can cost: the longest judge prompt (at ~2 characters a token) plus a full reply, priced. */
+  const judgeCallCeilingUsd = (scorer: { providerId?: string; model?: string }): number | null =>
+    usageService.estimateCostUsd(
+      scorer.providerId ?? config.EVAL_JUDGE_PROVIDER_ID,
+      scorer.model ?? config.EVAL_JUDGE_MODEL,
+      Math.ceil(JUDGE_PROMPT_MAX_CHARS / 2),
+      config.EVAL_JUDGE_MAX_TOKENS,
+      0
+    );
+
+  // The starting user, found by id; a deleted user whose email a new account
+  // took over is not the same user.
+  const evalPolicyActor = (userId: string, email: string): SafeUser | null => {
+    const found = store.getUserById(userId);
+    if (!found || found.email.toLowerCase() !== email.toLowerCase() || !MCP_POLICY_ROLES.includes(found.role as McpPolicyRole)) return null;
     return { id: found.id, email: found.email, role: found.role as UserRole };
   };
 
@@ -2882,12 +2985,27 @@ export function createApp(
     return input.mcp?.record ? mcpCassetteService.planRecording(mcpRegistry) : undefined;
   };
 
+  /**
+   * The user a background eval run or replay job runs as: the one who
+   * started it (by id, with the same email), looked up again for every case, as long as they may still run
+   * the workflow (the same rule as queued runs). The run then executes with
+   * their policy and project scope (run-scope.ts).
+   */
+  const evalRunActor = (userId: string, email: string, workflowId: string): SafeUser | null => {
+    const actor = evalPolicyActor(userId, email);
+    return actor && runAccess.workflow(actor, workflowId, "workflow:execute").ok ? actor : null;
+  };
+
   const evalService = new EvalService(store, async (input) => {
     const workflow = store.getWorkflow(input.workflowId);
     if (!workflow) {
       return { output: null, error: `Workflow not found: ${input.workflowId}` };
     }
-    const executionId = crypto.randomUUID();
+    const policyActor = evalRunActor(input.triggeredByUserId, input.triggeredBy, workflow.id);
+    if (!policyActor) {
+      return { output: null, error: `The user who started this run (${input.triggeredBy}) can no longer run this workflow.` };
+    }
+    const executionId = input.executionId ?? crypto.randomUUID();
     const fixtureRecord =
       input.fixtureInput && typeof input.fixtureInput === "object" && !Array.isArray(input.fixtureInput)
         ? (input.fixtureInput as Record<string, unknown>)
@@ -2907,15 +3025,15 @@ export function createApp(
         directInput: { trigger_type: "eval", eval_run_id: input.runId, eval_fixture_name: input.fixtureName, ...fixtureRecord },
         triggerType: "eval",
         triggeredBy: input.triggeredBy,
-        // Eval runs are started by a signed-in builder; their email is recorded server-side.
-        policyActor: evalPolicyActor(input.triggeredBy),
+        // Eval runs are started by a signed-in builder, looked up again for every case.
+        policyActor,
         mcpPlan
       });
       const result = finishMcpCassettePlan(mcpPlan, executed, {
         executionId,
         workflow,
         source: "eval",
-        createdBy: input.triggeredBy ?? null,
+        createdBy: input.triggeredBy,
         evalRunId: input.runId,
         fixtureId: input.fixtureId
       });
@@ -2942,12 +3060,25 @@ export function createApp(
         if (typeof usage.outputTokens === "number") { tokenOutput += usage.outputTokens; sawTokens = true; }
         if (typeof usage.totalTokens === "number") { tokenTotal += usage.totalTokens; sawTokens = true; }
       }
+      const durationMs = Date.now() - startedAt;
+      // Phase 15.2 — what the run did, for the status, tool, guard and budget scorers (used for scoring only, not stored).
+      const facts = buildRunFacts({
+        status: result.status,
+        error: result.error ?? null,
+        output: result.output,
+        durationMs,
+        nodeResults: result.nodeResults,
+        nodes: workflow.nodes,
+        guardEvents: store.listGuardEventsForExecution(executionId),
+        priceTurn: (providerId, model, inputTokens, outputTokens, cachedInputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, cachedInputTokens)
+      });
       return {
         executionId,
         output: result.output,
         error: result.status !== "success" ? (result.error ?? `execution status: ${result.status}`) : undefined,
-        durationMs: Date.now() - startedAt,
-        tokens: sawTokens ? { input: tokenInput, output: tokenOutput, total: tokenTotal } : undefined
+        durationMs,
+        tokens: sawTokens ? { input: tokenInput, output: tokenOutput, total: tokenTotal } : undefined,
+        facts
       };
     } catch (err) {
       return {
@@ -2957,10 +3088,70 @@ export function createApp(
         durationMs: Date.now() - startedAt
       };
     }
-  }, evalLlmJudge);
+  }, evalLlmJudge, {
+    concurrency: config.REPLAY_CONCURRENCY,
+    maxCases: config.REPLAY_JOB_MAX_CASES,
+    defaultMaxCostUsd: config.REPLAY_JOB_DEFAULT_MAX_COST_USD,
+    evalRunMaxCostUsd: config.EVAL_RUN_MAX_COST_USD,
+    judgeCallCeilingUsd,
+    maxResultBytes: config.EVAL_RESULT_MAX_BYTES,
+    // Provider error bodies and reasons are stored and shown to viewers: no secret value goes with them.
+    scrub: (text) => String(secretService.redact(replayRecordingService.scrubber().text(text))),
+    abortExecution: (executionId, reason) => activeExecutions.get(executionId)?.controller.abort(reason),
+    // Phase 15.2 — replay jobs use the 15.1 replay machinery, built further down.
+    replay: {
+      resolveCandidate: (workflowId, request) => {
+        const candidate = replayService.resolveWorkflowCandidate(workflowId, request);
+        return { ...candidate, workflowHash: ReplayService.candidateHash(candidate.workflow) };
+      },
+      getRecording: (id) => store.getReplayRecording(id),
+      // The candidate was resolved when the job started; it runs in the workflow's current project.
+      replayCase: ({ recording, candidate, request, actor, executionId }) => {
+        const current = store.getWorkflow(candidate.workflow.id);
+        if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
+        const scoped = { ...candidate, workflow: { ...candidate.workflow, projectId: current.projectId, folderId: current.folderId } };
+        return replayService.replay(recording, request, actor, { candidate: scoped, executionId });
+      },
+      actorFor: (userId, email, workflowId) => evalRunActor(userId, email, workflowId)
+    },
+    logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
+  app.addHook("onClose", async () => {
+    evalService.shutdown();
+  });
 
   const workerMode = config.WORKER_MODE;
   const runsBackgroundWorkers = workerMode === "all" || workerMode === "worker";
+  // SQLite cannot be shared between processes; on Postgres another instance may own a live run.
+  const sharedDatabase = config.HA_ENABLED || (store as object) instanceof PostgresStore;
+
+  // Phase 15.2 — eval runs and replay jobs a stopped server left queued or
+  // running. The same rules as the execution reconcile below: webhook
+  // replicas never touch other instances' runs, and on a shared database only
+  // runs no live instance has touched lately are interrupted. Eval storage is
+  // SQLite-only, so a store without it skips this.
+  const evalStoreReady = typeof (store as unknown as { listEvalRuns?: unknown }).listEvalRuns === "function";
+  const recoverEvalRuns = (reason: "startup" | "interval") => {
+    try {
+      const interrupted = evalService.recoverInterrupted({ onlyStale: sharedDatabase });
+      if (interrupted > 0) app.log.warn({ count: interrupted, reason }, "Marked eval runs and replay jobs interrupted by a restart");
+    } catch (err) {
+      app.log.warn({ err: err instanceof Error ? err.message : String(err), reason }, "Failed to mark interrupted eval runs");
+    }
+  };
+  if (!evalStoreReady) {
+    app.log.info("This database has no eval storage; skipping the interrupted eval run check");
+  } else if (workerMode !== "webhook") {
+    recoverEvalRuns("startup");
+    if (sharedDatabase) {
+      // An instance that died is noticed by the others, not only by the next one to boot.
+      const evalRecoveryTimer = setInterval(() => recoverEvalRuns("interval"), EVAL_RUN_STALE_MS);
+      (evalRecoveryTimer as { unref?: () => void }).unref?.();
+      app.addHook("onClose", async () => {
+        clearInterval(evalRecoveryTimer);
+      });
+    }
+  }
   const leaderElection = new LeaderElectionService(
     store,
     {
@@ -2972,10 +3163,7 @@ export function createApp(
         // Webhook replicas run beside the main instances with HA off; they never own other instances' runs.
         if (workerMode !== "webhook") {
           try {
-            const interrupted = await reconcileInterruptedRuns(store, {
-              // SQLite cannot be shared between processes; on Postgres another instance may own a live run.
-              sharedDatabase: config.HA_ENABLED || (store as object) instanceof PostgresStore
-            });
+            const interrupted = await reconcileInterruptedRuns(store, { sharedDatabase });
             if (interrupted.length > 0) {
               app.log.warn(
                 { count: interrupted.length, executionIds: interrupted.slice(0, 50).map((run) => run.id) },
@@ -4675,203 +4863,18 @@ export function createApp(
     }
   });
 
-  // ---------------------------------------------------------------------------
-  // Phase 7.3 — Agent eval framework routes (admin/builder).
-  // ---------------------------------------------------------------------------
-
-  // Eval datasets follow their project. One without a project is shared:
-  // everyone can read it, and writes to it count against the default project.
-  const evalDatasetAccess = (user: SafeUser, datasetId: string, permission: "workflow:read" | "workflow:write", what = "Dataset") => {
-    const dataset = store.getEvalDataset(datasetId);
-    if (!dataset) return { ok: false as const, status: 404 as const, error: `${what} not found` };
-    if (!dataset.projectId && permission === "workflow:read") return { ok: true as const, dataset };
-    const access = runAccess.project(user, dataset.projectId, permission, what);
-    return access.ok ? { ok: true as const, dataset } : access;
-  };
-
-  app.get("/api/eval/datasets", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return;
-    const projectId = (request.query as { projectId?: string } | undefined)?.projectId;
-    const readable = runAccess.readableProjectIds(user);
-    const ids = readable && new Set(readable);
-    return { datasets: evalService.listDatasets({ projectId }).filter((dataset) => !ids || !dataset.projectId || ids.has(dataset.projectId)) };
-  });
-
-  app.post<{ Body: { name?: string; description?: string; projectId?: string } }>("/api/eval/datasets", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return;
-    const name = String(request.body?.name ?? "").trim();
-    if (!name) {
-      reply.code(400);
-      return { error: "name is required" };
-    }
-    const projectAccess = runAccess.project(user, request.body?.projectId, "workflow:write");
-    if (!projectAccess.ok) return denyRunAccess(reply, projectAccess);
-    return { dataset: evalService.createDataset({ name, description: request.body?.description, projectId: request.body?.projectId, createdBy: user.email }) };
-  });
-
-  app.delete<{ Params: { id: string } }>("/api/eval/datasets/:id", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return;
-    const access = evalDatasetAccess(user, request.params.id, "workflow:write");
-    if (!access.ok) return denyRunAccess(reply, access);
-    const ok = evalService.deleteDataset(request.params.id);
-    if (!ok) {
-      reply.code(404);
-      return { error: "Dataset not found" };
-    }
-    return { ok: true };
-  });
-
-  app.get<{ Params: { id: string } }>("/api/eval/datasets/:id/fixtures", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return;
-    const access = evalDatasetAccess(user, request.params.id, "workflow:read");
-    if (!access.ok) return denyRunAccess(reply, access);
-    return { fixtures: evalService.listFixtures(request.params.id) };
-  });
-
-  app.post<{
-    Params: { id: string };
-    Body: { name?: string; input?: unknown; expected?: unknown; scorers?: ScorerSpec[] };
-  }>("/api/eval/datasets/:id/fixtures", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return;
-    const name = String(request.body?.name ?? "").trim();
-    if (!name) {
-      reply.code(400);
-      return { error: "name is required" };
-    }
-    if (request.body?.input === undefined) {
-      reply.code(400);
-      return { error: "input is required" };
-    }
-    const access = evalDatasetAccess(user, request.params.id, "workflow:write");
-    if (!access.ok) return denyRunAccess(reply, access);
-    return {
-      fixture: evalService.addFixture({
-        datasetId: request.params.id,
-        name,
-        input: request.body.input,
-        expected: request.body.expected,
-        scorers: request.body.scorers
-      })
-    };
-  });
-
-  app.delete<{ Params: { id: string } }>("/api/eval/fixtures/:id", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return;
-    const datasetId = store.getEvalFixtureDatasetId(request.params.id);
-    const access = datasetId ? evalDatasetAccess(user, datasetId, "workflow:write", "Fixture") : null;
-    if (access && !access.ok) return denyRunAccess(reply, access);
-    const ok = datasetId ? evalService.deleteFixture(request.params.id) : false;
-    if (!ok) {
-      reply.code(404);
-      return { error: "Fixture not found" };
-    }
-    return { ok: true };
-  });
-
-  // Phase 10.8 — eval runs can record their MCP calls, or replay them from cassettes.
-  const evalMcpOptionsSchema = z.object({
-    record: z.boolean().optional(),
-    replay: z
-      .object({
-        cassetteId: z.string().trim().min(1).optional(),
-        evalRunId: z.string().trim().min(1).optional(),
-        mode: z.enum(["strict", "lenient"]).optional()
-      })
-      .refine((value) => Boolean(value.cassetteId) !== Boolean(value.evalRunId), {
-        message: "replay needs exactly one of cassetteId or evalRunId"
-      })
-      .optional()
-  });
-
-  app.post<{
-    Body: { datasetId?: string; workflowId?: string; scorers?: ScorerSpec[]; record?: boolean; replay?: unknown };
-  }>("/api/eval/runs", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return;
-    const datasetId = String(request.body?.datasetId ?? "").trim();
-    const workflowId = String(request.body?.workflowId ?? "").trim();
-    if (!datasetId || !workflowId) {
-      reply.code(400);
-      return { error: "datasetId and workflowId are required" };
-    }
-    const workflowAccess = runAccess.workflow(user, workflowId, "workflow:execute");
-    if (!workflowAccess.ok) return denyRunAccess(reply, workflowAccess);
-    const mcpOptions = evalMcpOptionsSchema.safeParse({ record: request.body?.record, replay: request.body?.replay });
-    if (!mcpOptions.success) {
-      reply.code(400);
-      return { error: "Invalid MCP record or replay options", details: mcpOptions.error.issues };
-    }
-    if (mcpOptions.data.record && mcpOptions.data.replay) {
-      reply.code(400);
-      return { error: "An eval run can record MCP calls or replay them, not both." };
-    }
-    const datasetAccess = evalDatasetAccess(user, datasetId, "workflow:read");
-    if (!datasetAccess.ok) return denyRunAccess(reply, datasetAccess);
-    // Replay sources must be readable (else 404, as if missing) and recorded
-    // for this same workflow (else 409).
-    const replaySource = mcpOptions.data.replay;
-    if (replaySource?.cassetteId) {
-      const summary = store.getMcpCassetteSummary(replaySource.cassetteId);
-      const access = runAccess.run(user, summary && { id: summary.id, workflowId: summary.workflowId ?? "" }, "workflow:read", "Cassette");
-      if (!access.ok) return denyRunAccess(reply, access);
-      if (summary?.workflowId !== workflowId) {
-        reply.code(409);
-        return { error: "That cassette was recorded for a different workflow." };
-      }
-    } else if (replaySource?.evalRunId) {
-      const source = store.getEvalRun(replaySource.evalRunId);
-      const access = runAccess.run(user, source, "workflow:read", "Eval run");
-      if (!access.ok) return denyRunAccess(reply, access);
-      if (access.run.workflowId !== workflowId) {
-        reply.code(409);
-        return { error: "That eval run was recorded for a different workflow." };
-      }
-    }
-    try {
-      const result = await evalService.startRun({
-        datasetId,
-        workflowId,
-        scorers: request.body?.scorers,
-        triggeredBy: user.email,
-        ...(mcpOptions.data.record ? { recordMcp: true } : {}),
-        ...(mcpOptions.data.replay ? { replayMcp: mcpOptions.data.replay } : {})
-      });
-      return { ok: true, ...result };
-    } catch (err) {
-      reply.code(400);
-      return { error: err instanceof Error ? err.message : String(err) };
-    }
-  });
-
-  app.get("/api/eval/runs", async (request, reply) => {
-    const user = await requireRole(request, reply, ["viewer"]);
-    if (!user) return;
-    const query = request.query as { datasetId?: string; workflowId?: string; limit?: string } | undefined;
-    // Narrowed to readable workflows in SQL, before the limit.
-    const runs = store.listEvalRuns({
-      datasetId: query?.datasetId,
-      workflowId: query?.workflowId,
-      workflowIds: runAccess.readableWorkflowIds(user) ?? undefined,
-      limit: query?.limit ? Math.max(1, Math.min(500, parseInt(query.limit, 10) || 100)) : undefined
-    });
-    // Phase 10.8 — how many fixture cassettes each run recorded, for "replay from eval run".
-    return {
-      runs: runs.map((run) => ({ ...run, mcpCassettes: store.listMcpCassettesForEvalRun(run.id).length }))
-    };
-  });
-
-  app.get<{ Params: { id: string } }>("/api/eval/runs/:id", async (request, reply) => {
-    const user = await requireRole(request, reply, ["viewer"]);
-    if (!user) return;
-    const access = runAccess.run(user, evalService.getRun(request.params.id), "workflow:read", "Eval run");
-    if (!access.ok) return denyRunAccess(reply, access);
-    return access.run;
+  // Phase 7.3 / 15.2 — evals, golden sets and replay jobs (routes in eval-routes.ts).
+  registerEvalRoutes({
+    app,
+    store,
+    evals: evalService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    runAccess,
+    denyRunAccess,
+    canUseSecret: canUseJudgeSecret,
+    audit: (request, user, event) => audit(request, user, event),
+    sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
+    strictIsolation: config.PROJECT_ISOLATION === "strict"
   });
 
   app.get("/widget.js", async (_request, reply) => {

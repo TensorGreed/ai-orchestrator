@@ -5,6 +5,7 @@ import {
   fetchReplayRecording,
   fetchWorkflowVersions,
   runReplay,
+  type ReplayCaseDiff,
   type ReplayMcpMode,
   type ReplayRecordingDetail,
   type ReplayRunRequest,
@@ -198,7 +199,8 @@ function ToolLane({ step }: { step: ReplayToolStep }) {
   );
 }
 
-export function ReplayResultView({ result }: { result: ReplayRunResponse }) {
+/** Renders a replay's verdict and run diff; takes a live replay response or a replay job's case diff (neither needs the facts). */
+export function ReplayResultView({ result }: { result: ReplayCaseDiff }) {
   const { diff } = result;
   const steps = diff.toolCalls.steps;
   return (

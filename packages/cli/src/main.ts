@@ -16,6 +16,8 @@
  *                     saved version and gate on the diff. Connector, HTTP,
  *                     MCP and code nodes are answered from the recording;
  *                     expressions in the nodes that run are still evaluated.
+ *                     Phase 15.2 — with --set, start a replay job over one or
+ *                     more golden sets, wait for it and gate on its cases.
  *
  * Exit codes: 0 clean, 1 the check found problems (or a request failed),
  * 2 usage errors, 3 an audit bundle is internally consistent but its signer
@@ -32,6 +34,9 @@ import {
   REPLAY_IGNORE_PATHS_MAX,
   REPLAY_MCP_MODES,
   replayIgnorePathSchema,
+  replayJobExitCode,
+  type EvalCaseResult,
+  type EvalRunView,
   type ReplayRunResponse,
   type McpCheckReport,
   type McpCheckServerResult,
@@ -59,6 +64,8 @@ export interface CliIo {
   stderr: NodeJS.WritableStream;
   env: Record<string, string | undefined>;
   fetch?: typeof fetch;
+  /** Waits between polls of a replay job (tests pass an instant one). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export const EXIT_OK = 0;
@@ -84,13 +91,17 @@ const USAGE = `Usage:
   l2m replay run --recording <id> [--draft | --version <n>] [--mcp strict|lenient]
                  [--ignore-path <glob>]... [--number-tolerance <n>]
                  [--api-url <url>] [--api-key <key>] [--json]
+  l2m replay run --set <goldenSetId>... [--draft | --version <n>] [--mcp strict|lenient]
+                 [--ignore-path <glob>]... [--number-tolerance <n>] [--max-cost <usd>]
+                 [--timeout <seconds>] [--api-url <url>] [--api-key <key>] [--json]
 
 The API URL and key default to L2M_API_URL and L2M_API_KEY.
 Exit codes: 0 clean (replay: pass), 1 problems found or a request failed
-(replay: the candidate differs from the golden run), 2 usage error
-(replay: also flags the API rejects),
+(replay: the candidate differs from the golden run; --set: a case failed),
+2 usage error (replay: also flags the API rejects),
 3 audit bundle signer not verified (no --public-key; see --trust-embedded-key),
-4 a replay is inconclusive.
+4 a replay is inconclusive (--set: a case was inconclusive, or the job did
+not complete: canceled, over budget, interrupted or past --timeout).
 `;
 
 function write(stream: NodeJS.WritableStream, text: string): void {
@@ -442,9 +453,15 @@ function isReplayRunResponse(value: unknown): value is ReplayRunResponse {
   );
 }
 
-async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
-  const recording = oneFlag(args, "recording");
-  if (!recording) throw new UsageError("l2m replay run needs --recording <id>");
+interface ReplayFlags {
+  version?: number;
+  mcpMode?: string;
+  ignorePaths: string[];
+  numberTolerance?: number;
+}
+
+/** The candidate and comparison flags `replay run` takes with --recording and with --set. */
+function replayFlags(args: ParsedArgs): ReplayFlags {
   const versionFlag = oneFlag(args, "version");
   const draft = args.booleans.has("draft");
   if (draft && versionFlag !== undefined) throw new UsageError("Choose --draft or --version, not both");
@@ -468,6 +485,16 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
     const checked = replayIgnorePathSchema.safeParse(pattern);
     if (!checked.success) throw new UsageError(`--ignore-path ${JSON.stringify(pattern.slice(0, 40))}: ${checked.error.issues[0]?.message ?? "invalid"}`);
   }
+  return { ...(version !== undefined ? { version } : {}), ...(mcpMode ? { mcpMode } : {}), ignorePaths, ...(numberTolerance !== undefined ? { numberTolerance } : {}) };
+}
+
+async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
+  const recording = oneFlag(args, "recording");
+  const sets = listFlag(args, "set");
+  if (recording && sets.length > 0) throw new UsageError("Choose --recording or --set, not both");
+  if (sets.length > 0) return runReplayJob(args, io, sets);
+  if (!recording) throw new UsageError("l2m replay run needs --recording <id> or --set <goldenSetId>");
+  const { version, mcpMode, ignorePaths, numberTolerance } = replayFlags(args);
   const target = apiTarget(args, io);
 
   let result: unknown;
@@ -506,6 +533,106 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
     write(io.stderr, `l2m: replay is inconclusive: the API's answer could not be read (${error instanceof Error ? error.message : String(error)})`);
     return EXIT_INCOMPLETE;
   }
+}
+
+// --- replay run --set ---------------------------------------------------------
+
+const JOB_POLL_MS = 2_000;
+const DEFAULT_JOB_TIMEOUT_S = 1_800;
+
+function isRunView(value: unknown): value is EvalRunView & { results?: EvalCaseResult[] } {
+  return isObject(value) && typeof value.id === "string" && typeof value.status === "string";
+}
+
+/**
+ * Server text (run errors, case names, score reasons) can carry a replayed
+ * output's bytes; control characters are dropped so it cannot drive the
+ * terminal or a CI log (ANSI escapes, carriage returns).
+ */
+export function cleanServerText(value: unknown): string {
+  return String(value ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
+function formatJob(run: EvalRunView & { results?: EvalCaseResult[] }, code: number): string {
+  const lines: string[] = [];
+  const candidate = run.candidate ? (run.candidate.kind === "version" ? `version ${cleanServerText(run.candidate.version)}` : "draft") : "candidate";
+  const verdict = code === EXIT_OK ? "PASS" : code === EXIT_FAILED ? "FAIL" : "INCONCLUSIVE";
+  lines.push(`Replay job ${cleanServerText(run.id)} against the ${candidate}${run.candidate ? ` (${cleanServerText(run.candidate.workflowHash).slice(0, 12)})` : ""}: ${verdict} (${cleanServerText(run.status)})`);
+  const summary = run.summary;
+  if (summary) {
+    lines.push(
+      `  ${summary.pass} passed, ${summary.fail} failed, ${summary.error} inconclusive${summary.skipped ? `, ${summary.skipped} skipped` : ""} of ${summary.total}; spent $${(summary.costUsd ?? 0).toFixed(4)}${summary.costUnknown ? " or more (some calls are unpriced)" : ""}`
+    );
+    for (const warning of summary.warnings ?? []) lines.push(`  warning: ${cleanServerText(warning)}`);
+  }
+  if (run.error) lines.push(`  ${cleanServerText(run.error)}`);
+  for (const result of run.results ?? []) {
+    if (result.status === "pass") continue;
+    const failed = (result.score?.details ?? []).filter((detail) => !detail.pass).map((detail) => `${cleanServerText(detail.type)}: ${cleanServerText(detail.reason)}`);
+    lines.push(`  ${cleanServerText(result.status)} ${cleanServerText(result.fixtureName ?? result.fixtureId)}${result.error ? `: ${cleanServerText(result.error)}` : ""}`);
+    for (const reason of failed) lines.push(`    - ${reason}`);
+  }
+  return lines.join("\n");
+}
+
+async function runReplayJob(args: ParsedArgs, io: CliIo, sets: string[]): Promise<number> {
+  const { version, mcpMode, ignorePaths, numberTolerance } = replayFlags(args);
+  const maxCostFlag = oneFlag(args, "max-cost");
+  let maxCostUsd: number | undefined;
+  if (maxCostFlag !== undefined) {
+    maxCostUsd = Number(maxCostFlag);
+    if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) throw new UsageError("--max-cost must be a number of US dollars above 0");
+  }
+  const timeoutFlag = oneFlag(args, "timeout");
+  const timeoutS = timeoutFlag === undefined ? DEFAULT_JOB_TIMEOUT_S : Number(timeoutFlag);
+  if (!Number.isFinite(timeoutS) || timeoutS <= 0) throw new UsageError("--timeout must be a number of seconds above 0");
+  const target = apiTarget(args, io);
+  const sleep = io.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  let run: EvalRunView & { results?: EvalCaseResult[] };
+  try {
+    const started = await apiRequest<{ run?: unknown }>(target, "POST", "/api/replay/runs", {
+      datasetIds: sets,
+      ...(version !== undefined ? { version } : { draft: true }),
+      ...(mcpMode ? { mcpMode } : {}),
+      ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
+      ...(numberTolerance !== undefined ? { numberTolerance } : {}),
+      ...(maxCostUsd !== undefined ? { maxCostUsd } : {})
+    });
+    if (!isRunView(started?.run)) {
+      write(io.stderr, "l2m: replay job is inconclusive: the API's answer is not a replay job (is the CLI the same version as the API?)");
+      return EXIT_INCOMPLETE;
+    }
+    run = started.run;
+    const deadline = Date.now() + timeoutS * 1000;
+    while (run.status === "queued" || run.status === "running") {
+      if (Date.now() >= deadline) {
+        write(io.stderr, `l2m: replay job ${run.id} is still ${run.status} after ${timeoutS} s; it keeps running on the server.`);
+        return EXIT_INCOMPLETE;
+      }
+      await sleep(JOB_POLL_MS);
+      const polled = await apiRequest<{ run?: unknown }>(target, "GET", `/api/replay/runs/${encodeURIComponent(run.id)}`);
+      if (!isRunView(polled?.run)) {
+        write(io.stderr, "l2m: replay job is inconclusive: the API's answer is not a replay job");
+        return EXIT_INCOMPLETE;
+      }
+      run = polled.run;
+    }
+  } catch (error) {
+    if (error instanceof RequestError) {
+      if (error.status === 400) {
+        write(io.stderr, `l2m: ${cleanServerText(error.message)}`);
+        return EXIT_USAGE;
+      }
+      write(io.stderr, `l2m: replay job is inconclusive: ${cleanServerText(error.message)}`);
+      return EXIT_INCOMPLETE;
+    }
+    throw error;
+  }
+  const code = replayJobExitCode(run);
+  if (args.booleans.has("json")) io.stdout.write(`${JSON.stringify({ ...run, exitCode: code }, null, 2)}\n`);
+  else write(io.stdout, formatJob(run, code));
+  return code;
 }
 
 // --- entry -------------------------------------------------------------------

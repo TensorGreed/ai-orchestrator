@@ -1470,6 +1470,50 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_replay_recordings_workflow;
       DROP TABLE IF EXISTS replay_recordings;
     `
+  },
+  {
+    version: 31,
+    description: "Phase 15.2 — Golden sets and background replay jobs on the eval tables",
+    up: `
+      ALTER TABLE eval_datasets ADD COLUMN IF NOT EXISTS workflow_id TEXT;
+      ALTER TABLE eval_fixtures ADD COLUMN IF NOT EXISTS recording_id TEXT;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'eval';
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS triggered_by_user_id TEXT;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS dataset_ids_json TEXT;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS candidate_json TEXT;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS workflow_hash TEXT;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS workflow_version INTEGER;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS options_json TEXT;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS progress_json TEXT;
+      ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS recording_id TEXT;
+      ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS verdict TEXT;
+      ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS diff_json TEXT;
+      ALTER TABLE eval_results ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION;
+      CREATE INDEX IF NOT EXISTS idx_eval_datasets_workflow ON eval_datasets(workflow_id);
+      CREATE INDEX IF NOT EXISTS idx_eval_fixtures_recording ON eval_fixtures(recording_id);
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_kind ON eval_runs(kind, workflow_id, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_eval_runs_status ON eval_runs(status);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_eval_runs_status;
+      DROP INDEX IF EXISTS idx_eval_runs_kind;
+      DROP INDEX IF EXISTS idx_eval_fixtures_recording;
+      DROP INDEX IF EXISTS idx_eval_datasets_workflow;
+      ALTER TABLE eval_results DROP COLUMN IF EXISTS cost_usd;
+      ALTER TABLE eval_results DROP COLUMN IF EXISTS diff_json;
+      ALTER TABLE eval_results DROP COLUMN IF EXISTS verdict;
+      ALTER TABLE eval_results DROP COLUMN IF EXISTS recording_id;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS progress_json;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS options_json;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS workflow_version;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS workflow_hash;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS candidate_json;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS dataset_ids_json;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS triggered_by_user_id;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS kind;
+      ALTER TABLE eval_fixtures DROP COLUMN IF EXISTS recording_id;
+      ALTER TABLE eval_datasets DROP COLUMN IF EXISTS workflow_id;
+    `
   }
 ];
 

@@ -330,13 +330,16 @@ Programmatic scorers work out of the box. LLM-judge scorers require:
 
 ```bash
 EVAL_JUDGE_ENABLED=true
+EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true    # faithfulness / answer_relevance take no secretRef
 EVAL_JUDGE_PROVIDER_ID=openai            # any registered provider
 EVAL_JUDGE_MODEL=gpt-4o-mini             # cheap default
 EVAL_JUDGE_TEMPERATURE=0
 EVAL_JUDGE_MAX_TOKENS=512
 ```
 
-The judge uses the standard provider-config + secret-resolution path — same OPENAI_API_KEY (or secretRef) that drives normal LLM calls.
+`faithfulness` and `answer_relevance` authenticate with the server's provider environment keys (such as `OPENAI_API_KEY`), which the operator must allow with `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true`. An `llm_judge` scorer can use a `secretRef` from the secret store instead.
+
+Golden sets, replay jobs and the newer scorers (JSON, schema, tool sequence, guard, budget, rubric and pairwise judges with a `secretRef`) are described in [Golden sets, replay jobs and scorers](../product/golden-sets.md).
 
 ### Workflow output shape
 

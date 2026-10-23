@@ -77,16 +77,43 @@ const envSchema = z.object({
   AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(365),
   AUDIT_LOG_PRUNE_INTERVAL_MS: z.coerce.number().int().positive().default(3600000),
 
-  // Phase 9.5 — RAG eval judge.
-  // When EVAL_JUDGE_ENABLED=true, the eval framework can run faithfulness +
-  // answer_relevance scorers using the named provider. Provider credentials
-  // come from the standard provider-config + secret resolution path; per-
-  // scorer overrides take precedence.
+  // Phase 9.5 / 15.2 — LLM judges (faithfulness, answer_relevance, llm_judge).
+  // EVAL_JUDGE_ENABLED=false turns every judge call off. A judge authenticates
+  // with the scorer's secretRef (resolved through SecretService and checked
+  // against the run's project and user); one without a secretRef may use the
+  // deployment's provider environment keys only when
+  // EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true. Per-scorer provider and model
+  // override the defaults below.
   EVAL_JUDGE_ENABLED: booleanFromEnv.default(false),
+  EVAL_JUDGE_ALLOW_ENV_CREDENTIALS: booleanFromEnv.default(false),
   EVAL_JUDGE_PROVIDER_ID: z.string().default("openai"),
   EVAL_JUDGE_MODEL: z.string().default("gpt-4o-mini"),
   EVAL_JUDGE_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
   EVAL_JUDGE_MAX_TOKENS: z.coerce.number().int().positive().default(512),
+  /**
+   * Phase 15.2 — base URL for judge calls (an OpenAI-compatible or Ollama
+   * endpoint inside the deployment). Set by the operator only: scorers can
+   * name a provider, model and secretRef, never a URL.
+   */
+  EVAL_JUDGE_BASE_URL: z.string().url().optional(),
+  /**
+   * Phase 15.2 — replay jobs and eval runs run in the background: how many
+   * cases run at once in one API process, the most cases one run may have,
+   * a replay job's spend limit (model plus judge calls, USD) when the request
+   * names none, and every eval run's spend limit.
+   */
+  REPLAY_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(2),
+  REPLAY_JOB_MAX_CASES: z.coerce.number().int().min(1).max(5_000).default(200),
+  REPLAY_JOB_DEFAULT_MAX_COST_USD: z.coerce.number().positive().max(100_000).default(5),
+  EVAL_RUN_MAX_COST_USD: z.coerce.number().positive().max(100_000).default(5),
+  /** Phase 15.2 — a case output or run diff whose JSON is larger is stored as a truncation marker (scorers see it whole). */
+  EVAL_RESULT_MAX_BYTES: z.coerce.number().int().min(1_024).max(16 * 1024 * 1024).default(262_144),
+  /**
+   * Phase 15.2 — finished eval runs and replay jobs older than this are
+   * deleted by the retention pruner (EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
+   * the newest run of every set is always kept. 0 keeps them forever.
+   */
+  EVAL_RUN_RETENTION_DAYS: z.coerce.number().int().nonnegative().max(36_500).default(90),
 
   // Phase 8.4 — Audit export to long-term sinks (SIEM, archive, etc.)
   // Phase 10.1 — MCP server registry health probes. 0 turns the background loop off.
