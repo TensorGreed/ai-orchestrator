@@ -5,8 +5,13 @@
  * instead of the host's process object.
  */
 import { afterEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   CODE_NODES_DISABLED_MESSAGE,
+  CODE_SANDBOX_INITIALISING,
+  PYTHON_IN_PROCESS_DENIED_MESSAGE,
   resolveCodeSandboxPlan,
   runJavaScriptCode,
   runPythonCode,
@@ -43,7 +48,7 @@ const ESCAPES: Record<string, string> = {
   bufferMissing: "return typeof Buffer"
 };
 
-describe("JavaScript code node sandbox (in-process realm)", () => {
+describe("JavaScript code node sandbox (in-process QuickJS)", () => {
   it("blocks every known escape: no body reaches the host process", async () => {
     for (const [name, body] of Object.entries(ESCAPES)) {
       const [out] = await runJavaScriptCode({ kind: "in_process" }, body, [{ x: 1 }], 1000);
@@ -163,11 +168,71 @@ describe("Python code node environment", () => {
   });
 });
 
+describe("Python on the host: what it can still do, and the switches", () => {
+  it("CODE_SANDBOX_PYTHON_IN_PROCESS=deny refuses host Python but keeps JavaScript", async () => {
+    const plan = { kind: "in_process", python: "deny" } as const;
+    await expect(runPythonCode(plan, { code: "result = 1", items: [{}], mode: "runOnceForAllItems" })).rejects.toThrow(PYTHON_IN_PROCESS_DENIED_MESSAGE);
+    const [out] = await runJavaScriptCode(plan, "return 1 + 1;", [{}], 1000);
+    expect(out!.result).toBe(2);
+  });
+
+  it("documents the exposure the warning names: host Python can read the API's environment through /proc (Linux)", async () => {
+    if (process.platform !== "linux" || !(await isPythonAvailable())) return;
+    // /proc/<ppid>/environ is the API's environment as it was at exec, which is where
+    // SECRET_MASTER_KEY_BASE64 lives when it is set in the environment. PATH proves readability.
+    const res = await runPythonCode({ kind: "in_process" }, {
+      code: "import os\ntry:\n    data = open('/proc/%d/environ' % os.getppid(), 'rb').read()\n    result = {'readable': True, 'hasPath': b'PATH=' in data}\nexcept Exception as e:\n    result = {'readable': False, 'error': repr(e)}",
+      items: [{}],
+      mode: "runOnceForAllItems",
+      timeoutMs: 15000
+    });
+    // If this ever stops being readable, update the startup warning and docs/security/code-execution.md.
+    expect(res.result).toMatchObject({ readable: true, hasPath: true });
+  });
+
+  it("CODE_SANDBOX_PYTHON_UID fails clearly when the API cannot switch users", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0 || !(await isPythonAvailable())) return;
+    await expect(
+      runPythonCode({ kind: "in_process", pythonUid: 65534, pythonGid: 65534 }, { code: "result = 1", items: [{}], mode: "runOnceForAllItems" })
+    ).rejects.toThrow(/CODE_SANDBOX_PYTHON_UID/);
+  });
+
+  it("a timeout also kills processes the code started", async () => {
+    if (process.platform === "win32" || !(await isPythonAvailable())) return;
+    const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "l2m-pgid-")), "pid");
+    await expect(
+      runPythonCode({ kind: "in_process" }, {
+        code: `import subprocess\np = subprocess.Popen(['sleep', '30'])\nopen(${JSON.stringify(marker)}, 'w').write(str(p.pid))\nwhile True:\n    pass`,
+        items: [{}],
+        mode: "runOnceForAllItems",
+        timeoutMs: 1500
+      })
+    ).rejects.toThrow(/timed out/);
+    const pid = Number(fs.readFileSync(marker, "utf8"));
+    let alive = true;
+    for (let i = 0; i < 20 && alive; i += 1) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } catch {
+        alive = false;
+      }
+    }
+    expect(alive).toBe(false);
+    fs.rmSync(path.dirname(marker), { recursive: true, force: true });
+  });
+});
+
 describe("disabled code nodes", () => {
   it("fail with a clear configuration error for both languages", async () => {
     const plan = { kind: "disabled", reason: CODE_NODES_DISABLED_MESSAGE } as const;
     await expect(runJavaScriptCode(plan, "return 1;", [{}], 1000)).rejects.toThrow(CODE_NODES_DISABLED_MESSAGE);
     await expect(runPythonCode(plan, { code: "result = 1", items: [{}], mode: "runOnceForAllItems" })).rejects.toThrow(CODE_NODES_DISABLED_MESSAGE);
+  });
+
+  it("the start-up plan refuses code until the real plan has settled", async () => {
+    await expect(runJavaScriptCode(CODE_SANDBOX_INITIALISING, "return 1;", [{}], 1000)).rejects.toThrow(/still starting up/);
+    await expect(runPythonCode(CODE_SANDBOX_INITIALISING, { code: "result = 1", items: [{}], mode: "runOnceForAllItems" })).rejects.toThrow(/still starting up/);
   });
 });
 
@@ -194,8 +259,30 @@ describe("resolveCodeSandboxPlan", () => {
 
   it("auto falls back in-process, with a warning, when no runtime is installed", async () => {
     const { plan, warning } = await resolveCodeSandboxPlan(base, { locator: locator([]) });
-    expect(plan.kind).toBe("in_process");
+    expect(plan).toMatchObject({ kind: "in_process", python: "allow", memoryMb: 256 });
     expect(warning).toMatch(/run on the API host/);
+  });
+
+  it("the in-process warning says plainly what host Python can do", async () => {
+    const { warning } = await resolveCodeSandboxPlan(base, { locator: locator([]) });
+    expect(warning).toMatch(/NOT sandboxed/);
+    expect(warning).toMatch(/any OS command/);
+    expect(warning).toMatch(/bypass the outbound URL guard/);
+    expect(warning).toMatch(/\/proc\/<pid>\/environ/);
+    expect(warning).toMatch(/SECRET_MASTER_KEY_BASE64/);
+  });
+
+  it("pythonInProcess=deny is carried into the plan and the warning", async () => {
+    const { plan, warning } = await resolveCodeSandboxPlan({ ...base, pythonInProcess: "deny" }, { locator: locator([]) });
+    expect(plan).toMatchObject({ kind: "in_process", python: "deny" });
+    expect(warning).toMatch(/Python code nodes are disabled/);
+    expect(warning).not.toMatch(/NOT sandboxed/);
+  });
+
+  it("a configured Python uid is carried into the plan", async () => {
+    const { plan, warning } = await resolveCodeSandboxPlan({ ...base, pythonUid: 65534, pythonGid: 65534 }, { locator: locator([]) });
+    expect(plan).toMatchObject({ kind: "in_process", pythonUid: 65534, pythonGid: 65534 });
+    expect(warning).toMatch(/as uid 65534/);
   });
 
   it("auto falls back in-process when the images are not present locally", async () => {

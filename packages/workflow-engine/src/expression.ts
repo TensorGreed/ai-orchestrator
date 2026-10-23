@@ -7,8 +7,9 @@
  * functions ($if, $ifEmpty, $jmespath).
  *
  * Security notes:
- *   - Expressions run in an isolated realm with no host objects (see
- *     expression-sandbox.ts) and a time limit; data goes in and out as JSON.
+ *   - Expressions run in a QuickJS WebAssembly sandbox with no host objects
+ *     (see expression-sandbox.ts), a memory limit and a time limit; data goes
+ *     in and out as JSON.
  *   - process / require / global / Function / eval / globalThis are also
  *     shadowed in the evaluation scope.
  *   - $env exposes a curated subset rather than `process.env` directly.
@@ -17,6 +18,8 @@ import {
   JMESPATH_SOURCE,
   evaluateInSandbox,
   serializeExpressionPayload,
+  withExpressionSandbox,
+  type SandboxEvaluate,
   type SandboxExpressionPayload
 } from "./expression-sandbox";
 
@@ -76,24 +79,37 @@ function payloadFor(context: ExpressionContext): SandboxExpressionPayload {
   };
 }
 
-/**
- * An evaluator bound to one context: the context is serialized for the
- * sandbox once, on the first evaluation, and reused for the rest (a template
- * with several expressions).
- */
-export function createExpressionEvaluator(context: ExpressionContext): (expression: string) => unknown {
+function evaluatorFor(context: ExpressionContext, run: (expression: string, serialized: string) => unknown): (expression: string) => unknown {
   let serialized: string | null = null;
   return (expression: string) => {
     const trimmed = expression.trim();
     if (!trimmed) return undefined;
     try {
       serialized ??= serializeExpressionPayload(payloadFor(context));
-      return evaluateInSandbox(trimmed, serialized);
+      return run(trimmed, serialized);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(`Expression evaluation failed for '${trimmed}': ${message}`);
     }
   };
+}
+
+/**
+ * An evaluator bound to one context: the context is serialized for the
+ * sandbox once, on the first evaluation, and reused for the rest. Each call
+ * runs in its own sandbox session.
+ */
+export function createExpressionEvaluator(context: ExpressionContext): (expression: string) => unknown {
+  return evaluatorFor(context, (expression, serialized) => evaluateInSandbox(expression, serialized));
+}
+
+/**
+ * Like `createExpressionEvaluator`, but every evaluation inside `body` shares
+ * one sandbox session (one template's expressions), which saves the session
+ * start-up per expression. The evaluator must not be used after `body` returns.
+ */
+export function withExpressionEvaluator<R>(context: ExpressionContext, body: (evaluate: (expression: string) => unknown) => R): R {
+  return withExpressionSandbox((evaluate: SandboxEvaluate) => body(evaluatorFor(context, (expression, serialized) => evaluate("expr", expression, serialized))));
 }
 
 export function evaluateExpression(expression: string, context: ExpressionContext): unknown {
@@ -116,15 +132,20 @@ function stringifyResult(value: unknown): string {
 
 export function renderExpressionTemplate(template: string, context: ExpressionContext): string {
   if (typeof template !== "string" || !template.includes("{{")) return template;
-  const evaluate = createExpressionEvaluator(context);
-  return template.replace(TEMPLATE_REGEX, (_match, expr: string) => {
-    try {
-      const result = evaluate(expr);
-      return stringifyResult(result);
-    } catch {
-      return "";
-    }
-  });
+  const render = (evaluate: (expression: string) => unknown) =>
+    template.replace(TEMPLATE_REGEX, (_match, expr: string) => {
+      try {
+        return stringifyResult(evaluate(expr));
+      } catch {
+        return "";
+      }
+    });
+  try {
+    return withExpressionEvaluator(context, render);
+  } catch {
+    // The sandbox could not start a session (restarting): fall back to one session per expression.
+    return render(createExpressionEvaluator(context));
+  }
 }
 
 /**

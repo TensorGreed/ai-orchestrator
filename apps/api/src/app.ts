@@ -148,7 +148,7 @@ import {
   resolveCodeSandboxPlan,
   describeCodeSandboxPlan,
   configureExpressionSandbox,
-  expressionRealmIsShared,
+  expressionSandboxLimits,
   nodeDnsResolver,
   type CodeSandboxPlan,
   type OutboundGuardConfig
@@ -1299,7 +1299,7 @@ export function createApp(
       codeSandboxPlan = plan;
       const described = describeCodeSandboxPlan(plan);
       if (warning) app.log.warn({ codeSandboxMode: described.mode }, warning);
-      else app.log.info({ codeSandbox: described.mode, detail: described.detail, expressionRealm: expressionRealmIsShared() ? "shared" : "per-eval" }, "Code node sandbox ready");
+      else app.log.info({ codeSandbox: described.mode, detail: described.detail, expressions: expressionSandboxLimits() }, "Code node sandbox ready");
     })
     .catch((error) => {
       // Keep the safe in-process default if the check throws.

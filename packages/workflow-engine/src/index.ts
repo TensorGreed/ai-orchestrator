@@ -22,5 +22,5 @@ export * from "./guard-runtime";
 export * from "./replay-plan";
 export { executeGuardNodeStep, type GuardNodeSummary } from "./guard-node";
 export * from "./code-sandbox";
-export { configureExpressionSandbox, expressionRealmIsShared } from "./expression-sandbox";
+export { configureExpressionSandbox, expressionSandboxLimits } from "./expression-sandbox";
 export * from "./outbound-url-guard";

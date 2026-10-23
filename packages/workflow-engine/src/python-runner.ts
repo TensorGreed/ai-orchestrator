@@ -31,6 +31,9 @@ export interface PythonExecutionInput {
   cwd?: string;
   /** Run with `python -I` (isolated: ignores PYTHON* variables and the user site directory). Default true. */
   isolated?: boolean;
+  /** Run the child as this uid / gid (the API needs CAP_SETUID / CAP_SETGID, e.g. root in a container). */
+  uid?: number;
+  gid?: number;
 }
 
 export interface PythonExecutionResult {
@@ -90,7 +93,16 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
   return new Promise<PythonExecutionResult>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(pythonBin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: input.cwd, windowsHide: true });
+      child = spawn(pythonBin, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+        cwd: input.cwd,
+        windowsHide: true,
+        // Its own process group, so a timeout also kills what the code started (unless it calls setsid).
+        detached: process.platform !== "win32",
+        ...(input.uid !== undefined ? { uid: input.uid } : {}),
+        ...(input.gid !== undefined ? { gid: input.gid } : {})
+      });
     } catch (err) {
       reject(
         new WorkflowError(
@@ -109,7 +121,12 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      try {
+        if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      }
       fn();
     };
     const timer = setTimeout(() => {

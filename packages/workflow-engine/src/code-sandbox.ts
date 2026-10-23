@@ -9,37 +9,52 @@
  *               memory, CPU and process limits, no host mounts and no
  *               environment. Needs docker or podman and the two images.
  *   in_process  the fallback when no container runtime (or image) is there.
- *               JavaScript runs in an isolated V8 realm in the API process
- *               with no host objects (the same hardening as the expression
- *               sandbox), its result passed out as JSON. Python runs as a
+ *               JavaScript runs in QuickJS compiled to WebAssembly inside the
+ *               API process (see quickjs-sandbox.ts): no host objects, a
+ *               memory limit (CODE_SANDBOX_MEMORY_MB), a stack limit and a
+ *               time limit, its result passed out as JSON. Python runs as a
  *               host subprocess in isolated mode (`-I`) with an explicit,
- *               minimal environment (no API secrets), a scratch working
- *               directory and a hard kill on timeout. It can still read files
- *               the API user can read, which is why the API warns at startup.
- *   disabled    CODE_NODES_ENABLED=false: every code node fails with a clear
- *               configuration error.
+ *               minimal environment, a scratch working directory and a hard
+ *               kill on timeout -- but that is NOT a sandbox: it can run any
+ *               command, open network connections the outbound URL guard
+ *               never sees, and read whatever the API user can read. The API
+ *               warns at startup, and CODE_SANDBOX_PYTHON_IN_PROCESS=deny
+ *               turns it off.
+ *   disabled    CODE_NODES_ENABLED=false (or the plan is still being
+ *               resolved): every code node fails with a clear error.
  *
- * Both JavaScript paths use the same in-realm harness, so code behaves the
- * same in either: `input` holds the node's input, `console.*` is collected
- * into `code_logs`, `return` sets the result (async code may `await`), and
- * there is no `require`, `process`, `fetch`, timers or Buffer.
+ * Both JavaScript paths use the same harness, so code behaves the same in
+ * either: `input` holds the node's input, `console.*` is collected into
+ * `code_logs`, `return` sets the result (async code may `await`), and there
+ * is no `require`, `process`, `fetch`, timers or Buffer. The container runs
+ * it on V8 (Node), the in-process path on QuickJS, which has no `Intl`.
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import vm from "node:vm";
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 import { buildContainerRunArgs, currentSandboxOwner, detectContainerRuntime, type RuntimeLocator } from "@ai-orchestrator/mcp-sdk";
-import { REALM_HARDEN_SOURCE, createBareContext, toSandboxJson } from "./expression-sandbox";
+import { toSandboxJson } from "./expression-sandbox";
+import { GuestError, QUICKJS_STACK_BYTES, SandboxFailureError, SandboxTimeoutError, withQuickJs } from "./quickjs-sandbox";
 import { PY_RUNNER, executePythonCodeNode, parsePythonRunnerOutput, type PythonExecutionInput, type PythonExecutionResult } from "./python-runner";
 
 export type CodeSandboxMode = "auto" | "container" | "in_process";
 
 export type CodeSandboxPlan =
   | { kind: "disabled"; reason: string }
-  | { kind: "in_process"; reason?: string }
+  | {
+      kind: "in_process";
+      reason?: string;
+      /** Heap limit for one in-process JavaScript run. Default 256. */
+      memoryMb?: number;
+      /** Whether Python code nodes may run as host subprocesses. Default "allow". */
+      python?: "allow" | "deny";
+      /** Run host Python as this uid/gid (needs the API to hold CAP_SETUID/CAP_SETGID). */
+      pythonUid?: number;
+      pythonGid?: number;
+    }
   | {
       kind: "container";
       runtime: "docker" | "podman";
@@ -57,6 +72,15 @@ export type CodeSandboxPlan =
 
 export const IN_PROCESS_CODE_SANDBOX: CodeSandboxPlan = { kind: "in_process" };
 
+/** The plan in force while the real one is being resolved at startup: nothing runs until it settles. */
+export const CODE_SANDBOX_INITIALISING: CodeSandboxPlan = {
+  kind: "disabled",
+  reason: "The code node sandbox is still starting up; try again in a moment."
+};
+
+export const PYTHON_IN_PROCESS_DENIED_MESSAGE =
+  "Python code nodes are disabled on this deployment: no container sandbox is available and CODE_SANDBOX_PYTHON_IN_PROCESS=deny. Ask an admin to install docker or podman with the Python image, or to allow in-process Python.";
+
 export const CODE_NODES_DISABLED_MESSAGE = "Code nodes are disabled on this deployment (CODE_NODES_ENABLED=false). Ask an admin to enable them.";
 
 export function codeNodesDisabledError(plan: Extract<CodeSandboxPlan, { kind: "disabled" }>): WorkflowError {
@@ -69,12 +93,13 @@ export interface CodeRunOutput {
 }
 
 /**
- * The in-realm harness: returns a setter for (code, payload JSON), defines
- * `__l2mStart` (parse the payload into `input`, compile the code as an async
- * function body in the realm, run it) and `__l2mResult` (the outcome as a JSON
- * string once the code has settled, undefined before). The code is compiled
- * by the realm's own AsyncFunction, so it cannot break out of a wrapper, and
- * every error is caught and described inside the realm.
+ * The harness, for QuickJS (in process) and V8 (the container): defines
+ * `__l2mSet(code, payload JSON)`, `__l2mStart()` (parse the payload into
+ * `input`, compile the code as an async function body, run it) and
+ * `__l2mResult()` (the outcome as a JSON string once the code has settled,
+ * undefined before). The code is compiled by the sandbox's own
+ * AsyncFunction, so it cannot break out of a wrapper, and every error is
+ * caught and described inside the sandbox.
  */
 export const CODE_PRELUDE_SOURCE = String.raw`(() => {
   "use strict";
@@ -131,12 +156,13 @@ export const CODE_PRELUDE_SOURCE = String.raw`(() => {
     }
   });
   Object.defineProperty(globalThis, "__l2mResult", { value: () => out });
-  return (nextCode, nextPayload) => { code = nextCode; payload = nextPayload; };
-})()`;
+  Object.defineProperty(globalThis, "__l2mSet", { value: (nextCode, nextPayload) => { code = nextCode; payload = nextPayload; } });
+})();`;
 
 const NEVER_SETTLED = "Code node did not finish: it waits on a promise that never settles (timers and network are not available in the sandbox).";
 
-type HarnessSetter = (code: string, payload: string) => void;
+/** Default heap limit for one in-process JavaScript run (CODE_SANDBOX_MEMORY_MB). */
+export const DEFAULT_IN_PROCESS_MEMORY_MB = 256;
 
 function parseHarnessOutput(raw: unknown): CodeRunOutput {
   if (typeof raw !== "string") throw new Error(`Code node sandbox error: ${NEVER_SETTLED}`);
@@ -151,21 +177,45 @@ function parseHarnessOutput(raw: unknown): CodeRunOutput {
   throw new Error(`Code node sandbox error: ${typeof parsed.error === "string" ? parsed.error : "Code node execution failed."}`);
 }
 
-/** One JavaScript run in a fresh, hardened realm of this process. */
-export function runJavaScriptInProcess(code: string, input: unknown, timeoutMs: number): CodeRunOutput {
-  const context = createBareContext();
-  vm.runInContext(REALM_HARDEN_SOURCE, context);
-  const setJob = vm.runInContext(CODE_PRELUDE_SOURCE, context) as HarnessSetter;
-  setJob(code, toSandboxJson(input));
+/** One JavaScript run in a fresh QuickJS runtime and context of this process. */
+export function runJavaScriptInProcess(code: string, input: unknown, timeoutMs: number, memoryMb: number = DEFAULT_IN_PROCESS_MEMORY_MB): CodeRunOutput {
+  let raw: string | undefined;
   try {
-    vm.runInContext("__l2mStart()", context, { timeout: timeoutMs, filename: "code-node.js" });
+    raw = withQuickJs({ memoryBytes: Math.floor(memoryMb * 1024 * 1024), stackBytes: QUICKJS_STACK_BYTES, timeoutMs }, (session) => {
+      session.evaluateTrusted(CODE_PRELUDE_SOURCE, "l2m-code-prelude.js");
+      session.callGlobal("__l2mSet", [code, toSandboxJson(input)]);
+      session.callGlobal("__l2mStart", []);
+      let result = session.callGlobal("__l2mResult", []);
+      session.drainJobs(() => {
+        result = session.callGlobal("__l2mResult", []);
+        return result !== undefined;
+      });
+      const final = result ?? session.callGlobal("__l2mResult", []);
+      // The time limit interrupting an awaited job reaches the harness as a rejection named "interrupted".
+      if (final !== undefined && session.remainingMs() <= 0 && (JSON.parse(final) as { error?: unknown }).error === "interrupted") {
+        throw new SandboxTimeoutError(timeoutMs);
+      }
+      return final;
+    });
   } catch (error) {
-    // Only the host's own timeout error can reach here; the harness catches everything the code throws.
-    const message = error instanceof Error ? error.message : "Code node execution failed.";
+    // The harness catches everything the code throws; only a timeout or a sandbox failure reaches here.
+    const message = error instanceof SandboxTimeoutError || error instanceof GuestError || error instanceof SandboxFailureError ? error.message : "Code node execution failed.";
     throw new Error(`Code node sandbox error: ${message}`);
   }
-  return parseHarnessOutput(vm.runInContext("__l2mResult()", context, { timeout: 100 }));
+  return parseHarnessOutput(raw);
 }
+
+/** Hardening for the V8 realm the container runner builds (the container is the boundary; this is defence in depth). */
+export const REALM_HARDEN_SOURCE = String.raw`(() => {
+  "use strict";
+  Object.defineProperty(Error, "prepareStackTrace", { value: undefined, writable: false, configurable: false, enumerable: false });
+  for (const name of ["WebAssembly", "SharedArrayBuffer", "Atomics", "WeakRef", "FinalizationRegistry"]) {
+    try { delete globalThis[name]; } catch (error) { globalThis[name] = undefined; }
+  }
+  for (const name of ["$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "input", "$_", "lastMatch", "$&", "lastParen", "$+", "leftContext", "$\u0060", "rightContext", "$'"]) {
+    try { delete RegExp[name]; } catch (error) { /* not configurable on this runtime */ }
+  }
+})();`;
 
 /** The program a container runs for JavaScript: the same harness, fed from stdin. */
 export const CONTAINER_JS_RUNNER = String.raw`"use strict";
@@ -177,7 +227,8 @@ const runOne = (code, payload, timeout) => {
   const options = { microtaskMode: "afterEvaluate", codeGeneration: { strings: true, wasm: false } };
   const context = dont !== undefined ? vm.createContext(dont, options) : vm.createContext(Object.create(null), options);
   vm.runInContext(HARDEN, context);
-  vm.runInContext(PRELUDE, context)(code, payload);
+  vm.runInContext(PRELUDE, context);
+  vm.runInContext("__l2mSet", context)(code, payload);
   try {
     vm.runInContext("__l2mStart()", context, { timeout, filename: "code-node.js" });
   } catch (error) {
@@ -301,7 +352,7 @@ function containerFailure(plan: Extract<CodeSandboxPlan, { kind: "container" }>,
  */
 export async function runJavaScriptCode(plan: CodeSandboxPlan, code: string, inputs: unknown[], timeoutMs: number): Promise<CodeRunOutput[]> {
   if (plan.kind === "disabled") throw codeNodesDisabledError(plan);
-  if (plan.kind === "in_process") return inputs.map((input) => runJavaScriptInProcess(code, input, timeoutMs));
+  if (plan.kind === "in_process") return inputs.map((input) => runJavaScriptInProcess(code, input, timeoutMs, plan.memoryMb));
   const job = JSON.stringify({ code, timeoutMs, payloads: inputs.map((input) => toSandboxJson(input)) });
   const budgetMs = plan.startupMs + timeoutMs * Math.max(1, inputs.length);
   const run = await runContainer(plan, plan.jsImage, "node", ["-e", CONTAINER_JS_RUNNER], job, budgetMs);
@@ -340,9 +391,29 @@ export async function runPythonCode(plan: CodeSandboxPlan, input: PythonExecutio
   if (plan.kind === "disabled") throw codeNodesDisabledError(plan);
   const timeoutMs = input.timeoutMs ?? 15000;
   if (plan.kind === "in_process") {
+    if (plan.python === "deny") throw new WorkflowError(PYTHON_IN_PROCESS_DENIED_MESSAGE, ErrorCategory.CONFIGURATION, false);
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-py-"));
     try {
-      return await executePythonCodeNode({ ...input, timeoutMs, env: pythonHostEnv(workdir), cwd: workdir, isolated: true });
+      if (plan.pythonUid !== undefined) {
+        try {
+          fs.chownSync(workdir, plan.pythonUid, plan.pythonGid ?? -1);
+        } catch (error) {
+          throw new WorkflowError(
+            `CODE_SANDBOX_PYTHON_UID is set but the API cannot hand its scratch directory to uid ${plan.pythonUid} (${(error as Error).message}); the API needs CAP_CHOWN and CAP_SETUID.`,
+            ErrorCategory.CONFIGURATION,
+            false
+          );
+        }
+      }
+      return await executePythonCodeNode({
+        ...input,
+        timeoutMs,
+        env: pythonHostEnv(workdir),
+        cwd: workdir,
+        isolated: true,
+        uid: plan.pythonUid,
+        gid: plan.pythonGid
+      });
     } finally {
       fs.rmSync(workdir, { recursive: true, force: true });
     }
@@ -365,6 +436,11 @@ export interface CodeSandboxSettings {
   pidsLimit: number;
   startupMs: number;
   instanceLabel: string;
+  /** Whether Python may run as a host subprocess when there is no container plan. Default "allow". */
+  pythonInProcess?: "allow" | "deny";
+  /** Optional uid / gid for host Python subprocesses. */
+  pythonUid?: number;
+  pythonGid?: number;
 }
 
 /** Checks whether an image is present locally (nothing is pulled). Seam for tests. */
@@ -387,6 +463,16 @@ const defaultImagePresent: ImagePresenceCheck = (runtimePath, image) =>
     });
   });
 
+/** The startup warning for an in-process plan: what each language can and cannot do on the host. */
+export function hostWarning(reason: string, python: "allow" | "deny", pythonUid?: number): string {
+  const js = `JavaScript code nodes run in a QuickJS WebAssembly sandbox in the API process (no host access, memory and time limits).`;
+  const py =
+    python === "deny"
+      ? "Python code nodes are disabled (CODE_SANDBOX_PYTHON_IN_PROCESS=deny)."
+      : `Python code nodes run as host subprocesses${pythonUid !== undefined ? ` as uid ${pythonUid}` : " as the API user"} and are NOT sandboxed: they can run any OS command, open network connections that bypass the outbound URL guard, and read any file that user can read (the SQLite database, .env)${pythonUid !== undefined ? "" : ", including the API's own environment through /proc/<pid>/environ, which holds SECRET_MASTER_KEY_BASE64"}. Anyone who can author a workflow can do this.`;
+  return `Code nodes run on the API host, not in a container: ${reason} ${js} ${py} Install docker or podman with the code images (CODE_SANDBOX_MODE=container), set CODE_SANDBOX_PYTHON_IN_PROCESS=deny, or CODE_NODES_ENABLED=false.`;
+}
+
 /**
  * Picks the plan for this deployment, with a warning when code runs on the
  * host. `auto` uses containers only when a runtime is installed and both
@@ -399,9 +485,17 @@ export async function resolveCodeSandboxPlan(
   deps: { locator?: RuntimeLocator; imagePresent?: ImagePresenceCheck } = {}
 ): Promise<{ plan: CodeSandboxPlan; warning: string | null }> {
   if (!settings.enabled) return { plan: { kind: "disabled", reason: CODE_NODES_DISABLED_MESSAGE }, warning: null };
+  const python = settings.pythonInProcess ?? "allow";
   const onHost = (reason: string) => ({
-    plan: { kind: "in_process", reason } as CodeSandboxPlan,
-    warning: `Code nodes run on the API host, not in a container: ${reason} JavaScript runs in an isolated realm without host access; Python runs as a subprocess with a minimal environment but can read files the API user can read. Set CODE_SANDBOX_MODE=container with docker or podman installed, or CODE_NODES_ENABLED=false.`
+    plan: {
+      kind: "in_process",
+      reason,
+      memoryMb: settings.memoryMb,
+      python,
+      ...(settings.pythonUid !== undefined ? { pythonUid: settings.pythonUid } : {}),
+      ...(settings.pythonGid !== undefined ? { pythonGid: settings.pythonGid } : {})
+    } as CodeSandboxPlan,
+    warning: hostWarning(reason, python, settings.pythonUid)
   });
   if (settings.mode === "in_process") return onHost("CODE_SANDBOX_MODE=in_process.");
   const found = detectContainerRuntime(settings.runtime, deps.locator);
