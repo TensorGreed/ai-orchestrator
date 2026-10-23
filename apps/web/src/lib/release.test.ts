@@ -31,6 +31,17 @@ describe("release helpers", () => {
     expect(users.approvers).toMatchObject({ approverUsers: ["a@example.com", "b@example.com"], approverRoles: [], allowSelfApproval: false });
   });
 
+  it("keeps approvers with no roles or users (anyone else who may publish) instead of dropping them (N10)", () => {
+    const anyone = { approverRoles: [], approverUsers: [], allowSelfApproval: false, timeoutMinutes: 60 };
+    const gate = { ...defaultReleaseGate("wf-1"), enabled: true, datasetIds: ["set-1"], requireApproval: true, approvers: anyone };
+    const form = gateFormFrom(gate);
+    expect(form.anyPublisherApproves).toBe(true);
+    const { settings, errors } = gateSettingsFromForm(form, gate);
+    expect(errors).toEqual([]);
+    expect(settings.approvers).toEqual(anyone);
+    expect(gateSettingsFromForm({ ...form, requireApproval: false, anyPublisherApproves: false }, gate).settings.approvers).toBeNull();
+  });
+
   it("does not change the candidate options by naming the default MCP mode, and keeps a chosen one", () => {
     const gate = { ...defaultReleaseGate("wf-1"), enabled: true, datasetIds: ["set-1"], candidateOptions: { repeats: 3 } };
     expect(gateSettingsFromForm(gateFormFrom(gate), gate).settings.candidateOptions).toEqual({ repeats: 3 });

@@ -230,6 +230,15 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
               disabled={locked}
               onChange={(event) => update({ approverUsers: event.target.value })}
             />
+            <label className="guard-check">
+              <input
+                type="checkbox"
+                checked={form.anyPublisherApproves}
+                disabled={locked}
+                onChange={(event) => update({ anyPublisherApproves: event.target.checked })}
+              />
+              <span>With no roles or emails named: anyone else who may publish this workflow approves</span>
+            </label>
             <div className="cfg-help">Approvers also need permission to publish this workflow. A blocked publish can be sent to them with a reason.</div>
           </div>
           <label className="guard-check">

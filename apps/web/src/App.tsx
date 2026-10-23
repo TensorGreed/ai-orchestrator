@@ -93,6 +93,7 @@ import {
   type TraceStreamHandlers
 } from "./lib/run-trace";
 import { computeAttachmentSlots, orbitPositions } from "./lib/stages";
+import { newNodeConfig } from "./lib/trigger-paths";
 import {
   deleteTabWipWorkflow,
   preferTabWip,
@@ -4162,7 +4163,7 @@ function StudioApp() {
         data: {
           label: definition.label,
           nodeType: definition.type as EditorNodeData["nodeType"],
-          config: definition.sampleConfig ?? {}
+          config: newNodeConfig(definition.type, definition.sampleConfig)
         }
       };
 

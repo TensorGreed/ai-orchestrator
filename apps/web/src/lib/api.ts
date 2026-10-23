@@ -1794,6 +1794,7 @@ export interface GitSyncResult {
   error?: string;
   workflowsExported?: number;
   workflowsImported?: number;
+  workflowsRefused?: Array<{ workflowId: string; file: string; reason: string }>;
   variablesSynced?: number;
 }
 

@@ -81,6 +81,8 @@ export interface GateForm {
   requireApproval: boolean;
   approverRoles: string[];
   approverUsers: string;
+  /** Approvers with no roles or users named: anyone else who may publish the workflow approves. */
+  anyPublisherApproves: boolean;
   allowSelfApproval: boolean;
 }
 
@@ -119,6 +121,7 @@ export function gateFormFrom(gate: ReleaseGateView): GateForm {
     requireApproval: gate.requireApproval,
     approverRoles: gate.approvers ? [...gate.approvers.approverRoles] : [],
     approverUsers: gate.approvers ? gate.approvers.approverUsers.join(", ") : "",
+    anyPublisherApproves: Boolean(gate.approvers && gate.approvers.approverRoles.length === 0 && gate.approvers.approverUsers.length === 0),
     allowSelfApproval: gate.approvers?.allowSelfApproval ?? false
   };
 }
@@ -144,7 +147,8 @@ export function gateSettingsFromForm(form: GateForm, previous: ReleaseGateView):
     .split(/[\s,]+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
-  const hasApprovers = form.approverRoles.length > 0 || users.length > 0;
+  const named = form.approverRoles.length > 0 || users.length > 0;
+  const hasApprovers = named || form.anyPublisherApproves;
   if (form.requireApproval && !hasApprovers) errors.push("Requiring approval needs at least one approver role or user");
   const policy: Record<string, unknown> = {
     minPassRate: minPassRatePct === undefined ? previous.policy.minPassRate : minPassRatePct / 100,

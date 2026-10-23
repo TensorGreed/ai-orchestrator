@@ -11,25 +11,40 @@ Nothing changes for a workflow that was never published: every entry point runs 
 | Production webhooks (`/webhook/:path`, `POST /api/webhooks/execute`, `/stream`) | the published version |
 | Schedules, app triggers (Slack, GitHub, Stripe, Telegram, Discord, polling triggers) | the published version |
 | Chat (`/api/chat/:workflowId`), forms, the MCP Server Trigger, the MCP gateway's workflow tools | the published version |
-| `POST /api/workflows/:id/execute` and `/execute/stream` called with an API key (`Authorization: Bearer`) | the published version |
+| `POST /api/workflows/:id/execute` and `/execute/stream` called with an API key (`Authorization: Bearer`) | the published version; the draft with `?channel=draft` when the key's user has `workflow:write` on the workflow |
 | The execution queue | the published version when the job runs |
 | A sub-workflow called from any of the above | the child's published version (its draft when it was never published) |
-| A retry | the version the failed run ran: a production run's published version (refused with `409` if that version was pruned), a draft run's current draft |
+| A retry | the failed run's channel: a production run is retried as production runs now (the version published today, never a superseded or rolled-back one), a draft run on the current draft |
 | The editor (**Run**, `/execute` with a signed-in session), `/webhook-test/:path`, the manual trigger, eval runs, replays | the draft, or the candidate a replay names |
 
-Scripts and CI that call `/execute` with an API key therefore get production behaviour once the workflow is published; call `/webhook-test/` or run from the editor to exercise the draft.
+Scripts and CI that call `/execute` with an API key therefore get production behaviour once the workflow is published. To test a change you just saved, add `?channel=draft` (needs `workflow:write`), call `/webhook-test/`, or run from the editor.
 
 A run paused on an approval resumes on the version it started with, even when another version is published meanwhile. A production webhook routes by the published version's path: a path you changed in the draft answers only on `/webhook-test/` until you publish. Schedules and app triggers re-register from the published version when you publish or roll back.
 
-If the published version can no longer be loaded, production refuses the run instead of falling back to the draft. The same holds when a gate is on and nothing is published: the pill shows **production off**, and production answers as if the workflow had no such route until a version passes, is approved, or an admin overrides.
+If the published version can no longer be loaded, production refuses the run instead of falling back to the draft. The same holds when a gate is on and nothing is published: the pill shows **production off**, and production refuses runs (`409`, "No published version of this workflow can be loaded") until a version passes, is approved, or an admin overrides.
 
-### Stopping production
+### Deactivating a workflow
 
-To stop production traffic, **deactivate** the workflow (`POST /api/workflows/:id/deactivate`): every production entry point then refuses it, whatever version is published, while the editor and `/webhook-test/` keep running the draft. **Activate** brings the published version back. To change what production does instead, publish (or roll back to) another version. Turning a trigger off in the draft does not touch production until you publish it.
+What **deactivate** (`POST /api/workflows/:id/deactivate`) does depends on the gate:
 
-### Production paths are unique
+- **Without a release gate** it works as it always did: it unregisters the workflow's schedules and app or polling triggers. Production webhooks, chat, forms, the MCP Server Trigger, the MCP gateway, API-key `/execute`, queued jobs and sub-workflow calls keep running, whether or not a version is published.
+- **With a release gate on** it is the kill switch: every production entry point refuses the workflow, whatever version is published. Webhooks, forms, the MCP Server Trigger, chat, app webhooks and API-key `/execute` answer `409` with "This workflow is deactivated, so production runs are refused." Queued jobs fail with that message, a production run that calls it as a sub-workflow fails with it, a production failure that names it as the error workflow skips it (the log says why), and the MCP gateway stops listing its tool. The editor and `/webhook-test/` keep running the draft. **Activate** brings the published version back.
 
-A webhook path, form path or MCP Server Trigger path that a published or gated workflow answers on in production cannot be claimed by another workflow: saving, importing or duplicating a workflow that uses it answers `409` naming the workflow that owns it (or "another workflow" when you cannot read it). Webhook paths compare without case and regardless of method. Two workflows that already shared a path before this release can still be saved, but neither can be published, nor have a gate turned on, until one of them changes it. Git sync imports are not checked.
+The SQLite and Postgres code paths behave the same for workflows without a gate; gates exist only on SQLite in this release. To change what production does instead, publish (or roll back to) another version. Turning a trigger off in the draft does not touch production until you publish it.
+
+### Production paths belong to what serves production
+
+A webhook path, form path or MCP Server Trigger path is claimed by what actually serves production on it:
+
+- a gated workflow claims the paths of its **published version**; its draft claims nothing, so you can move a gated workflow's draft to any path and save it;
+- an active workflow without a gate claims the paths of its published version when it has one, otherwise those of its saved workflow;
+- a deactivated workflow without a gate claims nothing.
+
+A save (create, update, import, external import, restore, move, activate) is refused with `409` only when it would put an active ungated workflow on a path another workflow claims. The message names that workflow when you can read it, and says "another workflow" otherwise. A path a workflow already claimed before the save never blocks it, so two workflows that shared a path before this release can both still be saved. Publishing, turning a gate on (its baseline), rollback and approving a release are refused while the version's paths are claimed by another workflow; an admin override does not skip this. Webhook paths compare without case and regardless of method, form and MCP trigger paths without case.
+
+**Duplicate**, **use a template** and **import a shared link** never answer `409` for a path: each trigger path another workflow already uses gets `-copy`, then `-copy-2`, `-copy-3` and so on. New webhook, form and MCP trigger nodes added in the editor get a default path with a short random suffix; saved workflows keep their paths.
+
+**Git pull** refuses only a workflow that would take a claimed path. The result lists it under `workflowsRefused` with the reason, and Settings shows it. The other workflows import.
 
 ## The version pill
 
@@ -58,7 +73,7 @@ Set it up under **Evaluations → Release gates**, or from **Set up a gate** in 
 - **Jobs that say they are not eligible**: when a replay job records `releaseEligible`, the gate requires it to be `true` and shows the job's own reasons otherwise. A job without the field is judged by the checks below.
 - **Missing evidence**: a case whose stored diff is missing or truncated counts as an error when the policy has a cost, latency or guard-block limit.
 - **Only plain jobs count**: guard-profile, MCP-mode, live-read and model overrides do not change a job's workflow hash, so a job that ran with any setting the gate's own candidate options do not name (an override, `models` other than `live`, `ignorePaths`, `numberTolerance`, repeats, aggregation or comparison other than the gate's, or a field this release does not know) is not proof for publishing. The reasons name the setting. The budget (`maxCostUsd`) does not count.
-- **Approvers**: roles and users, and whether the requester may approve their own release (off by default). Approvers must also be allowed to publish the workflow. With **Every publish needs an approver**, a passing publish becomes a release request too.
+- **Approvers**: roles and users, and whether the requester may approve their own release (off by default). With no roles or users named, **anyone else who may publish this workflow** approves. Approvers must also be allowed to publish the workflow. With **Every publish needs an approver**, a passing publish becomes a release request too.
 
 The job is judged when you publish, under the policy then: loosening the policy lets an older job pass, and tightening it blocks a job that passed before. Every completed job for the version's hash is considered, newest first. A job completed with `compare: baseline_rerun` judges regressions against the baseline's own result, so old golden runs are not held against it; it is always accepted, whatever the gate's `compare`.
 
@@ -71,7 +86,7 @@ An admin can **enforce** a gate. Then only an admin can:
 - turn it off, lift enforcement or loosen the policy (lower the pass rate, allow more regressions, raise or remove a limit, remove a golden set, accept older golden runs);
 - change the approvers in any way, or self-approval;
 - change the candidate options (scorers, MCP mode, repeats, aggregation, comparison, budget, timeout);
-- remove cases from, or delete, one of its golden sets, or add a case that carries its own scorers (adding a plain case is allowed, and makes earlier jobs stale);
+- remove cases from, or delete, one of its golden sets, add a case that carries its own scorers, or delete a golden run one of its cases uses (adding a plain case is allowed, and makes earlier jobs stale);
 - roll back;
 - delete the workflow.
 
@@ -79,7 +94,7 @@ A builder can still tighten the policy and add golden sets. A refused change ans
 
 ### Deleting a workflow
 
-A workflow's gate and release history outlive it. A workflow created or imported again under the same id inherits the gate; its old releases do not make it runnable, since rollback only returns to a version whose hash matches what was released. With the gate on and nothing loadable published, production refuses runs until a new version is published through the gate. Pending release requests for a deleted workflow are canceled.
+A workflow's gate and release history outlive it. Ids the server picks (duplicate, external import) skip an id that still has a gate or releases. A workflow created or imported again under the same id on purpose inherits the gate; its old releases do not make it runnable, since rollback only returns to a version whose hash matches what was released. With the gate on and nothing loadable published, production refuses runs until a new version is published through the gate. Pending release requests for a deleted workflow are canceled.
 
 ## Release requests
 
@@ -95,7 +110,7 @@ A published or released version is pinned: version retention never prunes it. Th
 
 ## Permissions
 
-Publishing, rollback and deciding a release request need `workflow:publish` on the workflow's project. Admins, builders, project admins and editors have it; operators and viewers do not, and a custom role can grant it. Changing the gate needs `workflow:write`. A workflow the user cannot read answers `404` on every release route, and one they can read but not change `403`. `PROJECT_ISOLATION=strict` applies as everywhere else.
+Publishing, rollback and deciding a release request need `workflow:publish` on the workflow's project. Admins, builders, project admins and editors have it; operators and viewers do not, and a custom role can grant it. Changing the gate needs `workflow:write`; turning it on when nothing is published also needs `workflow:publish`, since that publishes the baseline in your name. A workflow the user cannot read answers `404` on every release route, and one they can read but not change `403`. `PROJECT_ISOLATION=strict` applies as everywhere else.
 
 ## API
 
