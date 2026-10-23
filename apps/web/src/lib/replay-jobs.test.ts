@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReplayJobRequest, candidateLabel, caseStatusLabel, emptyReplayJobForm, formatUsd, jobCounts, parseIgnorePaths, shortHash, statusTone, type ReplayJobForm } from "./replay-jobs";
+import { buildReplayJobRequest, candidateLabel, caseStatusLabel, emptyReplayJobForm, formatSpend, formatUsd, jobCounts, jobWarnings, parseIgnorePaths, shortHash, statusTone, type ReplayJobForm } from "./replay-jobs";
 
 function form(patch: (draft: ReplayJobForm) => void = () => undefined): ReplayJobForm {
   const value = emptyReplayJobForm();
@@ -107,6 +107,18 @@ describe("labels", () => {
     const progress = { total: 4, done: 2, running: 1, pass: 1, fail: 1, error: 0, skipped: 0, spentUsd: 0.2, updatedAt: "" };
     expect(jobCounts({ summary: null, progress })).toMatchObject({ total: 4, done: 2, running: 1, pass: 1, fail: 1, spentUsd: 0.2 });
     const summary = { total: 4, pass: 3, fail: 1, error: 0, skipped: 0, passRate: 0.75, totalTokenInput: 0, totalTokenOutput: 0, totalTokenTotal: 0, totalDurationMs: 0, avgDurationMs: 0, costUsd: 0.3 };
-    expect(jobCounts({ summary, progress })).toMatchObject({ total: 4, done: 4, running: 0, pass: 3, spentUsd: 0.3 });
+    expect(jobCounts({ summary, progress })).toMatchObject({ total: 4, done: 4, running: 0, pass: 3, spentUsd: 0.3, costUnknown: false });
+  });
+
+  it("marks a spend with unpriced calls as a lower bound and surfaces the warning", () => {
+    const progress = { total: 2, done: 1, running: 1, pass: 1, fail: 0, error: 0, skipped: 0, spentUsd: 0.2, costUnknown: true, updatedAt: "" };
+    const live = jobCounts({ summary: null, progress });
+    expect(live.costUnknown).toBe(true);
+    expect(formatSpend(live)).toBe(`${formatUsd(0.2)}+`);
+    expect(jobWarnings({ summary: null, progress })[0]).toContain("no price");
+    const summary = { total: 2, pass: 2, fail: 0, error: 0, passRate: 1, totalTokenInput: 0, totalTokenOutput: 0, totalTokenTotal: 0, totalDurationMs: 0, avgDurationMs: 0, costUsd: 0.3, costUnknown: true, warnings: ["W"] };
+    expect(jobWarnings({ summary, progress })).toEqual(["W"]);
+    expect(formatSpend(jobCounts({ summary, progress: null }))).toBe(`${formatUsd(0.3)}+`);
+    expect(jobWarnings({ summary: { ...summary, warnings: undefined }, progress: null })).toEqual([]);
   });
 });

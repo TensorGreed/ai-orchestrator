@@ -227,6 +227,20 @@ export interface JobCounts {
   done: number;
   running: number;
   spentUsd: number | null;
+  /** A model or judge call had no price: `spentUsd` is a lower bound. */
+  costUnknown: boolean;
+}
+
+/** Spend as shown: a lower bound gets a trailing "+". */
+export function formatSpend(counts: Pick<JobCounts, "spentUsd" | "costUnknown">): string {
+  return `${formatUsd(counts.spentUsd)}${counts.costUnknown && counts.spentUsd !== null ? "+" : ""}`;
+}
+
+/** What a reader should know about a job's numbers: the finished summary's warnings, or the live one. */
+export function jobWarnings(run: Pick<EvalRunView, "summary" | "progress">): string[] {
+  if (run.summary?.warnings && run.summary.warnings.length > 0) return run.summary.warnings;
+  if (!run.summary && run.progress?.costUnknown) return ["Some model or judge calls have no price in the price table: the spend shown leaves them out, and the budget cannot stop on them."];
+  return [];
 }
 
 /** Counts for a job from its summary when finished, else from its live progress. */
@@ -240,7 +254,8 @@ export function jobCounts(run: Pick<EvalRunView, "summary" | "progress">): JobCo
       total: run.summary.total,
       done: run.summary.total,
       running: 0,
-      spentUsd: run.summary.costUsd ?? run.progress?.spentUsd ?? null
+      spentUsd: run.summary.costUsd ?? run.progress?.spentUsd ?? null,
+      costUnknown: Boolean(run.summary.costUnknown ?? run.progress?.costUnknown)
     };
   }
   const progress = run.progress;
@@ -252,6 +267,7 @@ export function jobCounts(run: Pick<EvalRunView, "summary" | "progress">): JobCo
     total: progress?.total ?? 0,
     done: progress?.done ?? 0,
     running: progress?.running ?? 0,
-    spentUsd: progress?.spentUsd ?? null
+    spentUsd: progress?.spentUsd ?? null,
+    costUnknown: Boolean(progress?.costUnknown)
   };
 }

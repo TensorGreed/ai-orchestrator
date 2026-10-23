@@ -39,8 +39,10 @@ import {
   caseStatusLabel,
   emptyReplayJobForm,
   formatDuration,
+  formatSpend,
   formatUsd,
   jobCounts,
+  jobWarnings,
   shortHash,
   statusTone,
   type ReplayJobForm
@@ -1010,7 +1012,9 @@ function ReplayJobsView({ workflowNames, activeProjectId, canEdit, openJobId, on
                   </span>
                   <span className="evals-row-cell">
                     <span className="evals-cell-label">Spent</span>
-                    <span className="mono-cell">{formatUsd(counts.spentUsd)}</span>
+                    <span className="mono-cell" title={counts.costUnknown ? "Some calls are unpriced: at least this much" : undefined}>
+                      {formatSpend(counts)}
+                    </span>
                   </span>
                   <span className="evals-row-cell">
                     <span className="evals-cell-label">Started</span>
@@ -1165,6 +1169,11 @@ function ReplayJobDetailView({ jobId, workflowNames, setNames, canEdit, onBack }
       </div>
       {error && <div className="error-banner">{error}</div>}
       {job.error && <div className="golden-note is-warn">{job.error}</div>}
+      {jobWarnings(job).map((warning) => (
+        <div key={warning} className="golden-note is-warn" role="status">
+          {warning}
+        </div>
+      ))}
 
       <section className="pg-card evals-card evals-progress-card" aria-label="Progress">
         <div className="evals-progress-head">
@@ -1173,7 +1182,7 @@ function ReplayJobDetailView({ jobId, workflowNames, setNames, canEdit, onBack }
             {counts.running > 0 ? ` · ${counts.running} running` : ""}
           </span>
           <span className="mono-cell">
-            spent {formatUsd(counts.spentUsd)}
+            spent {formatSpend(counts)}
             {budget !== null ? ` of ${formatUsd(budget)}` : ""}
           </span>
         </div>
@@ -1320,6 +1329,10 @@ export function CaseDrawer({ runId, resultId, onClose }: { runId: string; result
               )}
               {detail.replay ? (
                 <ReplayResultView result={detail.replay} />
+              ) : detail.replayTruncated ? (
+                <div className="golden-note is-warn" role="status">
+                  The run diff was {detail.replayTruncated.bytes.toLocaleString()} bytes, over the {detail.replayTruncated.maxBytes.toLocaleString()}-byte limit for a stored case, so only its size was kept. The scores above were computed on the full diff and output.
+                </div>
               ) : (
                 <div className="golden-note is-warn" role="status">
                   {detail.error ?? (detail.status === "skipped" ? "This case was not replayed." : "No replay diff is stored for this case.")}
