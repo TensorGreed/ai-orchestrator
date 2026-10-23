@@ -144,6 +144,14 @@ import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError } from "./db/store-errors.js";
 import { createRunScope } from "./run-scope.js";
 import {
+  IN_PROCESS_CODE_SANDBOX,
+  resolveCodeSandboxPlan,
+  describeCodeSandboxPlan,
+  configureExpressionSandbox,
+  expressionRealmIsShared,
+  type CodeSandboxPlan
+} from "@ai-orchestrator/workflow-engine";
+import {
   McpCassetteService,
   applyReplayOutcome,
   buildSnapshotFile,
@@ -1265,6 +1273,34 @@ export function createApp(
   const mcpSandboxLauncher = new ContainerSandboxLauncher(mcpSandboxPolicy, {
     onWarning: (message, fields) => app.log.warn(fields ?? {}, message)
   });
+
+  // Code nodes: pick a sandbox plan at startup. Until it resolves (one async
+  // runtime/image check), code nodes use the in-process isolate, which is
+  // always safe to run — the plan only decides host-isolate vs container.
+  configureExpressionSandbox({ timeoutMs: config.EXPRESSION_TIMEOUT_MS });
+  let codeSandboxPlan: CodeSandboxPlan = IN_PROCESS_CODE_SANDBOX;
+  void resolveCodeSandboxPlan({
+    enabled: config.CODE_NODES_ENABLED,
+    mode: config.CODE_SANDBOX_MODE,
+    runtime: config.CODE_SANDBOX_RUNTIME,
+    jsImage: config.CODE_SANDBOX_JS_IMAGE,
+    pythonImage: config.CODE_SANDBOX_PYTHON_IMAGE,
+    memoryMb: config.CODE_SANDBOX_MEMORY_MB,
+    cpus: config.CODE_SANDBOX_CPUS,
+    pidsLimit: config.CODE_SANDBOX_PIDS_LIMIT,
+    startupMs: config.CODE_SANDBOX_STARTUP_MS,
+    instanceLabel: crypto.createHash("sha256").update(`l2m-code:${store.storageLocation()}`).digest("hex").slice(0, 16)
+  })
+    .then(({ plan, warning }) => {
+      codeSandboxPlan = plan;
+      const described = describeCodeSandboxPlan(plan);
+      if (warning) app.log.warn({ codeSandboxMode: described.mode }, warning);
+      else app.log.info({ codeSandbox: described.mode, detail: described.detail, expressionRealm: expressionRealmIsShared() ? "shared" : "per-eval" }, "Code node sandbox ready");
+    })
+    .catch((error) => {
+      // Keep the safe in-process default if the check throws.
+      app.log.warn({ err: error instanceof Error ? error.message : String(error) }, "Could not resolve the code sandbox plan; code nodes run in-process");
+    });
   // Phase 10.7 — rate limits, concurrency caps and circuit breakers. State is
   // in memory, per API instance, keyed by registry server id; it is shared by
   // workflow runs, the gateway and the playground of this process.
@@ -1734,6 +1770,8 @@ export function createApp(
           loadMcpToolPolicy,
           // Phase 10.5 — resources, elicitation and list_changed notifications.
           mcpResourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
+          // Where code nodes run (container, in-process isolate, or disabled).
+          codeSandbox: codeSandboxPlan,
           onMcpListChanged: input.replay ? undefined : (event) => mcpProbeService.onListChanged(event),
           onMcpElicitation: input.replay
             ? input.replay.sandbox.onMcpElicitation
@@ -1820,7 +1858,8 @@ export function createApp(
                   ...errorScoped,
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
-                  loadMcpToolPolicy
+                  loadMcpToolPolicy,
+                  codeSandbox: codeSandboxPlan
                 }
               );
             } catch (err) {
@@ -7599,12 +7638,16 @@ export function createApp(
       };
     }
 
+    if (codeSandboxPlan.kind === "disabled") {
+      reply.code(403);
+      return { error: codeSandboxPlan.reason };
+    }
     try {
       const result = await executeCodeNodeSandbox({
         code: parsed.data.code,
         timeoutMs: parsed.data.timeout,
         input: parsed.data.input ?? {}
-      });
+      }, codeSandboxPlan);
       return result;
     } catch (error) {
       reply.code(400);
