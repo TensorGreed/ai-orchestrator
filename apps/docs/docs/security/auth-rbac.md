@@ -84,6 +84,7 @@ on top of the global role:
 | Create a template from a workflow / use a template | `workflow:write` on the source / `workflow:write` in the target project |
 | Rename or delete a project | `project:manage` in that project (in `role` isolation, also a builder with no membership there) |
 | Create or change a folder | `workflow:write` in that project |
+| Create a secret | `secret:write`, or `workflow:write` and `secret:use`, in the target project (editors may create secrets in their project but not change, share or delete others') |
 | List, share, unshare or delete a secret | `secret:read` / `secret:write` in the secret's project |
 
 - Admins always pass.
@@ -110,8 +111,9 @@ on top of the global role:
 - Webhook endpoint and MCP toolset candidate lists only contain workflows the
   user can read. Recent MCP tool calls of runs the user cannot read keep their
   outcome but drop the workflow id and error text.
-- A project can only be deleted once it has no workflows and no secrets left
-  (`409` otherwise). Deleting it removes its folders, memberships, custom
+- A project can only be deleted once it has no workflows, secrets, knowledge
+  bases, MCP servers and eval datasets left (`409` with the counts
+  otherwise). Deleting it removes its folders, variables, memberships, custom
   roles and the shares into it, so a project created later with the same id
   starts empty.
 - Running a workflow through an execute share needs `workflow:execute` in the

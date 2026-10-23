@@ -1023,12 +1023,11 @@ describe("project authorization: projects, folders and placement (L4, L5, L6)", 
     expect((await call(context, "POST", "/api/workflows", admin.cookie, simpleWorkflow("wf-ghost", "no-such-project"))).json()).toEqual({ error: "Target project does not exist" });
   });
 
-  it("a knowledge base of a deleted project reads as missing for non-admins", async () => {
-    const { context, admin, builder } = await seed();
+  it("a project that still holds a knowledge base is not deleted, so the knowledge base never loses its project", async () => {
+    const { context, admin } = await seed();
     context.store.upsertProject({ id: "gone", name: "gone" });
     const kbId = (await call(context, "POST", "/api/knowledge-bases", admin.cookie, { name: "orphan", embedderId: "token-embedder", projectId: "gone" })).json<{ knowledgeBase: { id: string } }>().knowledgeBase.id;
-    context.store.deleteProject("gone");
-    expect((await call(context, "GET", `/api/knowledge-bases/${kbId}`, builder.cookie)).statusCode).toBe(404);
+    expect(() => context.store.deleteProject("gone")).toThrow(/knowledge bases/);
     expect((await call(context, "GET", `/api/knowledge-bases/${kbId}`, admin.cookie)).statusCode).toBe(200);
   });
 
@@ -1250,7 +1249,7 @@ describe("project authorization: renaming and deleting projects (N3)", () => {
     const finSecret = context.secretService.createSecret({ name: "fin-bank-key", provider: "custom", value: "bank", projectId: "fin" }).secretId;
     const refused = await call(context, "DELETE", "/api/projects/fin", builder.cookie);
     expect(refused.statusCode).toBe(409);
-    expect(refused.json()).toEqual({ error: "Move or delete this project's workflows and secrets first.", workflows: 1, secrets: 1 });
+    expect(refused.json()).toEqual({ error: "Move or delete this project's workflows, secrets, knowledge bases, MCP servers and eval datasets first.", workflows: 1, secrets: 1, knowledgeBases: 0, mcpServers: 0, evalDatasets: 0 });
     expect(context.store.getWorkflow("wf-fin")!.projectId).toBe("fin");
     expect(context.store.getSecret(finSecret)!.projectId).toBe("fin");
     expect((await call(context, "GET", "/api/workflows/wf-fin", viewer.cookie)).statusCode).toBe(404);
@@ -1340,5 +1339,67 @@ describe("project authorization: refused queued jobs (N6)", () => {
     expect(refusal).toHaveLength(1);
     expect(refusal[0]).toMatchObject({ category: "workflow", outcome: "denied", resourceId: "wf-hidden" });
     expect(context.store.getExecutionHistory("exec-refused")).toBeFalsy();
+  });
+});
+
+describe("project authorization: editors create secrets (F1)", () => {
+  it("role: an editor member creates a secret in their project and a workflow there uses it; a viewer member cannot; an editor cannot delete another's secret", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const editor = await login(context, "builder", "x-editor");
+    const viewer = await login(context, "builder", "x-viewer");
+    context.store.upsertProject({ id: "x", name: "x" });
+    context.store.upsertProjectRole({ userId: editor.id, projectId: "x", role: "editor" });
+    context.store.upsertProjectRole({ userId: viewer.id, projectId: "x", role: "viewer" });
+    const created = await call(context, "POST", "/api/secrets", editor.cookie, { name: "mine", provider: "custom", value: "editor-token", projectId: "x" });
+    expect(created.statusCode).toBe(200);
+    const secretId = created.json<{ id: string }>().id;
+    await withEcho(async (port, seen) => {
+      context.store.upsertWorkflow(secretWorkflow("wf-x", "x", port, secretId));
+      expect((await call(context, "POST", "/api/workflows/wf-x/execute", editor.cookie, {})).json<{ status: string }>().status).toBe("success");
+      expect(seen).toEqual(["Bearer editor-token"]);
+    });
+    expect((await call(context, "POST", "/api/secrets", viewer.cookie, { name: "nope", provider: "custom", value: "viewer-token", projectId: "x" })).statusCode).toBe(403);
+    const adminsId = (await call(context, "POST", "/api/secrets", admin.cookie, { name: "admins", provider: "custom", value: "admin-token", projectId: "x" })).json<{ id: string }>().id;
+    expect((await call(context, "DELETE", `/api/secrets/${adminsId}`, editor.cookie)).statusCode).toBe(403);
+  });
+
+  it("strict: an editor of x creates a secret in x", async () => {
+    const context = await createTestContext({ env: { PROJECT_ISOLATION: "strict" } });
+    const editor = await login(context, "builder", "x-editor");
+    context.store.upsertProject({ id: "x", name: "x" });
+    context.store.upsertProjectRole({ userId: editor.id, projectId: "x", role: "editor" });
+    const created = await call(context, "POST", "/api/secrets", editor.cookie, { name: "mine", provider: "custom", value: "editor-token", projectId: "x" });
+    expect(created.statusCode).toBe(200);
+    expect(created.json<{ projectId: string }>().projectId).toBe("x");
+  });
+});
+
+describe("project authorization: project delete strands nothing (F2)", () => {
+  it("refuses while a knowledge base, MCP server or eval dataset remains, then removes variables so a re-created id starts empty", async () => {
+    const context = await createTestContext({ env: { PROJECT_ISOLATION: "strict" } });
+    const owner = await login(context, "builder", "fin-admin");
+    const stranger = await login(context, "builder", "stranger");
+    context.store.upsertProject({ id: "fin", name: "fin" });
+    context.store.upsertProjectRole({ userId: owner.id, projectId: "fin", role: "project_admin" });
+    context.store.createKnowledgeBase({ id: "kb-fin", name: "kb", projectId: "fin", embedderId: "mock" });
+    context.store.upsertVariable({ id: "var-fin", projectId: "fin", key: "BANK_URL", value: "https://internal.fin" });
+    const kbRefused = await call(context, "DELETE", "/api/projects/fin", owner.cookie);
+    expect(kbRefused.statusCode).toBe(409);
+    expect(kbRefused.json()).toMatchObject({ workflows: 0, secrets: 0, knowledgeBases: 1, mcpServers: 0, evalDatasets: 0 });
+
+    context.store.deleteKnowledgeBase("kb-fin");
+    context.store.createEvalDataset({ id: "ds-fin", name: "ds", projectId: "fin" });
+    expect((await call(context, "DELETE", "/api/projects/fin", owner.cookie)).json()).toMatchObject({ evalDatasets: 1 });
+    context.store.deleteEvalDataset("ds-fin");
+    context.store.createMcpServer({ id: "mcp-fin", name: "mcp", adapterId: "mock-mcp", projectId: "fin" });
+    expect((await call(context, "DELETE", "/api/projects/fin", owner.cookie)).json()).toMatchObject({ mcpServers: 1 });
+    context.store.deleteMcpServer("mcp-fin");
+
+    expect((await call(context, "DELETE", "/api/projects/fin", owner.cookie)).statusCode).toBe(200);
+    expect(context.store.listVariables("fin")).toEqual([]);
+    expect((await call(context, "POST", "/api/projects", stranger.cookie, { id: "fin", name: "fin" })).statusCode).toBe(200);
+    expect((await call(context, "GET", "/api/knowledge-bases/kb-fin", stranger.cookie)).statusCode).toBe(404);
+    expect((await call(context, "GET", "/api/variables?projectId=fin", stranger.cookie)).json<{ variables: unknown[] }>().variables).toEqual([]);
   });
 });

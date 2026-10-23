@@ -194,7 +194,7 @@ export function createRunScope(deps: RunScopeDeps) {
       listToolCalls: async (input) => {
         const rows = deps.sessions.listToolCalls({ ...input, namespace: key(input.namespace) });
         const limit = typeof input.limit === "number" && input.limit > 0 ? input.limit : 20;
-        if (!legacyReadable(input.namespace) || rows.length >= limit) return rows.map((row) => asCaller(row, input.namespace));
+        if (rows.length >= limit || !legacyReadable(input.namespace)) return rows.map((row) => asCaller(row, input.namespace));
         const legacy = deps.sessions.listToolCalls(input);
         return [...rows, ...legacy]
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
