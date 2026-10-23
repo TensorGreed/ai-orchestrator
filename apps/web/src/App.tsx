@@ -128,6 +128,7 @@ import { McpServersPage } from "./components/McpServersPage";
 import { McpOverviewPage } from "./components/McpOverviewPage";
 import { McpMyConnectionsPage } from "./components/McpRuntimeSafety";
 import { GuardSecurityPage } from "./components/GuardSecurityPage";
+import { EvaluationsPage } from "./components/EvaluationsPage";
 import { McpToolsPage } from "./components/McpToolsPage";
 import { McpChangesPage } from "./components/McpChangesPage";
 import type { McpNavTarget } from "./lib/mcp-control-plane";
@@ -5248,18 +5249,13 @@ function StudioApp() {
             </section>
           )}
 
-          {activeMode === "evaluations" && (
-            <section className="placeholder-pane page-pane">
-              <header className="page-head">
-                <div className="page-head-copy">
-                  <h2 className="page-title">Evaluations</h2>
-                  <p className="page-sub">Score workflow outputs against datasets and rubrics.</p>
-                </div>
-              </header>
-              <div className="page-empty">
-                Evaluation dashboards are out of scope for V1. Use the Editor and Runs for runtime validation.
-              </div>
-            </section>
+          {activeMode === "evaluations" && authUser && (
+            <EvaluationsPage
+              workflows={workflowList}
+              activeProjectId={activeProjectId}
+              role={authUser.role}
+              onOpenSettings={() => setActiveMode("settings")}
+            />
           )}
 
           {activeMode === "knowledge" && (

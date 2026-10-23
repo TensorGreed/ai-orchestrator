@@ -375,6 +375,632 @@
   overflow-wrap: anywhere;
 }
 
+/* Phase 15.2 — the Evaluations page: golden sets, the run-replay dialog, replay jobs and the case drawer. */
+
+.evals-page .page-head {
+  align-items: flex-end;
+}
+
+.evals-tabs {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.evals-inline-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.evals-inline-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.evals-panel,
+.evals-stack {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.evals-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+}
+
+.evals-toolbar .pg-eyebrow {
+  margin: 0;
+}
+
+.evals-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.evals-card > .pg-eyebrow {
+  margin: 0;
+}
+
+.evals-form {
+  display: grid;
+  gap: 12px;
+}
+
+.evals-form label,
+.evals-replay-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.evals-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.evals-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.evals-row {
+  box-sizing: border-box;
+  display: grid;
+  align-items: center;
+  gap: 8px 16px;
+  width: 100%;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+}
+
+button.evals-row {
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+button.evals-row:hover {
+  border-color: var(--accent-line);
+  background: var(--bg-elev-2);
+}
+
+button.evals-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.evals-set-row {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr) 96px minmax(0, 1.2fr);
+}
+
+.evals-case-item {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.5fr) auto;
+}
+
+.evals-recording-item {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.evals-job-row {
+  grid-template-columns: 104px minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1.5fr) 80px minmax(0, 1.2fr);
+}
+
+.evals-case-head,
+.evals-case-row {
+  grid-template-columns: minmax(0, 1.6fr) 112px minmax(0, 2.4fr) 80px 80px;
+}
+
+.evals-case-head {
+  display: grid;
+  gap: 16px;
+  padding: 0 14px;
+  color: var(--fg-faint);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.evals-row-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.evals-row-title {
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.evals-row-sub {
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.evals-row-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.evals-row-cell.num {
+  justify-content: flex-end;
+}
+
+.evals-cell-label {
+  display: none;
+  color: var(--fg-faint);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.evals-set-row .evals-cell-label,
+.evals-job-row .evals-cell-label {
+  display: block;
+  flex-basis: 100%;
+}
+
+.evals-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.evals-chip-cell {
+  gap: 6px;
+}
+
+.evals-case-item .evals-cell-label {
+  display: block;
+  flex-basis: 100%;
+}
+
+.evals-muted {
+  color: var(--fg-faint);
+  font-size: var(--fs-xs);
+}
+
+.mono-pill {
+  font-family: var(--font-mono);
+}
+
+.evals-case-error {
+  color: var(--err);
+}
+
+.evals-candidate {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.evals-candidate-kind {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.evals-counts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.evals-count {
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.evals-count.is-pass {
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.evals-count.is-fail {
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.evals-count.is-error {
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  background: var(--warn-soft);
+  color: var(--fg);
+}
+
+.evals-scorer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.evals-scorer-chip.is-pass {
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.evals-scorer-chip.is-fail {
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.evals-scorer-type {
+  color: var(--fg);
+}
+
+.evals-scorer-score {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Golden set / job detail header */
+
+.evals-detail-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px 16px;
+}
+
+.evals-detail-title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.evals-detail-title .pg-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.evals-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* The one primary action on the page: run a replay. */
+.pg-btn.primary.evals-primary {
+  box-shadow: var(--glow-accent);
+}
+
+.pg-btn.primary.evals-primary:disabled {
+  box-shadow: none;
+}
+
+/* Progress */
+
+.evals-progress-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+
+.evals-progress-head strong {
+  color: var(--fg);
+}
+
+.evals-progress {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--bg-elev-2);
+}
+
+.evals-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--ok);
+  transition: width var(--dur) var(--ease);
+}
+
+.evals-progress.is-active .evals-progress-fill {
+  background: var(--running);
+  box-shadow: 0 0 8px var(--running);
+}
+
+/* Run replay dialog */
+
+.evals-replay-modal {
+  width: min(760px, 100%);
+}
+
+.evals-replay-modal:focus,
+.evals-drawer:focus {
+  outline: none;
+}
+
+.evals-replay-form {
+  display: grid;
+  gap: 14px;
+}
+
+.mono-input,
+.pg-modal textarea.mono-input {
+  font-family: var(--font-mono);
+}
+
+.evals-scorers {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.evals-scorers legend {
+  padding: 0 6px;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.evals-scorer {
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev);
+}
+
+.evals-scorer.is-on {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.evals-replay-form .evals-scorer-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  cursor: pointer;
+}
+
+.evals-scorer-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.evals-scorer-hint {
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+
+.evals-scorer-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.evals-span-all {
+  grid-column: 1 / -1;
+}
+
+.evals-sticky-actions {
+  position: sticky;
+  bottom: -20px;
+  margin: 0 -20px -20px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+
+/* Case drawer */
+
+.evals-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  background: var(--scrim);
+}
+
+.evals-drawer {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  height: 100%;
+  background: var(--bg-elev);
+  border-left: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-lg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  animation: evals-drawer-in var(--dur) var(--ease);
+}
+
+.evals-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.evals-drawer-head .golden-meta {
+  align-items: center;
+}
+
+.evals-drawer-body {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  padding: 18px 20px 24px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.evals-score-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.evals-score-list li {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.evals-score-list li.is-fail {
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
+}
+
+.evals-score-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.evals-score-reason {
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+@keyframes evals-drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@media (max-width: 960px) {
+  .evals-job-row {
+    grid-template-columns: 104px minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .evals-set-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .evals-case-head {
+    display: none;
+  }
+
+  .evals-case-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .evals-case-row .evals-chip-cell {
+    grid-column: 1 / -1;
+  }
+
+  .evals-case-row .evals-row-cell.num {
+    justify-content: flex-start;
+  }
+
+  .evals-case-row .evals-cell-label {
+    display: inline;
+  }
+
+  .evals-case-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .evals-case-item .evals-row-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .evals-job-row,
+  .evals-set-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .evals-detail-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .evals-detail-actions {
+    justify-content: flex-start;
+  }
+
+  .evals-sticky-actions .pg-btn {
+    flex: 1 1 auto;
+  }
+}
+
 @media (max-width: 640px) {
   .golden-tool-head {
     display: none;
@@ -394,7 +1020,13 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .golden-badge {
+  .golden-badge,
+  button.evals-row,
+  .evals-progress-fill {
     transition: none;
+  }
+
+  .evals-drawer {
+    animation: none;
   }
 }
