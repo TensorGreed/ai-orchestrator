@@ -46,9 +46,9 @@ export interface StudioHudProps {
   /** Phase 10.2 — the workflow's "No write tools" setting; the menu item shows only when the toggle handler is set. */
   noWriteTools?: boolean;
   onToggleNoWriteTools?: () => void;
-  /** Phase 11.2 — the workflow's "Ask before write tools" setting (agents pause for approval before an MCP write tool). */
+  /** Phase 11.2 — the workflow's "Ask before write tools" setting (agents pause for approval before an MCP write tool); the item opens its settings. */
   writeToolApproval?: boolean;
-  onToggleWriteToolApproval?: () => void;
+  onEditWriteToolApproval?: () => void;
   /** Phase 10.8 — record the MCP calls of manual runs into a cassette; the menu item shows only when the toggle handler is set. */
   recordMcp?: boolean;
   onToggleRecordMcp?: () => void;
@@ -114,7 +114,7 @@ export function StudioHud({
   noWriteTools = false,
   onToggleNoWriteTools,
   writeToolApproval = false,
-  onToggleWriteToolApproval,
+  onEditWriteToolApproval,
   recordMcp = false,
   onToggleRecordMcp,
   extraItems = NO_EXTRA_ITEMS,
@@ -484,22 +484,22 @@ export function StudioHud({
                     No write tools
                   </button>
                 )}
-                {onToggleWriteToolApproval && (
+                {onEditWriteToolApproval && (
                   <button
                     type="button"
                     className="hud-dropdown-item hud-dropdown-check"
                     role="menuitemcheckbox"
                     aria-checked={writeToolApproval}
-                    title="Agents in this workflow pause for an approval in Approvals before they call an MCP tool that is not read-only"
+                    title="Agents in this workflow pause for an approval in Approvals before they call an MCP tool an admin has not marked read-only"
                     onClick={() => {
                       setOverflowOpen(false);
-                      onToggleWriteToolApproval();
+                      onEditWriteToolApproval();
                     }}
                   >
                     <span className="hud-check-box" aria-hidden="true">
                       {writeToolApproval ? "✓" : ""}
                     </span>
-                    Ask before write tools
+                    Ask before write tools…
                   </button>
                 )}
                 {onToggleRecordMcp && (

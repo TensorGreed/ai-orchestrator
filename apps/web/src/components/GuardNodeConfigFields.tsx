@@ -150,7 +150,7 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
           type="number"
           min={1}
           className="cfg-input"
-          value={num(config.timeoutMinutes, 60)}
+          value={num(config.timeoutMinutes, 1440)}
           onChange={(event) => setConfig((current) => ({ ...current, timeoutMinutes: Math.max(1, Number(event.target.value) || 1) }))}
         />
       </div>

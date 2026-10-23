@@ -9202,6 +9202,8 @@ export function NodeInspector({
           <button className="insp-btn" type="button" onClick={() => void onUnpinNodeOutput?.(node.id)}>
             Unpin output
           </button>
+        ) : node.data.nodeType === "approval_gate" ? (
+          <span className="insp-note">An Approval Gate cannot be pinned: its output only comes from a person's decision.</span>
         ) : (
           <button
             className="insp-btn"

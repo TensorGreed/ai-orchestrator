@@ -146,6 +146,12 @@ describe("ApprovalsPage", () => {
     expect(await screen.findByText("Rejected. The run is now success.")).toBeInTheDocument();
   });
 
+  it("says when the requester is unknown (a webhook or schedule started the run)", async () => {
+    vi.mocked(api.listApprovals).mockResolvedValue({ items: [view({ requestedBy: null, triggeredBy: null, triggerType: null })] });
+    render(<ApprovalsPage />);
+    expect(await screen.findByText("Requester unknown (automatic trigger)")).toBeInTheDocument();
+  });
+
   it("opens a deep-linked request that was already decided on the Decided tab", async () => {
     window.history.replaceState(null, "", "/?mode=approvals&request=req-9");
     vi.mocked(api.listApprovals).mockImplementation(async (filter) =>

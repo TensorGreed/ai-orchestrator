@@ -3746,3 +3746,17 @@ export async function rejectApproval(executionId: string, payload: { reason?: st
     body: JSON.stringify(payload)
   });
 }
+
+/** Phase 11.2 — whether anyone but the signed-in user could approve with these approver settings. */
+export async function checkApprovalEligibility(payload: {
+  workflowId: string;
+  projectId?: string;
+  approverRoles?: string[];
+  approverUsers?: string[];
+  allowSelfApproval?: boolean;
+}) {
+  return apiRequest<{ othersCanApprove: boolean; requesterCanApprove: boolean }>("/api/approvals/eligibility", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}

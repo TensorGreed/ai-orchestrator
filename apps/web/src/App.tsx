@@ -138,6 +138,7 @@ import { useMcpCanvasStatus } from "./lib/use-mcp-canvas-status";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
+import { WriteToolApprovalDialog } from "./components/WriteToolApprovalDialog";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
@@ -1092,6 +1093,7 @@ function StudioApp() {
   const [mfaCode, setMfaCode] = useState("");
   const [showWelcome, setShowWelcome] = useState<boolean>(() => !isWelcomeDismissed());
   const [templateInitialCategory, setTemplateInitialCategory] = useState<string | undefined>(undefined);
+  const [writeToolDialogOpen, setWriteToolDialogOpen] = useState(false);
   const [shareWorkflowTarget, setShareWorkflowTarget] = useState<{
     id: string;
     name: string;
@@ -4673,17 +4675,7 @@ function StudioApp() {
               : undefined
           }
           writeToolApproval={currentWorkflow.settings?.writeToolApproval?.enabled === true}
-          onToggleWriteToolApproval={
-            canManageWorkflows
-              ? () =>
-                  setCurrentWorkflow((current) => {
-                    const { writeToolApproval, ...rest } = current.settings ?? {};
-                    // Turning it off keeps the approver settings, so turning it back on restores them.
-                    const settings = { ...rest, writeToolApproval: { ...(writeToolApproval ?? {}), enabled: !writeToolApproval?.enabled } };
-                    return { ...current, settings };
-                  })
-              : undefined
-          }
+          onEditWriteToolApproval={canManageWorkflows ? () => setWriteToolDialogOpen(true) : undefined}
           recordMcp={recordMcp}
           onToggleRecordMcp={canManageWorkflows ? () => setRecordMcp((value) => !value) : undefined}
           docsUrl={docsUrl}
@@ -5584,6 +5576,16 @@ function StudioApp() {
         onNativeFile={handleNativeFileInImportDialog}
         onClose={closeExternalImport}
       />
+
+      {writeToolDialogOpen && (
+        <WriteToolApprovalDialog
+          workflowId={currentWorkflow.id}
+          projectId={currentWorkflow.projectId ?? activeProjectId}
+          settings={currentWorkflow.settings?.writeToolApproval}
+          onChange={(writeToolApproval) => setCurrentWorkflow((current) => ({ ...current, settings: { ...(current.settings ?? {}), writeToolApproval } }))}
+          onClose={() => setWriteToolDialogOpen(false)}
+        />
+      )}
 
       {shareWorkflowTarget && (
         <WorkflowShareModal

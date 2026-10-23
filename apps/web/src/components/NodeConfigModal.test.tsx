@@ -94,6 +94,15 @@ describe("NodeInspector", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
   });
 
+  it("offers no pin for an Approval Gate, whose output only comes from a decision", async () => {
+    const user = userEvent.setup();
+    const gate: Node<EditorNodeData> = { id: "gate", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Gate", nodeType: "approval_gate", config: {} } };
+    render(<NodeInspector {...makeProps({ node: gate })} />);
+    await user.click(screen.getByRole("tab", { name: "Output" }));
+    expect(screen.queryByRole("button", { name: "Pin output" })).toBeNull();
+    expect(screen.getByText(/An Approval Gate cannot be pinned/)).toBeInTheDocument();
+  });
+
   it("saves updated user prompt text", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn();

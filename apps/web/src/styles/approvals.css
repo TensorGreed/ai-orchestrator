@@ -372,6 +372,31 @@
   font-size: var(--fs-xs);
 }
 
+/* The workflow's "Ask before write tools" dialog. */
+.write-gate-modal {
+  width: min(520px, 100%);
+}
+.write-gate-modal fieldset:disabled {
+  opacity: 0.55;
+}
+.write-gate-warning,
+.approval-requester-unknown {
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--warn-soft);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+.approval-requester-unknown {
+  padding: 2px 8px;
+  display: inline-block;
+}
+.insp-note {
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+
 @media (max-width: 880px) {
   .approval-card {
     padding: 14px;

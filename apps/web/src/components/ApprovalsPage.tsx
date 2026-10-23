@@ -318,7 +318,13 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
         )}
         <div>
           <dt>Requested by</dt>
-          <dd>{view.requestedBy ?? view.triggeredBy ?? view.triggerType ?? "unknown"}</dd>
+          <dd>
+            {view.requestedBy ?? (
+              <span className="approval-requester-unknown" title="A webhook, schedule or other automatic trigger started this run, so self-approval cannot be checked.">
+                Requester unknown (automatic trigger)
+              </span>
+            )}
+          </dd>
         </div>
         <div>
           <dt>Approvers</dt>
