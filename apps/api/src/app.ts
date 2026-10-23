@@ -139,7 +139,8 @@ import { environmentSecretValues, scrubExemptionWarnings } from "./services/audi
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
-import { createRunAccess } from "./run-access.js";
+import { createRunAccess, type RunAccessDenial } from "./run-access.js";
+import { ProjectNotEmptyError } from "./db/store-errors.js";
 import { createRunScope } from "./run-scope.js";
 import {
   McpCassetteService,
@@ -7005,6 +7006,19 @@ export function createApp(
     tags: z.array(z.string().min(1).max(64)).optional()
   });
 
+  // Renaming or deleting a project needs `project:manage` in it (admins
+  // pass). In role isolation a builder without a membership in the project
+  // keeps the management their global role always gave them. Unreadable
+  // projects answer 404.
+  const projectManageDenial = (user: SafeUser, projectId: string): RunAccessDenial | null => {
+    if (user.role === "admin") return null;
+    const access = runAccess.project(user, projectId, "workflow:read");
+    if (!access.ok) return access;
+    if (rbacService.can(user, projectId, "project:manage")) return null;
+    if (config.PROJECT_ISOLATION === "role" && user.role === "builder" && !rbacService.getMembership(user.id, projectId)) return null;
+    return { ok: false, status: 403, error: "Permission 'project:manage' required in this project" };
+  };
+
   app.get("/api/projects", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
@@ -7024,8 +7038,8 @@ export function createApp(
     const id = parsed.data.id?.trim() || `proj-${crypto.randomUUID()}`;
     // Reusing an existing id is an update of that project.
     if (store.getProject(id)) {
-      const access = runAccess.project(user, id, "workflow:write");
-      if (!access.ok) return denyRunAccess(reply, access);
+      const denial = projectManageDenial(user, id);
+      if (denial) return denyRunAccess(reply, denial);
     }
     const project = store.upsertProject({
       id,
@@ -7048,8 +7062,8 @@ export function createApp(
       reply.code(404);
       return { error: "Project not found" };
     }
-    const access = runAccess.project(user, existing.id, "workflow:write");
-    if (!access.ok) return denyRunAccess(reply, access);
+    const denial = projectManageDenial(user, existing.id);
+    if (denial) return denyRunAccess(reply, denial);
     const parsed = projectPayloadSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -7067,16 +7081,28 @@ export function createApp(
   app.delete<{ Params: { id: string } }>("/api/projects/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const access = runAccess.project(user, request.params.id, "workflow:write");
-    if (!access.ok) return denyRunAccess(reply, access);
+    const denial = projectManageDenial(user, request.params.id);
+    if (denial) return denyRunAccess(reply, denial);
     try {
       const ok = store.deleteProject(request.params.id);
       if (!ok) {
         reply.code(404);
         return { error: "Project not found" };
       }
+      audit(request, user, {
+        category: "project",
+        eventType: "project.delete",
+        action: "delete",
+        resourceType: "project",
+        resourceId: request.params.id,
+        projectId: request.params.id
+      });
       return { ok: true };
     } catch (error) {
+      if (error instanceof ProjectNotEmptyError) {
+        reply.code(409);
+        return { error: error.message, ...error.counts };
+      }
       reply.code(400);
       return { error: error instanceof Error ? error.message : "Failed to delete project" };
     }

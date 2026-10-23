@@ -4,6 +4,7 @@ import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@
 import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
 import { runMigrations } from "./migrations.js";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
+import { ProjectNotEmptyError } from "./store-errors.js";
 
 export interface PostgresStoreConfig {
   host: string;
@@ -456,12 +457,17 @@ export class PostgresStore {
     }
     const existing = await this.getProject(id);
     if (!existing) return false;
-    await this.execute(`UPDATE workflows SET project_id = $1, folder_id = NULL WHERE project_id = $2`, [
-      DEFAULT_PROJECT_ID,
-      id
-    ]);
-    await this.execute(`UPDATE secrets SET project_id = $1 WHERE project_id = $2`, [DEFAULT_PROJECT_ID, id]);
+    // Never move a project's workflows or secrets into the default project.
+    const count = async (table: string) =>
+      toNum((await this.queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM ${table} WHERE project_id = $1`, [id]))?.count ?? 0);
+    const counts = { workflows: await count("workflows"), secrets: await count("secrets") };
+    if (counts.workflows > 0 || counts.secrets > 0) throw new ProjectNotEmptyError(counts);
     await this.execute(`DELETE FROM folders WHERE project_id = $1`, [id]);
+    await this.execute(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = $1`, [id]);
+    // Memberships, roles and shares must not revive with a re-created id.
+    for (const table of ["user_project_roles", "custom_roles", "workflow_shares", "secret_shares"]) {
+      await this.execute(`DELETE FROM ${table} WHERE project_id = $1`, [id]);
+    }
     await this.execute(`DELETE FROM projects WHERE id = $1`, [id]);
     return true;
   }

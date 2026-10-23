@@ -51,6 +51,7 @@ import {
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
 import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
+import { ProjectNotEmptyError } from "./store-errors.js";
 
 type BindParams = unknown[];
 
@@ -4738,14 +4739,19 @@ export class SqliteStore {
     }
     const existing = this.getProject(id);
     if (!existing) return false;
-    // Move anything belonging to this project back to the default before delete.
-    this.exec(`UPDATE workflows SET project_id = ?, folder_id = NULL WHERE project_id = ?`, [
-      DEFAULT_PROJECT_ID,
-      id
-    ]);
-    this.exec(`UPDATE secrets SET project_id = ? WHERE project_id = ?`, [DEFAULT_PROJECT_ID, id]);
+    // Never move a project's workflows or secrets into the default project:
+    // that would hand them to everyone who can use the default project.
+    const count = (table: string) => toNumber(this.queryOne<{ count: number }>(`SELECT COUNT(*) as count FROM ${table} WHERE project_id = ?`, [id])?.count ?? 0);
+    const counts = { workflows: count("workflows"), secrets: count("secrets") };
+    if (counts.workflows > 0 || counts.secrets > 0) throw new ProjectNotEmptyError(counts);
     this.exec(`DELETE FROM folders WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = ?`, [id]);
+    // Memberships, roles and shares of a deleted project must not come back
+    // to life if a project with the same id is created later.
+    this.exec(`DELETE FROM user_project_roles WHERE project_id = ?`, [id]);
+    this.exec(`DELETE FROM custom_roles WHERE project_id = ?`, [id]);
+    this.exec(`DELETE FROM workflow_shares WHERE project_id = ?`, [id]);
+    this.exec(`DELETE FROM secret_shares WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM projects WHERE id = ?`, [id]);
     this.persist();
     return true;
