@@ -376,8 +376,32 @@
 .write-gate-modal {
   width: min(520px, 100%);
 }
+.write-gate-modal .pg-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.write-gate-modal fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.write-gate-modal legend {
+  padding: 0;
+  margin-bottom: 6px;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
 .write-gate-modal fieldset:disabled {
   opacity: 0.55;
+}
+.write-gate-modal .cfg-help {
+  display: block;
+  margin-top: 4px;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
 }
 .write-gate-warning,
 .approval-requester-unknown {
