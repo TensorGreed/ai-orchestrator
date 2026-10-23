@@ -136,7 +136,7 @@ export function SaveGoldenRunDialog({ executionId, workflowName, hasCassette, on
           <p className="golden-note">
             Copies this run's input, every node's result and its recorded MCP calls, scrubbed of secrets. A golden run is kept until you delete it; run history
             retention does not remove it. In a replay, nodes that reach outside (Slack, email, HTTP, databases, sub-workflows) and code nodes are answered from it
-            instead of running. Expressions inside the nodes that do run are still evaluated and can make network calls until expression sandboxing lands.
+            instead of running. Expressions inside the nodes that do run are evaluated in an isolated sandbox with no network or file access.
           </p>
           {!hasCassette && (
             <p className="golden-note is-warn" role="status">
@@ -440,7 +440,7 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
                 <p className="golden-note">
                   A replay runs the candidate on this input. Slack, email, HTTP calls, databases, queues, sub-workflows and code nodes are answered from the recording
                   instead of running; knowledge-base writes are refused; approvals and waits are skipped; session memory starts empty and is thrown away. Models
-                  run live. Expressions inside the nodes that do run are still evaluated and can make network calls until expression sandboxing lands.
+                  run live. Expressions inside the nodes that do run are evaluated in an isolated sandbox with no network or file access.
                 </p>
                 <p className="golden-note">
                   A replay is inconclusive if it reaches a node the golden run never saw, a code node whose code changed, or a node that runs more often than the golden run recorded: neither is run, so neither can be

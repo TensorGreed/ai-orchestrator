@@ -55,7 +55,22 @@ export interface ChartRenderOptions {
    * spec names. The render fails instead of drawing a chart without data.
    */
   offline?: boolean;
+  /**
+   * When set (and not offline), every data/image URL the spec loads is checked
+   * against the outbound URL guard first, and `file:` loads are refused. The
+   * HTTP(S) check is async, so Vega's loader is wrapped accordingly.
+   */
+  urlGuard?: (url: string) => Promise<void>;
+  /**
+   * With `urlGuard`: the fetch HTTP(S) loads go through (the guarded, pinned
+   * fetch), so the connection reaches only the address the guard vetted.
+   * Without it, Vega's own fetch is used after the guard check.
+   */
+  fetcher?: (url: string) => Promise<Response>;
 }
+
+/** Largest inline `data:image/...` URI a chart may embed (characters). */
+export const MAX_INLINE_CHART_IMAGE_CHARS = 2 * 1024 * 1024;
 
 export interface ChartRenderResult {
   svg: string;
@@ -93,7 +108,11 @@ export async function renderChart(options: ChartRenderOptions): Promise<ChartRen
   let view: vega.View;
   try {
     const runtime = vega.parse(vegaSpec, options.config);
-    const loader = options.offline ? offlineLoader(() => (blocked = true)) : linkSafeLoader(vega.loader());
+    const loader = options.offline
+      ? offlineLoader(() => (blocked = true))
+      : options.urlGuard
+        ? guardedLoader(vega.loader(), options.urlGuard, options.fetcher)
+        : linkSafeLoader(vega.loader());
     view = new vega.View(runtime, { renderer: "none", loader });
   } catch (err) {
     throw new Error(`vega parse failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -143,6 +162,60 @@ function linkSafeLoader(base: vega.Loader): vega.Loader {
  * `sanitize`, which does no I/O, so a replayed chart draws the same links as
  * the live run.
  */
+/**
+ * A live Vega loader that runs the outbound URL guard before every data or
+ * image load and refuses `file:` loads outright. Links (`href`) are not loads
+ * and go through the link-safe sanitizer unchanged.
+ */
+function guardedLoader(base: vega.Loader, guard: (url: string) => Promise<void>, fetcher?: (url: string) => Promise<Response>): vega.Loader {
+  const safe = linkSafeLoader(base);
+  const load = safe.load.bind(safe);
+  const http = safe.http?.bind(safe);
+  safe.load = (async (uri: string, options?: unknown) => {
+    // An inline image is decoded locally (see `http` below); nothing is fetched, so it needs no guard check.
+    if (!isInlineImage(uri)) await guard(uri);
+    return load(uri, options as never);
+  }) as vega.Loader["load"];
+  safe.http = (async (uri: string, options?: { response?: string }) => {
+    if (isInlineImage(uri)) return decodeInlineImage(uri, options?.response);
+    await guard(uri);
+    if (!fetcher) {
+      if (!http) throw new Error("No HTTP loader available for this chart.");
+      return http(uri, options as never);
+    }
+    // Same contract as Vega's own http loader: an error on a non-2xx, else the body as `options.response` asks.
+    const response = await fetcher(uri);
+    if (!response.ok) throw new Error(`${response.status}${response.statusText}`);
+    const reader = options?.response ? (response as unknown as Record<string, unknown>)[options.response] : undefined;
+    return typeof reader === "function" ? (reader as () => Promise<unknown>).call(response) : response.text();
+  }) as vega.Loader["http"];
+  // A chart must never read the server's disk; file loads are always refused.
+  safe.file = (async (filename: string) => {
+    throw new Error(`A chart may not load a local file ('${filename}').`);
+  }) as vega.Loader["file"];
+  return safe;
+}
+
+/** True for a `data:image/...` URI, which a chart may embed without any network access. */
+function isInlineImage(uri: unknown): uri is string {
+  return typeof uri === "string" && /^data:image\/[a-z0-9.+-]+[;,]/i.test(uri);
+}
+
+function decodeInlineImage(uri: string, responseType?: string): string | ArrayBuffer {
+  if (uri.length > MAX_INLINE_CHART_IMAGE_CHARS) {
+    throw new Error(`An inline chart image is larger than ${MAX_INLINE_CHART_IMAGE_CHARS} characters.`);
+  }
+  const comma = uri.indexOf(",");
+  if (comma < 0) throw new Error("Malformed data: image URI.");
+  const meta = uri.slice(5, comma);
+  const payload = uri.slice(comma + 1);
+  const bytes = /;base64$/i.test(meta) ? Buffer.from(payload, "base64") : Buffer.from(decodeURIComponent(payload), "utf8");
+  if (responseType === "arrayBuffer") {
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  }
+  return bytes.toString("utf8");
+}
+
 function offlineLoader(onBlocked: () => void): vega.Loader {
   const links = linkSafeLoader(vega.loader());
   const refuse = async (): Promise<never> => {

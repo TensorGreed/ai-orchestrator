@@ -70,6 +70,7 @@ import {
   exportWorkflowToJson,
   importWorkflowFromJson,
   renderExpressionTemplate,
+  runWithSandboxOwner,
   validateWorkflowGraph,
   KnowledgeBaseVectorStoreAdapter,
   TokenEmbeddingAdapter,
@@ -143,6 +144,16 @@ import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError } from "./db/store-errors.js";
 import { createRunScope } from "./run-scope.js";
+import {
+  CODE_SANDBOX_INITIALISING,
+  resolveCodeSandboxPlan,
+  describeCodeSandboxPlan,
+  configureExpressionSandbox,
+  expressionSandboxLimits,
+  nodeDnsResolver,
+  type CodeSandboxPlan,
+  type OutboundGuardConfig
+} from "@ai-orchestrator/workflow-engine";
 import {
   McpCassetteService,
   applyReplayOutcome,
@@ -1217,6 +1228,11 @@ async function verifyWebhookRequestAuth(input: {
   return { ok: true };
 }
 
+export interface CreateAppOptions {
+  /** Runtime/image detection seams for the code sandbox plan (tests). */
+  codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
+}
+
 export function createApp(
   config: AppConfig,
   store: SqliteStore,
@@ -1224,7 +1240,8 @@ export function createApp(
   authService: AuthService,
   schedulerService?: SchedulerService,
   queueService?: QueueService,
-  triggerService?: TriggerService
+  triggerService?: TriggerService,
+  options: CreateAppOptions = {}
 ) {
   // Phase 4.4 — Request-ID propagation.
   // - `requestIdHeader: "x-request-id"` makes Fastify honor an incoming
@@ -1264,6 +1281,54 @@ export function createApp(
   };
   const mcpSandboxLauncher = new ContainerSandboxLauncher(mcpSandboxPolicy, {
     onWarning: (message, fields) => app.log.warn(fields ?? {}, message)
+  });
+
+  // Code nodes: pick a sandbox plan at startup. Until it settles (one async
+  // runtime/image check) code nodes are refused, and the server does not
+  // accept requests (the onReady hook below waits for it), so nothing runs
+  // under a plan the admin did not choose.
+  configureExpressionSandbox({
+    timeoutMs: config.EXPRESSION_TIMEOUT_MS,
+    memoryMb: config.EXPRESSION_MEMORY_MB,
+    maxResultMb: config.EXPRESSION_MAX_RESULT_MB,
+    templateBudgetMs: config.EXPRESSION_TEMPLATE_BUDGET_MS
+  });
+  // Outbound URL policy for nodes that fetch a user-supplied URL.
+  const outboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
+  let codeSandboxPlan: CodeSandboxPlan = CODE_SANDBOX_INITIALISING;
+  const codeSandboxSettled = resolveCodeSandboxPlan(
+    {
+      enabled: config.CODE_NODES_ENABLED,
+      mode: config.CODE_SANDBOX_MODE,
+      runtime: config.CODE_SANDBOX_RUNTIME,
+      jsImage: config.CODE_SANDBOX_JS_IMAGE,
+      pythonImage: config.CODE_SANDBOX_PYTHON_IMAGE,
+      memoryMb: config.CODE_SANDBOX_MEMORY_MB,
+      cpus: config.CODE_SANDBOX_CPUS,
+      pidsLimit: config.CODE_SANDBOX_PIDS_LIMIT,
+      startupMs: config.CODE_SANDBOX_STARTUP_MS,
+      instanceLabel: crypto.createHash("sha256").update(`l2m-code:${store.storageLocation()}`).digest("hex").slice(0, 16),
+      pythonInProcess: config.CODE_SANDBOX_PYTHON_IN_PROCESS,
+      pythonUid: config.CODE_SANDBOX_PYTHON_UID,
+      pythonGid: config.CODE_SANDBOX_PYTHON_GID,
+      maxTimeoutMs: config.CODE_SANDBOX_MAX_TIMEOUT_MS,
+      maxResultMb: config.CODE_SANDBOX_MAX_RESULT_MB
+    },
+    options.codeSandboxDeps
+  )
+    .then(({ plan, warning }) => {
+      codeSandboxPlan = plan;
+      const described = describeCodeSandboxPlan(plan);
+      if (warning) app.log.warn({ codeSandboxMode: described.mode }, warning);
+      else app.log.info({ codeSandbox: described.mode, detail: described.detail, expressions: expressionSandboxLimits() }, "Code node sandbox ready");
+    })
+    .catch((error) => {
+      // Fail closed: an unknown environment never falls back to running code on the host.
+      codeSandboxPlan = { kind: "disabled", reason: "Code nodes are unavailable: the code sandbox could not be set up at startup. Check the API logs." };
+      app.log.error({ err: error instanceof Error ? error.message : String(error) }, "Could not resolve the code sandbox plan; code nodes are disabled");
+    });
+  app.addHook("onReady", async () => {
+    await codeSandboxSettled;
   });
   // Phase 10.7 — rate limits, concurrency caps and circuit breakers. State is
   // in memory, per API instance, keyed by registry server id; it is shared by
@@ -1734,6 +1799,11 @@ export function createApp(
           loadMcpToolPolicy,
           // Phase 10.5 — resources, elicitation and list_changed notifications.
           mcpResourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
+          // Where code nodes run (container, in-process isolate, or disabled).
+          codeSandbox: codeSandboxPlan,
+          // SSRF/egress policy for HTTP Request, Web Browse, Chart data.url and HTML PDF.
+          outboundGuard,
+          outboundDnsResolver: nodeDnsResolver,
           onMcpListChanged: input.replay ? undefined : (event) => mcpProbeService.onListChanged(event),
           onMcpElicitation: input.replay
             ? input.replay.sandbox.onMcpElicitation
@@ -1820,7 +1890,10 @@ export function createApp(
                   ...errorScoped,
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
-                  loadMcpToolPolicy
+                  loadMcpToolPolicy,
+                  codeSandbox: codeSandboxPlan,
+                  outboundGuard,
+                  outboundDnsResolver: nodeDnsResolver
                 }
               );
             } catch (err) {
@@ -2575,6 +2648,7 @@ export function createApp(
   if (triggerService) {
     triggerService.setExecutionHandler(async (payload) => executeTriggeredWorkflow(payload));
     triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
+    triggerService.setOutboundGuard(outboundGuard, nodeDnsResolver);
     app.addHook("onClose", async () => {
       await triggerService.stop();
     });
@@ -7599,12 +7673,18 @@ export function createApp(
       };
     }
 
+    if (codeSandboxPlan.kind === "disabled") {
+      reply.code(403);
+      return { error: codeSandboxPlan.reason };
+    }
     try {
-      const result = await executeCodeNodeSandbox({
-        code: parsed.data.code,
-        timeoutMs: parsed.data.timeout,
-        input: parsed.data.input ?? {}
-      });
+      const result = await runWithSandboxOwner(`user:${user.id}`, () =>
+        executeCodeNodeSandbox({
+          code: parsed.data.code,
+          timeoutMs: parsed.data.timeout,
+          input: parsed.data.input ?? {}
+        }, codeSandboxPlan)
+      );
       return result;
     } catch (error) {
       reply.code(400);
@@ -7858,10 +7938,12 @@ export function createApp(
     };
 
     try {
-      const result =
+      // Previews count against the user's own sandbox circuit breaker, not a workflow's.
+      const result = runWithSandboxOwner(`user:${user.id}`, () =>
         parsed.data.mode === "template" || parsed.data.expression.includes("{{")
           ? renderExpressionTemplate(parsed.data.expression, expressionContext)
-          : evaluateExpression(parsed.data.expression, expressionContext);
+          : evaluateExpression(parsed.data.expression, expressionContext)
+      );
       return {
         ok: true,
         result

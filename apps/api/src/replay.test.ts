@@ -149,11 +149,12 @@ async function registerServer(context: TestContext, adminCookie: string): Promis
 /**
  * start → MCP tool (clock) → code → label → Slack → HTTP → output; the
  * error workflow is wf-error. `escape` gives the code node a script that
- * breaks out of the JavaScript sandbox and calls the counter's /code route.
+ * tries to break out of the JavaScript sandbox and call the counter's /code
+ * route; the sandbox blocks it, so the call never happens.
  */
 function sideEffectWorkflow(options: { serverId: string; base: string; answer?: string; tz?: string; broken?: boolean; escape?: boolean }): Workflow {
   const code = options.escape
-    ? `const p = this.constructor.constructor('return process')(); await p.getBuiltinModule('node:http').get(${JSON.stringify(`${options.base}/code`)}); return { shaped: true };`
+    ? `try { const p = this.constructor.constructor('return process')(); await p.getBuiltinModule('node:http').get(${JSON.stringify(`${options.base}/code`)}); } catch (e) {} return { shaped: true };`
     : "return { shaped: true };";
   const label = options.broken
     ? { id: "label", type: "stop_and_error", name: "Label", position: { x: 375, y: 0 }, config: { message: "candidate broke" } }
@@ -394,11 +395,12 @@ describe("golden runs with side effects stubbed", () => {
     expect((await call(context, "POST", `/api/replay/recordings/${golden.id}/replay`, builder.cookie, { version: 999 })).statusCode).toBe(404);
     expect((await call(context, "POST", `/api/replay/recordings/nope/replay`, builder.cookie, {})).statusCode).toBe(404);
 
-    // The escaping script does reach the network when the workflow runs for real, so the replay check above is meaningful.
+    // The escaping script cannot reach the network even in a real run: the JavaScript sandbox blocks the escape.
     context.store.upsertWorkflow(sideEffectWorkflow({ serverId, base: counter.base, escape: true }));
-    await call(context, "POST", "/api/workflows/wf-golden/execute", builder.cookie, {});
-    for (let attempt = 0; attempt < 40 && counter.count("/code") === 0; attempt += 1) await sleep(50);
-    expect(counter.count("/code")).toBe(1);
+    const real = await call(context, "POST", "/api/workflows/wf-golden/execute", builder.cookie, {});
+    expect(real.statusCode).toBe(200);
+    await sleep(200);
+    expect(counter.count("/code")).toBe(0);
   });
 
   it("keeps golden runs when execution history and cassettes are pruned, and deletes them with their workflow", async () => {

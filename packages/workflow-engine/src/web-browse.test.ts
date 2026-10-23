@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import http from "node:http";
 import { chromium } from "playwright";
 import { browseUrl } from "./web-browse.js";
+import { playwrightWebSocketGuard } from "./outbound-url-guard.js";
 
 /**
  * Resolve the Chromium executable the same way web-browse.ts does:
@@ -67,10 +68,21 @@ const SPA_HTML = `<!doctype html>
 
 let server: http.Server;
 let baseUrl: string;
+let upgradeAttempts = 0;
+
+/** Opens a WebSocket to this server and marks the page done a little later (a routed close does not always reach the page). */
+const wsPage = (port: number) => `<!doctype html><html><head><title>ws</title></head><body><script>
+  const ws = new WebSocket('ws://127.0.0.1:${port}/socket');
+  const done = () => { if (!document.getElementById('done')) document.body.insertAdjacentHTML('beforeend', '<div id="done">done</div>'); };
+  setTimeout(done, 700);
+</script></body></html>`;
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
-    if (req.url === "/spa") {
+    if (req.url === "/ws-page") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(wsPage((server.address() as { port: number }).port));
+    } else if (req.url === "/spa") {
       res.writeHead(200, { "content-type": "text/html" });
       res.end(SPA_HTML);
     } else if (req.url === "/404") {
@@ -80,6 +92,11 @@ beforeAll(async () => {
       res.writeHead(200, { "content-type": "text/html" });
       res.end(HTML);
     }
+  });
+  // Count WebSocket upgrade attempts and refuse them; the page only needs to see the socket close.
+  server.on("upgrade", (_request, socket) => {
+    upgradeAttempts += 1;
+    socket.destroy();
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
@@ -183,6 +200,27 @@ describe("web_browse", () => {
       // Title + meta + html still present
       expect(r.title).toBe("Test Page");
       expect(r.html).toMatch(/Welcome/);
+    }, 30000);
+
+    it("a WebSocket the guard blocks never reaches the server; an allowed one does", async () => {
+      // Under OUTBOUND_DENY_PRIVATE the loopback socket is blocked (the page itself is loaded without a request guard here).
+      upgradeAttempts = 0;
+      await browseUrl({
+        url: `${baseUrl}/ws-page`,
+        screenshot: false,
+        waitForSelector: "#done",
+        timeoutMs: 8000,
+        webSocketGuard: playwrightWebSocketGuard({ denyPrivate: true, allowlist: [] })
+      });
+      expect(upgradeAttempts).toBe(0);
+      await browseUrl({
+        url: `${baseUrl}/ws-page`,
+        screenshot: false,
+        waitForSelector: "#done",
+        timeoutMs: 8000,
+        webSocketGuard: playwrightWebSocketGuard({ denyPrivate: false, allowlist: [] })
+      });
+      expect(upgradeAttempts).toBe(1);
     }, 30000);
   });
 });

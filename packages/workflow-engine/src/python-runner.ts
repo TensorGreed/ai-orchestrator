@@ -10,6 +10,11 @@
  *
  * If the python binary is missing, rejects with a WorkflowError tagged
  * ErrorCategory.CONFIGURATION so callers can surface a clean error.
+ *
+ * The child never inherits the API's environment (which holds
+ * SECRET_MASTER_KEY_BASE64 and provider keys): it gets the `env` it is given,
+ * or PATH alone. Where it runs (host or container) is decided by
+ * code-sandbox.ts.
  */
 import { spawn } from "node:child_process";
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
@@ -20,6 +25,15 @@ export interface PythonExecutionInput {
   mode: "runOnceForAllItems" | "runOnceForEachItem";
   timeoutMs?: number;
   pythonBin?: string;
+  /** The child's whole environment. Defaults to PATH only; never inherits the API's. */
+  env?: NodeJS.ProcessEnv;
+  /** Working directory for the child. */
+  cwd?: string;
+  /** Run with `python -I` (isolated: ignores PYTHON* variables and the user site directory). Default true. */
+  isolated?: boolean;
+  /** Run the child as this uid / gid (the API needs CAP_SETUID / CAP_SETGID, e.g. root in a container). */
+  uid?: number;
+  gid?: number;
 }
 
 export interface PythonExecutionResult {
@@ -27,7 +41,7 @@ export interface PythonExecutionResult {
   logs: string[];
 }
 
-const PY_RUNNER = [
+export const PY_RUNNER = [
   "import json, sys, traceback",
   "data = json.loads(sys.stdin.read())",
   "items = data['items']",
@@ -54,25 +68,56 @@ const PY_RUNNER = [
   "    sys.stdout.write(json.dumps({'ok': False, 'error': str(e), 'trace': traceback.format_exc(), 'logs': logs}))"
 ].join("\n");
 
+/** The runner's JSON reply as a result, or its error as a WorkflowError. */
+export function parsePythonRunnerOutput(stdout: string, stderr: string): PythonExecutionResult {
+  let parsed: { ok: boolean; result?: unknown; error?: string; trace?: string; logs?: string[] };
+  try {
+    parsed = JSON.parse(stdout) as typeof parsed;
+  } catch {
+    throw new WorkflowError(`Python output was not valid JSON: ${stdout || stderr}`, ErrorCategory.UNKNOWN, false);
+  }
+  if (parsed.ok) return { result: parsed.result, logs: parsed.logs ?? [] };
+  throw new WorkflowError(`Python error: ${parsed.error ?? "unknown"}`, ErrorCategory.UNKNOWN, false, { trace: parsed.trace });
+}
+
+/** How long to keep reading output after Python exits, before its pipes are dropped. */
+const EXIT_OUTPUT_GRACE_MS = 100;
+
 export async function executePythonCodeNode(input: PythonExecutionInput): Promise<PythonExecutionResult> {
   const timeoutMs = input.timeoutMs ?? 15000;
   const pythonBin =
     input.pythonBin ||
     process.env.PYTHON_BIN ||
     (process.platform === "win32" ? "python" : "python3");
+  // Never the API's own environment: callers pass a minimal one, and without one the child gets PATH only.
+  const env = input.env ?? { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" };
+  const args = [...(input.isolated === false ? [] : ["-I"]), "-c", PY_RUNNER];
 
+  const spawnFailure = (err: NodeJS.ErrnoException): WorkflowError => {
+    if (err.code === "EPERM" && (input.uid !== undefined || input.gid !== undefined)) {
+      return new WorkflowError(
+        `CODE_SANDBOX_PYTHON_UID/GID is set (uid ${input.uid ?? "unchanged"}, gid ${input.gid ?? "unchanged"}) but the API is not allowed to switch to it (${err.message}); the API needs CAP_SETUID and CAP_SETGID, or unset both.`,
+        ErrorCategory.CONFIGURATION,
+        false
+      );
+    }
+    return new WorkflowError(`Python runtime '${pythonBin}' is not available: ${err.message}`, ErrorCategory.CONFIGURATION, false);
+  };
   return new Promise<PythonExecutionResult>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(pythonBin, ["-c", PY_RUNNER], { stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(pythonBin, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+        cwd: input.cwd,
+        windowsHide: true,
+        // Its own process group, so a timeout also kills what the code started (unless it calls setsid).
+        detached: process.platform !== "win32",
+        ...(input.uid !== undefined ? { uid: input.uid } : {}),
+        ...(input.gid !== undefined ? { gid: input.gid } : {})
+      });
     } catch (err) {
-      reject(
-        new WorkflowError(
-          `Python runtime '${pythonBin}' is not available: ${(err as Error).message}`,
-          ErrorCategory.CONFIGURATION,
-          false
-        )
-      );
+      reject(spawnFailure(err as NodeJS.ErrnoException));
       return;
     }
 
@@ -83,7 +128,12 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { child.kill(); } catch { /* ignore */ }
+      try {
+        if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      }
       fn();
     };
     const timer = setTimeout(() => {
@@ -99,15 +149,7 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
     }, timeoutMs);
 
     child.on("error", (err) => {
-      finalize(() =>
-        reject(
-          new WorkflowError(
-            `Python runtime '${pythonBin}' is not available: ${err.message}`,
-            ErrorCategory.CONFIGURATION,
-            false
-          )
-        )
-      );
+      finalize(() => reject(spawnFailure(err as NodeJS.ErrnoException)));
     });
     child.stdout?.on("data", (chunk) => {
       stdout += chunk.toString();
@@ -115,7 +157,13 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("close", (code) => {
+    // Settle when Python itself exits, not when its pipes close: a process the code detached (setsid)
+    // keeps them open. Output still in flight is read during a short grace, then the pipes are dropped.
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    const settleExit = (code: number | null) => {
+      if (exitTimer) clearTimeout(exitTimer);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       finalize(() => {
         if (code !== 0 && !stdout) {
           reject(
@@ -128,36 +176,17 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
           return;
         }
         try {
-          const parsed = JSON.parse(stdout) as {
-            ok: boolean;
-            result?: unknown;
-            error?: string;
-            trace?: string;
-            logs?: string[];
-          };
-          if (parsed.ok) {
-            resolve({ result: parsed.result, logs: parsed.logs ?? [] });
-          } else {
-            reject(
-              new WorkflowError(
-                `Python error: ${parsed.error ?? "unknown"}`,
-                ErrorCategory.UNKNOWN,
-                false,
-                { trace: parsed.trace }
-              )
-            );
-          }
-        } catch {
-          reject(
-            new WorkflowError(
-              `Python output was not valid JSON: ${stdout || stderr}`,
-              ErrorCategory.UNKNOWN,
-              false
-            )
-          );
+          resolve(parsePythonRunnerOutput(stdout, stderr));
+        } catch (error) {
+          reject(error);
         }
       });
+    };
+    child.on("exit", (code) => {
+      exitTimer = setTimeout(() => settleExit(code), EXIT_OUTPUT_GRACE_MS);
     });
+    child.on("close", (code) => settleExit(code));
+    child.stdin?.on("error", () => undefined);
     child.stdin?.write(JSON.stringify({ items: input.items, mode: input.mode, code: input.code }));
     child.stdin?.end();
   });

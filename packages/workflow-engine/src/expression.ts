@@ -7,10 +7,23 @@
  * functions ($if, $ifEmpty, $jmespath).
  *
  * Security notes:
- *   - process / require / global / Function / eval / globalThis are stripped
- *     from the evaluation scope by passing `undefined`.
+ *   - Expressions run in a QuickJS WebAssembly sandbox with no host objects
+ *     (see expression-sandbox.ts), a memory limit and a time limit; data goes
+ *     in and out as JSON.
+ *   - process / require / global / Function / eval / globalThis are also
+ *     shadowed in the evaluation scope.
  *   - $env exposes a curated subset rather than `process.env` directly.
  */
+import {
+  JMESPATH_SOURCE,
+  evaluateInSandbox,
+  isExpressionSandboxFailure,
+  serializeExpressionPayload,
+  withExpressionSandbox,
+  type SandboxEvaluate,
+  type SandboxExpressionPayload
+} from "./expression-sandbox";
+
 export interface ExpressionContext {
   $input?: unknown;
   $json?: unknown;
@@ -23,22 +36,6 @@ export interface ExpressionContext {
   $nodeOutputs?: Record<string, unknown>;
   /** Extra root-level variables exposed verbatim (e.g. `text`, `answer`). */
   extras?: Record<string, unknown>;
-}
-
-interface SandboxScope extends Record<string, unknown> {
-  $input: unknown;
-  $json: unknown;
-  $workflow: { id: string; name: string };
-  $execution: { id: string; customData: Record<string, unknown> };
-  $env: Record<string, string | undefined>;
-  $vars: Record<string, unknown>;
-  $now: Date;
-  $today: Date;
-  $itemIndex: number;
-  $node: (name: string) => { output: unknown };
-  $if: (cond: unknown, a: unknown, b: unknown) => unknown;
-  $ifEmpty: (value: unknown, fallback: unknown) => unknown;
-  $jmespath: (input: unknown, path: string) => unknown;
 }
 
 const DEFAULT_SAFE_ENV_KEYS = [
@@ -59,195 +56,67 @@ function buildSafeEnv(provided?: Record<string, string | undefined>): Record<str
   return env;
 }
 
-function isEmpty(value: unknown): boolean {
-  if (value === undefined || value === null) return true;
-  if (typeof value === "string") return value.length === 0;
-  if (Array.isArray(value)) return value.length === 0;
-  if (typeof value === "object") return Object.keys(value as object).length === 0;
-  return false;
-}
-
 /**
  * Tiny JMESPath-like evaluator.
  * Supports: dot paths (`a.b.c`), array indexing (`a[0]`), wildcard (`a[*].b`),
  * filter expressions (`a[?field=='val']` and `a[?field==1]`).
+ * Built from the same source the expression sandbox uses as `$jmespath`.
  */
-export function jmespath(input: unknown, path: string): unknown {
-  if (input == null || !path) return input;
-  const tokens = tokenizeJmesPath(path);
-  let current: unknown = input;
-  for (const token of tokens) {
-    if (current == null) return undefined;
-    current = applyJmesToken(current, token);
-  }
-  return current;
+// eslint-disable-next-line no-new-func
+export const jmespath = new Function(`return (${JMESPATH_SOURCE});`)() as (input: unknown, path: string) => unknown;
+
+/** The payload the sandbox builds `$input`, `$json`, `$node()`, `$vars` and the rest from. */
+function payloadFor(context: ExpressionContext): SandboxExpressionPayload {
+  return {
+    input: context.$input,
+    json: context.$json ?? context.$input,
+    extras: context.extras,
+    workflow: { id: context.$workflow?.id ?? "", name: context.$workflow?.name ?? "" },
+    execution: { id: context.$execution?.id ?? "", customData: context.$execution?.customData ?? {} },
+    env: buildSafeEnv(context.$env),
+    vars: context.$vars ?? {},
+    itemIndex: context.$itemIndex ?? 0,
+    nodeOutputs: context.$nodeOutputs ?? {}
+  };
 }
 
-type JmesToken =
-  | { kind: "key"; name: string }
-  | { kind: "index"; index: number }
-  | { kind: "wildcard" }
-  | { kind: "filter"; field: string; op: "=="; value: string | number | boolean | null };
-
-function tokenizeJmesPath(path: string): JmesToken[] {
-  const tokens: JmesToken[] = [];
-  let i = 0;
-  let buffer = "";
-  const flushBuffer = () => {
-    if (buffer.length > 0) {
-      tokens.push({ kind: "key", name: buffer });
-      buffer = "";
+function evaluatorFor(context: ExpressionContext, run: (expression: string, serialized: string) => unknown): (expression: string) => unknown {
+  let serialized: string | null = null;
+  return (expression: string) => {
+    const trimmed = expression.trim();
+    if (!trimmed) return undefined;
+    try {
+      serialized ??= serializeExpressionPayload(payloadFor(context));
+      return run(trimmed, serialized);
+    } catch (err) {
+      // A sandbox failure keeps its type, so templates can tell it from the expression's own error.
+      if (isExpressionSandboxFailure(err)) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Expression evaluation failed for '${trimmed}': ${message}`);
     }
   };
-  while (i < path.length) {
-    const c = path[i];
-    if (c === ".") {
-      flushBuffer();
-      i++;
-      continue;
-    }
-    if (c === "[") {
-      flushBuffer();
-      const close = path.indexOf("]", i);
-      if (close === -1) throw new Error(`jmespath: unclosed bracket in '${path}'`);
-      const inner = path.slice(i + 1, close).trim();
-      if (inner === "*") {
-        tokens.push({ kind: "wildcard" });
-      } else if (inner.startsWith("?")) {
-        const filter = inner.slice(1).trim();
-        const m = filter.match(/^([A-Za-z_$][\w$]*)\s*==\s*(.+)$/);
-        if (!m) throw new Error(`jmespath: unsupported filter '${filter}'`);
-        const field = m[1];
-        const rawValue = m[2].trim();
-        let value: string | number | boolean | null;
-        if ((rawValue.startsWith("'") && rawValue.endsWith("'")) ||
-            (rawValue.startsWith('"') && rawValue.endsWith('"'))) {
-          value = rawValue.slice(1, -1);
-        } else if (rawValue === "true") value = true;
-        else if (rawValue === "false") value = false;
-        else if (rawValue === "null") value = null;
-        else if (!Number.isNaN(Number(rawValue))) value = Number(rawValue);
-        else value = rawValue;
-        tokens.push({ kind: "filter", field, op: "==", value });
-      } else if (/^-?\d+$/.test(inner)) {
-        tokens.push({ kind: "index", index: Number(inner) });
-      } else {
-        throw new Error(`jmespath: unsupported bracket expr '[${inner}]'`);
-      }
-      i = close + 1;
-      continue;
-    }
-    buffer += c;
-    i++;
-  }
-  flushBuffer();
-  return tokens;
 }
 
-function applyJmesToken(current: unknown, token: JmesToken): unknown {
-  if (token.kind === "key") {
-    if (Array.isArray(current)) {
-      return current.map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>)[token.name] : undefined));
-    }
-    if (current && typeof current === "object") {
-      return (current as Record<string, unknown>)[token.name];
-    }
-    return undefined;
-  }
-  if (token.kind === "index") {
-    if (Array.isArray(current)) {
-      const idx = token.index < 0 ? current.length + token.index : token.index;
-      return current[idx];
-    }
-    return undefined;
-  }
-  if (token.kind === "wildcard") {
-    if (Array.isArray(current)) return current.slice();
-    if (current && typeof current === "object") return Object.values(current);
-    return [];
-  }
-  if (token.kind === "filter") {
-    if (!Array.isArray(current)) return [];
-    return current.filter((entry) => {
-      if (!entry || typeof entry !== "object") return false;
-      const fieldValue = (entry as Record<string, unknown>)[token.field];
-      // eslint-disable-next-line eqeqeq
-      return fieldValue == token.value;
-    });
-  }
-  return undefined;
+/**
+ * An evaluator bound to one context: the context is serialized for the
+ * sandbox once, on the first evaluation, and reused for the rest. Each call
+ * runs in its own sandbox session.
+ */
+export function createExpressionEvaluator(context: ExpressionContext): (expression: string) => unknown {
+  return evaluatorFor(context, (expression, serialized) => evaluateInSandbox(expression, serialized));
 }
 
-function buildScope(context: ExpressionContext): SandboxScope {
-  const nodeOutputs = context.$nodeOutputs ?? {};
-  const $node = (name: string) => ({
-    output: nodeOutputs[name]
-  });
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-  const scope: SandboxScope = {
-    $input: context.$input,
-    $json: context.$json ?? context.$input,
-    $workflow: { id: context.$workflow?.id ?? "", name: context.$workflow?.name ?? "" },
-    $execution: {
-      id: context.$execution?.id ?? "",
-      customData: context.$execution?.customData ?? {}
-    },
-    $env: buildSafeEnv(context.$env),
-    $vars: context.$vars ?? {},
-    $now: now,
-    $today: today,
-    $itemIndex: context.$itemIndex ?? 0,
-    $node,
-    $if: (cond, a, b) => (cond ? a : b),
-    $ifEmpty: (value, fallback) => (isEmpty(value) ? fallback : value),
-    $jmespath: jmespath
-  };
-
-  if (context.extras) {
-    for (const [key, value] of Object.entries(context.extras)) {
-      if (!(key in scope)) {
-        scope[key] = value;
-      }
-    }
-  }
-
-  // Explicitly block dangerous globals so a `with` scope cannot reach them.
-  scope.process = undefined;
-  scope.require = undefined;
-  scope.global = undefined;
-  scope.globalThis = undefined;
-  scope.Function = undefined;
-  scope.eval = undefined;
-
-  return scope;
-}
-
-const evaluatorCache = new Map<string, (scope: Record<string, unknown>) => unknown>();
-
-function compileExpression(expression: string): (scope: Record<string, unknown>) => unknown {
-  const cached = evaluatorCache.get(expression);
-  if (cached) return cached;
-  // eslint-disable-next-line no-new-func
-  const fn = new Function(
-    "__scope",
-    `with (__scope) { return (${expression}); }`
-  ) as (scope: Record<string, unknown>) => unknown;
-  evaluatorCache.set(expression, fn);
-  return fn;
+/**
+ * Like `createExpressionEvaluator`, but every evaluation inside `body` shares
+ * one sandbox session (one template's expressions), which saves the session
+ * start-up per expression. The evaluator must not be used after `body` returns.
+ */
+export function withExpressionEvaluator<R>(context: ExpressionContext, body: (evaluate: (expression: string) => unknown) => R): R {
+  return withExpressionSandbox((evaluate: SandboxEvaluate) => body(evaluatorFor(context, (expression, serialized) => evaluate("expr", expression, serialized))));
 }
 
 export function evaluateExpression(expression: string, context: ExpressionContext): unknown {
-  const trimmed = expression.trim();
-  if (!trimmed) return undefined;
-  const scope = buildScope(context);
-  try {
-    return compileExpression(trimmed)(scope);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Expression evaluation failed for '${trimmed}': ${message}`);
-  }
+  return createExpressionEvaluator(context)(expression);
 }
 
 const TEMPLATE_REGEX = /{{\s*([\s\S]+?)\s*}}/g;
@@ -264,16 +133,24 @@ function stringifyResult(value: unknown): string {
   }
 }
 
+/**
+ * Renders every `{{ }}` in one sandbox session. An expression that throws or
+ * times out renders "", as it always has; a failure of the sandbox itself
+ * (ExpressionSandboxError) is thrown, so the caller fails rather than using
+ * a value that silently lost its expression.
+ */
 export function renderExpressionTemplate(template: string, context: ExpressionContext): string {
   if (typeof template !== "string" || !template.includes("{{")) return template;
-  return template.replace(TEMPLATE_REGEX, (_match, expr: string) => {
-    try {
-      const result = evaluateExpression(expr, context);
-      return stringifyResult(result);
-    } catch {
-      return "";
-    }
-  });
+  return withExpressionEvaluator(context, (evaluate) =>
+    template.replace(TEMPLATE_REGEX, (_match, expr: string) => {
+      try {
+        return stringifyResult(evaluate(expr));
+      } catch (error) {
+        if (isExpressionSandboxFailure(error)) throw error;
+        return "";
+      }
+    })
+  );
 }
 
 /**

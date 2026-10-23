@@ -38,7 +38,7 @@ The candidate runs on the golden run's input. Each node is classified by type:
 
 | Node class | Examples | In a replay |
 | --- | --- | --- |
-| Logic | Set, If, Switch, Merge, Sort, Output, Webhook Response | Runs, including the expressions in its fields (see below) |
+| Logic | Set, If, Switch, Merge, Sort, Output, Webhook Response | Runs, including the expressions in its fields (sandboxed; see below) |
 | Chart | Chart | Runs from inline data; a chart that needs a data URL or file is not loaded, and the replay is inconclusive |
 | Model | LLM Call, Agent Orchestrator, Supervisor, Output Parser (it can ask the model to repair its output) | Runs live |
 | Guard | Guard nodes and agent guard bindings | Runs |
@@ -57,7 +57,7 @@ Code nodes are answered from the recording because neither runtime is cut off fr
 
 ### What a replay does not stop yet
 
-Expressions inside the nodes that do run are evaluated as in any run: `{{ }}` templates in prompts, Set and Output fields, If conditions and agent prompts, and Sort node expressions. These run in the API process, so an expression written to make a network call can make that call during a replay too. Treat a replay as protection against the workflow's connectors, HTTP calls and code nodes, not against a hostile workflow author. Sandboxing expressions is planned as separate work, and this page will change when it lands.
+Expressions inside the nodes that do run are evaluated as in any run: `{{ }}` templates in prompts, Set and Output fields, If conditions and agent prompts, and Sort node expressions. These run in an isolated realm with no host access — no `process`, `require`, `fetch`, timers or file system, and a time limit — so an expression cannot reach the network or disk, in a replay or anywhere else. See [Code nodes and expressions](/security/code-execution) for how that sandbox works.
 
 Replays never write to deployment state: session memory, the session tool cache and session artifacts live in memory for the replay and are thrown away, knowledge-base writes are refused, MCP elicitation requests are declined, the error workflow and failure notifications are not fired, budget alerts are not sent (a replay's live model spend still counts toward budgets, so the next real run over a threshold sends the alert), and replays stay out of execution metrics and MCP tool-call telemetry. Pinned node data on the workflow is ignored. The replay itself is stored as a run with trigger type `replay`.
 

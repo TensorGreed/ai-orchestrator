@@ -192,6 +192,67 @@ const envSchema = z.object({
     ),
   /** Container runtime for sandboxes: `auto` prefers docker, then podman. */
   MCP_SANDBOX_RUNTIME: z.enum(["auto", "docker", "podman"]).default("auto"),
+  // Code nodes (JavaScript and Python).
+  /** Master switch. When false, every code node fails with a clear error. */
+  CODE_NODES_ENABLED: booleanFromEnv.default(true),
+  /**
+   * Where code nodes run: `auto` uses a container when docker or podman is
+   * installed and both images are present locally, otherwise in process (JS
+   * in a QuickJS WebAssembly sandbox, Python as a host subprocess) with a
+   * startup warning; `container` insists on a container (code nodes fail
+   * without a runtime); `in_process` always runs on the host.
+   */
+  CODE_SANDBOX_MODE: z.enum(["auto", "container", "in_process"]).default("auto"),
+  /** Container runtime for code sandboxes: `auto` prefers docker, then podman. */
+  CODE_SANDBOX_RUNTIME: z.enum(["auto", "docker", "podman"]).default("auto"),
+  /** Pinned image (tag or digest) with `node` on PATH, for JavaScript code nodes in container mode. */
+  CODE_SANDBOX_JS_IMAGE: z.string().trim().min(1).default("node:22.11.0-alpine3.20"),
+  /** Pinned image with `python3` on PATH, for Python code nodes in container mode. */
+  CODE_SANDBOX_PYTHON_IMAGE: z.string().trim().min(1).default("python:3.12.7-alpine3.20"),
+  /** Memory ceiling for a code sandbox container, and for one in-process JavaScript run (MB). */
+  CODE_SANDBOX_MEMORY_MB: z.coerce.number().int().min(32).max(16384).default(256),
+  /** CPU ceiling for a code sandbox container (cores). */
+  CODE_SANDBOX_CPUS: z.coerce.number().min(0.1).max(16).default(1),
+  /** Process ceiling inside a code sandbox container. */
+  CODE_SANDBOX_PIDS_LIMIT: z.coerce.number().int().min(8).max(4096).default(128),
+  /** Time allowed for a code sandbox container to start, on top of the code's own timeout (ms). */
+  CODE_SANDBOX_STARTUP_MS: z.coerce.number().int().min(1000).max(120000).default(8000),
+  /**
+   * Whether Python code nodes may run as host subprocesses when there is no
+   * container sandbox. Host Python is not sandboxed: it can run commands,
+   * open network connections the outbound guard never sees and read what the
+   * API user can read. `deny` makes Python code nodes fail instead.
+   */
+  CODE_SANDBOX_PYTHON_IN_PROCESS: z.enum(["allow", "deny"]).default("deny"),
+  /** Run host Python as this uid (the API needs CAP_SETUID and CAP_CHOWN, e.g. root in a container). Unset: the API's own user. */
+  CODE_SANDBOX_PYTHON_UID: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().int().min(0).max(4294967294).optional()),
+  /** Run host Python with this gid (needs CAP_SETGID). Unset with a uid set: the same number as the uid. */
+  CODE_SANDBOX_PYTHON_GID: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().int().min(0).max(4294967294).optional()),
+  /**
+   * Ceiling on an in-process JavaScript code node's timeout (ms). The run
+   * holds the API's event loop, so a node's own timeout is clamped to this,
+   * and a per-item node may not exceed four times it in all.
+   */
+  CODE_SANDBOX_MAX_TIMEOUT_MS: z.coerce.number().int().min(100).max(300000).default(30000),
+  /** Ceiling on what one in-process JavaScript code node returns, results and logs of all items together (MB). */
+  CODE_SANDBOX_MAX_RESULT_MB: z.coerce.number().int().min(1).max(512).default(32),
+  /** Time limit for a single `{{ }}` or Sort-node expression (ms). */
+  EXPRESSION_TIMEOUT_MS: z.coerce.number().int().min(50).max(60000).default(1000),
+  /** Heap limit for a single expression evaluation (MB). */
+  EXPRESSION_MEMORY_MB: z.coerce.number().int().min(4).max(1024).default(64),
+  /** Largest result one expression may return (MB, as JSON). */
+  EXPRESSION_MAX_RESULT_MB: z.coerce.number().int().min(1).max(256).default(8),
+  /** Time budget for all the expressions of one template together (ms); never less than EXPRESSION_TIMEOUT_MS. */
+  EXPRESSION_TEMPLATE_BUDGET_MS: z.coerce.number().int().min(100).max(600000).default(5000),
+  // Outbound URL guard for nodes that fetch a user-supplied URL (HTTP Request,
+  // Web Browse, Chart data.url, HTML-render PDF).
+  /** Block private ranges and localhost for those nodes. Metadata and link-local are always blocked. */
+  OUTBOUND_DENY_PRIVATE: booleanFromEnv.default(false),
+  /** Comma-separated hosts or CIDRs allowed through when OUTBOUND_DENY_PRIVATE is on (e.g. 10.0.0.0/8, *.internal:8080). */
+  OUTBOUND_ALLOWLIST: z
+    .string()
+    .default("")
+    .transform((value) => value.split(",").map((entry) => entry.trim()).filter(Boolean)),
   /**
    * Phase 11.1 — Ed25519 private key (base64 of the 32-byte seed) that signs
    * run manifests and audit bundles. When unset, the API generates one on

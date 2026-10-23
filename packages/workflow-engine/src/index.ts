@@ -21,3 +21,7 @@ export * from "./approval-handoff";
 export * from "./guard-runtime";
 export * from "./replay-plan";
 export { executeGuardNodeStep, type GuardNodeSummary } from "./guard-node";
+export * from "./code-sandbox";
+export { configureExpressionSandbox, expressionSandboxLimits, EXPRESSION_SANDBOX_DEFAULTS, ExpressionSandboxError, isExpressionSandboxFailure } from "./expression-sandbox";
+export { runWithSandboxOwner } from "./quickjs-sandbox";
+export * from "./outbound-url-guard";

@@ -43,6 +43,7 @@ function makeDeps(extra: Partial<WorkflowExecutionDependencies> = {}, agentRunti
     connectorRegistry: createDefaultConnectorRegistry(),
     agentRuntime: agentRuntime ?? new ScriptedAgentRuntime(async () => undefined),
     resolveSecret: async () => undefined,
+    outboundDnsResolver: async () => ["93.184.216.34"],
     ...extra
   };
 }

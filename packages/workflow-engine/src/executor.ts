@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import vm from "node:vm";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore, AgentSessionToolDataStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
@@ -68,7 +67,8 @@ import {
   type RerankAdapter,
   type EmbeddingRegistry,
   type VectorStoreRegistry,
-  type KnowledgeBaseStore
+  type KnowledgeBaseStore,
+  type RagFetch
 } from "./rag-adapters";
 import {
   extractCitationsFromText,
@@ -76,6 +76,15 @@ import {
 } from "./citations";
 import { renderChart } from "./chart";
 import { browseUrl, type WebBrowseOptions } from "./web-browse";
+import {
+  DEFAULT_OUTBOUND_GUARD,
+  assertOutboundUrlAllowed,
+  guardedFetch,
+  playwrightOutboundGuard,
+  playwrightWebSocketGuard,
+  OutboundUrlBlockedError,
+  type OutboundGuardConfig
+} from "./outbound-url-guard";
 import { renderTemplate, tryParseJson } from "./template";
 import {
   createMcpElicitationHandler,
@@ -93,7 +102,8 @@ import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
 import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch";
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
-import { executePythonCodeNode } from "./python-runner";
+import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPythonCode, type CodeSandboxPlan } from "./code-sandbox";
+import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
@@ -223,6 +233,16 @@ export interface WorkflowExecutionDependencies {
   onMcpElicitation?: McpElicitationHandlerOptions["onElicitation"];
   /** Phase 10.5 — size limit for `resources/read` in MCP Tool nodes (bytes). */
   mcpResourceMaxBytes?: number;
+  /** Where code nodes run (container, isolated in-process realm, or disabled). Default: in-process. */
+  codeSandbox?: CodeSandboxPlan;
+  /**
+   * Policy for URLs that user-supplied nodes fetch (HTTP Request, Web Browse,
+   * Chart data.url, HTML-render PDF). When unset, the default policy applies
+   * (block file/data/other schemes, metadata and link-local; allow private
+   * and localhost). A custom DNS resolver can be injected for tests.
+   */
+  outboundGuard?: OutboundGuardConfig;
+  outboundDnsResolver?: (hostname: string) => Promise<string[]>;
   abortSignal?: AbortSignal;
   logger?: (message: string, metadata?: unknown) => void;
   /**
@@ -1950,6 +1970,8 @@ async function createHtmlPdfBuffer(input: {
   format: PdfPageFormat;
   printBackground: boolean;
   timeoutMs: number;
+  outboundGuard: OutboundGuardConfig;
+  resolver?: (hostname: string) => Promise<string[]>;
 }): Promise<Buffer> {
   type PlaywrightModule = typeof import("playwright");
   let playwright: PlaywrightModule;
@@ -1970,6 +1992,11 @@ async function createHtmlPdfBuffer(input: {
 
   try {
     const page = await browser.newPage();
+    // Every sub-resource the HTML loads (<img>, <script>, fetch) is checked; a
+    // blocked one is aborted, so an injected URL cannot read internal hosts.
+    await page.route("**/*", playwrightOutboundGuard(input.outboundGuard, input.resolver));
+    // WebSockets bypass page.route; they get the same check.
+    await page.routeWebSocket(/.*/, playwrightWebSocketGuard(input.outboundGuard, input.resolver));
     await page.setContent(input.html, {
       waitUntil: "networkidle",
       timeout: input.timeoutMs
@@ -2730,88 +2757,27 @@ function toJsonSafeValue(value: unknown): unknown {
   }
 }
 
-function toErrorMessage(error: unknown, fallback: string): string {
-  if (error && typeof error === "object") {
-    const record = error as Record<string, unknown>;
-    if (typeof record.message === "string" && record.message.trim()) {
-      return record.message.trim();
-    }
-    if (typeof record.name === "string" && record.name.trim()) {
-      return record.name.trim();
-    }
-    try {
-      const serialized = JSON.stringify(record);
-      if (serialized && serialized !== "{}") {
-        return serialized;
-      }
-    } catch {
-      // Ignore serialization errors and fallback to string coercion.
-    }
-  }
-  const coerced = String(error ?? "").trim();
-  return coerced || fallback;
+/** The outbound guard's pinned fetch, for RAG endpoints that come from a node's own config. */
+function guardedRagFetch(dependencies: { outboundGuard?: OutboundGuardConfig; outboundDnsResolver?: (hostname: string) => Promise<string[]> }): RagFetch {
+  return (url, init) =>
+    guardedFetch(url, init, {
+      config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+      ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+    });
 }
 
-export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput): Promise<CodeNodeExecutionOutput> {
-  const code = String(input.code ?? "");
-  const timeoutMs =
-    typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0
-      ? Math.floor(input.timeoutMs)
-      : 1500;
-  const logs: string[] = [];
+/**
+ * Runs code-node JavaScript under a sandbox plan (see code-sandbox.ts; with no
+ * plan, code is refused). `input` is what the code sees as `input`; the
+ * result and logs come back as JSON-safe values.
+ */
+export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput, plan: CodeSandboxPlan = NO_CODE_SANDBOX_PLAN): Promise<CodeNodeExecutionOutput> {
+  const [output] = await runJavaScriptCode(plan, String(input.code ?? ""), [input.input], codeNodeTimeout(input.timeoutMs));
+  return output!;
+}
 
-  const sandboxConsole = {
-    log: (...args: unknown[]) => {
-      logs.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "));
-    },
-    error: (...args: unknown[]) => {
-      logs.push(`ERROR: ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`);
-    },
-    warn: (...args: unknown[]) => {
-      logs.push(`WARN: ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`);
-    },
-    info: (...args: unknown[]) => {
-      logs.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "));
-    }
-  };
-
-  const contextObject: Record<string, unknown> = {
-    input: toJsonSafeValue(input.input),
-    JSON,
-    Math,
-    Number,
-    String,
-    Boolean,
-    Array,
-    Object,
-    Date,
-    Buffer,
-    console: sandboxConsole,
-    require: undefined,
-    process: undefined,
-    fs: undefined,
-    fetch: undefined,
-    globalThis: undefined,
-    Function: undefined,
-    eval: undefined
-  };
-
-  const context = vm.createContext(contextObject);
-  const wrappedCode = `(async () => {\n${code}\n})()`;
-
-  try {
-    const runResult = vm.runInContext(wrappedCode, context, {
-      timeout: timeoutMs
-    });
-    const resolvedResult = await Promise.resolve(runResult);
-    return {
-      result: toJsonSafeValue(resolvedResult),
-      logs
-    };
-  } catch (error) {
-    const message = toErrorMessage(error, "Code node execution failed.");
-    throw new Error(`Code node sandbox error: ${message}`);
-  }
+function codeNodeTimeout(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 1500;
 }
 
 interface GraphIndexes {
@@ -3051,7 +3017,10 @@ async function executeNode(
           requestInit.body = renderedBody;
         }
 
-        const response = await fetch(renderedUrl, requestInit);
+        const response = await guardedFetch(renderedUrl, requestInit, {
+          config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+        });
         const responseHeaders: Record<string, string> = {};
         response.headers.forEach((value, key) => {
           responseHeaders[key] = value;
@@ -3512,11 +3481,14 @@ async function executeNode(
       const language = typeof config.language === "string" ? config.language : "javascript";
       const mode = config.mode === "runOnceForEachItem" ? "runOnceForEachItem" : "runOnceForAllItems";
 
+      const codeSandbox = dependencies.codeSandbox ?? NO_CODE_SANDBOX_PLAN;
+      if (codeSandbox.kind === "disabled") throw codeNodesDisabledError(codeSandbox);
+
       if (language === "python") {
         const items = Array.isArray(templateData.items)
           ? (templateData.items as unknown[])
           : [templateData];
-        const py = await executePythonCodeNode({ code, items, mode, timeoutMs: timeout });
+        const py = await runPythonCode(codeSandbox, { code, items, mode, timeoutMs: timeout });
         if (py.result && typeof py.result === "object" && !Array.isArray(py.result)) {
           return {
             ...(py.result as Record<string, unknown>),
@@ -3529,16 +3501,11 @@ async function executeNode(
 
       // JS path — supports runOnceForEachItem too
       if (mode === "runOnceForEachItem" && Array.isArray(templateData.items)) {
-        const outputs: unknown[] = [];
-        const allLogs: string[] = [];
-        for (let i = 0; i < (templateData.items as unknown[]).length; i++) {
-          const item = (templateData.items as unknown[])[i];
-          const itemInput = { ...templateData, item, _itemIndex: i, input: { ...templateData, item } };
-          const r = await executeCodeNodeSandbox({ code, input: itemInput, timeoutMs: timeout });
-          outputs.push(r.result);
-          allLogs.push(...r.logs);
-        }
-        return { code_result: outputs, items: outputs, code_logs: allLogs };
+        // One sandbox for all items (one container, or a fresh realm per item in-process).
+        const itemInputs = (templateData.items as unknown[]).map((item, i) => ({ ...templateData, item, _itemIndex: i, input: { ...templateData, item } }));
+        const runs = await runJavaScriptCode(codeSandbox, code, itemInputs, timeout);
+        const outputs = runs.map((r) => r.result);
+        return { code_result: outputs, items: outputs, code_logs: runs.flatMap((r) => r.logs) };
       }
 
       const sandboxInput = {
@@ -3549,7 +3516,7 @@ async function executeNode(
         code,
         input: sandboxInput,
         timeoutMs: timeout
-      });
+      }, codeSandbox);
 
       if (result.result && typeof result.result === "object" && !Array.isArray(result.result)) {
         return {
@@ -3971,6 +3938,8 @@ async function executeNode(
 
       const embedder = new AzureOpenAIEmbeddingAdapter({
         endpoint,
+        // The endpoint is node config, so it goes through the outbound guard (pinned).
+        fetcher: guardedRagFetch(dependencies),
         deployment,
         apiVersion:
           typeof config.apiVersion === "string" && config.apiVersion.trim()
@@ -3999,17 +3968,26 @@ async function executeNode(
       const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
       const vectorStoreId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
       const vectorStoreConfig = toRecord(config.vectorStoreConfig);
+      // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound guard.
+      const nodeFetch = (key: "endpoint" | "baseUrl") =>
+        typeof vectorStoreConfig[key] === "string" && String(vectorStoreConfig[key]).trim() ? guardedRagFetch(dependencies) : undefined;
+      // The deployment's env key only ever goes to the deployment's own endpoint. When the node names its own
+      // endpoint (or baseUrl), only the node's secret is sent there, or no key at all.
+      const ragKey = async (envName: string, endpointKey: "endpoint" | "baseUrl"): Promise<string | undefined> => {
+        const ref = config.embeddingSecretRef;
+        if (typeof ref === "object" && ref) return dependencies.resolveSecret(ref as SecretReference);
+        if (nodeFetch(endpointKey)) return undefined;
+        return process.env[envName];
+      };
 
       let embedder = dependencies.embeddingRegistry?.get(embedderId);
       if (!embedder) {
         if (embedderId === "token-embedder") embedder = new TokenEmbeddingAdapter();
         else if (embedderId === "openai-embedder") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.OPENAI_API_KEY;
-           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...vectorStoreConfig });
+           const apiKey = await ragKey("OPENAI_API_KEY", "baseUrl");
+           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...vectorStoreConfig, fetcher: nodeFetch("baseUrl") });
         } else if (embedderId === "azure-openai-embedder") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.AZURE_OPENAI_API_KEY;
+           const apiKey = await ragKey("AZURE_OPENAI_API_KEY", "endpoint");
            const endpoint = typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_OPENAI_ENDPOINT;
            const deployment =
              typeof vectorStoreConfig.deployment === "string" && vectorStoreConfig.deployment.trim()
@@ -4019,6 +3997,7 @@ async function executeNode(
                  : "text-embedding-3-small";
            embedder = new AzureOpenAIEmbeddingAdapter({
              endpoint: endpoint || "",
+             fetcher: nodeFetch("endpoint"),
              deployment,
              apiVersion: typeof vectorStoreConfig.apiVersion === "string" ? vectorStoreConfig.apiVersion : process.env.AZURE_OPENAI_API_VERSION,
              apiKey: apiKey || ""
@@ -4055,9 +4034,9 @@ async function executeNode(
            const connStr = typeof connRef === "object" && connRef ? await dependencies.resolveSecret(connRef as SecretReference) : process.env.DATABASE_URL;
            store = new PGVectorStoreAdapter({ connectionString: connStr || "", tableName: typeof vectorStoreConfig.tableName === "string" ? vectorStoreConfig.tableName as string : "vectors" });
          } else if (vectorStoreId === "azure-ai-search-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.AZURE_AI_SEARCH_API_KEY;
+           const apiKey = await ragKey("AZURE_AI_SEARCH_API_KEY", "endpoint");
            store = new AzureAiSearchVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_AI_SEARCH_ENDPOINT || "",
              indexName: typeof vectorStoreConfig.indexName === "string" ? vectorStoreConfig.indexName : "",
              apiVersion: typeof vectorStoreConfig.apiVersion === "string" ? vectorStoreConfig.apiVersion : undefined,
@@ -4068,11 +4047,7 @@ async function executeNode(
              apiKey: apiKey || ""
            });
          } else if (vectorStoreId === "qdrant-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey =
-             typeof apiKeyRef === "object" && apiKeyRef
-               ? await dependencies.resolveSecret(apiKeyRef as SecretReference)
-               : process.env.QDRANT_API_KEY;
+           const apiKey = await ragKey("QDRANT_API_KEY", "endpoint");
            const parsedFilter = (() => {
              const raw = vectorStoreConfig.filter;
              if (raw && typeof raw === "object" && !Array.isArray(raw)) {
@@ -4091,6 +4066,7 @@ async function executeNode(
              return undefined;
            })();
            store = new QdrantVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint:
                typeof vectorStoreConfig.endpoint === "string"
                  ? vectorStoreConfig.endpoint
@@ -4117,25 +4093,25 @@ async function executeNode(
              filter: parsedFilter
            });
          } else if (vectorStoreId === "chroma-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.CHROMA_API_KEY;
+           const apiKey = await ragKey("CHROMA_API_KEY", "endpoint");
            store = new ChromaVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.CHROMA_ENDPOINT || "http://localhost:8000",
              collectionName: typeof vectorStoreConfig.collectionName === "string" ? vectorStoreConfig.collectionName : "",
              apiKey: apiKey || undefined
            });
          } else if (vectorStoreId === "weaviate-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.WEAVIATE_API_KEY;
+           const apiKey = await ragKey("WEAVIATE_API_KEY", "endpoint");
            store = new WeaviateVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.WEAVIATE_ENDPOINT || "http://localhost:8080",
              className: typeof vectorStoreConfig.className === "string" ? vectorStoreConfig.className : "",
              apiKey: apiKey || undefined
            });
          } else if (vectorStoreId === "redis-vector-store") {
-           const apiKeyRef = config.embeddingSecretRef;
-           const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.REDIS_API_KEY;
+           const apiKey = await ragKey("REDIS_API_KEY", "endpoint");
            store = new RedisVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.REDIS_ENDPOINT || "http://localhost:6379",
              indexName: typeof vectorStoreConfig.indexName === "string" ? vectorStoreConfig.indexName : "",
              apiKey: apiKey || undefined
@@ -4319,7 +4295,9 @@ async function executeNode(
         ...(config.extractImages === false ? { extractImages: false } : {}),
         ...(typeof config.waitForSelector === "string" && config.waitForSelector.trim()
           ? { waitForSelector: config.waitForSelector.trim() }
-          : {})
+          : {}),
+        requestGuard: playwrightOutboundGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver),
+        webSocketGuard: playwrightWebSocketGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver)
       };
 
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim()
@@ -4393,7 +4371,14 @@ async function executeNode(
         height,
         config: themeConfig,
         // Phase 15.1 — a replay never lets a chart load data from a URL or file.
-        offline: Boolean(dependencies.replayNodeHook)
+        offline: Boolean(dependencies.replayNodeHook),
+        // Live charts run every data/image URL through the outbound guard, and fetch over a pinned connection.
+        urlGuard: (url: string) => assertOutboundUrlAllowed(url, dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver),
+        fetcher: (url: string) =>
+          guardedFetch(url, {}, {
+            config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+            ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+          })
       });
 
       return {
@@ -5745,7 +5730,9 @@ async function executeNode(
           html,
           format: pageFormat,
           printBackground,
-          timeoutMs: htmlRenderTimeoutMs
+          timeoutMs: htmlRenderTimeoutMs,
+          outboundGuard: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
         });
       } else {
         let sourceText = textTemplate.trim() ? renderTemplate(textTemplate, templateData) : toPdfSourceText(resolvedSource);
@@ -6075,6 +6062,10 @@ async function executeNodeWithRetry(
       if (isCancellationError(error) || dependencies.abortSignal?.aborted || isMcpToolPolicyBlock(error) || isGuardBlockedError(error) || isApprovalHandoffSignal(error)) {
         throw error;
       }
+      // A URL the outbound guard refuses is refused again on every attempt.
+      if (error instanceof OutboundUrlBlockedError) {
+        throw error;
+      }
       if (error instanceof WorkflowError) {
         lastError = error;
       } else {
@@ -6223,14 +6214,19 @@ export async function executeWorkflow(
   request: ExecuteWorkflowRequest,
   dependencies: WorkflowExecutionDependencies
 ): Promise<WorkflowExecutionResult> {
-  // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
-  if (dependencies.activityRecorder) {
-    return executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined });
-  }
-  const recorder = createNodeActivityRecorder(dependencies.onNodeActivity);
-  const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
-  attachNodeActivity(result.nodeResults, recorder);
-  return result;
+  // Sandbox sessions started by this run count against its workflow's circuit breaker (see quickjs-sandbox.ts).
+  const owner = (request.resumeState?.workflow ?? request.workflow)?.id;
+  const run = async (): Promise<WorkflowExecutionResult> => {
+    // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
+    if (dependencies.activityRecorder) {
+      return executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined });
+    }
+    const recorder = createNodeActivityRecorder(dependencies.onNodeActivity);
+    const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
+    attachNodeActivity(result.nodeResults, recorder);
+    return result;
+  };
+  return owner ? runWithSandboxOwner(`workflow:${owner}`, run) : run();
 }
 
 /** Copies each node's recorded activity onto its results; nodes restored from a paused run keep theirs. */

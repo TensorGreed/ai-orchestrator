@@ -18,6 +18,7 @@ import {
   timingSafeEqual
 } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { sortKeysInSandbox } from "./expression-sandbox";
 
 // ---------------------------------------------------------------------------
 // utilities
@@ -129,9 +130,11 @@ export function sortItems(items: unknown[], opts: { field?: string; order?: Sort
   }
   let keyFn: (item: unknown) => unknown;
   if (expression) {
-    // eslint-disable-next-line no-new-func
-    const fn = new Function("item", "$json", `return (${expression});`) as (item: unknown, j: unknown) => unknown;
-    keyFn = (item: unknown) => fn(item, item);
+    // Keys are computed in the expression sandbox, all items in one call.
+    const keys = new Map<unknown, unknown>();
+    const computed = sortKeysInSandbox(expression, out);
+    out.forEach((item, index) => keys.set(item, computed[index]));
+    keyFn = (item: unknown) => keys.get(item);
   } else if (field) {
     keyFn = (item: unknown) => getField(item, field);
   } else {
