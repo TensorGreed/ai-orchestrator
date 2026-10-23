@@ -89,6 +89,7 @@ import {
 } from "@ai-orchestrator/workflow-engine";
 import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
 import { SqliteStore, type McpServerRecord } from "./db/database";
+import { PostgresStore } from "./db/postgres-store.js";
 import type { AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
 import { McpCatalogService } from "./services/mcp-catalog.js";
@@ -115,6 +116,7 @@ import {
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GitSyncService } from "./services/git-sync-service";
 import { LeaderElectionService } from "./services/leader-election-service";
+import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import { MetricsService } from "./services/metrics-service";
 import { TracingService, parseKeyValueList, parseTraceparent } from "./services/tracing-service";
 import { OtlpMetricsExporter } from "./services/otlp-metrics-exporter";
@@ -2792,7 +2794,24 @@ export function createApp(
       instanceId: config.HA_INSTANCE_ID,
       leaseTtlMs: config.HA_LEASE_TTL_MS,
       renewIntervalMs: config.HA_RENEW_INTERVAL_MS,
-      onBecomeLeader: () => {
+      onBecomeLeader: async () => {
+        // Webhook replicas run beside the main instances with HA off; they never own other instances' runs.
+        if (workerMode !== "webhook") {
+          try {
+            const interrupted = await reconcileInterruptedRuns(store, {
+              // SQLite cannot be shared between processes; on Postgres another instance may own a live run.
+              sharedDatabase: config.HA_ENABLED || (store as object) instanceof PostgresStore
+            });
+            if (interrupted.length > 0) {
+              app.log.warn(
+                { count: interrupted.length, executionIds: interrupted.slice(0, 50).map((run) => run.id) },
+                "Marked interrupted runs as errors after a restart"
+              );
+            }
+          } catch (err) {
+            app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to reconcile interrupted runs");
+          }
+        }
         if (!runsBackgroundWorkers) return;
         try {
           schedulerService?.initialize();
@@ -3061,6 +3080,25 @@ export function createApp(
     const full = { ...event, actor };
     auditService.record(full);
     logStreamingService.dispatchAudit(full);
+  };
+  // User-initiated run actions (not webhook/schedule runs). Cancel passes the run's workflow id.
+  const auditRunAction = (
+    request: { ip?: string; headers: Record<string, unknown> },
+    user: SafeUser,
+    eventType: "execution.started" | "execution.retried" | "execution.replayed" | "execution.cancel_requested",
+    run: { executionId: string; workflowId: string; projectId?: string | null },
+    metadata: Record<string, unknown> = {}
+  ) => {
+    audit(request, user, {
+      category: "execution",
+      eventType,
+      action: eventType === "execution.cancel_requested" ? "cancel" : "execute",
+      outcome: "success",
+      resourceType: "workflow",
+      resourceId: run.workflowId,
+      projectId: run.projectId ?? null,
+      metadata: { executionId: run.executionId, ...metadata }
+    });
   };
   const samlService = new SamlService(store, {
     enabled: config.SAML_ENABLED,
@@ -7113,6 +7151,7 @@ export function createApp(
     const executionPayload = prepared.payload;
 
     const executionId = crypto.randomUUID();
+    auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "manual" });
     const progressHooks = createProgressTrackingHooks({
       executionId,
       workflow,
@@ -7194,6 +7233,7 @@ export function createApp(
     const executionPayload = prepared.payload;
 
     const executionId = crypto.randomUUID();
+    auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "manual_stream" });
     let streamClosed = false;
     request.raw.on("close", () => {
       streamClosed = true;
@@ -7695,6 +7735,7 @@ export function createApp(
 
     const executionPayload = prepared.payload;
     const executionId = crypto.randomUUID();
+    auditRunAction(request, user, "execution.retried", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: sourceExecution.id });
     const progressHooks = createProgressTrackingHooks({
       executionId,
       workflow,
@@ -7784,6 +7825,7 @@ export function createApp(
     const mode: McpReplayMode = parsed.data.mode ?? "strict";
     const mcpPlan = mcpCassetteService.planReplay(cassette, mode, mcpRegistry, resolveRegisteredMcpServer);
     const executionId = crypto.randomUUID();
+    auditRunAction(request, user, "execution.replayed", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: source.id, cassetteId: cassette.id, mode });
     const storedInput = asRecord(source.input);
     const customData = {
       ...asRecord(source.customData),
@@ -7868,6 +7910,13 @@ export function createApp(
       return { error: "Execution not found" };
     }
 
+    auditRunAction(
+      request,
+      user,
+      "execution.cancel_requested",
+      { executionId: execution.id, workflowId: execution.workflowId, projectId: store.getWorkflow(execution.workflowId)?.projectId },
+      { abortedActiveRun: Boolean(active), previousStatus: execution.status }
+    );
     return {
       ok: true,
       id: request.params.id,
@@ -10814,6 +10863,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             : undefined,
           priority: typeof body.priority === "number" ? body.priority : 0
         });
+
+        auditRunAction(request, user, "execution.started", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { triggerType: "queue" });
 
         const depth = queueService.getDepth();
         return { queued: true, executionId, queueDepth: depth };

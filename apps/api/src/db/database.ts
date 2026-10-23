@@ -50,6 +50,7 @@ import {
   type McpSandboxSettings,
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
+import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 
 type BindParams = unknown[];
 
@@ -4487,13 +4488,21 @@ export class SqliteStore {
     this.persist();
   }
 
-  requeueStuckItems(stuckAfterMs = 600_000): number {
-    const stuckBefore = new Date(Date.now() - stuckAfterMs).toISOString();
-    const now = new Date().toISOString();
-    const stuck = this.queryAll<ExecutionQueueRow>(
-      `SELECT id FROM execution_queue WHERE status = 'running' AND started_at <= ?`,
+  requeueStuckItems(stuckAfterMs = 600_000, excludeIds: string[] = [], marginMs = STUCK_JOB_MARGIN_MS): number {
+    const nowMs = Date.now();
+    const stuckBefore = new Date(nowMs - stuckAfterMs).toISOString();
+    const now = new Date(nowMs).toISOString();
+    const skip = new Set(excludeIds);
+    const stuck = this.queryAll<ExecutionQueueRow & { started_at: unknown; payload_json: unknown }>(
+      `SELECT id, started_at, payload_json FROM execution_queue WHERE status = 'running' AND started_at <= ?`,
       [stuckBefore]
-    );
+    ).filter((row) => {
+      if (skip.has(toString(row.id))) return false;
+      // A job may carry its own, longer run time limit; it is not stuck before that limit and the margin have passed.
+      const runTimeout = queuedRunTimeoutMs(row.payload_json);
+      if (runTimeout === null) return true;
+      return Date.parse(toString(row.started_at)) <= nowMs - Math.max(stuckAfterMs, runTimeout + marginMs);
+    });
 
     for (const row of stuck) {
       this.exec(
@@ -4506,6 +4515,31 @@ export class SqliteStore {
       this.persist();
     }
     return stuck.length;
+  }
+
+  /**
+   * Marks runs still recorded as running that no live process owns as errors. Runs the queue still
+   * owns (pending/running queue rows) and runs paused for approval are left alone.
+   */
+  reconcileOrphanedExecutions(input: { error: string; startedBefore?: string }): Array<{ id: string; workflowId: string }> {
+    const rows = this.queryAll<{ id: unknown; workflow_id: unknown; started_at: unknown }>(
+      `SELECT id, workflow_id, started_at FROM execution_history
+       WHERE status = 'running'
+         AND (? IS NULL OR started_at < ?)
+         AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))`,
+      [input.startedBefore ?? null, input.startedBefore ?? null]
+    );
+    const completedAt = new Date().toISOString();
+    for (const row of rows) {
+      this.exec(
+        `UPDATE execution_history SET status = 'error', completed_at = ?, duration_ms = ?, error = ? WHERE id = ?`,
+        [completedAt, toDurationMsForStore(toString(row.started_at), completedAt), input.error, toString(row.id)]
+      );
+    }
+    if (rows.length > 0) {
+      this.persist();
+    }
+    return rows.map((row) => ({ id: toString(row.id), workflowId: toString(row.workflow_id) }));
   }
 
   getQueueDepth(): { pending: number; running: number; dlq: number } {

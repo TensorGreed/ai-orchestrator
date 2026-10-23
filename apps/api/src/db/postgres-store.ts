@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { ChatMessage, Folder, Project, Workflow, WorkflowListItem } from "@ai-orchestrator/shared";
 import { DEFAULT_PROJECT_ID } from "@ai-orchestrator/shared";
 import { runMigrations } from "./migrations.js";
+import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 
 export interface PostgresStoreConfig {
   host: string;
@@ -1762,15 +1763,46 @@ export class PostgresStore {
     }
   }
 
-  async requeueStuckItems(stuckAfterMs = 600_000): Promise<number> {
-    const stuckBefore = new Date(Date.now() - stuckAfterMs).toISOString();
-    const now = new Date().toISOString();
+  async requeueStuckItems(stuckAfterMs = 600_000, excludeIds: string[] = [], marginMs = STUCK_JOB_MARGIN_MS): Promise<number> {
+    const nowMs = Date.now();
+    const stuckBefore = new Date(nowMs - stuckAfterMs).toISOString();
+    const candidates = await this.pool.query(
+      `SELECT id, started_at, payload_json FROM execution_queue
+       WHERE status = 'running' AND started_at <= $1 AND NOT (id = ANY($2::text[]))`,
+      [stuckBefore, excludeIds]
+    );
+    const ids = candidates.rows
+      .filter((row: { started_at: Date | string; payload_json: string }) => {
+        // A job may carry its own, longer run time limit; it is not stuck before that limit and the margin have passed.
+        const runTimeout = queuedRunTimeoutMs(row.payload_json);
+        return runTimeout === null || new Date(row.started_at).getTime() <= nowMs - Math.max(stuckAfterMs, runTimeout + marginMs);
+      })
+      .map((row: { id: string }) => row.id);
+    if (ids.length === 0) return 0;
     const result = await this.pool.query(
       `UPDATE execution_queue SET status = 'pending', started_at = NULL, updated_at = $1
-       WHERE status = 'running' AND started_at <= $2`,
-      [now, stuckBefore]
+       WHERE status = 'running' AND id = ANY($2::text[]) AND started_at <= $3`,
+      [new Date(nowMs).toISOString(), ids, stuckBefore]
     );
     return result.rowCount ?? 0;
+  }
+
+  async reconcileOrphanedExecutions(input: {
+    error: string;
+    startedBefore?: string;
+  }): Promise<Array<{ id: string; workflowId: string }>> {
+    const completedAt = new Date().toISOString();
+    const result = await this.pool.query(
+      `UPDATE execution_history
+       SET status = 'error', completed_at = $1, error = $2,
+           duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM ($4::timestamptz - started_at::timestamptz)) * 1000)::bigint)
+       WHERE status = 'running'
+         AND ($3::timestamptz IS NULL OR started_at < $3::timestamptz)
+         AND id NOT IN (SELECT id FROM execution_queue WHERE status IN ('pending', 'running'))
+       RETURNING id, workflow_id`,
+      [completedAt, input.error, input.startedBefore ?? null, completedAt]
+    );
+    return result.rows.map((row: { id: string; workflow_id: string }) => ({ id: row.id, workflowId: row.workflow_id }));
   }
 
   async getQueueDepth(): Promise<{ pending: number; running: number; dlq: number }> {

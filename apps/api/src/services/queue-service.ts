@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteStore } from "../db/database.js";
+import { STUCK_JOB_MARGIN_MS, queuedRunTimeoutMs } from "../db/queue-timeouts.js";
 
 export interface QueuedExecutionPayload {
   workflowId: string;
@@ -19,6 +20,15 @@ export interface QueueServiceConfig {
   concurrency?: number;
   pollIntervalMs?: number;
   stuckJobTimeoutMs?: number;
+  /** The run time limit; a job is never treated as stuck before this plus a margin has passed. */
+  executionTimeoutMs?: number;
+}
+
+export { STUCK_JOB_MARGIN_MS };
+
+/** A running job can legitimately take the whole run time limit, so the stuck threshold must exceed it. */
+export function resolveStuckJobTimeoutMs(stuckJobTimeoutMs: number, executionTimeoutMs: number): number {
+  return Math.max(stuckJobTimeoutMs, executionTimeoutMs + STUCK_JOB_MARGIN_MS);
 }
 
 export type ExecutionHandler = (payload: QueuedExecutionPayload) => Promise<void>;
@@ -27,6 +37,8 @@ export class QueueService {
   private readonly store: SqliteStore;
   private readonly config: Required<QueueServiceConfig>;
   private running = 0;
+  private readonly inFlight = new Map<string, { startedAtMs: number; stuckAfterMs: number }>();
+  private readonly warnedStuck = new Set<string>();
   private handler: ExecutionHandler | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private stuckTimer: NodeJS.Timeout | null = null;
@@ -37,7 +49,8 @@ export class QueueService {
     this.config = {
       concurrency: config.concurrency ?? 5,
       pollIntervalMs: config.pollIntervalMs ?? 1000,
-      stuckJobTimeoutMs: config.stuckJobTimeoutMs ?? 600_000
+      stuckJobTimeoutMs: resolveStuckJobTimeoutMs(config.stuckJobTimeoutMs ?? 600_000, config.executionTimeoutMs ?? 0),
+      executionTimeoutMs: config.executionTimeoutMs ?? 0
     };
   }
 
@@ -56,15 +69,32 @@ export class QueueService {
 
     // Check for stuck items every 60 seconds
     this.stuckTimer = setInterval(() => {
-      try {
-        const requeued = this.store.requeueStuckItems(this.config.stuckJobTimeoutMs);
-        if (requeued > 0) {
-          console.info(`[queue] Re-queued ${requeued} stuck job(s)`);
-        }
-      } catch (error) {
-        console.error("[queue] Failed to requeue stuck items", error);
-      }
+      this.sweepStuck();
     }, 60_000);
+  }
+
+  private sweepStuck(): void {
+    const nowMs = Date.now();
+    for (const [id, { startedAtMs, stuckAfterMs }] of this.inFlight) {
+      if (nowMs - startedAtMs > stuckAfterMs && !this.warnedStuck.has(id)) {
+        this.warnedStuck.add(id);
+        console.warn(`[queue] Job ${id} still running after ${nowMs - startedAtMs}ms; it is not re-queued while this process holds it`);
+      }
+    }
+    try {
+      // A shared database can hold running jobs of other instances; the store applies each job's own run time limit.
+      Promise.resolve(this.store.requeueStuckItems(this.config.stuckJobTimeoutMs, [...this.inFlight.keys()], STUCK_JOB_MARGIN_MS))
+        .then((requeued) => {
+          if (requeued > 0) {
+            console.info(`[queue] Re-queued ${requeued} stuck job(s)`);
+          }
+        })
+        .catch((error: unknown) => {
+          console.error("[queue] Failed to requeue stuck items", error);
+        });
+    } catch (error) {
+      console.error("[queue] Failed to requeue stuck items", error);
+    }
   }
 
   stop(): void {
@@ -133,6 +163,15 @@ export class QueueService {
 
     for (const item of items) {
       this.running++;
+      // Warn only once the job's own run time limit (if it set one) and the margin have passed.
+      const ownTimeoutMs = queuedRunTimeoutMs(item.payload);
+      this.inFlight.set(item.id, {
+        startedAtMs: Date.now(),
+        stuckAfterMs:
+          ownTimeoutMs === null
+            ? this.config.stuckJobTimeoutMs
+            : Math.max(this.config.stuckJobTimeoutMs, ownTimeoutMs + STUCK_JOB_MARGIN_MS)
+      });
       void this.executeItem(item);
     }
   }
@@ -143,6 +182,8 @@ export class QueueService {
     const handler = this.handler;
     if (!handler) {
       this.running--;
+      this.inFlight.delete(item.id);
+      this.warnedStuck.delete(item.id);
       try {
         this.store.markQueueItemFailed(item.id, "No handler registered");
       } catch {
@@ -165,6 +206,8 @@ export class QueueService {
       }
     } finally {
       this.running--;
+      this.inFlight.delete(item.id);
+      this.warnedStuck.delete(item.id);
     }
   }
 }
