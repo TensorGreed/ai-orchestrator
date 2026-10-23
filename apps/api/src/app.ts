@@ -137,7 +137,7 @@ import { registerReplayRoutes } from "./replay-routes.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
-import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, type ApprovalResumeJob } from "./services/approval-service.js";
+import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
 import { ReplayRunError, ReplayService } from "./services/replay-service.js";
 import { buildRunFacts } from "./services/run-facts.js";
@@ -3433,6 +3433,30 @@ export function createApp(
     app.log.warn("Approval requests need the SQLite store in this release: on Postgres the approvals inbox, decisions and approval timeouts answer 501");
   }
   const approvalResumes = new ApprovalResumeRunner();
+  // A timed-out approval whose run cannot continue: the run ends as an error and its paused state is cleared.
+  const failTimedOutRun = (executionId: string, workflow: Workflow, error: string) => {
+    const existing = store.getExecutionHistory(executionId);
+    const completedAt = new Date().toISOString();
+    const startedAt = existing?.startedAt ?? completedAt;
+    persistExecutionHistoryRecord(
+      {
+        id: executionId,
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        status: "error",
+        startedAt,
+        completedAt,
+        durationMs: toDurationMs(startedAt, completedAt),
+        triggerType: existing?.triggerType ?? undefined,
+        triggeredBy: existing?.triggeredBy ?? undefined,
+        inputJson: existing?.input,
+        nodeResultsJson: existing?.nodeResults,
+        error
+      },
+      { phase: "final", executionId, workflowId: workflow.id, triggerType: existing?.triggerType ?? undefined, status: "error" }
+    );
+    deleteWorkflowExecutionSafely(executionId, workflow.id);
+  };
   const runApprovalResume = (job: ApprovalResumeJob): Promise<Awaited<ReturnType<typeof runWorkflowExecution>> | null> =>
     approvalResumes.run(job, async () => {
       const pending = store.getWorkflowExecutionState(job.executionId);
@@ -3453,27 +3477,47 @@ export function createApp(
         // queued runs: run-scope gives it the workflow's project (as it is
         // now) and that user's `secret:use`. A queued or recovered resume can
         // start later, so the decider is looked up again by id and must still
-        // be the same account with execute access; otherwise the request is
-        // pending again for someone who may decide it. A timeout has no
-        // decider and resumes with no user, like a scheduled run.
+        // be the same account, with the same checks as at decision time
+        // (execute access along the whole path, the approver rules; not the
+        // self-approval rule); otherwise the request is pending again for
+        // someone who may decide it. A timeout resumes as the person who
+        // started the run, with the same access check; if they are gone or
+        // lost access, the run fails and no branch runs. A run nobody
+        // started (webhook, schedule) times out with no user, as it began.
         let actor: SafeUser | null = null;
-        if (request.decidedByUserId) {
-          const actorRecord = store.getUserById(request.decidedByUserId);
-          actor = actorRecord && actorRecord.email === request.decidedBy ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
-          if (!actor || !runAccess.run(actor, pending, "workflow:execute").ok) {
+        const timedOut = decided === "timeout";
+        const actorUserId = timedOut ? request.requestedByUserId : request.decidedByUserId;
+        const actorEmail = timedOut ? request.requestedBy : request.decidedBy;
+        if (actorUserId) {
+          const actorRecord = store.getUserById(actorUserId);
+          actor = actorRecord && actorRecord.email === actorEmail ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
+          const check = actor
+            ? approvalPersonCheck(request, actor, (user, workflowId, permission) => runAccess.run(user, { id: workflowId, workflowId }, permission), {
+                skipSelfApproval: true,
+                accessOnly: timedOut
+              })
+            : null;
+          if (!actor || !check?.allowed) {
             auditService.record({
               category: "approval",
               eventType: "approval.resume_refused",
               action: decided,
               outcome: "denied",
-              actor: { userId: request.decidedByUserId, ...(request.decidedBy ? { email: request.decidedBy } : {}), type: "user" },
+              actor: { userId: actorUserId, ...(actorEmail ? { email: actorEmail } : {}), type: "user" },
               resourceType: "workflow",
               resourceId: pending.workflowId,
               projectId: store.getWorkflow(pending.workflowId)?.projectId ?? request.projectId,
-              metadata: { executionId: job.executionId, requestId: job.requestId, reason: actor ? "no_execute_permission" : "user_not_found" },
-              message: "Approval resume refused: the person who decided may no longer run this workflow."
+              metadata: { executionId: job.executionId, requestId: job.requestId, reason: !actor ? "user_not_found" : check?.allowed === false && check.code !== "project_access" ? "not_an_approver" : "no_execute_permission" },
+              message: timedOut
+                ? "Approval timeout refused: the person who started this run may no longer run this workflow."
+                : "Approval resume refused: the person who decided may no longer run this workflow."
             });
-            throw new Error("The person who decided this approval can no longer run this workflow; the request is pending again.");
+            if (!timedOut) {
+              throw new Error("The person who decided this approval can no longer run this workflow; the request is pending again.");
+            }
+            // Nobody can decide a timed-out request again, so the run ends here instead of waiting forever.
+            failTimedOutRun(job.executionId, state.workflow, "The approval timed out, and the person who started this run can no longer run this workflow, so no branch was run.");
+            return null;
           }
         }
         // Scoped by the workflow's current project (the one access was checked against), not the one stored at the pause.

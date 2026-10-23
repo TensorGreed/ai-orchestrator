@@ -1545,6 +1545,7 @@ export const MIGRATIONS: Migration[] = [
         edited_fields_json TEXT,
         asking_workflow_id TEXT,
         edits_salt TEXT,
+        workflow_deleted_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL
       );

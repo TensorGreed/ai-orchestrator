@@ -1598,6 +1598,8 @@ export interface ApprovalRequestRecord {
   askingWorkflowId: string | null;
   /** Per-request salt of the edits digest. */
   editsSalt: string | null;
+  /** Set when the workflow was deleted: the request is then admin-only, even if a new workflow reuses the id. */
+  workflowDeletedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1661,6 +1663,7 @@ function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
     editedFields: parseJsonArray(row.edited_fields_json),
     askingWorkflowId: nullableText(row.asking_workflow_id),
     editsSalt: nullableText(row.edits_salt),
+    workflowDeletedAt: nullableText(row.workflow_deleted_at),
     createdAt: toString(row.created_at),
     updatedAt: toString(row.updated_at)
   };
@@ -2996,6 +2999,7 @@ export class SqliteStore {
         edited_fields_json TEXT,
         asking_workflow_id TEXT,
         edits_salt TEXT,
+        workflow_deleted_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -3020,6 +3024,7 @@ export class SqliteStore {
     // Phase 11.2 — columns added to approval_requests after it first shipped on this branch.
     this.ensureColumn("approval_requests", "asking_workflow_id", "TEXT");
     this.ensureColumn("approval_requests", "edits_salt", "TEXT");
+    this.ensureColumn("approval_requests", "workflow_deleted_at", "TEXT");
     // When approval requests (migration 32) first came up: runs paused before it get one full timeout from here.
     this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('approval_requests', ?)`, [new Date().toISOString()]);
 
@@ -3303,13 +3308,15 @@ export class SqliteStore {
         this.exec("DELETE FROM workflow_executions WHERE workflow_id = ?", [id]);
       }
 
-      // Phase 11.2 — decided requests stay as the audit trail; pending ones end with their paused run.
+      // Phase 11.2 — decided requests stay as the audit trail (admin-only from here on, even if a new
+      // workflow reuses the id); pending ones end with their paused run.
       if (hasTable("approval_requests")) {
         const now = new Date().toISOString();
         this.exec(
           "UPDATE approval_requests SET status = 'canceled', reason = 'The workflow was deleted', decided_at = ?, updated_at = ? WHERE workflow_id = ? AND status = 'pending'",
           [now, now, id]
         );
+        this.exec("UPDATE approval_requests SET workflow_deleted_at = ? WHERE workflow_id = ? AND workflow_deleted_at IS NULL", [now, id]);
       }
 
       if (hasTable("mcp_cassettes")) {
@@ -4754,6 +4761,8 @@ export class SqliteStore {
       if (workflowIds.length === 0) return [];
       clauses.push(`workflow_id IN (${workflowIds.map(() => "?").join(", ")})`);
       params.push(...workflowIds);
+      // A deleted workflow's requests stay admin-only, also when a new workflow reuses its id.
+      clauses.push(`workflow_deleted_at IS NULL`);
     }
     if (filter.status === "pending") clauses.push(`status = 'pending'`);
     if (filter.status === "decided") clauses.push(`status <> 'pending'`);

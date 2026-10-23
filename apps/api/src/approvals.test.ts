@@ -178,6 +178,7 @@ describe("migration 32", () => {
       "expires_at TIMESTAMPTZ",
       "asking_workflow_id TEXT",
       "edits_salt TEXT",
+      "workflow_deleted_at TIMESTAMPTZ",
       "idx_approval_requests_status_expires",
       "CREATE TABLE IF NOT EXISTS schema_markers",
       "INSERT INTO schema_markers"
@@ -191,7 +192,7 @@ describe("migration 32", () => {
     try {
       const columns = (db.prepare("PRAGMA table_info(approval_requests)").all() as Array<{ name: string }>).map((row) => row.name);
       expect(columns).toEqual(
-        expect.arrayContaining(["id", "execution_id", "project_id", "kind", "status", "spec_json", "requested_by_user_id", "expires_at", "decided_by", "reason", "edits_json", "edited_fields_json", "asking_workflow_id", "edits_salt"])
+        expect.arrayContaining(["id", "execution_id", "project_id", "kind", "status", "spec_json", "requested_by_user_id", "expires_at", "decided_by", "reason", "edits_json", "edited_fields_json", "asking_workflow_id", "edits_salt", "workflow_deleted_at"])
       );
       expect(db.prepare("SELECT name FROM schema_markers").all()).toEqual([{ name: "approval_requests" }]);
     } finally {
@@ -993,6 +994,183 @@ describe("project authorization (run-access)", () => {
     const other = await login(context, "builder", "other");
     expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, other.cookie, { edits: { reply: "ok" } })).statusCode).toBe(202);
     await waitFor(() => context.store.getExecutionHistory(run.executionId!)?.status === "success");
+  });
+});
+
+describe("who a resume runs as, and what it re-checks", () => {
+  const expireNow = async (context: TestContext, executionId: string) => {
+    rawDb(context).prepare("UPDATE approval_requests SET expires_at = ? WHERE execution_id = ?").run(new Date(Date.now() - 1_000).toISOString(), executionId);
+    // A decision past the expiry answers 409 and starts a sweep, which resumes the run with the timeout.
+    const lead = await login(context, "admin", "sweeper");
+    expect((await call(context, "POST", `/api/approvals/${executionId}/approve`, lead.cookie, {})).statusCode).toBe(409);
+  };
+  const waitForEnd = (context: TestContext, executionId: string) =>
+    waitFor(() => {
+      const entry = context.store.getExecutionHistory(executionId);
+      return entry && entry.status !== "waiting_approval" && entry.status !== "running" ? entry : null;
+    });
+  const nodeStatus = (entry: { nodeResults: unknown }, id: string) => (entry.nodeResults as Array<{ nodeId: string; status: string }>).find((result) => result.nodeId === id)?.status;
+  const refusals = (context: TestContext) => context.store.listAuditLogs({ category: "approval", pageSize: 100 }).items.filter((entry) => entry.eventType === "approval.resume_refused");
+
+  /** A gate whose timeout branch calls a project secret, with a server that records what it receives. */
+  async function withSecretServer(run: (setup: { port: number; seen: string[] }) => Promise<void>) {
+    const seen: string[] = [];
+    const server = http.createServer((request, response) => {
+      seen.push(String(request.headers.authorization ?? ""));
+      response.setHeader("content-type", "application/json");
+      response.end("{}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      await run({ port: (server.address() as { port: number }).port, seen });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+  const fallbackCalls = (id: string, port: number, secretId: string): Workflow => {
+    const workflow = gateWorkflow(id, { ...GATE, editableFields: [] });
+    workflow.nodes.push(node("call", "http_request", { method: "GET", urlTemplate: `http://127.0.0.1:${port}/`, secretRef: { secretId } }));
+    workflow.edges = workflow.edges.map((edge) => (edge.id === "e5" ? { ...edge, target: "call" } : edge));
+    workflow.edges.push({ id: "e6", source: "call", target: "late" });
+    return workflow;
+  };
+
+  it("a timeout resumes as the person who started the run: without secret:use the fallback branch cannot use a secret", async () => {
+    await withSecretServer(async ({ port, seen }) => {
+      const context = await createTestContext();
+      const limited = await login(context, "builder", "limited");
+      context.store.upsertCustomRole({ id: "runner", projectId: "default", name: "runner", permissions: ["workflow:read", "workflow:execute"] });
+      context.store.upsertProjectRole({ userId: limited.id, projectId: "default", role: "custom", customRoleId: "runner" });
+      const secretId = context.secretService.createSecret({ name: "token", provider: "custom", value: "project-token", projectId: "default" }).secretId;
+      const run = await startRun(context, fallbackCalls("wf-timeout-actor", port, secretId), limited.cookie);
+      expect(context.store.listApprovalRequestsForExecution(run.executionId!)[0]).toMatchObject({ requestedByUserId: limited.id, requestedBy: limited.email });
+      await expireNow(context, run.executionId!);
+      const entry = await waitForEnd(context, run.executionId!);
+      expect(entry.status).toBe("error");
+      expect(nodeStatus(entry, "call")).toBe("error");
+      expect(entry.error ?? JSON.stringify(entry.nodeResults)).toContain("secret:use");
+      expect(seen).toEqual([]);
+    });
+  });
+
+  it("a timeout of a run a trigger started still goes to the fallback, with no user", async () => {
+    await withSecretServer(async ({ port, seen }) => {
+      const context = await createTestContext();
+      const secretId = context.secretService.createSecret({ name: "token", provider: "custom", value: "project-token", projectId: "default" }).secretId;
+      const workflow = fallbackCalls("wf-timeout-trigger", port, secretId);
+      context.store.upsertWorkflow(workflow);
+      const started = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-timeout-trigger", payload: { user_prompt: "Ana" } });
+      expect(started.json<{ output: { waitingForApproval: boolean } }>().output.waitingForApproval).toBe(true);
+      const executionId = (rawDb(context).prepare("SELECT id FROM workflow_executions WHERE workflow_id = ?").get("wf-timeout-trigger") as { id: string }).id;
+      expect(context.store.getWorkflowExecutionState(executionId)?.status).toBe("waiting_approval");
+      expect(context.store.listApprovalRequestsForExecution(executionId)[0]).toMatchObject({ requestedByUserId: null });
+      await expireNow(context, executionId);
+      const entry = await waitForEnd(context, executionId);
+      expect(entry.status).toBe("success");
+      expect(nodeStatus(entry, "call")).toBe("success");
+      expect(seen).toEqual(["Bearer project-token"]);
+      expect(refusals(context)).toEqual([]);
+    });
+  });
+
+  it("a timeout fails closed when the person who started the run is gone: no branch runs, and it is audited", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const run = await startRun(context, gateWorkflow("wf-timeout-gone", GATE), requester.cookie);
+    context.store.deleteUser(requester.id);
+    await expireNow(context, run.executionId!);
+    const entry = await waitForEnd(context, run.executionId!);
+    expect(entry.status).toBe("error");
+    expect(entry.error).toMatch(/no longer run this workflow/);
+    expect(nodeStatus(entry, "late")).not.toBe("success");
+    expect(nodeStatus(entry, "stopped")).not.toBe("success");
+    expect(context.store.getWorkflowExecutionState(run.executionId!)).toBeNull();
+    expect(context.store.listApprovalRequestsForExecution(run.executionId!).map((request) => request.status)).toEqual(["timed_out"]);
+    expect(refusals(context)).toEqual([expect.objectContaining({ outcome: "denied", metadata: expect.objectContaining({ reason: "user_not_found" }) })]);
+  });
+
+  it("a timeout fails closed when the person who started the run lost execute access", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const run = await startRun(context, gateWorkflow("wf-timeout-revoked", GATE), requester.cookie);
+    context.store.upsertCustomRole({ id: "reader", projectId: "default", name: "reader", permissions: ["workflow:read"] });
+    context.store.upsertProjectRole({ userId: requester.id, projectId: "default", role: "custom", customRoleId: "reader" });
+    await expireNow(context, run.executionId!);
+    const entry = await waitForEnd(context, run.executionId!);
+    expect(entry.status).toBe("error");
+    expect(nodeStatus(entry, "late")).not.toBe("success");
+    expect(refusals(context)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ reason: "no_execute_permission" }) })]);
+  });
+
+  describe("a queued resume re-checks the decider like a decision", () => {
+    const decideThenChange = async (change: (context: TestContext, approver: { id: string; email: string }) => void, spec: Record<string, unknown> = { approverRoles: ["admin"] }) => {
+      const context = await createTestContext({ queue: true });
+      const requester = await login(context, "builder", "requester");
+      const approver = await login(context, "admin", "boss");
+      const run = await startRun(context, gateWorkflow("wf-recheck", { ...GATE, ...spec }), requester.cookie);
+      context.queue!.stop();
+      expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, approver.cookie, { edits: { reply: "ok" } })).statusCode).toBe(202);
+      change(context, approver);
+      context.queue!.start();
+      await waitFor(() => refusals(context)[0]);
+      await waitFor(() => context.store.getWorkflowExecutionState(run.executionId!)?.status === "waiting_approval");
+      expect(context.store.listApprovalRequestsForExecution(run.executionId!).at(-1)!.status).toBe("pending");
+      expect(context.store.getExecutionHistory(run.executionId!)?.status).not.toBe("success");
+      return { context, run, reasons: refusals(context).map((entry) => (entry.metadata as { reason?: string }).reason) };
+    };
+
+    it("refuses an approver demoted below the gate's approver roles", async () => {
+      const { reasons } = await decideThenChange((context, approver) => context.store.updateUserRole(approver.id, "operator"));
+      expect(reasons).toEqual(["not_an_approver"]);
+    });
+
+    it("refuses a decider who was deleted", async () => {
+      const { reasons } = await decideThenChange((context, approver) => context.store.deleteUser(approver.id));
+      expect(reasons).toEqual(["user_not_found"]);
+    });
+
+    it("refuses a decider replaced by a new account with the same email", async () => {
+      const { reasons } = await decideThenChange((context, approver) => {
+        context.store.deleteUser(approver.id);
+        context.authService.register({ email: approver.email, password: "boss-Pass-123!", role: "admin" });
+      });
+      expect(reasons).toEqual(["user_not_found"]);
+    });
+  });
+});
+
+describe("approvals after a workflow is deleted or moved", () => {
+  it("keeps a deleted workflow's requests admin-only, also when another project reuses the id", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const admin = await login(context, "admin");
+    const newcomer = await login(context, "builder", "newcomer");
+    context.store.upsertProject({ id: "other", name: "Other" });
+    context.store.upsertProjectRole({ userId: newcomer.id, projectId: "other", role: "editor" });
+    const run = await startRun(context, gateWorkflow("wf-reused", GATE), requester.cookie);
+    const decided = await startRun(context, gateWorkflow("wf-reused", GATE), requester.cookie);
+    expect((await call(context, "POST", `/api/approvals/${decided.executionId}/approve`, admin.cookie, { edits: { reply: "ok" } })).statusCode).toBe(200);
+    expect((await call(context, "DELETE", "/api/workflows/wf-reused", admin.cookie)).statusCode).toBe(200);
+    expect(context.store.listApprovalRequestsForExecution(run.executionId!).map((request) => request.workflowDeletedAt !== null)).toEqual([true]);
+
+    context.store.upsertWorkflow(gateWorkflow("wf-reused", GATE, "other"));
+    expect(await inbox(context, newcomer.cookie, "?status=all")).toEqual([]);
+    expect(await inbox(context, newcomer.cookie, "?workflowId=wf-reused&status=all")).toEqual([]);
+    expect((await inbox(context, admin.cookie, "?status=all")).map((item) => item.executionId).sort()).toEqual([run.executionId, decided.executionId].sort());
+  });
+
+  it("tags inbox items and approval audit events with the workflow's current project", async () => {
+    const context = await createTestContext();
+    const requester = await login(context, "builder", "requester");
+    const admin = await login(context, "admin");
+    context.store.upsertProject({ id: "moved-to", name: "Moved to" });
+    const workflow = gateWorkflow("wf-moved-audit", GATE);
+    const run = await startRun(context, workflow, requester.cookie);
+    expect(context.store.listAuditLogs({ category: "approval", pageSize: 20 }).items.find((entry) => entry.eventType === "approval.requested")?.projectId).toBe("default");
+    context.store.upsertWorkflow({ ...workflow, projectId: "moved-to" });
+    expect((await inbox(context, admin.cookie))[0]).toMatchObject({ projectId: "moved-to" });
+    expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, admin.cookie, { edits: { reply: "ok" } })).statusCode).toBe(200);
+    expect(context.store.listAuditLogs({ category: "approval", pageSize: 20 }).items.find((entry) => entry.eventType === "approval.decided")?.projectId).toBe("moved-to");
   });
 });
 

@@ -172,6 +172,38 @@ function requesterFromState(state: WorkflowExecutionState): { userId: string | n
   return { userId: null, email: null };
 }
 
+export type ApprovalCheck = { allowed: true } | { allowed: false; message: string; code: string };
+
+/**
+ * May `user` decide this request: execute access to the workflow and to every
+ * workflow along its sub-workflow path, then the request's approver rules.
+ * `skipSelfApproval` leaves out the "you started this run" rule, which only
+ * applies when a decision is taken: a queued or recovered resume re-checks
+ * the person who already decided with this same check. `accessOnly` stops
+ * after the access checks (the requester of a timed-out run is no approver).
+ */
+export function approvalPersonCheck(
+  record: ApprovalRequestRecord,
+  user: SafeUser,
+  access: ApprovalServiceOptions["access"],
+  options: { skipSelfApproval?: boolean; accessOnly?: boolean } = {}
+): ApprovalCheck {
+  if (!access(user, record.workflowId, "workflow:execute").ok) {
+    return { allowed: false, code: "project_access", message: "You do not have execute access to this workflow's project." };
+  }
+  // A gate inside a sub-workflow: execute access on every workflow down to the one that asked.
+  const along = new Set([...record.path.map((step) => step.workflowId), record.askingWorkflowId ?? ""].filter((id) => id && id !== record.workflowId));
+  for (const workflowId of along) {
+    if (!access(user, workflowId, "workflow:execute").ok) {
+      return { allowed: false, code: "project_access", message: "You do not have execute access to the project of a sub-workflow this request comes from." };
+    }
+  }
+  if (options.accessOnly) return { allowed: true };
+  const spec = { ...defaultApprovalRequest(record.kind), ...record.spec, ...(options.skipSelfApproval ? { allowSelfApproval: true } : {}) };
+  const check = checkApprover(spec, user, { userId: record.requestedByUserId, email: record.requestedBy });
+  return check.allowed ? { allowed: true } : { allowed: false, code: check.code, message: check.message };
+}
+
 export class ApprovalService {
   private timer: NodeJS.Timeout | null = null;
   private sweeping = false;
@@ -213,6 +245,15 @@ export class ApprovalService {
         }
       })
       .catch((error) => this.log("warn", "Approval notification failed", { error: error instanceof Error ? error.message : String(error) }));
+  }
+
+  /** The workflow's project now (it may have moved since the pause), else the one stored with the request. */
+  private currentProjectId(record: Pick<ApprovalRequestRecord, "workflowId" | "projectId">, memo?: Map<string, string>): string {
+    const known = memo?.get(record.workflowId);
+    if (known !== undefined) return known;
+    const projectId = this.store.getWorkflow(record.workflowId)?.projectId ?? record.projectId;
+    memo?.set(record.workflowId, projectId);
+    return projectId;
   }
 
   private auditMetadata(record: ApprovalRequestRecord, extra: Record<string, unknown> = {}) {
@@ -269,7 +310,7 @@ export class ApprovalService {
       actor: { type: "system", email: requester.email, userId: requester.userId },
       resourceType: "workflow",
       resourceId: record.workflowId,
-      projectId: record.projectId,
+      projectId: this.currentProjectId(record),
       metadata: this.auditMetadata(record, { expiresAt: record.expiresAt, approverRoles: record.spec.approverRoles, approverUsers: record.spec.approverUsers.length })
     });
     this.notify(record, "approval.requested");
@@ -340,20 +381,8 @@ export class ApprovalService {
     return pending && pending.status === "waiting_approval" ? this.backfill(pending) : null;
   }
 
-  private decisionCheck(record: ApprovalRequestRecord, user: SafeUser): { allowed: true } | { allowed: false; message: string; code: string } {
-    if (!this.options.access(user, record.workflowId, "workflow:execute").ok) {
-      return { allowed: false, code: "project_access", message: "You do not have execute access to this workflow's project." };
-    }
-    // A gate inside a sub-workflow: execute access on every workflow down to the one that asked.
-    const along = new Set([...record.path.map((step) => step.workflowId), record.askingWorkflowId ?? ""].filter((id) => id && id !== record.workflowId));
-    for (const workflowId of along) {
-      if (!this.options.access(user, workflowId, "workflow:execute").ok) {
-        return { allowed: false, code: "project_access", message: "You do not have execute access to the project of a sub-workflow this request comes from." };
-      }
-    }
-    const spec = { ...defaultApprovalRequest(record.kind), ...record.spec };
-    const check = checkApprover(spec, user, { userId: record.requestedByUserId, email: record.requestedBy });
-    return check.allowed ? { allowed: true } : { allowed: false, code: check.code, message: check.message };
+  private decisionCheck(record: ApprovalRequestRecord, user: SafeUser): ApprovalCheck {
+    return approvalPersonCheck(record, user, this.options.access);
   }
 
   /**
@@ -386,7 +415,7 @@ export class ApprovalService {
     };
   }
 
-  toView(record: ApprovalRequestRecord, user: SafeUser): ApprovalRequestView {
+  toView(record: ApprovalRequestRecord, user: SafeUser, projects?: Map<string, string>): ApprovalRequestView {
     const spec = { ...defaultApprovalRequest(record.kind), ...record.spec };
     const check = record.status === "pending" ? this.decisionCheck(record, user) : { allowed: false as const, message: "Already decided.", code: "decided" };
     const redact = <T>(value: T): T => this.options.redact(value) as T;
@@ -396,7 +425,7 @@ export class ApprovalService {
       executionId: record.executionId,
       workflowId: record.workflowId,
       workflowName: record.workflowName,
-      projectId: record.projectId,
+      projectId: this.currentProjectId(record, projects),
       nodeId: record.nodeId,
       nodeType: record.nodeType,
       kind: record.kind,
@@ -437,10 +466,13 @@ export class ApprovalService {
     // The SQL scope already holds only readable workflows; this re-check is per workflow, not per row.
     const readable = new Map<string, boolean>();
     const visible: ApprovalRequestView[] = [];
+    const projects = new Map<string, string>();
     for (const row of rows) {
+      // A deleted workflow's requests stay admin-only, even if a new workflow reuses the id.
+      if (row.workflowDeletedAt && user.role !== "admin") continue;
       if (!readable.has(row.workflowId)) readable.set(row.workflowId, this.options.access(user, row.workflowId, "workflow:read").ok);
       if (!readable.get(row.workflowId)) continue;
-      visible.push(this.toView(row, user));
+      visible.push(this.toView(row, user, projects));
       if (visible.length >= limit) break;
     }
     return visible;
@@ -494,7 +526,7 @@ export class ApprovalService {
         actor: { userId: input.user.id, email: input.user.email, type: "user" },
         resourceType: "workflow",
         resourceId: record.workflowId,
-        projectId: record.projectId,
+        projectId: this.currentProjectId(record),
         metadata: this.auditMetadata(record, { refused: check.code })
       });
       throw new ApprovalDecisionError(check.message, 403);
@@ -533,7 +565,7 @@ export class ApprovalService {
       actor: { userId: input.user.id, email: input.user.email, type: "user" },
       resourceType: "workflow",
       resourceId: record.workflowId,
-      projectId: record.projectId,
+      projectId: this.currentProjectId(record),
       metadata: this.auditMetadata(decided, {
         decision: input.decision,
         reason: reason ? String(this.options.redact(reason)) : null,
@@ -619,7 +651,7 @@ export class ApprovalService {
           actor: { type: "system", email: SYSTEM_ACTOR },
           resourceType: "workflow",
           resourceId: record.workflowId,
-          projectId: record.projectId,
+          projectId: this.currentProjectId(record),
           metadata: this.auditMetadata(record, { expiresAt: record.expiresAt, outcome })
         });
         this.notify(record, "approval.timed_out", outcome);
@@ -694,7 +726,7 @@ export class ApprovalService {
         actor: user ? { userId: user.id, email: user.email, type: "user" } : { type: "system", email: SYSTEM_ACTOR },
         resourceType: "workflow",
         resourceId: pending.workflowId,
-        projectId: pending.projectId,
+        projectId: this.currentProjectId(pending),
         metadata: this.auditMetadata(pending)
       });
     }
