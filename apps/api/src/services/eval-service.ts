@@ -12,12 +12,20 @@
  *           sandboxed state) against one candidate, then scored against the
  *           golden run. Hand-written fixtures are skipped.
  *
- * The runner caps how many cases run at once across all runs
+ * The runner caps how many cases run at once in this process
  * (`REPLAY_CONCURRENCY`), reports progress after every case (store and
  * listeners), can cancel a run (queued cases are dropped, running
- * executions are aborted), stops a replay job that reaches its cost budget,
- * and marks runs left queued or running by a stopped server `interrupted`
- * when it starts. A run executes in the process that accepted it.
+ * executions are aborted), stops a run that reaches its cost budget, and
+ * marks runs left queued or running by a stopped server `interrupted` when
+ * it starts. A run executes in the process that accepted it.
+ *
+ * Budgets: before a case starts, the worst-case cost of its judge calls is
+ * reserved against the run's budget, so cases in flight can never spend
+ * more on judges than the budget has left. A case's own model calls are
+ * not known in advance, so a run can overshoot by at most the model spend
+ * of the cases in flight (at most `REPLAY_CONCURRENCY`). An unpriced model
+ * or judge call makes the run's cost "unknown": the spend is a lower bound
+ * and the run carries a warning.
  *
  * Token and latency aggregation pulls from the `_telemetry` blob the host
  * reads off node results; cost comes from the run facts (priced with the
@@ -26,7 +34,9 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  EVAL_JUDGE_CALLS_PER_CASE_MAX,
   EVAL_RUN_FINISHED_STATUSES,
+  type EvalStoredTruncation,
   type EvalCaseDetail,
   type EvalCaseResult,
   type EvalCaseStatus,
@@ -46,9 +56,9 @@ import {
 } from "@ai-orchestrator/shared";
 import type { EvalFixtureRecord, EvalResultRecord, EvalRunRecord, ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import type { SafeUser } from "./auth-service.js";
-import { applyScorer, __scorerTest__, type EvalLlmJudge } from "./eval-scorers.js";
+import { applyScorer, judgeCallsFor, __scorerTest__, type EvalJudgeContext, type EvalLlmJudge } from "./eval-scorers.js";
 
-export type { EvalLlmJudge, EvalJudgeResponse } from "./eval-scorers.js";
+export type { EvalLlmJudge, EvalJudgeContext, EvalJudgeResponse } from "./eval-scorers.js";
 export type { EvalRunSummary, EvalScoreDetail };
 
 /** Kept for callers that predate the shared schema. */
@@ -126,12 +136,24 @@ export interface EvalReplayDeps {
 }
 
 export interface EvalServiceOptions {
-  /** Cases running at once across all runs. Default 2. */
+  /** Cases running at once across all runs of this process. Default 2. */
   concurrency?: number;
   /** Most cases one run may have. Default 200. */
   maxCases?: number;
   /** A replay job's budget when the request names none, in USD. Default 5. */
   defaultMaxCostUsd?: number;
+  /** An eval run's budget, in USD. Default 5. */
+  evalRunMaxCostUsd?: number;
+  /**
+   * The most one judge call of this scorer can cost (the longest prompt and
+   * the reply's token cap, priced), reserved before a case starts; null when
+   * the model has no price. Without it nothing is reserved.
+   */
+  judgeCallCeilingUsd?: (scorer: { providerId?: string; model?: string }) => number | null;
+  /** A stored case output or run diff larger than this (JSON bytes) is replaced by a truncation marker. Default 256 KB. */
+  maxResultBytes?: number;
+  /** Removes secrets from text that is stored and shown (case errors, score reasons). */
+  scrub?: (text: string) => string;
   replay?: EvalReplayDeps;
   /** Aborts a running execution (cancel). */
   abortExecution?: (executionId: string, reason: string) => void;
@@ -159,6 +181,8 @@ type Listener = (run: EvalRunView, done: boolean) => void;
 
 interface CaseOutcome {
   status: EvalCaseStatus;
+  /** A model or judge call of the case had no price. */
+  costUnknown?: boolean;
   executionId?: string;
   score?: { pass: boolean; details: EvalScoreDetail[] };
   output?: unknown;
@@ -181,11 +205,19 @@ interface ActiveRun {
   resolveDone: () => void;
   progress: EvalRunProgress;
   summary: EvalRunSummary;
+  /** Woken whenever a case finishes or the run is canceled (a case waiting for budget headroom). */
+  caseWaiters: Array<() => void>;
+  warnings: Set<string>;
 }
 
 interface CaseSpec {
   fixture: EvalFixtureRecord;
+  /** The worst-case judge spend reserved before the case starts, and whether a judge model has no price. */
+  reserveUsd: number;
+  reserveUnknown: boolean;
 }
+
+const UNPRICED_WARNING = "Some model or judge calls have no price in the price table: the spend shown leaves them out, and the budget cannot stop on them.";
 
 interface ReplayJobContext {
   actorEmail: string;
@@ -240,6 +272,15 @@ function roundUsd(value: number): number {
   return Math.round(value * 1e8) / 1e8;
 }
 
+/** A model call of the run had no price, so its cost is not in `totals.costUsd`. */
+function modelCostIsUnknown(facts: RunFacts | undefined | null): boolean {
+  return Boolean(facts?.modelCalls.some((call) => call.costUsd === null));
+}
+
+function isTruncation(value: unknown): value is EvalStoredTruncation {
+  return Boolean(value && typeof value === "object" && (value as { truncated?: unknown }).truncated === true && typeof (value as { bytes?: unknown }).bytes === "number");
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -247,7 +288,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 export class EvalService {
   private readonly slots: Slots;
   private readonly active = new Map<string, ActiveRun>();
-  private readonly options: Required<Pick<EvalServiceOptions, "maxCases" | "defaultMaxCostUsd" | "heartbeatMs">> & EvalServiceOptions;
+  private readonly options: Required<Pick<EvalServiceOptions, "maxCases" | "defaultMaxCostUsd" | "evalRunMaxCostUsd" | "maxResultBytes" | "heartbeatMs">> & EvalServiceOptions;
 
   constructor(
     private readonly store: SqliteStore,
@@ -260,7 +301,7 @@ export class EvalService {
     private readonly llmJudge?: EvalLlmJudge,
     options: EvalServiceOptions = {}
   ) {
-    this.options = { maxCases: 200, defaultMaxCostUsd: 5, heartbeatMs: 30_000, ...options };
+    this.options = { maxCases: 200, defaultMaxCostUsd: 5, evalRunMaxCostUsd: 5, maxResultBytes: 262_144, heartbeatMs: 30_000, ...options };
     this.slots = new Slots(options.concurrency ?? 2);
   }
 
@@ -287,7 +328,11 @@ export class EvalService {
   }
 
   deleteDataset(id: string): boolean {
-    for (const run of this.store.listEvalRuns({ datasetId: id, statuses: ["queued", "running"], limit: 500 })) this.cancel(run.id);
+    for (let page = 0; page < 100; page += 1) {
+      const live = this.store.listEvalRuns({ datasetId: id, statuses: ["queued", "running"], limit: 500 });
+      for (const run of live) this.cancel(run.id);
+      if (live.length < 500) break;
+    }
     return this.store.deleteEvalDataset(id);
   }
 
@@ -347,6 +392,8 @@ export class EvalService {
     const fixtures = this.store.listEvalFixtures(request.datasetId);
     if (fixtures.length === 0) throw new EvalRunError(`Dataset ${request.datasetId} has no fixtures`, "invalid");
     if (fixtures.length > this.options.maxCases) throw new EvalRunError(`Dataset ${request.datasetId} has ${fixtures.length} fixtures; a run can have at most ${this.options.maxCases} (REPLAY_JOB_MAX_CASES).`, "limit");
+    if (dataset.workflowId && dataset.workflowId !== request.workflowId) throw new EvalRunError("This golden set belongs to another workflow.", "invalid");
+    if (fixtures.every((fixture) => fixture.recordingId)) throw new EvalRunError("This golden set holds only golden runs: run it as a replay job, which replays them without side effects.", "invalid");
     const workflow = this.store.getWorkflow(request.workflowId);
 
     const runId = `run_${randomUUID()}`;
@@ -362,8 +409,8 @@ export class EvalService {
       scorers: request.scorers as Array<Record<string, unknown>> | undefined,
       progress: progress as unknown as Record<string, unknown>
     });
-    const cases = fixtures.map((fixture) => ({ fixture }));
-    this.launch(runId, cases, (spec, executionId) => this.runEvalCase(request, runId, spec, executionId));
+    const cases = fixtures.map((fixture) => this.caseSpec(fixture, request.scorers));
+    this.launch(runId, cases, (spec, executionId) => this.runEvalCase(request, runId, spec, executionId), { maxCostUsd: this.options.evalRunMaxCostUsd });
     return this.view(this.store.getEvalRun(runId)!);
   }
 
@@ -390,7 +437,7 @@ export class EvalService {
     for (const datasetId of datasetIds) {
       const dataset = this.store.getEvalDataset(datasetId);
       if (!dataset) throw new EvalRunError(`Golden set not found: ${datasetId}`, "not_found");
-      if (dataset.workflowId !== context.workflowId) throw new EvalRunError(`Golden set ${dataset.name} does not belong to this workflow.`, "invalid");
+      if (dataset.workflowId !== context.workflowId) throw new EvalRunError(`Golden set ${datasetId} does not belong to this workflow.`, "invalid");
       fixtures.push(...this.store.listEvalFixtures(datasetId));
     }
     if (!fixtures.some((fixture) => fixture.recordingId)) throw new EvalRunError("These golden sets hold no golden runs to replay.", "invalid");
@@ -431,8 +478,8 @@ export class EvalService {
     const job: ReplayJobContext = { actorEmail: context.actor.email, candidate, options, scorers: request.scorers && request.scorers.length > 0 ? request.scorers : null };
     this.launch(
       runId,
-      fixtures.map((fixture) => ({ fixture })),
-      (spec, executionId) => this.runReplayCase(job, context.workflowId, spec, executionId),
+      fixtures.map((fixture) => this.caseSpec(fixture, job.scorers)),
+      (spec, executionId) => this.runReplayCase(job, runId, context.workflowId, spec, executionId),
       { maxCostUsd: options.maxCostUsd }
     );
     return this.view(this.store.getEvalRun(runId)!);
@@ -472,12 +519,13 @@ export class EvalService {
     if (active) {
       active.canceled = true;
       for (const executionId of active.inFlight) this.options.abortExecution?.(executionId, "The eval run was canceled.");
+      this.wake(active);
     }
     const progress = active ? { ...active.progress, updatedAt: this.now().toISOString() } : (record.progress as unknown as EvalRunProgress | null);
     this.store.finalizeEvalRun({
       id: runId,
       status: "canceled",
-      ...(active ? { summary: this.finishSummary(active.summary) as unknown as Record<string, unknown> } : {}),
+      ...(active ? { summary: this.finishSummary(active) as unknown as Record<string, unknown> } : {}),
       ...(progress ? { progress: progress as unknown as Record<string, unknown> } : {}),
       error: "Canceled",
       onlyFrom: ["queued", "running"]
@@ -498,11 +546,12 @@ export class EvalService {
       if (active.canceled) continue;
       active.canceled = true;
       for (const executionId of active.inFlight) this.options.abortExecution?.(executionId, "The server is stopping.");
+      this.wake(active);
       this.safely(() => {
         this.store.finalizeEvalRun({
           id: active.runId,
           status: "interrupted",
-          summary: this.finishSummary(active.summary) as unknown as Record<string, unknown>,
+          summary: this.finishSummary(active) as unknown as Record<string, unknown>,
           progress: { ...active.progress, updatedAt: this.now().toISOString() } as unknown as Record<string, unknown>,
           error: "The server stopped before this run finished.",
           onlyFrom: ["queued", "running"]
@@ -520,14 +569,25 @@ export class EvalService {
    */
   recoverInterrupted(options: { onlyStale?: boolean } = {}): number {
     let count = 0;
+    // Runs left alone stay in the list, so the next page starts after them.
+    let kept = 0;
     const nowMs = this.now().getTime();
-    for (const run of this.store.listEvalRuns({ statuses: ["queued", "running"], limit: 500 })) {
-      if (this.active.has(run.id)) continue;
-      if (options.onlyStale) {
-        const seen = Date.parse(String((run.progress as { updatedAt?: unknown } | null)?.updatedAt ?? run.startedAt));
-        if (Number.isFinite(seen) && nowMs - seen < EVAL_RUN_STALE_MS) continue;
+    for (;;) {
+      const page = this.store.listEvalRuns({ statuses: ["queued", "running"], limit: 500, offset: kept });
+      for (const run of page) {
+        let keep = this.active.has(run.id);
+        if (!keep && options.onlyStale) {
+          const seen = Date.parse(String((run.progress as { updatedAt?: unknown } | null)?.updatedAt ?? run.startedAt));
+          keep = Number.isFinite(seen) && nowMs - seen < EVAL_RUN_STALE_MS;
+        }
+        if (keep) {
+          kept += 1;
+          continue;
+        }
+        if (this.store.finalizeEvalRun({ id: run.id, status: "interrupted", error: "The server stopped before this run finished.", onlyFrom: ["queued", "running"] })) count += 1;
+        else kept += 1;
       }
-      if (this.store.finalizeEvalRun({ id: run.id, status: "interrupted", error: "The server stopped before this run finished.", onlyFrom: ["queued", "running"] })) count += 1;
+      if (page.length < 500) break;
     }
     return count;
   }
@@ -551,7 +611,9 @@ export class EvalService {
   getCase(runId: string, resultId: string): EvalCaseDetail | null {
     const result = this.store.getEvalResult(runId, resultId);
     if (!result) return null;
-    return { ...this.caseView(result), output: result.output, replay: (result.diff as ReplayCaseDiff | null) ?? null };
+    const diff = (result.diff as ReplayCaseDiff | EvalStoredTruncation | null) ?? null;
+    if (isTruncation(diff)) return { ...this.caseView(result), output: result.output, replay: null, replayTruncated: diff };
+    return { ...this.caseView(result), output: result.output, replay: diff };
   }
 
   // ---------------------------------------------------------------------------
@@ -560,6 +622,23 @@ export class EvalService {
 
   private initialProgress(total: number): EvalRunProgress {
     return { total, done: 0, running: 0, pass: 0, fail: 0, error: 0, skipped: 0, spentUsd: 0, updatedAt: this.now().toISOString() };
+  }
+
+  /** A case and the judge spend to reserve for it (its own scorers, else the run's; default scorers never call a judge). */
+  private caseSpec(fixture: EvalFixtureRecord, runScorers: EvalScorerSpec[] | null | undefined): CaseSpec {
+    let calls = 0;
+    let reserveUsd = 0;
+    let reserveUnknown = false;
+    for (const scorer of this.effectiveScorers(fixture, runScorers, [])) {
+      const wanted = Math.min(judgeCallsFor(scorer), EVAL_JUDGE_CALLS_PER_CASE_MAX - calls);
+      if (wanted <= 0 || !this.options.judgeCallCeilingUsd) continue;
+      calls += wanted;
+      const judge = scorer as { providerId?: string; model?: string };
+      const ceiling = this.options.judgeCallCeilingUsd({ ...(judge.providerId ? { providerId: judge.providerId } : {}), ...(judge.model ? { model: judge.model } : {}) });
+      if (ceiling === null || !Number.isFinite(ceiling)) reserveUnknown = true;
+      else reserveUsd += wanted * ceiling;
+    }
+    return { fixture, reserveUsd: roundUsd(reserveUsd), reserveUnknown };
   }
 
   private launch(runId: string, cases: CaseSpec[], runCase: (spec: CaseSpec, executionId: string) => Promise<CaseOutcome>, limits: { maxCostUsd?: number } = {}): void {
@@ -576,13 +655,38 @@ export class EvalService {
       done,
       resolveDone,
       progress: (record.progress as unknown as EvalRunProgress) ?? this.initialProgress(cases.length),
-      summary: emptySummary(cases.length)
+      summary: emptySummary(cases.length),
+      caseWaiters: [],
+      warnings: new Set()
     };
     this.active.set(runId, active);
-    void this.execute(active, cases, runCase, limits).finally(() => {
-      this.active.delete(runId);
-      active.resolveDone();
-    });
+    this.execute(active, cases, runCase, limits)
+      .catch((error) => {
+        this.options.logger?.warn("Eval run failed", { runId, error: error instanceof Error ? error.message : String(error) });
+        this.safely(() => {
+          this.store.finalizeEvalRun({
+            id: runId,
+            status: "failed",
+            summary: this.finishSummary(active) as unknown as Record<string, unknown>,
+            error: `The run stopped on an internal error: ${error instanceof Error ? error.message : String(error)}`,
+            onlyFrom: ["queued", "running"]
+          });
+        });
+      })
+      .finally(() => {
+        this.active.delete(runId);
+        this.wake(active);
+        active.resolveDone();
+      });
+  }
+
+  private wake(active: ActiveRun): void {
+    const waiters = active.caseWaiters.splice(0);
+    for (const waiter of waiters) waiter();
+  }
+
+  private nextCaseDone(active: ActiveRun): Promise<void> {
+    return new Promise((resolve) => active.caseWaiters.push(resolve));
   }
 
   private async execute(active: ActiveRun, cases: CaseSpec[], runCase: (spec: CaseSpec, executionId: string) => Promise<CaseOutcome>, limits: { maxCostUsd?: number }): Promise<void> {
@@ -595,17 +699,35 @@ export class EvalService {
     const running: Array<Promise<void>> = [];
     let started = false;
     let budgetStop: string | null = null;
+    // Judge spend reserved by the cases in flight.
+    let reserved = 0;
     try {
       for (const spec of cases) {
         await this.slots.acquire();
+        const max = limits.maxCostUsd;
+        if (max !== undefined) {
+          // Wait for cases in flight to give back their reservations while this one does not fit.
+          while (!active.canceled && reserved > 0 && active.progress.spentUsd + reserved + spec.reserveUsd > max) await this.nextCaseDone(active);
+        }
         if (active.canceled) {
           this.slots.release();
           break;
         }
-        if (limits.maxCostUsd !== undefined && active.progress.spentUsd >= limits.maxCostUsd) {
-          this.slots.release();
-          budgetStop = `Stopped after ${active.progress.done} of ${cases.length} cases: the job spent $${active.progress.spentUsd.toFixed(4)} of its $${limits.maxCostUsd} budget.`;
-          break;
+        if (max !== undefined) {
+          const spent = active.progress.spentUsd;
+          if (spent >= max) {
+            budgetStop = `Stopped after ${active.progress.done} of ${cases.length} cases: the run spent $${spent.toFixed(4)} of its $${max} budget.`;
+          } else if (spent + spec.reserveUsd > max) {
+            budgetStop = `Stopped after ${active.progress.done} of ${cases.length} cases: the next case's judge calls could cost up to $${spec.reserveUsd.toFixed(4)}, more than the $${(max - spent).toFixed(4)} left of the run's $${max} budget.`;
+          }
+          if (budgetStop) {
+            this.slots.release();
+            break;
+          }
+        }
+        if (spec.reserveUnknown && !active.warnings.has(UNPRICED_WARNING)) {
+          active.warnings.add(UNPRICED_WARNING);
+          active.progress = { ...active.progress, costUnknown: true };
         }
         if (!started) {
           started = true;
@@ -615,6 +737,7 @@ export class EvalService {
         const executionId = randomUUID();
         active.inFlight.add(executionId);
         active.progress = { ...active.progress, running: active.progress.running + 1 };
+        reserved = roundUsd(reserved + spec.reserveUsd);
         running.push(
           (async () => {
             let outcome: CaseOutcome;
@@ -626,7 +749,14 @@ export class EvalService {
               active.inFlight.delete(executionId);
               this.slots.release();
             }
-            this.record(active, spec, outcome);
+            reserved = Math.max(0, roundUsd(reserved - spec.reserveUsd));
+            try {
+              this.record(active, spec, outcome);
+            } catch (error) {
+              this.options.logger?.warn("Eval case bookkeeping failed", { runId: active.runId, error: error instanceof Error ? error.message : String(error) });
+            } finally {
+              this.wake(active);
+            }
           })()
         );
       }
@@ -634,7 +764,7 @@ export class EvalService {
     } finally {
       clearInterval(heartbeat);
     }
-    const summary = this.finishSummary(active.summary);
+    const summary = this.finishSummary(active);
     const progress = { ...active.progress, running: 0, updatedAt: this.now().toISOString() };
     active.progress = progress;
     if (active.canceled) {
@@ -652,8 +782,10 @@ export class EvalService {
         })
       );
     }
-    const record = this.store.getEvalRun(active.runId);
-    if (record) this.emit(active, this.view(record), true);
+    this.safely(() => {
+      const record = this.store.getEvalRun(active.runId);
+      if (record) this.emit(active, this.view(record), true);
+    });
   }
 
   private safely(write: () => void): void {
@@ -661,6 +793,26 @@ export class EvalService {
       write();
     } catch (error) {
       this.options.logger?.warn("Eval run bookkeeping failed", { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  /** A value to store as it is, or a truncation marker when its JSON is over `maxResultBytes`. */
+  private capped(value: unknown): unknown {
+    if (value === undefined) return undefined;
+    const json = JSON.stringify(value);
+    if (json === undefined) return value;
+    const bytes = Buffer.byteLength(json, "utf8");
+    if (bytes <= this.options.maxResultBytes) return value;
+    const marker: EvalStoredTruncation = { truncated: true, bytes, maxBytes: this.options.maxResultBytes, preview: json.slice(0, 2000) };
+    return marker;
+  }
+
+  private scrubText(text: string): string {
+    if (!this.options.scrub) return text;
+    try {
+      return this.options.scrub(text);
+    } catch {
+      return text;
     }
   }
 
@@ -677,8 +829,13 @@ export class EvalService {
     const cost = typeof outcome.costUsd === "number" && Number.isFinite(outcome.costUsd) ? outcome.costUsd : 0;
     summary.costUsd = roundUsd((summary.costUsd ?? 0) + cost);
     summary.judgeCostUsd = roundUsd((summary.judgeCostUsd ?? 0) + (outcome.judgeCostUsd ?? 0));
+    if (outcome.costUnknown) active.warnings.add(UNPRICED_WARNING);
 
-    this.safely(() =>
+    const error = outcome.error ? this.scrubText(outcome.error) : undefined;
+    const score = outcome.score ? { pass: outcome.score.pass, details: outcome.score.details.map((detail) => ({ ...detail, reason: this.scrubText(detail.reason) })) } : undefined;
+    this.safely(() => {
+      // The run was deleted with its golden set while this case ran: store nothing.
+      if (!this.store.getEvalRun(active.runId)) return;
       this.store.recordEvalResult({
         id: `res_${randomUUID()}`,
         runId: active.runId,
@@ -686,19 +843,19 @@ export class EvalService {
         fixtureName: spec.fixture.name,
         status: outcome.status,
         ...(outcome.executionId ? { executionId: outcome.executionId } : {}),
-        ...(outcome.score ? { score: outcome.score as unknown as Record<string, unknown> } : {}),
-        ...(outcome.output !== undefined ? { output: outcome.output } : {}),
-        ...(outcome.error ? { error: outcome.error } : {}),
+        ...(score ? { score: score as unknown as Record<string, unknown> } : {}),
+        ...(outcome.output !== undefined ? { output: this.capped(outcome.output) } : {}),
+        ...(error ? { error } : {}),
         ...(typeof outcome.durationMs === "number" ? { durationMs: outcome.durationMs } : {}),
         ...(typeof outcome.tokens?.input === "number" ? { tokenInput: outcome.tokens.input } : {}),
         ...(typeof outcome.tokens?.output === "number" ? { tokenOutput: outcome.tokens.output } : {}),
         ...(typeof outcome.tokens?.total === "number" ? { tokenTotal: outcome.tokens.total } : {}),
         ...(outcome.recordingId ? { recordingId: outcome.recordingId } : {}),
         ...(outcome.verdict ? { verdict: outcome.verdict } : {}),
-        ...(outcome.diff ? { diff: outcome.diff } : {}),
+        ...(outcome.diff ? { diff: this.capped(outcome.diff) as Record<string, unknown> } : {}),
         costUsd: outcome.costUsd ?? null
-      })
-    );
+      });
+    });
 
     active.progress = {
       ...active.progress,
@@ -706,20 +863,25 @@ export class EvalService {
       running: Math.max(0, active.progress.running - 1),
       [outcome.status]: active.progress[outcome.status] + 1,
       spentUsd: roundUsd(active.progress.spentUsd + cost),
+      ...(outcome.costUnknown ? { costUnknown: true } : {}),
       updatedAt: this.now().toISOString()
     };
     if (!active.canceled) {
       this.safely(() => this.store.updateEvalRunProgress({ id: active.runId, progress: active.progress as unknown as Record<string, unknown> }));
     }
-    const record = this.store.getEvalRun(active.runId);
-    if (record) this.emit(active, { ...this.view(record), progress: active.progress }, false);
+    this.safely(() => {
+      const record = this.store.getEvalRun(active.runId);
+      if (record) this.emit(active, { ...this.view(record), progress: active.progress }, false);
+    });
   }
 
-  private finishSummary(running: EvalRunSummary): EvalRunSummary {
-    const summary = { ...running };
+  private finishSummary(active: ActiveRun): EvalRunSummary {
+    const summary = { ...active.summary };
     const scored = summary.total - (summary.skipped ?? 0);
     summary.passRate = scored > 0 ? summary.pass / scored : 0;
     summary.avgDurationMs = scored > 0 ? Math.round(summary.totalDurationMs / scored) : 0;
+    if (active.warnings.size > 0) summary.warnings = [...active.warnings];
+    if (active.warnings.has(UNPRICED_WARNING)) summary.costUnknown = true;
     return summary;
   }
 
@@ -744,14 +906,31 @@ export class EvalService {
     return fallback;
   }
 
-  private async score(scorers: EvalScorerSpec[], ctx: Parameters<typeof applyScorer>[1]): Promise<{ score: { pass: boolean; details: EvalScoreDetail[] }; judgeCostUsd: number }> {
-    const details = await Promise.all(scorers.map((scorer) => applyScorer(scorer, ctx)));
+  /** The judge for one case: every call carries who it is for, so the host can check the secret and record usage. */
+  private judgeFor(context: EvalJudgeContext): EvalLlmJudge | undefined {
+    const judge = this.llmJudge;
+    if (!judge) return undefined;
+    return (input) => judge({ ...input, context });
+  }
+
+  private async score(
+    scorers: EvalScorerSpec[],
+    ctx: Omit<Parameters<typeof applyScorer>[1], "llmJudge" | "judgeCalls">,
+    context: EvalJudgeContext
+  ): Promise<{ score: { pass: boolean; details: EvalScoreDetail[] }; judgeCostUsd: number; judgeCostUnknown: boolean }> {
+    // One counter for every scorer of the case: at most EVAL_JUDGE_CALLS_PER_CASE_MAX judge calls in all.
+    const shared = { ...ctx, llmJudge: this.judgeFor(context), judgeCalls: { count: 0 } };
+    const details = await Promise.all(scorers.map((scorer) => applyScorer(scorer, shared)));
     const judgeCostUsd = roundUsd(details.reduce((sum, detail) => sum + (detail.costUsd ?? 0), 0));
-    return { score: { pass: details.every((detail) => detail.pass), details }, judgeCostUsd };
+    return { score: { pass: details.every((detail) => detail.pass), details }, judgeCostUsd, judgeCostUnknown: details.some((detail) => detail.costUnknown) };
   }
 
   private async runEvalCase(request: EvalRunRequest, runId: string, spec: CaseSpec, executionId: string): Promise<CaseOutcome> {
     const { fixture } = spec;
+    if (fixture.recordingId) {
+      // A golden run replays without side effects in a replay job; an eval run would run it live.
+      return { status: "skipped", recordingId: fixture.recordingId, error: "A golden run; golden runs run as replay jobs, never live in an eval run." };
+    }
     const exec = await this.executor({
       workflowId: request.workflowId,
       fixtureInput: fixture.input,
@@ -765,33 +944,36 @@ export class EvalService {
         : {})
     });
     const modelCost = exec.facts?.totals.costUsd ?? null;
+    const modelCostUnknown = modelCostIsUnknown(exec.facts);
     if (exec.error) {
-      return { status: "error", executionId: exec.executionId, error: exec.error, durationMs: exec.durationMs, tokens: exec.tokens, costUsd: modelCost };
+      return { status: "error", executionId: exec.executionId, error: exec.error, durationMs: exec.durationMs, tokens: exec.tokens, costUsd: modelCost, costUnknown: modelCostUnknown };
     }
-    const recording = fixture.recordingId ? (this.options.replay?.getRecording(fixture.recordingId) ?? null) : null;
-    const { score, judgeCostUsd } = await this.score(this.effectiveScorers(fixture, request.scorers, [{ type: "exact_match" }]), {
-      output: exec.output,
-      expected: fixture.expected ?? recording?.facts.output ?? undefined,
-      fixtureInput: fixture.input,
-      baseline: recording?.facts ?? null,
-      candidate: exec.facts ?? null,
-      llmJudge: this.llmJudge,
-      ...(this.options.random ? { random: this.options.random } : {})
-    });
+    const { score, judgeCostUsd, judgeCostUnknown } = await this.score(
+      this.effectiveScorers(fixture, request.scorers, [{ type: "exact_match" }]),
+      {
+        output: exec.output,
+        expected: fixture.expected ?? undefined,
+        fixtureInput: fixture.input,
+        baseline: null,
+        candidate: exec.facts ?? null,
+        ...(this.options.random ? { random: this.options.random } : {})
+      },
+      { runId, workflowId: request.workflowId, actorEmail: request.triggeredBy ?? null, ...(exec.executionId ? { executionId: exec.executionId } : {}) }
+    );
     return {
       status: score.pass ? "pass" : "fail",
+      costUnknown: modelCostUnknown || judgeCostUnknown,
       executionId: exec.executionId,
       score,
       output: exec.output,
       durationMs: exec.durationMs,
       tokens: exec.tokens,
       costUsd: roundUsd((modelCost ?? 0) + judgeCostUsd),
-      judgeCostUsd,
-      ...(fixture.recordingId ? { recordingId: fixture.recordingId } : {})
+      judgeCostUsd
     };
   }
 
-  private async runReplayCase(job: ReplayJobContext, workflowId: string, spec: CaseSpec, executionId: string): Promise<CaseOutcome> {
+  private async runReplayCase(job: ReplayJobContext, runId: string, workflowId: string, spec: CaseSpec, executionId: string): Promise<CaseOutcome> {
     const { fixture } = spec;
     const replay = this.options.replay!;
     if (!fixture.recordingId) {
@@ -823,23 +1005,27 @@ export class EvalService {
       durationMs: facts.totals.durationMs ?? undefined,
       tokens
     };
+    const modelCostUnknown = modelCostIsUnknown(facts);
     if (response.verdict === "error") {
-      return { ...base, status: "error", error: response.reasons.join(" ") || "The replay was inconclusive.", costUsd: modelCost };
+      return { ...base, status: "error", error: response.reasons.join(" ") || "The replay was inconclusive.", costUsd: modelCost, costUnknown: modelCostUnknown };
     }
     const fallback: EvalScorerSpec[] = [
       { type: "status", expect: recording.facts.status },
       { type: "json_equal", against: "baseline", ...(job.options.ignorePaths ? { ignorePaths: job.options.ignorePaths } : {}), ...(job.options.numberTolerance !== undefined ? { numberTolerance: job.options.numberTolerance } : {}) }
     ];
-    const { score, judgeCostUsd } = await this.score(this.effectiveScorers(fixture, job.scorers, fallback), {
-      output: facts.output,
-      expected: fixture.expected ?? recording.facts.output,
-      fixtureInput: recording.input,
-      baseline: recording.facts,
-      candidate: facts,
-      llmJudge: this.llmJudge,
-      ...(this.options.random ? { random: this.options.random } : {})
-    });
-    return { ...base, status: score.pass ? "pass" : "fail", score, costUsd: roundUsd((modelCost ?? 0) + judgeCostUsd), judgeCostUsd };
+    const { score, judgeCostUsd, judgeCostUnknown } = await this.score(
+      this.effectiveScorers(fixture, job.scorers, fallback),
+      {
+        output: facts.output,
+        expected: fixture.expected ?? recording.facts.output,
+        fixtureInput: recording.input,
+        baseline: recording.facts,
+        candidate: facts,
+        ...(this.options.random ? { random: this.options.random } : {})
+      },
+      { runId, workflowId, actorEmail: job.actorEmail, executionId: response.executionId }
+    );
+    return { ...base, status: score.pass ? "pass" : "fail", score, costUsd: roundUsd((modelCost ?? 0) + judgeCostUsd), judgeCostUsd, costUnknown: modelCostUnknown || judgeCostUnknown };
   }
 
   // ---------------------------------------------------------------------------

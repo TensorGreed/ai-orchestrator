@@ -98,7 +98,8 @@ import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
-import { EvalService, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
+import { EVAL_RUN_STALE_MS, EvalService, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
+import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
 import { NonRetryableQueueError, QueueService } from "./services/queue-service";
@@ -1533,10 +1534,32 @@ export function createApp(
     }
   };
 
+  // Phase 15.2 — finished eval runs and replay jobs, on the same timer. The
+  // newest run of every set is kept; a store without eval storage skips it.
+  const pruneEvalRuns = (reason: "startup" | "interval") => {
+    const retentionDays = config.EVAL_RUN_RETENTION_DAYS;
+    const evalStore = store as unknown as { pruneEvalRuns?: (input: { before: string }) => number };
+    if (retentionDays <= 0 || typeof evalStore.pruneEvalRuns !== "function") return 0;
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    try {
+      const deleted = evalStore.pruneEvalRuns({ before: cutoff });
+      if (deleted > 0) app.log.info({ deleted, cutoff, retentionDays, reason }, "Pruned eval runs and replay jobs");
+      return deleted;
+    } catch (error) {
+      app.log.warn(
+        { cutoff, retentionDays, reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
+        "Failed to prune eval runs and replay jobs"
+      );
+      return 0;
+    }
+  };
+
   pruneExecutionHistory("startup");
-  const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0
+  pruneEvalRuns("startup");
+  const retentionTimer = config.EXECUTION_HISTORY_RETENTION_DAYS > 0 || config.EVAL_RUN_RETENTION_DAYS > 0
     ? setInterval(() => {
         pruneExecutionHistory("interval");
+        pruneEvalRuns("interval");
       }, config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS)
     : null;
   if (retentionTimer) {
@@ -2826,15 +2849,44 @@ export function createApp(
   // as the per-fixture executor so eval runs share routing, telemetry, and
   // history with regular runs. SQLite-only — see /docs/extensions/eval-framework
   // for the Postgres-parity follow-up note.
+  /**
+   * Phase 15.2 — whether `user` may hand this secret to a judge running for a
+   * workflow in `projectId`: a non-internal secret owned by or shared to the
+   * project, and `secret:use` there (admins pass). Checked when a run starts
+   * and again for every judge call.
+   */
+  const canUseJudgeSecret = (user: SafeUser, secretId: string, projectId: string): boolean => {
+    const row = store.getSecret(secretId);
+    if (!row || isInternalSecretProvider(row.provider)) return false;
+    if (user.role === "admin") return true;
+    const owningProject = row.projectId ?? DEFAULT_PROJECT_ID;
+    const reachable = owningProject === projectId || rbacService.listSecretShares(secretId).some((share) => share.projectId === projectId);
+    return reachable && rbacService.can(user, projectId, "secret:use");
+  };
+
   // Phase 9.5 / 15.2 — the LLM judge for judge scorers (faithfulness,
-  // answer_relevance, llm_judge). A scorer that names a provider (and a
-  // secretRef, resolved through SecretService) always works; one that names
-  // none uses the deployment default, which needs EVAL_JUDGE_ENABLED so a
-  // default judge never adds cost by surprise. Judge calls are priced with
-  // the deployment's price table and counted into the run's cost.
+  // answer_relevance, llm_judge). EVAL_JUDGE_ENABLED=false turns every judge
+  // call off. A judge authenticates with its scorer's secretRef, which must
+  // still be usable by the run's user in the workflow's project when the
+  // call is made; without one it may use the provider's environment keys
+  // only when the operator set EVAL_JUDGE_ALLOW_ENV_CREDENTIALS. Judge calls
+  // are priced with the deployment's price table (null when the model has no
+  // price), counted into the run's cost and recorded as usage events of the
+  // workflow's project.
   const evalLlmJudge: EvalLlmJudge = async (judgeInput) => {
-    if (!judgeInput.providerId && !config.EVAL_JUDGE_ENABLED) {
-      throw new Error("no default judge — set EVAL_JUDGE_ENABLED=true or name a providerId on the scorer");
+    if (!config.EVAL_JUDGE_ENABLED) {
+      throw new Error("LLM judges are turned off on this server (EVAL_JUDGE_ENABLED=false)");
+    }
+    const context = judgeInput.context;
+    const workflow = context ? store.getWorkflow(context.workflowId) : null;
+    const projectId = workflow?.projectId ?? DEFAULT_PROJECT_ID;
+    if (judgeInput.secretRef) {
+      const actor = context?.actorEmail ? evalPolicyActor(context.actorEmail) : null;
+      if (!actor || !canUseJudgeSecret(actor, judgeInput.secretRef.secretId, projectId)) {
+        throw new Error(`the judge's secret ${judgeInput.secretRef.secretId} cannot be used by the user who started this run in this workflow's project`);
+      }
+    } else if (!config.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS) {
+      throw new Error("the judge has no secretRef: give the scorer one, or the operator can set EVAL_JUDGE_ALLOW_ENV_CREDENTIALS=true to use this server's provider keys");
     }
     const providerId = judgeInput.providerId ?? config.EVAL_JUDGE_PROVIDER_ID;
     const adapter = providerRegistry.tryGet(providerId);
@@ -2842,6 +2894,7 @@ export function createApp(
       throw new Error(`eval judge provider "${providerId}" is not registered`);
     }
     const model = judgeInput.model ?? config.EVAL_JUDGE_MODEL;
+    const startedAt = Date.now();
     const response = await adapter.generate(
       {
         provider: {
@@ -2860,8 +2913,35 @@ export function createApp(
     const costUsd = usage
       ? usageService.estimateCostUsd(providerId, model, usage.inputTokens ?? 0, usage.outputTokens ?? 0, usage.cachedInputTokens ?? 0)
       : null;
+    if (context) {
+      try {
+        usageService.recordExecution({
+          executionId: context.executionId ?? context.runId,
+          workflowId: context.workflowId,
+          workflowName: workflow?.name ?? null,
+          userEmail: context.actorEmail,
+          projectId,
+          triggerType: "eval_judge",
+          status: "success",
+          durationMs: Date.now() - startedAt,
+          nodeResults: { judge: { _telemetry: { providerId, model, usage: usage ?? {}, llmCallCount: 1 } } }
+        });
+      } catch (error) {
+        app.log.warn({ runId: context.runId, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Failed to record judge usage");
+      }
+    }
     return { content: response.content ?? "", costUsd };
   };
+
+  /** The most one judge call can cost: the longest judge prompt (at ~2 characters a token) plus a full reply, priced. */
+  const judgeCallCeilingUsd = (scorer: { providerId?: string; model?: string }): number | null =>
+    usageService.estimateCostUsd(
+      scorer.providerId ?? config.EVAL_JUDGE_PROVIDER_ID,
+      scorer.model ?? config.EVAL_JUDGE_MODEL,
+      Math.ceil(JUDGE_PROMPT_MAX_CHARS / 2),
+      config.EVAL_JUDGE_MAX_TOKENS,
+      0
+    );
 
   const evalPolicyActor = (email: string | undefined): SafeUser | null => {
     const found = email ? store.getUserByEmail(email) : null;
@@ -2986,6 +3066,11 @@ export function createApp(
     concurrency: config.REPLAY_CONCURRENCY,
     maxCases: config.REPLAY_JOB_MAX_CASES,
     defaultMaxCostUsd: config.REPLAY_JOB_DEFAULT_MAX_COST_USD,
+    evalRunMaxCostUsd: config.EVAL_RUN_MAX_COST_USD,
+    judgeCallCeilingUsd,
+    maxResultBytes: config.EVAL_RESULT_MAX_BYTES,
+    // Provider error bodies and reasons are stored and shown to viewers: no secret value goes with them.
+    scrub: (text) => String(secretService.redact(replayRecordingService.scrubber().text(text))),
     abortExecution: (executionId, reason) => activeExecutions.get(executionId)?.controller.abort(reason),
     // Phase 15.2 — replay jobs use the 15.1 replay machinery, built further down.
     replay: {
@@ -2999,15 +3084,42 @@ export function createApp(
     },
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
-  // Phase 15.2 — runs a stopped server left queued or running. With several instances, only those no live instance has touched lately.
-  const interruptedEvalRuns = evalService.recoverInterrupted({ onlyStale: config.HA_ENABLED });
-  if (interruptedEvalRuns > 0) app.log.warn({ count: interruptedEvalRuns }, "Marked eval runs and replay jobs interrupted by a restart");
   app.addHook("onClose", async () => {
     evalService.shutdown();
   });
 
   const workerMode = config.WORKER_MODE;
   const runsBackgroundWorkers = workerMode === "all" || workerMode === "worker";
+  // SQLite cannot be shared between processes; on Postgres another instance may own a live run.
+  const sharedDatabase = config.HA_ENABLED || (store as object) instanceof PostgresStore;
+
+  // Phase 15.2 — eval runs and replay jobs a stopped server left queued or
+  // running. The same rules as the execution reconcile below: webhook
+  // replicas never touch other instances' runs, and on a shared database only
+  // runs no live instance has touched lately are interrupted. Eval storage is
+  // SQLite-only, so a store without it skips this.
+  const evalStoreReady = typeof (store as unknown as { listEvalRuns?: unknown }).listEvalRuns === "function";
+  const recoverEvalRuns = (reason: "startup" | "interval") => {
+    try {
+      const interrupted = evalService.recoverInterrupted({ onlyStale: sharedDatabase });
+      if (interrupted > 0) app.log.warn({ count: interrupted, reason }, "Marked eval runs and replay jobs interrupted by a restart");
+    } catch (err) {
+      app.log.warn({ err: err instanceof Error ? err.message : String(err), reason }, "Failed to mark interrupted eval runs");
+    }
+  };
+  if (!evalStoreReady) {
+    app.log.info("This database has no eval storage; skipping the interrupted eval run check");
+  } else if (workerMode !== "webhook") {
+    recoverEvalRuns("startup");
+    if (sharedDatabase) {
+      // An instance that died is noticed by the others, not only by the next one to boot.
+      const evalRecoveryTimer = setInterval(() => recoverEvalRuns("interval"), EVAL_RUN_STALE_MS);
+      (evalRecoveryTimer as { unref?: () => void }).unref?.();
+      app.addHook("onClose", async () => {
+        clearInterval(evalRecoveryTimer);
+      });
+    }
+  }
   const leaderElection = new LeaderElectionService(
     store,
     {
@@ -3019,10 +3131,7 @@ export function createApp(
         // Webhook replicas run beside the main instances with HA off; they never own other instances' runs.
         if (workerMode !== "webhook") {
           try {
-            const interrupted = await reconcileInterruptedRuns(store, {
-              // SQLite cannot be shared between processes; on Postgres another instance may own a live run.
-              sharedDatabase: config.HA_ENABLED || (store as object) instanceof PostgresStore
-            });
+            const interrupted = await reconcileInterruptedRuns(store, { sharedDatabase });
             if (interrupted.length > 0) {
               app.log.warn(
                 { count: interrupted.length, executionIds: interrupted.slice(0, 50).map((run) => run.id) },
@@ -4730,15 +4839,15 @@ export function createApp(
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission),
-    canUseSecret: (user, secretId, projectId) => {
-      const row = store.getSecret(secretId);
-      if (!row || isInternalSecretProvider(row.provider)) return false;
-      if (user.role === "admin") return true;
-      const owningProject = row.projectId ?? DEFAULT_PROJECT_ID;
-      const reachable = owningProject === projectId || rbacService.listSecretShares(secretId).some((share) => share.projectId === projectId);
-      return reachable && rbacService.can(user, projectId, "secret:use");
+    canUseSecret: canUseJudgeSecret,
+    // A cassette is readable when the user can read its workflow (cassettes without a workflow are anyone's, as in the MCP testing routes).
+    cassetteAllowed: (user, cassetteId) => {
+      const cassette = store.getMcpCassetteSummary(cassetteId);
+      if (!cassette) return false;
+      if (user.role === "admin" || !cassette.workflowId) return true;
+      const workflow = store.getWorkflow(cassette.workflowId);
+      return rbacService.canAccessWorkflow(user, workflow ? { id: workflow.id, projectId: workflow.projectId ?? undefined } : { id: cassette.workflowId, ...(cassette.projectId ? { projectId: cassette.projectId } : {}) }, "workflow:read");
     },
-    cassetteExists: (cassetteId) => Boolean(store.getMcpCassetteSummary(cassetteId)),
     audit: (request, user, event) => audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS
   });

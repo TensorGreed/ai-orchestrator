@@ -24,8 +24,11 @@
  * `workflow:write`, starting or canceling a run `workflow:execute` (admins
  * always pass). A dataset without a workflow follows its project; one with
  * neither (made before projects scoped datasets) is visible to builders
- * and admins only. A judge scorer's `secretRef` must name a secret the
- * starting user may use in the workflow's project.
+ * and admins only. Something the user cannot read answers 404, as if it did
+ * not exist; something they can read but not change answers 403. A judge
+ * scorer's `secretRef` (on the request or on any case of the set) must name
+ * a secret the starting user may use in the workflow's project; the judge
+ * checks it again for every call.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -56,8 +59,8 @@ export interface EvalRoutesDeps {
   canInProject: (user: SafeUser, projectId: string, permission: WorkflowPermission) => boolean;
   /** Whether `user` may hand this secret to a judge running for a workflow in `projectId`. */
   canUseSecret: (user: SafeUser, secretId: string, projectId: string) => boolean;
-  /** Whether the MCP cassette exists (eval runs that replay one). */
-  cassetteExists: (cassetteId: string) => boolean;
+  /** Whether the MCP cassette exists and the user may read it (eval runs that replay one). */
+  cassetteAllowed: (user: SafeUser, cassetteId: string) => boolean;
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
   sseHeartbeatMs: number;
 }
@@ -131,12 +134,35 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     return { error: `Insufficient permissions for this ${what}` };
   };
 
-  /** Judge scorers name a provider secret by reference; the user must be allowed to use it for this workflow. */
-  const judgeSecretProblem = (user: SafeUser, scorers: EvalScorerSpec[] | undefined | null, workflowId: string): string | null => {
-    const projectId = store.getWorkflow(workflowId)?.projectId ?? "default";
+  const notFound = (reply: FastifyReply, what: string) => {
+    reply.code(404);
+    return { error: `${what} not found` };
+  };
+
+  /** 404 when the user cannot even read it (no existence oracle), 403 when they can read but not do this. */
+  const denied = (reply: FastifyReply, readable: boolean, what: string, label: string) => (readable ? forbidden(reply, what) : notFound(reply, label));
+
+  /** Judge scorers name a provider secret by reference; the user must be allowed to use it in this project. */
+  const judgeSecretProblemInProject = (user: SafeUser, scorers: EvalScorerSpec[] | undefined | null, projectId: string): string | null => {
     for (const scorer of scorers ?? []) {
       if (scorer.type !== "llm_judge" || !scorer.secretRef) continue;
       if (!deps.canUseSecret(user, scorer.secretRef.secretId, projectId)) return `The judge's secret ${scorer.secretRef.secretId} was not found or cannot be used in this workflow's project.`;
+    }
+    return null;
+  };
+
+  const judgeSecretProblem = (user: SafeUser, scorers: EvalScorerSpec[] | undefined | null, workflowId: string): string | null =>
+    judgeSecretProblemInProject(user, scorers, store.getWorkflow(workflowId)?.projectId ?? "default");
+
+  /** The first judge secret problem of the request's scorers or of any case in these datasets. */
+  const runScorerProblem = (user: SafeUser, scorers: EvalScorerSpec[] | undefined | null, datasetIds: string[], workflowId: string): string | null => {
+    const own = judgeSecretProblem(user, scorers, workflowId);
+    if (own) return own;
+    for (const datasetId of datasetIds) {
+      for (const fixture of evals.listFixtures(datasetId)) {
+        const problem = judgeSecretProblem(user, fixture.scorers as EvalScorerSpec[] | null, workflowId);
+        if (problem) return problem;
+      }
     }
     return null;
   };
@@ -173,12 +199,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     let projectId = parsed.data.projectId;
     if (parsed.data.workflowId) {
       const workflow = store.getWorkflow(parsed.data.workflowId);
-      if (!workflow) {
-        if (user.role !== "admin") return forbidden(reply, "workflow");
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
-      if (!workflowAllows(user, workflow.id, "workflow:write")) return forbidden(reply, "workflow");
+      if (!workflow) return notFound(reply, "Workflow");
+      if (!workflowAllows(user, workflow.id, "workflow:write")) return denied(reply, workflowAllows(user, workflow.id, "workflow:read"), "workflow", "Workflow");
       // A golden set lives in its workflow's project.
       projectId = workflow.projectId ?? "default";
     } else if (projectId && user.role !== "admin" && !deps.canInProject(user, projectId, "workflow:write")) {
@@ -209,11 +231,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     const dataset = evals.getDataset(request.params.id);
-    if (!dataset) {
-      reply.code(404);
-      return { error: "Dataset not found" };
-    }
-    if (!datasetAllows(user, dataset, "workflow:write")) return forbidden(reply, "dataset");
+    if (!dataset) return notFound(reply, "Dataset");
+    if (!datasetAllows(user, dataset, "workflow:write")) return denied(reply, datasetAllows(user, dataset, "workflow:read"), "dataset", "Dataset");
     evals.deleteDataset(dataset.id);
     if (dataset.workflowId) {
       deps.audit(request, user, {
@@ -233,11 +252,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
     const dataset = evals.getDataset(request.params.id);
-    if (!dataset) {
-      reply.code(404);
-      return { error: "Dataset not found" };
-    }
-    if (!datasetAllows(user, dataset, "workflow:read")) return forbidden(reply, "dataset");
+    if (!dataset || !datasetAllows(user, dataset, "workflow:read")) return notFound(reply, "Dataset");
     return { fixtures: evals.listFixtures(dataset.id) };
   });
 
@@ -250,17 +265,15 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       return { error: firstIssue(parsed.error).replace(/^(name|input): /, ""), details: parsed.error.issues };
     }
     const dataset = evals.getDataset(request.params.id);
-    if (!dataset) {
-      reply.code(404);
-      return { error: "Dataset not found" };
-    }
-    if (!datasetAllows(user, dataset, "workflow:write")) return forbidden(reply, "dataset");
-    if (dataset.workflowId) {
-      const problem = judgeSecretProblem(user, parsed.data.scorers, dataset.workflowId);
-      if (problem) {
-        reply.code(400);
-        return { error: problem };
-      }
+    if (!dataset) return notFound(reply, "Dataset");
+    if (!datasetAllows(user, dataset, "workflow:write")) return denied(reply, datasetAllows(user, dataset, "workflow:read"), "dataset", "Dataset");
+    // Checked for every dataset: a golden set against its workflow's project, any other against its own.
+    const problem = dataset.workflowId
+      ? judgeSecretProblem(user, parsed.data.scorers, dataset.workflowId)
+      : judgeSecretProblemInProject(user, parsed.data.scorers, dataset.projectId ?? "default");
+    if (problem) {
+      reply.code(400);
+      return { error: problem };
     }
     return {
       fixture: evals.addFixture({
@@ -282,11 +295,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       return { error: firstIssue(parsed.error), details: parsed.error.issues };
     }
     const dataset = evals.getDataset(request.params.id);
-    if (!dataset) {
-      reply.code(404);
-      return { error: "Golden set not found" };
-    }
-    if (!datasetAllows(user, dataset, "workflow:write")) return forbidden(reply, "golden set");
+    if (!dataset) return notFound(reply, "Golden set");
+    if (!datasetAllows(user, dataset, "workflow:write")) return denied(reply, datasetAllows(user, dataset, "workflow:read"), "golden set", "Golden set");
     if (!dataset.workflowId) {
       reply.code(400);
       return { error: "This dataset is not a golden set: create one for a workflow to add golden runs." };
@@ -323,12 +333,14 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     const fixture = evals.getFixture(request.params.id);
-    const dataset = fixture ? evals.getDataset(fixture.datasetId) : null;
-    if (!fixture) {
-      reply.code(404);
-      return { error: "Fixture not found" };
+    if (!fixture) return notFound(reply, "Fixture");
+    const dataset = evals.getDataset(fixture.datasetId);
+    // A case whose dataset is gone belongs to no one: only admins clean it up.
+    if (!dataset) {
+      if (user.role !== "admin") return notFound(reply, "Fixture");
+    } else if (!datasetAllows(user, dataset, "workflow:write")) {
+      return denied(reply, datasetAllows(user, dataset, "workflow:read"), "dataset", "Fixture");
     }
-    if (dataset && !datasetAllows(user, dataset, "workflow:write")) return forbidden(reply, "dataset");
     evals.deleteFixture(fixture.id);
     return { ok: true };
   });
@@ -363,14 +375,20 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       reply.code(400);
       return { error: "An eval run can record MCP calls or replay them, not both." };
     }
-    if (!workflowAllows(user, workflowId, "workflow:execute")) return forbidden(reply, "workflow");
+    if (!workflowAllows(user, workflowId, "workflow:execute")) return denied(reply, workflowAllows(user, workflowId, "workflow:read"), "workflow", "Workflow");
     const dataset = evals.getDataset(datasetId);
-    if (dataset && !datasetAllows(user, dataset, "workflow:read")) return forbidden(reply, "dataset");
-    if (mcpOptions.data.replay?.cassetteId && !deps.cassetteExists(mcpOptions.data.replay.cassetteId)) {
-      reply.code(404);
-      return { error: "Cassette not found" };
+    if (!dataset || !datasetAllows(user, dataset, "workflow:read")) return notFound(reply, "Eval dataset");
+    if (dataset.workflowId && dataset.workflowId !== workflowId) {
+      reply.code(400);
+      return { error: "This golden set belongs to another workflow.", code: "invalid" };
     }
-    const problem = judgeSecretProblem(user, scorers.data, workflowId);
+    if (mcpOptions.data.replay?.cassetteId && !deps.cassetteAllowed(user, mcpOptions.data.replay.cassetteId)) return notFound(reply, "Cassette");
+    if (mcpOptions.data.replay?.evalRunId) {
+      const source = evals.getRunView(mcpOptions.data.replay.evalRunId);
+      if (!source || !runAllows(user, source, "workflow:read")) return notFound(reply, "Eval run to replay from");
+    }
+    // The request's judges and every judge stored on the dataset's cases run with this user's rights.
+    const problem = runScorerProblem(user, scorers.data, [dataset.id], workflowId);
     if (problem) {
       reply.code(400);
       return { error: problem };
@@ -383,22 +401,26 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       ...(mcpOptions.data.record ? { recordMcp: true } : {}),
       ...(mcpOptions.data.replay ? { replayMcp: mcpOptions.data.replay } : {})
     };
-    try {
-      if (request.query.wait === "true" || request.query.wait === "1") {
-        // The pre-15.2 blocking response, kept for one release.
+    if (request.query.wait === "true" || request.query.wait === "1") {
+      try {
+        // The pre-15.2 blocking response, kept for one release (every refusal is a 400, as it was).
         reply.header("Deprecation", "true");
         const result = await evals.startRun(runRequest);
         return { ok: true, ...result };
+      } catch (error) {
+        if (error instanceof EvalRunError) {
+          reply.code(400);
+          return { error: error.message, code: error.code };
+        }
+        throw error;
       }
+    }
+    try {
       const run = evals.enqueueRun(runRequest);
       reply.code(202);
       return { run, runId: run.id };
     } catch (error) {
-      if (error instanceof EvalRunError) {
-        reply.code(400);
-        return { error: error.message, code: error.code };
-      }
-      throw error;
+      return evalRunError(reply, error);
     }
   });
 
@@ -413,7 +435,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       ...(kind ? { kind: kind as "eval" | "replay" } : {}),
       limit: limitFrom(query.limit, 100)
     };
-    if (query.workflowId && !workflowAllows(user, query.workflowId, "workflow:read")) return forbidden(reply, "workflow");
+    if (query.workflowId && !workflowAllows(user, query.workflowId, "workflow:read")) return notFound(reply, "Workflow");
     const runs = user.role === "admin" || query.workflowId ? evals.listRuns(filter) : evals.listRuns({ ...filter, workflowIds: readableWorkflowIds(user) });
     // Phase 10.8 — how many fixture cassettes each run recorded, for "replay from eval run".
     return { runs: runs.map((run) => ({ ...run, mcpCassettes: store.listMcpCassettesForEvalRun(run.id).length })) };
@@ -423,11 +445,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
     const run = evals.getRun(request.params.id);
-    if (!run) {
-      reply.code(404);
-      return { error: "Eval run not found" };
-    }
-    if (!runAllows(user, run, "workflow:read")) return forbidden(reply, "eval run");
+    if (!run || !runAllows(user, run, "workflow:read")) return notFound(reply, "Eval run");
     return run;
   });
 
@@ -435,10 +453,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return reply;
     const existing = evals.getRunView(request.params.id);
-    if (!existing || (kind && existing.kind !== kind)) {
-      reply.code(404);
-      return { error: kind ? "Replay job not found" : "Eval run not found" };
-    }
+    const label = kind ? "Replay job" : "Eval run";
+    if (!existing || (kind && existing.kind !== kind) || !runAllows(user, existing, "workflow:read")) return notFound(reply, label);
     if (!runAllows(user, existing, "workflow:execute")) return forbidden(reply, kind ? "replay job" : "eval run");
     if (existing.status !== "queued" && existing.status !== "running") {
       reply.code(409);
@@ -462,11 +478,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
     const run = evals.getRunView(request.params.id);
-    if (!run) {
-      reply.code(404);
-      return { error: "Eval run not found" };
-    }
-    if (!runAllows(user, run, "workflow:read")) return forbidden(reply, "eval run");
+    if (!run || !runAllows(user, run, "workflow:read")) return notFound(reply, "Eval run");
 
     let closed = false;
     const send = (event: "progress" | "done", payload: EvalRunView) => {
@@ -522,23 +534,19 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       return { error: "Invalid replay job", details: parsed.error.issues };
     }
     const first = evals.getDataset(parsed.data.datasetIds[0]!);
-    if (!first) {
-      reply.code(404);
-      return { error: "Golden set not found" };
-    }
+    if (!first || !datasetAllows(user, first, "workflow:read")) return notFound(reply, "Golden set");
     if (!first.workflowId) {
       reply.code(400);
       return { error: "This dataset is not a golden set: replay jobs need sets made for a workflow." };
     }
     const workflowId = first.workflowId;
     if (!workflowAllows(user, workflowId, "workflow:execute")) return forbidden(reply, "golden set");
-    const scorerProblem =
-      judgeSecretProblem(user, parsed.data.scorers, workflowId) ??
-      parsed.data.datasetIds
-        .flatMap((id) => evals.listFixtures(id))
-        .map((fixture) => judgeSecretProblem(user, fixture.scorers as EvalScorerSpec[] | null, workflowId))
-        .find((problem) => problem !== null) ??
-      null;
+    // Every set must be this workflow's before anything about its cases (names, secret ids) is read.
+    for (const datasetId of parsed.data.datasetIds) {
+      const dataset = evals.getDataset(datasetId);
+      if (!dataset || dataset.workflowId !== workflowId) return notFound(reply, "Golden set");
+    }
+    const scorerProblem = runScorerProblem(user, parsed.data.scorers, [...new Set(parsed.data.datasetIds)], workflowId);
     if (scorerProblem) {
       reply.code(400);
       return { error: scorerProblem };
@@ -566,7 +574,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
     const query = request.query;
-    if (query.workflowId && !workflowAllows(user, query.workflowId, "workflow:read")) return forbidden(reply, "workflow");
+    if (query.workflowId && !workflowAllows(user, query.workflowId, "workflow:read")) return notFound(reply, "Workflow");
     const filter = {
       kind: "replay" as const,
       ...(query.workflowId ? { workflowId: query.workflowId } : {}),
@@ -581,11 +589,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
     const run = evals.getRun(request.params.id);
-    if (!run || run.kind !== "replay") {
-      reply.code(404);
-      return { error: "Replay job not found" };
-    }
-    if (!runAllows(user, run, "workflow:read")) return forbidden(reply, "replay job");
+    if (!run || run.kind !== "replay" || !runAllows(user, run, "workflow:read")) return notFound(reply, "Replay job");
     return { run: { ...run, results: run.results.map(({ output: _output, ...result }) => result) } };
   });
 
@@ -593,11 +597,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
     const run = evals.getRunView(request.params.id);
-    if (!run || run.kind !== "replay") {
-      reply.code(404);
-      return { error: "Replay job not found" };
-    }
-    if (!runAllows(user, run, "workflow:read")) return forbidden(reply, "replay job");
+    if (!run || run.kind !== "replay" || !runAllows(user, run, "workflow:read")) return notFound(reply, "Replay job");
     const result = evals.getCase(run.id, request.params.resultId);
     if (!result) {
       reply.code(404);

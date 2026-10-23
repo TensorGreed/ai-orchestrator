@@ -220,7 +220,7 @@ async function waitForJob(context: TestContext, cookie: string, runId: string, t
 describe("replay jobs over golden sets", () => {
   it("replays ten golden runs in the background, scores each one and judges with a secret from SecretService", async () => {
     const judge = await startModel('{"score": 0.9, "reason": "answers the question"}');
-    const context = await createTestContext({ EVAL_JUDGE_BASE_URL: judge.baseUrl, REPLAY_CONCURRENCY: "2" });
+    const context = await createTestContext({ EVAL_JUDGE_ENABLED: "true", EVAL_JUDGE_BASE_URL: judge.baseUrl, REPLAY_CONCURRENCY: "2" });
     const builder = await login(context, "builder");
     const viewer = await login(context, "viewer");
     const counter = await startCounter();
@@ -292,6 +292,17 @@ describe("replay jobs over golden sets", () => {
     expect((await call(context, "POST", `/api/replay/runs/${job.id}/cancel`, builder.cookie)).statusCode).toBe(409);
     expect((await call(context, "POST", `/api/replay/runs/${job.id}/cancel`, viewer.cookie)).statusCode).toBe(403);
 
+    // Every judge call is a usage event of the workflow's project.
+    const usage = new Database(context.dbPath, { readonly: true });
+    try {
+      const rows = usage.prepare("SELECT * FROM usage_events WHERE trigger_type = 'eval_judge'").all() as Array<{ project_id: string; workflow_id: string; user_email: string; llm_call_count: number; cost_usd: number }>;
+      expect(rows).toHaveLength(10);
+      expect(rows[0]).toMatchObject({ project_id: "default", workflow_id: "wf-set", user_email: "builder@example.com", llm_call_count: 1 });
+      expect(rows[0]!.cost_usd).toBeGreaterThan(0);
+    } finally {
+      usage.close();
+    }
+
     // The judge's key appears nowhere in what was stored.
     const db = new Database(context.dbPath, { readonly: true });
     try {
@@ -330,12 +341,24 @@ describe("replay jobs over golden sets", () => {
     context.store.upsertCustomRole({ id: "none-hidden", projectId: "hidden", name: "No access", permissions: [] });
     context.store.upsertProjectRole({ userId: outsider.id, projectId: "hidden", role: "custom", customRoleId: "none-hidden" });
     context.store.upsertWorkflow(setWorkflow(counter.base, "v2", "hidden"));
-    expect((await call(context, "GET", `/api/replay/runs/${job.id}`, outsider.cookie)).statusCode).toBe(403);
-    expect((await call(context, "GET", `/api/replay/runs/${job.id}/results/${failed.id}`, outsider.cookie)).statusCode).toBe(403);
-    expect((await call(context, "GET", `/api/eval/runs/${job.id}`, outsider.cookie)).statusCode).toBe(403);
-    expect((await call(context, "GET", `/api/eval/datasets/${setId}/fixtures`, outsider.cookie)).statusCode).toBe(403);
-    expect((await call(context, "POST", "/api/replay/runs", outsider.cookie, { datasetIds: [setId] })).statusCode).toBe(403);
-    expect((await call(context, "DELETE", `/api/eval/datasets/${setId}`, outsider.cookie)).statusCode).toBe(403);
+    // Ids the user cannot read answer 404, the same as ids that do not exist.
+    for (const [method, url, payload] of [
+      ["GET", `/api/replay/runs/${job.id}`],
+      ["GET", `/api/replay/runs/${job.id}/results/${failed.id}`],
+      ["GET", `/api/eval/runs/${job.id}`],
+      ["GET", `/api/eval/runs/${job.id}/events`],
+      ["POST", `/api/replay/runs/${job.id}/cancel`],
+      ["GET", `/api/eval/datasets/${setId}/fixtures`],
+      ["POST", `/api/eval/datasets/${setId}/fixtures`, { name: "x", input: {} }],
+      ["POST", "/api/replay/runs", { datasetIds: [setId] }],
+      ["DELETE", `/api/eval/datasets/${setId}`],
+      ["GET", "/api/replay/runs?workflowId=wf-set"]
+    ] as Array<["GET" | "POST" | "DELETE", string, unknown?]>) {
+      const response = await call(context, method, url, outsider.cookie, payload);
+      expect(response.statusCode, `${method} ${url}`).toBe(404);
+      // A foreign event stream never starts: no event is written.
+      expect(response.body).not.toContain("event:");
+    }
     expect((await call(context, "GET", "/api/replay/runs", outsider.cookie)).json<{ runs: EvalRunView[] }>().runs).toEqual([]);
     expect((await call(context, "GET", "/api/eval/runs", outsider.cookie)).json<{ runs: EvalRunView[] }>().runs).toEqual([]);
     expect((await call(context, "GET", "/api/eval/datasets", outsider.cookie)).json<{ datasets: unknown[] }>().datasets).toEqual([]);
@@ -393,7 +416,8 @@ describe("eval runs on the background runner", () => {
     expect(waited.statusCode).toBe(200);
     expect(waited.headers.deprecation).toBe("true");
     expect(waited.json<{ ok: boolean; summary: { total: number } }>()).toMatchObject({ ok: true, summary: { total: 2 } });
-    expect((await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: "ds_missing", workflowId: "wf-set" })).statusCode).toBe(400);
+    expect((await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: "ds_missing", workflowId: "wf-set" })).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/eval/runs?wait=true", builder.cookie, { datasetId: dataset.id, workflowId: "wf-missing" })).statusCode).toBe(404);
   }, 30_000);
 
   it("marks runs left running by a stopped server as interrupted on the next boot", async () => {
@@ -407,6 +431,165 @@ describe("eval runs on the background runner", () => {
     } finally {
       await closeContext(second);
       fs.rmSync(first.tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("review fixes over the API", () => {
+  const hiddenProject = (context: TestContext) => {
+    context.store.upsertProject({ id: "hidden", name: "Hidden" });
+    return context.secretService.createSecret({ name: "Hidden key", provider: "openai", value: JUDGE_KEY, projectId: "hidden" });
+  };
+
+  it("refuses a judge secret from another project on fixture add and on eval run start, also for cases stored before the check", async () => {
+    const judge = await startModel('{"score": 1}');
+    const context = await createTestContext({ EVAL_JUDGE_ENABLED: "true", EVAL_JUDGE_BASE_URL: judge.baseUrl });
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const foreign = hiddenProject(context);
+    const judgeScorer = { type: "llm_judge", rubric: "r", providerId: "openai", secretRef: { secretId: foreign.secretId } };
+    // A project-only dataset (no workflow) is checked against its project too.
+    const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain", projectId: "default" })).json<{ dataset: { id: string } }>().dataset;
+    const added = await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name: "a", input: {}, scorers: [judgeScorer] });
+    expect(added.statusCode, added.body).toBe(400);
+    expect(added.json<{ error: string }>().error).toContain(foreign.secretId);
+    // A case that already holds the secret (stored before this check existed) stops the run before anything runs.
+    context.store.createEvalFixture({ id: "fix_old", datasetId: dataset.id, name: "old", input: {}, scorers: [judgeScorer] });
+    const started = await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set" });
+    expect(started.statusCode, started.body).toBe(400);
+    expect(started.json<{ error: string }>().error).toContain(foreign.secretId);
+    expect(judge.auth).toHaveLength(0);
+    expect(counter.count("/slack")).toBe(0);
+  }, 30_000);
+
+  it("checks the judge's secret again for every call: a secret removed mid-run fails the later cases", async () => {
+    const judge = await startModel('{"score": 1}', 300);
+    const context = await createTestContext({ EVAL_JUDGE_ENABLED: "true", EVAL_JUDGE_BASE_URL: judge.baseUrl, REPLAY_CONCURRENCY: "1" });
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    const setId = await goldenSet(context, builder.cookie, "wf-set", await goldenRuns(context, builder.cookie, "wf-set", 3));
+    const secret = context.secretService.createSecret({ name: "Judge key", provider: "openai", value: JUDGE_KEY });
+    const started = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId], scorers: [{ type: "llm_judge", rubric: "r", providerId: "openai", secretRef: { secretId: secret.secretId } }] });
+    expect(started.statusCode, started.body).toBe(202);
+    const until = Date.now() + 10_000;
+    while (judge.auth.length === 0 && Date.now() < until) await sleep(10);
+    context.secretService.deleteSecret(secret.secretId);
+    const job = await waitForJob(context, builder.cookie, started.json<{ run: EvalRunView }>().run.id);
+    expect(job.summary).toMatchObject({ pass: 1, fail: 2 });
+    const failed = job.results.filter((result) => result.status === "fail");
+    for (const result of failed) expect(result.score!.details[0]!.reason).toContain("cannot be used by the user who started this run");
+    expect(judge.auth).toHaveLength(1);
+  }, 30_000);
+
+  it("never uses the server's provider keys for a judge without a secretRef unless the operator allows it, and EVAL_JUDGE_ENABLED=false stops every judge", async () => {
+    const judge = await startModel('{"score": 1}');
+    for (const [overrides, expected] of [
+      [{ EVAL_JUDGE_ENABLED: "true" }, "has no secretRef"],
+      [{ EVAL_JUDGE_ENABLED: "false" }, "turned off"]
+    ] as const) {
+      const context = await createTestContext({ ...overrides, EVAL_JUDGE_BASE_URL: judge.baseUrl, OPENAI_API_KEY: "sk-env-key-should-never-be-sent-0000" });
+      const builder = await login(context, "builder");
+      const counter = await startCounter();
+      context.store.upsertWorkflow(setWorkflow(counter.base));
+      const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain" })).json<{ dataset: { id: string } }>().dataset;
+      expect((await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name: "a", input: {}, scorers: [{ type: "llm_judge", rubric: "r", providerId: "openai" }] })).statusCode).toBe(200);
+      const waited = await call(context, "POST", "/api/eval/runs?wait=true", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set" });
+      expect(waited.statusCode, waited.body).toBe(200);
+      const run = (await call(context, "GET", `/api/eval/runs/${waited.json<{ runId: string }>().runId}`, builder.cookie)).json<EvalRunView & { results: EvalCaseResult[] }>();
+      expect(run.results[0]!.score!.details[0]).toMatchObject({ pass: false, reason: expect.stringContaining(expected) });
+    }
+    expect(judge.auth).toHaveLength(0);
+  }, 30_000);
+
+  it("streams progress before done for a running job", async () => {
+    const model = await startModel("hello", 150);
+    const context = await createTestContext({ REPLAY_CONCURRENCY: "1" });
+    const builder = await login(context, "builder");
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: JUDGE_KEY });
+    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    const setId = await goldenSet(context, builder.cookie, "wf-agent", await goldenRuns(context, builder.cookie, "wf-agent", 2));
+    const started = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId] });
+    const stream = await call(context, "GET", `/api/eval/runs/${started.json<{ run: EvalRunView }>().run.id}/events`, builder.cookie);
+    const progress = stream.body.indexOf("event: progress");
+    expect(progress).toBeGreaterThan(-1);
+    expect(stream.body.indexOf("event: done")).toBeGreaterThan(progress);
+    expect(stream.body.match(/event: progress/g)!.length).toBeGreaterThanOrEqual(2);
+  }, 30_000);
+
+  it("keeps golden runs out of live eval runs, and other workflows' sets out of both", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    context.store.upsertWorkflow({ ...setWorkflow(counter.base), id: "wf-other", name: "Secret project name" });
+    const setId = await goldenSet(context, builder.cookie, "wf-set", await goldenRuns(context, builder.cookie, "wf-set", 1));
+    const before = counter.count("/slack");
+    const live = await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: setId, workflowId: "wf-set" });
+    expect(live.statusCode).toBe(400);
+    expect(live.json<{ error: string }>().error).toContain("replay job");
+    expect((await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: setId, workflowId: "wf-other" })).json<{ error: string }>().error).toContain("another workflow");
+    expect(counter.count("/slack")).toBe(before);
+    // A set of another workflow in a replay job is a 404 that names nothing.
+    const otherSet = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Other suite", workflowId: "wf-other" })).json<{ dataset: { id: string } }>().dataset;
+    const mixed = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId, otherSet.id] });
+    expect(mixed.statusCode).toBe(404);
+    expect(mixed.body).not.toContain("Other suite");
+    expect((await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId, "ds_missing"] })).statusCode).toBe(404);
+  }, 30_000);
+
+  it("refuses to replay MCP answers from another project's cassette or eval run", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(setWorkflow(counter.base));
+    context.store.upsertProject({ id: "hidden", name: "Hidden" });
+    context.store.upsertCustomRole({ id: "none-hidden", projectId: "hidden", name: "No access", permissions: [] });
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "hidden", role: "custom", customRoleId: "none-hidden" });
+    context.store.upsertWorkflow({ ...setWorkflow(counter.base, "v1", "hidden"), id: "wf-hidden" });
+    const cassette = context.store.saveMcpCassette({
+      id: "cas_hidden",
+      executionId: null,
+      workflowId: "wf-hidden",
+      workflowName: "Hidden",
+      projectId: "hidden",
+      source: "manual",
+      cassette: { format: "l2m.mcp-cassette", version: 1, recordedAt: new Date().toISOString(), servers: [], entries: [], truncated: false, bytes: 0, llm: "not_recorded" } as never,
+      createdBy: null
+    });
+    context.store.createEvalRun({ id: "run_hidden", datasetId: "ds_hidden", workflowId: "wf-hidden", status: "completed" });
+    const dataset = (await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Plain" })).json<{ dataset: { id: string } }>().dataset;
+    await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name: "a", input: {} });
+    expect((await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set", replay: { cassetteId: cassette.id } })).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-set", replay: { evalRunId: "run_hidden" } })).statusCode).toBe(404);
+  }, 30_000);
+
+  it("boots on a store without eval storage instead of crashing", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-replay-jobs-noeval-"));
+    const real = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
+    real.ensureDefaultProject();
+    const missing = new Set(["listEvalRuns", "pruneEvalRuns"]);
+    const store = new Proxy(real, {
+      get(target, key, receiver) {
+        if (typeof key === "string" && missing.has(key)) return undefined;
+        const value = Reflect.get(target, key, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+    const config = parseConfig({ LOG_LEVEL: "warn", SEED_SAMPLE_WORKFLOWS: "false", SECRET_MASTER_KEY_BASE64: MASTER_KEY, COOKIE_SECURE: "false", RATE_LIMIT_ENABLED: "false", MCP_PROBE_INTERVAL_MS: "0", GIT_SYNC_WORKDIR: path.join(tempDir, "git") });
+    const app = createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), new AuthService(store, config.SESSION_TTL_HOURS));
+    try {
+      await app.ready();
+      expect((await app.inject({ method: "GET", url: "/health" })).statusCode).toBe(200);
+    } finally {
+      await app.close();
+      try {
+        real.close();
+      } catch {
+        // Closed by the app.
+      }
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });

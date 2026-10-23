@@ -274,3 +274,191 @@ describe("replay jobs", () => {
     expect(() => svc.enqueueReplayJob({ datasetIds: [empty.id], version: 9 }, { workflowId: "wf", actor })).toThrow(/Version 9/);
   });
 });
+
+describe("review fixes: budgets, bookkeeping and storage", () => {
+  const judgeSpec = { type: "llm_judge" as const, rubric: "r", providerId: "openai", model: "gpt-4o-mini" };
+
+  it("reserves each case's worst-case judge spend, so concurrent cases never overshoot the budget on judges", async () => {
+    let running = 0;
+    let peak = 0;
+    const judge = async () => {
+      running += 1;
+      peak = Math.max(peak, running);
+      await sleep(10);
+      running -= 1;
+      return { content: '{"score": 1}', costUsd: 0.1 };
+    };
+    const svc = new EvalService(store, async (input) => ({ executionId: input.executionId, output: input.fixtureInput }), judge, {
+      concurrency: 3,
+      evalRunMaxCostUsd: 1,
+      judgeCallCeilingUsd: () => 0.4
+    });
+    const dataset = svc.createDataset({ name: "set" })!;
+    for (let index = 0; index < 10; index += 1) svc.addFixture({ datasetId: dataset.id, name: `case-${index}`, input: {}, scorers: [judgeSpec] });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com" });
+    await svc.wait(run.id);
+    const done = svc.getRun(run.id)!;
+    // Two reservations of $0.40 fit in $1; a third waits for one to come back.
+    expect(peak).toBe(2);
+    expect(done.status).toBe("failed");
+    expect(done.error).toContain("could cost up to $0.4000");
+    expect(done.progress!.spentUsd).toBeLessThanOrEqual(1);
+    // Every case that started stayed within the budget with its reservation: spent + 0.4 <= 1 when it started.
+    expect(done.results.length).toBe(7);
+  });
+
+  it("bounds a run's overshoot on model spend by the cases in flight", async () => {
+    const recordings = new Map(["r1", "r2", "r3", "r4", "r5"].map((id) => [id, { id, workflowId: "wf", input: {}, facts: facts({ ok: true }), name: id } as unknown as ReplayRecordingRecord]));
+    const replay: EvalReplayDeps = {
+      resolveCandidate: (workflowId) => ({ workflow: store.getWorkflow(workflowId)!, kind: "draft", version: null, workflowHash: "h" }),
+      getRecording: (id) => recordings.get(id) ?? null,
+      replayCase: async ({ recording, executionId }) => {
+        await sleep(10);
+        return { recordingId: recording.id, executionId, candidate: { kind: "draft", version: null, workflowHash: "h" }, status: "success", diff: {} as ReplayRunResponse["diff"], verdict: "pass", reasons: [], facts: facts({ ok: true }, 0.6) };
+      },
+      actorFor: (email) => ({ id: "u1", email, role: "builder" })
+    };
+    const svc = new EvalService(store, async () => ({ output: null }), undefined, { concurrency: 3, replay });
+    const set = svc.createDataset({ name: "golden", workflowId: "wf" })!;
+    for (const recording of recordings.values()) svc.addGoldenRun({ datasetId: set.id, recording });
+    const job = svc.enqueueReplayJob({ datasetIds: [set.id], maxCostUsd: 1 }, { workflowId: "wf", actor: { id: "u1", email: "b@example.com", role: "builder" } });
+    await svc.wait(job.id);
+    const run = svc.getRun(job.id)!;
+    // Cases 1-3 start at $0; case 4 starts at $0.60 (under budget) while two are still in flight; then the
+    // budget is spent. The overshoot is at most REPLAY_CONCURRENCY cases' model spend past the last check.
+    expect(run.status).toBe("failed");
+    expect(run.results).toHaveLength(4);
+    expect(run.progress!.spentUsd).toBe(2.4);
+    expect(run.progress!.spentUsd).toBeLessThanOrEqual(0.6 + 3 * 0.6);
+  });
+
+  it("counts an unpriced model or judge as cost unknown, with a warning on the run", async () => {
+    const svc = new EvalService(store, async (input) => ({ executionId: input.executionId, output: input.fixtureInput, facts: { ...facts({}), modelCalls: [{ nodeId: "a", iteration: null, providerId: "x", model: "y", inputTokens: 1, outputTokens: 1, costUsd: null, latencyMs: 1 }] } }), async () => ({ content: '{"score":1}', costUsd: null }), { judgeCallCeilingUsd: () => null });
+    const dataset = svc.createDataset({ name: "set" })!;
+    svc.addFixture({ datasetId: dataset.id, name: "a", input: {}, scorers: [judgeSpec] });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" });
+    await svc.wait(run.id);
+    const done = svc.getRun(run.id)!;
+    expect(done.status).toBe("completed");
+    expect(done.progress!.costUnknown).toBe(true);
+    expect(done.summary).toMatchObject({ costUnknown: true, warnings: [expect.stringContaining("no price")] });
+    expect(done.results[0]!.score!.details[0]!.costUnknown).toBe(true);
+  });
+
+  it("gives the judge who each call is for, and caps judge calls per case across scorers", async () => {
+    const contexts: unknown[] = [];
+    const svc = new EvalService(store, async (input) => ({ executionId: input.executionId, output: "x" }), async (input) => {
+      contexts.push(input.context);
+      return '{"score": 1}';
+    });
+    const dataset = svc.createDataset({ name: "set" })!;
+    const many = Array.from({ length: 11 }, () => ({ ...judgeSpec, votes: 5 }));
+    svc.addFixture({ datasetId: dataset.id, name: "a", input: {}, scorers: many });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf", triggeredBy: "b@example.com" });
+    await svc.wait(run.id);
+    expect(contexts).toHaveLength(50);
+    expect(contexts[0]).toMatchObject({ runId: run.id, workflowId: "wf", actorEmail: "b@example.com", executionId: expect.any(String) });
+    const details = svc.getRun(run.id)!.results[0]!.score!.details;
+    expect(details.at(-1)!.reason).toContain("judge call limit reached (50 per case)");
+  });
+
+  it("never revives a finished run with a late progress write", () => {
+    store.createEvalRun({ id: "run_done", datasetId: "ds", workflowId: "wf", status: "running" });
+    store.finalizeEvalRun({ id: "run_done", status: "interrupted", error: "stopped" });
+    store.updateEvalRunProgress({ id: "run_done", status: "running", progress: { done: 1 } });
+    store.updateEvalRunProgress({ id: "run_done", progress: { done: 2 } });
+    expect(store.getEvalRun("run_done")).toMatchObject({ status: "interrupted", progress: null });
+  });
+
+  it("settles a run whose store reads start failing, with no unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let reads = 0;
+      const flaky = new Proxy(store, {
+        get(target, key, receiver) {
+          if (key === "getEvalRun") {
+            return (id: string) => {
+              reads += 1;
+              if (reads > 2) throw new Error("database is closed");
+              return target.getEvalRun(id);
+            };
+          }
+          const value = Reflect.get(target, key, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
+      const warnings: string[] = [];
+      const svc = new EvalService(flaky, async (input) => ({ executionId: input.executionId, output: input.fixtureInput }), undefined, { logger: { warn: (message) => warnings.push(message) } });
+      const dataset = datasetWith(svc, 2);
+      const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" });
+      await svc.wait(run.id);
+      await sleep(20);
+      expect(svc.isActive(run.id)).toBe(false);
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("drops a run that waits for a slot when it is canceled, without starting its cases", async () => {
+    const gate = deferred();
+    const started: string[] = [];
+    const svc = new EvalService(store, async (input) => {
+      started.push(`${input.runId}:${input.fixtureName}`);
+      await gate.promise;
+      return { executionId: input.executionId, output: input.fixtureInput };
+    }, undefined, { concurrency: 1 });
+    const holder = svc.enqueueRun({ datasetId: datasetWith(svc, 1).id, workflowId: "wf" });
+    const waiting = svc.enqueueRun({ datasetId: datasetWith(svc, 2).id, workflowId: "wf" });
+    await sleep(5);
+    expect(svc.cancel(waiting.id)!.status).toBe("canceled");
+    gate.resolve();
+    await Promise.all([svc.wait(holder.id), svc.wait(waiting.id)]);
+    expect(started).toEqual([`${holder.id}:case-0`]);
+    expect(svc.getRun(waiting.id)).toMatchObject({ status: "canceled", results: [] });
+    expect(svc.getRunView(holder.id)!.status).toBe("completed");
+  });
+
+  it("stores outputs and diffs over the size cap as truncation markers, scored on the full value, with secrets scrubbed", async () => {
+    const big = { text: `${"x".repeat(5000)} the needle` };
+    const svc = new EvalService(store, async (input) => ({ executionId: input.executionId, output: big, error: undefined }), undefined, {
+      maxResultBytes: 1024,
+      scrub: (text) => text.replaceAll("hunter2", "[secret]")
+    });
+    const dataset = svc.createDataset({ name: "set" })!;
+    svc.addFixture({ datasetId: dataset.id, name: "a", input: {}, scorers: [{ type: "contains", path: "text", needle: "the needle" }, { type: "contains", path: "text", needle: "hunter2" }] });
+    const run = svc.enqueueRun({ datasetId: dataset.id, workflowId: "wf" });
+    await svc.wait(run.id);
+    const result = svc.getRun(run.id)!.results[0]!;
+    expect(result.score!.details[0]!.pass).toBe(true);
+    expect(result.output).toMatchObject({ truncated: true, maxBytes: 1024, bytes: expect.any(Number) });
+    expect((result.output as { preview: string }).preview.length).toBe(2000);
+    expect(result.score!.details[1]!.reason).toContain("[secret]");
+    expect(result.score!.details[1]!.reason).not.toContain("hunter2");
+  });
+
+  it("prunes finished runs before the cutoff but keeps the newest run of every set", () => {
+    for (const [id, datasetId, status] of [["run_a1", "ds_a", "completed"], ["run_b1", "ds_b", "completed"], ["run_a2", "ds_a", "completed"], ["run_a3", "ds_a", "running"]] as const) {
+      store.createEvalRun({ id, datasetId, workflowId: "wf", status, ...(id === "run_b1" ? { kind: "replay", datasetIds: ["ds_b", "ds_a"] } : {}) });
+      store.recordEvalResult({ id: `res_${id}`, runId: id, fixtureId: "f", status: "pass" });
+    }
+    // Everything started before the cutoff: run_a3 is ds_a's newest (and still running), run_a2 its newest finished, run_b1 ds_b's only run.
+    expect(store.pruneEvalRuns({ before: "9999-01-01T00:00:00Z" })).toBe(1);
+    expect(store.getEvalRun("run_a1")).toBeNull();
+    expect(store.listEvalResults("run_a1")).toEqual([]);
+    for (const id of ["run_a2", "run_a3", "run_b1"]) expect(store.getEvalRun(id)).not.toBeNull();
+    expect(store.pruneEvalRuns({ before: "2000-01-01T00:00:00Z" })).toBe(0);
+  });
+
+  it("matches a dataset id literally when listing its runs, and pages through every interrupted run", () => {
+    store.createEvalRun({ id: "run_like", datasetId: "ds_1", workflowId: "wf", kind: "replay", datasetIds: ["ds_1", "ds%"] });
+    expect(store.listEvalRuns({ datasetId: "ds%" }).map((run) => run.id)).toEqual(["run_like"]);
+    expect(store.listEvalRuns({ datasetId: "ds_" })).toEqual([]);
+    const svc = new EvalService(store, async () => ({ output: null }));
+    for (let index = 0; index < 505; index += 1) store.createEvalRun({ id: `run_q${index}`, datasetId: "ds", workflowId: "wf", status: "queued" });
+    expect(svc.recoverInterrupted()).toBe(506);
+  });
+});

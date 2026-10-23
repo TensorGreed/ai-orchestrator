@@ -274,9 +274,25 @@ export interface EvalCaseResult {
 /** One replayed case with its run diff: what the case diff drawer shows. */
 export type ReplayCaseDiff = Omit<ReplayRunResponse, "facts">;
 
+/**
+ * What is stored in place of a case output or run diff whose JSON is over
+ * the per-case limit (EVAL_RESULT_MAX_BYTES): its size and the start of it.
+ * Scorers always saw the full value.
+ */
+export interface EvalStoredTruncation {
+  truncated: true;
+  bytes: number;
+  maxBytes: number;
+  /** The first 2000 characters of the JSON. */
+  preview: string;
+}
+
 export interface EvalCaseDetail extends EvalCaseResult {
+  /** The output, or an `EvalStoredTruncation` when it was too large to store. */
   output: unknown;
   replay: ReplayCaseDiff | null;
+  /** The run diff was too large to store: `replay` is null and this says how large it was. */
+  replayTruncated?: EvalStoredTruncation;
 }
 
 export const replayJobRequestSchema = z

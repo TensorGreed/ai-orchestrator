@@ -7349,14 +7349,65 @@ export class SqliteStore {
     this.persist();
   }
 
-  /** Phase 15.2 — a queued run starts, or a running run reports progress. */
+  /**
+   * Phase 15.2 — a queued run starts, or a running run reports progress.
+   * Only a run still queued or running is touched, so a late heartbeat never
+   * revives a run another process finished, canceled or interrupted.
+   */
   updateEvalRunProgress(input: { id: string; status?: string; progress: Record<string, unknown> }): void {
     if (input.status) {
-      this.exec(`UPDATE eval_runs SET status = ?, progress_json = ? WHERE id = ?`, [input.status, JSON.stringify(input.progress), input.id]);
+      this.exec(`UPDATE eval_runs SET status = ?, progress_json = ? WHERE id = ? AND status IN ('queued', 'running')`, [input.status, JSON.stringify(input.progress), input.id]);
     } else {
-      this.exec(`UPDATE eval_runs SET progress_json = ? WHERE id = ?`, [JSON.stringify(input.progress), input.id]);
+      this.exec(`UPDATE eval_runs SET progress_json = ? WHERE id = ? AND status IN ('queued', 'running')`, [JSON.stringify(input.progress), input.id]);
     }
     this.persist();
+  }
+
+  /**
+   * Phase 15.2 — deletes finished eval runs and replay jobs (with their case
+   * results) that started before `before`. The newest run of every dataset
+   * or golden set, and its newest finished one, are always kept, so a set
+   * never loses its last verdict. Returns how many runs were deleted.
+   */
+  pruneEvalRuns(input: { before: string }): number {
+    const rows = this.queryAll<{ id: string; dataset_id: string; dataset_ids_json: string | null; status: string; started_at: string }>(
+      `SELECT id, dataset_id, dataset_ids_json, status, started_at FROM eval_runs ORDER BY started_at DESC, rowid DESC`
+    );
+    const newest = new Set<string>();
+    const newestFinished = new Set<string>();
+    const keep = new Set<string>();
+    const doomed: string[] = [];
+    for (const row of rows) {
+      const id = toString(row.id);
+      const status = toString(row.status);
+      const finished = status !== "queued" && status !== "running";
+      let sets: string[] = [toString(row.dataset_id)];
+      try {
+        const parsed = row.dataset_ids_json ? (JSON.parse(toString(row.dataset_ids_json)) as unknown) : null;
+        if (Array.isArray(parsed)) sets = [...new Set([...sets, ...parsed.map((entry) => String(entry))])];
+      } catch {
+        // A malformed list: the first set still counts.
+      }
+      for (const set of sets) {
+        if (!newest.has(set)) {
+          newest.add(set);
+          keep.add(id);
+        }
+        if (finished && !newestFinished.has(set)) {
+          newestFinished.add(set);
+          keep.add(id);
+        }
+      }
+      if (finished && !keep.has(id) && toString(row.started_at) < input.before) doomed.push(id);
+    }
+    for (let index = 0; index < doomed.length; index += 200) {
+      const chunk = doomed.slice(index, index + 200);
+      const marks = chunk.map(() => "?").join(", ");
+      this.exec(`DELETE FROM eval_results WHERE run_id IN (${marks})`, chunk);
+      this.exec(`DELETE FROM eval_runs WHERE id IN (${marks})`, chunk);
+    }
+    if (doomed.length > 0) this.persist();
+    return doomed.length;
   }
 
   finalizeEvalRun(input: {
@@ -7393,11 +7444,16 @@ export class SqliteStore {
     this.persist();
   }
 
-  listEvalRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; statuses?: string[]; id?: string; limit?: number } = {}): EvalRunRecord[] {
+  listEvalRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; statuses?: string[]; id?: string; limit?: number; offset?: number } = {}): EvalRunRecord[] {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (options.id) { clauses.push("id = ?"); params.push(options.id); }
-    if (options.datasetId) { clauses.push("(dataset_id = ? OR dataset_ids_json LIKE ?)"); params.push(options.datasetId, `%${JSON.stringify(options.datasetId)}%`); }
+    if (options.datasetId) {
+      // The id is matched as a JSON string inside the list; `%`, `_` and `\` in it are literal.
+      const needle = JSON.stringify(options.datasetId).replace(/[\\%_]/g, (char) => `\\${char}`);
+      clauses.push("(dataset_id = ? OR dataset_ids_json LIKE ? ESCAPE '\\')");
+      params.push(options.datasetId, `%${needle}%`);
+    }
     if (options.workflowId) { clauses.push("workflow_id = ?"); params.push(options.workflowId); }
     // Project scope: only runs of these workflows (an empty list matches nothing).
     if (options.workflowIds) {
@@ -7421,8 +7477,8 @@ export class SqliteStore {
       `SELECT id, dataset_id, workflow_id, workflow_name, status, started_at, completed_at,
               triggered_by, scorers_json, summary_json, error, kind, dataset_ids_json, candidate_json,
               workflow_hash, workflow_version, options_json, progress_json
-       FROM eval_runs ${where} ORDER BY started_at DESC, rowid DESC LIMIT ?`,
-      [...params, limit]
+       FROM eval_runs ${where} ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?`,
+      [...params, limit, Math.max(0, Math.floor(options.offset ?? 0))]
     );
     const parse = <T>(value: string | null): T | null => (value ? (JSON.parse(toString(value)) as T) : null);
     return rows.map((r) => ({

@@ -1751,7 +1751,7 @@ export const openApiSpec = {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["datasetId", "workflowId"], properties: { datasetId: { type: "string" }, workflowId: { type: "string" }, scorers: { type: "array", items: { type: "object" } }, record: { type: "boolean" }, replay: { type: "object" } } } } }
         },
-        responses: { "202": { description: "{ run, runId }" }, "200": { description: "With ?wait=true: { ok, runId, summary }" }, "400": { description: "Invalid request, unknown dataset, empty dataset or too many cases" }, "403": { description: "No access" } }
+        responses: { "202": { description: "{ run, runId }; the run stops at EVAL_RUN_MAX_COST_USD" }, "200": { description: "With ?wait=true: { ok, runId, summary }" }, "400": { description: "Invalid request or scorers, a judge secret that cannot be used (on the request or a case), an empty dataset, or a golden set of another workflow or with only golden runs; with ?wait=true every runner refusal" }, "403": { description: "Read access to the workflow but no execute access" }, "404": { description: "Dataset, workflow, cassette or source eval run not found or not readable" }, "409": { description: "More cases than REPLAY_JOB_MAX_CASES" } }
       },
       get: {
         tags: ["Evals"],
@@ -1766,17 +1766,17 @@ export const openApiSpec = {
       }
     },
     "/api/eval/runs/{id}": {
-      get: { tags: ["Evals"], summary: "One run with its case results (viewers)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "run with results" }, "404": { description: "Not found" } } }
+      get: { tags: ["Evals"], summary: "One run with its case results (viewers)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "run with results" }, "404": { description: "Not found or not readable" } } }
     },
     "/api/eval/runs/{id}/cancel": {
-      post: { tags: ["Evals"], summary: "Cancel a queued or running run: no further cases start and running executions are aborted (builders)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "{ run }" }, "409": { description: "Already finished" } } }
+      post: { tags: ["Evals"], summary: "Cancel a queued or running run: no further cases start and running executions are aborted (builders)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "{ run }" }, "403": { description: "Readable but no execute access" }, "404": { description: "Not found or not readable" }, "409": { description: "Already finished" } } }
     },
     "/api/eval/runs/{id}/events": {
       get: {
         tags: ["Evals"],
         summary: "Server-sent events: `progress` after every case and `done` when the run finishes, each { type, run } (viewers)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "SSE stream", content: { "text/event-stream": { schema: { type: "string" } } } } }
+        responses: { "200": { description: "SSE stream", content: { "text/event-stream": { schema: { type: "string" } } } }, "404": { description: "Not found or not readable; no stream is opened" } }
       }
     },
     "/api/replay/runs": {
@@ -1804,7 +1804,7 @@ export const openApiSpec = {
             }
           }
         },
-        responses: { "202": { description: "{ run }" }, "400": { description: "Invalid request, not a golden set, no golden runs, or a judge secret that cannot be used" }, "403": { description: "No execute access" }, "404": { description: "Set or version not found" }, "409": { description: "More cases than REPLAY_JOB_MAX_CASES" } }
+        responses: { "202": { description: "{ run }" }, "400": { description: "Invalid request, not a golden set, no golden runs, or a judge secret that cannot be used" }, "403": { description: "Read access to the workflow but no execute access" }, "404": { description: "A set that is missing, not readable or another workflow's, or a version not found" }, "409": { description: "More cases than REPLAY_JOB_MAX_CASES" } }
       },
       get: {
         tags: ["Evals"],
@@ -1831,7 +1831,7 @@ export const openApiSpec = {
       }
     },
     "/api/replay/runs/{id}/cancel": {
-      post: { tags: ["Evals"], summary: "Cancel a replay job (builders)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "{ run }" }, "409": { description: "Already finished" } } }
+      post: { tags: ["Evals"], summary: "Cancel a replay job (builders)", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "{ run }" }, "403": { description: "Readable but no execute access" }, "404": { description: "Not found or not readable" }, "409": { description: "Already finished" } } }
     },
     "/api/mcp/servers/{id}/tools/{toolName}/classification": {
       put: {
