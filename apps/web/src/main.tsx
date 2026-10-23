@@ -13,6 +13,7 @@ import "./styles/replay.css";
 import "./styles/mcp-runtime-safety.css";
 import "./styles/guard.css";
 import "./styles/approvals.css";
+import "./styles/release.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

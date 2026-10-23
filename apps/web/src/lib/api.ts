@@ -1,5 +1,12 @@
 import type {
   ApprovalRequestView,
+  ReleaseApprovalRequestView,
+  ReleaseGateSettingsInput,
+  ReleaseGateView,
+  ReleasePublishPreview,
+  ReleaseStateView,
+  WorkflowRelease,
+  WorkflowReleasesView,
   AuditSigningKeysResponse,
   AuditSigningKeyView,
   RunManifestView,
@@ -3720,6 +3727,9 @@ export async function rotateAuditSigningKey() {
 // Phase 11.2 — the approvals inbox.
 export type { ApprovalEditableField, ApprovalRequestView, ApprovalStatus } from "@ai-orchestrator/shared";
 
+/** Phase 15.4 — the inbox holds paused runs and release requests (kind "release"). */
+export type ApprovalInboxItem = ApprovalRequestView | ReleaseApprovalRequestView;
+
 export type ApprovalListStatus = "pending" | "decided" | "all";
 
 export async function listApprovals(filter: { status?: ApprovalListStatus; workflowId?: string; executionId?: string; limit?: number } = {}) {
@@ -3729,7 +3739,7 @@ export async function listApprovals(filter: { status?: ApprovalListStatus; workf
   if (filter.executionId) params.set("executionId", filter.executionId);
   if (filter.limit) params.set("limit", String(filter.limit));
   const q = params.toString() ? `?${params.toString()}` : "";
-  return apiRequest<{ items: ApprovalRequestView[] }>(`/api/approvals${q}`);
+  return apiRequest<{ items: ApprovalInboxItem[] }>(`/api/approvals${q}`);
 }
 
 /**
@@ -3766,4 +3776,84 @@ export async function checkApprovalEligibility(payload: {
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+// Phase 15.4 — release gate and publish.
+export type { ReleaseApprovalRequestView, ReleaseGateView, ReleasePublishPreview, ReleaseStateView, WorkflowRelease, WorkflowReleasesView };
+
+const releasePath = (workflowId: string, rest: string) => `/api/workflows/${encodeURIComponent(workflowId)}/${rest}`;
+
+export async function fetchReleaseGate(workflowId: string) {
+  return apiRequest<{ gate: ReleaseGateView }>(releasePath(workflowId, "release-gate"));
+}
+
+export async function saveReleaseGate(workflowId: string, settings: ReleaseGateSettingsInput) {
+  return apiRequest<{ gate: ReleaseGateView }>(releasePath(workflowId, "release-gate"), { method: "PUT", body: JSON.stringify(settings) });
+}
+
+export async function fetchReleaseState(workflowId: string) {
+  return apiRequest<{ state: ReleaseStateView }>(releasePath(workflowId, "release-state"));
+}
+
+export async function fetchPublishPreview(workflowId: string, version: number, replayRunId?: string) {
+  const params = new URLSearchParams({ version: String(version) });
+  if (replayRunId) params.set("replayRunId", replayRunId);
+  return apiRequest<{ preview: ReleasePublishPreview }>(`${releasePath(workflowId, "publish-preview")}?${params.toString()}`);
+}
+
+export async function fetchReleases(workflowId: string) {
+  return apiRequest<WorkflowReleasesView>(releasePath(workflowId, "releases"));
+}
+
+export interface PublishRequest {
+  version: number;
+  workflowHash?: string;
+  replayRunId?: string;
+  override?: { reason: string };
+  requestApproval?: { reason: string };
+}
+
+/** The three answers of a publish: published, sent to approvers, or blocked. */
+export type PublishResult =
+  | { outcome: "published"; release: WorkflowRelease }
+  | { outcome: "needs_approval"; approvalRequestId: string; reasons: string[] }
+  | { outcome: "blocked"; reasons: string[]; replayRunId?: string; canRequestApproval: boolean };
+
+export async function publishWorkflowVersion(workflowId: string, payload: PublishRequest): Promise<PublishResult> {
+  const response = await fetch(`${API_BASE}${releasePath(workflowId, "publish")}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  let json: Record<string, unknown> = {};
+  try {
+    const parsed = (await response.json()) as unknown;
+    if (parsed && typeof parsed === "object") json = parsed as Record<string, unknown>;
+  } catch {
+    json = {};
+  }
+  const reasons = Array.isArray(json.reasons) ? json.reasons.map((reason) => String(reason)) : [];
+  if (response.status === 200 && json.release) return { outcome: "published", release: json.release as WorkflowRelease };
+  if (response.status === 202 && typeof json.approvalRequestId === "string") return { outcome: "needs_approval", approvalRequestId: json.approvalRequestId, reasons };
+  if (response.status === 409 && json.verdict === "blocked") {
+    return {
+      outcome: "blocked",
+      reasons,
+      ...(typeof json.replayRunId === "string" ? { replayRunId: json.replayRunId } : {}),
+      canRequestApproval: json.canRequestApproval === true
+    };
+  }
+  throw new ApiError(String(json.error ?? "Publish failed"), response.status, json);
+}
+
+export async function rollbackWorkflowRelease(workflowId: string, payload: { version: number; reason: string }) {
+  return apiRequest<{ release: WorkflowRelease }>(releasePath(workflowId, "rollback"), { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function decideReleaseRequest(requestId: string, decision: "approve" | "reject", reason?: string) {
+  return apiRequest<{ request: ReleaseApprovalRequestView; release: WorkflowRelease | null }>(
+    `/api/approvals/${encodeURIComponent(requestId)}/${decision}`,
+    { method: "POST", body: JSON.stringify(reason ? { reason } : {}) }
+  );
 }

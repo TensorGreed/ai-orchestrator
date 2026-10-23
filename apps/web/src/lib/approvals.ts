@@ -1,12 +1,13 @@
-import { validateApprovalEdits, type ApprovalEditableField, type ApprovalRequestView } from "@ai-orchestrator/shared";
-import { ApiError, type ApprovalDecisionResponse } from "./api";
+import { validateApprovalEdits, type ApprovalEditableField, type ApprovalRequestView, type ReleaseApprovalRequestView } from "@ai-orchestrator/shared";
+import { ApiError, type ApprovalDecisionResponse, type ApprovalInboxItem } from "./api";
 
 /** Phase 11.2 — helpers behind the approvals inbox. */
 
 export type FieldDraft = string | boolean;
 export type FieldDrafts = Record<string, FieldDraft>;
 
-const KIND_LABELS: Record<ApprovalRequestView["kind"], string> = {
+const KIND_LABELS: Record<ApprovalInboxItem["kind"], string> = {
+  release: "Release",
   approval_gate: "Approval gate",
   human_approval: "Human approval",
   guard: "Guard",
@@ -21,7 +22,7 @@ const STATUS_LABELS: Record<ApprovalRequestView["status"], string> = {
   canceled: "Canceled"
 };
 
-export function approvalKindLabel(kind: ApprovalRequestView["kind"]): string {
+export function approvalKindLabel(kind: ApprovalInboxItem["kind"]): string {
   return KIND_LABELS[kind] ?? kind;
 }
 
@@ -127,10 +128,34 @@ export function decisionOutcome(decision: "approve" | "reject", response: Approv
   return `${verb}. The run is now ${status}.`;
 }
 
+/** Phase 15.4 — a release request rather than a paused run. */
+export function isReleaseInboxItem(item: ApprovalInboxItem): item is ReleaseApprovalRequestView {
+  return item.kind === "release";
+}
+
+/** Whether an inbox item is the one a deep link names (a request id, or a paused run's execution id). */
+export function matchesFocus(item: ApprovalInboxItem, focusId: string | null): boolean {
+  if (!focusId) return false;
+  return item.requestId === focusId || (!isReleaseInboxItem(item) && item.executionId === focusId);
+}
+
+/** One line describing a decided release request. */
+export function releaseDecisionOutcome(decision: "approve" | "reject", version: number, published: boolean): string {
+  if (decision === "reject") return `Rejected. Version ${version} was not published.`;
+  return published ? `Approved. Version ${version} is now in production.` : `Approved.`;
+}
+
 /** Case-insensitive match over the text an approver would search by. */
-export function matchesApprovalFilter(view: ApprovalRequestView, filter: string): boolean {
+export function matchesApprovalFilter(view: ApprovalInboxItem, filter: string): boolean {
   const needle = filter.trim().toLowerCase();
   if (!needle) return true;
+  if (isReleaseInboxItem(view)) {
+    return [view.message, view.workflowName, view.workflowId, "release", `v${view.version}`, view.requestedBy, view.decidedBy, view.requestReason]
+      .filter((part): part is string => typeof part === "string")
+      .join(" ")
+      .toLowerCase()
+      .includes(needle);
+  }
   const details = view.details ?? {};
   const haystack = [
     view.message,

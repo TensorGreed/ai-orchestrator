@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode, type RefObject } from "react";
 import type { Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import type { AuthUser } from "../lib/api";
 import { SidebarMenuButton } from "./AppSidebar";
@@ -37,6 +37,8 @@ export interface StudioHudProps {
   onCreateProject: () => void;
   /** Run-status pill content. */
   runStatus?: RunStatus;
+  /** Phase 15.4 — the version pill (published vs draft); rendered in editor mode only. */
+  releaseControl?: ReactNode;
   /** Primary "Run" action; rendered in editor mode only. */
   onRun?: () => void;
   /** Shows the unsaved dot on the Save pill. */
@@ -108,6 +110,7 @@ export function StudioHud({
   onChangeActiveProject,
   onCreateProject,
   runStatus,
+  releaseControl,
   onRun,
   isDirty = false,
   onShare,
@@ -281,6 +284,7 @@ export function StudioHud({
           <span className="hud-dot" aria-hidden="true" />
           <span className="hud-run-label">{status.label}</span>
         </div>
+        {isEditor && releaseControl}
       </div>
 
       <div className="hud-right">

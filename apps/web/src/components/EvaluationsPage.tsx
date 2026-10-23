@@ -53,11 +53,13 @@ import {
 } from "../lib/replay-jobs";
 import { GoldenStarIcon, ReplayResultView } from "./GoldenRunPanel";
 import { ReplayCandidateFields, ReplayEstimatePanel } from "./ReplayCandidateFields";
+import { ReleaseGatePanel } from "./ReleaseGatePanel";
 
 /**
  * Phase 15.2 — the Evaluations page: golden sets (golden runs of one
  * workflow, grouped) and replay jobs (every case of a set replayed against
- * the draft or a saved version, then scored).
+ * the draft or a saved version, then scored). Phase 15.4 adds release
+ * gates: which jobs a version must pass before it is published.
  */
 
 export type EvaluationsRole = "admin" | "builder" | "operator" | "viewer";
@@ -68,9 +70,15 @@ export interface EvaluationsPageProps {
   role: EvaluationsRole;
   /** Opens Settings, where plain eval datasets with hand-written fixtures live. */
   onOpenSettings?: () => void;
+  /** Phase 15.4 — the tab to open on, and the workflow the Release gates tab starts on. */
+  initialTab?: EvaluationsTab;
+  currentWorkflowId?: string;
 }
 
-type Tab = "sets" | "jobs";
+export type EvaluationsTab = "sets" | "jobs" | "gates";
+type Tab = EvaluationsTab;
+
+const TAB_LABELS: Record<Tab, string> = { sets: "Golden sets", jobs: "Replay jobs", gates: "Release gates" };
 
 const TOOL_SEQUENCE_MODE_LABELS: Record<ToolSequenceMode, string> = {
   exact: "Exact order",
@@ -153,9 +161,9 @@ function describeScorer(scorer: EvalScorerSpec): string {
   }
 }
 
-export function EvaluationsPage({ workflows, activeProjectId, role, onOpenSettings }: EvaluationsPageProps) {
+export function EvaluationsPage({ workflows, activeProjectId, role, onOpenSettings, initialTab = "sets", currentWorkflowId }: EvaluationsPageProps) {
   const canEdit = role === "admin" || role === "builder";
-  const [tab, setTab] = useState<Tab>("sets");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [openJobId, setOpenJobId] = useState<string | null>(null);
   const [jobsVersion, setJobsVersion] = useState(0);
   const workflowNames = useMemo(() => new Map(workflows.map((workflow) => [workflow.id, workflow.name])), [workflows]);
@@ -186,7 +194,7 @@ export function EvaluationsPage({ workflows, activeProjectId, role, onOpenSettin
           </p>
         </div>
         <div className="finops-range evals-tabs" role="tablist" aria-label="Evaluation views">
-          {(["sets", "jobs"] as Tab[]).map((entry) => (
+          {(["sets", "jobs", "gates"] as Tab[]).map((entry) => (
             <button
               key={entry}
               type="button"
@@ -197,7 +205,7 @@ export function EvaluationsPage({ workflows, activeProjectId, role, onOpenSettin
               className={tab === entry ? "finops-range-btn active" : "finops-range-btn"}
               onClick={() => setTab(entry)}
             >
-              {entry === "sets" ? "Golden sets" : "Replay jobs"}
+              {TAB_LABELS[entry]}
             </button>
           ))}
         </div>
@@ -205,6 +213,14 @@ export function EvaluationsPage({ workflows, activeProjectId, role, onOpenSettin
       <div role="tabpanel" id={`evals-panel-${tab}`} aria-labelledby={`evals-tab-${tab}`} className="evals-panel">
         {tab === "sets" ? (
           <GoldenSetsView workflows={workflows} workflowNames={workflowNames} activeProjectId={activeProjectId} canEdit={canEdit} onJobStarted={onJobStarted} />
+        ) : tab === "gates" ? (
+          <ReleaseGatePanel
+            workflows={workflows}
+            activeProjectId={activeProjectId}
+            canEdit={canEdit}
+            isAdmin={role === "admin"}
+            {...(currentWorkflowId ? { initialWorkflowId: currentWorkflowId } : {})}
+          />
         ) : (
           <ReplayJobsView
             key={jobsVersion}
