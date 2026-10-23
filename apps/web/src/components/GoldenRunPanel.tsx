@@ -441,13 +441,22 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
               <div className="golden-notes">
                 <p className="golden-note">
                   A replay runs the candidate on this input. Slack, email, HTTP calls, databases, queues, sub-workflows and code nodes are answered from the recording
-                  instead of running; knowledge-base writes are refused; approvals and waits are skipped; session memory starts empty and is thrown away. Models
-                  run live. Expressions inside the nodes that do run are evaluated in an isolated sandbox with no network or file access.
+                  instead of running; knowledge-base writes are refused; approvals and waits are skipped; session memory starts{" "}
+                  {recording.capabilities.memory === "seeded" ? "from what it held when this run started" : "empty"} and is thrown away. Models run live
+                  {recording.capabilities.models === "tape"
+                    ? `, or from this run's model tape (${recording.modelCallCount ?? 0} model call${recording.modelCallCount === 1 ? "" : "s"} recorded) in a replay job with model calls from the tape`
+                    : ""}
+                  . Expressions inside the nodes that do run are evaluated in an isolated sandbox with no network or file access.
                 </p>
                 <p className="golden-note">
                   A replay is inconclusive if it reaches a node the golden run never saw, a code node whose code changed, or a node that runs more often than the golden run recorded: neither is run, so neither can be
                   judged.
                 </p>
+                {recording.capabilities.models !== "tape" && (
+                  <p className="golden-note" role="status">
+                    No model tape was recorded with this run, so replay jobs that answer model calls from the tape mark it inconclusive. Run with Record calls on to record one.
+                  </p>
+                )}
                 {recording.capabilities.mcp === "none" && (
                   <p className="golden-note is-warn" role="status">
                     No MCP calls were recorded with this run; MCP tools cannot be answered in a replay.

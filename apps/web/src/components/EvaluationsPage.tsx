@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { WorkflowListItem } from "@ai-orchestrator/shared";
+import type { ReplayJobEstimate, WorkflowListItem } from "@ai-orchestrator/shared";
 import {
   ApiError,
   addGoldenRunToSet,
@@ -7,6 +7,7 @@ import {
   createEvalDataset,
   deleteEvalDataset,
   deleteEvalFixture,
+  estimateReplayJob,
   fetchDefinitions,
   fetchEvalDatasets,
   fetchEvalFixtures,
@@ -37,17 +38,20 @@ import {
   buildReplayJobRequest,
   candidateLabel,
   caseStatusLabel,
+  comparisonLabel,
   emptyReplayJobForm,
   formatDuration,
   formatSpend,
   formatUsd,
   jobCounts,
   jobWarnings,
+  overrideLines,
   shortHash,
   statusTone,
   type ReplayJobForm
 } from "../lib/replay-jobs";
 import { GoldenStarIcon, ReplayResultView } from "./GoldenRunPanel";
+import { ReplayCandidateFields, ReplayEstimatePanel } from "./ReplayCandidateFields";
 
 /**
  * Phase 15.2 — the Evaluations page: golden sets (golden runs of one
@@ -626,6 +630,8 @@ export function RunReplayDialog({ set, workflowId, caseCount, onClose, onStarted
   const [providers, setProviders] = useState<Array<{ id: string; label: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Phase 15.3 — the job is estimated before it can start; any change to the form asks for a new estimate.
+  const [estimate, setEstimate] = useState<ReplayJobEstimate | null>(null);
   const dialogRef = useOverlayFocus<HTMLDivElement>();
   useEscape(onClose);
 
@@ -657,8 +663,14 @@ export function RunReplayDialog({ set, workflowId, caseCount, onClose, onStarted
     };
   }, [workflowId, set.projectId]);
 
-  const update = (patch: Partial<ReplayJobForm>) => setForm((current) => ({ ...current, ...patch }));
-  const updateScorers = (patch: Partial<ReplayJobForm["scorers"]>) => setForm((current) => ({ ...current, scorers: { ...current.scorers, ...patch } }));
+  const update = (patch: Partial<ReplayJobForm>) => {
+    setEstimate(null);
+    setForm((current) => ({ ...current, ...patch }));
+  };
+  const updateScorers = (patch: Partial<ReplayJobForm["scorers"]>) => {
+    setEstimate(null);
+    setForm((current) => ({ ...current, scorers: { ...current.scorers, ...patch } }));
+  };
   const scorers = form.scorers;
 
   const submit = async () => {
@@ -669,6 +681,16 @@ export function RunReplayDialog({ set, workflowId, caseCount, onClose, onStarted
     }
     setBusy(true);
     setError(null);
+    if (!estimate) {
+      try {
+        setEstimate(await estimateReplayJob(built.request));
+      } catch (err) {
+        setError(errorText(err, "The replay job could not be estimated"));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     try {
       const response = await startReplayJob(built.request);
       onStarted(response.run);
@@ -677,6 +699,7 @@ export function RunReplayDialog({ set, workflowId, caseCount, onClose, onStarted
       setBusy(false);
     }
   };
+  const runs = estimate ? estimate.cases * estimate.runsPerCase : 0;
 
   return (
     <div className="pg-modal-backdrop" role="presentation" onClick={onClose}>
@@ -712,23 +735,8 @@ export function RunReplayDialog({ set, workflowId, caseCount, onClose, onStarted
             void submit();
           }}
         >
+          <ReplayCandidateFields workflowId={workflowId} projectId={set.projectId} versions={versions} form={form} update={update} />
           <div className="evals-form-grid">
-            <label>
-              <span>Candidate</span>
-              <select
-                autoFocus
-                value={form.candidate === "draft" ? "draft" : String(form.candidate)}
-                onChange={(event) => update({ candidate: event.target.value === "draft" ? "draft" : Number(event.target.value) })}
-              >
-                <option value="draft">Draft (as saved now)</option>
-                {versions.map((version) => (
-                  <option key={version.version} value={String(version.version)}>
-                    Version {version.version}
-                    {version.changeNote ? ` · ${version.changeNote}` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
             <label title="Strict answers each recorded MCP call once. Lenient reuses the last answer when the candidate repeats a call more often than recorded. Neither reaches a live server.">
               <span>MCP calls</span>
               <select value={form.mcpMode} onChange={(event) => update({ mcpMode: event.target.value as ReplayMcpMode })}>
@@ -889,12 +897,19 @@ export function RunReplayDialog({ set, workflowId, caseCount, onClose, onStarted
               {error}
             </div>
           )}
+          {estimate && <ReplayEstimatePanel estimate={estimate} />}
           <div className="golden-actions evals-sticky-actions">
             <button type="button" className="pg-btn small ghost" onClick={onClose}>
               Cancel
             </button>
             <button type="submit" className="pg-btn primary evals-primary" disabled={busy}>
-              {busy ? "Starting…" : `Replay ${caseCount} case${caseCount === 1 ? "" : "s"}`}
+              {estimate
+                ? busy
+                  ? "Starting…"
+                  : `Start ${runs} run${runs === 1 ? "" : "s"}`
+                : busy
+                  ? "Estimating…"
+                  : `Estimate ${caseCount} case${caseCount === 1 ? "" : "s"}`}
             </button>
           </div>
         </form>
@@ -1152,6 +1167,7 @@ function ReplayJobDetailView({ jobId, workflowNames, setNames, canEdit, onBack }
               {job.candidate && <span className="mono-cell">{shortHash(job.candidate.workflowHash, 12)}</span>}
             </span>
             {job.options && <span>MCP {job.options.mcpMode}</span>}
+            {job.options && <span>{comparisonLabel(job.options)}</span>}
             <span className="mono-cell">{job.id}</span>
             <span>
               started {formatDate(job.startedAt)}
@@ -1168,6 +1184,16 @@ function ReplayJobDetailView({ jobId, workflowNames, setNames, canEdit, onBack }
         )}
       </div>
       {error && <div className="error-banner">{error}</div>}
+      {overrideLines(job.candidate).length > 0 && (
+        <section className="pg-card evals-card" aria-label="Candidate overrides">
+          <span className="pg-eyebrow">Candidate overrides</span>
+          <ul className="replay-override-list">
+            {overrideLines(job.candidate).map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        </section>
+      )}
       {job.error && <div className="golden-note is-warn">{job.error}</div>}
       {jobWarnings(job).map((warning) => (
         <div key={warning} className="golden-note is-warn" role="status">
@@ -1235,6 +1261,11 @@ function CaseRow({ result, onOpen }: { result: EvalCaseResult; onOpen: () => voi
       <span className="evals-row-main">
         <span className="evals-row-title">{name}</span>
         {result.error && <span className="evals-row-sub evals-case-error">{result.error}</span>}
+        {result.repeats && (
+          <span className="evals-row-sub">
+            {result.repeats.pass} of {result.repeats.total} repeats passed{result.repeats.flaky ? " · flaky" : ""}
+          </span>
+        )}
       </span>
       <span className="evals-row-cell">
         <StatusChip status={result.status} label={caseStatusLabel(result.status)} />
@@ -1322,6 +1353,27 @@ export function CaseDrawer({ runId, resultId, onClose }: { runId: string; result
                           {typeof score.costUsd === "number" && <span className="mono-cell">{formatUsd(score.costUsd)}</span>}
                         </span>
                         <span className="evals-score-reason">{score.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {detail.replay?.attempts && detail.replay.attempts.length > 0 && (
+                <div className="golden-section">
+                  <span className="pg-eyebrow">
+                    Repeats{detail.replay.compare === "baseline_rerun" ? " · each against its own baseline rerun" : ""}
+                  </span>
+                  <ul className="evals-score-list">
+                    {detail.replay.attempts.map((attempt) => (
+                      <li key={attempt.repeatIndex} className={attempt.status === "pass" ? "is-pass" : "is-fail"}>
+                        <span className="evals-score-top">
+                          <span>Repeat {attempt.repeatIndex + 1}</span>
+                          <StatusChip status={attempt.status} label={caseStatusLabel(attempt.status)} />
+                          {attempt.executionId && <span className="mono-cell">{attempt.executionId}</span>}
+                          {attempt.baselineExecutionId && <span className="mono-cell">baseline {attempt.baselineExecutionId}</span>}
+                          <span className="mono-cell">{formatUsd(attempt.costUsd)}</span>
+                        </span>
+                        {attempt.reasons.length > 0 && <span className="evals-score-reason">{attempt.reasons.join(" ")}</span>}
                       </li>
                     ))}
                   </ul>

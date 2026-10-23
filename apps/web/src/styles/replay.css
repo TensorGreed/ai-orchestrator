@@ -1039,3 +1039,62 @@ button.evals-row:focus-visible {
     animation: none;
   }
 }
+
+/* Phase 15.3 — candidate overrides, comparison and the estimate in the Run replay dialog. */
+.replay-override-block {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.evals-replay-form .replay-override-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.evals-replay-form label.replay-override-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.evals-replay-form label.evals-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.replay-estimate {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+}
+
+.replay-estimate-numbers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.replay-override-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+@media (max-width: 640px) {
+  .evals-replay-form .replay-override-row,
+  .evals-replay-form label.replay-override-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
