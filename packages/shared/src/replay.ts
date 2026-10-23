@@ -347,6 +347,20 @@ export interface ReplayRecordingCapabilities {
    * uses one. Absent on golden runs saved before this was recorded.
    */
   scrubbed?: ReplayScrubbedValues;
+  /**
+   * Phase 15.5: `imported` when the golden run came from a golden-set file
+   * (absent, or `recorded`, for a run saved on this deployment). For an
+   * imported run the summary's `createdAt` is the time the file claims the
+   * run was recorded (never later than the import), so age rules treat it as
+   * old as it says it is; `importedAt` is when it was loaded here.
+   */
+  origin?: "recorded" | "imported";
+  /** Imported runs: when the file says the run was recorded. */
+  recordedAt?: string;
+  /** Imported runs: when the file was imported here. */
+  importedAt?: string;
+  /** Imported runs: the workflow id the file was exported from. */
+  sourceWorkflowId?: string | null;
 }
 
 export interface ReplayScrubbedValues {

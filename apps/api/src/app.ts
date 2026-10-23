@@ -11549,7 +11549,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runAccess,
     audit: (request, user, event) => audit(request, user, event),
     available: !((store as object) instanceof PostgresStore),
-    maxFileBytes: GOLDEN_SET_FILE_DEFAULT_MAX_BYTES,
+    maxFileBytes: config.GOLDEN_SET_IMPORT_MAX_BYTES ?? GOLDEN_SET_FILE_DEFAULT_MAX_BYTES,
     maxCaseBytes: config.REPLAY_RECORDING_MAX_BYTES,
     maxCases: config.REPLAY_JOB_MAX_CASES
   });

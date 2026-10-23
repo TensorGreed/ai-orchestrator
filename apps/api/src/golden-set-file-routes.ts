@@ -3,8 +3,9 @@
  *
  *   GET  /api/eval/datasets/:id/export   the golden set as an `l2m.golden-set` file (viewer);
  *                                        `?sign=true` adds a signature by the deployment's audit key
- *   POST /api/eval/datasets/import       body { file, workflowId, projectId?, name? }: creates a golden
- *                                        set and its golden runs in one go (builder)
+ *                                        (admins only: the same people who manage the signing keys)
+ *   POST /api/eval/datasets/import       body { file, workflowId, projectId?, name?, allowWorkflowMismatch? }:
+ *                                        creates a golden set and its golden runs in one go (builder)
  *
  * Access follows eval-routes.ts and run-access.ts: exporting needs
  * `workflow:read` on the set's workflow (a set the user cannot read answers
@@ -12,12 +13,22 @@
  * cannot be read, 403 when it can be read but not written, so an
  * execute-only user cannot import).
  *
- * The importer never trusts the file. Everything in it is scrubbed again with
- * this deployment's secrets, secret references are dropped (also from judge
- * scorers, whose credential the importing user attaches afterwards), the
- * schema, MCP cassette, case count and sizes are checked, and the set and
- * every golden run are created in one SQLite transaction: any failure
- * leaves nothing behind. Both routes answer 501 on Postgres.
+ * The importer never trusts the file. The caller is authenticated in an
+ * `onRequest` hook, before the body is read, and the body is capped by
+ * `GOLDEN_SET_IMPORT_MAX_BYTES`. A file nested deeper than 64 levels is
+ * refused before anything else looks at it. A file exported from another
+ * workflow is refused unless the request sets `allowWorkflowMismatch`, and
+ * then only recorded outputs of nodes whose id and type match the target are
+ * kept. Every field of every case gets the full recording-time scrub
+ * (credential key names, token shapes, this deployment's secret values) and
+ * loses its secret references (also judge scorers, whose credential the
+ * importing user attaches afterwards); each case's workflow hash is
+ * recomputed and must match. That work runs case by case, yielding to the
+ * event loop between cases, before the transaction; the transaction then
+ * only inserts the set and every golden run: any failure leaves nothing
+ * behind. Imported golden runs are marked `origin: "imported"` with the
+ * claimed recording time and the source workflow id. Both routes answer 501
+ * on Postgres.
  */
 
 import { randomUUID } from "node:crypto";
@@ -26,21 +37,25 @@ import {
   DEFAULT_PROJECT_ID,
   GOLDEN_SET_CASE_MAX_BYTES,
   GOLDEN_SET_FILE_FORMAT,
+  GOLDEN_SET_FILE_MAX_CASES,
+  GOLDEN_SET_FILE_MAX_DEPTH,
   GOLDEN_SET_FILE_VERSION,
+  goldenSetFileCaseSchema,
   goldenSetFileSchema,
-  goldenSetFileSizeProblem,
   goldenSetImportRequestSchema,
   goldenSetSignedBytes,
-  stripSecretReferences,
+  jsonDepthExceeds,
   type EvalScorerSpec,
-  type GoldenSetFile
+  type GoldenSetFile,
+  type GoldenSetFileCase
 } from "@ai-orchestrator/shared";
+import { z } from "zod";
 import type { SqliteStore } from "./db/database.js";
 import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { AuditSigningService } from "./services/audit-signing-service.js";
-import { ReplayRecordingError, type ReplayRecordingService } from "./services/replay-recording-service.js";
+import { ReplayRecordingError, type PreparedImport, type ReplayRecordingService } from "./services/replay-recording-service.js";
 
 export interface GoldenSetFileRoutesDeps {
   app: FastifyInstance;
@@ -52,7 +67,7 @@ export interface GoldenSetFileRoutesDeps {
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
   /** False on Postgres: both routes answer 501. */
   available: boolean;
-  /** The largest file accepted, and the basis of the import route's request body limit. */
+  /** `GOLDEN_SET_IMPORT_MAX_BYTES`: the largest file accepted, and the basis of the import route's request body limit. */
   maxFileBytes: number;
   /** `REPLAY_RECORDING_MAX_BYTES`: the largest single case. */
   maxCaseBytes: number;
@@ -88,8 +103,18 @@ function withoutJudgeSecret(scorers: EvalScorerSpec[] | undefined): { scorers: E
   return { scorers: cleaned, dropped };
 }
 
+/** The file without its cases checked first; each case is checked on its own, yielding between cases. */
+const goldenSetFileHeaderSchema = goldenSetFileSchema.extend({ cases: z.array(z.unknown()).max(GOLDEN_SET_FILE_MAX_CASES) });
+
+const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value) ?? "null", "utf8");
+
+/** Lets other requests run between two expensive steps. */
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void {
   const { app, store, recordings, requireRole, runAccess } = deps;
+  /** The user the import route's onRequest hook authenticated, per request. */
+  const importUsers = new WeakMap<FastifyRequest, SafeUser>();
 
   const deny = (reply: FastifyReply, denial: { status: number; error: string }) => {
     reply.code(denial.status);
@@ -115,6 +140,11 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       reply.code(400);
       return { error: "This dataset is not a golden set: only golden sets made for a workflow can be exported." };
     }
+    const signed = request.query.sign === "true" || request.query.sign === "1";
+    // Signing uses the deployment's audit key, which only admins manage (GET/POST /api/audit/signing-keys).
+    if (signed && user.role !== "admin") {
+      return deny(reply, { status: 403, error: "Only admins can sign a golden-set file with the deployment's audit key; export it unsigned." });
+    }
     const workflow = store.getWorkflow(dataset.workflowId);
     const scrubber = recordings.scrubber();
     const cases: GoldenSetFile["cases"] = [];
@@ -126,8 +156,14 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
         skipped += 1;
         continue;
       }
+      // A golden run of another workflow never rides along (it could belong to another project).
+      if (recording.workflowId !== dataset.workflowId) {
+        reply.code(409);
+        return { error: `Case ${JSON.stringify(fixture.name)} uses a golden run of another workflow; remove it from the golden set before exporting.` };
+      }
       const { scorers } = withoutJudgeSecret((fixture.scorers as EvalScorerSpec[] | null) ?? undefined);
       cases.push({ name: fixture.name, ...(scorers && scorers.length > 0 ? { scorers } : {}), recording: recordings.toFileRecording(recording, scrubber) });
+      await yieldToEventLoop();
     }
     const exportedAt = new Date().toISOString();
     const file: Record<string, unknown> = {
@@ -140,7 +176,6 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       exportedBy: user.email,
       cases
     };
-    const signed = request.query.sign === "true" || request.query.sign === "1";
     if (signed) {
       const keyId = deps.signing.activeKeyId();
       const signature = deps.signing.sign(goldenSetSignedBytes(file, keyId, exportedAt));
@@ -153,7 +188,15 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       resourceType: "golden_set",
       resourceId: dataset.id,
       projectId: workflow?.projectId ?? dataset.projectId ?? null,
-      metadata: { datasetId: dataset.id, workflowId: dataset.workflowId, cases: cases.length, skipped, signed }
+      metadata: {
+        datasetId: dataset.id,
+        workflowId: dataset.workflowId,
+        cases: cases.length,
+        imported: cases.filter((entry) => entry.recording.origin === "imported").length,
+        skipped,
+        signed,
+        ...(signed ? { keyId: (file.signature as { keyId: string }).keyId } : {})
+      }
     });
     reply.header("x-l2m-skipped-cases", String(skipped));
     reply.header("content-disposition", `attachment; filename="golden-set-${dataset.id}.json"`);
@@ -162,11 +205,27 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
 
   app.post<{ Body: unknown }>(
     "/api/eval/datasets/import",
-    { bodyLimit: Math.max(deps.maxFileBytes + 64 * 1024, 1024 * 1024) },
+    {
+      bodyLimit: deps.maxFileBytes + 64 * 1024,
+      // Authenticate before the body is read: an anonymous upload is refused without being parsed.
+      onRequest: async (request, reply) => {
+        const user = await requireRole(request, reply, ["builder"]);
+        if (!user) return reply;
+        if (!deps.available) return reply.code(501).send({ error: "Golden-set files need the SQLite store in this release" });
+        importUsers.set(request, user);
+      }
+    },
     async (request, reply) => {
-      const user = await requireRole(request, reply, ["builder"]);
-      if (!user) return reply;
-      if (!deps.available) return unavailable(reply);
+      const user = importUsers.get(request);
+      if (!user) {
+        reply.code(401);
+        return { error: "Authentication required" };
+      }
+      // Depth first: every later check walks the value recursively.
+      if (jsonDepthExceeds((request.body as { file?: unknown } | null)?.file ?? null, GOLDEN_SET_FILE_MAX_DEPTH)) {
+        reply.code(400);
+        return { error: `The file is nested deeper than ${GOLDEN_SET_FILE_MAX_DEPTH} levels.` };
+      }
       const body = goldenSetImportRequestSchema.safeParse(request.body ?? {});
       if (!body.success) {
         reply.code(400);
@@ -181,65 +240,109 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
         reply.code(400);
         return { error: "projectId does not match the project of the target workflow." };
       }
-      const parsed = goldenSetFileSchema.safeParse(body.data.file);
-      if (!parsed.success) {
+      const header = goldenSetFileHeaderSchema.safeParse(body.data.file);
+      if (!header.success) {
         reply.code(400);
-        return { error: `Not a valid l2m.golden-set file (${firstIssue(parsed.error)})`, details: parsed.error.issues.slice(0, 20) };
+        return { error: `Not a valid l2m.golden-set file (${firstIssue(header.error)})`, details: header.error.issues.slice(0, 20) };
       }
-      const file = parsed.data;
-      const sizeProblem = goldenSetFileSizeProblem(file, {
-        maxBytes: deps.maxFileBytes,
-        maxCaseBytes: Math.min(deps.maxCaseBytes, GOLDEN_SET_CASE_MAX_BYTES),
-        maxCases: deps.maxCases
-      });
-      if (sizeProblem) {
+      const maxCases = Math.min(deps.maxCases, GOLDEN_SET_FILE_MAX_CASES);
+      if (header.data.cases.length > maxCases) {
         reply.code(413);
-        return { error: sizeProblem };
+        return { error: `The file has ${header.data.cases.length} cases; at most ${maxCases} can be imported.` };
+      }
+      const fileHeader = header.data;
+      const mismatch = fileHeader.workflow.id !== target.id;
+      if (mismatch && !body.data.allowWorkflowMismatch) {
+        reply.code(409);
+        return {
+          error: `The file was exported from workflow ${fileHeader.workflow.id}, not ${target.id}. Set allowWorkflowMismatch (CLI: --allow-other-workflow) to import it anyway; only nodes whose id and type match keep their recorded outputs.`,
+          code: "workflow_mismatch"
+        };
       }
 
       const warnings: string[] = [];
-      if (file.workflow.id !== target.id) {
-        warnings.push(`The file was exported from workflow ${file.workflow.id} (${file.workflow.name || "unnamed"}); its cases were imported into ${target.id} as asked.`);
-      }
-      if (file.signature) {
-        const bytes = goldenSetSignedBytes(body.data.file as Record<string, unknown>, file.signature.keyId, file.signature.signedAt);
-        if (!deps.signing.verify(file.signature.keyId, bytes, file.signature.signature)) {
+      let signature: "verified" | "unverified" | "absent" = "absent";
+      if (fileHeader.signature) {
+        const bytes = goldenSetSignedBytes(body.data.file as Record<string, unknown>, fileHeader.signature.keyId, fileHeader.signature.signedAt);
+        signature = deps.signing.verify(fileHeader.signature.keyId, bytes, fileHeader.signature.signature) ? "verified" : "unverified";
+        if (signature === "unverified") {
           warnings.push(
-            `The file is signed with key ${file.signature.keyId.slice(0, 16)}, which this deployment cannot verify. Everything in it was scrubbed and checked on import as for any file; verify the signature with 'l2m golden verify' and the exporting deployment's public key.`
+            `The file is signed with key ${fileHeader.signature.keyId.slice(0, 16)}, which this deployment cannot verify. Everything in it was scrubbed and checked on import as for any file; verify the signature with 'l2m golden verify' and the exporting deployment's public key.`
           );
         }
       }
+
+      // Validation, scrub and serialise, case by case, outside the transaction.
+      const caseLimit = Math.min(deps.maxCaseBytes, GOLDEN_SET_CASE_MAX_BYTES);
+      const keepNodes = mismatch ? new Map(target.nodes.map((node) => [node.id, node.type])) : undefined;
       const scrubber = recordings.scrubber();
+      const prepared: Array<{ entry: GoldenSetFileCase; recording: PreparedImport; scorers: EvalScorerSpec[] | undefined }> = [];
+      const droppedNodes = new Set<string>();
       let droppedJudgeSecrets = 0;
       let ignoredTapes = 0;
-      const name = body.data.name ?? file.name;
-      const datasetId = `ds_${randomUUID()}`;
-      let imported = 0;
+      let total = jsonBytes({ ...fileHeader, cases: [] });
       try {
+        for (const [index, rawCase] of fileHeader.cases.entries()) {
+          await yieldToEventLoop();
+          const parsedCase = goldenSetFileCaseSchema.safeParse(rawCase);
+          if (!parsedCase.success) {
+            const issue = parsedCase.error.issues[0];
+            const where = ["cases", index, ...(issue?.path ?? [])].join(".");
+            reply.code(400);
+            return { error: `Not a valid l2m.golden-set file (${where}: ${issue?.message ?? "invalid"})`, details: parsedCase.error.issues.slice(0, 20) };
+          }
+          const entry = parsedCase.data;
+          const size = jsonBytes(entry);
+          if (size > caseLimit) {
+            reply.code(413);
+            return { error: `Case ${index + 1} (${entry.name}) is ${size} bytes; a case can be at most ${caseLimit} bytes.` };
+          }
+          total += size;
+          if (total > deps.maxFileBytes) {
+            reply.code(413);
+            return { error: `The file is over ${deps.maxFileBytes} bytes (GOLDEN_SET_IMPORT_MAX_BYTES).` };
+          }
+          const recording = recordings.prepareImport(
+            { workflowId: target.id, projectId, recording: entry.recording, name: entry.recording.name, sourceWorkflowId: fileHeader.workflow.id, ...(keepNodes ? { keepNodes } : {}) },
+            scrubber
+          );
+          for (const nodeId of recording.droppedNodes) droppedNodes.add(nodeId);
+          const { scorers, dropped } = withoutJudgeSecret(entry.scorers);
+          droppedJudgeSecrets += dropped;
+          if (entry.recording.modelTape !== undefined || entry.recording.memorySeed !== undefined) ignoredTapes += 1;
+          prepared.push({ entry, recording, scorers });
+        }
+      } catch (error) {
+        if (error instanceof ReplayRecordingError) {
+          reply.code(RECORDING_ERROR_STATUS[error.code]);
+          return { error: error.message, code: error.code };
+        }
+        throw error;
+      }
+
+      const name = body.data.name ?? fileHeader.name;
+      const datasetId = `ds_${randomUUID()}`;
+      try {
+        // Inserts only: everything expensive happened above.
         store.transaction(() => {
           store.createEvalDataset({
             id: datasetId,
             name,
-            ...(file.description ? { description: file.description } : {}),
+            ...(fileHeader.description ? { description: fileHeader.description } : {}),
             projectId,
             workflowId: target.id,
             createdBy: user.email
           });
-          for (const entry of file.cases) {
-            const summary = recordings.importRecording({ workflowId: target.id, projectId, recording: entry.recording, name: entry.recording.name }, user.email, scrubber);
-            const record = store.getReplayRecording(summary.id)!;
-            const { scorers, dropped } = withoutJudgeSecret(entry.scorers);
-            droppedJudgeSecrets += dropped;
-            if (entry.recording.modelTape !== undefined || entry.recording.memorySeed !== undefined) ignoredTapes += 1;
+          for (const { entry, recording, scorers } of prepared) {
+            const summary = recordings.saveImport(recording, user.email);
             store.createEvalFixture({
               id: `fix_${randomUUID()}`,
               datasetId,
               name: entry.name,
-              input: record.input ?? null,
+              input: recording.input ?? null,
               ...(scorers && scorers.length > 0 ? { scorers: scorers as unknown as Array<Record<string, unknown>> } : {}),
-              recordingId: record.id
+              recordingId: summary.id
             });
-            imported += 1;
           }
         });
       } catch (error) {
@@ -248,6 +351,15 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
           return { error: error.message, code: error.code };
         }
         throw error;
+      }
+      if (mismatch) {
+        warnings.push(`The file was exported from workflow ${fileHeader.workflow.id} (${fileHeader.workflow.name || "unnamed"}); its cases were imported into ${target.id} as asked.`);
+      }
+      if (droppedNodes.size > 0) {
+        const list = [...droppedNodes].slice(0, 20).join(", ");
+        warnings.push(
+          `Recorded outputs of ${droppedNodes.size} node${droppedNodes.size === 1 ? "" : "s"} were dropped because ${target.id} has no node with the same id and type: ${list}${droppedNodes.size > 20 ? ", ..." : ""}. A replay stubs those nodes without a recording.`
+        );
       }
       if (droppedJudgeSecrets > 0) {
         warnings.push(`${droppedJudgeSecrets} judge scorer${droppedJudgeSecrets === 1 ? "" : "s"} lost the credential reference: attach one before running the judge.`);
@@ -263,10 +375,20 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
         resourceType: "golden_set",
         resourceId: datasetId,
         projectId,
-        metadata: { datasetId, workflowId: target.id, sourceWorkflowId: file.workflow.id, cases: imported, signed: Boolean(file.signature), warnings: warnings.length }
+        metadata: {
+          datasetId,
+          workflowId: target.id,
+          sourceWorkflowId: fileHeader.workflow.id,
+          workflowMismatch: mismatch,
+          cases: prepared.length,
+          signature,
+          ...(fileHeader.signature ? { keyId: fileHeader.signature.keyId } : {}),
+          droppedNodes: droppedNodes.size,
+          warnings: warnings.length
+        }
       });
       reply.code(201);
-      return { dataset, imported, skipped: 0, warnings };
+      return { dataset, imported: prepared.length, skipped: 0, warnings };
     }
   );
 }

@@ -1411,6 +1411,14 @@ function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordin
               nodes: Array.isArray(capabilities.scrubbed.nodes) ? capabilities.scrubbed.nodes.filter((id): id is string => typeof id === "string") : []
             }
           }
+        : {}),
+      ...(capabilities?.origin === "imported"
+        ? {
+            origin: "imported" as const,
+            ...(typeof capabilities.recordedAt === "string" ? { recordedAt: capabilities.recordedAt } : {}),
+            ...(typeof capabilities.importedAt === "string" ? { importedAt: capabilities.importedAt } : {}),
+            sourceWorkflowId: typeof capabilities.sourceWorkflowId === "string" ? capabilities.sourceWorkflowId : null
+          }
         : {})
     },
     bytes: toNumber(row.bytes),

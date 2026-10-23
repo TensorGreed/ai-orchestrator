@@ -28,6 +28,7 @@ import {
   type McpCassette,
   type ModelMemorySeed,
   type ModelTape,
+  type McpCassetteEntry,
   type ReplayRecordedNode,
   type ReplayRecordedRun,
   type ReplayRecordingCapabilities,
@@ -39,7 +40,7 @@ import {
   type GoldenSetFileRecording,
   type Workflow
 } from "@ai-orchestrator/shared";
-import { parseCassette, scrubForCassette } from "@ai-orchestrator/mcp-sdk";
+import { canonicalJson as cassetteCanonical, hashCassetteArgs, parseCassette, scrubForCassette } from "@ai-orchestrator/mcp-sdk";
 import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import { SecretScrubber } from "./audit-scrub.js";
 import { sanitizeConfig, sha256Hex, workflowForHash } from "./audit-bundle-service.js";
@@ -92,6 +93,15 @@ function byteLength(text: string): number {
 
 function jsonBytes(value: unknown): number {
   return byteLength(JSON.stringify(value ?? null) ?? "null");
+}
+
+/** A golden run from a file, checked and scrubbed, ready to be saved (`ReplayRecordingService.saveImport`). */
+export interface PreparedImport {
+  row: Omit<Parameters<SqliteStore["saveReplayRecording"]>[0], "createdBy">;
+  /** The scrubbed trigger input, for the golden set's fixture. */
+  input: unknown;
+  /** Recorded nodes left out because the target has no node with the same id and type. */
+  droppedNodes: string[];
 }
 
 /**
@@ -173,11 +183,18 @@ export class ReplayRecordingService {
    * the captured workflow (where a node's config sits three levels down) and
    * scrubbed of secret values. A replay compares candidate and recorded
    * configurations in this form, so scrubbing alone never reads as a change.
-   * Secret references (`secretRef`, `...SecretId`) are dropped from it.
+   *
+   * `imported`: the form an imported golden run stores its workflow in (see
+   * `scrubWorkflow`): secret references dropped and the full shape scrub
+   * applied. Only imported golden runs are compared this way: a file carries
+   * no secret references, so the candidate's are left out too. For a run
+   * recorded here a changed credential reference still counts as a change.
    */
-  storedConfig(config: unknown, scrubber: SecretScrubber = this.scrubber()): unknown {
-    // Secret references are left out of the comparison: a golden run that came from a golden-set file carries none.
-    const sanitised = JSON.parse(canonicalJson(stripSecretReferences(sanitizeConfig(config ?? {}, 3)))) as unknown;
+  storedConfig(config: unknown, scrubber: SecretScrubber = this.scrubber(), options: { imported?: boolean } = {}): unknown {
+    if (options.imported) {
+      return this.scrubValue(JSON.parse(canonicalJson(stripSecretReferences(sanitizeConfig(config ?? {}, 3)))) as unknown, scrubber);
+    }
+    const sanitised = JSON.parse(canonicalJson(sanitizeConfig(config ?? {}, 3))) as unknown;
     return JSON.parse(scrubber.text(JSON.stringify(scrubber.tree(sanitised)) ?? "null")) as unknown;
   }
 
@@ -406,44 +423,129 @@ export class ReplayRecordingService {
   }
 
   /**
-   * A golden run in the form a golden-set file carries it: everything scrubbed
-   * again with the secrets the deployment holds now, secret references removed.
+   * The full recording-time scrub plus secret-reference stripping, for a
+   * value that came from outside (or is about to leave): credential key
+   * names, token shapes and the deployment's secret values, and every
+   * `secretRef` / `...SecretId` / `credentialId` key.
+   */
+  private scrubForFile<T>(value: T, scrubber: SecretScrubber): T {
+    return this.scrubValue(stripSecretReferences(value), scrubber);
+  }
+
+  /**
+   * A workflow as a golden-set file or an imported golden run carries it:
+   * sanitised like a captured workflow, secret references dropped, then the
+   * full scrub. Identifiers (the workflow id, node ids and types, edge ends)
+   * only lose secret values: the token-shape redactor would otherwise blank
+   * a long id and break the replay plan.
+   */
+  scrubWorkflow(workflow: Record<string, unknown>, scrubber: SecretScrubber = this.scrubber()): Record<string, unknown> {
+    const scrubbed = this.scrubForFile(sanitizeConfig(workflow) as Record<string, unknown>, scrubber);
+    const id = (value: unknown) => (typeof value === "string" ? scrubber.text(value) : value);
+    if (typeof workflow.id === "string") scrubbed.id = id(workflow.id);
+    const restore = (key: "nodes" | "edges", fields: string[]) => {
+      const before = Array.isArray(workflow[key]) ? (workflow[key] as unknown[]) : null;
+      const after = Array.isArray(scrubbed[key]) ? (scrubbed[key] as unknown[]) : null;
+      if (!before || !after) return;
+      before.forEach((entry, index) => {
+        const original = asRecord(entry);
+        const target = asRecord(after[index]);
+        if (!original || !target) return;
+        for (const field of fields) if (typeof original[field] === "string") target[field] = id(original[field]);
+      });
+    };
+    restore("nodes", ["id", "type"]);
+    restore("edges", ["id", "source", "target", "sourceHandle", "targetHandle"]);
+    return JSON.parse(canonicalJson(scrubbed)) as Record<string, unknown>;
+  }
+
+  /**
+   * An MCP cassette with the full scrub applied to all of it (names,
+   * arguments, results, errors, server-initiated exchanges and anything else
+   * an entry carries); argument hashes are taken again over the scrubbed
+   * arguments, as the recorder does. The match fields (format, server keys
+   * and ids, methods, snapshot hashes) only lose secret values, so a replay
+   * still finds its entries.
+   */
+  scrubCassette(cassette: McpCassette, scrubber: SecretScrubber = this.scrubber()): McpCassette {
+    const scrubbed = this.scrubForFile(cassette, scrubber) as McpCassette;
+    const text = (value: unknown) => (typeof value === "string" ? scrubber.text(value) : value);
+    const servers = cassette.servers.map((server, index) => {
+      const out = { ...(asRecord(scrubbed.servers?.[index]) ?? {}) } as Record<string, unknown>;
+      const original = server as unknown as Record<string, unknown>;
+      for (const field of ["key", "adapterId", "registryServerId", "snapshotHash"]) {
+        if (typeof original[field] === "string") out[field] = text(original[field]);
+      }
+      return out as unknown as McpCassette["servers"][number];
+    });
+    const entries = cassette.entries.map((entry, index) => {
+      const out = { ...(asRecord(scrubbed.entries?.[index]) ?? {}) } as unknown as McpCassetteEntry;
+      out.seq = entry.seq;
+      out.method = entry.method;
+      out.server = scrubber.text(entry.server);
+      if (out.args !== undefined) {
+        out.args = cassetteCanonical(out.args);
+        out.argsHash = hashCassetteArgs(out.args);
+      } else {
+        out.argsHash = scrubber.text(entry.argsHash);
+      }
+      return out;
+    });
+    return { ...scrubbed, format: cassette.format, version: cassette.version, servers, entries };
+  }
+
+  /**
+   * A golden run in the form a golden-set file carries it. Every field goes
+   * through the full scrub again on the way out (defence in depth: it was
+   * scrubbed when it was stored, but the deployment may hold new secrets
+   * since), and secret references are removed. `workflowHash` is the hash of
+   * the workflow exactly as the file carries it, so an importer can check it.
    */
   toFileRecording(record: ReplayRecordingRecord, scrubber: SecretScrubber = this.scrubber()): GoldenSetFileRecording {
-    const nodes = this.scrubValue(record.nodes, scrubber);
-    const input = record.input === undefined || record.input === null ? null : this.scrubValue(record.input, scrubber);
+    const nodes = this.scrubForFile(record.nodes, scrubber);
+    const input = record.input === undefined || record.input === null ? null : this.scrubForFile(record.input, scrubber);
+    const workflow = this.scrubWorkflow(record.capturedWorkflow, scrubber);
+    const imported = record.capabilities.origin === "imported";
     return {
       name: record.name,
       notes: record.notes,
       sourceTriggerType: record.sourceTriggerType,
       sourceStatus: record.sourceStatus,
-      workflowHash: record.workflowHash,
+      workflowHash: sha256Hex(canonicalJson(workflow)),
+      recordedAt: record.capabilities.recordedAt ?? record.createdAt,
+      origin: imported ? "imported" : "recorded",
+      ...(imported ? { sourceWorkflowId: record.capabilities.sourceWorkflowId ?? null } : {}),
       workflowSavedVersion: record.workflowSavedVersion,
-      workflow: JSON.parse(this.serialise(scrubber.tree(stripSecretReferences(record.capturedWorkflow)), scrubber)) as Record<string, unknown>,
+      workflow,
       input,
       nodes,
-      facts: this.scrubFacts(record.facts, scrubber),
-      cassette: record.mcpCassette ? (JSON.parse(this.serialise(scrubber.tree(record.mcpCassette), scrubber)) as unknown) : null,
+      facts: this.scrubFacts(stripSecretReferences(record.facts), scrubber),
+      cassette: record.mcpCassette ? this.scrubCassette(record.mcpCassette, scrubber) : null,
       truncated: record.truncated,
       ...(record.capabilities.scrubbed ? { scrubbed: record.capabilities.scrubbed } : {})
     };
   }
 
   /**
-   * Stores a golden run from a golden-set file for `workflowId`. The file is
-   * not trusted: it is scrubbed again with this deployment's secrets, its
-   * secret references are dropped, its cassette must be a valid cassette and
-   * the size and storage budgets apply as for a run saved here.
+   * Checks and scrubs one golden run from a golden-set file, without touching
+   * the store: the file is not trusted. Its workflow hash must match the
+   * workflow it carries, its cassette must be a valid cassette, every field
+   * goes through the full recording-time scrub and loses its secret
+   * references, and the per-recording size limit applies. `keepNodes`
+   * (node id to type) keeps recorded outputs only for nodes whose id and type
+   * both match; the ids of the others come back in `droppedNodes`.
+   *
+   * The result is saved with `saveImport`; the split lets a caller do this
+   * expensive part outside a transaction and yield between cases.
    */
-  importRecording(
-    input: { workflowId: string; projectId: string | null; recording: GoldenSetFileRecording; name: string },
-    createdBy: string | null,
+  prepareImport(
+    input: { workflowId: string; projectId: string | null; recording: GoldenSetFileRecording; name: string; sourceWorkflowId: string; keepNodes?: Map<string, string> },
     scrubber: SecretScrubber = this.scrubber()
-  ): ReplayRecordingSummary {
-    const store = this.options.store;
+  ): PreparedImport {
     const file = input.recording;
-    if (store.countReplayRecordingsForWorkflow(input.workflowId) >= this.options.maxPerWorkflow) {
-      throw new ReplayRecordingError(`This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before importing more.`, "limit");
+    const claimedHash = sha256Hex(canonicalJson(file.workflow));
+    if (claimedHash !== file.workflowHash) {
+      throw new ReplayRecordingError(`The workflow hash ${JSON.stringify(file.workflowHash.slice(0, 80))} does not match the workflow the case carries (${claimedHash.slice(0, 16)}...).`, "invalid");
     }
     for (const [key, node] of Object.entries(file.nodes)) {
       if (node.nodeId !== key) throw new ReplayRecordingError(`Node ${JSON.stringify(key.slice(0, 80))} is recorded under a different id.`, "invalid");
@@ -451,59 +553,97 @@ export class ReplayRecordingService {
     let cassette: McpCassette | null = null;
     if (file.cassette !== null && file.cassette !== undefined) {
       try {
-        cassette = parseCassette(file.cassette);
+        cassette = parseCassette(this.scrubCassette(parseCassette(file.cassette), scrubber));
       } catch (error) {
         throw new ReplayRecordingError(`The MCP cassette is not valid: ${error instanceof Error ? error.message : String(error)}`, "invalid");
       }
     }
-    const nodes = this.scrubValue(file.nodes as Record<string, ReplayRecordedNode>, scrubber);
-    const facts = this.scrubFacts(file.facts as RunFacts, scrubber);
-    const scrubbedInput = file.input === undefined || file.input === null ? null : this.scrubValue(file.input, scrubber);
+    const droppedNodes: string[] = [];
+    let recordedNodes = file.nodes as Record<string, ReplayRecordedNode>;
+    if (input.keepNodes) {
+      recordedNodes = {};
+      for (const [nodeId, node] of Object.entries(file.nodes)) {
+        if (input.keepNodes.get(nodeId) === node.nodeType) recordedNodes[nodeId] = node as ReplayRecordedNode;
+        else droppedNodes.push(nodeId);
+      }
+    }
+    const nodes = this.scrubForFile(recordedNodes, scrubber);
+    const facts = this.scrubFacts(stripSecretReferences(file.facts as RunFacts), scrubber);
+    const scrubbedInput = file.input === undefined || file.input === null ? null : this.scrubForFile(file.input, scrubber);
     const altered = (before: unknown, after: unknown) => canonicalJson(before ?? null) !== canonicalJson(after ?? null);
     const scrubbed: ReplayScrubbedValues = {
       input: Boolean(file.scrubbed?.input) || (scrubbedInput !== null && altered(file.input, scrubbedInput)),
       output: Boolean(file.scrubbed?.output) || altered((file.facts as RunFacts).output, facts.output),
       nodes: [
         ...new Set([
-          ...(file.scrubbed?.nodes ?? []),
+          ...(file.scrubbed?.nodes ?? []).filter((nodeId) => nodeId in nodes),
           ...Object.keys(nodes).filter((nodeId) => {
-            const before = file.nodes[nodeId]!;
+            const before = recordedNodes[nodeId]!;
             const after = nodes[nodeId];
             return !after || altered(before.output, after.output) || altered(before.error, after.error) || altered(before.runs, after.runs);
           })
         ])
       ]
     };
-    const workflowJson = this.serialise(scrubber.tree(stripSecretReferences(file.workflow)), scrubber);
+    const workflow = this.scrubWorkflow(file.workflow, scrubber);
+    const workflowJson = this.serialise(workflow, scrubber);
     const inputJson = scrubbedInput === null ? null : this.serialise(scrubbedInput, scrubber);
     const factsJson = this.serialise(facts, scrubber);
     const nodesJson = this.serialise(nodes, scrubber);
-    const cassetteJson = cassette ? this.serialise(scrubber.tree(cassette), scrubber) : null;
+    const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
     const bytes = byteLength(workflowJson) + (inputJson ? byteLength(inputJson) : 0) + byteLength(factsJson) + byteLength(nodesJson) + (cassetteJson ? byteLength(cassetteJson) : 0);
     if (bytes > this.options.maxBytes) throw new ReplayRecordingError(`${this.tooLargeMessage()} The recording is ${bytes} bytes.`, "too_large");
-    this.checkBudgets(input.workflowId, bytes);
-    return store.saveReplayRecording({
-      id: `rec_${randomUUID()}`,
-      workflowId: input.workflowId,
-      projectId: input.projectId,
-      name: input.name,
-      notes: file.notes?.trim() ? file.notes.trim() : null,
-      sourceExecutionId: null,
-      sourceTriggerType: file.sourceTriggerType ?? null,
-      sourceStatus: file.sourceStatus,
-      workflowHash: file.workflowHash,
-      workflowSavedVersion: file.workflowSavedVersion ?? null,
-      capturedWorkflowJson: workflowJson,
-      inputJson,
-      nodeOutputsJson: nodesJson,
-      factsJson,
-      mcpCassetteJson: cassetteJson,
-      capabilities: { mcp: cassette ? "cassette" : "none", models: "live", memory: "empty", workflowSource: "captured", scrubbed },
-      bytes,
-      truncated: Boolean(file.truncated),
-      createdAt: this.now().toISOString(),
-      createdBy
-    });
+    // The claimed recording time, never later than now: an old golden run stays old (accepted decision 3).
+    const now = this.now();
+    const claimed = Date.parse(file.recordedAt);
+    const recordedAt = new Date(Number.isFinite(claimed) ? Math.min(claimed, now.getTime()) : now.getTime()).toISOString();
+    return {
+      row: {
+        id: `rec_${randomUUID()}`,
+        workflowId: input.workflowId,
+        projectId: input.projectId,
+        name: input.name,
+        notes: file.notes?.trim() ? file.notes.trim() : null,
+        sourceExecutionId: null,
+        sourceTriggerType: file.sourceTriggerType ?? null,
+        sourceStatus: file.sourceStatus,
+        // The hash of the workflow as stored here, after the import scrub.
+        workflowHash: sha256Hex(canonicalJson(JSON.parse(workflowJson) as unknown)),
+        workflowSavedVersion: file.workflowSavedVersion ?? null,
+        capturedWorkflowJson: workflowJson,
+        inputJson,
+        nodeOutputsJson: nodesJson,
+        factsJson,
+        mcpCassetteJson: cassetteJson,
+        capabilities: {
+          mcp: cassette ? "cassette" : "none",
+          models: "live",
+          memory: "empty",
+          workflowSource: "captured",
+          scrubbed,
+          origin: "imported",
+          recordedAt,
+          importedAt: now.toISOString(),
+          sourceWorkflowId: input.sourceWorkflowId
+        },
+        bytes,
+        truncated: Boolean(file.truncated),
+        createdAt: recordedAt
+      },
+      input: scrubbedInput === null ? null : (JSON.parse(inputJson!) as unknown),
+      droppedNodes
+    };
+  }
+
+  /** Saves a golden run `prepareImport` checked, after the per-workflow count and the storage budgets. */
+  saveImport(prepared: PreparedImport, createdBy: string | null): ReplayRecordingSummary {
+    const store = this.options.store;
+    const { row } = prepared;
+    if (store.countReplayRecordingsForWorkflow(row.workflowId) >= this.options.maxPerWorkflow) {
+      throw new ReplayRecordingError(`This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before importing more.`, "limit");
+    }
+    this.checkBudgets(row.workflowId, row.bytes);
+    return store.saveReplayRecording({ ...row, createdBy });
   }
 
   private tooLargeMessage(): string {

@@ -11,28 +11,41 @@ import { evalScorerListSchema } from "./evals";
  *     "signature"? }
  *
  * Each case carries a self-contained golden run (scrubbed input, per-node
- * outputs, run facts, the MCP cassette and the workflow as it ran). A file
- * never holds secret values or secret references: the exporter strips them
- * and the importer scrubs the whole file again with the importing
- * deployment's own secrets, so a file edited by hand is not trusted.
+ * outputs, run facts, the MCP cassette and the workflow as it ran). The
+ * exporter and the importer both run the full recording-time scrub over
+ * every field (credential key names, token shapes, the deployment's own
+ * secret values) and strip secret references (`secretRef`, `secretId`,
+ * `...SecretId`, `credentialId` and the like), so a file edited by hand is
+ * not trusted. `recordedAt` and `origin` say when and where the run was
+ * recorded; an imported golden run keeps `origin: "imported"` when it is
+ * exported again, so re-signing a file cannot hide where it came from.
  *
  * `scorers` are per case (a case's scorers run before the job's). A judge
  * scorer's `secretRef` is not part of the file: the importing deployment's
  * user attaches a credential there.
  *
  * Signature: an Ed25519 signature by the exporting deployment's audit key over
- * the canonical JSON of the file without its `signature` block, bound to the
- * key id and signing time. Only a public key obtained from the deployment
- * through a trusted channel proves who exported a file; checked against the
- * key embedded in the file it shows internal consistency only.
+ * the canonical JSON of `{ purpose: "l2m.golden-set/1", file (without its
+ * `signature` block), keyId, signedAt }`. Only a public key obtained from the
+ * deployment through a trusted channel proves who exported a file; checked
+ * against the key embedded in the file it shows internal consistency only.
+ * A signature proves the deployment held this data when it signed it, not
+ * where the data was first recorded: look at each case's `origin`.
  */
 
 export const GOLDEN_SET_FILE_FORMAT = "l2m.golden-set";
 export const GOLDEN_SET_FILE_VERSION = 1;
 /** The most cases one file can hold. */
 export const GOLDEN_SET_FILE_MAX_CASES = 500;
-/** Default cap on a whole file, in bytes (`GOLDEN_SET_FILE_MAX_BYTES` on the server). */
-export const GOLDEN_SET_FILE_DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+/** Default cap on a whole file, in bytes (`GOLDEN_SET_IMPORT_MAX_BYTES` on the server). */
+export const GOLDEN_SET_FILE_DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
+/** The deepest JSON nesting a file may have; deeper files are refused before any other check. */
+export const GOLDEN_SET_FILE_MAX_DEPTH = 64;
+/** Domain-separation tag inside the signed object, so no other signed format can collide with a golden-set file. */
+export const GOLDEN_SET_SIGNATURE_PURPOSE = "l2m.golden-set/1";
+/** Where a golden run was recorded: on this deployment (`recorded`) or loaded from a golden-set file (`imported`). */
+export const GOLDEN_RUN_ORIGINS = ["recorded", "imported"] as const;
+export type GoldenRunOrigin = (typeof GOLDEN_RUN_ORIGINS)[number];
 /** Absolute ceiling on one case's recording, in bytes; a deployment's `REPLAY_RECORDING_MAX_BYTES` applies on top. */
 export const GOLDEN_SET_CASE_MAX_BYTES = 32 * 1024 * 1024;
 
@@ -116,8 +129,17 @@ export const goldenSetFileRecordingSchema = z.object({
   notes: z.string().max(4000).nullable().optional(),
   sourceTriggerType: nullableString.optional(),
   sourceStatus: z.string().min(1).max(80),
-  /** Hash of the workflow as it ran (the exporting deployment's). */
+  /**
+   * sha256 of the canonical JSON of `workflow` exactly as it is in the file.
+   * The importer recomputes it and refuses a file whose hash does not match.
+   */
   workflowHash: z.string().min(1).max(200),
+  /** When the run was recorded (ISO 8601). An importer never takes a time later than its own clock. */
+  recordedAt: z.string().datetime({ offset: true }),
+  /** `recorded`: the exporting deployment recorded the run; `imported`: it came to that deployment in a file. */
+  origin: z.enum(GOLDEN_RUN_ORIGINS).optional(),
+  /** For an imported golden run: the workflow id its file was exported from. */
+  sourceWorkflowId: z.string().min(1).max(200).nullable().optional(),
   workflowSavedVersion: z.number().int().positive().nullable().optional(),
   /** The workflow as it ran, with node configurations sanitised and secret references removed. */
   workflow: jsonRecord,
@@ -174,15 +196,37 @@ export const goldenSetImportRequestSchema = z
     file: z.unknown(),
     workflowId: z.string().trim().min(1).max(200),
     projectId: z.string().trim().min(1).max(200).optional(),
-    name: z.string().trim().min(1).max(120).optional()
+    name: z.string().trim().min(1).max(120).optional(),
+    /**
+     * Import a file exported from another workflow. Without it such a file is
+     * refused (409). With it, recorded outputs are kept only for nodes whose
+     * id and type both match the target; the rest are dropped with a warning.
+     */
+    allowWorkflowMismatch: z.boolean().optional()
   })
   .strict();
 export type GoldenSetImportRequest = z.infer<typeof goldenSetImportRequestSchema>;
 
-/** The bytes a file signature covers: the file without its signature block, bound to the key id and signing time. */
+/** The bytes a file signature covers: the purpose tag and the file without its signature block, bound to the key id and signing time. */
 export function goldenSetSignedBytes(file: Record<string, unknown>, keyId: string, signedAt: string): Uint8Array {
   const { signature: _signature, ...unsigned } = file;
-  return canonicalJsonBytes({ file: unsigned, keyId, signedAt });
+  return canonicalJsonBytes({ purpose: GOLDEN_SET_SIGNATURE_PURPOSE, file: unsigned, keyId, signedAt });
+}
+
+/**
+ * Whether a parsed JSON value nests deeper than `maxDepth` (objects and
+ * arrays). Iterative, so a hostile value cannot overflow the stack here.
+ */
+export function jsonDepthExceeds(value: unknown, maxDepth: number = GOLDEN_SET_FILE_MAX_DEPTH): boolean {
+  const stack: Array<{ node: unknown; depth: number }> = [{ node: value, depth: 0 }];
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (!node || typeof node !== "object") continue;
+    if (depth >= maxDepth) return true;
+    const children = Array.isArray(node) ? node : Object.values(node as Record<string, unknown>);
+    for (const child of children) if (child && typeof child === "object") stack.push({ node: child, depth: depth + 1 });
+  }
+  return false;
 }
 
 const byteLength = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value) ?? "null").length;
@@ -204,11 +248,17 @@ export function goldenSetFileSizeProblem(file: GoldenSetFile, limits: { maxBytes
   return null;
 }
 
-const SECRET_REFERENCE_KEY = /^(secretId|secretRef|.*SecretId|.*SecretRef)$/;
+/**
+ * Keys that hold a reference to a stored credential: `secretRef`, `secretId`,
+ * `...SecretRef` / `...SecretId` (`authSecretId`, `credentialsSecretId`,
+ * `signingSecretRef`, ...), and `credentialId` / `credentialRef` with the
+ * same suffix forms, in camel or snake case.
+ */
+export const SECRET_REFERENCE_KEY = /^(.*secret_?(id|ref)|.*credential_?(id|ref))$/i;
 
 /**
- * A copy of a value without secret references: every `secretRef`, `secretId`
- * and `...SecretRef` / `...SecretId` key, at any depth, is removed.
+ * A copy of a value without secret references: every key matching
+ * `SECRET_REFERENCE_KEY`, at any depth, is removed.
  */
 export function stripSecretReferences<T>(value: T): T {
   const walk = (node: unknown, depth: number): unknown => {

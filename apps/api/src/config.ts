@@ -318,6 +318,15 @@ const envSchema = z.object({
    */
   REPLAY_RECORDINGS_MAX_TOTAL_BYTES: z.coerce.number().int().min(16_384).max(1_099_511_627_776).default(1_073_741_824),
   /**
+   * Phase 15.5 — the largest golden-set file `POST /api/eval/datasets/import`
+   * accepts (32 MiB), and the basis of that route's request body limit. The
+   * caller is authenticated before the body is read, so only signed-in
+   * builders can make the API read a body this large. Unset means the
+   * default, `GOLDEN_SET_FILE_DEFAULT_MAX_BYTES` (optional in the type, so
+   * configs built in code need not name it).
+   */
+  GOLDEN_SET_IMPORT_MAX_BYTES: z.coerce.number().int().min(65_536).max(1_073_741_824).optional(),
+  /**
    * Phase 11.2 — how often the leader expires approval requests past their
    * timeout (ms). Overdue requests are also expired once at startup.
    */
