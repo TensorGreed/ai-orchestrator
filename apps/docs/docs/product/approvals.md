@@ -59,6 +59,7 @@ A gate is a separation-of-duties control, so whoever can start a run cannot step
 - A gate's output never comes from pinned data or from `nodeOutputs` sent with a run. A workflow with a pinned gate does not validate, the pin route refuses an Approval Gate (`400`), and the editor offers no **Pin output** for one.
 - A run that would start after a gate is refused before any node runs: `startNodeId` or a single-node run of a node downstream of a gate, on `/api/workflows/:id/execute` and on `/api/executions/:id/retry`, fails with "This run would start after Approval Gate '…'. Start at or before the gate." The check covers every node the run would execute, not just the start node: starting on a sibling branch that merges below the gate, or at a worker or other node attached to an agent below the gate, is refused too. Starting at the gate itself is allowed; it pauses as usual.
 - A node below a gate cannot also be attached, as a worker or tool, to an agent that does not wait for the gate: validation reports `approval_gate_attachment_bypass` and the workflow cannot be saved or run. Attach such a node only to agents below the gate.
+- A gate cannot continue on error. **Continue Anyway** would run the approved branch after a rejection with nowhere to go, or after a request that could not be rendered (for example when the expression sandbox fails). Validation reports `approval_gate_continue_on_error` and the editor does not offer it; a stored workflow that still has it, by `onError` or `errorConfig.continueOnFail`, stops at the failed gate. Use **Stop** or the error branch.
 - [Replays](./golden-runs.md) are the exception: they answer a gate from the decision the golden run recorded.
 
 Human Approval nodes keep their earlier behaviour here (pins and start nodes work as before). A pinned Human Approval node makes validation report a `human_approval_pinned` warning, because runs then skip the pause. Human Approval is not a separation-of-duties control: use an Approval Gate when the person who runs the workflow must not be able to approve or skip it.
@@ -68,6 +69,18 @@ Human Approval nodes keep their earlier behaviour here (pins and start nodes wor
 Each editable field has a key, a label, a type (`string`, `text`, `number`, `boolean` or `json`), an optional value template the approver starts from (for example `{{reply}}`), whether it is required and, for text, a maximum length. When the gate pauses, the templates are rendered from the run and the approver sees the proposed values.
 
 Edits are checked before the run resumes: only listed keys, values of the field's type, required fields not empty, text within its maximum length, and no more than 64 KiB in total. A refused edit answers `400` with one message per field. The values land on the approved output under their keys, so a field named `reply` replaces the incoming `reply` for every node after the gate. Edits are ignored on a rejection or a timeout.
+
+## Who can see and decide: project authorization
+
+Approvals use the same project authorization as runs (see [Authentication and RBAC](../security/auth-rbac.md)), always against the workflow as it is now, not the project stored when the run paused:
+
+- A request whose workflow you cannot read answers `404`, the same as a run that does not exist, on approve, reject and approve with edits, and nothing is written for it. `GET /api/approvals?workflowId=` and `?executionId=` answer `404` for a workflow or run you cannot read, or one that does not exist.
+- A request you can read but whose workflow you may not run (no `workflow:execute`, or no execute access to a sub-workflow along its path) is listed with **canDecide** false and answers `403`.
+- The inbox lists only requests of workflows you can read, filtered before the limit. A workflow moved to another project takes its requests with it. Requests of a deleted workflow's runs are admin-only.
+- With `PROJECT_ISOLATION=strict`, only members of the workflow's project (and admins) see or decide its requests.
+- Admins pass these checks, as everywhere else; the approver list and the self-approval rule still apply to them.
+
+A resumed run runs as the person who decided, like any run that person starts: it reaches only its workflow's project (its secrets, MCP servers, knowledge bases, sub-workflows), and that person needs `secret:use` there for secrets. An admin approving does not widen what the run can reach. A resume that runs later on the queue or after a restart looks the person up again: if they were deleted, replaced by another account with the same email, or lost execute access in the meantime, the resume is refused (audited as `approval.resume_refused`) and the request is pending again for someone who may decide it. A timeout has no decider and resumes with no user, like a scheduled run.
 
 ## The approvals inbox
 
@@ -147,7 +160,7 @@ The gate applies to tools reached through an agent's tool port. A direct **MCP T
 
 ## Notifications
 
-When a request is created and when one times out, L2M sends `approval.requested` and `approval.timed_out` through the notification channels (Slack, Teams, email). Channels configured in the environment receive them unless `NOTIFICATIONS_APPROVAL_EVENTS=false`; channels stored in the database receive them when their event list includes them. Set `APP_PUBLIC_URL` (for example `https://l2m.example.com`) to include a link to the inbox. Messages carry the workflow, the run, the message, who may decide and the expiry; values in the message that look like secrets are masked.
+When a request is created and when one times out, L2M sends `approval.requested` and `approval.timed_out` through the notification channels (Slack, Teams, email). Channels configured in the environment receive them unless `NOTIFICATIONS_APPROVAL_EVENTS=false`; channels stored in the database receive them when their event list includes them. Set `APP_PUBLIC_URL` (for example `https://l2m.example.com`) to include a link to the inbox. Notification channels are not scoped to a project, so messages carry only the workflow, the run id, who may decide and the expiry (or the timeout outcome). The request's own text and proposed values stay in the inbox, where project access applies.
 
 ## Audit and the run manifest
 
@@ -158,6 +171,7 @@ Audit entries, in the `approval` category:
 | `approval.requested` | A run paused for a decision |
 | `approval.decided` | Someone approved or rejected (outcome `success`), or was refused (outcome `denied`, with the reason: self-approval, not an approver, no project access) |
 | `approval.timed_out` | The sweeper expired a request |
+| `approval.resume_refused` | A queued or recovered resume was refused because the person who decided may no longer run the workflow (the request is pending again) |
 | `approval.canceled` | The paused run was canceled |
 
 Decisions record the reason, the keys of the edited fields and a digest of the edits, not the edited values. The digest is HMAC-SHA256 over the canonical JSON of the edits, keyed with a random salt kept on the request row, so the audit entry and the manifest carry the same digest and a short edit cannot be guessed from an exported manifest. Reasons are masked for secret-looking values in both.
