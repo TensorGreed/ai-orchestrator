@@ -131,6 +131,26 @@ export const approvalRejectInputSchema = z.object({
   requestId: z.string().min(1).max(128).optional()
 });
 
+/**
+ * Who could approve a request with these approver settings on a workflow:
+ * the editor asks before a single-user setup locks itself out (with
+ * self-approval off, a run nobody else may approve waits until it times out).
+ */
+export const approvalEligibilityInputSchema = z.object({
+  workflowId: z.string().min(1).max(200),
+  projectId: z.string().min(1).max(200).optional(),
+  approverRoles: z.array(z.enum(APPROVER_ROLE_VALUES)).max(APPROVER_ROLE_VALUES.length).default([]),
+  approverUsers: z.array(approverUserSchema).max(50).default([]),
+  allowSelfApproval: z.boolean().default(false)
+});
+
+export interface ApprovalEligibilityView {
+  /** Someone other than the signed-in user may approve. */
+  othersCanApprove: boolean;
+  /** The signed-in user may approve a run they started. */
+  requesterCanApprove: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Who may decide
 // ---------------------------------------------------------------------------

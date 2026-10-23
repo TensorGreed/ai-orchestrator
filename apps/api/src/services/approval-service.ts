@@ -37,6 +37,7 @@ import {
   resolvePendingApproval,
   validateApprovalEdits,
   type ApprovalDecisionValue,
+  type ApprovalEligibilityView,
   type ApprovalRequestSpec,
   type ApprovalRequestView,
   type WorkflowExecutionState
@@ -85,6 +86,8 @@ export interface ApprovalServiceOptions {
   canExecute: (user: SafeUser, workflow: WorkflowRef) => boolean;
   /** Which requests the user may see, applied in SQL before the list limit. */
   readScope: (user: SafeUser) => ApprovalReadScope;
+  /** Every user, for the editor's "who could approve" check. */
+  listUsers: () => SafeUser[];
   /** Masks secret values in text shown to approvers. */
   redact: (value: unknown) => unknown;
   sweepIntervalMs: number;
@@ -334,6 +337,20 @@ export class ApprovalService {
     const spec = { ...defaultApprovalRequest(record.kind), ...record.spec };
     const check = checkApprover(spec, user, { userId: record.requestedByUserId, email: record.requestedBy });
     return check.allowed ? { allowed: true } : { allowed: false, code: check.code, message: check.message };
+  }
+
+  /**
+   * Who could approve a request with these approver settings on this
+   * workflow if `requester` started the run: project execute access and the
+   * approver check, as at decision time.
+   */
+  eligibility(input: { workflow: WorkflowRef; spec: Pick<ApprovalRequestSpec, "approverRoles" | "approverUsers" | "allowSelfApproval">; requester: SafeUser }): ApprovalEligibilityView {
+    const requester = { userId: input.requester.id, email: input.requester.email };
+    const can = (user: SafeUser) => this.options.canExecute(user, input.workflow) && checkApprover(input.spec, user, requester).allowed;
+    return {
+      othersCanApprove: this.options.listUsers().some((user) => user.id !== input.requester.id && can(user)),
+      requesterCanApprove: can(input.requester)
+    };
   }
 
   toView(record: ApprovalRequestRecord, user: SafeUser): ApprovalRequestView {

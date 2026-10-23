@@ -3481,6 +3481,12 @@ export function createApp(
       const workflowIds = [...new Set(projectIds.flatMap((projectId) => [...rbacService.listWorkflowsVisibleToProject(projectId).keys()]))];
       return { projectIds, workflowIds };
     },
+    listUsers: () =>
+      store.listUsers().map((entry) => ({
+        id: entry.id,
+        email: entry.email,
+        role: entry.role === "admin" || entry.role === "builder" || entry.role === "operator" ? entry.role : "viewer"
+      })),
     redact: (value) => secretService.redact(value),
     sweepIntervalMs: config.APPROVAL_SWEEP_INTERVAL_MS,
     appPublicUrl: config.APP_PUBLIC_URL,
@@ -8385,6 +8391,8 @@ export function createApp(
     app,
     approvals: approvalService,
     available: approvalsSupported,
+    loadWorkflow: (id) => store.getWorkflow(id) ?? null,
+    canReadWorkflow: (user, workflow) => rbacService.canAccessWorkflow(user, workflow, "workflow:read"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume
   });

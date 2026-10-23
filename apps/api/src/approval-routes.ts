@@ -4,6 +4,7 @@
  *   GET  /api/approvals                  requests the user can see (pending by default; ?status=decided|all, ?workflowId, ?executionId)
  *   POST /api/approvals/:id/approve      approve the run paused as execution :id, optionally with edits and a reason
  *   POST /api/approvals/:id/reject       reject it, with a reason when the request requires one
+ *   POST /api/approvals/eligibility      who could approve with these approver settings (editor warning)
  *
  * Listing needs `workflow:read` on the workflow's project; deciding needs
  * `workflow:execute` on it and must satisfy the request's approvers and its
@@ -18,7 +19,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { approvalApproveInputSchema, approvalRejectInputSchema } from "@ai-orchestrator/shared";
+import { approvalApproveInputSchema, approvalEligibilityInputSchema, approvalRejectInputSchema } from "@ai-orchestrator/shared";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { ApprovalDecisionError, type ApprovalResumeJob, type ApprovalService } from "./services/approval-service.js";
 
@@ -28,6 +29,9 @@ export interface ApprovalRoutesDeps {
   /** False on stores without approval requests (Postgres in this release). */
   available: boolean;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** The workflow as stored, for the eligibility check; null when it does not exist. */
+  loadWorkflow: (id: string) => { id: string; projectId?: string } | null;
+  canReadWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
   /** Resumes the run: inline (resolves with the run result) or on the queue (resolves with `{ queued: true }`). */
   dispatch: (job: ApprovalResumeJob) => Promise<{ queued: true } | { queued: false; result: { status: string } } | null>;
 }
@@ -105,6 +109,24 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
     if (outcome.result.status === "error") reply.code(400);
     return outcome.result;
   };
+
+  app.post<{ Body: unknown }>("/api/approvals/eligibility", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    if (!deps.available) return unavailable(reply);
+    const parsed = approvalEligibilityInputSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid eligibility payload", details: parsed.error.issues };
+    }
+    // An unsaved workflow is checked against the project it will be saved in.
+    const workflow = deps.loadWorkflow(parsed.data.workflowId) ?? { id: parsed.data.workflowId, ...(parsed.data.projectId ? { projectId: parsed.data.projectId } : {}) };
+    if (!deps.canReadWorkflow(user, workflow)) {
+      reply.code(404);
+      return { error: "Workflow not found" };
+    }
+    return approvals.eligibility({ workflow, spec: parsed.data, requester: user });
+  });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/approvals/:id/approve", (request, reply) => decide(request, reply, "approve"));
   app.post<{ Params: { id: string }; Body: unknown }>("/api/approvals/:id/reject", (request, reply) => decide(request, reply, "reject"));

@@ -691,6 +691,21 @@ describe("who may see and decide", () => {
     expect((await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, {})).json<RunResult>().status).toBe("success");
   });
 
+  it("tells the editor when nobody but the requester could approve", async () => {
+    const context = await createTestContext();
+    const solo = await login(context, "admin", "solo");
+    const check = (payload: Record<string, unknown>) => call(context, "POST", "/api/approvals/eligibility", solo.cookie, { workflowId: "wf-unsaved", ...payload });
+    // Alone on the instance, with self-approval off: nobody can approve.
+    expect((await check({})).json()).toEqual({ othersCanApprove: false, requesterCanApprove: false });
+    expect((await check({ allowSelfApproval: true })).json()).toEqual({ othersCanApprove: false, requesterCanApprove: true });
+    await login(context, "operator", "colleague");
+    expect((await check({})).json()).toEqual({ othersCanApprove: true, requesterCanApprove: false });
+    // Only admins listed: the operator does not count.
+    expect((await check({ approverRoles: ["admin"] })).json()).toMatchObject({ othersCanApprove: false });
+    const viewer = await login(context, "viewer", "watcher");
+    expect((await call(context, "POST", "/api/approvals/eligibility", viewer.cookie, { workflowId: "wf-unsaved" })).statusCode).toBe(403);
+  });
+
   it("requires execute access on every project along a sub-workflow path, two levels deep", async () => {
     const context = await createTestContext();
     const requester = await login(context, "builder", "requester");
@@ -791,7 +806,7 @@ describe("what approvals record and send", () => {
   it("answers 501 when the store has no approval requests", async () => {
     const app = Fastify();
     const user = { id: "u1", email: "u@example.com", role: "admin" as const };
-    registerApprovalRoutes({ app, approvals: {} as never, available: false, requireRole: async () => user, dispatch: async () => null });
+    registerApprovalRoutes({ app, approvals: {} as never, available: false, loadWorkflow: () => null, canReadWorkflow: () => true, requireRole: async () => user, dispatch: async () => null });
     await app.ready();
     const listed = await app.inject({ method: "GET", url: "/api/approvals" });
     expect(listed.statusCode).toBe(501);
