@@ -7297,8 +7297,12 @@ async function executeWorkflowRun(
     const started = Date.now();
     const startedAtNode = nowIso();
     const nodeConfig = toRecord(node.config);
-    const onError: "stop" | "continue" | "branch" =
+    const requestedOnError: "stop" | "continue" | "branch" =
       node.errorConfig?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
+    // Phase 11.2 — a failed Approval Gate (rejected with nowhere to go, or a
+    // request that could not be rendered) never continues: "continue" would
+    // run its approved branch with no decision. The error branch still works.
+    const onError = node.type === "approval_gate" && requestedOnError === "continue" ? "stop" : requestedOnError;
     const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
     const parentOutputs: Record<string, unknown> = {};
     for (const parentId of parentIds) {

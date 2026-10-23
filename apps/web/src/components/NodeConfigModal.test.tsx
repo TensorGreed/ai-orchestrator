@@ -103,6 +103,16 @@ describe("NodeInspector", () => {
     expect(screen.getByText(/An Approval Gate cannot be pinned/)).toBeInTheDocument();
   });
 
+  it("offers no 'Continue Anyway' on error for an Approval Gate", () => {
+    const gate: Node<EditorNodeData> = { id: "gate", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Gate", nodeType: "approval_gate", config: {} } };
+    const { unmount } = render(<NodeInspector {...makeProps({ node: gate })} />);
+    const options = (select: HTMLElement) => Array.from(select.querySelectorAll("option")).map((option) => option.getAttribute("value"));
+    expect(options(screen.getByLabelText("On Error Behavior"))).toEqual(["stop", "branch"]);
+    unmount();
+    render(<NodeInspector {...makeProps()} />);
+    expect(options(screen.getByLabelText("On Error Behavior"))).toEqual(["stop", "continue", "branch"]);
+  });
+
   it("saves updated user prompt text", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn();

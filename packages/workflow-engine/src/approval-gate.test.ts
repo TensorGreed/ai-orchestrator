@@ -738,6 +738,19 @@ describe("nothing skips an Approval Gate", () => {
   });
 });
 
+describe("a failed Approval Gate never continues", () => {
+  it("refuses a gate set to continue on error; the error branch is fine", async () => {
+    const continuing = gateWorkflow({ ...GATE, onError: "continue" });
+    expect(validateWorkflowGraph(continuing).issues.map((issue) => issue.code)).toContain("approval_gate_continue_on_error");
+    expect(validateWorkflowGraph(gateWorkflow({ ...GATE, onError: "branch" })).issues.map((issue) => issue.code)).not.toContain("approval_gate_continue_on_error");
+    const paused: WorkflowExecutionState[] = [];
+    const refused = await executeWorkflow({ workflow: continuing, executionId: "exec-continue", webhookPayload: { user_prompt: "Ana" } }, deps({ paused }));
+    expect(refused.status).toBe("error");
+    expect(paused).toEqual([]);
+    expect(last(refused, "on_approved")?.status).not.toBe("success");
+  });
+});
+
 describe("approval pauses with retries and loops", () => {
   it("restarts a resumed child on retry of the Execute Workflow node, so it asks again", async () => {
     const child = workflow(

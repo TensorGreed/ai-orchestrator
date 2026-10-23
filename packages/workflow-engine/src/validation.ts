@@ -730,6 +730,15 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           nodeId: node.id
         });
       }
+      // Continuing past a failed gate would run its approved branch with no decision.
+      // (The engine also refuses it at run time, for errorConfig.continueOnFail too.)
+      if ((node.config as Record<string, unknown> | undefined)?.onError === "continue") {
+        issues.push({
+          code: "approval_gate_continue_on_error",
+          message: "An Approval Gate cannot continue on error: that would run its approved branch with no decision. Stop, or use the error branch.",
+          nodeId: node.id
+        });
+      }
       // Loop bodies run inline and cannot be paused and resumed part-way.
       const inLoop = workflow.edges.some((edge) => edge.target === node.id && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node");
       if (inLoop) {
