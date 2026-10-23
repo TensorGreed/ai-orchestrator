@@ -1166,6 +1166,48 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
   }
 
   issues.push(...validateGuardPlacement(workflow));
+  issues.push(...validateApprovalGateAttachments(workflow));
+  return issues;
+}
+
+/**
+ * Phase 11.2 — a node that runs after an Approval Gate must not also be
+ * attached (worker or tool) to a node that does not wait for the gate: that
+ * node would reach it at run time with no decision.
+ */
+function validateApprovalGateAttachments(workflow: Workflow): WorkflowValidationIssue[] {
+  const issues: WorkflowValidationIssue[] = [];
+  const gates = workflow.nodes.filter((entry) => entry.type === "approval_gate");
+  if (gates.length === 0) return issues;
+  const outgoing = new Map<string, string[]>();
+  for (const edge of workflow.edges) {
+    const list = outgoing.get(edge.source) ?? [];
+    list.push(edge.target);
+    outgoing.set(edge.source, list);
+  }
+  const attachedEdges = workflow.edges.filter((edge) => edge.sourceHandle === "worker" || edge.sourceHandle === "tool");
+  const nodeNames = new Map(workflow.nodes.map((entry) => [entry.id, entry.name || entry.id]));
+  for (const gate of gates) {
+    const after = new Set<string>();
+    const pending = [gate.id];
+    while (pending.length > 0) {
+      const id = pending.pop()!;
+      for (const target of outgoing.get(id) ?? []) {
+        if (target === gate.id || after.has(target)) continue;
+        after.add(target);
+        pending.push(target);
+      }
+    }
+    for (const edge of attachedEdges) {
+      if (!after.has(edge.target) || after.has(edge.source) || edge.source === gate.id) continue;
+      issues.push({
+        code: "approval_gate_attachment_bypass",
+        message: `Node '${nodeNames.get(edge.target) ?? edge.target}' runs after Approval Gate '${gate.name || gate.id}' but is also attached to '${nodeNames.get(edge.source) ?? edge.source}', which does not wait for the gate. Attach it only to nodes after the gate.`,
+        nodeId: edge.target,
+        edgeId: edge.id
+      });
+    }
+  }
   return issues;
 }
 

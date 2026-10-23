@@ -611,6 +611,46 @@ describe("nothing skips an Approval Gate", () => {
     expect(atGate.status).toBe("waiting_approval");
   });
 
+  function dualPath(supAfterGate: boolean) {
+    return workflow(
+      "dual",
+      [
+        node("in", "manual_trigger"),
+        node("sup", "supervisor_node", { maxIterations: 2, userPromptTemplate: "go" }),
+        node("gate", "approval_gate", { message: "ok?" }),
+        node("supm", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+        node("w", "agent_orchestrator", { userPromptTemplate: "x", maxIterations: 2 }),
+        node("wm", "llm_call", { provider: { providerId: "scripted", model: "m" } }),
+        node("out", "output"),
+        node("out2", "output")
+      ],
+      [
+        { source: "in", target: supAfterGate ? "gate" : "sup" },
+        ...(supAfterGate ? [{ source: "gate", sourceHandle: "approved", target: "sup" }] : [{ source: "in", target: "gate" }]),
+        { source: "gate", sourceHandle: "approved", target: "w" },
+        { source: "w", target: "out" },
+        { source: "sup", sourceHandle: "chat_model", target: "supm" },
+        { source: "sup", sourceHandle: "worker", target: "w" },
+        { source: "w", sourceHandle: "chat_model", target: "wm" },
+        { source: "sup", target: "out2" }
+      ]
+    );
+  }
+
+  it("rejects a node after a gate that is also attached to an agent that does not wait for the gate", () => {
+    const invalid = validateWorkflowGraph(dualPath(false));
+    expect(invalid.valid).toBe(false);
+    expect(invalid.issues).toContainEqual(expect.objectContaining({ code: "approval_gate_attachment_bypass", nodeId: "w" }));
+    expect(invalid.issues.find((issue) => issue.code === "approval_gate_attachment_bypass")?.severity).toBeUndefined();
+    expect(validateWorkflowGraph(dualPath(true)).issues.some((issue) => issue.code === "approval_gate_attachment_bypass")).toBe(false);
+  });
+
+  it("refuses a workflow-mode run at an agent whose worker is below a gate", async () => {
+    const result = await executeWorkflow({ workflow: dualPath(false), executionId: "exec-dual-workflow", startNodeId: "sup", runMode: "workflow" }, deps({ paused: [] }));
+    expect(result.status).toBe("error");
+    expect(result.nodeResults).toHaveLength(0);
+  });
+
   it("warns, without failing validation, when a Human Approval node is pinned", () => {
     const wf = workflow(
       "wf-human-pin",

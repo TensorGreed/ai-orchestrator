@@ -6527,7 +6527,20 @@ async function executeWorkflowRun(
   const enforceApprovalGates = !dependencies.replayNodeHook && !request.resumeState;
   const approvalGateIds = new Set(workflow.nodes.filter((entry) => entry.type === "approval_gate").map((entry) => entry.id));
   if (enforceApprovalGates && explicitStartNodeId && approvalGateIds.size > 0) {
-    const skippedGate = skippedApprovalGate(approvalGateIds, new Set(nodeOrder), graphIndexes.outgoingExecution, graphIndexes.attachmentsBySource);
+    // Attached workers and tools run when their agent does, so they count as running.
+    const willRun = new Set(nodeOrder);
+    for (const pending = [...willRun]; pending.length > 0; ) {
+      const id = pending.pop()!;
+      for (const targets of graphIndexes.attachmentsBySource.get(id)?.values() ?? []) {
+        for (const target of targets) {
+          if (!willRun.has(target)) {
+            willRun.add(target);
+            pending.push(target);
+          }
+        }
+      }
+    }
+    const skippedGate = skippedApprovalGate(approvalGateIds, willRun, graphIndexes.outgoingExecution, graphIndexes.attachmentsBySource);
     if (skippedGate) {
       const error = WorkflowError.nodeConfig(`This run would start after Approval Gate '${skippedGate}'. Start at or before the gate.`);
       return {
