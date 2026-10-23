@@ -16,6 +16,7 @@ import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./N
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields";
+import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import {
@@ -6415,6 +6416,8 @@ export function NodeInspector({
         );
       case "guard_protection":
         return <GuardProtectionFields config={config} setConfig={setConfig} secrets={availableSecrets} />;
+      case "approval_gate":
+        return <ApprovalGateNodeFields config={config} setConfig={setConfig} />;
       case "human_approval":
         return (
           <>

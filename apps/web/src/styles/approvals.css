@@ -1,0 +1,385 @@
+/* ---------------------------------------------------------------------------
+   approvals.css — Phase 11.2: the Approvals inbox and the Approval Gate
+   node's inspector extras. Tokens only; both themes come from tokens.css.
+   --------------------------------------------------------------------------- */
+
+.approvals-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.approvals-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.approvals-filter {
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  flex: 1 1 280px;
+  max-width: 460px;
+  min-width: 0;
+}
+
+.approvals-count {
+  font-size: var(--fs-xs);
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+}
+
+.approvals-notice,
+.approvals-error,
+.approvals-empty {
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+.approvals-notice {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+.approvals-error {
+  border-color: color-mix(in srgb, var(--err) 45%, transparent);
+  background: var(--err-soft);
+  color: var(--err);
+}
+.approvals-empty {
+  color: var(--fg-muted);
+  text-align: center;
+  padding: 28px 14px;
+}
+
+.approvals-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.approval-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-sm);
+  min-width: 0;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.approval-card.is-pending {
+  border-left: 3px solid var(--warn);
+}
+.approval-card.is-focused {
+  border-color: var(--accent);
+  box-shadow: var(--glow-accent);
+}
+
+.approval-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.approval-card-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+.approval-card-title h3 {
+  margin: 0;
+  flex: 1 1 100%;
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  letter-spacing: var(--ls-display);
+  line-height: 1.35;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.approval-card-when {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.approval-status,
+.approval-kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  border: 1px solid var(--line);
+  color: var(--fg-muted);
+}
+.approval-status-pending {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: transparent;
+}
+.approval-status-approved {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: transparent;
+}
+.approval-status-rejected,
+.approval-status-timed_out {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: transparent;
+}
+.approval-kind {
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.approval-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+}
+.approval-meta > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.approval-meta dt {
+  font-size: var(--fs-xs);
+  color: var(--fg-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.approval-meta dd {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.approval-meta code,
+.approval-tool code,
+.approval-field-type {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--accent);
+}
+.approval-path {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.approval-reason,
+.approval-edited {
+  display: block;
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+
+.approval-tool {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--port-tool) 40%, transparent);
+  background: var(--port-tool-soft);
+  min-width: 0;
+}
+.approval-tool-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.approval-tool-server {
+  font-size: var(--fs-xs);
+}
+.approval-tool-args {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: var(--r-sm);
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-fields {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+  min-width: 0;
+}
+.approval-fields legend {
+  padding: 0 6px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+.approval-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.approval-field > label {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.approval-field-check > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+.approval-json {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+.approval-field [aria-invalid="true"],
+.approval-reason-input [aria-invalid="true"] {
+  border-color: var(--err);
+}
+.approval-field-error {
+  color: var(--err);
+  font-size: var(--fs-xs);
+}
+
+.approval-decide {
+  display: grid;
+  gap: 10px;
+}
+.approval-reason-input {
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.approval-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.approval-cannot {
+  margin-right: auto;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+
+.sidebar-item-badge {
+  margin-left: auto;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.app-sidebar.is-collapsed .sidebar-item {
+  position: relative;
+}
+.app-sidebar.is-collapsed .sidebar-item-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 14px;
+  padding: 0 3px;
+  line-height: 14px;
+  font-size: 9px;
+}
+
+/* ---- Approval Gate card ------------------------------------------------ */
+.wf-gate-port-approved .port-label {
+  color: var(--ok);
+}
+.wf-gate-port-rejected .port-label {
+  color: var(--err);
+}
+.wf-gate-port-timed_out .port-label {
+  color: var(--warn);
+}
+
+/* ---- Approval Gate inspector ------------------------------------------ */
+.gate-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.gate-field-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 110px;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+}
+.gate-field-row .gate-field-template {
+  grid-column: 1 / -1;
+}
+.gate-field-row-foot {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.gate-field-row-foot .gate-field-remove {
+  margin-left: auto;
+}
+.gate-field-maxlen {
+  width: 90px;
+}
+.gate-error {
+  color: var(--err);
+  font-size: var(--fs-xs);
+}
+
+@media (max-width: 880px) {
+  .approval-card {
+    padding: 14px;
+  }
+  .approval-card-when {
+    justify-items: start;
+  }
+  .gate-field-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

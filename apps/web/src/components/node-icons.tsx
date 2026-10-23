@@ -1188,6 +1188,7 @@ const NODE_ICON_MAP: Record<string, NodePaletteIconKey> = {
   execute_workflow: "execute_workflow",
   wait_node: "wait",
   human_approval: "human",
+  approval_gate: "human",
   output: "output",
   helper_chat_response: "response",
   pdf_output: "pdf_output",

@@ -11,6 +11,7 @@ const STUDIO_MODES: StudioMode[] = [
   "templates",
   "variables",
   "executions",
+  "approvals",
   "chat",
   "evaluations",
   "mcp",
