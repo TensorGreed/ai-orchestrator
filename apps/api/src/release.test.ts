@@ -606,7 +606,7 @@ describe("retention", () => {
 });
 
 describe("project authorization on the release routes", () => {
-  const routes = (workflowId: string): Array<["GET" | "POST" | "PUT", string, unknown?, "read" | "write"]> => [
+  const routes = (workflowId: string): Array<["GET" | "POST" | "PUT", string, unknown, "read" | "write"]> => [
     ["GET", `/api/workflows/${workflowId}/release-gate`, undefined, "read"],
     ["GET", `/api/workflows/${workflowId}/releases`, undefined, "read"],
     ["GET", `/api/workflows/${workflowId}/release-state`, undefined, "read"],

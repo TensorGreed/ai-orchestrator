@@ -2723,7 +2723,8 @@ export function createApp(
   };
 
   if (schedulerService) {
-    schedulerService.setWorkflowLoader((workflowId) => productionWorkflow(workflowId));
+    // A scheduler test double that only fires schedules has no loader.
+    schedulerService.setWorkflowLoader?.((workflowId) => productionWorkflow(workflowId));
     schedulerService.setExecutionHandler((input) => executeScheduledWorkflow(input));
     app.addHook("onClose", async () => {
       schedulerService.stop();

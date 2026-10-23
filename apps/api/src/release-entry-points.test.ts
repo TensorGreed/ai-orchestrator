@@ -98,7 +98,7 @@ describe("production entry points load the published version", () => {
   });
 
   it("schedules and app triggers register from the production loader", () => {
-    expect(appSource).toContain("schedulerService.setWorkflowLoader((workflowId) => productionWorkflow(workflowId))");
+    expect(appSource).toContain("schedulerService.setWorkflowLoader?.((workflowId) => productionWorkflow(workflowId))");
     expect(appSource).toContain("triggerService.setWorkflowLoader((workflowId) => productionWorkflow(workflowId))");
     for (const file of ["services/scheduler-service.ts", "services/trigger-service.ts"]) {
       const source = read(file);
