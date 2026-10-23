@@ -447,7 +447,7 @@
 
 .evals-form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
 }
 
@@ -565,6 +565,11 @@ button.evals-row:focus-visible {
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.evals-row-cell .pg-count {
+  height: 18px;
+  min-width: 18px;
 }
 
 .evals-set-row .evals-cell-label,
@@ -687,6 +692,10 @@ button.evals-row:focus-visible {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
   gap: 10px 16px;
+}
+
+.evals-detail-head > .pg-btn {
+  justify-self: start;
 }
 
 .evals-detail-title {

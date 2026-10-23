@@ -124,10 +124,10 @@ function StatusChip({ status, label }: { status: string; label?: string }) {
 
 function ScorerChip({ detail }: { detail: EvalScoreDetail }) {
   return (
-    <span className={`eval-scorer-chip ${detail.pass ? "is-pass" : "is-fail"}`} title={detail.reason}>
+    <span className={`evals-scorer-chip ${detail.pass ? "is-pass" : "is-fail"}`} title={detail.reason}>
       <span aria-hidden="true">{detail.pass ? "✓" : "✗"}</span>
-      <span className="eval-scorer-type">{detail.type}</span>
-      {typeof detail.score === "number" && <span className="eval-scorer-score">{detail.score.toFixed(2)}</span>}
+      <span className="evals-scorer-type">{detail.type}</span>
+      {typeof detail.score === "number" && <span className="evals-scorer-score">{detail.score.toFixed(2)}</span>}
       <span className="sr-only">{detail.pass ? " passed" : " failed"}: {detail.reason}</span>
     </span>
   );
@@ -1014,9 +1014,9 @@ function ReplayJobsView({ workflowNames, activeProjectId, canEdit, openJobId, on
                   </span>
                   <span className="evals-row-cell">
                     <span className="evals-cell-label">Started</span>
-                    <span>
-                      {formatDate(job.startedAt)}
-                      {job.triggeredBy && <span className="evals-row-sub"> by {job.triggeredBy}</span>}
+                    <span className="evals-row-main">
+                      <span>{formatDate(job.startedAt)}</span>
+                      {job.triggeredBy && <span className="evals-row-sub">by {job.triggeredBy}</span>}
                     </span>
                   </span>
                 </button>
@@ -1035,7 +1035,7 @@ function CountChips({ counts }: { counts: ReturnType<typeof jobCounts> }) {
       <span className="evals-count is-pass" title="passed">
         {counts.pass} pass
       </span>
-      <span className="evals-count is-fail" title="failed (regressions)">
+      <span className={`evals-count${counts.fail > 0 ? " is-fail" : ""}`} title="failed (regressions)">
         {counts.fail} fail
       </span>
       {counts.error > 0 && (
