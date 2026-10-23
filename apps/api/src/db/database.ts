@@ -4474,7 +4474,8 @@ export class SqliteStore {
     this.persist();
   }
 
-  markQueueItemFailed(id: string, error: string): void {
+  /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
+  markQueueItemFailed(id: string, error: string, options: { retryable?: boolean } = {}): void {
     const now = new Date().toISOString();
     const row = this.queryOne<ExecutionQueueRow>(
       `SELECT id, workflow_id, workflow_name, payload_json, attempts, max_attempts FROM execution_queue WHERE id = ?`,
@@ -4487,7 +4488,7 @@ export class SqliteStore {
     const attempts = toNumber(row.attempts) + 1;
     const maxAttempts = toNumber(row.max_attempts);
 
-    if (attempts >= maxAttempts) {
+    if (attempts >= maxAttempts || options.retryable === false) {
       // Move to DLQ
       const dlqId = randomUUID();
       this.exec(

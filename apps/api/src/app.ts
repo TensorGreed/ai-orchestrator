@@ -100,7 +100,7 @@ import { CommunityPackageLoader } from "./services/community-package-loader";
 import { EvalService, type EvalWorkflowExecutor, type ScorerSpec } from "./services/eval-service";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
-import { QueueService } from "./services/queue-service";
+import { NonRetryableQueueError, QueueService } from "./services/queue-service";
 import { TriggerService } from "./services/trigger-service";
 import { ApiKeyService } from "./services/api-key-service";
 import { MfaService } from "./services/mfa-service";
@@ -1631,6 +1631,12 @@ export function createApp(
      * over `policyActor` and the owner fallback.
      */
     policySubject?: McpToolPolicySubject;
+    /**
+     * MCP elicitations from this run belong to the workflow, not to
+     * `policyActor`: anyone with workflow:execute on it may answer them.
+     * Set for queued jobs, whose enqueuer is usually not watching.
+     */
+    elicitationsForWorkflow?: boolean;
     executionTimeoutMs?: number;
     customData?: Record<string, unknown>;
     resumeState?: WorkflowExecutionState;
@@ -1743,7 +1749,7 @@ export function createApp(
                   serverName: elicitation.registryServerId ? store.getMcpServer(elicitation.registryServerId)?.name : undefined,
                   toolName: elicitation.toolName,
                   triggerType: input.triggerType,
-                  createdBy: input.policyActor?.id ?? null,
+                  createdBy: input.elicitationsForWorkflow ? null : input.policyActor?.id ?? null,
                   timeoutMs: executionTimeoutMs,
                   signal: runController.signal
                 })
@@ -11037,17 +11043,34 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       }
       // A job a user enqueued runs only if that user may still run the
       // workflow: a revoked membership or a deleted account stops it.
+      // Retrying cannot fix that, so the job goes straight to the DLQ.
       let enqueuedBy: SafeUser | null = null;
       if (payload.enqueuedByUserId) {
         const found = store.getUserById(payload.enqueuedByUserId);
         enqueuedBy = found ? { id: found.id, email: found.email, role: found.role as UserRole } : null;
         if (!enqueuedBy || !runAccess.workflow(enqueuedBy, workflow.id, "workflow:execute").ok) {
-          throw new Error(`The user who queued this run can no longer run workflow ${payload.workflowId}.`);
+          const reason = enqueuedBy ? "no_execute_permission" : "user_not_found";
+          auditService.record({
+            category: "workflow",
+            eventType: "queue.job_refused",
+            action: "execute",
+            outcome: "denied",
+            actor: enqueuedBy ? { userId: enqueuedBy.id, email: enqueuedBy.email, type: "user" } : { userId: payload.enqueuedByUserId, type: "user" },
+            resourceType: "workflow",
+            resourceId: workflow.id,
+            projectId: workflow.projectId ?? DEFAULT_PROJECT_ID,
+            metadata: { executionId: payload.executionId, reason },
+            message: "Queued run refused: the user who queued it may no longer run this workflow."
+          });
+          throw new NonRetryableQueueError(
+            `The user who queued this run can no longer run workflow ${payload.workflowId} (workflow:execute is required).`
+          );
         }
       }
       const startedAt = new Date().toISOString();
       const result = await runWorkflowExecution({
         policyActor: enqueuedBy,
+        elicitationsForWorkflow: true,
         workflow,
         executionId: payload.executionId,
         directInput: payload.input,

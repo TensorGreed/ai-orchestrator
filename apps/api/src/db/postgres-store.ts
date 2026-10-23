@@ -1741,7 +1741,8 @@ export class PostgresStore {
     );
   }
 
-  async markQueueItemFailed(id: string, error: string): Promise<void> {
+  /** Retries with backoff until max attempts; `retryable: false` moves the job to the DLQ now. */
+  async markQueueItemFailed(id: string, error: string, options: { retryable?: boolean } = {}): Promise<void> {
     const now = new Date().toISOString();
     const row = await this.queryOne<{
       id: string;
@@ -1759,7 +1760,7 @@ export class PostgresStore {
     const attempts = toNum(row.attempts) + 1;
     const maxAttempts = toNum(row.max_attempts);
 
-    if (attempts >= maxAttempts) {
+    if (attempts >= maxAttempts || options.retryable === false) {
       const dlqId = randomUUID();
       await this.execute(
         `INSERT INTO execution_queue_dlq (id, original_id, workflow_id, workflow_name, payload_json, attempts, final_error, failed_at, created_at)

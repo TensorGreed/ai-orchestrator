@@ -35,6 +35,18 @@ export function resolveStuckJobTimeoutMs(stuckJobTimeoutMs: number, executionTim
 
 export type ExecutionHandler = (payload: QueuedExecutionPayload) => Promise<void>;
 
+/**
+ * A job that can never succeed by retrying (for example, the user who queued
+ * it may no longer run the workflow). It goes straight to the dead-letter
+ * queue instead of spending its remaining attempts.
+ */
+export class NonRetryableQueueError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonRetryableQueueError";
+  }
+}
+
 export class QueueService {
   private readonly store: SqliteStore;
   private readonly config: Required<QueueServiceConfig>;
@@ -202,7 +214,7 @@ export class QueueService {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[queue] Job ${item.id} failed: ${errorMessage}`);
       try {
-        this.store.markQueueItemFailed(item.id, errorMessage);
+        this.store.markQueueItemFailed(item.id, errorMessage, { retryable: !(error instanceof NonRetryableQueueError) });
       } catch (persistError) {
         console.error("[queue] Failed to mark item as failed", persistError);
       }
