@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { McpOAuthConnectionStatus, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { afterEach, beforeEach, vi } from "vitest";
@@ -164,6 +164,8 @@ describe("McpOAuthPanel", () => {
     vi.resetAllMocks();
   });
   afterEach(() => {
+    // Unmount first: a late effect of a still-mounted page would otherwise call a mock that was just restored.
+    cleanup();
     vi.restoreAllMocks();
   });
 
