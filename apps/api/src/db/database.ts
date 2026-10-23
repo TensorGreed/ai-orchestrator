@@ -7134,6 +7134,11 @@ export class SqliteStore {
     }));
   }
 
+  getEvalFixtureDatasetId(id: string): string | null {
+    const row = this.queryOne<{ dataset_id: string }>(`SELECT dataset_id FROM eval_fixtures WHERE id = ?`, [id]);
+    return row ? toString(row.dataset_id) : null;
+  }
+
   deleteEvalFixture(id: string): boolean {
     this.exec(`DELETE FROM eval_fixtures WHERE id = ?`, [id]);
     const row = this.queryOne<{ count: number }>("SELECT changes() as count");
@@ -7181,7 +7186,7 @@ export class SqliteStore {
     this.persist();
   }
 
-  listEvalRuns(options: { datasetId?: string; workflowId?: string; limit?: number } = {}): Array<{
+  listEvalRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; limit?: number } = {}): Array<{
     id: string; datasetId: string; workflowId: string; workflowName: string | null;
     status: string; startedAt: string; completedAt: string | null;
     triggeredBy: string | null; summary: Record<string, unknown> | null; error: string | null;
@@ -7190,6 +7195,11 @@ export class SqliteStore {
     const params: BindParams = [];
     if (options.datasetId) { clauses.push("dataset_id = ?"); params.push(options.datasetId); }
     if (options.workflowId) { clauses.push("workflow_id = ?"); params.push(options.workflowId); }
+    // Project scope: only runs of these workflows (an empty list matches nothing).
+    if (options.workflowIds) {
+      clauses.push(options.workflowIds.length > 0 ? `workflow_id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");
+      params.push(...options.workflowIds);
+    }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const limit = Math.max(1, Math.min(500, options.limit ?? 100));
     const rows = this.queryAll<{
@@ -9405,6 +9415,11 @@ export class SqliteStore {
   } {
     const where: string[] = [];
     const params: Array<string | number> = [];
+    // Project scope: only cassettes of these workflows (an empty list matches nothing).
+    if (options.workflowIds) {
+      where.push(options.workflowIds.length > 0 ? `workflow_id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");
+      params.push(...options.workflowIds);
+    }
     // Project scope: only cassettes of these workflows (an empty list matches nothing).
     if (options.workflowIds) {
       where.push(options.workflowIds.length > 0 ? `workflow_id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");

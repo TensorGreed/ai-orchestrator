@@ -301,9 +301,10 @@ describe("eval runs against cassettes", () => {
     expect((await call(context, "POST", "/api/eval/runs", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", record: true, replay: { evalRunId: recordedRunId } })).statusCode).toBe(400);
     expect((await call(context, "POST", "/api/eval/runs", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", replay: {} })).statusCode).toBe(400);
     expect((await call(context, "POST", "/api/eval/runs", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", replay: { cassetteId: "nope" } })).statusCode).toBe(404);
-    // A run that recorded nothing leaves each fixture with an error.
-    const empty = await call(context, "POST", "/api/eval/runs", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", replay: { evalRunId: "run_missing" } });
-    expect(empty.json<{ summary: { error: number } }>().summary.error).toBe(2);
+    // Replaying from an eval run that does not exist is refused up front.
+    const missing = await call(context, "POST", "/api/eval/runs", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", replay: { evalRunId: "run_missing" } });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ error: "Eval run not found" });
   }, 30_000);
 });
 
