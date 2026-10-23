@@ -20,6 +20,7 @@ import { SqliteStore } from "./db/database.js";
 import { createRunAccess } from "./run-access.js";
 import { AuthService, type SafeUser } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
+import { strictIsolationStartupWarning } from "./services/rbac-service.js";
 import type { SchedulerService } from "./services/scheduler-service.js";
 
 type SchedulerExecutionHandler = Parameters<SchedulerService["setExecutionHandler"]>[0];
@@ -646,7 +647,7 @@ describe("project authorization: sub-workflows at run time (H3)", () => {
     expect(run.json<{ status: string; error: string }>()).toMatchObject({ status: "error", error: expect.stringContaining("is in another project") });
   });
 
-  it("same project, execute shares and a run user who may execute the child all work", async () => {
+  it("same project and execute shares work; another project the run's user may run does not", async () => {
     const { context, admin, builder } = await seed();
     context.store.upsertWorkflow(childWorkflow("wf-same", "default", "same-project-output"));
     context.store.upsertWorkflow(callerWorkflow("wf-call-same", "default", "wf-same"));
@@ -660,11 +661,48 @@ describe("project authorization: sub-workflows at run time (H3)", () => {
     expect((await call(context, "POST", "/api/workflows/wf-shared-child/shares", admin.cookie, { projectId: "default", accessLevel: "execute" })).statusCode).toBe(200);
     expect((await call(context, "POST", "/api/workflows/wf-call-shared/execute", builder.cookie, {})).body).toContain("shared-child-output");
 
-    // Another project the run's user may run: allowed when a user started the run.
+    // Another project the run's user may run: only the projects decide, so it is refused (N1).
     context.store.upsertProject({ id: "p2", name: "p2" });
     context.store.upsertWorkflow(childWorkflow("wf-p2-child", "p2", "p2-output"));
     context.store.upsertWorkflow(callerWorkflow("wf-call-p2", "default", "wf-p2-child"));
-    expect((await call(context, "POST", "/api/workflows/wf-call-p2/execute", builder.cookie, {})).body).toContain("p2-output");
+    const crossProject = await call(context, "POST", "/api/workflows/wf-call-p2/execute", builder.cookie, {});
+    expect(crossProject.body).not.toContain("p2-output");
+    expect(crossProject.json<{ status: string; error: string }>()).toMatchObject({ status: "error", error: expect.stringContaining("is in another project") });
+  });
+
+  it("an admin approving a builder's paused run does not let it call another project (N1)", async () => {
+    const { context, admin, builder } = await seed();
+    context.store.upsertWorkflow(childWorkflow("wf-secret", "hidden", "hidden-project-secret-output"));
+    const gated = callerWorkflow("wf-gated", "default", "wf-secret");
+    gated.nodes.splice(1, 0, { id: "gate", type: "human_approval", name: "Gate", position: { x: 100, y: 0 }, config: { approvalMessage: "ok?", timeoutMinutes: 60 } });
+    gated.edges = [
+      { id: "e0", source: "start", target: "gate" },
+      { id: "e1", source: "gate", target: "sub" },
+      { id: "e2", source: "sub", target: "out" }
+    ];
+    expect((await call(context, "POST", "/api/workflows", builder.cookie, gated)).statusCode).toBe(200);
+    const run = (await call(context, "POST", "/api/workflows/wf-gated/execute", builder.cookie, {})).json<{ status: string; executionId: string }>();
+    expect(run.status).toBe("waiting_approval");
+    const approved = await call(context, "POST", `/api/approvals/${run.executionId}/approve`, admin.cookie, {});
+    // A failed run answers 400 with the run's result.
+    expect(approved.statusCode).toBe(400);
+    expect(approved.body).not.toContain("hidden-project-secret-output");
+    expect(approved.json<{ status: string; error: string }>()).toMatchObject({ status: "error", error: expect.stringContaining("is in another project") });
+    const detail = await call(context, "GET", `/api/executions/${run.executionId}`, builder.cookie);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.body).not.toContain("hidden-project-secret-output");
+  });
+
+  it("an admin retrying a builder's failed run does not let it call another project (N1)", async () => {
+    const { context, admin, builder } = await seed();
+    context.store.upsertWorkflow(childWorkflow("wf-secret", "hidden", "hidden-project-secret-output"));
+    expect((await call(context, "POST", "/api/workflows", builder.cookie, callerWorkflow("wf-plain", "default", "wf-secret"))).statusCode).toBe(200);
+    const first = (await call(context, "POST", "/api/workflows/wf-plain/execute", builder.cookie, {})).json<{ executionId: string; status: string }>();
+    expect(first.status).toBe("error");
+    const retry = await call(context, "POST", `/api/executions/${first.executionId}/retry`, admin.cookie, {});
+    expect(retry.statusCode).toBe(400);
+    expect(retry.body).not.toContain("hidden-project-secret-output");
+    expect(retry.json<{ status: string; error: string }>()).toMatchObject({ status: "error", error: expect.stringContaining("is in another project") });
   });
 
   it("a run with no user (webhook) only reaches its own project's sub-workflows", async () => {
@@ -750,7 +788,10 @@ describe("project authorization: lists, deletes and elicitations (M2, M3, M4)", 
     context.store.enqueueExecution({ id: "job-reuse", workflowId: "wf-reuse", payload: {}, maxAttempts: 1 });
     context.store.markQueueItemFailed("job-reuse", "boom");
     context.store.createEvalRun({ id: "er-reuse", datasetId: "ds", workflowId: "wf-reuse" });
-    context.store.saveSessionMemory("wf-reuse:agent", "s1", [{ role: "user", content: "old memory" }]);
+    context.store.saveSessionMemory("wf-reuse:out", "s1", [{ role: "user", content: "old memory" }]);
+    // Another workflow whose id extends the deleted one's: its legacy rows stay (N5).
+    context.store.upsertWorkflow(simpleWorkflow("wf-reuse:x", "hidden"));
+    context.store.saveSessionMemory("wf-reuse:x:out", "s1", [{ role: "user", content: "other workflow" }]);
     expect((await call(context, "DELETE", "/api/workflows/wf-reuse", admin.cookie)).statusCode).toBe(200);
 
     expect((await call(context, "POST", "/api/workflows", builder.cookie, simpleWorkflow("wf-reuse", "default"))).statusCode).toBe(200);
@@ -759,7 +800,8 @@ describe("project authorization: lists, deletes and elicitations (M2, M3, M4)", 
     expect(context.store.listWorkflowShares("wf-reuse")).toEqual([]);
     expect(context.store.listDlqItems(50, ["wf-reuse"])).toEqual([]);
     expect(context.store.listEvalRuns({ workflowId: "wf-reuse" })).toEqual([]);
-    expect(context.store.loadSessionMemory("wf-reuse:agent", "s1")).toEqual([]);
+    expect(context.store.loadSessionMemory("wf-reuse:out", "s1")).toEqual([]);
+    expect(context.store.loadSessionMemory("wf-reuse:x:out", "s1")).toEqual([{ role: "user", content: "other workflow" }]);
   });
 
   it("elicitations are listed, read and answered only within readable projects", async () => {
@@ -935,6 +977,16 @@ describe("project authorization: isolation mode (M7)", () => {
     expect((await call(context, "GET", "/api/projects", builder.cookie)).json<{ projects: Array<{ id: string }> }>().projects.map((project) => project.id)).toContain(created.id);
   });
 
+  it("strict with no memberships at all warns at startup that only admins can see anything (N9)", async () => {
+    expect(strictIsolationStartupWarning("strict", 0)).toContain("only admins can see anything");
+    expect(strictIsolationStartupWarning("strict", 1)).toBeNull();
+    expect(strictIsolationStartupWarning("role", 0)).toBeNull();
+    const context = await createTestContext({ env: { PROJECT_ISOLATION: "strict" } });
+    expect(context.store.countProjectMemberships()).toBe(0);
+    context.store.upsertProjectRole({ userId: "u1", projectId: "default", role: "viewer" });
+    expect(context.store.countProjectMemberships()).toBe(1);
+  });
+
   it("role (default): a user with no membership keeps their global role", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
@@ -1081,5 +1133,212 @@ describe("project authorization: queued runs (L7)", () => {
     await waitFor(() => context.store.listDlqItems(50).some((item) => item.workflowId === "wf-hidden"));
     expect(context.store.listDlqItems(50).find((item) => item.workflowId === "wf-hidden")!.finalError).toContain("can no longer run");
     expect(context.store.getExecutionHistory(executionId)).toBeFalsy();
+  });
+});
+
+/** An HTTP server that records the Authorization header of every request. */
+async function withEcho<T>(fn: (port: number, seen: string[]) => Promise<T>): Promise<T> {
+  const seen: string[] = [];
+  const server = http.createServer((request, response) => {
+    seen.push(String(request.headers.authorization ?? ""));
+    response.setHeader("content-type", "application/json");
+    response.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    return await fn((server.address() as { port: number }).port, seen);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/** Manual trigger → HTTP Request sending `secretId` as a bearer token to the echo server → output. */
+function secretWorkflow(id: string, projectId: string, port: number, secretId: string): Workflow {
+  return {
+    id,
+    name: id,
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    projectId,
+    nodes: [
+      { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+      { id: "req", type: "http_request", name: "Req", position: { x: 200, y: 0 }, config: { method: "GET", urlTemplate: `http://127.0.0.1:${port}/`, secretRef: { secretId } } },
+      { id: "out", type: "output", name: "Out", position: { x: 400, y: 0 }, config: {} }
+    ],
+    edges: [
+      { id: "e1", source: "start", target: "req" },
+      { id: "e2", source: "req", target: "out" }
+    ]
+  };
+}
+
+describe("project authorization: default-project secrets and isolation (N2)", () => {
+  it("strict: a default-project secret reaches another project's runs only once it is shared there", async () => {
+    const context = await createTestContext({ env: { PROJECT_ISOLATION: "strict" } });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    context.store.upsertProject({ id: "x", name: "x" });
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "x", role: "editor" });
+    const adminSecret = context.secretService.createSecret({ name: "prod-db", provider: "custom", value: "admin-only-token" }).secretId;
+    await withEcho(async (port, seen) => {
+      expect((await call(context, "POST", "/api/workflows", builder.cookie, secretWorkflow("wf-x", "x", port, adminSecret))).statusCode).toBe(200);
+      const refused = await call(context, "POST", "/api/workflows/wf-x/execute", builder.cookie, {});
+      expect(refused.json<{ status: string; error: string }>()).toMatchObject({ status: "error", error: expect.stringContaining("belongs to another project") });
+      expect(seen).toEqual([]);
+      expect((await call(context, "GET", "/api/secrets", builder.cookie)).body).not.toContain("prod-db");
+      // The one-time admin step: share the default secret to the project that uses it.
+      expect((await call(context, "POST", `/api/secrets/${adminSecret}/shares`, admin.cookie, { projectId: "x" })).statusCode).toBe(200);
+      expect((await call(context, "POST", "/api/workflows/wf-x/execute", builder.cookie, {})).json<{ status: string }>().status).toBe("success");
+      expect(seen).toEqual(["Bearer admin-only-token"]);
+    });
+  });
+
+  it("role (default): default-project secrets stay usable from every project", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    context.store.upsertProject({ id: "x", name: "x" });
+    const openSecret = context.secretService.createSecret({ name: "shared", provider: "custom", value: "shared-token" }).secretId;
+    await withEcho(async (port, seen) => {
+      context.store.upsertWorkflow(secretWorkflow("wf-x", "x", port, openSecret));
+      expect((await call(context, "POST", "/api/workflows/wf-x/execute", builder.cookie, {})).json<{ status: string }>().status).toBe("success");
+      expect(seen).toEqual(["Bearer shared-token"]);
+    });
+  });
+
+  it("creating a secret: the given project is used, and a default-project save by default carries a warning", async () => {
+    const role = await createTestContext();
+    const roleBuilder = await login(role, "builder");
+    role.store.upsertProject({ id: "x", name: "x" });
+    const defaulted = await call(role, "POST", "/api/secrets", roleBuilder.cookie, { name: "a", provider: "custom", value: "value-a-1234" });
+    expect(defaulted.statusCode).toBe(200);
+    expect(defaulted.json<{ projectId: string; warnings: string[] }>()).toMatchObject({ projectId: "default", warnings: [expect.stringContaining("every project can use")] });
+    const placed = await call(role, "POST", "/api/secrets", roleBuilder.cookie, { name: "b", provider: "custom", value: "value-b-1234", projectId: "x" });
+    expect(placed.json<{ projectId: string; warnings: string[] }>()).toMatchObject({ projectId: "x", warnings: [] });
+
+    const strict = await createTestContext({ env: { PROJECT_ISOLATION: "strict" } });
+    const strictBuilder = await login(strict, "builder");
+    strict.store.upsertProject({ id: "x", name: "x" });
+    strict.store.upsertProjectRole({ userId: strictBuilder.id, projectId: "x", role: "project_admin" });
+    // The UI now sends the project: saved there. Without it, the default project needs a membership.
+    expect((await call(strict, "POST", "/api/secrets", strictBuilder.cookie, { name: "c", provider: "custom", value: "value-c-1234", projectId: "x" })).json<{ projectId: string }>().projectId).toBe("x");
+    expect((await call(strict, "POST", "/api/secrets", strictBuilder.cookie, { name: "d", provider: "custom", value: "value-d-1234" })).statusCode).toBe(403);
+  });
+});
+
+describe("project authorization: renaming and deleting projects (N3)", () => {
+  it("needs project:manage: an editor gets 403, a locked-out user 404", async () => {
+    const { context, builder, viewer } = await seed();
+    context.store.upsertProject({ id: "fin", name: "fin" });
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "fin", role: "editor" });
+    lockOut(context, viewer.id, "fin");
+    context.store.upsertWorkflow(simpleWorkflow("wf-fin", "fin"));
+    expect((await call(context, "DELETE", "/api/projects/fin", builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "PUT", "/api/projects/fin", builder.cookie, { name: "renamed" })).statusCode).toBe(403);
+    expect((await call(context, "POST", "/api/projects", builder.cookie, { id: "fin", name: "renamed" })).statusCode).toBe(403);
+    expect((await call(context, "DELETE", "/api/projects/fin", viewer.cookie)).statusCode).toBe(403);
+    expect(context.store.getProject("fin")!.name).toBe("fin");
+    // The project's workflow stayed where it was: the locked-out viewer still cannot read it.
+    expect((await call(context, "GET", "/api/workflows/wf-fin", viewer.cookie)).statusCode).toBe(404);
+  });
+
+  it("a project with workflows or secrets is not deleted; an empty one takes its memberships, roles and shares with it", async () => {
+    const { context, admin, builder, viewer } = await seed();
+    context.store.upsertProject({ id: "fin", name: "fin" });
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "fin", role: "project_admin" });
+    lockOut(context, viewer.id, "fin");
+    context.store.upsertWorkflow(simpleWorkflow("wf-fin", "fin"));
+    const finSecret = context.secretService.createSecret({ name: "fin-bank-key", provider: "custom", value: "bank", projectId: "fin" }).secretId;
+    const refused = await call(context, "DELETE", "/api/projects/fin", builder.cookie);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toEqual({ error: "Move or delete this project's workflows and secrets first.", workflows: 1, secrets: 1 });
+    expect(context.store.getWorkflow("wf-fin")!.projectId).toBe("fin");
+    expect(context.store.getSecret(finSecret)!.projectId).toBe("fin");
+    expect((await call(context, "GET", "/api/workflows/wf-fin", viewer.cookie)).statusCode).toBe(404);
+
+    // Shares into the project, from elsewhere, go with it too.
+    context.store.upsertWorkflowShare({ workflowId: "wf-open", projectId: "fin", accessLevel: "execute" });
+    const openSecret = context.secretService.createSecret({ name: "open", provider: "custom", value: "v" }).secretId;
+    context.store.upsertSecretShare({ secretId: openSecret, projectId: "fin" });
+    expect((await call(context, "DELETE", "/api/workflows/wf-fin", builder.cookie)).statusCode).toBe(200);
+    expect((await call(context, "DELETE", `/api/secrets/${finSecret}`, builder.cookie)).statusCode).toBe(200);
+    expect((await call(context, "DELETE", "/api/projects/fin", builder.cookie)).statusCode).toBe(200);
+    expect(context.store.listProjectMembers("fin")).toEqual([]);
+    expect(context.store.getCustomRole("none-fin")).toBeFalsy();
+    expect(context.store.listWorkflowsSharedToProject("fin")).toEqual([]);
+    expect(context.store.listSecretsSharedToProject("fin")).toEqual([]);
+
+    // Re-creating the id grants nothing from before.
+    expect((await call(context, "POST", "/api/projects", admin.cookie, { id: "fin", name: "fin again" })).statusCode).toBe(200);
+    expect(context.store.listProjectMembers("fin")).toEqual([]);
+  });
+
+  it("role (default): a builder with no membership in a project can still rename and delete it", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const created = (await call(context, "POST", "/api/projects", builder.cookie, { name: "scratch" })).json<{ id: string }>();
+    expect((await call(context, "PUT", `/api/projects/${created.id}`, builder.cookie, { name: "renamed" })).statusCode).toBe(200);
+    expect((await call(context, "DELETE", `/api/projects/${created.id}`, builder.cookie)).statusCode).toBe(200);
+  });
+});
+
+describe("project authorization: execute shares (N4, N10)", () => {
+  it("strict: a consumer-project editor runs an execute-shared workflow that uses its owner's secret, directly and as a sub-workflow", async () => {
+    const context = await createTestContext({ env: { PROJECT_ISOLATION: "strict" } });
+    const admin = await login(context, "admin");
+    const editor = await login(context, "builder", "consumer-editor");
+    const consumerViewer = await login(context, "builder", "consumer-viewer");
+    context.store.upsertProject({ id: "owner", name: "owner" });
+    context.store.upsertProject({ id: "consumer", name: "consumer" });
+    context.store.upsertProjectRole({ userId: editor.id, projectId: "consumer", role: "editor" });
+    context.store.upsertProjectRole({ userId: consumerViewer.id, projectId: "consumer", role: "viewer" });
+    const ownerSecret = context.secretService.createSecret({ name: "owner-s", provider: "custom", value: "owner-token", projectId: "owner" }).secretId;
+    await withEcho(async (port, seen) => {
+      context.store.upsertWorkflow(secretWorkflow("wf-owned", "owner", port, ownerSecret));
+      expect((await call(context, "POST", "/api/workflows/wf-owned/shares", admin.cookie, { projectId: "consumer", accessLevel: "execute" })).statusCode).toBe(200);
+      expect((await call(context, "POST", "/api/workflows/wf-owned/execute", editor.cookie, {})).json<{ status: string }>().status).toBe("success");
+      context.store.upsertWorkflow(callerWorkflow("wf-cons", "consumer", "wf-owned"));
+      expect((await call(context, "POST", "/api/workflows/wf-cons/execute", editor.cookie, {})).json<{ status: string }>().status).toBe("success");
+      expect(seen).toEqual(["Bearer owner-token", "Bearer owner-token"]);
+      // A viewer of the consumer project can see the shared workflow but not run it.
+      expect((await call(context, "GET", "/api/workflows/wf-owned", consumerViewer.cookie)).statusCode).toBe(200);
+      expect((await call(context, "POST", "/api/workflows/wf-owned/execute", consumerViewer.cookie, {})).statusCode).toBe(403);
+      expect(seen).toHaveLength(2);
+    });
+  });
+
+  it("role: a viewer member of the target project cannot run through an execute share; an editor can", async () => {
+    const { context, admin, builder, viewer } = await seed();
+    // builder and viewer have viewer memberships in "ro"; share wf-hidden there with execute.
+    expect((await call(context, "POST", "/api/workflows/wf-hidden/shares", admin.cookie, { projectId: "ro", accessLevel: "execute" })).statusCode).toBe(200);
+    expect((await call(context, "GET", "/api/workflows/wf-hidden", builder.cookie)).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows/wf-hidden/execute", builder.cookie, {})).statusCode).toBe(403);
+    expect((await call(context, "POST", "/api/workflows/wf-hidden/execute", viewer.cookie, {})).statusCode).toBe(403);
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "ro", role: "editor" });
+    expect((await call(context, "POST", "/api/workflows/wf-hidden/execute", builder.cookie, {})).statusCode).toBe(200);
+  });
+});
+
+describe("project authorization: templates need write on the source (N7)", () => {
+  it("a read-only member cannot publish a project workflow as a template; an editor can", async () => {
+    const { context, builder } = await seed();
+    expect((await call(context, "POST", "/api/templates", builder.cookie, { name: "t", workflowId: "wf-ro" })).statusCode).toBe(403);
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "ro", role: "editor" });
+    expect((await call(context, "POST", "/api/templates", builder.cookie, { name: "t", workflowId: "wf-ro" })).statusCode).toBe(200);
+  });
+});
+
+describe("project authorization: refused queued jobs (N6)", () => {
+  it("a job whose user lost access goes straight to the dead-letter queue, with an audit event", async () => {
+    const { context, builder } = await seed({ queuePollMs: 20 });
+    context.store.enqueueExecution({ id: "job-refused", workflowId: "wf-hidden", payload: { workflowId: "wf-hidden", executionId: "exec-refused", enqueuedByUserId: builder.id }, maxAttempts: 3 });
+    for (let attempt = 0; attempt < 200 && !context.store.listDlqItems(50).some((item) => item.originalId === "job-refused"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const dead = context.store.listDlqItems(50).find((item) => item.originalId === "job-refused")!;
+    expect(dead).toMatchObject({ attempts: 1, finalError: expect.stringContaining("can no longer run workflow wf-hidden") });
+    const refusal = context.store.listAuditLogs({ eventType: "queue.job_refused", pageSize: 10 }).items;
+    expect(refusal).toHaveLength(1);
+    expect(refusal[0]).toMatchObject({ category: "workflow", outcome: "denied", resourceId: "wf-hidden" });
+    expect(context.store.getExecutionHistory("exec-refused")).toBeFalsy();
   });
 });

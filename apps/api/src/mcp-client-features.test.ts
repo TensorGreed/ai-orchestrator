@@ -21,6 +21,7 @@ import { MIGRATIONS } from "./db/migrations.js";
 import { AuthService } from "./services/auth-service.js";
 import { McpElicitationService } from "./services/mcp-elicitation-service.js";
 import { McpProbeService } from "./services/mcp-probe-service.js";
+import { QueueService } from "./services/queue-service.js";
 import { extractMcpToolCalls, rollupMcpToolCalls } from "./services/mcp-tool-telemetry.js";
 import { SecretService } from "./services/secret-service.js";
 
@@ -35,7 +36,7 @@ interface TestContext {
 
 const contexts: TestContext[] = [];
 
-async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
+async function createTestContext(overrides: Record<string, string> = {}, options: { queuePollMs?: number } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-mcp-features-"));
   const store = await SqliteStore.create(path.join(tempDir, "orchestrator.db"));
   store.ensureDefaultProject();
@@ -51,7 +52,8 @@ async function createTestContext(overrides: Record<string, string> = {}): Promis
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = createApp(config, store, secretService, authService);
+  const queueService = options.queuePollMs ? new QueueService(store, { pollIntervalMs: options.queuePollMs }) : undefined;
+  const app = createApp(config, store, secretService, authService, undefined, queueService);
   await app.ready();
   const context = { app, store, authService, secretService, config, tempDir };
   contexts.push(context);
@@ -319,6 +321,24 @@ describe("resource read and prompt get endpoints", () => {
     expect((await call(context, "POST", "/api/mcp/policies/evaluate", admin.cookie, { role: "builder", serverId, toolName: "mock://kb/index.json" })).json<{ ruleName: string | null }>().ruleName).toBe("All tools");
   });
 
+  it("a registry server with a project is usable only from that project's workflows", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    context.store.upsertProject({ id: "pb", name: "pb" });
+    const serverId = await registerMockServer(context, admin.cookie, { projectId: "pb" });
+    const elsewhere = directWorkflow("wf-elsewhere", serverId, { toolName: "get_current_time" });
+    expect((await call(context, "POST", "/api/workflows", admin.cookie, elsewhere)).statusCode).toBe(200);
+    const refused = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-elsewhere", payload: {} });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.body).toContain(`MCP server '${serverId}' belongs to another project`);
+    const inProject = { ...directWorkflow("wf-in-pb", serverId, { toolName: "get_current_time" }), projectId: "pb" };
+    expect((await call(context, "POST", "/api/workflows", admin.cookie, inProject)).statusCode).toBe(200);
+    const allowed = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-in-pb", payload: {} });
+    expect(allowed.statusCode).toBe(200);
+    const run = context.store.listExecutionHistory({ workflowId: "wf-in-pb", pageSize: 5 }).items[0];
+    expect(run?.status).toBe("success");
+  });
+
   it("MCP Tool nodes read resources in a run", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
@@ -406,6 +426,27 @@ describe("elicitation", () => {
     const accepted = audits.find((entry) => entry.eventType === "mcp_elicitation.accepted")!;
     expect(JSON.stringify(accepted.metadata)).not.toContain("\"eu\"");
     expect(JSON.stringify(accepted.metadata)).toContain("\"fields\":[\"answer\"]");
+  });
+
+  it("a queued run's request belongs to the workflow: anyone who may run it can answer", async () => {
+    const context = await createTestContext({}, { queuePollMs: 20 });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const other = await login(context, "builder", "other");
+    const viewer = await login(context, "viewer");
+    const serverId = await registerMockServer(context, admin.cookie);
+    await call(context, "POST", "/api/workflows", builder.cookie, askWorkflow("wf-queued-ask", serverId));
+    // An attended trigger type, so the request waits for a person instead of being declined.
+    const queued = await call(context, "POST", "/api/workflows/wf-queued-ask/enqueue", builder.cookie, { triggerType: "manual" });
+    expect(queued.statusCode).toBeLessThan(300);
+    const pending = await waitFor(() => context.store.listMcpElicitations({ status: "pending" })[0]);
+    expect(pending).toMatchObject({ workflowId: "wf-queued-ask", createdBy: null });
+    // Another builder who may run the workflow sees it and answers it; a viewer sees it but cannot answer.
+    expect((await call(context, "GET", "/api/mcp/elicitations", other.cookie)).json<{ items: McpElicitationView[] }>().items.map((item) => item.id)).toEqual([pending.id]);
+    expect((await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, viewer.cookie, { action: "decline" })).statusCode).toBe(403);
+    const answered = await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, other.cookie, { action: "accept", content: { answer: "us" } });
+    expect(answered.statusCode).toBe(200);
+    expect(answered.json<{ elicitation: McpElicitationView }>().elicitation).toMatchObject({ status: "accepted", answeredBy: other.email });
   });
 
   it("declines automatically for unattended runs, with a trace entry, and refuses credential-looking schemas", async () => {
