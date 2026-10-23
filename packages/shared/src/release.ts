@@ -225,6 +225,13 @@ export interface ReleaseGateJob {
   mcpMode?: string | null;
   /** The job made (or was allowed to make) live write calls: never acceptable for a gate. */
   liveWrites: boolean;
+  /**
+   * Options or overrides the job ran with that the gate's own candidate
+   * options do not specify (a guard profile, MCP mode or model override,
+   * an unknown field). Such a job carries the version's hash without having
+   * tested it as it ships, so it is no proof.
+   */
+  overrides?: string[];
 }
 
 export interface ReleaseGateEvidence {
@@ -365,6 +372,9 @@ export function judgeReleaseGate(
     reasons.push(`The gate replays MCP calls strictly; job ${job.id} used ${job.mcpMode}.`);
   }
   if (job.liveWrites) reasons.push(`Replay job ${job.id} allowed live write calls, which a gate run never may.`);
+  if (job.overrides && job.overrides.length > 0) {
+    reasons.push(`Replay job ${job.id} ran with settings the gate does not specify (${job.overrides.join(", ")}), so it does not test the version as it ships.`);
+  }
 
   const stats = statsOf(evidence, policy, now);
   if (stats.cases < policy.minCases) reasons.push(`Only ${stats.cases} case${stats.cases === 1 ? "" : "s"} judged; the gate needs at least ${policy.minCases}.`);

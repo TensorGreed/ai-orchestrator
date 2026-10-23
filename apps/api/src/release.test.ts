@@ -352,6 +352,54 @@ describe("the release gate", () => {
     expect((await call(context, "POST", "/api/workflows/wf-jobs/publish", builder.cookie, { version: 99 })).statusCode).toBe(404);
   });
 
+  it("a job counts as proof only with no settings beyond the gate's own candidate options", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const version = save(context, hookWorkflow("wf-ovr", "x"));
+    await enableGate(context, builder.cookie, "wf-ovr");
+    const hash = await versionHash(context, builder.cookie, "wf-ovr", version);
+    const job = (extra: { options?: Record<string, unknown>; candidate?: Record<string, unknown> } = {}) => {
+      const id = seedJob(context, { workflowId: "wf-ovr", datasetIds: ["set-wf-ovr"], version, hash, statuses: ["pass", "pass", "pass"], ...(extra.options ? { options: extra.options } : {}) });
+      if (extra.candidate) {
+        const db = (context.store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => void } } }).db;
+        db.prepare("UPDATE eval_runs SET candidate_json = ? WHERE id = ?").run(JSON.stringify({ kind: "version", version, workflowHash: hash, ...extra.candidate }), id);
+      }
+      return id;
+    };
+    const verdictOf = async (runId: string) => {
+      const response = await call(context, "GET", `/api/workflows/wf-ovr/publish-preview?version=${version}&replayRunId=${runId}`, builder.cookie);
+      expect(response.statusCode, response.body).toBe(200);
+      return response.json<{ preview: { verdict: string; reasons: string[] } }>().preview;
+    };
+    // Overrides that keep the version's hash: a weaker guard profile, live reads, a model swap, looser comparison, or a field this release does not know.
+    for (const [extra, pattern] of [
+      [{ options: { overrides: { guardProfiles: { g1: "permissive" } } } }, /overrides \(guardProfiles\)/],
+      [{ candidate: { overrides: { mcpServers: { srv: "live_read_only" } } } }, /candidate overrides \(mcpServers\)/],
+      [{ options: { models: "replay" } }, /models replay/],
+      [{ options: { ignorePaths: ["$.answer"] } }, /ignorePaths/],
+      [{ options: { numberTolerance: 0.5 } }, /numberTolerance/],
+      [{ options: { repeats: 3, aggregate: "any" } }, /repeats 3, aggregate any/],
+      [{ options: { somethingNew: true } }, /somethingNew/]
+    ] as Array<[{ options?: Record<string, unknown>; candidate?: Record<string, unknown> }, RegExp]>) {
+      const preview = await verdictOf(job(extra));
+      expect(preview.verdict, JSON.stringify(extra)).toBe("blocked");
+      expect(preview.reasons.join("\n"), JSON.stringify(extra)).toMatch(pattern);
+    }
+    // A plain job (no override fields, empty ones, models live, the budget) is proof.
+    expect((await verdictOf(job({ options: { overrides: {}, models: "live", maxCostUsd: 2 } }))).verdict).toBe("passed");
+    // Options the gate itself names count when they match it.
+    await enableGate(context, builder.cookie, "wf-ovr", { candidateOptions: { mcpMode: "strict", compare: "baseline_rerun", repeats: 3, aggregate: "majority" } });
+    expect((await verdictOf(job({ options: { compare: "baseline_rerun", repeats: 3, aggregate: "majority" } }))).verdict).toBe("passed");
+    expect((await verdictOf(job({ options: { compare: "recording", repeats: 3, aggregate: "majority" } }))).reasons.join()).toMatch(/compare recording/);
+    // Publishing without naming a job skips disqualified ones and finds no proof among them.
+    const fresh = save(context, hookWorkflow("wf-ovr", "y"));
+    const freshHash = await versionHash(context, builder.cookie, "wf-ovr", fresh);
+    seedJob(context, { workflowId: "wf-ovr", datasetIds: ["set-wf-ovr"], version: fresh, hash: freshHash, statuses: ["pass", "pass", "pass"], options: { compare: "baseline_rerun", repeats: 3, aggregate: "majority", overrides: { guardProfiles: { g1: "off" } } } });
+    const refused = await call(context, "POST", "/api/workflows/wf-ovr/publish", builder.cookie, { version: fresh });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json<{ reasons: string[] }>().reasons.join()).toMatch(/guardProfiles/);
+  });
+
   it("an enforced gate cannot be disabled or loosened by a builder", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");

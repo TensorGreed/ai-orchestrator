@@ -65,6 +65,14 @@ describe("judgeReleaseGate", () => {
     expect(judged.reasons.join("\n")).toMatch(/strictly/);
   });
 
+  it("refuses a job that ran with overrides the gate does not specify", () => {
+    const cases = [passing("c1"), passing("c2"), passing("c3")];
+    const judged = judgeReleaseGate(evidence(cases, { overrides: ["overrides (guardProfiles)"] }), policy(), { expected, now: NOW });
+    expect(judged.verdict).toBe("blocked");
+    expect(judged.reasons.join("\n")).toMatch(/settings the gate does not specify \(overrides \(guardProfiles\)\)/);
+    expect(judgeReleaseGate(evidence(cases, { overrides: [] }), policy(), { expected, now: NOW }).verdict).toBe("passed");
+  });
+
   it("counts regressions, pass rate and minimum cases", () => {
     const cases = [passing("c1"), { ...passing("c2"), status: "fail" as const }, { ...passing("c3"), status: "error" as const }];
     const strict = judgeReleaseGate(evidence(cases), policy(), { expected, now: NOW });

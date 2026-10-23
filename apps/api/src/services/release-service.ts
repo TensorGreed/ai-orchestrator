@@ -49,6 +49,7 @@ import {
   type EvalRunView,
   type ReleaseApprovalRequestView,
   type ReleaseApprovers,
+  type ReleaseCandidateOptions,
   type ReleaseAggregateMode,
   type ReleaseCaseStatus,
   type ReleaseChannel,
@@ -146,6 +147,57 @@ export function replayJobAllowsLiveWrites(run: Pick<EvalRunView, "options" | "ca
     }
   }
   return false;
+}
+
+/** Candidate fields a plain job carries; `workflow` is an inline candidate, whose content the hash covers. */
+const PLAIN_CANDIDATE_KEYS = new Set(["kind", "version", "workflowHash", "workflow"]);
+/** Job options that do not change what is tested (the budget), or that the gate's candidate options name. */
+const NEUTRAL_OPTION_KEYS = new Set(["maxCostUsd"]);
+const GATE_OPTION_DEFAULTS: Record<string, unknown> = { compare: "recording", repeats: 1, aggregate: "all", models: "live" };
+
+function isEmptyValue(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length === 0;
+  return false;
+}
+
+/**
+ * Phase 15.4 — what a replay job ran with beyond the gate's own candidate
+ * options. Guard-profile, MCP-mode and live-read overrides do not change a
+ * job's candidate hash, so a job run on the unchanged version under weaker
+ * settings would otherwise pass as proof. Every field is read defensively:
+ * a field this release does not know counts against the job, and one the
+ * gate names counts only when its value differs from the gate's.
+ */
+export function replayJobOverrideFindings(run: Pick<EvalRunView, "options" | "candidate">, gateOptions: ReleaseCandidateOptions): string[] {
+  const findings = new Set<string>();
+  const candidate = asRecord(run.candidate);
+  for (const [key, value] of Object.entries(candidate)) {
+    if (PLAIN_CANDIDATE_KEYS.has(key) || isEmptyValue(value)) continue;
+    findings.add(key === "overrides" ? `candidate overrides (${Object.keys(asRecord(value)).join(", ") || "unreadable"})` : `candidate.${key}`);
+  }
+  const gate = gateOptions as Record<string, unknown>;
+  for (const [key, value] of Object.entries(asRecord(run.options))) {
+    if (NEUTRAL_OPTION_KEYS.has(key) || isEmptyValue(value)) continue;
+    if (key === "overrides") {
+      findings.add(`overrides (${Object.keys(asRecord(value)).join(", ") || "unreadable"})`);
+      continue;
+    }
+    if (key === "mcpMode") {
+      // A strict gate's own check names a lenient job; here only a mode other than the gate's counts.
+      if (gate.mcpMode !== undefined && value !== gate.mcpMode) findings.add(`mcpMode ${String(value)}`);
+      continue;
+    }
+    if (key in GATE_OPTION_DEFAULTS) {
+      const expected = gate[key] ?? GATE_OPTION_DEFAULTS[key];
+      if (value !== expected) findings.add(`${key} ${String(value)}`);
+      continue;
+    }
+    // ignorePaths, numberTolerance and anything newer loosen or change the comparison the gate did not ask for.
+    findings.add(key);
+  }
+  return [...findings];
 }
 
 export class ReleaseService {
@@ -326,7 +378,7 @@ export class ReleaseService {
   }
 
   /** What `judgeReleaseGate` needs from a replay job: its cases with repeats aggregated. */
-  evidenceFor(job: JobView): ReleaseGateEvidence {
+  evidenceFor(job: JobView, gateOptions: ReleaseCandidateOptions = {}): ReleaseGateEvidence {
     const options = asRecord(job.options);
     const aggregate = (typeof options.aggregate === "string" ? options.aggregate : "all") as ReleaseAggregateMode;
     const groups = new Map<string, Array<EvalCaseResult & Record<string, unknown>>>();
@@ -391,7 +443,8 @@ export class ReleaseService {
         datasetIds: job.datasetIds,
         compare: typeof options.compare === "string" ? options.compare : null,
         mcpMode: typeof options.mcpMode === "string" ? options.mcpMode : null,
-        liveWrites: replayJobAllowsLiveWrites(job)
+        liveWrites: replayJobAllowsLiveWrites(job),
+        overrides: replayJobOverrideFindings(job, gateOptions)
       },
       cases
     };
@@ -403,7 +456,7 @@ export class ReleaseService {
    */
   judge(gate: ReleaseGateView, workflowId: string, workflowHash: string, replayRunId?: string): { judgement: ReleaseGateJudgement; replayRunId?: string } {
     const expected = { workflowHash, datasetIds: gate.datasetIds, ...(gate.candidateOptions.mcpMode ? { mcpMode: gate.candidateOptions.mcpMode } : {}) };
-    const judgeJob = (job: JobView) => judgeReleaseGate(this.evidenceFor(job), gate.policy, { expected, requireApproval: gate.requireApproval, now: this.now() });
+    const judgeJob = (job: JobView) => judgeReleaseGate(this.evidenceFor(job, gate.candidateOptions), gate.policy, { expected, requireApproval: gate.requireApproval, now: this.now() });
     if (replayRunId) {
       const job = this.options.loadJob(replayRunId);
       if (!job || job.kind !== "replay" || job.workflowId !== workflowId) throw new ReleaseError("Replay job not found", 404);
