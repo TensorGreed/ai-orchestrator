@@ -14,6 +14,9 @@
  *
  * List endpoints are narrowed to the workflows (or projects) the user can
  * read before paging, so totals never count rows from other projects.
+ *
+ * New routes that touch run or project data should use this helper rather
+ * than calling the RBAC service directly, so the 404/403 rules stay the same.
  */
 
 import { DEFAULT_PROJECT_ID, type Workflow } from "@ai-orchestrator/shared";
@@ -35,6 +38,10 @@ export interface RunAccessDeps {
   listProjectIds: () => string[];
   canAccessWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }, permission: RunPermission) => boolean;
   canInProject: (user: SafeUser, projectId: string, permission: RunPermission) => boolean;
+  /** Workflow ids shared (read or execute) to a project. */
+  listWorkflowIdsSharedToProject: (projectId: string) => string[];
+  /** Does a project with this id exist? The default project always does. */
+  projectExists: (projectId: string) => boolean;
 }
 
 export interface RunAccess {
@@ -65,13 +72,32 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
     return null;
   };
 
+  // One membership lookup per project instead of one (or two) per workflow:
+  // a workflow is readable when its project is, or when it is shared to a
+  // project the user can read. Same rule as `canAccessWorkflow`, batched.
   const readableWorkflowIds = (user: SafeUser): string[] | null => {
     if (user.role === "admin") return null;
+    const verdicts = new Map<string, boolean>();
+    const canRead = (projectId: string) => {
+      let verdict = verdicts.get(projectId);
+      if (verdict === undefined) {
+        verdict = deps.canInProject(user, projectId, "workflow:read");
+        verdicts.set(projectId, verdict);
+      }
+      return verdict;
+    };
+    const shared = new Set<string>();
+    for (const projectId of deps.listProjectIds()) {
+      if (!canRead(projectId)) continue;
+      for (const workflowId of deps.listWorkflowIdsSharedToProject(projectId)) shared.add(workflowId);
+    }
     return deps
       .listWorkflows()
-      .filter((workflow) => deps.canAccessWorkflow(user, { id: workflow.id, projectId: workflow.projectId ?? undefined }, "workflow:read"))
+      .filter((workflow) => shared.has(workflow.id) || canRead(workflow.projectId ?? DEFAULT_PROJECT_ID))
       .map((workflow) => workflow.id);
   };
+
+  const projectKnown = (projectId: string) => projectId === DEFAULT_PROJECT_ID || deps.projectExists(projectId);
 
   return {
     workflow(user, workflowId, permission, what = "Workflow") {
@@ -100,7 +126,8 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
     project(user, projectId, permission, what = "Project") {
       if (user.role === "admin") return { ok: true };
       const id = projectId ?? DEFAULT_PROJECT_ID;
-      if (!deps.canInProject(user, id, "workflow:read")) return notFound(what);
+      // A project that does not exist (or was deleted) reads as missing.
+      if (!projectKnown(id) || !deps.canInProject(user, id, "workflow:read")) return notFound(what);
       if (permission !== "workflow:read" && !deps.canInProject(user, id, permission)) {
         return { ok: false, status: 403, error: `Permission '${permission}' required in this project` };
       }

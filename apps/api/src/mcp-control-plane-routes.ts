@@ -18,6 +18,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { McpPolicyRole, McpRuntimeStateView, McpToolAnnotations } from "@ai-orchestrator/shared";
 import type { McpServerProbeRecord, McpServerRecord, McpServerStatus, SqliteStore } from "./db/database.js";
+import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { McpOAuthService } from "./services/mcp-oauth-service.js";
 import { deriveStatus } from "./services/mcp-probe-service.js";
@@ -38,6 +39,8 @@ export interface McpControlPlaneDeps {
   /** Phase 10.7 — breaker and limit state on this API instance (the last error only for admins). */
   runtime: (serverId: string, user: SafeUser) => McpRuntimeStateView;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
+  /** Project scope: recent calls name their workflow only to users who can read it. */
+  runAccess: RunAccess;
 }
 
 export type McpChangeKind =
@@ -437,16 +440,20 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
       const calls = detail ? store.listMcpToolCalls({ registryServerId: server.id, since }) : [];
       const telemetry = detail ? new Map(rollupMcpToolCalls(calls).tools.map((entry) => [entry.toolName, entry])) : null;
       const recentByTool = new Map<string, unknown[]>();
+      const readable = detail ? deps.runAccess.readableWorkflowIds(user) : null;
+      const readableIds = readable && new Set(readable);
       for (const call of [...calls].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))) {
         const list = recentByTool.get(call.toolName) ?? [];
         if (list.length >= RECENT_CALLS) continue;
+        const visibleCall = !readableIds || !call.workflowId || readableIds.has(call.workflowId);
         list.push({
           startedAt: call.startedAt,
           ok: call.ok,
           durationMs: call.durationMs,
           source: call.source,
-          workflowId: call.workflowId || null,
-          error: call.error ? truncate(call.error) : null
+          // A call from a run the user cannot read keeps its outcome but not its workflow or error text.
+          workflowId: visibleCall ? call.workflowId || null : null,
+          error: visibleCall && call.error ? truncate(call.error) : null
         });
         recentByTool.set(call.toolName, list);
       }

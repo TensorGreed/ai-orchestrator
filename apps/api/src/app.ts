@@ -143,6 +143,7 @@ import { createRunAccess } from "./run-access.js";
 import { createRunScope } from "./run-scope.js";
 import { createRunScope } from "./run-scope.js";
 import { createRunScope } from "./run-scope.js";
+import { createRunScope } from "./run-scope.js";
 import {
   McpCassetteService,
   applyReplayOutcome,
@@ -791,34 +792,43 @@ function parseConfiguredOrigins(configuredOrigin: string): Set<string> {
 }
 
 function isLocalDevOrigin(origin: string): boolean {
-  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
 /**
  * Picks the workflow for the signed-in compat webhook routes. `canUse` hides
  * workflows the caller may not read: an explicit id, a path match and the
  * fallback pick all skip them, so they read as absent.
  */
-}
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
 /**
  * Picks the workflow for the signed-in compat webhook routes. `canUse` hides
  * workflows the caller may not read: an explicit id, a path match and the
   webhookMethod = "POST",
   canUse: (workflow: Workflow) => boolean = () => true
  */
+}
+    const workflow = store.getWorkflow(workflowId);
+    return workflow && canUse(workflow) ? workflow : null;
+ * Picks the workflow for the signed-in compat webhook routes. `canUse` hides
+ * workflows the caller may not read: an explicit id, a path match and the
+  webhookMethod = "POST",
+    const match = await selectWebhookByPath(store, webhookPath, webhookMethod, canUse);
+ */
 
     const workflow = store.getWorkflow(workflowId);
     return workflow && canUse(workflow) ? workflow : null;
+  let firstUsable: Workflow | null = null;
   store: SqliteStore,
   workflowId?: string,
-  webhookMethod = "POST",
+    if (!workflow || !canUse(workflow)) {
     const match = await selectWebhookByPath(store, webhookPath, webhookMethod, canUse);
   webhookMethod = "POST"
+    firstUsable ??= workflow;
 ): Promise<Workflow | null> {
     const workflow = store.getWorkflow(workflowId);
     return workflow && canUse(workflow) ? workflow : null;
   let firstUsable: Workflow | null = null;
     return store.getWorkflow(workflowId);
   }
-    if (!workflow || !canUse(workflow)) {
+  return firstUsable;
     const match = await selectWebhookByPath(store, webhookPath, webhookMethod, canUse);
     const match = await selectWebhookByPath(store, webhookPath, webhookMethod);
     firstUsable ??= workflow;
@@ -1025,7 +1035,8 @@ async function listAllWebhookEndpoints(
 
   for (const workflowSummary of workflows) {
     const workflow = store.getWorkflow(workflowSummary.id);
-    if (!workflow) {
+  method: string,
+  canUse: (workflow: Workflow) => boolean = () => true
       continue;
     }
 
@@ -1033,7 +1044,7 @@ async function listAllWebhookEndpoints(
       endpoints.push({
         workflowId: workflow.id,
         workflowName: workflow.name,
-        nodeId: endpoint.nodeId,
+    if (!workflow || !canUse(workflow)) {
         path: endpoint.path,
   method: string,
   canUse: (workflow: Workflow) => boolean = () => true
@@ -1651,6 +1662,7 @@ export function createApp(
       reason?: string;
     };
     hooks?: WorkflowExecutionEventHooks;
+    const scoped = runScope.dependenciesFor(mergedWorkflow, input.policyActor);
     /** Phase 10.8 — record this run's MCP calls, or answer them from a cassette. */
     mcpPlan?: McpCassetteRunPlan;
     /**
@@ -1693,18 +1705,6 @@ export function createApp(
     try {
       const result = await executeWorkflow(
         {
-          workflow: mergedWorkflow,
-          startNodeId: input.startNodeId,
-          runMode: input.runMode,
-          usePinnedData: input.usePinnedData,
-          pinnedData: input.pinnedData,
-          nodeOutputs: input.nodeOutputs,
-          input: input.directInput,
-          webhookPayload: input.webhookPayload,
-          variables: input.variables,
-          systemPrompt: input.systemPrompt,
-          userPrompt: input.userPrompt,
-          sessionId: input.sessionId,
           // Session state, secrets, knowledge bases and sub-workflows are
           // scoped to the workflow's project (run-scope.ts); a sub-workflow
           // gets its own project's scope through scopeSubWorkflow.
@@ -1712,41 +1712,12 @@ export function createApp(
           memoryStore: input.replay?.sandbox.memoryStore ?? scoped.memoryStore,
           toolDataStore: input.replay?.sandbox.toolDataStore ?? scoped.toolDataStore,
           sessionArtifactStore: input.replay?.sandbox.sessionArtifactStore ?? scoped.sessionArtifactStore,
-              app.log.warn({ errorWorkflowId: payload.errorWorkflowId, sourceWorkflowId: payload.sourceWorkflowId, reason: errorTarget.error }, "Error workflow not run");
+                  resolveRegisteredMcpServer,
           loadWorkflow: input.replay ? undefined : scoped.loadWorkflow,
           scopeSubWorkflow: input.replay ? undefined : scoped.scopeSubWorkflow,
           // Phase 9.1 — built-in persistent vector store, limited to the
           // workflow's project and the shared knowledge bases.
           knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
-                {
-                  workflow: errorWf,
-                  input: {
-                    error: payload.error,
-                    errorStack: payload.errorStack,
-                    sourceWorkflowId: payload.sourceWorkflowId,
-                    sourceWorkflowName: payload.sourceWorkflowName,
-                    executionId: payload.executionId,
-                    timestamp: payload.timestamp
-                  },
-                  triggerType: "error",
-                  toolPolicySubject: resolveToolPolicySubject(errorWf.id),
-                  executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS
-                },
-                {
-                  providerRegistry,
-                  connectorRegistry,
-                  mcpRegistry,
-                  agentRuntime,
-                  ...errorScoped,
-                  // The error handler is guarded under its own bindings, like any other run.
-                  guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
-                  resolveRegisteredMcpServer,
-                  loadMcpToolPolicy
-                }
-              );
-            } catch (err) {
-            // Execute the designated error handler workflow: one in the same
-            // project, a shared one, or one the run's user may execute.
             const failingWorkflow = payload.sourceWorkflowId === mergedWorkflow.id ? mergedWorkflow : store.getWorkflow(payload.sourceWorkflowId) ?? mergedWorkflow;
             const errorTarget = runScope.errorWorkflowFor(failingWorkflow, input.policyActor, payload.errorWorkflowId);
             if ("error" in errorTarget) {
@@ -1803,12 +1774,16 @@ export function createApp(
           executionId: meta.executionId,
           workflow: meta.workflow,
           source: meta.source,
-          evalRunId: meta.evalRunId ?? null,
-          fixtureId: meta.fixtureId ?? null,
-                  ...errorScoped,
-    if (report) next = applyReplayOutcome({ ...next, mcpReplay: report }, report);
+            // Execute the designated error handler workflow: one in the same
+            // project, a shared one, or one the run's user may execute.
+            const failingWorkflow = payload.sourceWorkflowId === mergedWorkflow.id ? mergedWorkflow : store.getWorkflow(payload.sourceWorkflowId) ?? mergedWorkflow;
+            const errorTarget = runScope.errorWorkflowFor(failingWorkflow, input.policyActor, payload.errorWorkflowId);
+            if ("error" in errorTarget) {
+              app.log.warn({ errorWorkflowId: payload.errorWorkflowId, sourceWorkflowId: payload.sourceWorkflowId, reason: errorTarget.error }, "Error workflow not run");
     return next;
   };
+            const errorWf = errorTarget.workflow;
+            const errorScoped = runScope.dependenciesFor(errorWf, input.policyActor);
 
   /** Phase 10.8 — what a replay feeds the workflow, rebuilt from the source run's stored request input. */
   const replayRunInputFor = (
@@ -1830,17 +1805,7 @@ export function createApp(
         ...(typeof stored.system_prompt === "string" ? { systemPrompt: stored.system_prompt } : {}),
         ...(typeof stored.user_prompt === "string" ? { userPrompt: stored.user_prompt } : {}),
         sessionId: normalizeSessionId(
-          typeof stored.sessionId === "string" ? stored.sessionId : undefined,
-          typeof stored.session_id === "string" ? stored.session_id : undefined
-        ),
-        usePinnedData: stored.usePinnedData !== false
-      };
-    }
-    const parsed = parseWebhookRunInput(stored);
-    return {
-      webhookPayload: parsed.body,
-      ...(parsed.variables ? { variables: parsed.variables } : {}),
-      ...(parsed.systemPrompt ? { systemPrompt: parsed.systemPrompt } : {}),
+                  ...errorScoped,
       ...(parsed.userPrompt ? { userPrompt: parsed.userPrompt } : {}),
       sessionId: parsed.sessionId
     };
@@ -2617,6 +2582,43 @@ export function createApp(
   // A changed placement must name a project that exists and, with a folder,
   // Test and discovery routes resolve a secretRef the caller typed in. They
   // may only use a secret the caller could use in a run: `secret:use` in the
+  const rbacService = new RbacService(store, config.PROJECT_ISOLATION);
+  const resolveSecretForUser = (user: SafeUser) => async (secretRef?: SecretReference): Promise<string | undefined> => {
+    if (!secretRef?.secretId) return undefined;
+    const row = store.getSecret(secretRef.secretId);
+    if (!row) return undefined;
+    const usable =
+    canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission),
+    listWorkflowIdsSharedToProject: (projectId) => store.listWorkflowsSharedToProject(projectId).map((share) => share.workflowId),
+    projectExists: (projectId) => Boolean(store.getProject(projectId))
+      rbacService.listSecretShares(row.id).some((share) => rbacService.can(user, share.projectId, "secret:use"));
+    if (!usable) throw new Error(`Secret '${secretRef.secretId}' is not available to you.`);
+    return secretService.resolveSecret(secretRef);
+  };
+  // What a run can reach once it is going: sub-workflows, secrets, knowledge
+  // bases and session state of its own project (see run-scope.ts).
+  const runScope = createRunScope({
+    getWorkflow: (id) => store.getWorkflow(id),
+    listWorkflowShares: (workflowId) => store.listWorkflowShares(workflowId),
+    canExecuteWorkflow: (user, workflow) => runAccess.workflow(user, workflow.id, "workflow:execute").ok,
+    getSecretProjectId: (secretId) => store.getSecret(secretId)?.projectId ?? null,
+    listSecretIdsSharedToProject: (projectId) => store.listSecretsSharedToProject(projectId),
+    canUseSecretsInProject: (user, projectId) => rbacService.can(user, projectId, "secret:use"),
+    resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+    knowledgeBaseStoreFor: (projectId) => knowledgeBaseStoreForRun(projectId),
+    sessions: {
+      loadMemory: (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
+      saveMemory: (namespace, sessionId, messages) => store.saveSessionMemory(namespace, sessionId, messages),
+      saveToolCall: (input) => store.saveSessionToolCall(input),
+      listToolCalls: (input) => store.listSessionToolCalls(input),
+      getToolCall: (input) => store.getSessionToolCall(input),
+      saveArtifact: (input) => store.saveSessionArtifact(input),
+      loadArtifact: (input) => store.loadSessionArtifact(input)
+    }
+  });
+  // A changed placement must name a project that exists and, with a folder,
+  // Test and discovery routes resolve a secretRef the caller typed in. They
+  // may only use a secret the caller could use in a run: `secret:use` in the
   // secret's project or in a project it is shared to.
   const resolveSecretForUser = (user: SafeUser) => async (secretRef?: SecretReference): Promise<string | undefined> => {
     if (!secretRef?.secretId) return undefined;
@@ -2660,6 +2662,30 @@ export function createApp(
     if (existing && projectId === (existing.projectId ?? DEFAULT_PROJECT_ID) && folderId === (existing.folderId ?? null)) return null;
     if (projectId !== DEFAULT_PROJECT_ID && !store.getProject(projectId)) return "Target project does not exist";
     if (folderId) {
+      const folder = store.getFolder(folderId);
+      if (!folder) return "Target folder does not exist";
+      if (folder.projectId !== projectId) return "Target folder belongs to a different project";
+    }
+    return null;
+  };
+  // Saving a workflow needs write access to the one it replaces (same id) and
+  // to the project it lands in (its own projectId, else the replaced one's),
+  // and a placement that exists (400 otherwise).
+  const workflowSaveDenial = (
+    user: SafeUser,
+    workflow: { id: string; projectId?: string | null; folderId?: string | null }
+  ): { ok: false; status: 400 | 403 | 404; error: string } | null => {
+  const workflowPlacementError = (
+    workflow: { projectId?: string | null; folderId?: string | null },
+    existing?: { projectId?: string | null; folderId?: string | null } | null
+  ): string | null => {
+    const projectId = workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID;
+    const folderId = workflow.folderId ?? null;
+    if (!target.ok) return target;
+    const placement = workflowPlacementError(workflow, existing);
+    return placement ? { ok: false, status: 400, error: placement } : null;
+    if (projectId !== DEFAULT_PROJECT_ID && !store.getProject(projectId)) return "Target project does not exist";
+  const denyRunAccess = (reply: FastifyReply, denial: { status: number; error: string }) => {
       const folder = store.getFolder(folderId);
       if (!folder) return "Target folder does not exist";
       if (folder.projectId !== projectId) return "Target folder belongs to a different project";
@@ -4005,11 +4031,18 @@ export function createApp(
       intervalSeconds: number;
       enabled: boolean;
     }> | undefined;
-    if (!patch || typeof patch !== "object") {
+  // One without a project is shared across the deployment (admins create these):
+  // everyone can read it, but only an admin may add content, since every
+  // project's runs retrieve from it.
       reply.code(400);
       return { error: "Empty update payload" };
     }
-    store.updateAuditExportDestination(request.params.id, patch);
+    if (!kb.projectId) {
+      if (permission === "workflow:write" && user.role !== "admin") {
+        return { ok: false as const, status: 403 as const, error: "Only an admin can add content to a shared knowledge base" };
+      }
+      return { ok: true as const, kb };
+    }
     auditService.record({
       category: "system",
       eventType: "audit_export.destination.updated",
@@ -4525,11 +4558,23 @@ export function createApp(
   // to npm with --ignore-scripts; the loader validates each package's
   // manifest before importing it. See /docs/extensions/community-nodes for
   // the threat model.
+  // Eval datasets follow their project. One without a project is shared:
+  // everyone can read it, and writes to it count against the default project.
+  const evalDatasetAccess = (user: SafeUser, datasetId: string, permission: "workflow:read" | "workflow:write", what = "Dataset") => {
+    const dataset = store.getEvalDataset(datasetId);
+    if (!dataset) return { ok: false as const, status: 404 as const, error: `${what} not found` };
+    if (!dataset.projectId && permission === "workflow:read") return { ok: true as const, dataset };
+    const access = runAccess.project(user, dataset.projectId, permission, what);
+    return access.ok ? { ok: true as const, dataset } : access;
+  };
+
   // ---------------------------------------------------------------------------
   const requireCommunityLoader = (reply: FastifyReply): CommunityPackageLoader | null => {
     if (!communityLoader) {
       reply.code(503);
-      reply.send({ error: "Community node SDK is disabled. Set COMMUNITY_NODES_ENABLED=true to enable." });
+    const readable = runAccess.readableProjectIds(user);
+    const ids = readable && new Set(readable);
+    return { datasets: evalService.listDatasets({ projectId }).filter((dataset) => !ids || !dataset.projectId || ids.has(dataset.projectId)) };
       return null;
     }
     return communityLoader;
@@ -4540,12 +4585,16 @@ export function createApp(
     if (!user) return;
     const loader = requireCommunityLoader(reply);
     if (!loader) return;
+    const projectAccess = runAccess.project(user, request.body?.projectId, "workflow:write");
+    if (!projectAccess.ok) return denyRunAccess(reply, projectAccess);
     return {
       enabled: true,
       pluginsDir: path.resolve(config.COMMUNITY_NODES_DIR),
       allowlist: config.COMMUNITY_NODES_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean),
       packages: loader.list()
     };
+    const access = evalDatasetAccess(user, request.params.id, "workflow:write");
+    if (!access.ok) return denyRunAccess(reply, access);
   });
 
   app.post<{ Body: { packageSpec?: string } }>("/api/community-nodes/install", async (request, reply) => {
@@ -4557,6 +4606,8 @@ export function createApp(
     if (!spec) {
       reply.code(400);
   // Eval datasets follow their project. One without a project is shared:
+    const access = evalDatasetAccess(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
   // everyone can read it, and writes to it count against the default project.
   const evalDatasetAccess = (user: SafeUser, datasetId: string, permission: "workflow:read" | "workflow:write", what = "Dataset") => {
     const dataset = store.getEvalDataset(datasetId);
@@ -4575,6 +4626,8 @@ export function createApp(
     return { datasets: evalService.listDatasets({ projectId }).filter((dataset) => !ids || !dataset.projectId || ids.has(dataset.projectId)) };
     } catch (err) {
       reply.code(400);
+    const access = evalDatasetAccess(user, request.params.id, "workflow:write");
+    if (!access.ok) return denyRunAccess(reply, access);
       return { error: err instanceof Error ? err.message : String(err) };
     }
   });
@@ -4589,7 +4642,10 @@ export function createApp(
     const packages = await loader.loadAll();
     return { ok: true, packages };
   });
-
+    const datasetId = store.getEvalFixtureDatasetId(request.params.id);
+    const access = datasetId ? evalDatasetAccess(user, datasetId, "workflow:write", "Fixture") : null;
+    if (access && !access.ok) return denyRunAccess(reply, access);
+    const ok = datasetId ? evalService.deleteFixture(request.params.id) : false;
   app.delete<{ Params: { packageName: string } }>("/api/community-nodes/:packageName", async (request, reply) => {
     const access = evalDatasetAccess(user, request.params.id, "workflow:write");
     if (!access.ok) return denyRunAccess(reply, access);
@@ -4634,9 +4690,27 @@ export function createApp(
 
   app.delete<{ Params: { id: string } }>("/api/eval/datasets/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
-    if (!user) return;
-    const ok = evalService.deleteDataset(request.params.id);
-    if (!ok) {
+    const datasetAccess = evalDatasetAccess(user, datasetId, "workflow:read");
+    if (!datasetAccess.ok) return denyRunAccess(reply, datasetAccess);
+    // Replay sources must be readable (else 404, as if missing) and recorded
+    // for this same workflow (else 409).
+    const replaySource = mcpOptions.data.replay;
+    if (replaySource?.cassetteId) {
+      const summary = store.getMcpCassetteSummary(replaySource.cassetteId);
+      const access = runAccess.run(user, summary && { id: summary.id, workflowId: summary.workflowId ?? "" }, "workflow:read", "Cassette");
+      if (!access.ok) return denyRunAccess(reply, access);
+      if (summary?.workflowId !== workflowId) {
+        reply.code(409);
+        return { error: "That cassette was recorded for a different workflow." };
+      }
+    } else if (replaySource?.evalRunId) {
+      const source = store.getEvalRun(replaySource.evalRunId);
+      const access = runAccess.run(user, source, "workflow:read", "Eval run");
+      if (!access.ok) return denyRunAccess(reply, access);
+      if (access.run.workflowId !== workflowId) {
+        reply.code(409);
+        return { error: "That eval run was recorded for a different workflow." };
+      }
       reply.code(404);
       return { error: "Dataset not found" };
     }
@@ -4658,14 +4732,16 @@ export function createApp(
   }>("/api/eval/datasets/:id/fixtures", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const name = String(request.body?.name ?? "").trim();
+    // Narrowed to readable workflows in SQL, before the limit.
+    const runs = store.listEvalRuns({
     if (!name) {
       reply.code(400);
+      workflowIds: runAccess.readableWorkflowIds(user) ?? undefined,
       return { error: "name is required" };
     }
     if (request.body?.input === undefined) {
       reply.code(400);
-      return { error: "input is required" };
+      runs: runs.map((run) => ({ ...run, mcpCassettes: store.listMcpCassettesForEvalRun(run.id).length }))
     }
     return {
       fixture: evalService.addFixture({
@@ -4724,8 +4800,13 @@ export function createApp(
 
   app.post<{
     Body: { datasetId?: string; workflowId?: string; scorers?: ScorerSpec[]; record?: boolean; replay?: unknown };
+    // A webhook path is a capability (for unauthenticated webhooks it is the
+    // only secret), so only workflows the user can read are listed.
+    const readable = runAccess.readableWorkflowIds(user);
+    const readableIds = readable && new Set(readable);
   }>("/api/eval/runs", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
+      if (readableIds && !readableIds.has(summary.id)) continue;
     if (!user) return;
     const datasetId = String(request.body?.datasetId ?? "").trim();
     const workflowId = String(request.body?.workflowId ?? "").trim();
@@ -6152,26 +6233,18 @@ export function createApp(
         return { error: "Project not found" };
       }
       if (!rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
-        reply.code(403);
-        return { error: "Insufficient permissions to remove members" };
-      }
-      const ok = rbacService.removeMember(request.params.userId, project.id);
-      if (!ok) {
-        reply.code(404);
-        return { error: "Membership not found" };
-      }
-      audit(request, user, {
-        category: "rbac",
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    return { shares: rbacService.listWorkflowShares(access.workflow.id) };
         eventType: "project.member.remove",
         action: "remove_member",
         resourceType: "project_member",
         resourceId: `${project.id}:${request.params.userId}`,
         projectId: project.id
-      });
-      return { ok: true };
-    }
-  );
-
+    // Unreadable reads as missing; sharing needs write on the owning project.
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
   // ---------------------------------------------------------------------------
   // Phase 5.2 — Custom roles
   // ---------------------------------------------------------------------------
@@ -6213,11 +6286,9 @@ export function createApp(
     });
     audit(request, user, {
       category: "rbac",
-      eventType: "custom_role.create",
-      action: "create",
-      resourceType: "custom_role",
-      resourceId: id,
-      projectId: parsed.data.projectId ?? null,
+      const access = runAccess.workflow(user, request.params.id, "workflow:read");
+      if (!access.ok) return denyRunAccess(reply, access);
+      const workflow = access.workflow;
       metadata: { name: parsed.data.name, permissions: parsed.data.permissions }
     });
     return { id, role: rbacService.getCustomRole(id) };
@@ -6254,24 +6325,48 @@ export function createApp(
     }
     audit(request, user, {
       category: "rbac",
+  // Secrets follow their project. Seeing one needs `secret:read` in its
+  // project or in a project it is shared to (else it reads as missing);
+  // sharing, unsharing or deleting it needs `secret:write` in its project.
+  const canSeeSecret = (user: SafeUser, secret: { id: string; projectId?: string | null }) =>
+    rbacService.can(user, secret.projectId ?? DEFAULT_PROJECT_ID, "secret:read") ||
+    rbacService.listSecretShares(secret.id).some((share) => rbacService.can(user, share.projectId, "secret:read"));
+  const secretManageDenial = (
+    user: SafeUser,
+    secret: { id: string; projectId?: string | null },
+    permission: "secret:read" | "secret:write",
+    what = "Secret"
+  ): { status: 403 | 404; error: string } | null => {
+    if (!canSeeSecret(user, secret)) return { status: 404, error: `${what} not found` };
+    if (permission === "secret:write" && !rbacService.can(user, secret.projectId ?? DEFAULT_PROJECT_ID, "secret:write")) {
+      return { status: 403, error: "Permission 'secret:write' required in the secret's project" };
+    }
+    return null;
+  };
       eventType: "custom_role.delete",
       action: "delete",
       resourceType: "custom_role",
       resourceId: request.params.id
-    });
+    const secret = shareableSecret(request.params.id);
+    if (!secret) {
     return { ok: true };
   });
 
+    const denial = secretManageDenial(user, secret, "secret:read");
+    if (denial) return denyRunAccess(reply, denial);
   // ---------------------------------------------------------------------------
   // Phase 5.2 — Workflow sharing
   // ---------------------------------------------------------------------------
 
   const workflowShareSchema = z.object({
     projectId: z.string().min(1).max(120),
-    accessLevel: z.enum(["read", "execute"]).default("read")
+    const secret = shareableSecret(request.params.id);
+    if (!secret) {
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/shares", async (request, reply) => {
+    const denial = secretManageDenial(user, secret, "secret:write");
+    if (denial) return denyRunAccess(reply, denial);
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const workflow = store.getWorkflow(request.params.id);
@@ -6302,10 +6397,13 @@ export function createApp(
     const parsed = workflowShareSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
-      return { error: "Invalid share payload", details: parsed.error.issues };
+      const secret = shareableSecret(request.params.id);
+      if (!secret) {
     }
     if (!store.getProject(parsed.data.projectId)) {
       reply.code(400);
+      const denial = secretManageDenial(user, secret, "secret:write", "Share");
+      if (denial) return denyRunAccess(reply, denial);
       return { error: "Target project does not exist" };
     }
     if (parsed.data.projectId === owningProject) {
@@ -6873,7 +6971,9 @@ export function createApp(
     }
 
     let source: unknown = parsed.data.source;
-    if (source === undefined && typeof parsed.data.sourceText === "string") {
+    const readable = runAccess.readableProjectIds(user);
+    const ids = readable && new Set(readable);
+    return { projects: store.listProjects().filter((project) => !ids || ids.has(project.id)) };
       try {
         source = JSON.parse(parsed.data.sourceText);
       } catch (error) {
@@ -6885,12 +6985,21 @@ export function createApp(
     }
     if (source === undefined) {
       reply.code(400);
+    // Reusing an existing id is an update of that project.
+    if (store.getProject(id)) {
+      const access = runAccess.project(user, id, "workflow:write");
+      if (!access.ok) return denyRunAccess(reply, access);
+    }
       return { error: "Provide the export as 'source' (JSON object) or 'sourceText' (JSON string)." };
     }
 
     const folder = parsed.data.folderId ? store.getFolder(parsed.data.folderId) : null;
     if (parsed.data.folderId && !folder) {
       reply.code(400);
+    // Under strict isolation only members see a project, so its creator joins it.
+    if (config.PROJECT_ISOLATION === "strict" && user.role !== "admin" && !rbacService.getMembership(user.id, id)) {
+      rbacService.addMember({ userId: user.id, projectId: id, role: "project_admin" });
+    }
       return { error: "Target folder does not exist" };
     }
     const projectId = parsed.data.projectId ?? folder?.projectId ?? "default";
@@ -6902,6 +7011,8 @@ export function createApp(
       reply.code(400);
       return { error: `Folder '${folder.id}' belongs to project '${folder.projectId}', not '${projectId}'` };
     }
+    const access = runAccess.project(user, existing.id, "workflow:write");
+    if (!access.ok) return denyRunAccess(reply, access);
     if (!rbacService.can(user, projectId, "workflow:write")) {
       deny(reply, 403, `Permission 'workflow:write' required in project '${projectId}'`);
       return;
@@ -6919,6 +7030,8 @@ export function createApp(
     }
 
     const name = parsed.data.name?.trim();
+    const access = runAccess.project(user, request.params.id, "workflow:write");
+    if (!access.ok) return denyRunAccess(reply, access);
     const workflow: Workflow = {
       ...conversion.workflow,
       id: makeUniqueWorkflowId(store, conversion.workflow.id),
@@ -6939,7 +7052,9 @@ export function createApp(
 
     if (parsed.data.dryRun === true) {
       return { workflow, report: conversion.report, dryRun: true };
-    }
+    const readable = runAccess.readableProjectIds(user);
+    const ids = readable && new Set(readable);
+    return { folders: store.listFolders(projectId).filter((folder) => !ids || ids.has(folder.projectId)) };
 
     const savedWorkflow = store.upsertWorkflow(workflow, { createdBy: user.id });
     workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "imported from another builder" });
@@ -6954,11 +7069,19 @@ export function createApp(
       projectId: savedWorkflow.projectId,
       metadata: {
         name: savedWorkflow.name,
-        sourceName: conversion.report.sourceName,
+    const projectAccess = runAccess.project(user, parsed.data.projectId, "workflow:write");
+    if (!projectAccess.ok) return denyRunAccess(reply, projectAccess);
+    const parentFolder = parsed.data.parentId ? store.getFolder(parsed.data.parentId) : null;
+    if (parsed.data.parentId && (!parentFolder || parentFolder.projectId !== parsed.data.projectId)) {
         summary: conversion.report.summary,
-        unresolvedExpressions: conversion.report.unresolvedExpressions.length,
+      return { error: "Parent folder does not exist in this project" };
         secretsToResolve: conversion.report.secretsToResolve.map((secret) => secret.secretId)
       }
+    const replaced = store.getFolder(id);
+    if (replaced) {
+      const replacedAccess = runAccess.project(user, replaced.projectId, "workflow:write");
+      if (!replacedAccess.ok) return denyRunAccess(reply, replacedAccess);
+    }
     });
     return { workflow: savedWorkflow, report: conversion.report };
   });
@@ -6976,11 +7099,15 @@ export function createApp(
     return {
       json: exportWorkflowToJson(workflow)
     };
+    const existingAccess = runAccess.project(user, existing.projectId, "workflow:write", "Folder");
+    if (!existingAccess.ok) return denyRunAccess(reply, existingAccess);
   });
 
   app.post<{ Params: { id: string } }>("/api/workflows/:id/validate", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) {
+    const targetAccess = runAccess.project(user, parsed.data.projectId, "workflow:write");
+    if (!targetAccess.ok) return denyRunAccess(reply, targetAccess);
       return;
     }
 
@@ -6997,6 +7124,11 @@ export function createApp(
 
   const projectPayloadSchema = z.object({
     id: z
+    const folder = store.getFolder(request.params.id);
+    if (folder) {
+      const access = runAccess.project(user, folder.projectId, "workflow:write", "Folder");
+      if (!access.ok) return denyRunAccess(reply, access);
+    }
       .string()
       .min(1)
       .max(120)
@@ -7031,17 +7163,20 @@ export function createApp(
     const parsed = projectPayloadSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
-      return { error: "Invalid project payload", details: parsed.error.issues };
-    }
+      const nextProjectId = parsed.data.projectId ?? workflow.projectId;
+      const projectChanged = (nextProjectId ?? DEFAULT_PROJECT_ID) !== (workflow.projectId ?? DEFAULT_PROJECT_ID);
     const id = parsed.data.id?.trim() || `proj-${crypto.randomUUID()}`;
     const project = store.upsertProject({
-      id,
+        projectId: nextProjectId,
+        // A move to another project leaves the old project's folder behind.
       name: parsed.data.name.trim(),
       description: parsed.data.description?.trim() || undefined,
       createdBy: user.email
-    });
+            : parsed.data.folderId ?? (projectChanged ? undefined : workflow.folderId),
     return project;
   });
+      const moveDenial = workflowSaveDenial(user, nextWorkflow);
+      if (moveDenial) return denyRunAccess(reply, moveDenial);
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/projects/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
@@ -7425,7 +7560,7 @@ export function createApp(
     };
 
     reply.hijack();
-    reply.raw.writeHead(200, {
+        resolveSecret: resolveSecretForUser(user)
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive"
@@ -7457,7 +7592,7 @@ export function createApp(
         passthroughHooks: {
           onNodeStart: (event) => {
             sendSseEvent("node_start", event);
-          },
+      const resolveCtx = { resolveSecret: resolveSecretForUser(user) };
           onNodeComplete: (event) => {
             sendSseEvent("node_complete", event);
           },
@@ -7534,7 +7669,7 @@ export function createApp(
         resolveSecret: resolveSecretForUser(user)
     const parsed = codeNodeTestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
-      reply.code(400);
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.GEMINI_API_KEY;
       return {
         error: "Invalid Code Node test payload",
         details: parsed.error.issues
@@ -7548,7 +7683,7 @@ export function createApp(
         input: parsed.data.input ?? {}
       });
       return result;
-    } catch (error) {
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.OPENAI_API_KEY;
       reply.code(400);
       return {
         error: error instanceof Error ? error.message : "Code node test failed"
@@ -7565,7 +7700,7 @@ export function createApp(
     const parsed = connectorTestSchema.safeParse(request.body ?? {});
       const resolveCtx = { resolveSecret: resolveSecretForUser(user) };
       reply.code(400);
-      return {
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.ANTHROPIC_API_KEY;
         error: "Invalid connector test payload",
         details: parsed.error.issues
       };
@@ -7591,7 +7726,7 @@ export function createApp(
       return;
     }
 
-    const parsed = providerTestSchema.safeParse(request.body ?? {});
+        const apiKey = await resolveSecretForUser(user)(secretRef);
     if (!parsed.success) {
       reply.code(400);
       return {
@@ -7604,7 +7739,7 @@ export function createApp(
     const probePrompt = parsed.data.prompt?.trim() || "Reply with: connection_ok";
     const systemPrompt = parsed.data.systemPrompt?.trim() || "You are a connection test assistant. Keep responses short.";
 
-    try {
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.AZURE_OPENAI_API_KEY;
       const providerAdapter = providerRegistry.get(testProvider.providerId);
       const resolveCtx = { resolveSecret: (secretRef: Parameters<typeof secretService.resolveSecret>[0]) => secretService.resolveSecret(secretRef) };
 
@@ -7832,7 +7967,13 @@ export function createApp(
       status: typeof query.status === "string" && query.status.trim() ? query.status.trim() : undefined,
       workflowId: typeof query.workflowId === "string" && query.workflowId.trim() ? query.workflowId.trim() : undefined,
       // Only runs of workflows the user can read, filtered before paging so totals match.
-      workflowIds: runAccess.readableWorkflowIds(user) ?? undefined,
+    // An unreadable cassette reads as missing; a readable one must belong to
+    // this workflow (a cassette with no workflow never does).
+    if (parsed.data.cassetteId) {
+      const cassetteAccess = runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:read", "Cassette");
+      if (!cassetteAccess.ok) return denyRunAccess(reply, cassetteAccess);
+    }
+    if (cassette.workflowId !== source.workflowId) {
       triggerType:
         typeof query.triggerType === "string" && query.triggerType.trim() ? query.triggerType.trim() : undefined,
       startedFrom: normalizeIsoDateFilter(query.startedFrom),
@@ -8080,12 +8221,16 @@ export function createApp(
     const completedAt = new Date().toISOString();
     const canceled = store.cancelExecutionHistory({
       id: request.params.id,
-      completedAt,
+      inferAgentWebhookPath(parsed.data),
+      "POST",
+      (candidate) => runAccess.workflow(user, candidate.id, "workflow:read").ok
       error: reason
     });
     if (!canceled) {
       reply.code(404);
       return { error: "Execution not found" };
+    const executeAccess = runAccess.workflow(user, workflow.id, "workflow:execute");
+    if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
     }
 
     auditRunAction(
@@ -8891,6 +9036,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         if (!access.ok) return denyRunAccess(reply, access);
       } else if (authMode === "bearer") {
         const secretRef = toSecretReference(cfg.secretRef);
+    runAccess,
         const secret = await secretService.resolveSecret(secretRef);
         if (!secret) {
           reply.code(500);
@@ -8965,12 +9111,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     for (const summary of store.listWorkflows()) {
       const wf = store.getWorkflow(summary.id);
       if (!wf) continue;
-      for (const node of wf.nodes) {
+      inferAgentWebhookPath(parsed.data),
+      "POST",
+      (candidate) => runAccess.workflow(user, candidate.id, "workflow:read").ok
         if (node.type !== "mcp_server_trigger") continue;
         const cfg = asRecord(node.config);
         if (typeof cfg.path === "string" && cfg.path.trim() === p) {
           return { workflow: wf, node };
         }
+    const executeAccess = runAccess.workflow(user, workflow.id, "workflow:execute");
+    if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
       }
     }
     return null;
@@ -9450,6 +9600,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                 const raw = latestRecord?.__webhookHttpResponse;
                 if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
                   return null;
+    const targetProject = parsed.data.projectId ?? DEFAULT_PROJECT_ID;
+    if (!rbacService.can(user, targetProject, "secret:write")) {
+      reply.code(403);
+      return { error: "Permission 'secret:write' required in the target project" };
+    }
                 }
                 const asRecord = raw as Record<string, unknown>;
                 const statusCode =
@@ -9509,6 +9664,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const result = await runWorkflowExecution({
           workflow: match.workflow,
           webhookPayload: {
+    const deleteDenial = secretManageDenial(user, row, "secret:write");
+    if (deleteDenial) return denyRunAccess(reply, deleteDenial);
             ...parsedInput.body,
             ...(parsedInput.systemPrompt ? { system_prompt: parsedInput.systemPrompt } : {}),
             ...(parsedInput.userPrompt ? { user_prompt: parsedInput.userPrompt } : {}),
@@ -9532,15 +9689,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           result,
           triggerType,
           triggeredBy: "webhook",
-          requestInput: parsedInput.body
+    return secretService.listSecrets({ projectId }).filter((secret) => canSeeSecret(user, secret));
         });
 
         const defaultResponsePayload = {
           output: result.output ?? null,
           error: result.status === "error" ? (result.error ?? "Workflow execution failed") : undefined,
-          idempotency: security.idempotencyEnabled
+  // With a user, secretRefs from the request body go through resolveSecretForUser.
+  const withScopedMcpContext = async <T>(run: (mcpContext: MCPExecutionContext) => Promise<T>, user?: SafeUser): Promise<T> => {
             ? {
-                key: idempotencyKey ?? null,
+      resolveSecret: user ? resolveSecretForUser(user) : (secretRef) => secretService.resolveSecret(secretRef),
                 reused: replayingExistingResult
               }
             : undefined
@@ -9577,8 +9735,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
                     body: webhookOverride.body
                   }
-                }
-              : responsePayload
+      const tools = await withScopedMcpContext(
+        (mcpContext) => mcpRegistry.get(parsed.data.serverId).discoverTools(serverConfig, mcpContext),
+        user
           });
         }
 
@@ -9626,8 +9785,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Invalid secret payload",
         details: parsed.error.issues
       };
-    }
-    if (isInternalSecretProvider(parsed.data.provider)) {
+      const result = await withScopedMcpContext(
+        (mcpContext) => invokeDirectMCPTool(serverConfig, parsed.data.toolName, parsed.data.args ?? {}, mcpRegistry, mcpContext),
+        user
       // Providers L2M uses for its own secrets cannot be created through the API.
       reply.code(400);
       return { error: "Invalid secret payload", details: [{ path: ["provider"], message: "Unsupported provider" }] };
@@ -10675,6 +10835,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     recordPolicyAudit(user, "mcp_policy.created", "create", rule.id, policyAuditMetadata(rule), rule.projectId);
     reply.code(201);
     return { rule };
+    runAccess,
   });
 
   app.put<{ Params: { id: string }; Body: unknown }>("/api/mcp/policies/:id", async (request, reply) => {
@@ -10690,6 +10851,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       reply.code(400);
       return { error: "Invalid MCP tool policy rule", details: parsed.error.issues };
     }
+    runAccess,
     const invalid = validatePolicyScope(parsed.data, reply);
     if (invalid) return invalid;
     const { name, description, roles, ...rest } = parsed.data;
@@ -10786,6 +10948,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (!server) {
         reply.code(404);
         return { error: "MCP server not found" };
+    runAccess,
       }
       const toolName = request.params.toolName.trim();
       if (!toolName || toolName.length > 200) {
@@ -11099,19 +11262,30 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     for (const w of workflows) {
       if (Array.isArray(w.tags)) {
         for (const t of w.tags) {
-          if (typeof t === "string") tagSet.add(t);
+    let wfData: Record<string, unknown>;
         }
-      }
-    }
-    return { tags: [...tagSet].sort() };
+      const access = runAccess.workflow(user, parsed.data.workflowId, "workflow:read");
+      if (!access.ok) return denyRunAccess(reply, access);
+      wfData = { ...access.workflow };
   });
-
+      try {
+        const candidate: unknown = JSON.parse(parsed.data.workflowJson);
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("not an object");
+        wfData = { ...(candidate as Record<string, unknown>) };
+      } catch {
+        reply.code(400);
+        return { error: "workflowJson must be a JSON object" };
+      }
   app.post<{ Body: unknown }>("/api/tags", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
     const schema = z.object({ name: z.string().min(1).max(100) });
-    const parsed = schema.safeParse(request.body ?? {});
-    if (!parsed.success) {
+    // Templates are readable by every user, so they never carry where the
+    // source lived or what its runs produced: no project, folder or pinned data.
+    delete wfData.projectId;
+    delete wfData.folderId;
+    delete wfData.pinnedData;
+    const workflowJson = JSON.stringify(wfData);
       reply.code(400);
       return { error: "Invalid tag name", details: parsed.error.issues };
     }
@@ -11141,9 +11315,21 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
       }
     }
+    const target = z
+      .object({ projectId: z.string().trim().min(1).optional(), folderId: z.string().trim().min(1).optional() })
+      .safeParse(request.body ?? {});
+    if (!target.success) { reply.code(400); return { error: "Invalid payload", details: target.error.issues }; }
+
     audit(request, user, {
       category: "workflow",
       eventType: "tag.delete",
+    // The new workflow lands where the caller asks (default project), never
+    // in whatever project the template's JSON names.
+    imported.projectId = target.data.projectId ?? DEFAULT_PROJECT_ID;
+    imported.folderId = target.data.folderId;
+    delete imported.pinnedData;
+    const saveDenial = workflowSaveDenial(user, imported);
+    if (saveDenial) return denyRunAccess(reply, saveDenial);
       action: "delete",
       resourceType: "tag",
       resourceId: tagToRemove,

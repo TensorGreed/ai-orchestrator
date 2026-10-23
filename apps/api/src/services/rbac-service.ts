@@ -83,8 +83,17 @@ export interface ProjectMembership {
   permissions: Permission[];
 }
 
+/**
+ * `role`: a user with no membership in a project gets their global role
+ * there. `strict`: they get nothing, so only memberships grant access.
+ */
+export type ProjectIsolationMode = "role" | "strict";
+
 export class RbacService {
-  constructor(private readonly store: SqliteStore) {}
+  constructor(
+    private readonly store: SqliteStore,
+    private readonly isolation: ProjectIsolationMode = "role"
+  ) {}
 
   // --- Project memberships -------------------------------------------------
 
@@ -225,13 +234,15 @@ export class RbacService {
    * Rules:
    *  - Global admins always get every permission.
    *  - Otherwise: use the user's explicit project membership if present.
-   *  - Otherwise: fall back to the user's global role mapped to a coarse permission set
-   *    (this preserves backwards-compatible behaviour for users without per-project roles).
+   *  - Otherwise, in `role` isolation: fall back to the user's global role mapped to a coarse
+   *    permission set (backwards-compatible behaviour for users without per-project roles).
+   *  - Otherwise, in `strict` isolation: no permissions.
    */
   effectivePermissions(user: SafeUser, projectId: string): Permission[] {
     if (user.role === "admin") return [...ALL_PERMISSIONS];
     const membership = this.getMembership(user.id, projectId);
     if (membership) return membership.permissions;
+    if (this.isolation === "strict") return [];
     return [...GLOBAL_ROLE_PERMISSIONS[user.role]];
   }
 

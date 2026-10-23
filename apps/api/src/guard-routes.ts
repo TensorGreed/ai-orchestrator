@@ -115,8 +115,7 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   };
 
   /** Workflows a non-admin may read, for scoping guard events; undefined for admins (no filter). */
-  const readableWorkflowIds = (user: SafeUser): string[] | undefined =>
-    user.role === "admin" ? undefined : store.listWorkflows().filter((workflow) => deps.canAccessWorkflow(user, workflow, "workflow:read")).map((workflow) => workflow.id);
+  const readableWorkflowIds = (user: SafeUser): string[] | undefined => deps.runAccess.readableWorkflowIds(user) ?? undefined;
 
   // ---------------------------------------------------------------------------
   // Profiles
@@ -380,18 +379,14 @@ export function registerGuardRoutes(deps: GuardRoutesDeps): void {
   const workflowFor = async (request: FastifyRequest, reply: FastifyReply, workflowId: string, permission: "workflow:read" | "workflow:write", roles: UserRole[]) => {
     const user = await requireRole(request, reply, roles);
     if (!user) return null;
-    const workflow = store.getWorkflow(workflowId);
-    if (!workflow) {
-      reply.code(404);
-      reply.send({ error: "Workflow not found" });
+    // An unreadable workflow reads as missing; a readable one without the permission is 403.
+    const access = deps.runAccess.workflow(user, workflowId, permission);
+    if (!access.ok) {
+      reply.code(access.status);
+      reply.send({ error: access.status === 404 ? "Workflow not found" : "Insufficient permissions" });
       return null;
     }
-    if (!deps.canAccessWorkflow(user, workflow, permission)) {
-      reply.code(403);
-      reply.send({ error: "Insufficient permissions" });
-      return null;
-    }
-    return { user, workflow };
+    return { user, workflow: access.workflow };
   };
 
   const workflowBindingResponse = (workflow: Workflow) => {
