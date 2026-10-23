@@ -73,6 +73,8 @@ function sourceLabel(source: string | undefined): string | null {
       return "project binding";
     case "instance":
       return "instance default";
+    case "candidate":
+      return "replay candidate";
     case "none":
       return "no profile";
     default:

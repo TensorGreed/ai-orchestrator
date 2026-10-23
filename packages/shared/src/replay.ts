@@ -560,7 +560,7 @@ export function judgeReplayDiff(diff: RunDiff): ReplayJudgement {
 export interface ReplayRunResponse {
   recordingId: string;
   executionId: string;
-  candidate: { kind: "draft" | "version"; version: number | null; workflowHash: string };
+  candidate: { kind: "draft" | "version" | "inline"; version: number | null; workflowHash: string };
   status: string;
   diff: RunDiff;
   verdict: ReplayVerdict;

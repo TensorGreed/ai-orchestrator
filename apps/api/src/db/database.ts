@@ -12,6 +12,8 @@ import type {
   McpPolicyRole,
   McpClient,
   McpCassette,
+  ModelMemorySeed,
+  ModelTape,
   McpCassetteBadge,
   McpCassetteRecord,
   McpCassetteSource,
@@ -1348,6 +1350,10 @@ export interface ReplayRecordingRecord extends ReplayRecordingSummary {
   nodes: Record<string, ReplayRecordedNode>;
   facts: RunFacts;
   mcpCassette: McpCassette | null;
+  /** Phase 15.3 — the source run's model calls, when it recorded them. */
+  modelTape: ModelTape | null;
+  /** Phase 15.3 — session memory as the source run first read it. */
+  memorySeed: ModelMemorySeed | null;
 }
 
 export interface ReplayRecordingInsert {
@@ -1366,6 +1372,9 @@ export interface ReplayRecordingInsert {
   nodeOutputsJson: string;
   factsJson: string;
   mcpCassetteJson: string | null;
+  /** Phase 15.3 */
+  modelTapeJson?: string | null;
+  memorySeedJson?: string | null;
   capabilities: ReplayRecordingCapabilities;
   bytes: number;
   truncated: boolean;
@@ -1391,8 +1400,8 @@ function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordin
     workflowSavedVersion: row.workflow_saved_version === null || row.workflow_saved_version === undefined ? null : toNumber(row.workflow_saved_version),
     capabilities: {
       mcp: capabilities?.mcp === "cassette" ? "cassette" : "none",
-      models: "live",
-      memory: "empty",
+      models: capabilities?.models === "tape" ? "tape" : "live",
+      memory: capabilities?.memory === "seeded" ? "seeded" : "empty",
       workflowSource: capabilities?.workflowSource === "captured" ? "captured" : "current",
       ...(capabilities?.scrubbed && typeof capabilities.scrubbed === "object"
         ? {
@@ -10487,8 +10496,8 @@ export class SqliteStore {
       `INSERT INTO replay_recordings (
          id, workflow_id, project_id, name, notes, source_execution_id, source_trigger_type, source_status,
          workflow_hash, workflow_saved_version, captured_workflow_json, input_json, node_outputs_json, facts_json,
-         mcp_cassette_json, capabilities_json, bytes, truncated, created_at, created_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         mcp_cassette_json, model_tape_json, memory_seed_json, capabilities_json, bytes, truncated, created_at, created_by
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.workflowId,
@@ -10505,6 +10514,8 @@ export class SqliteStore {
         input.nodeOutputsJson,
         input.factsJson,
         input.mcpCassetteJson,
+        input.modelTapeJson ?? null,
+        input.memorySeedJson ?? null,
         JSON.stringify(input.capabilities),
         input.bytes,
         input.truncated ? 1 : 0,
@@ -10530,7 +10541,9 @@ export class SqliteStore {
       input: parse(row.input_json),
       nodes: (parse(row.node_outputs_json) ?? {}) as Record<string, ReplayRecordedNode>,
       facts: parse(row.facts_json) as RunFacts,
-      mcpCassette: parse(row.mcp_cassette_json) as McpCassette | null
+      mcpCassette: parse(row.mcp_cassette_json) as McpCassette | null,
+      modelTape: parse(row.model_tape_json) as ModelTape | null,
+      memorySeed: parse(row.memory_seed_json) as ModelMemorySeed | null
     };
   }
 

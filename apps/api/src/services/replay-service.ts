@@ -23,24 +23,50 @@
  * something the golden run never produced: a placeholder for a node it never
  * saw, the old output of a code node whose code changed, or a code node's
  * answer for more calls than were recorded.
+ *
+ * Phase 15.3 — candidates and fair comparison:
+ *
+ *   - a job's candidate is the draft, a saved version or an inline workflow
+ *     file (same workflow id, validated like an import, never saved), plus
+ *     overrides: models per node or provider (`applyCandidate`, part of the
+ *     candidate hash), a guard profile, per-server MCP modes and read nodes
+ *     that run live (reads only; a write is never run live);
+ *   - `models: "replay"` answers model calls from the golden run's model
+ *     tape (strict: a miss is inconclusive; lenient: a miss calls the live
+ *     model and says so). A golden run without a tape is inconclusive at
+ *     once, without running anything;
+ *   - session memory starts from the golden run's memory seed;
+ *   - a baseline rerun replays the golden run's own version under the same
+ *     settings, and the candidate is compared with that run instead of the
+ *     recording.
  */
 
 import { randomUUID } from "node:crypto";
 import {
+  applyCandidate,
   canonicalJson,
   judgeReplayDiff,
+  liveReadNodeProblems,
+  normaliseCandidateOverrides,
   REPLAY_BLOCKED_LOAD_MARKER,
+  ReplayCandidateError,
+  type ModelMemorySeed,
+  type ModelTapeReport,
+  type ReplayCandidateOverrides,
   type ReplayHealthWarning,
   type ReplayMcpMode,
+  type ReplayModelMode,
   type ReplayRunRequest,
   type ReplayRunResponse,
   type McpReplayReport,
+  type RunFacts,
   type Workflow
 } from "@ai-orchestrator/shared";
-import { buildReplayPlan, type ReplayPlan } from "@ai-orchestrator/workflow-engine";
+import { buildReplayPlan, importWorkflowFromJson, validateWorkflowGraph, type ReplayPlan } from "@ai-orchestrator/workflow-engine";
+import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import { sha256Hex, workflowForHash } from "./audit-bundle-service.js";
-import type { McpCassetteRunPlan, McpCassetteService } from "./mcp-cassette-service.js";
+import type { McpCassetteRunPlan, McpCassetteService, ModelReplayPlan, OfflineReplayOptions } from "./mcp-cassette-service.js";
 import { diffRunFacts } from "./run-diff.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import { ReplayRecordingService } from "./replay-recording-service.js";
@@ -64,6 +90,41 @@ export interface ReplayExecutionInput {
   plan: ReplayPlan;
   mcpPlan: McpCassetteRunPlan;
   customData: Record<string, unknown>;
+  /** Phase 15.3 — model calls answered from the golden run's tape (`models: "replay"`). */
+  modelPlan?: ModelReplayPlan;
+  /** Phase 15.3 — session memory the replay starts from. */
+  memorySeed?: ModelMemorySeed | null;
+  /** Phase 15.3 — the candidate's guard profile. */
+  guardProfileOverride?: { profileId: string; version?: number };
+}
+
+/** A candidate workflow, resolved once. */
+export interface ResolvedCandidate {
+  workflow: Workflow;
+  kind: "draft" | "version" | "inline";
+  version: number | null;
+}
+
+/** Phase 15.3 — a replay job's candidate: the workflow after model overrides, its hashes and the other overrides. */
+export interface ResolvedJobCandidate extends ResolvedCandidate {
+  workflowHash: string;
+  baseHash: string;
+  overrides: ReplayCandidateOverrides | null;
+  name: string;
+}
+
+/** Phase 15.3 — how one case replays, on top of the request. */
+export interface ReplayCaseOptions {
+  candidate?: ResolvedCandidate;
+  executionId?: string;
+  models?: ReplayModelMode;
+  /** The overrides that change how the replay runs (model overrides are already in the candidate). */
+  overrides?: Pick<ReplayCandidateOverrides, "guardProfile" | "mcpServers" | "liveReadNodes"> | null;
+  /** Compare with this run instead of the recording (a baseline rerun's facts, already scrubbed). */
+  baseline?: { facts: RunFacts; executionId: string };
+  /** What this execution is in the job: the candidate, or the baseline it is compared with. */
+  role?: "candidate" | "baseline";
+  repeatIndex?: number;
 }
 
 export interface ReplayExecutionResult {
@@ -83,6 +144,12 @@ export interface ReplayServiceOptions {
   priceTurn: PriceTurn;
   /** Runs the candidate in the replay sandbox as `actor` (the tool policy subject) and stores the execution. */
   execute: (input: ReplayExecutionInput, actor: SafeUser) => Promise<ReplayExecutionResult>;
+  /** Phase 15.3 — the deployment's providers: lenient model replays call them on a tape miss. */
+  providerRegistry?: ProviderRegistry;
+  /** Phase 15.3 — what `live_read_only` MCP servers need to read from the live server. */
+  liveReads?: OfflineReplayOptions["liveReads"];
+  /** Phase 15.3 — why a guard profile override cannot run (null when it can). */
+  guardProfileProblem?: (override: { profileId: string; version?: number }) => string | null;
 }
 
 function durationOf(result: ReplayExecutionResult): number | null {
@@ -102,8 +169,110 @@ export class ReplayService {
    * budgets are the ones that apply to the workflow now (a moved workflow
    * never replays under its old project).
    */
-  resolveCandidate(recording: ReplayRecordingRecord, request: ReplayRunRequest): { workflow: Workflow; kind: "draft" | "version"; version: number | null } {
+  resolveCandidate(recording: ReplayRecordingRecord, request: ReplayRunRequest): ResolvedCandidate {
     return this.resolveWorkflowCandidate(recording.workflowId, request);
+  }
+
+  /**
+   * Phase 15.3 — a replay job's candidate: the draft, a saved version or an
+   * inline workflow file, with the model overrides applied. Checks every
+   * override: a model override that matches nothing, a live read node that
+   * is not a read, a guard profile or version that does not exist.
+   */
+  resolveJobCandidate(workflowId: string, request: { version?: number; workflow?: Record<string, unknown>; overrides?: ReplayCandidateOverrides }): ResolvedJobCandidate {
+    const base: ResolvedCandidate = request.workflow ? this.inlineCandidate(workflowId, request.workflow) : this.resolveWorkflowCandidate(workflowId, request);
+    const overrides = normaliseCandidateOverrides(request.overrides) ?? null;
+    let workflow: Workflow;
+    try {
+      workflow = applyCandidate(base.workflow, overrides);
+    } catch (error) {
+      if (error instanceof ReplayCandidateError) throw new ReplayRunError(error.message, "invalid");
+      throw error;
+    }
+    const problems = liveReadNodeProblems(workflow, overrides?.liveReadNodes ?? []);
+    if (problems.length > 0) throw new ReplayRunError(problems.join(" "), "invalid");
+    if (overrides?.guardProfile) {
+      const problem = this.options.guardProfileProblem?.(overrides.guardProfile);
+      if (problem) throw new ReplayRunError(problem, "invalid");
+    }
+    return {
+      ...base,
+      workflow,
+      workflowHash: ReplayService.candidateHash(workflow),
+      baseHash: ReplayService.candidateHash(base.workflow),
+      overrides,
+      name: workflow.name
+    };
+  }
+
+  /**
+   * An inline candidate: a workflow JSON (or an export file holding one),
+   * validated like an import. It must be this workflow's, and it runs in the
+   * workflow's current project and folder. It is never saved.
+   */
+  inlineCandidate(workflowId: string, raw: Record<string, unknown>): ResolvedCandidate {
+    const current = this.options.store.getWorkflow(workflowId);
+    if (!current) throw new ReplayRunError("The workflow this golden set belongs to no longer exists.", "not_found");
+    const inner = raw.workflow && typeof raw.workflow === "object" && !Array.isArray(raw.workflow) && !Array.isArray(raw.nodes) ? (raw.workflow as Record<string, unknown>) : raw;
+    let parsed: Workflow;
+    try {
+      parsed = importWorkflowFromJson(JSON.stringify(inner));
+    } catch (error) {
+      const issue = error instanceof Error ? error.message.split("\n")[0]!.slice(0, 300) : "invalid JSON";
+      throw new ReplayRunError(`The workflow file is not a valid workflow: ${issue}`, "invalid");
+    }
+    if (parsed.id !== workflowId) {
+      throw new ReplayRunError(`The workflow file is for workflow ${String(parsed.id).slice(0, 200)}, not this golden set's workflow (${workflowId}).`, "invalid");
+    }
+    const validation = validateWorkflowGraph(parsed);
+    if (!validation.valid) {
+      throw new ReplayRunError(`The workflow file failed validation: ${validation.issues.map((issue) => issue.message).join("; ")}`, "invalid");
+    }
+    const { projectId: _project, folderId: _folder, ...snapshot } = parsed;
+    return {
+      workflow: {
+        ...snapshot,
+        id: workflowId,
+        ...(current.projectId !== undefined ? { projectId: current.projectId } : {}),
+        ...(current.folderId !== undefined ? { folderId: current.folderId } : {})
+      },
+      kind: "inline",
+      version: null
+    };
+  }
+
+  /**
+   * Phase 15.3 — the golden run's own workflow for a baseline rerun: the
+   * saved version it ran, else (no saved version, or pruned since) the
+   * workflow captured with it, in the workflow's current project.
+   */
+  baselineFor(recording: ReplayRecordingRecord): ResolvedCandidate & { source: "version" | "captured" } {
+    const current = this.options.store.getWorkflow(recording.workflowId);
+    if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
+    if (recording.workflowSavedVersion !== null) {
+      try {
+        return { ...this.resolveWorkflowCandidate(recording.workflowId, { version: recording.workflowSavedVersion }), source: "version" };
+      } catch (error) {
+        if (!(error instanceof ReplayRunError)) throw error;
+      }
+    }
+    const captured = recording.capturedWorkflow as unknown as Workflow;
+    if (!captured || !Array.isArray(captured.nodes) || !Array.isArray(captured.edges)) {
+      throw new ReplayRunError("The golden run's own workflow could not be read, so there is no baseline to rerun.", "invalid");
+    }
+    const { projectId: _project, folderId: _folder, ...snapshot } = captured;
+    return {
+      workflow: {
+        ...snapshot,
+        id: recording.workflowId,
+        name: typeof captured.name === "string" ? captured.name : current.name,
+        ...(current.projectId !== undefined ? { projectId: current.projectId } : {}),
+        ...(current.folderId !== undefined ? { folderId: current.folderId } : {})
+      } as Workflow,
+      kind: "version",
+      version: recording.workflowSavedVersion,
+      source: "captured"
+    };
   }
 
   /** The candidate for a workflow: the draft, or one of its saved versions (see `resolveCandidate`). */
@@ -146,36 +315,79 @@ export class ReplayService {
    * change what the job tests); `options.executionId` lets the job cancel
    * the run.
    */
-  async replay(
-    recording: ReplayRecordingRecord,
-    request: ReplayRunRequest,
-    actor: SafeUser,
-    options: { candidate?: { workflow: Workflow; kind: "draft" | "version"; version: number | null }; executionId?: string } = {}
-  ): Promise<ReplayRunResponse> {
+  async replay(recording: ReplayRecordingRecord, request: ReplayRunRequest, actor: SafeUser, options: ReplayCaseOptions = {}): Promise<ReplayRunResponse> {
     const candidate = options.candidate ?? this.resolveCandidate(recording, request);
     const workflowHash = ReplayService.candidateHash(candidate.workflow);
     const mcpMode: ReplayMcpMode = request.mcpMode ?? "strict";
+    const models: ReplayModelMode = options.models ?? "live";
+    const overrides = options.overrides ?? null;
+    const liveReadNodes = overrides?.liveReadNodes ?? [];
     const scrubber = this.options.recordings.scrubber();
     const plan = buildReplayPlan(candidate.workflow, recording.nodes, {
       recordedWorkflow: ReplayRecordingService.capturedWorkflow(recording),
-      normaliseConfig: (config) => this.options.recordings.storedConfig(config, scrubber)
+      normaliseConfig: (config) => this.options.recordings.storedConfig(config, scrubber),
+      ...(liveReadNodes.length > 0 ? { liveNodes: new Set(liveReadNodes) } : {})
     });
-    const mcpPlan = this.options.cassettes.planOfflineReplay(recording.mcpCassette, mcpMode, `${recording.id}:cassette`);
+    const mcpPlan = this.options.cassettes.planOfflineReplay(recording.mcpCassette, mcpMode, `${recording.id}:cassette`, {
+      ...(overrides?.mcpServers ? { serverModes: overrides.mcpServers } : {}),
+      ...(this.options.liveReads ? { liveReads: this.options.liveReads } : {})
+    });
     const executionId = options.executionId ?? randomUUID();
+    const role = options.role ?? "candidate";
     const customData = {
       replay: {
         recordingId: recording.id,
         sourceExecutionId: recording.sourceExecutionId,
         candidate: { kind: candidate.kind, version: candidate.version, workflowHash },
         mcpMode,
+        models,
+        role,
+        ...(options.repeatIndex !== undefined ? { repeatIndex: options.repeatIndex } : {}),
+        ...(overrides && Object.keys(overrides).length > 0 ? { overrides } : {}),
         startedBy: actor.email
       }
     };
 
+    // Phase 15.3 — model calls from the tape. Without a tape the case cannot be judged, and nothing runs.
+    let modelPlan: ModelReplayPlan | undefined;
+    const preflight: ReplayHealthWarning[] = [];
+    if (models === "replay") {
+      if (!recording.modelTape) {
+        preflight.push({
+          kind: "no_model_tape",
+          nodeId: null,
+          message: "This golden run has no model tape (it was saved from a run that did not record its calls), so model calls cannot be replayed. Record a new run with Record calls on, or replay with live models.",
+          blocking: true
+        });
+      } else if (this.options.providerRegistry) {
+        modelPlan = this.options.cassettes.planModelReplay(recording.modelTape, mcpMode, this.options.providerRegistry);
+      } else {
+        preflight.push({ kind: "no_model_tape", nodeId: null, message: "Model replay is not available on this server.", blocking: true });
+      }
+    }
+
     let result: ReplayExecutionResult;
     let executeError: string | null = null;
     try {
-      result = await this.options.execute({ executionId, workflow: candidate.workflow, recording, plan, mcpPlan, customData }, actor);
+      if (preflight.some((warning) => warning.blocking)) {
+        const at = new Date().toISOString();
+        result = { status: "error", error: preflight[0]!.message, startedAt: at, completedAt: at, nodeResults: [] };
+      } else {
+        result = await this.options.execute(
+          {
+            executionId,
+            workflow: candidate.workflow,
+            recording,
+            plan,
+            mcpPlan,
+            customData,
+            ...(modelPlan ? { modelPlan } : {}),
+            memorySeed: recording.memorySeed,
+            ...(overrides?.guardProfile ? { guardProfileOverride: overrides.guardProfile } : {})
+          },
+          actor
+        );
+      }
     } catch (error) {
       executeError = error instanceof Error ? error.message : String(error);
       result = {
@@ -187,8 +399,22 @@ export class ReplayService {
       };
     }
 
-    const health = this.health(recording, plan, result);
+    const health = [...preflight, ...(preflight.some((warning) => warning.blocking) ? [] : this.health(recording, plan, result))];
     if (executeError) health.push({ kind: "replay_error", nodeId: null, message: `The replay could not run: ${executeError}`, blocking: true });
+    if (modelPlan) health.push(...this.modelHealth(modelPlan.player.report()));
+    for (const nodeId of liveReadNodes) {
+      if (plan.decisions.some((decision) => decision.nodeId === nodeId && decision.action === "live")) {
+        health.push({ kind: "live_read", nodeId, message: `Node ${nodeId} read live data instead of the recorded answer; differences can come from data that changed since the golden run.`, blocking: false });
+      }
+    }
+    if (result.mcpReplay?.liveRead) {
+      health.push({
+        kind: "mcp_live_read",
+        nodeId: null,
+        message: `${result.mcpReplay.liveRead} read-only MCP call(s) went to the live server (live_read_only); their answers can differ from the golden run's.`,
+        blocking: false
+      });
+    }
     const candidateFacts = this.options.recordings.scrubFacts(
       buildRunFacts({
         status: result.status,
@@ -201,7 +427,7 @@ export class ReplayService {
         priceTurn: this.options.priceTurn
       })
     );
-    const diff = diffRunFacts(recording.facts, candidateFacts, {
+    const diff = diffRunFacts(options.baseline?.facts ?? recording.facts, candidateFacts, {
       ignorePaths: request.ignorePaths,
       numberTolerance: request.numberTolerance,
       health
@@ -217,6 +443,29 @@ export class ReplayService {
       reasons: judged.reasons,
       facts: candidateFacts
     };
+  }
+
+  /** Phase 15.3 — what the model tape did: a strict miss makes the case inconclusive, a live call is reported. */
+  private modelHealth(report: ModelTapeReport): ReplayHealthWarning[] {
+    const warnings: ReplayHealthWarning[] = [];
+    if (report.unmatched.length > 0) {
+      const count = report.unmatched.length;
+      warnings.push({
+        kind: "model_unmatched",
+        nodeId: report.unmatched[0]!.nodeId,
+        message: `${count} model call${count === 1 ? "" : "s"} had no recorded answer on the model tape: ${report.unmatched[0]!.reason}`,
+        blocking: true
+      });
+    }
+    if (report.live > 0) {
+      warnings.push({
+        kind: "model_live",
+        nodeId: null,
+        message: `${report.live} model call${report.live === 1 ? "" : "s"} were not on the model tape and called the live model (lenient).`,
+        blocking: false
+      });
+    }
+    return warnings;
   }
 
   private health(recording: ReplayRecordingRecord, plan: ReplayPlan, result: ReplayExecutionResult): ReplayHealthWarning[] {

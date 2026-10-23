@@ -42,4 +42,13 @@ describe("replay sandbox", () => {
     expect(wrapped.getKnowledgeBase("kb1")).toMatchObject({ id: "kb1" });
     expect(await createReplaySandbox().onMcpElicitation()).toEqual({ action: "decline" });
   });
+
+  it("starts session memory from a golden run's memory seed, and never writes back to it", async () => {
+    const seed = { sessions: [{ namespace: "ns", sessionId: "s1", messages: [{ role: "user" as const, content: "earlier" }] }], truncated: false };
+    const sandbox = createReplaySandbox(seed);
+    expect(await sandbox.memoryStore.loadMessages("ns", "s1")).toEqual([{ role: "user", content: "earlier" }]);
+    await sandbox.memoryStore.saveMessages("ns", "s1", [{ role: "user", content: "earlier" }, { role: "assistant", content: "now" }]);
+    expect(seed.sessions[0]!.messages).toHaveLength(1);
+    expect(await sandbox.memoryStore.loadMessages("ns", "s2")).toEqual([]);
+  });
 });
