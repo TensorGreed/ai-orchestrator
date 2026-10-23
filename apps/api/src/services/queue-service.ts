@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteStore } from "../db/database.js";
-import { STUCK_JOB_MARGIN_MS } from "../db/queue-timeouts.js";
+import { STUCK_JOB_MARGIN_MS, queuedRunTimeoutMs } from "../db/queue-timeouts.js";
 
 export interface QueuedExecutionPayload {
   workflowId: string;
@@ -37,7 +37,7 @@ export class QueueService {
   private readonly store: SqliteStore;
   private readonly config: Required<QueueServiceConfig>;
   private running = 0;
-  private readonly inFlight = new Map<string, number>();
+  private readonly inFlight = new Map<string, { startedAtMs: number; stuckAfterMs: number }>();
   private readonly warnedStuck = new Set<string>();
   private handler: ExecutionHandler | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
@@ -75,8 +75,8 @@ export class QueueService {
 
   private sweepStuck(): void {
     const nowMs = Date.now();
-    for (const [id, startedAtMs] of this.inFlight) {
-      if (nowMs - startedAtMs > this.config.stuckJobTimeoutMs && !this.warnedStuck.has(id)) {
+    for (const [id, { startedAtMs, stuckAfterMs }] of this.inFlight) {
+      if (nowMs - startedAtMs > stuckAfterMs && !this.warnedStuck.has(id)) {
         this.warnedStuck.add(id);
         console.warn(`[queue] Job ${id} still running after ${nowMs - startedAtMs}ms; it is not re-queued while this process holds it`);
       }
@@ -163,7 +163,15 @@ export class QueueService {
 
     for (const item of items) {
       this.running++;
-      this.inFlight.set(item.id, Date.now());
+      // Warn only once the job's own run time limit (if it set one) and the margin have passed.
+      const ownTimeoutMs = queuedRunTimeoutMs(item.payload);
+      this.inFlight.set(item.id, {
+        startedAtMs: Date.now(),
+        stuckAfterMs:
+          ownTimeoutMs === null
+            ? this.config.stuckJobTimeoutMs
+            : Math.max(this.config.stuckJobTimeoutMs, ownTimeoutMs + STUCK_JOB_MARGIN_MS)
+      });
       void this.executeItem(item);
     }
   }

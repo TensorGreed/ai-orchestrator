@@ -1781,8 +1781,8 @@ export class PostgresStore {
     if (ids.length === 0) return 0;
     const result = await this.pool.query(
       `UPDATE execution_queue SET status = 'pending', started_at = NULL, updated_at = $1
-       WHERE status = 'running' AND id = ANY($2::text[])`,
-      [new Date(nowMs).toISOString(), ids]
+       WHERE status = 'running' AND id = ANY($2::text[]) AND started_at <= $3`,
+      [new Date(nowMs).toISOString(), ids, stuckBefore]
     );
     return result.rowCount ?? 0;
   }
