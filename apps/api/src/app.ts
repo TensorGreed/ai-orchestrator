@@ -139,6 +139,7 @@ import { environmentSecretValues, scrubExemptionWarnings } from "./services/audi
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
+import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import {
   McpCassetteService,
   applyReplayOutcome,
@@ -1744,20 +1745,7 @@ export function createApp(
           // Phase 9.1 — built-in persistent vector store. The SqliteStore
           // implements the minimal KnowledgeBaseStore interface declared in
           // workflow-engine/rag-adapters.ts.
-          knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, {
-            addKnowledgeBaseChunks: (input) =>
-              store.addKnowledgeBaseChunks({
-                knowledgeBaseId: input.knowledgeBaseId,
-                chunks: input.chunks
-              }),
-            listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
-            // Phase 9.3 — BM25 / hybrid support.
-            bm25SearchKnowledgeBase: (input) => store.bm25SearchKnowledgeBase(input),
-            getKnowledgeBase: (id) => {
-              const kb = store.getKnowledgeBase(id);
-              return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
-            }
-          }),
+          knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, knowledgeBaseStoreForRun(mergedWorkflow.projectId)),
           resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
           guard: guardService.runtimeFor({ executionId: input.executionId, workflowId: mergedWorkflow.id, projectId: mergedWorkflow.projectId ?? "default" }),
           replayNodeHook: input.replay?.hook,
@@ -1851,15 +1839,7 @@ export function createApp(
                     loadArtifact: async (artifact) => store.loadSessionArtifact(artifact)
                   },
                   loadWorkflow: (wid) => store.getWorkflow(wid) ?? undefined,
-                  knowledgeBaseStore: {
-                    addKnowledgeBaseChunks: (i) => store.addKnowledgeBaseChunks(i),
-                    listKnowledgeBaseChunks: (kbId) => store.listKnowledgeBaseChunks(kbId),
-                    bm25SearchKnowledgeBase: (i) => store.bm25SearchKnowledgeBase(i),
-                    getKnowledgeBase: (kbId) => {
-                      const kb = store.getKnowledgeBase(kbId);
-                      return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
-                    }
-                  },
+                  knowledgeBaseStore: knowledgeBaseStoreForRun(errorWf.projectId),
                   resolveSecret: (ref) => secretService.resolveSecret(ref),
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
@@ -2443,7 +2423,8 @@ export function createApp(
   type ParsedWorkflowExecutePayload = z.infer<typeof workflowExecuteRequestSchema>;
   const prepareWorkflowExecutionPayload = (
     payload: ParsedWorkflowExecutePayload,
-    reply: FastifyReply
+    reply: FastifyReply,
+    user: SafeUser
   ):
     | {
         payload: ParsedWorkflowExecutePayload;
@@ -2459,7 +2440,8 @@ export function createApp(
 
     if (sourceExecutionId) {
       const sourceExecution = store.getExecutionHistory(sourceExecutionId);
-      if (!sourceExecution) {
+      // A run the user cannot read is answered like a missing one.
+      if (!sourceExecution || !runAccess.run(user, sourceExecution, "workflow:read").ok) {
         reply.code(404);
         return null;
       }
@@ -2636,6 +2618,51 @@ export function createApp(
   const apiKeyService = new ApiKeyService(store, config.API_KEY_DEFAULT_EXPIRY_DAYS);
   const mfaService = new MfaService(store, config.SECRET_MASTER_KEY_BASE64, config.MFA_ISSUER);
   const rbacService = new RbacService(store);
+  const runAccess = createRunAccess({
+    getWorkflow: (id) => store.getWorkflow(id),
+    listWorkflows: () => store.listWorkflows(),
+    listProjectIds: () => store.listProjects().map((project) => project.id),
+    canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission),
+    canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission)
+  });
+  // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
+  // bases of its own project and the shared ones without a project; any other
+  // id reads as missing, for every method the engine calls.
+  const knowledgeBaseStoreForRun = (workflowProjectId: string | null | undefined): KnowledgeBaseStore => {
+    const projectId = workflowProjectId ?? DEFAULT_PROJECT_ID;
+    const visible = (id: string) => {
+      const kb = store.getKnowledgeBase(id);
+      return kb && (!kb.projectId || kb.projectId === projectId) ? kb : null;
+    };
+    const missing = (id: string) => new Error(`Knowledge base not found: ${id}`);
+    return {
+      addKnowledgeBaseChunks: (input) => {
+        if (!visible(input.knowledgeBaseId)) throw missing(input.knowledgeBaseId);
+        return store.addKnowledgeBaseChunks({ knowledgeBaseId: input.knowledgeBaseId, chunks: input.chunks });
+      },
+      listKnowledgeBaseChunks: (kbId) => (visible(kbId) ? store.listKnowledgeBaseChunks(kbId) : []),
+      bm25SearchKnowledgeBase: (input) => (visible(input.knowledgeBaseId) ? store.bm25SearchKnowledgeBase(input) : []),
+      getKnowledgeBase: (id) => {
+        const kb = visible(id);
+        return kb ? { id: kb.id, embedderId: kb.embedderId, dimensions: kb.dimensions } : null;
+      }
+    };
+  };
+  // Saving a workflow needs write access to the one it replaces (same id) and
+  // to the project it lands in (its own projectId, else the replaced one's).
+  const workflowSaveDenial = (user: SafeUser, workflow: { id: string; projectId?: string | null }): RunAccessDenial | null => {
+    const existing = store.getWorkflow(workflow.id);
+    if (existing) {
+      const access = runAccess.workflow(user, existing.id, "workflow:write");
+      if (!access.ok) return access;
+    }
+    const target = runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
+    return target.ok ? null : target;
+  };
+  const denyRunAccess = (reply: FastifyReply, denial: RunAccessDenial) => {
+    reply.code(denial.status);
+    return { error: denial.error };
+  };
   const externalSecretsService = new ExternalSecretsService(store);
   const variablesService = new VariablesService(store);
   const workflowVersionService = new WorkflowVersionService(store, config.WORKFLOW_VERSION_RETENTION);
@@ -3976,21 +4003,34 @@ export function createApp(
   // builder role for read; admin for create/update/delete to keep the data
   // tier governed (these are persistent corpora; non-admins shouldn't
   // wipe them).
+  // A knowledge base with a project belongs to it: reading needs `workflow:read`
+  // there and adding content needs `workflow:write`, and other users get 404.
+  // One without a project is shared across the deployment (admins create these).
+  const knowledgeBaseAccess = (user: SafeUser, id: string, permission: "workflow:read" | "workflow:write") => {
+    const kb = store.getKnowledgeBase(id);
+    if (!kb) return { ok: false as const, status: 404 as const, error: "Knowledge base not found" };
+    if (!kb.projectId) return { ok: true as const, kb };
+    const access = runAccess.project(user, kb.projectId, permission, "Knowledge base");
+    return access.ok ? { ok: true as const, kb } : access;
+  };
+
   app.get("/api/knowledge-bases", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
     const query = request.query as { projectId?: string } | undefined;
-    return { knowledgeBases: store.listKnowledgeBases({ projectId: query?.projectId }) };
+    const readable = runAccess.readableProjectIds(user);
+    const knowledgeBases = store
+      .listKnowledgeBases({ projectId: query?.projectId })
+      .filter((kb) => readable === null || !kb.projectId || readable.includes(kb.projectId));
+    return { knowledgeBases };
   });
 
   app.get<{ Params: { id: string } }>("/api/knowledge-bases/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const kb = store.getKnowledgeBase(request.params.id);
-    if (!kb) {
-      reply.code(404);
-      return { error: "Knowledge base not found" };
-    }
+    const access = knowledgeBaseAccess(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const kb = access.kb;
     const sources = store.listKnowledgeBaseSources(request.params.id);
     return { knowledgeBase: kb, sources };
   });
@@ -4100,11 +4140,9 @@ export function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/knowledge-bases/:id/ingest", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const kb = store.getKnowledgeBase(request.params.id);
-    if (!kb) {
-      reply.code(404);
-      return { error: "Knowledge base not found" };
-    }
+    const access = knowledgeBaseAccess(user, request.params.id, "workflow:write");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const kb = access.kb;
     const body = request.body as Partial<{
       sourceId: string;
       documents: Array<{ content: string; metadata?: Record<string, unknown> }>;
@@ -4187,11 +4225,9 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const kb = store.getKnowledgeBase(request.params.id);
-      if (!kb) {
-        reply.code(404);
-        return { error: "Knowledge base not found" };
-      }
+      const access = knowledgeBaseAccess(user, request.params.id, "workflow:write");
+      if (!access.ok) return denyRunAccess(reply, access);
+      const kb = access.kb;
       const body = request.body as Partial<{
         filename: string;
         kind: DocumentKind;
@@ -4293,11 +4329,9 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/knowledge-bases/:id/chunks", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const kb = store.getKnowledgeBase(request.params.id);
-    if (!kb) {
-      reply.code(404);
-      return { error: "Knowledge base not found" };
-    }
+    const access = knowledgeBaseAccess(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const kb = access.kb;
     const query = request.query as { limit?: string; sourceId?: string } | undefined;
     return {
       chunks: store.listKnowledgeBaseChunkPreviews({
@@ -4345,11 +4379,9 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const kb = store.getKnowledgeBase(request.params.id);
-      if (!kb) {
-        reply.code(404);
-        return { error: "Knowledge base not found" };
-      }
+      const access = knowledgeBaseAccess(user, request.params.id, "workflow:read");
+      if (!access.ok) return denyRunAccess(reply, access);
+      const kb = access.kb;
       const body = request.body as Partial<{ query: string; topK: number }> | undefined;
       if (!body?.query || typeof body.query !== "string") {
         reply.code(400);
@@ -4591,6 +4623,8 @@ export function createApp(
       reply.code(400);
       return { error: "datasetId and workflowId are required" };
     }
+    const workflowAccess = runAccess.workflow(user, workflowId, "workflow:execute");
+    if (!workflowAccess.ok) return denyRunAccess(reply, workflowAccess);
     const mcpOptions = evalMcpOptionsSchema.safeParse({ record: request.body?.record, replay: request.body?.replay });
     if (!mcpOptions.success) {
       reply.code(400);
@@ -4631,19 +4665,16 @@ export function createApp(
     });
     // Phase 10.8 — how many fixture cassettes each run recorded, for "replay from eval run".
     return {
-      runs: runs.map((run) => ({ ...run, mcpCassettes: store.listMcpCassettesForEvalRun(run.id).length }))
+      runs: runAccess.filterRuns(user, runs).map((run) => ({ ...run, mcpCassettes: store.listMcpCassettesForEvalRun(run.id).length }))
     };
   });
 
   app.get<{ Params: { id: string } }>("/api/eval/runs/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const run = evalService.getRun(request.params.id);
-    if (!run) {
-      reply.code(404);
-      return { error: "Eval run not found" };
-    }
-    return run;
+    const access = runAccess.run(user, evalService.getRun(request.params.id), "workflow:read", "Eval run");
+    if (!access.ok) return denyRunAccess(reply, access);
+    return access.run;
   });
 
   app.get("/widget.js", async (_request, reply) => {
@@ -5702,11 +5733,9 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/workflows/:id/versions", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
     return { versions: workflowVersionService.list(request.params.id) };
   });
 
@@ -5715,6 +5744,8 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["viewer"]);
       if (!user) return;
+      const access = runAccess.workflow(user, request.params.id, "workflow:read");
+      if (!access.ok) return denyRunAccess(reply, access);
       const version = Number.parseInt(request.params.version, 10);
       if (!Number.isFinite(version) || version <= 0) {
         reply.code(400);
@@ -5734,6 +5765,8 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
+      const access = runAccess.workflow(user, request.params.id, "workflow:write");
+      if (!access.ok) return denyRunAccess(reply, access);
       const version = Number.parseInt(request.params.version, 10);
       if (!Number.isFinite(version) || version <= 0) {
         reply.code(400);
@@ -5748,6 +5781,8 @@ export function createApp(
         ...entry.workflow,
         workflowVersion: (entry.workflow.workflowVersion ?? 1) + 1
       };
+      const saveDenial = workflowSaveDenial(user, restoredWorkflow);
+      if (saveDenial) return denyRunAccess(reply, saveDenial);
       const saved = store.upsertWorkflow(restoredWorkflow, { createdBy: user.id });
       workflowVersionService.snapshot({
         workflow: saved,
@@ -6316,12 +6351,16 @@ export function createApp(
             ? null
             : query.folderId
           : undefined;
-      return store.listWorkflows({
+      const workflows = store.listWorkflows({
         projectId: typeof query.projectId === "string" && query.projectId.trim() ? query.projectId : undefined,
         folderId: folderFilter,
         tag: typeof query.tag === "string" ? query.tag : undefined,
         search: typeof query.search === "string" ? query.search : undefined
       });
+      const readable = runAccess.readableWorkflowIds(user);
+      if (readable === null) return workflows;
+      const ids = new Set(readable);
+      return workflows.filter((workflow) => ids.has(workflow.id));
     }
   );
 
@@ -6331,13 +6370,10 @@ export function createApp(
       return;
     }
 
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
 
-    return workflow;
+    return access.workflow;
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/variables", async (request, reply) => {
@@ -6346,11 +6382,9 @@ export function createApp(
       return;
     }
 
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
 
     return {
       workflowId: workflow.id,
@@ -6364,11 +6398,9 @@ export function createApp(
       return;
     }
 
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:write");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
 
     const parsed = workflowVariablesSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -6417,6 +6449,9 @@ export function createApp(
       };
     }
 
+    const saveDenial = workflowSaveDenial(user, parsed.data);
+    if (saveDenial) return denyRunAccess(reply, saveDenial);
+
     const savedWorkflow = store.upsertWorkflow(parsed.data, { createdBy: user.id });
     workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "created" });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
@@ -6462,6 +6497,9 @@ export function createApp(
       };
     }
 
+    const saveDenial = workflowSaveDenial(user, parsed.data);
+    if (saveDenial) return denyRunAccess(reply, saveDenial);
+
     const savedWorkflow = store.upsertWorkflow(parsed.data, { createdBy: user.id });
     workflowVersionService.snapshot({ workflow: savedWorkflow, createdBy: user.id, changeNote: "updated" });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
@@ -6483,6 +6521,9 @@ export function createApp(
     if (!user) {
       return;
     }
+
+    const access = runAccess.workflow(user, request.params.id, "workflow:delete");
+    if (!access.ok) return denyRunAccess(reply, access);
 
     try {
       const deleted = store.deleteWorkflow(request.params.id);
@@ -6515,11 +6556,9 @@ export function createApp(
       return;
     }
 
-    const sourceWorkflow = store.getWorkflow(request.params.id);
-    if (!sourceWorkflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const sourceWorkflowAccess = runAccess.workflow(user, request.params.id, "workflow:write");
+    if (!sourceWorkflowAccess.ok) return denyRunAccess(reply, sourceWorkflowAccess);
+    const sourceWorkflow = sourceWorkflowAccess.workflow;
 
     const parsed = workflowDuplicateSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -6551,11 +6590,9 @@ export function createApp(
   app.post<{ Params: { id: string } }>("/api/workflows/:id/activate", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:write");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
     const settings = typeof workflow.settings === "object" && workflow.settings ? { ...workflow.settings } : {};
     settings.active = true;
     workflow.settings = settings;
@@ -6575,11 +6612,9 @@ export function createApp(
   app.post<{ Params: { id: string } }>("/api/workflows/:id/deactivate", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:write");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
     const settings = typeof workflow.settings === "object" && workflow.settings ? { ...workflow.settings } : {};
     settings.active = false;
     workflow.settings = settings;
@@ -6657,6 +6692,9 @@ export function createApp(
           validation
         };
       }
+
+      const saveDenial = workflowSaveDenial(user, workflow);
+      if (saveDenial) return denyRunAccess(reply, saveDenial);
 
       const savedWorkflow = store.upsertWorkflow(workflow, { createdBy: user.id });
       schedulerService?.reloadWorkflow(savedWorkflow.id);
@@ -6782,11 +6820,9 @@ export function createApp(
       return;
     }
 
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
 
     return {
       json: exportWorkflowToJson(workflow)
@@ -6799,11 +6835,9 @@ export function createApp(
       return;
     }
 
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
 
     return validateWorkflowGraph(workflow);
   });
@@ -6977,11 +7011,9 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const workflow = store.getWorkflow(request.params.id);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const access = runAccess.workflow(user, request.params.id, "workflow:write");
+      if (!access.ok) return denyRunAccess(reply, access);
+      const workflow = access.workflow;
       const parsed = workflowMoveSchema.safeParse(request.body ?? {});
       if (!parsed.success) {
         reply.code(400);
@@ -6999,6 +7031,8 @@ export function createApp(
         reply.code(400);
         return { error: "Target folder does not exist" };
       }
+      const moveDenial = workflowSaveDenial(user, { id: workflow.id, projectId: parsed.data.projectId ?? workflow.projectId });
+      if (moveDenial) return denyRunAccess(reply, moveDenial);
       const nextWorkflow: Workflow = {
         ...workflow,
         projectId: parsed.data.projectId ?? workflow.projectId,
@@ -7018,11 +7052,9 @@ export function createApp(
   app.get<{ Params: { id: string } }>("/api/workflows/:id/pins", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
     return {
       workflowId: workflow.id,
       pinnedData: asRecord(workflow.pinnedData)
@@ -7034,11 +7066,9 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const workflow = store.getWorkflow(request.params.id);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const access = runAccess.workflow(user, request.params.id, "workflow:write");
+      if (!access.ok) return denyRunAccess(reply, access);
+      const workflow = access.workflow;
       if (!workflow.nodes.some((node) => node.id === request.params.nodeId)) {
         reply.code(404);
         return { error: "Node not found" };
@@ -7072,11 +7102,9 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const workflow = store.getWorkflow(request.params.id);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const access = runAccess.workflow(user, request.params.id, "workflow:write");
+      if (!access.ok) return denyRunAccess(reply, access);
+      const workflow = access.workflow;
       const pinnedData = { ...asRecord(workflow.pinnedData) };
       delete pinnedData[request.params.nodeId];
       const nextWorkflow: Workflow = {
@@ -7101,11 +7129,9 @@ export function createApp(
       return;
     }
 
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:execute");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
 
     // Phase 8.3 — pre-execution budget check. Block-action budgets reject
     // here (HTTP 402); warn-action budgets only fire post-execution.
@@ -7144,7 +7170,7 @@ export function createApp(
         details: parsed.error.issues
       };
     }
-    const prepared = prepareWorkflowExecutionPayload(parsed.data, reply);
+    const prepared = prepareWorkflowExecutionPayload(parsed.data, reply, user);
     if (!prepared) {
       return { error: "Source execution not found" };
     }
@@ -7212,11 +7238,9 @@ export function createApp(
       return;
     }
 
-    const workflow = store.getWorkflow(request.params.id);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    const access = runAccess.workflow(user, request.params.id, "workflow:execute");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
 
     const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -7226,7 +7250,7 @@ export function createApp(
         details: parsed.error.issues
       };
     }
-    const prepared = prepareWorkflowExecutionPayload(parsed.data, reply);
+    const prepared = prepareWorkflowExecutionPayload(parsed.data, reply, user);
     if (!prepared) {
       return { error: "Source execution not found" };
     }
@@ -7658,6 +7682,8 @@ export function createApp(
       pageSize: Number.isFinite(pageSize) ? pageSize : 20,
       status: typeof query.status === "string" && query.status.trim() ? query.status.trim() : undefined,
       workflowId: typeof query.workflowId === "string" && query.workflowId.trim() ? query.workflowId.trim() : undefined,
+      // Only runs of workflows the user can read, filtered before paging so totals match.
+      workflowIds: runAccess.readableWorkflowIds(user) ?? undefined,
       triggerType:
         typeof query.triggerType === "string" && query.triggerType.trim() ? query.triggerType.trim() : undefined,
       startedFrom: normalizeIsoDateFilter(query.startedFrom),
@@ -7683,13 +7709,10 @@ export function createApp(
       return;
     }
 
-    const execution = store.getExecutionHistory(request.params.id);
-    if (!execution) {
-      reply.code(404);
-      return { error: "Execution not found" };
-    }
+    const access = runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
 
-    return execution;
+    return access.run;
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/retry", async (request, reply) => {
@@ -7698,11 +7721,9 @@ export function createApp(
       return;
     }
 
-    const sourceExecution = store.getExecutionHistory(request.params.id);
-    if (!sourceExecution) {
-      reply.code(404);
-      return { error: "Execution not found" };
-    }
+    const sourceAccess = runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:execute");
+    if (!sourceAccess.ok) return denyRunAccess(reply, sourceAccess);
+    const sourceExecution = sourceAccess.run;
 
     if (!["error", "partial", "canceled"].includes(sourceExecution.status)) {
       reply.code(409);
@@ -7728,7 +7749,7 @@ export function createApp(
       ...parsed.data,
       sourceExecutionId: sourceExecution.id,
       usePinnedData: parsed.data.usePinnedData ?? true
-    }, reply);
+    }, reply, user);
     if (!prepared) {
       return { error: "Source execution not found" };
     }
@@ -7803,11 +7824,9 @@ export function createApp(
       reply.code(400);
       return { error: "Invalid replay payload", details: parsed.error.issues };
     }
-    const source = store.getExecutionHistory(request.params.id);
-    if (!source) {
-      reply.code(404);
-      return { error: "Execution not found" };
-    }
+    const sourceAccess = runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:execute");
+    if (!sourceAccess.ok) return denyRunAccess(reply, sourceAccess);
+    const source = sourceAccess.run;
     const cassette = parsed.data.cassetteId ? store.getMcpCassette(parsed.data.cassetteId) : store.getMcpCassetteForExecution(source.id);
     if (!cassette) {
       reply.code(404);
@@ -7868,11 +7887,9 @@ export function createApp(
       return;
     }
 
-    const execution = store.getExecutionHistory(request.params.id);
-    if (!execution) {
-      reply.code(404);
-      return { error: "Execution not found" };
-    }
+    const access = runAccess.run(user, store.getExecutionHistory(request.params.id), "workflow:execute");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const execution = access.run;
 
     const cancelable =
       execution.status === "running" ||
@@ -7933,7 +7950,7 @@ export function createApp(
     }
 
     return {
-      items: store.listPendingApprovals()
+      items: runAccess.filterRuns(user, store.listPendingApprovals())
     };
   });
 
@@ -7948,6 +7965,8 @@ export function createApp(
       reply.code(404);
       return { error: "Pending approval not found" };
     }
+    const approvalAccess = runAccess.run(user, pending, "workflow:execute", "Pending approval");
+    if (!approvalAccess.ok) return denyRunAccess(reply, approvalAccess);
 
     const state = pending.state as WorkflowExecutionState | null;
     if (!state || typeof state !== "object" || !state.workflow) {
@@ -7995,6 +8014,8 @@ export function createApp(
       reply.code(404);
       return { error: "Pending approval not found" };
     }
+    const approvalAccess = runAccess.run(user, pending, "workflow:execute", "Pending approval");
+    if (!approvalAccess.ok) return denyRunAccess(reply, approvalAccess);
 
     const parsed = approvalDecisionSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -8488,11 +8509,9 @@ export function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
-      const workflow = store.getWorkflow(request.params.workflowId);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const access = runAccess.workflow(user, request.params.workflowId, "workflow:execute");
+      if (!access.ok) return denyRunAccess(reply, access);
+      const workflow = access.workflow;
       const manualNode = workflow.nodes.find((n) => n.type === "manual_trigger");
       if (!manualNode) {
         reply.code(400);
@@ -8609,6 +8628,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (cfg.authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
+        // Session forms are for people who can see the workflow's project.
+        const access = runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
+        if (!access.ok) return denyRunAccess(reply, access);
       }
       const successMsg =
         request.query?.submitted === "1" && typeof cfg.successMessage === "string"
@@ -8631,6 +8653,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (cfg.authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
+        // Session forms are for people who can see the workflow's project.
+        const access = runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
+        if (!access.ok) return denyRunAccess(reply, access);
       }
       const submission = asRecord(request.body);
       const executionId = crypto.randomUUID();
@@ -8692,6 +8717,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
+        // Session chats are for people who can see the workflow's project.
+        const access = runAccess.workflow(user, workflow.id, "workflow:read");
+        if (!access.ok) return denyRunAccess(reply, access);
       } else if (authMode === "bearer") {
         const secretRef = toSecretReference(cfg.secretRef);
         const secret = await secretService.resolveSecret(secretRef);
@@ -10685,7 +10713,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     environmentSecretValues: () => environmentSecretValues(config as unknown as Record<string, unknown>, process.env),
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
-  registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), audit: (request, user, event) => audit(request, user, event) });
+  registerAuditBundleRoutes({ app, store, bundles: auditBundleService, signing: auditSigningService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, audit: (request, user, event) => audit(request, user, event) });
 
   // Phase 15.1 — golden runs and replay.
   const replayRecordingService = new ReplayRecordingService({
@@ -10749,11 +10777,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     recordings: replayRecordingService,
     replays: replayService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission),
+    runAccess,
     audit: (request, user, event) => audit(request, user, event)
   });
 
-  registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
+  registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
 
   registerMcpTestingRoutes({
     app,
@@ -10828,7 +10856,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const limit = typeof (request.query as Record<string, unknown>).limit === "string"
         ? Math.min(200, Math.max(1, Number((request.query as Record<string, unknown>).limit)))
         : 50;
-      return queueService.listDlq(limit);
+      return queueService.listDlq(limit, runAccess.readableWorkflowIds(user) ?? undefined);
     });
 
     app.post<{ Params: { id: string }; Body: unknown }>(
@@ -10837,11 +10865,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
         if (!user) return;
 
-        const workflow = store.getWorkflow(request.params.id);
-        if (!workflow) {
-          reply.code(404);
-          return { error: "Workflow not found" };
-        }
+        const access = runAccess.workflow(user, request.params.id, "workflow:execute");
+        if (!access.ok) return denyRunAccess(reply, access);
+        const workflow = access.workflow;
 
         const body = asRecord(request.body);
         const executionId = await queueService.enqueue({
@@ -11151,9 +11177,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/workflows/:id/share-link", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin", "builder"]);
     if (!user) return;
-    const wf = store.getWorkflow(request.params.id);
-    if (!wf) { reply.code(404); return { error: "Workflow not found" }; }
-    const exported = exportWorkflowToJson(wf);
+    const access = runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const exported = exportWorkflowToJson(access.workflow);
     const encoded = Buffer.from(exported).toString("base64url");
     return { shareUrl: `/api/workflows/import-shared?data=${encoded}`, expiresIn: "permanent" };
   });
@@ -11170,6 +11196,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const imported = importWorkflowFromJson(json);
       imported.id = crypto.randomUUID();
       imported.name = `${imported.name} (imported)`;
+      const saveDenial = workflowSaveDenial(user, imported);
+      if (saveDenial) return denyRunAccess(reply, saveDenial);
       store.upsertWorkflow(imported, { createdBy: user.id });
       return { workflowId: imported.id, name: imported.name };
     } catch {

@@ -768,20 +768,20 @@ describe("audit bundle export", () => {
     expect((await call(context, "GET", `/api/executions/${executionId}/manifest`, viewer.cookie)).statusCode).toBe(200);
     expect((await call(context, "GET", `/api/executions/${executionId}/bundle`, viewer.cookie)).statusCode).toBe(200);
 
-    // A builder locked out of the workflow's project is refused.
+    // A builder locked out of the workflow's project is told the run does not exist.
     context.store.upsertProject({ id: "hidden", name: "Hidden" });
     context.store.upsertCustomRole({ id: "none-hidden", projectId: "hidden", name: "No access", permissions: [] });
     context.store.upsertProjectRole({ userId: builder.id, projectId: "hidden", role: "custom", customRoleId: "none-hidden" });
     const workflow = context.store.getWorkflow("wf-audit")!;
     context.store.upsertWorkflow({ ...workflow, projectId: "hidden" });
-    expect((await call(context, "GET", `/api/executions/${executionId}/manifest`, builder.cookie)).statusCode).toBe(403);
-    expect((await call(context, "GET", `/api/executions/${executionId}/bundle`, builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "GET", `/api/executions/${executionId}/manifest`, builder.cookie)).statusCode).toBe(404);
+    expect((await call(context, "GET", `/api/executions/${executionId}/bundle`, builder.cookie)).statusCode).toBe(404);
     expect((await call(context, "GET", `/api/executions/${executionId}/bundle`, admin.cookie)).statusCode).toBe(200);
 
     // Runs of a deleted workflow are admin-only.
     context.store.upsertWorkflow({ ...workflow, projectId: "default" });
     context.store.saveExecutionHistory({ id: "exec-orphan", workflowId: "wf-gone", status: "success", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
-    expect((await call(context, "GET", "/api/executions/exec-orphan/manifest", viewer.cookie)).statusCode).toBe(403);
+    expect((await call(context, "GET", "/api/executions/exec-orphan/manifest", viewer.cookie)).statusCode).toBe(404);
     const orphan = await call(context, "GET", "/api/executions/exec-orphan/manifest", admin.cookie);
     expect(orphan.statusCode).toBe(200);
     expect(orphan.json<RunManifestView>().manifest.workflow.source).toBe("unavailable");
