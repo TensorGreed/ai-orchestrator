@@ -56,6 +56,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type { ExecutionManifestRecord, McpServerRecord, SqliteStore } from "../db/database.js";
 import type { AuditSigningService } from "./audit-signing-service.js";
+import { approvalEditsDigest } from "./approval-digest.js";
 import { findCatalogEntryForCommand, packageSpecOf } from "./mcp-catalog.js";
 import { REDACTED, SecretScrubber } from "./audit-scrub.js";
 import { collectRunActivity, priceModelCall } from "./run-facts.js";
@@ -552,9 +553,9 @@ export class AuditBundleService {
       expiresAt: request.expiresAt,
       decidedBy: request.decidedBy,
       decidedAt: request.decidedAt,
-      reason: request.reason,
+      reason: request.reason ? String(this.options.secrets.redact(request.reason)) : null,
       editedFields: request.editedFields,
-      editsDigest: request.edits ? digestOf(request.edits) : null,
+      editsDigest: approvalEditsDigest(request.editsSalt, request.edits),
       subWorkflowPath: request.path.map((step) => step.nodeId)
     }));
 

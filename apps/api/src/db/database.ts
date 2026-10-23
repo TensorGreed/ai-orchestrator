@@ -1594,6 +1594,10 @@ export interface ApprovalRequestRecord {
   reason: string | null;
   edits: Record<string, unknown> | null;
   editedFields: string[];
+  /** The workflow whose node asked (the innermost one for a sub-workflow pause). */
+  askingWorkflowId: string | null;
+  /** Per-request salt of the edits digest. */
+  editsSalt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1615,8 +1619,13 @@ export interface ApprovalRequestInsert {
   requestedBy?: string | null;
   timeoutMinutes?: number | null;
   expiresAt?: string | null;
+  askingWorkflowId?: string | null;
+  editsSalt?: string | null;
   createdAt?: string;
 }
+
+/** Phase 11.2 — which approval requests a user may see: everything, or these projects plus workflows shared to them. */
+export type ApprovalReadScope = { all: true } | { all?: false; projectIds: string[]; workflowIds: string[] };
 
 type ApprovalRequestRow = Record<string, unknown>;
 
@@ -1649,6 +1658,8 @@ function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
     reason: nullableText(row.reason),
     edits: edits && typeof edits === "object" && !Array.isArray(edits) ? (edits as Record<string, unknown>) : null,
     editedFields: parseJsonArray(row.edited_fields_json),
+    askingWorkflowId: nullableText(row.asking_workflow_id),
+    editsSalt: nullableText(row.edits_salt),
     createdAt: toString(row.created_at),
     updatedAt: toString(row.updated_at)
   };
@@ -2982,8 +2993,14 @@ export class SqliteStore {
         reason TEXT,
         edits_json TEXT,
         edited_fields_json TEXT,
+        asking_workflow_id TEXT,
+        edits_salt TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS schema_markers (
+        name TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_approval_requests_status_expires ON approval_requests(status, expires_at);
       CREATE INDEX IF NOT EXISTS idx_approval_requests_execution ON approval_requests(execution_id, created_at);
@@ -2999,6 +3016,11 @@ export class SqliteStore {
     this.ensureColumn("secrets", "external_provider_id", "TEXT");
     this.ensureColumn("secrets", "external_key", "TEXT");
     this.ensureColumn("execution_history", "custom_data_json", "TEXT");
+    // Phase 11.2 — columns added to approval_requests after it first shipped on this branch.
+    this.ensureColumn("approval_requests", "asking_workflow_id", "TEXT");
+    this.ensureColumn("approval_requests", "edits_salt", "TEXT");
+    // When approval requests (migration 32) first came up: runs paused before it get one full timeout from here.
+    this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('approval_requests', ?)`, [new Date().toISOString()]);
 
     // Phase 15.2 — golden sets (datasets tied to a workflow) and background replay jobs on the eval tables.
     this.ensureColumn("eval_datasets", "workflow_id", "TEXT");
@@ -4626,10 +4648,41 @@ export class SqliteStore {
     return this.queryAll<{ id: string }>(`SELECT id FROM workflow_executions WHERE status = 'resuming' ORDER BY updated_at ASC`).map((row) => toString(row.id));
   }
 
-  /** Phase 11.2 — hand a claimed run back to the waiting state (the resume could not start). */
-  releaseWorkflowExecutionClaim(id: string): void {
-    this.exec(`UPDATE workflow_executions SET status = 'waiting_approval', updated_at = ? WHERE id = ? AND status = 'resuming'`, [new Date().toISOString(), id]);
-    this.persist();
+  /** Phase 11.2 — paused runs in `resuming` whose claim is older than `before`, with the claim time. */
+  listResumingWorkflowExecutions(before?: string): Array<{ id: string; claimedAt: string }> {
+    const rows = before
+      ? this.queryAll<{ id: string; updated_at: string }>(`SELECT id, updated_at FROM workflow_executions WHERE status = 'resuming' AND updated_at < ? ORDER BY updated_at ASC`, [before])
+      : this.queryAll<{ id: string; updated_at: string }>(`SELECT id, updated_at FROM workflow_executions WHERE status = 'resuming' ORDER BY updated_at ASC`);
+    return rows.map((row) => ({ id: toString(row.id), claimedAt: toString(row.updated_at) }));
+  }
+
+  /** Phase 11.2 — hand a claimed run back to the waiting state (the resume could not start). False when it was not claimed. */
+  releaseWorkflowExecutionClaim(id: string): boolean {
+    const result = this.db
+      .prepare(`UPDATE workflow_executions SET status = 'waiting_approval', updated_at = ? WHERE id = ? AND status = 'resuming'`)
+      .run(new Date().toISOString(), id);
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
+  }
+
+  /** Runs `fn` in one SQLite transaction: every statement commits together, or none does when it throws. */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  /** Phase 11.2 — when a schema marker was first written (see `schema_markers`). */
+  getSchemaMarker(name: string): string | null {
+    const row = this.queryOne<{ created_at: string }>(`SELECT created_at FROM schema_markers WHERE name = ?`, [name]);
+    return row ? toString(row.created_at) : null;
+  }
+
+  /** Phase 11.2 — whether a queue item with this id, or a retry of it (`<id>:retry-…`), is still waiting or running. */
+  hasActiveQueueItem(id: string): boolean {
+    const row = this.queryOne<{ id: string }>(
+      `SELECT id FROM execution_queue WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
+      [id, `${id.replace(/[\\%_]/g, "\\$&")}:retry-%`]
+    );
+    return Boolean(row);
   }
 
   // -------------------------------------------------------------------------
@@ -4642,8 +4695,8 @@ export class SqliteStore {
       `INSERT INTO approval_requests (
          id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
          spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
-         created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         asking_workflow_id, edits_salt, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.executionId,
@@ -4661,6 +4714,8 @@ export class SqliteStore {
         input.requestedBy ?? null,
         typeof input.timeoutMinutes === "number" ? Math.floor(input.timeoutMinutes) : null,
         input.expiresAt ?? null,
+        input.askingWorkflowId ?? null,
+        input.editsSalt ?? null,
         now,
         now
       ]
@@ -4687,9 +4742,24 @@ export class SqliteStore {
     return this.queryAll<ApprovalRequestRow>(`SELECT * FROM approval_requests WHERE execution_id = ? ORDER BY created_at ASC, id ASC`, [executionId]).map(mapApprovalRequestRow);
   }
 
-  listApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number }): ApprovalRequestRecord[] {
+  listApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number; scope?: ApprovalReadScope }): ApprovalRequestRecord[] {
     const clauses: string[] = [];
     const params: BindParams = [];
+    // Filtered before the limit, so other projects' requests never crowd out the user's own.
+    if (filter.scope && !filter.scope.all) {
+      const { projectIds, workflowIds } = filter.scope;
+      if (projectIds.length === 0 && workflowIds.length === 0) return [];
+      const parts: string[] = [];
+      if (projectIds.length > 0) {
+        parts.push(`project_id IN (${projectIds.map(() => "?").join(", ")})`);
+        params.push(...projectIds);
+      }
+      if (workflowIds.length > 0) {
+        parts.push(`workflow_id IN (${workflowIds.map(() => "?").join(", ")})`);
+        params.push(...workflowIds);
+      }
+      clauses.push(`(${parts.join(" OR ")})`);
+    }
     if (filter.status === "pending") clauses.push(`status = 'pending'`);
     if (filter.status === "decided") clauses.push(`status <> 'pending'`);
     if (filter.workflowId) {
@@ -4745,6 +4815,24 @@ export class SqliteStore {
         decidedAt,
         input.id
       );
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
+  }
+
+  /**
+   * Phase 11.2 — puts a decided request back to pending (its resume could not
+   * run), clearing the decision. Its expiry is unchanged. False when it was
+   * not in a decided state.
+   */
+  reopenApprovalRequest(id: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE approval_requests
+            SET status = 'pending', decided_by_user_id = NULL, decided_by = NULL, decided_at = NULL, reason = NULL,
+                edits_json = NULL, edited_fields_json = NULL, updated_at = ?
+          WHERE id = ? AND status IN ('approved', 'rejected', 'timed_out')`
+      )
+      .run(new Date().toISOString(), id);
     if (result.changes > 0) this.persist();
     return result.changes > 0;
   }

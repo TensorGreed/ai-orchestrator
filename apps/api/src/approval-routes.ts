@@ -10,6 +10,11 @@
  * self-approval rule. With the execution queue in use the resume runs on the
  * queue and the decision answers 202; otherwise it runs inline and answers
  * with the run result, as before.
+ *
+ * A decision is never lost: when its resume cannot be started the request
+ * goes back to pending and the route answers 503, so it can be decided
+ * again. Approvals need the SQLite store in this release; on Postgres every
+ * route answers 501.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -20,6 +25,8 @@ import { ApprovalDecisionError, type ApprovalResumeJob, type ApprovalService } f
 export interface ApprovalRoutesDeps {
   app: FastifyInstance;
   approvals: ApprovalService;
+  /** False on stores without approval requests (Postgres in this release). */
+  available: boolean;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** Resumes the run: inline (resolves with the run result) or on the queue (resolves with `{ queued: true }`). */
   dispatch: (job: ApprovalResumeJob) => Promise<{ queued: true } | { queued: false; result: { status: string } } | null>;
@@ -29,10 +36,15 @@ const STATUS_FILTERS = new Set(["pending", "decided", "all"]);
 
 export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
   const { app, approvals, requireRole } = deps;
+  const unavailable = (reply: FastifyReply) => {
+    reply.code(501);
+    return { error: "Approvals need the SQLite store in this release" };
+  };
 
   app.get<{ Querystring: Record<string, string | undefined> }>("/api/approvals", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    if (!deps.available) return unavailable(reply);
     const query = request.query ?? {};
     const status = query.status && STATUS_FILTERS.has(query.status) ? (query.status as "pending" | "decided" | "all") : "pending";
     const limit = query.limit ? Number(query.limit) : undefined;
@@ -49,6 +61,7 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
   const decide = async (request: FastifyRequest<{ Params: { id: string }; Body: unknown }>, reply: FastifyReply, decision: "approve" | "reject") => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    if (!deps.available) return unavailable(reply);
     const parsed = (decision === "approve" ? approvalApproveInputSchema : approvalRejectInputSchema).safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
@@ -72,7 +85,15 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       }
       throw error;
     }
-    const outcome = await deps.dispatch(job);
+    let outcome: Awaited<ReturnType<ApprovalRoutesDeps["dispatch"]>>;
+    try {
+      outcome = await deps.dispatch(job);
+    } catch (error) {
+      approvals.reopenAfterFailedResume(job);
+      request.log.warn({ executionId: job.executionId, error: error instanceof Error ? error.name : "Error" }, "Resuming an approved run failed");
+      reply.code(503);
+      return { error: "Could not resume the run; decide again", executionId: job.executionId, requestId: job.requestId };
+    }
     if (!outcome) {
       reply.code(409);
       return { error: "The run is already being resumed" };

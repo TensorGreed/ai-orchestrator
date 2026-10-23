@@ -1543,14 +1543,23 @@ export const MIGRATIONS: Migration[] = [
         reason TEXT,
         edits_json TEXT,
         edited_fields_json TEXT,
+        asking_workflow_id TEXT,
+        edits_salt TEXT,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_approval_requests_status_expires ON approval_requests(status, expires_at);
       CREATE INDEX IF NOT EXISTS idx_approval_requests_execution ON approval_requests(execution_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_approval_requests_project ON approval_requests(project_id, status, created_at DESC);
+      -- When approval requests came up: runs paused before it get one full timeout from here.
+      CREATE TABLE IF NOT EXISTS schema_markers (
+        name TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      INSERT INTO schema_markers (name, created_at) VALUES ('approval_requests', CURRENT_TIMESTAMP) ON CONFLICT (name) DO NOTHING;
     `,
     down: `
+      DROP TABLE IF EXISTS schema_markers;
       DROP INDEX IF EXISTS idx_approval_requests_project;
       DROP INDEX IF EXISTS idx_approval_requests_execution;
       DROP INDEX IF EXISTS idx_approval_requests_status_expires;

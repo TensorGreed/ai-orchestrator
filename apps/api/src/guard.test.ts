@@ -18,6 +18,7 @@ import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
 import { MIGRATIONS } from "./db/migrations.js";
+import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
 import { AuthService } from "./services/auth-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { SecretService } from "./services/secret-service.js";
@@ -136,8 +137,8 @@ type RunResult = { status: string; executionId?: string; error?: string; nodeRes
 describe("migration 28", () => {
   it("creates the guard tables with indexes and a rollback, in Postgres DDL", () => {
     const versions = MIGRATIONS.map((entry) => entry.version).sort((a, b) => a - b);
-    // Unique; version numbers are reserved per feature branch, so one may be missing until that branch lands.
-    expect(new Set(versions).size).toBe(versions.length);
+    // Contiguous from 1. v31 is reserved for a feature branch that may not have landed yet.
+    expect(versions).toEqual(contiguousMigrationVersions(versions));
     const migration = MIGRATIONS.find((entry) => entry.version === 28);
     expect(migration?.description).toContain("12.1");
     for (const table of ["guard_profiles", "guard_profile_versions", "guard_bindings", "guard_events", "guard_token_vault"]) {

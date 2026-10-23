@@ -83,6 +83,11 @@ function escapeHtml(value: string): string {
 }
 
 /** Slack mrkdwn treats `<`, `>` and `&` as control characters. */
+/** Teams renders MessageCard text as Markdown: escape it so run input cannot add links, images or emphasis. */
+export function escapeTeams(value: string): string {
+  return value.replace(/[\\`*_[\]()]/g, (char) => `\\${char}`);
+}
+
 function escapeSlack(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -184,9 +189,9 @@ export class NotificationService {
     const card = {
       "@type": "MessageCard",
       themeColor: content.color,
-      title: content.title,
-      text: content.text,
-      sections: [{ facts: content.facts }],
+      title: escapeTeams(content.title),
+      text: escapeTeams(content.text),
+      sections: [{ facts: content.facts.map((fact) => ({ name: escapeTeams(fact.name), value: escapeTeams(fact.value) })) }],
       ...(content.link ? { potentialAction: [{ "@type": "OpenUri", name: "Open the approvals inbox", targets: [{ os: "default", uri: content.link }] }] } : {})
     };
     await fetch(webhookUrl, {

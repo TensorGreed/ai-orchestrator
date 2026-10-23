@@ -136,7 +136,8 @@ import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerApprovalRoutes } from "./approval-routes.js";
-import { ApprovalService, type ApprovalResumeJob } from "./services/approval-service.js";
+import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
+import { ApprovalResumeRunner, ApprovalService, type ApprovalResumeJob } from "./services/approval-service.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
 import { ReplayRunError, ReplayService } from "./services/replay-service.js";
 import { buildRunFacts } from "./services/run-facts.js";
@@ -1866,6 +1867,7 @@ export function createApp(
               state: paused.state
             });
             // Phase 11.2 — who may decide, when it expires; audited and notified.
+            if (!approvalsSupported) return;
             try {
               approvalService.recordPause({
                 executionId: paused.executionId,
@@ -3389,69 +3391,73 @@ export function createApp(
   );
 
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
-  const approvalResumesInFlight = new Set<string>();
-  const runApprovalResume = async (job: ApprovalResumeJob) => {
-    if (approvalResumesInFlight.has(job.executionId)) return null;
-    const pending = store.getWorkflowExecutionState(job.executionId);
-    if (!pending || pending.status !== "resuming") return null;
-    const state = pending.state as WorkflowExecutionState | null;
-    if (!state || typeof state !== "object" || !state.workflow) {
-      store.releaseWorkflowExecutionClaim(job.executionId);
-      return null;
-    }
-    approvalResumesInFlight.add(job.executionId);
-    try {
-      const actorRecord = job.actorUserId ? store.getUserById(job.actorUserId) : null;
-      const actor: SafeUser | null = actorRecord ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
-      const approvalDecision = {
-        decision: job.decision,
-        actedBy: job.actedBy,
-        ...(job.reason ? { reason: job.reason } : {}),
-        ...(job.edits ? { edits: job.edits } : {}),
-        ...(job.editedFields ? { editedFields: job.editedFields } : {}),
-        requestId: job.requestId
-      };
-      const result = await runWorkflowExecution({
-        policyActor: actor,
-        workflow: state.workflow,
-        executionId: job.executionId,
-        triggerType: "approval_resume",
-        triggeredBy: job.actedBy,
-        resumeState: state,
-        approvalDecision
-      });
-      persistExecutionHistory({
-        executionId: job.executionId,
-        workflow: state.workflow,
-        result,
-        triggerType: "approval_resume",
-        triggeredBy: job.actedBy,
-        requestInput: {
+  // Approvals need the SQLite store in this release; on Postgres they answer 501 and nothing is recorded.
+  const approvalsSupported = !((store as object) instanceof PostgresStore);
+  if (!approvalsSupported) {
+    app.log.warn("Approval requests need the SQLite store in this release: on Postgres the approvals inbox, decisions and approval timeouts answer 501");
+  }
+  const approvalResumes = new ApprovalResumeRunner();
+  const runApprovalResume = (job: ApprovalResumeJob): Promise<Awaited<ReturnType<typeof runWorkflowExecution>> | null> =>
+    approvalResumes.run(job, async () => {
+      const pending = store.getWorkflowExecutionState(job.executionId);
+      if (!pending || pending.status !== "resuming") return null;
+      const state = pending.state as WorkflowExecutionState | null;
+      if (!state || typeof state !== "object" || !state.workflow) {
+        store.releaseWorkflowExecutionClaim(job.executionId);
+        return null;
+      }
+      try {
+        const actorRecord = job.actorUserId ? store.getUserById(job.actorUserId) : null;
+        const actor: SafeUser | null = actorRecord ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
+        const approvalDecision = {
           decision: job.decision,
-          approvalId: job.executionId,
-          requestId: job.requestId,
+          actedBy: job.actedBy,
           ...(job.reason ? { reason: job.reason } : {}),
-          ...(job.editedFields ? { editedFields: job.editedFields } : {})
-        }
-      });
-      return result;
-    } catch (error) {
-      // The run is still paused: hand it back so it can be decided again.
-      store.releaseWorkflowExecutionClaim(job.executionId);
-      throw error;
-    } finally {
-      approvalResumesInFlight.delete(job.executionId);
-    }
-  };
+          ...(job.edits ? { edits: job.edits } : {}),
+          ...(job.editedFields ? { editedFields: job.editedFields } : {}),
+          requestId: job.requestId
+        };
+        const result = await runWorkflowExecution({
+          policyActor: actor,
+          workflow: state.workflow,
+          executionId: job.executionId,
+          triggerType: "approval_resume",
+          triggeredBy: job.actedBy,
+          resumeState: state,
+          approvalDecision
+        });
+        persistExecutionHistory({
+          executionId: job.executionId,
+          workflow: state.workflow,
+          result,
+          triggerType: "approval_resume",
+          triggeredBy: job.actedBy,
+          requestInput: {
+            decision: job.decision,
+            approvalId: job.executionId,
+            requestId: job.requestId,
+            ...(job.reason ? { reason: job.reason } : {}),
+            ...(job.editedFields ? { editedFields: job.editedFields } : {})
+          }
+        });
+        return result;
+      } catch (error) {
+        // The decision is kept for a new try: the run waits again and the request is pending again.
+        approvalService.reopenAfterFailedResume(job);
+        throw error;
+      }
+    });
   const dispatchApprovalResume = async (job: ApprovalResumeJob): Promise<{ queued: true } | { queued: false; result: Awaited<ReturnType<typeof runWorkflowExecution>> } | null> => {
     if (queueService) {
       const pending = store.getWorkflowExecutionState(job.executionId);
       await queueService.enqueue({
         workflowId: pending?.workflowId ?? "",
         executionId: job.executionId,
-        queueItemId: `${job.executionId}:${job.requestId}`,
+        queueItemId: `${job.executionId}:${job.requestId}${job.retryTag ? `:retry-${job.retryTag}` : ""}`,
         triggerType: "approval_resume",
         triggeredBy: job.actedBy,
+        // The queue's stuck-job threshold follows the run's own timeout.
+        executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
         resume: job
       });
       return { queued: true };
@@ -3469,17 +3475,26 @@ export function createApp(
     isLeader: () => leaderElection.isLeader(),
     canRead: (user, workflow) => rbacService.canAccessWorkflow(user, store.getWorkflow(workflow.id) ?? workflow, "workflow:read"),
     canExecute: (user, workflow) => rbacService.canAccessWorkflow(user, store.getWorkflow(workflow.id) ?? workflow, "workflow:execute"),
+    readScope: (user) => {
+      if (user.role === "admin") return { all: true };
+      const projectIds = store.listProjects().map((project) => project.id).filter((projectId) => rbacService.can(user, projectId, "workflow:read"));
+      const workflowIds = [...new Set(projectIds.flatMap((projectId) => [...rbacService.listWorkflowsVisibleToProject(projectId).keys()]))];
+      return { projectIds, workflowIds };
+    },
     redact: (value) => secretService.redact(value),
     sweepIntervalMs: config.APPROVAL_SWEEP_INTERVAL_MS,
     appPublicUrl: config.APP_PUBLIC_URL,
-    recoverInterruptedResumes: !queueService,
+    queueMode: Boolean(queueService),
+    isResumeActive: (executionId) => approvalResumes.isActive(executionId),
+    resumeStaleAfterMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
+    recoverAtStartupImmediately: !config.HA_ENABLED,
     logger: {
       info: (msg, fields) => app.log.info(fields ?? {}, msg),
       warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
     }
   });
-  if (runsBackgroundWorkers) {
-    // After the leader lease is settled: the sweeper and startup expiry are leader-only.
+  if (runsBackgroundWorkers && approvalsSupported) {
+    // The timer starts on every worker instance; each sweep is leader-only, so a later leader takes over.
     app.addHook("onReady", async () => {
       approvalService.start();
     });
@@ -7471,9 +7486,15 @@ export function createApp(
       const access = runAccess.workflow(user, request.params.id, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       const workflow = access.workflow;
-      if (!workflow.nodes.some((node) => node.id === request.params.nodeId)) {
+      const pinNode = workflow.nodes.find((node) => node.id === request.params.nodeId);
+      if (!pinNode) {
         reply.code(404);
         return { error: "Node not found" };
+      }
+      // Phase 11.2 — a gate's output only comes from a person's decision.
+      if (pinNode.type === "approval_gate") {
+        reply.code(400);
+        return { error: "An Approval Gate cannot be pinned: its output only comes from a person's decision." };
       }
       const parsed = pinDataSchema.safeParse(request.body ?? {});
       if (!parsed.success) {
@@ -8330,7 +8351,7 @@ export function createApp(
     active?.controller.abort(reason);
     if (execution.status === "waiting_approval") {
       deleteWorkflowExecutionSafely(execution.id, execution.workflowId);
-      approvalService.cancelForExecution(execution.id, reason, user);
+      if (approvalsSupported) approvalService.cancelForExecution(execution.id, reason, user);
     }
 
     const completedAt = new Date().toISOString();
@@ -8363,6 +8384,7 @@ export function createApp(
   registerApprovalRoutes({
     app,
     approvals: approvalService,
+    available: approvalsSupported,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume
   });

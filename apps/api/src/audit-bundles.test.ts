@@ -30,6 +30,7 @@ import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
 import { MIGRATIONS } from "./db/migrations.js";
+import { contiguousMigrationVersions } from "./db/migration-versions.test-helper.js";
 import { AuthService } from "./services/auth-service.js";
 import { AuditBundleService } from "./services/audit-bundle-service.js";
 import { AuditSigningService, auditKeyIdFor, ed25519PublicKeyFromRaw } from "./services/audit-signing-service.js";
@@ -983,8 +984,8 @@ describe("signing keys", () => {
 describe("migration 29", () => {
   it("adds execution_manifests and audit_signing_keys in Postgres DDL with a down path", () => {
     const versions = MIGRATIONS.map((entry) => entry.version).sort((a, b) => a - b);
-    // Unique; version numbers are reserved per feature branch, so one may be missing until that branch lands.
-    expect(new Set(versions).size).toBe(versions.length);
+    // Contiguous from 1. v31 is reserved for a feature branch that may not have landed yet.
+    expect(versions).toEqual(contiguousMigrationVersions(versions));
     expect(Math.max(...versions)).toBeGreaterThanOrEqual(29);
     const migration = MIGRATIONS.find((entry) => entry.version === 29)!;
     expect(migration.description).toContain("11.1");
