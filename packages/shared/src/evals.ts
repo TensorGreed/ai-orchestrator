@@ -271,12 +271,13 @@ export interface ReplayJobCandidate {
   /**
    * Phase 15.3 — computed by the server when the job is created: whether
    * this job may count as release proof for `workflowHash`. False when the
-   * job changed anything about how the candidate ran or was compared: any
-   * override (models, guard profile, MCP server modes, live reads), models
-   * answered from the tape, lenient MCP, or an inline (file) candidate.
-   * A release gate requires `true` and never re-derives it from the
-   * options. Jobs made before this field existed have it absent: not
-   * eligible.
+   * job changed how the candidate ran: any override (models, guard profile,
+   * MCP server modes, live reads), models answered from the tape, lenient
+   * MCP, or an inline (file) candidate. Comparison settings (ignorePaths,
+   * numberTolerance, scorers, compare, repeats, aggregate, models) are not
+   * covered: the release gate checks them against its own options. A release
+   * gate requires `true` in addition to those checks. Jobs made before this
+   * field existed have it absent; the gate judges them by its own checks.
    */
   releaseEligible?: boolean;
   /** Why the job is not release proof (empty when `releaseEligible`). */

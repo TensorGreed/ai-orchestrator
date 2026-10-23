@@ -56,6 +56,7 @@
  *     the repeats it did run said.
  */
 
+import { CASSETTE_REDACTED } from "@ai-orchestrator/mcp-sdk";
 import { randomUUID } from "node:crypto";
 import {
   aggregateReplayAttempts,
@@ -667,7 +668,7 @@ export class EvalService {
       changedModelCalls += own.changed;
       if (own.unknown) costUnknown = true;
       if (baseline) {
-        if (this.baselineSourceOf(recording) !== "version") capturedBaselines += 1;
+        if (this.baselineSourceOf(recording) === "redacted") capturedBaselines += 1;
         const rerun = this.executionEstimate(recording, null, options);
         modelCalls += repeats * rerun.calls;
         costUsd += repeats * rerun.usd;
@@ -698,7 +699,7 @@ export class EvalService {
     }
     if (capturedBaselines > 0) {
       warnings.push(
-        `${capturedBaselines} golden run${capturedBaselines === 1 ? " has" : "s have"} no saved version to rerun as the baseline (it was pruned, or the run was of an unsaved draft); the only copy is the workflow captured with the golden run, which was scrubbed, so ${capturedBaselines === 1 ? "that case is" : "those cases are"} inconclusive. Compare with the recording instead.`
+        `${capturedBaselines} golden run${capturedBaselines === 1 ? " has" : "s have"} no saved version to rerun, and the workflow captured with ${capturedBaselines === 1 ? "it" : "them"} had credentials scrubbed out, so ${capturedBaselines === 1 ? "that case is" : "those cases are"} inconclusive under a baseline rerun. Re-record ${capturedBaselines === 1 ? "this golden run" : "these golden runs"} from a saved version, or compare with the recording.`
       );
     }
     if (!baseline && stale > 0) {
@@ -723,9 +724,11 @@ export class EvalService {
   }
 
   /** Phase 15.3 — where a golden run's baseline would come from: its saved version, else the scrubbed captured copy. */
-  private baselineSourceOf(recording: ReplayRecordingRecord): "version" | "captured" | "none" {
+  private baselineSourceOf(recording: ReplayRecordingRecord): "version" | "captured" | "redacted" | "none" {
     try {
-      return this.options.replay?.baselineFor?.(recording).source ?? "version";
+      const found = this.options.replay?.baselineFor?.(recording);
+      if (found?.source === "captured") return capturedWorkflowIsRedacted(found.workflow) ? "redacted" : "captured";
+      return "version";
     } catch {
       return "none";
     }
@@ -1408,14 +1411,12 @@ export class EvalService {
     if (compareBaseline) {
       try {
         const found = replay.baselineFor!(recording);
-        if (found.source === "captured") {
+        if (found.source === "captured" && capturedWorkflowIsRedacted(found.workflow)) {
           return {
             status: "error",
             recordingId,
             error:
-              recording.workflowSavedVersion !== null
-                ? `No baseline to rerun: saved version ${recording.workflowSavedVersion}, which the golden run ran, was pruned, and the only other copy is the workflow captured with the golden run, which was scrubbed when it was saved (inline credentials are redacted), so it cannot be rerun as a fair baseline. Compare with the recording instead.`
-                : "No baseline to rerun: the golden run ran an unsaved draft, and the only copy of it is the workflow captured with the golden run, which was scrubbed when it was saved (inline credentials are redacted), so it cannot be rerun as a fair baseline. Compare with the recording instead.",
+              "The baseline rerun is inconclusive: this golden run has no saved version to rerun, and the workflow captured with it had credentials scrubbed out when it was saved, so it cannot be rerun as a fair baseline. Re-record this golden run from a saved version, or compare with the recording instead.",
             executions: 0
           };
         }
@@ -1695,3 +1696,8 @@ export class EvalService {
 
 // Re-export internals for tests.
 export const __test__ = __scorerTest__;
+
+/** Whether scrubbing left a redaction marker in a workflow captured with a golden run (so it cannot be rerun faithfully). */
+function capturedWorkflowIsRedacted(workflow: Workflow): boolean {
+  return JSON.stringify(workflow).includes(CASSETTE_REDACTED);
+}

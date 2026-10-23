@@ -303,7 +303,7 @@ export function readNodesOf(workflow: Pick<Workflow, "nodes"> | null): Array<{ i
 /** Phase 15.3 — whether a job counts as release proof, and why not, for the job page. */
 export function releaseProofLine(candidate: ReplayJobCandidate | null): { eligible: boolean; text: string; reasons: string[] } | null {
   if (!candidate) return null;
-  if (candidate.releaseEligible === true) return { eligible: true, text: "Counts as release proof for this hash.", reasons: [] };
+  if (candidate.releaseEligible === true) return { eligible: true, text: "Eligible as release proof (the gate also checks its own settings).", reasons: [] };
   const reasons = candidate.releaseIneligibleReasons ?? [];
   return { eligible: false, text: "Not release proof.", reasons: reasons.length > 0 ? reasons : ["This job was made before release proof was recorded."] };
 }

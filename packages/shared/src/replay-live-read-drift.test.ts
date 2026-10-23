@@ -24,8 +24,7 @@ const MAY_RUN_LIVE: Record<string, "safe" | "get_only"> = {
   hubspot_get_contact: "safe",
   http_request: "get_only",
   jira_search_issues: "safe",
-  notion_query_database: "safe",
-  rag_retrieve: "safe"
+  notion_query_database: "safe"
 };
 
 describe("live-read allow-list drift", () => {
@@ -46,9 +45,10 @@ describe("live-read allow-list drift", () => {
         expect(REPLAY_LIVE_READ_POLICY[type as keyof typeof REPLAY_LIVE_READ_POLICY], type).toBe("refused");
       }
     }
-    for (const type of ["web_browse", "pdf_output", "connector_source", "postgres_query", "mysql_query", "mongo_operation", "redis_command", "salesforce_query", "code_node"]) {
+    for (const type of ["web_browse", "pdf_output", "connector_source", "postgres_query", "mysql_query", "mongo_operation", "redis_command", "salesforce_query", "code_node", "rag_retrieve"]) {
       expect(replayLiveReadRefusal({ id: "n", type }), type).not.toBeNull();
     }
+    expect(replayLiveReadRefusal({ id: "rag", type: "rag_retrieve", config: { vectorStoreId: "knowledge-base" } })).not.toBeNull();
     expect(replayLiveReadRefusal({ id: "n", type: "community_node" })).toContain("not a node type");
   });
 });

@@ -827,6 +827,23 @@ export function applyCandidate(workflow: Workflow, overrides: ReplayCandidateOve
  */
 export type ReplayLiveReadDecision = "safe" | "get_only" | "refused";
 
+/*
+ * Handlers checked for every entry that is not "refused" (a type stays on the
+ * list only if its handler writes nothing: no store, upsert, cache or file,
+ * and makes no paid call other than the read itself):
+ *   google_drive_source          executor.ts "google_drive_source" -> connector-sdk google-drive fetchData: GET list/export calls; its one POST is the OAuth token exchange
+ *   google_sheets_read           connectors/tier1.ts executeGoogleSheetsRead: one GET of the values range
+ *   notion_query_database        connectors/tier2.ts: POST /databases/:id/query, a read-only query endpoint
+ *   airtable_list_records        connectors/tier2.ts: GET of the records list
+ *   jira_search_issues           connectors/tier2.ts: POST /rest/api/3/search, a read-only search endpoint
+ *   hubspot_get_contact          connectors/tier2.ts: GET of one contact
+ *   aws_s3_get_object            connectors/tier2.ts: signed GET
+ *   aws_s3_list_objects          connectors/tier2.ts: signed GET (list)
+ *   google_calendar_list_events  connectors/tier2.ts: GET of the events list
+ *   http_request                 executor.ts "http_request": live only for a literal GET (no body is sent)
+ * Removed after review: rag_retrieve (its handler always upserts the documents
+ * into the vector store, and pays for embeddings, before it searches).
+ */
 export const REPLAY_LIVE_READ_POLICY: Readonly<Record<WorkflowNodeType, ReplayLiveReadDecision>> = {
   schedule_trigger: "refused",
   webhook_input: "refused",
@@ -925,7 +942,7 @@ export const REPLAY_LIVE_READ_POLICY: Readonly<Record<WorkflowNodeType, ReplayLi
   web_browse: "refused",
   connector_source: "refused",
   google_drive_source: "safe",
-  rag_retrieve: "safe",
+  rag_retrieve: "refused",
   rerank: "refused",
   embeddings_azure_openai: "refused",
   google_sheets_read: "safe",

@@ -283,7 +283,7 @@ describe("replay candidates (Phase 15.3)", () => {
 
   it("says whether a job is release proof, and why not", () => {
     expect(releaseProofLine(null)).toBeNull();
-    expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h", releaseEligible: true, releaseIneligibleReasons: [] })).toEqual({ eligible: true, text: "Counts as release proof for this hash.", reasons: [] });
+    expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h", releaseEligible: true, releaseIneligibleReasons: [] })).toEqual({ eligible: true, text: "Eligible as release proof (the gate also checks its own settings).", reasons: [] });
     expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h", releaseEligible: false, releaseIneligibleReasons: ["Lenient"] })).toMatchObject({ eligible: false, reasons: ["Lenient"] });
     // Jobs from before the field: not proof.
     expect(releaseProofLine({ kind: "draft", version: null, workflowHash: "h" })!.eligible).toBe(false);

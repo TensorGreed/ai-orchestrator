@@ -288,7 +288,13 @@ export class ReplayRecordingService {
 
     const inputJson = scrubbedInput === null ? null : this.serialise(scrubbedInput, scrubber);
     const factsJson = this.serialise(scrubbedFacts, scrubber);
-    const fixedBytes = byteLength(factsJson) + (inputJson ? byteLength(inputJson) : 0) + byteLength(workflowJson);
+    // Phase 15.3 — the model tape and memory seed travel in the cassette row; the golden run keeps them apart.
+    const { models: rawTape, memorySeed: rawSeed, ...mcpOnly } = cassetteRecord?.cassette ?? ({} as Partial<McpCassette>);
+    const cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(mcpOnly) as McpCassette) : null;
+    const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
+    // The MCP cassette counts toward REPLAY_RECORDING_MAX_BYTES with the rest: it cannot be cut (a cut cassette
+    // answers wrongly), so the node outputs give way to it, and a run whose fixed parts do not fit is refused.
+    const fixedBytes = byteLength(factsJson) + (inputJson ? byteLength(inputJson) : 0) + byteLength(workflowJson) + (cassetteJson ? byteLength(cassetteJson) : 0);
     if (fixedBytes > this.options.maxBytes) throw new ReplayRecordingError(this.tooLargeMessage(), "too_large");
     let truncated = false;
     let nodesJson = this.serialise(scrubbedNodes, scrubber);
@@ -312,10 +318,6 @@ export class ReplayRecordingService {
       if (fixedBytes + byteLength(nodesJson) > this.options.maxBytes) throw new ReplayRecordingError(this.tooLargeMessage(), "too_large");
     }
 
-    // Phase 15.3 — the model tape and memory seed travel in the cassette row; the golden run keeps them apart.
-    const { models: rawTape, memorySeed: rawSeed, ...mcpOnly } = cassetteRecord?.cassette ?? ({} as Partial<McpCassette>);
-    const cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(mcpOnly) as McpCassette) : null;
-    const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
     let modelTape: ModelTape | null = rawTape ? (scrubber.tree(rawTape) as ModelTape) : null;
     let modelTapeJson = modelTape ? this.serialise(modelTape, scrubber) : null;
     let memorySeed: ModelMemorySeed | null = rawSeed ? (scrubber.tree(rawSeed) as ModelMemorySeed) : null;
@@ -339,7 +341,6 @@ export class ReplayRecordingService {
     const bytes =
       fixedBytes +
       byteLength(nodesJson) +
-      (cassetteJson ? byteLength(cassetteJson) : 0) +
       (modelTapeJson ? byteLength(modelTapeJson) : 0) +
       (memorySeedJson ? byteLength(memorySeedJson) : 0);
     this.checkBudgets(history.workflowId, bytes);

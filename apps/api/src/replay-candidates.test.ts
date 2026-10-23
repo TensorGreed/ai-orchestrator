@@ -671,16 +671,58 @@ describe("replay candidates: review fixes", () => {
     expect(job.results[0]!.error).toContain("budget_exhausted");
   }, 90_000);
 
-  it("makes a baseline rerun of a golden run with no saved version inconclusive, and warns in the estimate (L7)", async () => {
+  it("reruns the captured workflow as the baseline when nothing was scrubbed out of it (N2)", async () => {
     const { context, builder, model, setId } = await agentSetup(undefined, 1, undefined, { saveVersion: false });
     const body = { datasetIds: [setId], compare: "baseline_rerun" };
     const estimate = (await call(context, "POST", "/api/replay/estimate", builder.cookie, body)).json<ReplayJobEstimate>();
-    expect(estimate.warnings.join(" ")).toContain("no saved version to rerun as the baseline");
+    expect(estimate.warnings.join(" ")).not.toContain("scrubbed out");
+    const before = model.calls.length;
+    const job = await runJob(context, builder.cookie, body);
+    expect(job.summary).toMatchObject({ total: 1, pass: 1 });
+    expect(job.results[0]).toMatchObject({ status: "pass" });
+    // The candidate and the baseline both ran.
+    expect(model.calls.length - before).toBe(2);
+  }, 60_000);
+
+  it("makes a baseline rerun inconclusive when the captured workflow had an inline credential redacted, and warns in the estimate (N2, L7)", async () => {
+    const model = await startModel();
+    const context = await createTestContext({ REPLAY_CONCURRENCY: "2" });
+    const builder = await login(context, "builder");
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    const workflow = agentWorkflow(model.baseUrl, secret.secretId);
+    workflow.nodes = workflow.nodes.map((node) => (node.id === "output" ? { ...node, config: { apiKey: "inline-credential-1234567890" } } : node));
+    context.store.upsertWorkflow(workflow);
+    const setId = await goldenSet(context, builder.cookie, "wf-cand", await goldenRuns(context, builder.cookie, "wf-cand", 1));
+    const body = { datasetIds: [setId], compare: "baseline_rerun" };
+    const estimate = (await call(context, "POST", "/api/replay/estimate", builder.cookie, body)).json<ReplayJobEstimate>();
+    expect(estimate.warnings.join(" ")).toContain("scrubbed out");
     const before = model.calls.length;
     const job = await runJob(context, builder.cookie, body);
     expect(job.summary).toMatchObject({ total: 1, error: 1 });
-    expect(job.results[0]!.error).toMatch(/No baseline to rerun: .*scrubbed/);
+    expect(job.results[0]!.error).toContain("Re-record this golden run");
     expect(model.calls.length).toBe(before);
+  }, 60_000);
+
+  it("counts the MCP cassette toward the golden run size limit (L6)", async () => {
+    const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
+    const admin = await login(context, "admin");
+    const serverId = await registerMockServer(context, admin.cookie);
+    // The calculator echoes its expression, so the tool output (in the cassette and in the node output) is about 2.5 KB.
+    const workflow = clockWorkflow(serverId);
+    workflow.nodes = workflow.nodes.map((node) =>
+      node.id === "tool" ? { ...node, config: { ...node.config, toolName: "calculator", argsTemplate: JSON.stringify({ expression: `1${" ".repeat(2500)}+1` }) } } : node
+    );
+    context.store.upsertWorkflow(workflow);
+    const run = await call(context, "POST", "/api/workflows/wf-clock/execute", admin.cookie, { record: true });
+    expect(run.statusCode, run.body).toBe(200);
+    const saved = await call(context, "POST", "/api/replay/recordings", admin.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "Calculator" });
+    expect(saved.statusCode, saved.body).toBe(201);
+    const stored = context.store.getReplayRecording(saved.json<{ recording: { id: string } }>().recording.id)!;
+    expect(stored.mcpCassette).toBeTruthy();
+    expect(JSON.stringify(stored.mcpCassette).length).toBeGreaterThan(2000);
+    // Workflow + cassette + node outputs would be over the limit: the node output gave way, the total fits.
+    expect(stored.bytes).toBeLessThanOrEqual(16384);
+    expect(stored.truncated).toBe(true);
   }, 60_000);
 
   it("re-checks workflow:write for every case of an overridden job (L3)", async () => {
