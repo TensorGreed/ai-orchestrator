@@ -109,6 +109,8 @@ interface ExecutionHistoryPanelProps {
   canDeleteCassettes?: boolean;
   /** Phase 15.1 — builders save finished runs as golden runs and replay them; everyone else only opens them. */
   canManageGoldenRuns?: boolean;
+  /** Phase 11.2 — opens the Approvals inbox on a run paused for a decision. */
+  onReviewApproval?: (executionId: string) => void;
 }
 
 const GOLDEN_SOURCE_BLOCKED = new Set(["running", "pending", "queued", "waiting_approval"]);
@@ -197,7 +199,8 @@ export function ExecutionHistoryPanel({
   onReplayFromNode,
   onReplayCassette,
   canDeleteCassettes = false,
-  canManageGoldenRuns = false
+  canManageGoldenRuns = false,
+  onReviewApproval
 }: ExecutionHistoryPanelProps) {
   const [expandedTraceKey, setExpandedTraceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<{ cassetteId: string; executionId: string } | null>(null);
@@ -447,6 +450,18 @@ export function ExecutionHistoryPanel({
                           }}
                         >
                           Save as golden
+                        </button>
+                      )}
+                      {onReviewApproval && item.status === "waiting_approval" && (
+                        <button
+                          className="pg-btn small primary"
+                          title="Open this run's request in Approvals"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onReviewApproval(item.id);
+                          }}
+                        >
+                          Review approval
                         </button>
                       )}
                       {canCancel && (

@@ -1,5 +1,6 @@
 import { createDefaultGuardProfile, mergeGuardProfileOverride } from "@ai-orchestrator/guard-sdk";
 import {
+  approvalGateConfigSchema,
   guardNodeConfigSchema,
   guardProtectionNodeConfigSchema,
   workflowSchema,
@@ -689,6 +690,15 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     }
 
     if (node.type === "human_approval") {
+      // A pin answers the pause on production runs, and Human Approval has no approver rules to protect.
+      if (workflow.pinnedData && Object.prototype.hasOwnProperty.call(workflow.pinnedData, node.id)) {
+        issues.push({
+          code: "human_approval_pinned",
+          message: "This Human Approval node has pinned data, so runs skip the pause. Unpin it to ask a person.",
+          nodeId: node.id,
+          severity: "warning"
+        });
+      }
       if (typeof config.approvalMessage !== "string" || !config.approvalMessage.trim()) {
         issues.push({
           code: "missing_human_approval_message",
@@ -700,6 +710,50 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_human_approval_timeout",
           message: "Human Approval node requires timeoutMinutes >= 1.",
+          nodeId: node.id
+        });
+      }
+      // Continuing past a failed Human Approval (a rejection, or a message that cannot be rendered) would run the next step with nobody asked.
+      // (The engine also refuses it at run time, for errorConfig.continueOnFail too.)
+      if (config.onError === "continue") {
+        issues.push({
+          code: "human_approval_continue_on_error",
+          message: "A Human Approval node cannot continue on error: that would run the next step with nobody asked. Stop, or use the error branch.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "approval_gate") {
+      const parsed = approvalGateConfigSchema.safeParse(node.config ?? {});
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) {
+          issues.push({ code: "invalid_approval_gate_config", message: `Approval Gate ${issue.path.join(".") || "config"}: ${issue.message}`, nodeId: node.id });
+        }
+      }
+      // A pinned gate output would skip the person who must decide.
+      if (workflow.pinnedData && Object.prototype.hasOwnProperty.call(workflow.pinnedData, node.id)) {
+        issues.push({
+          code: "approval_gate_pinned",
+          message: "An Approval Gate cannot have pinned data: its output only comes from a person's decision. Unpin it.",
+          nodeId: node.id
+        });
+      }
+      // Continuing past a failed gate would run its approved branch with no decision.
+      // (The engine also refuses it at run time, for errorConfig.continueOnFail too.)
+      if ((node.config as Record<string, unknown> | undefined)?.onError === "continue") {
+        issues.push({
+          code: "approval_gate_continue_on_error",
+          message: "An Approval Gate cannot continue on error: that would run its approved branch with no decision. Stop, or use the error branch.",
+          nodeId: node.id
+        });
+      }
+      // Loop bodies run inline and cannot be paused and resumed part-way.
+      const inLoop = workflow.edges.some((edge) => edge.target === node.id && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node");
+      if (inLoop) {
+        issues.push({
+          code: "approval_gate_in_loop",
+          message: "An Approval Gate cannot be a Loop node's body. Gate the loop's input or its output instead.",
           nodeId: node.id
         });
       }
@@ -1130,6 +1184,48 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
   }
 
   issues.push(...validateGuardPlacement(workflow));
+  issues.push(...validateApprovalGateAttachments(workflow));
+  return issues;
+}
+
+/**
+ * Phase 11.2 — a node that runs after an Approval Gate must not also be
+ * attached (worker or tool) to a node that does not wait for the gate: that
+ * node would reach it at run time with no decision.
+ */
+function validateApprovalGateAttachments(workflow: Workflow): WorkflowValidationIssue[] {
+  const issues: WorkflowValidationIssue[] = [];
+  const gates = workflow.nodes.filter((entry) => entry.type === "approval_gate");
+  if (gates.length === 0) return issues;
+  const outgoing = new Map<string, string[]>();
+  for (const edge of workflow.edges) {
+    const list = outgoing.get(edge.source) ?? [];
+    list.push(edge.target);
+    outgoing.set(edge.source, list);
+  }
+  const attachedEdges = workflow.edges.filter((edge) => edge.sourceHandle === "worker" || edge.sourceHandle === "tool");
+  const nodeNames = new Map(workflow.nodes.map((entry) => [entry.id, entry.name || entry.id]));
+  for (const gate of gates) {
+    const after = new Set<string>();
+    const pending = [gate.id];
+    while (pending.length > 0) {
+      const id = pending.pop()!;
+      for (const target of outgoing.get(id) ?? []) {
+        if (target === gate.id || after.has(target)) continue;
+        after.add(target);
+        pending.push(target);
+      }
+    }
+    for (const edge of attachedEdges) {
+      if (!after.has(edge.target) || after.has(edge.source) || edge.source === gate.id) continue;
+      issues.push({
+        code: "approval_gate_attachment_bypass",
+        message: `Node '${nodeNames.get(edge.target) ?? edge.target}' runs after Approval Gate '${gate.name || gate.id}' but is also attached to '${nodeNames.get(edge.source) ?? edge.source}', which does not wait for the gate. Attach it only to nodes after the gate.`,
+        nodeId: edge.target,
+        edgeId: edge.id
+      });
+    }
+  }
   return issues;
 }
 
@@ -1261,7 +1357,7 @@ export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationR
   }
 
   return {
-    valid: issues.length === 0,
+    valid: issues.every((issue) => issue.severity === "warning"),
     issues,
     orderedNodeIds: topology.order
   };

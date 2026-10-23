@@ -631,6 +631,18 @@ export function summarizeNode(node: { type: string; config?: unknown }): string 
     }
     case "human_approval":
       return join([str(c.approvalMessage, 36), typeof c.timeoutMinutes === "number" ? `${c.timeoutMinutes} min` : null]);
+    case "approval_gate": {
+      const roles = Array.isArray(c.approverRoles) ? c.approverRoles.map(String) : [];
+      const users = Array.isArray(c.approverUsers) ? c.approverUsers.length : 0;
+      const fields = Array.isArray(c.editableFields) ? c.editableFields.length : 0;
+      const who = roles.length > 0 ? roles.join("/") : users > 0 ? `${users} user${users === 1 ? "" : "s"}` : "any operator";
+      const minutes = typeof c.timeoutMinutes === "number" ? c.timeoutMinutes : 1440;
+      return join([
+        who,
+        minutes % 60 === 0 ? `${minutes / 60} h` : `${minutes} min`,
+        fields > 0 ? `${fields} editable` : null
+      ]);
+    }
     case "execute_workflow":
       return join([str(c.workflowId, 24) ?? "no workflow", str(c.mode)]);
     case "output":

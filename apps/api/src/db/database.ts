@@ -3,6 +3,10 @@ import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import type {
+  ApprovalRequestKind,
+  ApprovalRequestSpec,
+  ApprovalStatus,
+  PendingApprovalInfo,
   ChatMessage,
   Folder,
   McpPolicyRole,
@@ -1565,6 +1569,106 @@ function mapGuardEventRow(row: GuardEventRow): GuardEventRecord {
   };
 }
 
+/** Phase 11.2 — one approval request row. */
+export interface ApprovalRequestRecord {
+  id: string;
+  executionId: string;
+  workflowId: string;
+  workflowName: string | null;
+  projectId: string;
+  nodeId: string;
+  nodeType: string | null;
+  kind: ApprovalRequestKind;
+  status: ApprovalStatus;
+  message: string | null;
+  spec: ApprovalRequestSpec;
+  path: PendingApprovalInfo["path"];
+  details: Record<string, unknown> | null;
+  requestedByUserId: string | null;
+  requestedBy: string | null;
+  timeoutMinutes: number | null;
+  expiresAt: string | null;
+  decidedByUserId: string | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  reason: string | null;
+  edits: Record<string, unknown> | null;
+  editedFields: string[];
+  /** The workflow whose node asked (the innermost one for a sub-workflow pause). */
+  askingWorkflowId: string | null;
+  /** Per-request salt of the edits digest. */
+  editsSalt: string | null;
+  /** Set when the workflow was deleted: the request is then admin-only, even if a new workflow reuses the id. */
+  workflowDeletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ApprovalRequestInsert {
+  id: string;
+  executionId: string;
+  workflowId: string;
+  workflowName?: string | null;
+  projectId: string;
+  nodeId: string;
+  nodeType?: string | null;
+  kind: ApprovalRequestKind;
+  message?: string | null;
+  spec: ApprovalRequestSpec;
+  path?: PendingApprovalInfo["path"];
+  details?: Record<string, unknown> | null;
+  requestedByUserId?: string | null;
+  requestedBy?: string | null;
+  timeoutMinutes?: number | null;
+  expiresAt?: string | null;
+  askingWorkflowId?: string | null;
+  editsSalt?: string | null;
+  createdAt?: string;
+}
+
+/** Phase 11.2 — which approval requests a user may see: everything, or these projects plus workflows shared to them. */
+/** Which requests a user may list: every one (admins) or those of the workflows they can read now. */
+export type ApprovalReadScope = { all: true } | { all?: false; workflowIds: string[] };
+
+type ApprovalRequestRow = Record<string, unknown>;
+
+function mapApprovalRequestRow(row: ApprovalRequestRow): ApprovalRequestRecord {
+  const spec = parseJsonSafe(row.spec_json);
+  const path = parseJsonSafe(row.path_json);
+  const details = row.details_json ? parseJsonSafe(row.details_json) : null;
+  const edits = row.edits_json ? parseJsonSafe(row.edits_json) : null;
+  return {
+    id: toString(row.id),
+    executionId: toString(row.execution_id),
+    workflowId: toString(row.workflow_id),
+    workflowName: nullableText(row.workflow_name),
+    projectId: toString(row.project_id),
+    nodeId: toString(row.node_id),
+    nodeType: nullableText(row.node_type),
+    kind: toString(row.kind) as ApprovalRequestKind,
+    status: toString(row.status) as ApprovalStatus,
+    message: nullableText(row.message),
+    spec: (spec && typeof spec === "object" ? spec : {}) as ApprovalRequestSpec,
+    path: Array.isArray(path) ? (path as PendingApprovalInfo["path"]) : [],
+    details: details && typeof details === "object" && !Array.isArray(details) ? (details as Record<string, unknown>) : null,
+    requestedByUserId: nullableText(row.requested_by_user_id),
+    requestedBy: nullableText(row.requested_by),
+    timeoutMinutes: row.timeout_minutes === null || row.timeout_minutes === undefined ? null : toNumber(row.timeout_minutes),
+    expiresAt: nullableText(row.expires_at),
+    decidedByUserId: nullableText(row.decided_by_user_id),
+    decidedBy: nullableText(row.decided_by),
+    decidedAt: nullableText(row.decided_at),
+    reason: nullableText(row.reason),
+    edits: edits && typeof edits === "object" && !Array.isArray(edits) ? (edits as Record<string, unknown>) : null,
+    editedFields: parseJsonArray(row.edited_fields_json),
+    askingWorkflowId: nullableText(row.asking_workflow_id),
+    editsSalt: nullableText(row.edits_salt),
+    workflowDeletedAt: nullableText(row.workflow_deleted_at),
+    createdAt: toString(row.created_at),
+    updatedAt: toString(row.updated_at)
+  };
+}
+
 function toString(value: unknown): string {
   return typeof value === "string" ? value : String(value ?? "");
 }
@@ -2866,6 +2970,48 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_replay_recordings_source ON replay_recordings(source_execution_id);
     `);
 
+    // Phase 11.2 — approval requests: who may decide a paused run, and what
+    // was decided. The paused state itself stays in workflow_executions.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS approval_requests (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        project_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        node_type TEXT,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        spec_json TEXT NOT NULL,
+        path_json TEXT,
+        details_json TEXT,
+        requested_by_user_id TEXT,
+        requested_by TEXT,
+        timeout_minutes INTEGER,
+        expires_at TEXT,
+        decided_by_user_id TEXT,
+        decided_by TEXT,
+        decided_at TEXT,
+        reason TEXT,
+        edits_json TEXT,
+        edited_fields_json TEXT,
+        asking_workflow_id TEXT,
+        edits_salt TEXT,
+        workflow_deleted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS schema_markers (
+        name TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_approval_requests_status_expires ON approval_requests(status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_approval_requests_execution ON approval_requests(execution_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_approval_requests_project ON approval_requests(project_id, status, created_at DESC);
+    `);
+
     // Idempotent column additions for Phase 4.2 (SQLite has no ADD COLUMN IF NOT EXISTS).
     this.ensureColumn("workflows", "tags_json", "TEXT", "'[]'");
     this.ensureColumn("workflows", "project_id", "TEXT", `'${DEFAULT_PROJECT_ID}'`);
@@ -2875,6 +3021,12 @@ export class SqliteStore {
     this.ensureColumn("secrets", "external_provider_id", "TEXT");
     this.ensureColumn("secrets", "external_key", "TEXT");
     this.ensureColumn("execution_history", "custom_data_json", "TEXT");
+    // Phase 11.2 — columns added to approval_requests after it first shipped on this branch.
+    this.ensureColumn("approval_requests", "asking_workflow_id", "TEXT");
+    this.ensureColumn("approval_requests", "edits_salt", "TEXT");
+    this.ensureColumn("approval_requests", "workflow_deleted_at", "TEXT");
+    // When approval requests (migration 32) first came up: runs paused before it get one full timeout from here.
+    this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('approval_requests', ?)`, [new Date().toISOString()]);
 
     // Phase 15.2 — golden sets (datasets tied to a workflow) and background replay jobs on the eval tables.
     this.ensureColumn("eval_datasets", "workflow_id", "TEXT");
@@ -3154,6 +3306,17 @@ export class SqliteStore {
 
       if (hasTable("workflow_executions")) {
         this.exec("DELETE FROM workflow_executions WHERE workflow_id = ?", [id]);
+      }
+
+      // Phase 11.2 — decided requests stay as the audit trail (admin-only from here on, even if a new
+      // workflow reuses the id); pending ones end with their paused run.
+      if (hasTable("approval_requests")) {
+        const now = new Date().toISOString();
+        this.exec(
+          "UPDATE approval_requests SET status = 'canceled', reason = 'The workflow was deleted', decided_at = ?, updated_at = ? WHERE workflow_id = ? AND status = 'pending'",
+          [now, now, id]
+        );
+        this.exec("UPDATE approval_requests SET workflow_deleted_at = ? WHERE workflow_id = ? AND workflow_deleted_at IS NULL", [now, id]);
       }
 
       if (hasTable("mcp_cassettes")) {
@@ -4282,6 +4445,8 @@ export class SqliteStore {
     this.exec(`DELETE FROM mcp_cassettes WHERE created_at < ?`, [input.before]);
     // Phase 12.1 — and so do guard events.
     this.exec(`DELETE FROM guard_events WHERE created_at < ?`, [input.before]);
+    // Phase 11.2 — and decided approval requests; pending ones stay with their paused run.
+    this.exec(`DELETE FROM approval_requests WHERE status <> 'pending' AND created_at < ?`, [input.before]);
     const deleted = before ? toNumber(before.count) : 0;
     if (deleted > 0) {
       this.persist();
@@ -4472,6 +4637,221 @@ export class SqliteStore {
       this.persist();
     }
     return deleted;
+  }
+
+  /**
+   * Phase 11.2 — move a paused run to `resuming` once, so two decisions (two
+   * approvers, or an approver and the timeout sweeper) cannot both resume it.
+   */
+  claimWorkflowExecutionForResume(id: string): boolean {
+    const result = this.db
+      .prepare(`UPDATE workflow_executions SET status = 'resuming', updated_at = ? WHERE id = ? AND status = 'waiting_approval'`)
+      .run(new Date().toISOString(), id);
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
+  }
+
+  /** Phase 11.2 — paused runs a decision was taken for but whose resume did not finish (the process stopped). */
+  listResumingWorkflowExecutionIds(): string[] {
+    return this.queryAll<{ id: string }>(`SELECT id FROM workflow_executions WHERE status = 'resuming' ORDER BY updated_at ASC`).map((row) => toString(row.id));
+  }
+
+  /** Phase 11.2 — paused runs in `resuming` whose claim is older than `before`, with the claim time. */
+  listResumingWorkflowExecutions(before?: string): Array<{ id: string; claimedAt: string }> {
+    const rows = before
+      ? this.queryAll<{ id: string; updated_at: string }>(`SELECT id, updated_at FROM workflow_executions WHERE status = 'resuming' AND updated_at < ? ORDER BY updated_at ASC`, [before])
+      : this.queryAll<{ id: string; updated_at: string }>(`SELECT id, updated_at FROM workflow_executions WHERE status = 'resuming' ORDER BY updated_at ASC`);
+    return rows.map((row) => ({ id: toString(row.id), claimedAt: toString(row.updated_at) }));
+  }
+
+  /** Phase 11.2 — hand a claimed run back to the waiting state (the resume could not start). False when it was not claimed. */
+  releaseWorkflowExecutionClaim(id: string): boolean {
+    const result = this.db
+      .prepare(`UPDATE workflow_executions SET status = 'waiting_approval', updated_at = ? WHERE id = ? AND status = 'resuming'`)
+      .run(new Date().toISOString(), id);
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
+  }
+
+  /** Runs `fn` in one SQLite transaction: every statement commits together, or none does when it throws. */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  /** Phase 11.2 — when a schema marker was first written (see `schema_markers`). */
+  getSchemaMarker(name: string): string | null {
+    const row = this.queryOne<{ created_at: string }>(`SELECT created_at FROM schema_markers WHERE name = ?`, [name]);
+    return row ? toString(row.created_at) : null;
+  }
+
+  /** Phase 11.2 — whether a queue item with this id, or one that extends it (`<id>:…`), is still waiting or running. */
+  hasActiveQueueItem(id: string): boolean {
+    const row = this.queryOne<{ id: string }>(
+      `SELECT id FROM execution_queue WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
+      [id, `${id.replace(/[\\%_]/g, "\\$&")}:%`]
+    );
+    return Boolean(row);
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 11.2 — approval requests
+  // -------------------------------------------------------------------------
+
+  insertApprovalRequest(input: ApprovalRequestInsert): ApprovalRequestRecord {
+    const now = input.createdAt ?? new Date().toISOString();
+    this.exec(
+      `INSERT INTO approval_requests (
+         id, execution_id, workflow_id, workflow_name, project_id, node_id, node_type, kind, status, message,
+         spec_json, path_json, details_json, requested_by_user_id, requested_by, timeout_minutes, expires_at,
+         asking_workflow_id, edits_salt, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.executionId,
+        input.workflowId,
+        input.workflowName ?? null,
+        input.projectId,
+        input.nodeId,
+        input.nodeType ?? null,
+        input.kind,
+        input.message ?? null,
+        JSON.stringify(input.spec),
+        JSON.stringify(input.path ?? []),
+        input.details ? JSON.stringify(input.details) : null,
+        input.requestedByUserId ?? null,
+        input.requestedBy ?? null,
+        typeof input.timeoutMinutes === "number" ? Math.floor(input.timeoutMinutes) : null,
+        input.expiresAt ?? null,
+        input.askingWorkflowId ?? null,
+        input.editsSalt ?? null,
+        now,
+        now
+      ]
+    );
+    this.persist();
+    return this.getApprovalRequest(input.id)!;
+  }
+
+  getApprovalRequest(id: string): ApprovalRequestRecord | null {
+    const row = this.queryOne<ApprovalRequestRow>(`SELECT * FROM approval_requests WHERE id = ?`, [id]);
+    return row ? mapApprovalRequestRow(row) : null;
+  }
+
+  /** The newest pending request of a paused run. */
+  getPendingApprovalRequestForExecution(executionId: string): ApprovalRequestRecord | null {
+    const row = this.queryOne<ApprovalRequestRow>(
+      `SELECT * FROM approval_requests WHERE execution_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
+      [executionId]
+    );
+    return row ? mapApprovalRequestRow(row) : null;
+  }
+
+  listApprovalRequestsForExecution(executionId: string): ApprovalRequestRecord[] {
+    return this.queryAll<ApprovalRequestRow>(`SELECT * FROM approval_requests WHERE execution_id = ? ORDER BY created_at ASC, id ASC`, [executionId]).map(mapApprovalRequestRow);
+  }
+
+  listApprovalRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number; scope?: ApprovalReadScope }): ApprovalRequestRecord[] {
+    const clauses: string[] = [];
+    const params: BindParams = [];
+    // Filtered before the limit, so other projects' requests never crowd out the user's own.
+    if (filter.scope && !filter.scope.all) {
+      // By workflow, not the stored project_id: a workflow moved to another
+      // project takes its requests with it.
+      const { workflowIds } = filter.scope;
+      if (workflowIds.length === 0) return [];
+      clauses.push(`workflow_id IN (${workflowIds.map(() => "?").join(", ")})`);
+      params.push(...workflowIds);
+      // A deleted workflow's requests stay admin-only, also when a new workflow reuses its id.
+      clauses.push(`workflow_deleted_at IS NULL`);
+    }
+    if (filter.status === "pending") clauses.push(`status = 'pending'`);
+    if (filter.status === "decided") clauses.push(`status <> 'pending'`);
+    if (filter.workflowId) {
+      clauses.push(`workflow_id = ?`);
+      params.push(filter.workflowId);
+    }
+    if (filter.executionId) {
+      clauses.push(`execution_id = ?`);
+      params.push(filter.executionId);
+    }
+    const limit = Math.max(1, Math.min(1_000, Math.floor(filter.limit ?? 200)));
+    const order = filter.status === "decided" ? "COALESCE(decided_at, updated_at) DESC" : "created_at DESC";
+    return this.queryAll<ApprovalRequestRow>(
+      `SELECT * FROM approval_requests ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY ${order}, id DESC LIMIT ${limit}`,
+      params
+    ).map(mapApprovalRequestRow);
+  }
+
+  /** Pending requests past their expiry, oldest first. */
+  listExpiredApprovalRequests(now: string, limit = 100): ApprovalRequestRecord[] {
+    return this.queryAll<ApprovalRequestRow>(
+      `SELECT * FROM approval_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at ASC LIMIT ?`,
+      [now, Math.max(1, Math.floor(limit))]
+    ).map(mapApprovalRequestRow);
+  }
+
+  /** Records a decision once: false when the request was no longer pending. */
+  decideApprovalRequest(input: {
+    id: string;
+    status: "approved" | "rejected" | "timed_out" | "canceled";
+    decidedByUserId?: string | null;
+    decidedBy?: string | null;
+    reason?: string | null;
+    edits?: Record<string, unknown> | null;
+    editedFields?: string[];
+    decidedAt?: string;
+  }): boolean {
+    const decidedAt = input.decidedAt ?? new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE approval_requests
+            SET status = ?, decided_by_user_id = ?, decided_by = ?, decided_at = ?, reason = ?, edits_json = ?, edited_fields_json = ?, updated_at = ?
+          WHERE id = ? AND status = 'pending'`
+      )
+      .run(
+        input.status,
+        input.decidedByUserId ?? null,
+        input.decidedBy ?? null,
+        decidedAt,
+        input.reason ?? null,
+        input.edits ? JSON.stringify(input.edits) : null,
+        JSON.stringify(input.editedFields ?? []),
+        decidedAt,
+        input.id
+      );
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
+  }
+
+  /**
+   * Phase 11.2 — puts a decided request back to pending (its resume could not
+   * run), clearing the decision. Its expiry is unchanged. False when it was
+   * not in a decided state.
+   */
+  reopenApprovalRequest(id: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE approval_requests
+            SET status = 'pending', decided_by_user_id = NULL, decided_by = NULL, decided_at = NULL, reason = NULL,
+                edits_json = NULL, edited_fields_json = NULL, updated_at = ?
+          WHERE id = ? AND status IN ('approved', 'rejected', 'timed_out')`
+      )
+      .run(new Date().toISOString(), id);
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
+  }
+
+  /** Cancels every pending request of a run (the run was canceled or its workflow deleted). */
+  cancelPendingApprovalRequests(filter: { executionId?: string; workflowId?: string }, reason: string): number {
+    const column = filter.executionId ? "execution_id" : "workflow_id";
+    const value = filter.executionId ?? filter.workflowId;
+    if (!value) return 0;
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(`UPDATE approval_requests SET status = 'canceled', reason = ?, decided_at = ?, updated_at = ? WHERE ${column} = ? AND status = 'pending'`)
+      .run(reason, now, now, value);
+    if (result.changes > 0) this.persist();
+    return result.changes;
   }
 
   // -------------------------------------------------------------------------

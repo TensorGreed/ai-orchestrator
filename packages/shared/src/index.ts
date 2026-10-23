@@ -13,3 +13,4 @@ export * from "./zip-archive";
 export * from "./replay";
 export * from "./evals";
 export * from "./regex-safety";
+export * from "./approval-gate";

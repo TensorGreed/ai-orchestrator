@@ -16,6 +16,7 @@ import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./N
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields } from "./GuardNodeConfigFields";
+import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import {
@@ -6415,6 +6416,8 @@ export function NodeInspector({
         );
       case "guard_protection":
         return <GuardProtectionFields config={config} setConfig={setConfig} secrets={availableSecrets} />;
+      case "approval_gate":
+        return <ApprovalGateNodeFields config={config} setConfig={setConfig} />;
       case "human_approval":
         return (
           <>
@@ -9068,7 +9071,8 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, onError: next }))}
               options={[
                 { value: "stop", label: "Stop Execution" },
-                { value: "continue", label: "Continue Anyway" },
+                // A gate or approval that continued past a failure would run the next step with no decision.
+                ...(node.data.nodeType === "approval_gate" || node.data.nodeType === "human_approval" ? [] : [{ value: "continue", label: "Continue Anyway" }]),
                 { value: "branch", label: "Execute Fallback Branch" }
               ]}
             />
@@ -9199,6 +9203,8 @@ export function NodeInspector({
           <button className="insp-btn" type="button" onClick={() => void onUnpinNodeOutput?.(node.id)}>
             Unpin output
           </button>
+        ) : node.data.nodeType === "approval_gate" ? (
+          <span className="insp-note">An Approval Gate cannot be pinned: its output only comes from a person's decision.</span>
         ) : (
           <button
             className="insp-btn"

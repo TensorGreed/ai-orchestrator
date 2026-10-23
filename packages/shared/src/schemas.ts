@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { WORKFLOW_SCHEMA_VERSION } from "./types";
+import { writeToolApprovalSettingsSchema } from "./approval-gate";
 
 export const secretReferenceSchema = z.object({
   secretId: z.string().min(1)
@@ -63,6 +64,7 @@ export const workflowNodeSchema = z.object({
     "document_chunker",
     "output_parser",
     "human_approval",
+    "approval_gate",
     "input_validator",
     "output_guardrail",
     "guard",
@@ -181,7 +183,9 @@ export const workflowSettingsSchema = z
     saveDataErrorExecution: z.enum(["all", "none"]).optional(),
     active: z.boolean().optional(),
     /** Phase 10.2 — block every MCP write tool for agents and MCP Tool nodes in this workflow. */
-    noWriteTools: z.boolean().optional()
+    noWriteTools: z.boolean().optional(),
+    /** Phase 11.2 — agents pause for approval before calling an MCP write tool. */
+    writeToolApproval: writeToolApprovalSettingsSchema.optional()
   })
   .passthrough();
 

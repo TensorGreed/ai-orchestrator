@@ -50,6 +50,7 @@ import {
   fetchWorkflows,
   importExternalWorkflow,
   importWorkflow,
+  listApprovals,
   validateStoredWorkflow,
   isMfaChallenge,
   loginUser,
@@ -129,6 +130,7 @@ import { McpOverviewPage } from "./components/McpOverviewPage";
 import { McpMyConnectionsPage } from "./components/McpRuntimeSafety";
 import { GuardSecurityPage } from "./components/GuardSecurityPage";
 import { EvaluationsPage } from "./components/EvaluationsPage";
+import { ApprovalsPage } from "./components/ApprovalsPage";
 import { McpToolsPage } from "./components/McpToolsPage";
 import { McpChangesPage } from "./components/McpChangesPage";
 import type { McpNavTarget } from "./lib/mcp-control-plane";
@@ -136,6 +138,7 @@ import { useMcpCanvasStatus } from "./lib/use-mcp-canvas-status";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
 import { WorkflowShareModal } from "./components/WorkflowShareModal";
+import { WriteToolApprovalDialog } from "./components/WriteToolApprovalDialog";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
@@ -1090,6 +1093,7 @@ function StudioApp() {
   const [mfaCode, setMfaCode] = useState("");
   const [showWelcome, setShowWelcome] = useState<boolean>(() => !isWelcomeDismissed());
   const [templateInitialCategory, setTemplateInitialCategory] = useState<string | undefined>(undefined);
+  const [writeToolDialogOpen, setWriteToolDialogOpen] = useState(false);
   const [shareWorkflowTarget, setShareWorkflowTarget] = useState<{
     id: string;
     name: string;
@@ -1358,6 +1362,36 @@ function StudioApp() {
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
+  // Phase 11.2 — pending approvals the user can decide, for the sidebar badge.
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
+  const [approvalFocusExecutionId, setApprovalFocusExecutionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!authUser) {
+      setPendingApprovalCount(0);
+      return;
+    }
+    let cancelled = false;
+    const refresh = () => {
+      listApprovals({ status: "pending" })
+        .then((response) => {
+          if (!cancelled) setPendingApprovalCount(response.items.filter((item) => item.canDecide).length);
+        })
+        .catch(() => {
+          /* The badge is a hint; the Approvals page shows the error. */
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [authUser]);
+
+  useEffect(() => {
+    if (activeMode !== "approvals") setApprovalFocusExecutionId(null);
+  }, [activeMode]);
 
   useEffect(() => {
     setWorkflowVariableRows(workflowVariablesToRows(currentWorkflow.variables));
@@ -4570,6 +4604,7 @@ function StudioApp() {
         }}
         drawerOpen={navDrawerOpen}
         onDrawerOpenChange={setNavDrawerOpen}
+        badges={{ approvals: pendingApprovalCount }}
       />
 
       <div className="studio-main">
@@ -4639,6 +4674,8 @@ function StudioApp() {
                   })
               : undefined
           }
+          writeToolApproval={currentWorkflow.settings?.writeToolApproval?.enabled === true}
+          onEditWriteToolApproval={canManageWorkflows ? () => setWriteToolDialogOpen(true) : undefined}
           recordMcp={recordMcp}
           onToggleRecordMcp={canManageWorkflows ? () => setRecordMcp((value) => !value) : undefined}
           docsUrl={docsUrl}
@@ -5085,6 +5122,10 @@ function StudioApp() {
               onReplayCassette={canManageWorkflows ? (executionId, mode) => handleReplayCassette(executionId, mode) : undefined}
               canDeleteCassettes={authUser?.role === "admin"}
               canManageGoldenRuns={canManageWorkflows}
+              onReviewApproval={(executionId) => {
+                setApprovalFocusExecutionId(executionId);
+                setActiveMode("approvals");
+              }}
             />
           )}
 
@@ -5268,6 +5309,17 @@ function StudioApp() {
           {activeMode === "mcp" && <McpOverviewPage onNavigate={navigateMcp} />}
 
           {activeMode === "connections" && <McpMyConnectionsPage />}
+
+          {activeMode === "approvals" && authUser && (
+            <ApprovalsPage
+              focusExecutionId={approvalFocusExecutionId}
+              onPendingCountChange={setPendingApprovalCount}
+              onOpenRun={(executionId) => {
+                setActiveMode("executions");
+                if (!expandedExecutionIds.includes(executionId)) void toggleExecutionRow(executionId);
+              }}
+            />
+          )}
 
           {activeMode === "security" && authUser && (
             <GuardSecurityPage
@@ -5524,6 +5576,16 @@ function StudioApp() {
         onNativeFile={handleNativeFileInImportDialog}
         onClose={closeExternalImport}
       />
+
+      {writeToolDialogOpen && (
+        <WriteToolApprovalDialog
+          workflowId={currentWorkflow.id}
+          projectId={currentWorkflow.projectId ?? activeProjectId}
+          settings={currentWorkflow.settings?.writeToolApproval}
+          onChange={(writeToolApproval) => setCurrentWorkflow((current) => ({ ...current, settings: { ...(current.settings ?? {}), writeToolApproval } }))}
+          onClose={() => setWriteToolDialogOpen(false)}
+        />
+      )}
 
       {shareWorkflowTarget && (
         <WorkflowShareModal

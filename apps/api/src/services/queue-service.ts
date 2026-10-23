@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteStore } from "../db/database.js";
 import { STUCK_JOB_MARGIN_MS, queuedRunTimeoutMs } from "../db/queue-timeouts.js";
+import type { ApprovalResumeJob } from "./approval-service.js";
 
 export interface QueuedExecutionPayload {
   workflowId: string;
@@ -16,6 +17,8 @@ export interface QueuedExecutionPayload {
   enqueuedByUserId?: string;
   executionTimeoutMs?: number;
   customData?: Record<string, unknown>;
+  /** Phase 11.2 — resume a paused run with a recorded approval decision instead of starting one. */
+  resume?: ApprovalResumeJob;
 }
 
 export interface QueueServiceConfig {
@@ -124,18 +127,19 @@ export class QueueService {
   }
 
   async enqueue(
-    payload: Omit<QueuedExecutionPayload, "executionId"> & { executionId?: string; priority?: number }
+    payload: Omit<QueuedExecutionPayload, "executionId"> & { executionId?: string; priority?: number; queueItemId?: string; maxAttempts?: number }
   ): Promise<string> {
     const executionId = payload.executionId ?? randomUUID();
-    const { priority, executionId: _id, ...rest } = payload;
+    const { priority, executionId: _id, queueItemId, maxAttempts, ...rest } = payload;
 
     this.store.enqueueExecution({
-      id: executionId,
+      // A resume reuses its run's execution id, so its queue item needs its own id.
+      id: queueItemId ?? executionId,
       workflowId: rest.workflowId,
       workflowName: undefined,
       payload: { executionId, ...rest } as Record<string, unknown>,
       priority: priority ?? 0,
-      maxAttempts: 3
+      maxAttempts: maxAttempts ?? 3
     });
 
     return executionId;

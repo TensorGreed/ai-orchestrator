@@ -163,7 +163,7 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     title: "Human in the Loop",
     description: "Pause for human approvals before continuing execution.",
     icon: "human",
-    match: (node) => node.type === "human_approval"
+    match: (node) => node.type === "human_approval" || node.type === "approval_gate"
   },
   {
     key: "core",

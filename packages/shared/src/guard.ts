@@ -57,7 +57,8 @@ export const guardNodeConfigSchema = z.object({
   labels: z.array(z.enum(GUARD_PROVENANCE_VALUES)).optional(),
   /** Shown to the approver when a verdict requires approval. */
   approvalMessage: z.string().optional(),
-  timeoutMinutes: z.number().int().positive().max(10_080).default(60)
+  /** Phase 11.2 — enforced: an undecided hand-off is rejected after this long (default one day). */
+  timeoutMinutes: z.number().int().positive().max(10_080).default(1_440)
 });
 export type GuardNodeConfig = z.output<typeof guardNodeConfigSchema>;
 

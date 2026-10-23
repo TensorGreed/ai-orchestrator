@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore, AgentSessionToolDataStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
+  classifyMcpTool,
   evaluateMcpToolAccess,
   invokeDirectMCPTool,
   policyNeedsAnnotations,
@@ -17,6 +18,8 @@ import {
 import type { ProviderExecutionContext, ProviderRegistry, ResilientFetchRetryInfo } from "@ai-orchestrator/provider-sdk";
 import { NODE_ACTIVITY_LIMIT, NODE_ACTIVITY_PREVIEW_CHARS } from "@ai-orchestrator/shared";
 import type {
+  ApprovalDecisionValue,
+  ApprovalHandoffState,
   ChatMessage,
   ConnectorDocument,
   LLMProviderConfig,
@@ -109,6 +112,14 @@ import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orches
 import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
+import {
+  approvalGateOutcome,
+  approvalGatePause,
+  writeToolApprovalPause,
+  writeToolGateSkips,
+  WriteToolCallLedger,
+  type WriteToolCallSession
+} from "./approval-gate-node";
 import type { ReplayNodeHook, ReplayNodeStub } from "./replay-plan";
 import {
   builtInGuardProfile,
@@ -314,21 +325,42 @@ export interface ExecuteWorkflowRequest {
   toolPolicySubject?: McpToolPolicySubject;
   callStack?: string[];
   resumeState?: WorkflowExecutionState;
-  approvalDecision?: {
-    decision: "approve" | "reject";
-    actedBy?: string;
-    reason?: string;
-  };
+  approvalDecision?: ApprovalDecisionInput;
   executionTimeoutMs?: number;
   maxConcurrency?: number;
+}
+
+/**
+ * A decision about a paused run. Phase 11.2 — `timeout` is the timeout
+ * sweeper's decision: Approval Gates route it by their timeout outcome,
+ * every other pause handles it as a rejection. `edits` are the approver's
+ * already validated values for an Approval Gate's editable fields.
+ */
+export interface ApprovalDecisionInput {
+  decision: ApprovalDecisionValue;
+  actedBy?: string;
+  reason?: string;
+  edits?: Record<string, unknown>;
+  editedFields?: string[];
+  requestId?: string;
 }
 
 export interface ResumeWorkflowRequest {
   executionId: string;
   state: WorkflowExecutionState;
-  decision: "approve" | "reject";
+  decision: ApprovalDecisionValue;
   actedBy?: string;
   reason?: string;
+  edits?: Record<string, unknown>;
+  editedFields?: string[];
+  requestId?: string;
+}
+
+/** Phase 11.2 — a resumed decision for the node that paused, consumed when that node runs again. */
+interface NodeResumeDecision extends ApprovalDecisionInput {
+  nodeId: string;
+  decidedAt: string;
+  handoff: Extract<ApprovalHandoffState, { kind: "gate" | "sub_workflow" }>;
 }
 
 interface NodeRuntimeContext {
@@ -345,6 +377,12 @@ interface NodeRuntimeContext {
   toolPolicySubject?: McpToolPolicySubject;
   /** Phase 12.1 — guard approvals granted by a resumed `rerun` hand-off (never from globals). */
   approvedHandoffKeys?: ReadonlySet<string>;
+  /** Phase 11.2 — set only for the node a resumed run paused at (an Approval Gate or a sync Execute Workflow). */
+  resumeDecision?: NodeResumeDecision;
+  /** Phase 11.2 — the run's approved write-tool calls and their stored results. */
+  writeToolCalls?: WriteToolCallLedger;
+  /** Phase 11.2 — the agent execution a worker runs inside, so the worker shares its replay position. */
+  writeToolSession?: WriteToolCallSession;
   recordAttachmentUsage?: (usage: {
     attachedNodeId: string;
     usedByNodeId: string;
@@ -1036,6 +1074,11 @@ const MCP_TOOL_BLOCKED_REMEDIATION =
 
 function mcpToolBlockedError(message: string, hidden: McpHiddenTool): WorkflowError {
   return new WorkflowError(message, ErrorCategory.NODE_CONFIG, false, { mcpToolPolicy: hidden }, MCP_TOOL_BLOCKED_REMEDIATION);
+}
+
+/** Phase 11.2 — an Approval Gate rejection is a person's decision: retrying cannot change it. */
+function isApprovalDecisionError(error: unknown): boolean {
+  return error instanceof WorkflowError && Boolean(error.metadata?.approval);
 }
 
 /** Policy blocks are decisions, not failures: retrying cannot change them. */
@@ -3426,26 +3469,74 @@ async function executeNode(
         return { async: true, workflowId, status: "enqueued" };
       }
 
-      const childResult = await executeWorkflow(
-        {
-          workflow: targetWorkflow,
-          input: mappedInput,
-          triggerType: "sub_workflow",
-          triggeredBy: context.workflow.id,
-          toolPolicySubject: context.toolPolicySubject,
-          callStack: [...context.callStack]
-        },
-        childDependencies
-      );
+      // Phase 11.2 — a paused child is not saved on its own: its paused state
+      // travels in this run's hand-off, and the parent pauses at this node.
+      let childPause: Parameters<NonNullable<WorkflowExecutionDependencies["persistPausedExecution"]>>[0] | undefined;
+      const pauseCapturingDependencies: WorkflowExecutionDependencies = {
+        ...childDependencies,
+        persistPausedExecution: async (paused) => {
+          childPause = paused;
+        }
+      };
+      const resume = context.resumeDecision;
+      const resumingChild = resume && resume.nodeId === node.id && resume.handoff.kind === "sub_workflow" ? resume.handoff : undefined;
+      // The child resumes under the scope of the workflow this node calls
+      // now (checked by loadWorkflow above), never a stored one of another id.
+      if (resumingChild && resumingChild.childState.workflow?.id !== targetWorkflow.id) {
+        throw new Error(`The paused sub-workflow does not match '${workflowId}', so this run cannot resume it.`);
+      }
+      const childResult = resumingChild
+        ? await executeWorkflow(
+            {
+              workflow: resumingChild.childState.workflow,
+              triggerType: "sub_workflow",
+              triggeredBy: context.workflow.id,
+              toolPolicySubject: context.toolPolicySubject,
+              callStack: [...context.callStack],
+              resumeState: resumingChild.childState,
+              approvalDecision: {
+                decision: resume!.decision,
+                ...(resume!.actedBy ? { actedBy: resume!.actedBy } : {}),
+                ...(resume!.reason ? { reason: resume!.reason } : {}),
+                ...(resume!.edits ? { edits: resume!.edits } : {}),
+                ...(resume!.editedFields ? { editedFields: resume!.editedFields } : {}),
+                ...(resume!.requestId ? { requestId: resume!.requestId } : {})
+              }
+            },
+            pauseCapturingDependencies
+          )
+        : await executeWorkflow(
+            {
+              workflow: targetWorkflow,
+              input: mappedInput,
+              triggerType: "sub_workflow",
+              triggeredBy: context.workflow.id,
+              toolPolicySubject: context.toolPolicySubject,
+              callStack: [...context.callStack]
+            },
+            pauseCapturingDependencies
+          );
 
       if (childResult.status === "error") {
         throw new Error(childResult.error ?? `Sub-workflow '${workflowId}' execution failed.`);
       }
 
       if (childResult.status === "waiting_approval") {
-        throw new Error(
-          `Sub-workflow '${workflowId}' paused for approval. Waiting approvals are not supported inside Execute Workflow nodes.`
-        );
+        if (!childPause) {
+          throw new Error(`Sub-workflow '${workflowId}' paused for approval, but its paused state was not handed back.`);
+        }
+        throw new ApprovalHandoffSignal({
+          message: childPause.approvalMessage,
+          timeoutMinutes: childPause.timeoutMinutes,
+          handoff: {
+            kind: "sub_workflow",
+            source: "execute_workflow",
+            workflowId: childPause.workflowId,
+            workflowName: childPause.workflowName,
+            childState: childPause.state
+          },
+          details: { subWorkflowId: childPause.workflowId, subWorkflowName: childPause.workflowName, waitingNodeId: childPause.waitingNodeId }
+        });
       }
 
       // Apply outputMapping if configured
@@ -5089,6 +5180,8 @@ async function executeNode(
               })
             : undefined;
         let workerPendingApproval: ApprovalHandoffRequest | undefined;
+        let toolGatePendingApproval: ApprovalHandoffRequest | undefined;
+        const writeToolSession = context.writeToolSession ?? context.writeToolCalls?.session();
 
         emitNodeActivity(dependencies, node.id, {
           kind: "resolved_input",
@@ -5137,6 +5230,7 @@ async function executeNode(
                 
                   const workerContext: NodeRuntimeContext = {
                      ...context,
+                     ...(writeToolSession ? { writeToolSession } : {}),
                      globals: { ...context.globals, user_prompt: String(args.task_prompt ?? "") },
                      parentOutputs: { ...context.parentOutputs },
                      callStack: [...context.callStack, node.id]
@@ -5157,10 +5251,48 @@ async function executeNode(
                     throw error;
                   }
                }
+               const resolvedEntry = resolvedTools.resolved.find((entry) => entry.exposedName === toolName);
+               // Phase 11.2 — the workflow's write-tool gate: a person approves this exact call first.
+               const writeGate = context.workflow.settings?.writeToolApproval;
+               let approvedCallKey: string | undefined;
+               if (writeGate?.enabled && resolvedEntry && !dependencies.replayNodeHook) {
+                 const classification = toolPolicy
+                   ? toolPolicy.evaluate({
+                       adapterId: resolvedEntry.serverId,
+                       ...(resolvedEntry.registryServerId ? { registryServerId: resolvedEntry.registryServerId } : {}),
+                       toolName: resolvedEntry.originalName,
+                       ...(resolvedEntry.annotations ? { annotations: resolvedEntry.annotations } : {})
+                     }).classification
+                   : classifyMcpTool({ annotations: resolvedEntry.annotations });
+                 if (!writeToolGateSkips(classification)) {
+                   const serverKey = resolvedEntry.registryServerId ?? resolvedEntry.serverId;
+                   const pause = writeToolApprovalPause({
+                     settings: writeGate,
+                     nodeId: node.id,
+                     nodeName: node.name || node.id,
+                     serverKey,
+                     serverLabel: serverKey,
+                     toolName: resolvedEntry.originalName,
+                     args,
+                     classificationSource: classification.source === "manual" ? "manual" : "not_marked_read_only"
+                   });
+                   const approvalKey = pause.handoff.kind === "rerun" ? pause.handoff.approvalKey : undefined;
+                   // An approved call already ran in an earlier re-run: answer from its result.
+                   const replayed = approvalKey ? writeToolSession?.replay(approvalKey) : undefined;
+                   if (replayed?.hit) return replayed.result as Awaited<ReturnType<typeof resolvedTools.invokeByExposedName>>;
+                   if (!approvalKey || !writeToolSession?.takeApproval(approvalKey)) {
+                     toolGatePendingApproval = pause;
+                     throw new AgentGuardInterrupt("approval_required", "tool_arguments", 0, pause.message);
+                   }
+                   approvedCallKey = approvalKey;
+                 }
+               }
                // Phase 10.5 — each tool call gets a fresh sampling budget.
-               const originalName = resolvedTools.resolved.find((entry) => entry.exposedName === toolName)?.originalName ?? toolName;
+               const originalName = resolvedEntry?.originalName ?? toolName;
                agentMcp.samplingHandler.beginCall(originalName);
-               return resolvedTools.invokeByExposedName(toolName, args);
+               const toolResult = await resolvedTools.invokeByExposedName(toolName, args);
+               if (approvedCallKey) writeToolSession?.record(approvedCallKey, toolResult);
+               return toolResult;
             }
           },
           {
@@ -5177,7 +5309,7 @@ async function executeNode(
         } catch (error) {
           if (isAgentGuardInterrupt(error)) {
             if (error.reason === "approval_required") {
-              const request = guardSession?.takePendingApproval() ?? workerPendingApproval;
+              const request = toolGatePendingApproval ?? guardSession?.takePendingApproval() ?? workerPendingApproval;
               if (request) throw new ApprovalHandoffSignal(request);
             }
             throw new GuardBlockedError(
@@ -5688,6 +5820,24 @@ async function executeNode(
       };
     }
 
+    case "approval_gate": {
+      const resume = context.resumeDecision;
+      if (resume && resume.nodeId === node.id && resume.handoff.kind === "gate") {
+        const connectedHandles = new Set(
+          context.workflow.edges.filter((edge) => edge.source === node.id && edge.sourceHandle && !isAuxiliaryEdge(edge)).map((edge) => edge.sourceHandle as string)
+        );
+        return approvalGateOutcome({
+          decision: resume,
+          request: resume.handoff.request,
+          connectedHandles,
+          merged: context.merged,
+          parentIds: Object.keys(context.parentOutputs),
+          timeoutMinutes: typeof config.timeoutMinutes === "number" ? config.timeoutMinutes : undefined
+        });
+      }
+      throw approvalGatePause(config, (template) => renderTemplate(template, templateData));
+    }
+
     case "pdf_output": {
       const renderMode = config.renderMode === "html" ? "html" : "text";
       const inputKey = typeof config.inputKey === "string" && config.inputKey.trim() ? config.inputKey.trim() : "result";
@@ -6053,13 +6203,26 @@ async function executeNodeWithRetry(
   }
 
   let lastError: Error | undefined;
+  // Phase 11.2 — a resume decision is used by the first attempt only: a
+  // retry of an Execute Workflow node whose resumed child failed starts the
+  // child again (and it asks again), instead of resuming it twice.
+  const { resumeDecision: _firstAttemptOnly, ...retryContext } = context;
   for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
     try {
-      const output = await executeNode(node, context, dependencies);
+      const output = await executeNode(node, attempt === 1 ? context : retryContext, dependencies);
       return { output, attempts: attempt };
     } catch (error) {
       // Phase 12.1 — a guard block or an approval pause is a decision, not a transient failure.
-      if (isCancellationError(error) || dependencies.abortSignal?.aborted || isMcpToolPolicyBlock(error) || isGuardBlockedError(error) || isApprovalHandoffSignal(error)) {
+      if (
+        isCancellationError(error) ||
+        dependencies.abortSignal?.aborted ||
+        isMcpToolPolicyBlock(error) ||
+        isGuardBlockedError(error) ||
+        isApprovalHandoffSignal(error) ||
+        isApprovalDecisionError(error) ||
+        // A rejection or timeout is final: the resumed child must not restart and ask again.
+        (context.resumeDecision?.nodeId === node.id && context.resumeDecision.decision !== "approve")
+      ) {
         throw error;
       }
       // A URL the outbound guard refuses is refused again on every attempt.
@@ -6143,6 +6306,35 @@ function collectReachableFromRoots(
     }
   }
   return reachable;
+}
+
+/**
+ * The first Approval Gate that will not run but whose downstream (execution
+ * edges, plus agent attachments of every visited node) contains a node that will.
+ */
+function skippedApprovalGate(
+  gateIds: ReadonlySet<string>,
+  willRun: ReadonlySet<string>,
+  outgoingExecution: Map<string, string[]>,
+  attachmentsBySource: Map<string, Map<AgentAttachmentHandle, string[]>>
+): string | undefined {
+  for (const gateId of gateIds) {
+    if (willRun.has(gateId)) continue;
+    const seen = new Set<string>([gateId]);
+    const queue = [gateId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const next = [...(outgoingExecution.get(current) ?? [])];
+      for (const targets of attachmentsBySource.get(current)?.values() ?? []) next.push(...targets);
+      for (const target of next) {
+        if (seen.has(target)) continue;
+        if (willRun.has(target)) return gateId;
+        seen.add(target);
+        queue.push(target);
+      }
+    }
+  }
+  return undefined;
 }
 
 function serializeNodeOutputs(nodeOutputs: Map<string, unknown>): Record<string, unknown> {
@@ -6329,6 +6521,40 @@ async function executeWorkflowRun(
     }
   }
 
+  // Phase 11.2 — an Approval Gate is a separation-of-duties control: a run
+  // that may start must not be able to skip it. A start node or single-node
+  // run below a gate is refused (replays answer gates from the recording).
+  const enforceApprovalGates = !dependencies.replayNodeHook && !request.resumeState;
+  const approvalGateIds = new Set(workflow.nodes.filter((entry) => entry.type === "approval_gate").map((entry) => entry.id));
+  if (enforceApprovalGates && explicitStartNodeId && approvalGateIds.size > 0) {
+    // Attached workers and tools run when their agent does, so they count as running.
+    const willRun = new Set(nodeOrder);
+    for (const pending = [...willRun]; pending.length > 0; ) {
+      const id = pending.pop()!;
+      for (const targets of graphIndexes.attachmentsBySource.get(id)?.values() ?? []) {
+        for (const target of targets) {
+          if (!willRun.has(target)) {
+            willRun.add(target);
+            pending.push(target);
+          }
+        }
+      }
+    }
+    const skippedGate = skippedApprovalGate(approvalGateIds, willRun, graphIndexes.outgoingExecution, graphIndexes.attachmentsBySource);
+    if (skippedGate) {
+      const error = WorkflowError.nodeConfig(`This run would start after Approval Gate '${skippedGate}'. Start at or before the gate.`);
+      return {
+        workflowId: workflow.id,
+        status: "error",
+        startedAt,
+        completedAt: nowIso(),
+        executionId: request.executionId,
+        nodeResults: [],
+        error: error.message
+      };
+    }
+  }
+
   const globals: Record<string, unknown> = request.resumeState
     ? toRecord(request.resumeState.globals)
     : {
@@ -6350,6 +6576,7 @@ async function executeWorkflowRun(
         scheduled_at: request.triggerType === "cron" ? nowIso() : undefined
       };
   const approvedHandoffKeys = approvedHandoffKeysFromState(request.resumeState);
+  const writeToolCalls = new WriteToolCallLedger(approvedHandoffKeys, request.resumeState?.approvedToolResults);
   const customData = request.resumeState
     ? toRecord(globals.execution_custom_data)
     : toRecord(request.customData);
@@ -6367,7 +6594,14 @@ async function executeWorkflowRun(
     : deserializeNodeOutputs(toRecord(request.nodeOutputs));
   const workflowPinnedData = toRecord(workflow.pinnedData);
   const requestPinnedData = request.pinnedData === undefined ? workflowPinnedData : toRecord(request.pinnedData);
-  const pinnedData = request.usePinnedData === false ? {} : requestPinnedData;
+  const pinnedData = request.usePinnedData === false ? {} : { ...requestPinnedData };
+  if (enforceApprovalGates) {
+    // A gate's output only ever comes from a person's decision, never from pins or seeded outputs.
+    for (const gateId of approvalGateIds) {
+      delete pinnedData[gateId];
+      nodeOutputs.delete(gateId);
+    }
+  }
   if (!request.resumeState) {
     for (const [nodeId, output] of Object.entries(pinnedData)) {
       nodeOutputs.set(nodeId, output);
@@ -6484,6 +6718,8 @@ async function executeWorkflowRun(
     ? deserializeTryCatchScopes(request.resumeState.tryCatchScopes)
     : new Map<string, { errorTargets: string[]; successDescendants: Set<string> }>();
 
+  let pendingResumeDecision: NodeResumeDecision | undefined;
+
   if (request.resumeState && !request.approvalDecision) {
     return {
       workflowId: workflow.id,
@@ -6582,16 +6818,20 @@ async function executeWorkflowRun(
     nodeResults.splice(0, nodeResults.length, ...filteredNodeResults);
 
     const decidedAt = nowIso();
+    // Phase 11.2 — outside an Approval Gate, a timeout is a rejection.
+    const timedOut = request.approvalDecision.decision === "timeout";
     const decisionPayload = {
       approved: request.approvalDecision.decision === "approve",
-      rejected: request.approvalDecision.decision === "reject",
+      rejected: request.approvalDecision.decision !== "approve",
+      ...(timedOut ? { timedOut: true } : {}),
       timestamp: decidedAt,
       actedBy: request.approvalDecision.actedBy
     };
     const decisionInput = toJsonSafeValue({
-      decision: request.approvalDecision.decision,
+      decision: timedOut ? "reject" : request.approvalDecision.decision,
       actedBy: request.approvalDecision.actedBy,
-      reason: request.approvalDecision.reason
+      reason: request.approvalDecision.reason ?? (timedOut ? "Approval timed out" : undefined),
+      ...(timedOut ? { timedOut: true } : {})
     });
 
     // Phase 12.1 — approval hand-off: a guard node routes the decision, an
@@ -6599,7 +6839,12 @@ async function executeWorkflowRun(
     const handoff = request.resumeState.approvalHandoff;
     const approved = request.approvalDecision.decision === "approve";
     let handledByHandoff = false;
-    if (handoff?.kind === "route") {
+    if (handoff?.kind === "gate" || handoff?.kind === "sub_workflow") {
+      // Phase 11.2 — the gate (or the Execute Workflow node of a paused
+      // child) runs again first and turns the decision into its output.
+      pendingResumeDecision = { ...request.approvalDecision, nodeId: waitingNode.id, decidedAt, handoff };
+      handledByHandoff = true;
+    } else if (handoff?.kind === "route") {
       const routed = approved ? handoff.onApprove : handoff.onReject;
       nodeOutputs.set(waitingNode.id, routed);
       nodeResults.push({
@@ -6637,7 +6882,7 @@ async function executeWorkflowRun(
         output: decisionPayload
       });
     } else {
-      const rejectionError = request.approvalDecision.reason?.trim() || "Human approval rejected";
+      const rejectionError = request.approvalDecision.reason?.trim() || (timedOut ? "Human approval timed out" : "Human approval rejected");
       nodeResults.push({
         nodeId: waitingNode.id,
         status: "error",
@@ -6676,7 +6921,9 @@ async function executeWorkflowRun(
       }
 
       if (!caughtByTryCatch) {
-        const onError = getOnError(toRecord(waitingNode.config));
+        // A rejected Approval Gate or Human Approval never continues (see the node loop below).
+        const requestedOnError = getOnError(toRecord(waitingNode.config));
+        const onError = requestedOnError === "continue" && (waitingNode.type === "approval_gate" || waitingNode.type === "human_approval") ? "stop" : requestedOnError;
         if (onError === "continue") {
           nodeOutputs.set(waitingNode.id, {
             ...decisionPayload,
@@ -6792,7 +7039,8 @@ async function executeWorkflowRun(
     const stateSnapshot: WorkflowExecutionState = {
       workflow,
       nodeOrder,
-      nextNodeIndex: pause.handoff?.kind === "rerun" ? pause.index : pause.index + 1,
+      // Re-run hand-offs, gates and paused sub-workflows run the node again on resume.
+      nextNodeIndex: pause.handoff && pause.handoff.kind !== "route" ? pause.index : pause.index + 1,
       waitingNodeId: pause.node.id,
       startedAt,
       globals,
@@ -6804,7 +7052,8 @@ async function executeWorkflowRun(
       finalOutput,
       ...(toolPolicySubject ? { toolPolicySubject } : {}),
       ...(pause.handoff ? { approvalHandoff: pause.handoff } : {}),
-      ...(approvedHandoffKeys.size > 0 ? { approvedHandoffKeys: [...approvedHandoffKeys] } : {})
+      ...(approvedHandoffKeys.size > 0 ? { approvedHandoffKeys: [...approvedHandoffKeys] } : {}),
+      ...(writeToolCalls.toState() ? { approvedToolResults: writeToolCalls.toState() } : {})
     };
 
     if (dependencies.persistPausedExecution) {
@@ -7050,8 +7299,12 @@ async function executeWorkflowRun(
     const started = Date.now();
     const startedAtNode = nowIso();
     const nodeConfig = toRecord(node.config);
-    const onError: "stop" | "continue" | "branch" =
+    const requestedOnError: "stop" | "continue" | "branch" =
       node.errorConfig?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
+    // Phase 11.2 — a failed Approval Gate or Human Approval (rejected with
+    // nowhere to go, or a request that could not be rendered) never continues:
+    // "continue" would run the next step with nobody asked. The error branch still works.
+    const onError = (node.type === "approval_gate" || node.type === "human_approval") && requestedOnError === "continue" ? "stop" : requestedOnError;
     const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
     const parentOutputs: Record<string, unknown> = {};
     for (const parentId of parentIds) {
@@ -7194,11 +7447,13 @@ async function executeWorkflowRun(
                   callStack,
                   toolPolicySubject,
                   approvedHandoffKeys,
+                  writeToolCalls,
                   recordAttachmentUsage
                 },
                 dependencies
               );
               approvedHandoffKeys.clear();
+              writeToolCalls.clear();
 
               iterationOutputs[childNode.id] = childOutput;
               nodeOutputs.set(childNode.id, childOutput);
@@ -7224,7 +7479,13 @@ async function executeWorkflowRun(
                 input: childInput,
                 output: childOutput
               });
-            } catch (childError) {
+            } catch (caughtChildError) {
+              // Phase 11.2 — loop bodies run inline and cannot pause part-way.
+              const childError = isApprovalHandoffSignal(caughtChildError)
+                ? WorkflowError.nodeConfig(
+                    `Approvals cannot pause inside a Loop body: '${childNode.id}' asked for approval ("${caughtChildError.message}"). Move the approval before or after the Loop node.`
+                  )
+                : caughtChildError;
               const childErrorMessage = childError instanceof Error ? childError.message : "Loop iteration failed";
               nodeResults.push({
                 nodeId: childNode.id,
@@ -7303,6 +7564,9 @@ async function executeWorkflowRun(
         return await pauseForApproval({ node, index, nodeInput, startedAtNode, started, approvalMessage, timeoutMinutes });
       }
 
+      // Phase 11.2 — the decision belongs to the node the run paused at, once.
+      const resumeDecision = pendingResumeDecision?.nodeId === node.id ? pendingResumeDecision : undefined;
+      pendingResumeDecision = undefined;
       const { output, attempts } = await executeNodeWithRetry(
         node,
         {
@@ -7316,12 +7580,15 @@ async function executeWorkflowRun(
           callStack,
           toolPolicySubject,
           approvedHandoffKeys,
+          writeToolCalls,
+          ...(resumeDecision ? { resumeDecision } : {}),
           recordAttachmentUsage
         },
         dependencies
       );
       // Single use: a granted approval covers the re-run of the node it paused, not later nodes or runs.
       approvedHandoffKeys.clear();
+      writeToolCalls.clear();
 
       nodeOutputs.set(node.id, output);
 
@@ -7680,7 +7947,10 @@ export async function resumeWorkflowExecution(
       approvalDecision: {
         decision: request.decision,
         actedBy: request.actedBy,
-        reason: request.reason
+        reason: request.reason,
+        ...(request.edits ? { edits: request.edits } : {}),
+        ...(request.editedFields ? { editedFields: request.editedFields } : {}),
+        ...(request.requestId ? { requestId: request.requestId } : {})
       }
     },
     dependencies

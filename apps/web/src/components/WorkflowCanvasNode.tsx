@@ -304,6 +304,28 @@ function StructuralPorts({ data }: { data: EditorNodeData }) {
       </>
     );
   }
+  if (nodeType === "approval_gate") {
+    // Phase 11.2 — approved carries the item with the approver's edits,
+    // rejected the decision; timed_out is used only when the gate's timeout
+    // outcome is "fallback" and the output is connected.
+    const ports = [
+      { id: "approved", label: "Approved", top: "26%", className: "" },
+      { id: "rejected", label: "Rejected", top: "50%", className: " wf-handle-err" },
+      { id: "timed_out", label: "Timed out", top: "74%", className: " wf-handle-review" }
+    ];
+    return (
+      <div className="wf-structural-ports wf-guard-ports">
+        {ports.map((port) => (
+          <div key={port.id} className={`wf-structural-port wf-guard-port wf-gate-port-${port.id}`}>
+            <span className="port-label" style={{ top: port.top }}>
+              {port.label}
+            </span>
+            <Handle id={port.id} type="source" position={Position.Right} className={`wf-handle wf-handle-main${port.className}`} style={{ top: port.top }} />
+          </div>
+        ))}
+      </div>
+    );
+  }
   if (nodeType === "chat_intent_router") {
     const ports = [
       { id: "report", label: "Report", top: "20%" },

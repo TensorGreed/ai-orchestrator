@@ -94,6 +94,29 @@ describe("NodeInspector", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
   });
 
+  it("offers no pin for an Approval Gate, whose output only comes from a decision", async () => {
+    const user = userEvent.setup();
+    const gate: Node<EditorNodeData> = { id: "gate", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Gate", nodeType: "approval_gate", config: {} } };
+    render(<NodeInspector {...makeProps({ node: gate })} />);
+    await user.click(screen.getByRole("tab", { name: "Output" }));
+    expect(screen.queryByRole("button", { name: "Pin output" })).toBeNull();
+    expect(screen.getByText(/An Approval Gate cannot be pinned/)).toBeInTheDocument();
+  });
+
+  it("offers no 'Continue Anyway' on error for an Approval Gate or Human Approval", () => {
+    const gate: Node<EditorNodeData> = { id: "gate", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Gate", nodeType: "approval_gate", config: {} } };
+    const { unmount } = render(<NodeInspector {...makeProps({ node: gate })} />);
+    const options = (select: HTMLElement) => Array.from(select.querySelectorAll("option")).map((option) => option.getAttribute("value"));
+    expect(options(screen.getByLabelText("On Error Behavior"))).toEqual(["stop", "branch"]);
+    unmount();
+    const human: Node<EditorNodeData> = { id: "ask", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Ask", nodeType: "human_approval", config: {} } };
+    const humanView = render(<NodeInspector {...makeProps({ node: human })} />);
+    expect(options(screen.getByLabelText("On Error Behavior"))).toEqual(["stop", "branch"]);
+    humanView.unmount();
+    render(<NodeInspector {...makeProps()} />);
+    expect(options(screen.getByLabelText("On Error Behavior"))).toEqual(["stop", "continue", "branch"]);
+  });
+
   it("saves updated user prompt text", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn();

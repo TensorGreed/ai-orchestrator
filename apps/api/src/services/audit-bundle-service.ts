@@ -45,6 +45,7 @@ import {
   type McpCatalogEntry,
   type PreparedZip,
   type RunManifest,
+  type RunManifestApprovalRequest,
   type RunManifestGuardExtension,
   type RunManifestMcpServer,
   type RunManifestModelCall,
@@ -55,6 +56,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type { ExecutionManifestRecord, McpServerRecord, SqliteStore } from "../db/database.js";
 import type { AuditSigningService } from "./audit-signing-service.js";
+import { approvalEditsDigest } from "./approval-digest.js";
 import { findCatalogEntryForCommand, packageSpecOf } from "./mcp-catalog.js";
 import { REDACTED, SecretScrubber } from "./audit-scrub.js";
 import { collectRunActivity, priceModelCall } from "./run-facts.js";
@@ -541,6 +543,22 @@ export class AuditBundleService {
       }
     };
 
+    // Approval requests and decisions (Phase 11.2): edited values stay in the node output, only their digest is recorded.
+    const approvalRequests: RunManifestApprovalRequest[] = store.listApprovalRequestsForExecution(history.id).map((request) => ({
+      requestId: request.id,
+      nodeId: request.nodeId,
+      kind: request.kind,
+      outcome: request.status,
+      requestedAt: request.createdAt,
+      expiresAt: request.expiresAt,
+      decidedBy: request.decidedBy,
+      decidedAt: request.decidedAt,
+      reason: request.reason ? String(this.options.secrets.redact(request.reason)) : null,
+      editedFields: request.editedFields,
+      editsDigest: approvalEditsDigest(request.editsSalt, request.edits),
+      subWorkflowPath: request.path.map((step) => step.nodeId)
+    }));
+
     const inputTokens = modelCalls.reduce((sum, call) => sum + (call.inputTokens ?? 0), 0);
     const outputTokens = modelCalls.reduce((sum, call) => sum + (call.outputTokens ?? 0), 0);
     const cachedInputTokens = modelCalls.reduce((sum, call) => sum + (call.cachedInputTokens ?? 0), 0);
@@ -591,7 +609,7 @@ export class AuditBundleService {
         modelCalls: modelCalls.length,
         toolCalls: toolCalls.length
       },
-      extensions: { guard }
+      extensions: { guard, approvals: { requests: approvalRequests } }
     };
   }
 

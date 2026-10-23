@@ -52,9 +52,10 @@ export interface McpToolPolicyRequest {
  * Phase 10.5 — a tool's annotation hints with the MCP defaults filled in, the
  * way the spec defines a missing hint: `readOnlyHint` false,
  * `destructiveHint` true, `idempotentHint` false, `openWorldHint` true. An
- * admin's read-only override replaces `readOnlyHint`. `destructiveHint` and
- * `idempotentHint` only mean something for a tool that is not read-only, so a
- * read-only tool is never destructive. A tool without annotations therefore
+ * admin's read-only override replaces `readOnlyHint`. `destructiveHint: true`
+ * wins over `readOnlyHint: true` (a server claiming both is not read-only).
+ * `destructiveHint` and `idempotentHint` only mean something for a tool that
+ * is not read-only, so a read-only tool is never destructive. A tool without annotations therefore
  * counts as destructive and open-world, which is the safe reading for deny
  * rules.
  */
@@ -69,7 +70,8 @@ export function effectiveToolHints(
   annotations?: McpToolAnnotations | null,
   manualReadOnly?: boolean | null
 ): EffectiveToolHints {
-  const readOnly = typeof manualReadOnly === "boolean" ? manualReadOnly : annotations?.readOnlyHint === true;
+  const readOnly =
+    typeof manualReadOnly === "boolean" ? manualReadOnly : annotations?.readOnlyHint === true && annotations?.destructiveHint !== true;
   return {
     readOnly,
     destructive: readOnly ? false : annotations?.destructiveHint !== false,
@@ -247,7 +249,8 @@ export function evaluateMcpToolPolicy(
 /**
  * Read-only classification. Order: an admin's manual override (registry
  * servers only) wins in both directions; otherwise the server's
- * `readOnlyHint` annotation; otherwise the tool counts as a write tool.
+ * `readOnlyHint` annotation, except that `destructiveHint: true` always wins
+ * over it; otherwise the tool counts as a write tool.
  */
 export function classifyMcpTool(input: {
   manualReadOnly?: boolean | null;
@@ -255,6 +258,9 @@ export function classifyMcpTool(input: {
 }): McpToolClassification {
   if (typeof input.manualReadOnly === "boolean") {
     return { readOnly: input.manualReadOnly, source: "manual" };
+  }
+  if (input.annotations?.destructiveHint === true) {
+    return { readOnly: false, source: "annotation" };
   }
   const hint = input.annotations?.readOnlyHint;
   if (typeof hint === "boolean") {

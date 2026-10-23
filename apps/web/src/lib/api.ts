@@ -1,4 +1,5 @@
 import type {
+  ApprovalRequestView,
   AuditSigningKeysResponse,
   AuditSigningKeyView,
   RunManifestView,
@@ -3707,4 +3708,55 @@ export async function fetchAuditSigningKeys() {
 
 export async function rotateAuditSigningKey() {
   return apiRequest<{ key: AuditSigningKeyView; keys: AuditSigningKeysResponse }>("/api/audit/signing-keys/rotate", { method: "POST" });
+}
+
+// Phase 11.2 — the approvals inbox.
+export type { ApprovalEditableField, ApprovalRequestView, ApprovalStatus } from "@ai-orchestrator/shared";
+
+export type ApprovalListStatus = "pending" | "decided" | "all";
+
+export async function listApprovals(filter: { status?: ApprovalListStatus; workflowId?: string; executionId?: string; limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (filter.status) params.set("status", filter.status);
+  if (filter.workflowId) params.set("workflowId", filter.workflowId);
+  if (filter.executionId) params.set("executionId", filter.executionId);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{ items: ApprovalRequestView[] }>(`/api/approvals${q}`);
+}
+
+/**
+ * What a decision answered: the resumed run when it ran inline, or `queued`
+ * when the resume went onto the execution queue (HTTP 202).
+ */
+export type ApprovalDecisionResponse =
+  | { queued: true; executionId: string; requestId: string; decision: "approve" | "reject" }
+  | (WorkflowExecutionResult & { queued?: undefined });
+
+export async function approveApproval(executionId: string, payload: { reason?: string; edits?: Record<string, unknown>; requestId?: string }) {
+  return apiRequest<ApprovalDecisionResponse>(`/api/approvals/${encodeURIComponent(executionId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function rejectApproval(executionId: string, payload: { reason?: string; requestId?: string }) {
+  return apiRequest<ApprovalDecisionResponse>(`/api/approvals/${encodeURIComponent(executionId)}/reject`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+/** Phase 11.2 — whether anyone but the signed-in user could approve with these approver settings. */
+export async function checkApprovalEligibility(payload: {
+  workflowId: string;
+  projectId?: string;
+  approverRoles?: string[];
+  approverUsers?: string[];
+  allowSelfApproval?: boolean;
+}) {
+  return apiRequest<{ othersCanApprove: boolean; requesterCanApprove: boolean }>("/api/approvals/eligibility", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }

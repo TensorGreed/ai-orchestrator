@@ -607,25 +607,69 @@ export const openApiSpec = {
     "/api/approvals": {
       get: {
         tags: ["Approvals"],
-        summary: "List pending approval requests",
-        responses: { "200": { description: "Pending approvals" } }
+        summary: "List approval requests of workflows the user can read",
+        description:
+          "Pending requests by default. Each item says whether the signed-in user may decide it (canDecide) and why not. Viewer or above; items are limited to projects the user can read.",
+        parameters: [
+          { name: "status", in: "query", required: false, schema: { type: "string", enum: ["pending", "decided", "all"] } },
+          { name: "workflowId", in: "query", required: false, schema: { type: "string" } },
+          { name: "executionId", in: "query", required: false, schema: { type: "string" } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500 } }
+        ],
+        responses: { "200": { description: "Approval requests" } }
       }
     },
     "/api/approvals/{id}/approve": {
       post: {
         tags: ["Approvals"],
-        summary: "Approve a pending execution",
+        summary: "Approve the run paused as execution {id}",
+        description:
+          "Needs execute access to the workflow's project and must match the request's approvers; the person who started the run may not approve an Approval Gate unless it allows self-approval. With the execution queue in use the resume is queued (202).",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Execution resumed" }, "404": { description: "Approval not found" } }
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  reason: { type: "string", maxLength: 2000 },
+                  edits: { type: "object", description: "Values for the gate's editable fields" },
+                  requestId: { type: "string", description: "The request the approver saw; an older one is refused with 409" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Execution resumed (the run result)" },
+          "202": { description: "Resume queued" },
+          "400": { description: "Invalid edits, or the resumed run failed" },
+          "403": { description: "Not an approver, self-approval, or no execute access" },
+          "404": { description: "Approval not found" },
+          "409": { description: "Already decided, or a newer request is waiting" }
+        }
       }
     },
     "/api/approvals/{id}/reject": {
       post: {
         tags: ["Approvals"],
-        summary: "Reject a pending execution",
+        summary: "Reject the run paused as execution {id}",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        requestBody: { content: { "application/json": { schema: { type: "object", properties: { reason: { type: "string" } } } } } },
-        responses: { "200": { description: "Execution rejected" }, "404": { description: "Approval not found" } }
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: { type: "object", properties: { reason: { type: "string", maxLength: 2000, description: "Required for Approval Gates and write-tool approvals" }, requestId: { type: "string" } } }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Execution resumed with the rejection" },
+          "202": { description: "Resume queued" },
+          "400": { description: "Reason missing, or the resumed run failed" },
+          "403": { description: "Not an approver, self-approval, or no execute access" },
+          "404": { description: "Approval not found" },
+          "409": { description: "Already decided" }
+        }
       }
     },
 

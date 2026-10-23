@@ -160,6 +160,9 @@ describe("classifyMcpTool", () => {
   it("treats a tool with no signal as a write tool", () => {
     expect(classifyMcpTool({})).toEqual({ readOnly: false, source: "unknown" });
     expect(classifyMcpTool({ annotations: { destructiveHint: false } })).toEqual({ readOnly: false, source: "unknown" });
+    // A server that says both read-only and destructive is a write tool.
+    expect(classifyMcpTool({ annotations: { readOnlyHint: true, destructiveHint: true } })).toEqual({ readOnly: false, source: "annotation" });
+    expect(classifyMcpTool({ manualReadOnly: true, annotations: { readOnlyHint: true, destructiveHint: true } })).toEqual({ readOnly: true, source: "manual" });
     expect(classifyMcpTool({ manualReadOnly: null })).toEqual({ readOnly: false, source: "unknown" });
   });
 });

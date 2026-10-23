@@ -135,6 +135,9 @@ import { registerGuardRoutes } from "./guard-routes.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerEvalRoutes } from "./eval-routes.js";
+import { registerApprovalRoutes } from "./approval-routes.js";
+import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
+import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
 import { ReplayRunError, ReplayService } from "./services/replay-service.js";
 import { buildRunFacts } from "./services/run-facts.js";
@@ -359,10 +362,6 @@ const mcpServerCreateSchema = z.object({
 
 const mcpServerUpdateSchema = mcpServerCreateSchema.partial().refine((value) => Object.keys(value).length > 0, {
   message: "Empty update payload"
-});
-
-const approvalDecisionSchema = z.object({
-  reason: z.string().optional()
 });
 
 const codeNodeTestSchema = z.object({
@@ -1231,6 +1230,41 @@ async function verifyWebhookRequestAuth(input: {
   return { ok: true };
 }
 
+const TOOL_RESULTS_PURPOSE = "approval_tool_results";
+
+/**
+ * Phase 11.2 — approved write-tool results answer a re-run of the agent, so
+ * the agent must get them back exactly. A paused state is stored with them
+ * sealed with the master key (and no plaintext copy), through every
+ * sub-workflow's state too.
+ */
+function sealToolResults(secretService: SecretService, state: WorkflowExecutionState): WorkflowExecutionState {
+  const { approvedToolResults, ...rest } = state;
+  const out: WorkflowExecutionState = approvedToolResults
+    ? { ...rest, approvedToolResultsSealed: secretService.sealValue(TOOL_RESULTS_PURPOSE, JSON.stringify(approvedToolResults)) }
+    : { ...rest };
+  const handoff = state.approvalHandoff;
+  if (handoff?.kind === "sub_workflow") out.approvalHandoff = { ...handoff, childState: sealToolResults(secretService, handoff.childState) };
+  return out;
+}
+
+/** The inverse of sealToolResults. A value that cannot be opened is dropped, so the run asks again. */
+function openToolResults(secretService: SecretService, state: WorkflowExecutionState): WorkflowExecutionState {
+  const { approvedToolResultsSealed, ...rest } = state;
+  const out: WorkflowExecutionState = { ...rest };
+  if (approvedToolResultsSealed) {
+    try {
+      const opened = JSON.parse(secretService.openValue(TOOL_RESULTS_PURPOSE, approvedToolResultsSealed)) as unknown;
+      if (opened && typeof opened === "object" && !Array.isArray(opened)) out.approvedToolResults = opened as Record<string, unknown[]>;
+    } catch {
+      delete out.approvedToolResults;
+    }
+  }
+  const handoff = state.approvalHandoff;
+  if (handoff?.kind === "sub_workflow") out.approvalHandoff = { ...handoff, childState: openToolResults(secretService, handoff.childState) };
+  return out;
+}
+
 export interface CreateAppOptions {
   /** Runtime/image detection seams for the code sandbox plan (tests). */
   codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
@@ -1732,9 +1766,12 @@ export function createApp(
     customData?: Record<string, unknown>;
     resumeState?: WorkflowExecutionState;
     approvalDecision?: {
-      decision: "approve" | "reject";
+      decision: "approve" | "reject" | "timeout";
       actedBy?: string;
       reason?: string;
+      edits?: Record<string, unknown>;
+      editedFields?: string[];
+      requestId?: string;
     };
     hooks?: WorkflowExecutionEventHooks;
     /** Phase 10.8 — record this run's MCP calls, or answer them from a cassette. */
@@ -1862,8 +1899,27 @@ export function createApp(
               triggerType: paused.triggerType,
               triggeredBy: paused.triggeredBy,
               startedAt: paused.startedAt,
-              state: paused.state
+              // Approved tool results answer a re-run, so they are stored encrypted, not redacted.
+              state: sealToolResults(secretService, paused.state)
             });
+            // Phase 11.2 — who may decide, when it expires; audited and notified.
+            if (!approvalsSupported) return;
+            try {
+              approvalService.recordPause({
+                executionId: paused.executionId,
+                workflowId: paused.workflowId,
+                workflowName: paused.workflowName,
+                projectId: mergedWorkflow.projectId ?? DEFAULT_PROJECT_ID,
+                state: paused.state,
+                message: paused.approvalMessage,
+                timeoutMinutes: paused.timeoutMinutes
+              });
+            } catch (error) {
+              app.log.warn(
+                { executionId: paused.executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) },
+                "Failed to record the approval request"
+              );
+            }
           },
           // Phase 15.1 — a replay never fires the error workflow or its notifications.
           triggerErrorWorkflow: input.replay ? undefined : async (payload) => {
@@ -3369,6 +3425,207 @@ export function createApp(
       events: c.events
     }))
   );
+
+  // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
+  // Approvals need the SQLite store in this release; on Postgres they answer 501 and nothing is recorded.
+  const approvalsSupported = !((store as object) instanceof PostgresStore);
+  if (!approvalsSupported) {
+    app.log.warn("Approval requests need the SQLite store in this release: on Postgres the approvals inbox, decisions and approval timeouts answer 501");
+  }
+  const approvalResumes = new ApprovalResumeRunner();
+  // A timed-out approval whose run cannot continue: the run ends as an error and its paused state is cleared.
+  const failTimedOutRun = (executionId: string, workflow: Workflow, error: string) => {
+    const existing = store.getExecutionHistory(executionId);
+    const completedAt = new Date().toISOString();
+    const startedAt = existing?.startedAt ?? completedAt;
+    persistExecutionHistoryRecord(
+      {
+        id: executionId,
+        workflowId: workflow.id,
+        workflowName: workflow.name,
+        status: "error",
+        startedAt,
+        completedAt,
+        durationMs: toDurationMs(startedAt, completedAt),
+        triggerType: existing?.triggerType ?? undefined,
+        triggeredBy: existing?.triggeredBy ?? undefined,
+        inputJson: existing?.input,
+        nodeResultsJson: existing?.nodeResults,
+        error
+      },
+      { phase: "final", executionId, workflowId: workflow.id, triggerType: existing?.triggerType ?? undefined, status: "error" }
+    );
+    deleteWorkflowExecutionSafely(executionId, workflow.id);
+  };
+  const runApprovalResume = (job: ApprovalResumeJob): Promise<Awaited<ReturnType<typeof runWorkflowExecution>> | null> =>
+    approvalResumes.run(job, async () => {
+      const pending = store.getWorkflowExecutionState(job.executionId);
+      if (!pending || pending.status !== "resuming") return null;
+      const storedState = pending.state as WorkflowExecutionState | null;
+      if (!storedState || typeof storedState !== "object" || !storedState.workflow) {
+        store.releaseWorkflowExecutionClaim(job.executionId);
+        return null;
+      }
+      const state = openToolResults(secretService, storedState);
+      // The decision comes from the request row, never from the job payload: a stale
+      // queued job must not apply an earlier decision to a request decided again since.
+      const request = store.getApprovalRequest(job.requestId);
+      const decided = request ? approvalDecisionOf(request.status) : null;
+      if (!request || !decided || decided !== job.decision) return null;
+      try {
+        // The resume runs as the person who decided, like main's approve and
+        // queued runs: run-scope gives it the workflow's project (as it is
+        // now) and that user's `secret:use`. A queued or recovered resume can
+        // start later, so the decider is looked up again by id and must still
+        // be the same account, with the same checks as at decision time
+        // (execute access along the whole path, the approver rules; not the
+        // self-approval rule); otherwise the request is pending again for
+        // someone who may decide it. A timeout resumes as the person who
+        // started the run, with the same access check; if they are gone or
+        // lost access, the run fails and no branch runs. A run nobody
+        // started (webhook, schedule) times out with no user, as it began.
+        let actor: SafeUser | null = null;
+        const timedOut = decided === "timeout";
+        const actorUserId = timedOut ? request.requestedByUserId : request.decidedByUserId;
+        const actorEmail = timedOut ? request.requestedBy : request.decidedBy;
+        if (actorUserId) {
+          const actorRecord = store.getUserById(actorUserId);
+          actor = actorRecord && actorRecord.email === actorEmail ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
+          const check = actor
+            ? approvalPersonCheck(request, actor, (user, workflowId, permission) => runAccess.run(user, { id: workflowId, workflowId }, permission), {
+                skipSelfApproval: true,
+                accessOnly: timedOut
+              })
+            : null;
+          if (!actor || !check?.allowed) {
+            auditService.record({
+              category: "approval",
+              eventType: "approval.resume_refused",
+              action: decided,
+              outcome: "denied",
+              actor: { userId: actorUserId, ...(actorEmail ? { email: actorEmail } : {}), type: "user" },
+              resourceType: "workflow",
+              resourceId: pending.workflowId,
+              projectId: store.getWorkflow(pending.workflowId)?.projectId ?? request.projectId,
+              metadata: { executionId: job.executionId, requestId: job.requestId, reason: !actor ? "user_not_found" : check?.allowed === false && check.code !== "project_access" ? "not_an_approver" : "no_execute_permission" },
+              message: timedOut
+                ? "Approval timeout refused: the person who started this run may no longer run this workflow."
+                : "Approval resume refused: the person who decided may no longer run this workflow."
+            });
+            if (!timedOut) {
+              throw new Error("The person who decided this approval can no longer run this workflow; the request is pending again.");
+            }
+            // Nobody can decide a timed-out request again, so the run ends here instead of waiting forever.
+            failTimedOutRun(job.executionId, state.workflow, "The approval timed out, and the person who started this run can no longer run this workflow, so no branch was run.");
+            return null;
+          }
+        }
+        // Scoped by the workflow's current project (the one access was checked against), not the one stored at the pause.
+        const current = store.getWorkflow(pending.workflowId);
+        const resumeWorkflow: Workflow = current ? { ...state.workflow, projectId: current.projectId } : state.workflow;
+        const actedBy = request.decidedBy ?? job.actedBy;
+        const approvalDecision = {
+          decision: decided,
+          actedBy,
+          ...(request.reason ? { reason: request.reason } : {}),
+          ...(request.edits ? { edits: request.edits } : {}),
+          ...(request.editedFields.length > 0 ? { editedFields: request.editedFields } : {}),
+          requestId: job.requestId
+        };
+        const result = await runWorkflowExecution({
+          policyActor: actor,
+          workflow: resumeWorkflow,
+          executionId: job.executionId,
+          triggerType: "approval_resume",
+          triggeredBy: actedBy,
+          resumeState: { ...state, workflow: resumeWorkflow },
+          approvalDecision
+        });
+        persistExecutionHistory({
+          executionId: job.executionId,
+          workflow: state.workflow,
+          result,
+          triggerType: "approval_resume",
+          triggeredBy: actedBy,
+          requestInput: {
+            decision: decided,
+            approvalId: job.executionId,
+            requestId: job.requestId,
+            ...(request.reason ? { reason: request.reason } : {}),
+            ...(request.editedFields.length > 0 ? { editedFields: request.editedFields } : {})
+          }
+        });
+        return result;
+      } catch (error) {
+        // The decision is kept for a new try: the run waits again and the request is pending again.
+        approvalService.reopenAfterFailedResume(job);
+        throw error;
+      }
+    });
+  const dispatchApprovalResume = async (job: ApprovalResumeJob): Promise<{ queued: true } | { queued: false; result: Awaited<ReturnType<typeof runWorkflowExecution>> } | null> => {
+    if (queueService) {
+      const pending = store.getWorkflowExecutionState(job.executionId);
+      // One item per decision: a request that is reopened and decided again must not collide with the first.
+      const decidedAt = Date.parse(store.getApprovalRequest(job.requestId)?.decidedAt ?? "") || Date.now();
+      await queueService.enqueue({
+        workflowId: pending?.workflowId ?? "",
+        executionId: job.executionId,
+        queueItemId: `${job.executionId}:${job.requestId}:${decidedAt}${job.retryTag ? `:retry-${job.retryTag}` : ""}`,
+        // A failed resume reopens the request, so the queue does not retry it on its own.
+        maxAttempts: 1,
+        triggerType: "approval_resume",
+        triggeredBy: job.actedBy,
+        // The queue's stuck-job threshold follows the run's own timeout.
+        executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
+        resume: job
+      });
+      return { queued: true };
+    }
+    const result = await runApprovalResume(job);
+    return result ? { queued: false, result } : null;
+  };
+  const approvalService = new ApprovalService(store, {
+    audit: (event) => {
+      auditService.record(event);
+      logStreamingService.dispatchAudit(event);
+    },
+    notify: (event) => notificationService.notify(event),
+    dispatch: dispatchApprovalResume,
+    isLeader: () => leaderElection.isLeader(),
+    // Project authorization is the shared run-access check, on the workflow as it is now.
+    access: (user, workflowId, permission) => runAccess.run(user, { id: workflowId, workflowId }, permission),
+    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
+    canExecuteDraft: (user, workflow) =>
+      store.getWorkflow(workflow.id)
+        ? runAccess.workflow(user, workflow.id, "workflow:execute").ok
+        : runAccess.project(user, workflow.projectId, "workflow:execute").ok,
+    listUsers: () =>
+      store.listUsers().map((entry) => ({
+        id: entry.id,
+        email: entry.email,
+        role: entry.role === "admin" || entry.role === "builder" || entry.role === "operator" ? entry.role : "viewer"
+      })),
+    redact: (value) => secretService.redact(value),
+    sweepIntervalMs: config.APPROVAL_SWEEP_INTERVAL_MS,
+    appPublicUrl: config.APP_PUBLIC_URL,
+    queueMode: Boolean(queueService),
+    isResumeActive: (executionId) => approvalResumes.isActive(executionId),
+    resumeStaleAfterMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
+    recoverAtStartupImmediately: !config.HA_ENABLED,
+    logger: {
+      info: (msg, fields) => app.log.info(fields ?? {}, msg),
+      warn: (msg, fields) => app.log.warn(fields ?? {}, msg)
+    }
+  });
+  if (runsBackgroundWorkers && approvalsSupported) {
+    // The timer starts on every worker instance; each sweep is leader-only, so a later leader takes over.
+    app.addHook("onReady", async () => {
+      approvalService.start();
+    });
+  }
+  app.addHook("onClose", async () => {
+    approvalService.stop();
+  });
 
   const pruneAuditLogs = (reason: "startup" | "interval") => {
     const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
@@ -7353,9 +7610,15 @@ export function createApp(
       const access = runAccess.workflow(user, request.params.id, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       const workflow = access.workflow;
-      if (!workflow.nodes.some((node) => node.id === request.params.nodeId)) {
+      const pinNode = workflow.nodes.find((node) => node.id === request.params.nodeId);
+      if (!pinNode) {
         reply.code(404);
         return { error: "Node not found" };
+      }
+      // Phase 11.2 — a gate's output only comes from a person's decision.
+      if (pinNode.type === "approval_gate") {
+        reply.code(400);
+        return { error: "An Approval Gate cannot be pinned: its output only comes from a person's decision." };
       }
       const parsed = pinDataSchema.safeParse(request.body ?? {});
       if (!parsed.success) {
@@ -8212,6 +8475,7 @@ export function createApp(
     active?.controller.abort(reason);
     if (execution.status === "waiting_approval") {
       deleteWorkflowExecutionSafely(execution.id, execution.workflowId);
+      if (approvalsSupported) approvalService.cancelForExecution(execution.id, reason, user);
     }
 
     const completedAt = new Date().toISOString();
@@ -8241,123 +8505,16 @@ export function createApp(
     };
   });
 
-  app.get("/api/approvals", async (request, reply) => {
-    const user = await requireRole(request, reply, ["operator"]);
-    if (!user) {
-      return;
-    }
-
-    return {
-      items: runAccess.filterRuns(user, store.listPendingApprovals())
-    };
-  });
-
-  app.post<{ Params: { id: string }; Body: unknown }>("/api/approvals/:id/approve", async (request, reply) => {
-    const user = await requireRole(request, reply, ["operator"]);
-    if (!user) {
-      return;
-    }
-
-    const pending = store.getWorkflowExecutionState(request.params.id);
-    if (!pending || pending.status !== "waiting_approval") {
-      reply.code(404);
-      return { error: "Pending approval not found" };
-    }
-    const approvalAccess = runAccess.run(user, pending, "workflow:execute", "Pending approval");
-    if (!approvalAccess.ok) return denyRunAccess(reply, approvalAccess);
-
-    const state = pending.state as WorkflowExecutionState | null;
-    if (!state || typeof state !== "object" || !state.workflow) {
-      reply.code(400);
-      return { error: "Stored execution state is invalid and cannot be resumed" };
-    }
-
-    const result = await runWorkflowExecution({
-      policyActor: user,
-      workflow: state.workflow,
-      executionId: pending.id,
-      triggerType: "approval_resume",
-      triggeredBy: user.email,
-      resumeState: state,
-      approvalDecision: {
-        decision: "approve",
-        actedBy: user.email
-      }
-    });
-
-    persistExecutionHistory({
-      executionId: pending.id,
-      workflow: state.workflow,
-      result,
-      triggerType: "approval_resume",
-      triggeredBy: user.email,
-      requestInput: { decision: "approve", approvalId: pending.id }
-    });
-
-    if (result.status === "error") {
-      reply.code(400);
-    }
-
-    return result;
-  });
-
-  app.post<{ Params: { id: string }; Body: unknown }>("/api/approvals/:id/reject", async (request, reply) => {
-    const user = await requireRole(request, reply, ["operator"]);
-    if (!user) {
-      return;
-    }
-
-    const pending = store.getWorkflowExecutionState(request.params.id);
-    if (!pending || pending.status !== "waiting_approval") {
-      reply.code(404);
-      return { error: "Pending approval not found" };
-    }
-    const approvalAccess = runAccess.run(user, pending, "workflow:execute", "Pending approval");
-    if (!approvalAccess.ok) return denyRunAccess(reply, approvalAccess);
-
-    const parsed = approvalDecisionSchema.safeParse(request.body ?? {});
-    if (!parsed.success) {
-      reply.code(400);
-      return {
-        error: "Invalid rejection payload",
-        details: parsed.error.issues
-      };
-    }
-
-    const state = pending.state as WorkflowExecutionState | null;
-    if (!state || typeof state !== "object" || !state.workflow) {
-      reply.code(400);
-      return { error: "Stored execution state is invalid and cannot be resumed" };
-    }
-
-    const result = await runWorkflowExecution({
-      policyActor: user,
-      workflow: state.workflow,
-      executionId: pending.id,
-      triggerType: "approval_resume",
-      triggeredBy: user.email,
-      resumeState: state,
-      approvalDecision: {
-        decision: "reject",
-        actedBy: user.email,
-        reason: parsed.data.reason
-      }
-    });
-
-    persistExecutionHistory({
-      executionId: pending.id,
-      workflow: state.workflow,
-      result,
-      triggerType: "approval_resume",
-      triggeredBy: user.email,
-      requestInput: { decision: "reject", approvalId: pending.id, reason: parsed.data.reason }
-    });
-
-    if (result.status === "error") {
-      reply.code(400);
-    }
-
-    return result;
+  registerApprovalRoutes({
+    app,
+    approvals: approvalService,
+    available: approvalsSupported,
+    loadWorkflow: (id) => store.getWorkflow(id) ?? null,
+    loadRun: (executionId) => store.getExecutionHistory(executionId) ?? store.getWorkflowExecutionState(executionId) ?? null,
+    runAccess,
+    canSeeProjectAccounts: (user, workflow) => user.role === "admin" || rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    dispatch: dispatchApprovalResume
   });
 
   app.post<{ Body: unknown }>("/api/webhooks/execute", async (request, reply) => {
@@ -11138,6 +11295,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   if (queueService) {
     queueService.setHandler(async (payload) => {
+      // Phase 11.2 — a decided approval resumes on the queue.
+      if (payload.resume) {
+        const resumed = await runApprovalResume(payload.resume);
+        app.log.info({ executionId: payload.resume.executionId, status: resumed?.status ?? "skipped" }, "Queued approval resume completed");
+        return;
+      }
       const workflow = store.getWorkflow(payload.workflowId);
       if (!workflow) {
         throw new Error(`Workflow not found: ${payload.workflowId}`);

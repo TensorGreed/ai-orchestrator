@@ -8,13 +8,93 @@ interface NotificationChannel {
 }
 
 export interface NotificationEvent {
-  type: string; // "execution.failure" | "execution.success"
+  type: string; // "execution.failure" | "execution.success" | "approval.requested" | "approval.timed_out"
   workflowId: string;
   workflowName: string;
   executionId?: string;
   error?: string;
   errorStack?: string;
   timestamp: string;
+  /** Phase 11.2 — set for approval events. */
+  approval?: {
+    requestId: string;
+    nodeId: string;
+    expiresAt: string | null;
+    /** Who may decide, as shown to people (roles and users). */
+    approvers: string;
+    /** Link to the approvals inbox, when a public app URL is configured. */
+    link?: string;
+    /** For approval.timed_out: what the run does now. */
+    outcome?: string;
+  };
+}
+
+/** Phase 11.2 — approval events channels subscribe to alongside execution events. */
+export const APPROVAL_NOTIFICATION_EVENTS = ["approval.requested", "approval.timed_out"] as const;
+
+interface NotificationContent {
+  title: string;
+  /** Short status for Slack's first line. */
+  icon: string;
+  color: string;
+  facts: Array<{ name: string; value: string }>;
+  text: string;
+  link?: string;
+}
+
+function describeEvent(event: NotificationEvent): NotificationContent {
+  const facts: NotificationContent["facts"] = [
+    { name: "Workflow", value: event.workflowName },
+    { name: "Workflow ID", value: event.workflowId },
+    ...(event.executionId ? [{ name: "Execution ID", value: event.executionId }] : []),
+    { name: "Time", value: event.timestamp }
+  ];
+  if (event.type === "approval.requested" || event.type === "approval.timed_out") {
+    const approval = event.approval;
+    const requested = event.type === "approval.requested";
+    if (approval) {
+      facts.push({ name: "Approvers", value: approval.approvers });
+      if (requested && approval.expiresAt) facts.push({ name: "Expires", value: approval.expiresAt });
+      if (!requested && approval.outcome) facts.push({ name: "Outcome", value: approval.outcome });
+    }
+    return {
+      title: `${requested ? "Approval needed" : "Approval timed out"}: ${event.workflowName}`,
+      icon: requested ? "\u{1F7E1}" : "\u23F0",
+      color: requested ? "F2B705" : "8A8F98",
+      facts,
+      // Channels are not scoped to a project, so the run's own text (the
+      // request message, proposed values) stays in the project-scoped inbox.
+      text: requested ? "A run is waiting for approval. Open the approvals inbox to see the request." : "Nobody decided before the approval expired.",
+      ...(approval?.link ? { link: approval.link } : {})
+    };
+  }
+  const failed = event.type === "execution.failure";
+  if (event.error) facts.push({ name: "Error", value: event.error });
+  return {
+    title: `Workflow ${failed ? "Failed" : "Succeeded"}: ${event.workflowName}`,
+    icon: failed ? "\u{1F6A8}" : "\u2705",
+    color: failed ? "FF0000" : "00FF00",
+    facts,
+    text: event.error ?? "Execution completed"
+  };
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/** Teams renders MessageCard text as Markdown, and some clients a little HTML: escape both so run input cannot add links, images, emphasis or markup. */
+export function escapeTeams(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/[\\`*_[\]()]/g, (char) => `\\${char}`);
+}
+
+/** Slack mrkdwn treats `<`, `>` and `&` as control characters. */
+function escapeSlack(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 export class NotificationService {
@@ -27,6 +107,11 @@ export class NotificationService {
     this.reload();
   }
 
+  /** Events the env-configured channels receive; Phase 11.2 adds approval events unless turned off. */
+  private envChannelEvents(): string[] {
+    return this.config.NOTIFICATIONS_APPROVAL_EVENTS ? ["execution.failure", ...APPROVAL_NOTIFICATION_EVENTS] : ["execution.failure"];
+  }
+
   reload(): void {
     this.channels = this.listConfigs();
 
@@ -37,7 +122,7 @@ export class NotificationService {
           channel: "slack",
           enabled: true,
           config: { webhookUrl: this.config.NOTIFICATION_SLACK_WEBHOOK_URL },
-          events: ["execution.failure"]
+          events: this.envChannelEvents()
         });
       }
       if (this.config.NOTIFICATION_TEAMS_WEBHOOK_URL && !this.channels.some(c => c.channel === "teams")) {
@@ -45,7 +130,7 @@ export class NotificationService {
           channel: "teams",
           enabled: true,
           config: { webhookUrl: this.config.NOTIFICATION_TEAMS_WEBHOOK_URL },
-          events: ["execution.failure"]
+          events: this.envChannelEvents()
         });
       }
       if (this.config.NOTIFICATION_SMTP_HOST && this.config.NOTIFICATION_EMAIL_TO && !this.channels.some(c => c.channel === "email")) {
@@ -61,7 +146,7 @@ export class NotificationService {
             from: this.config.NOTIFICATION_EMAIL_FROM || "notifications@ai-orchestrator",
             to: this.config.NOTIFICATION_EMAIL_TO
           },
-          events: ["execution.failure"]
+          events: this.envChannelEvents()
         });
       }
     }
@@ -92,32 +177,27 @@ export class NotificationService {
   private async sendSlack(config: Record<string, unknown>, event: NotificationEvent): Promise<void> {
     const webhookUrl = String(config.webhookUrl ?? "");
     if (!webhookUrl) return;
-    const icon = event.type === "execution.failure" ? "\u{1F6A8}" : "\u2705";
-    const label = event.type === "execution.failure" ? "Failed" : "Succeeded";
-    const text = `${icon} *Workflow ${label}*\n*Workflow:* ${event.workflowName}\n*Error:* ${event.error ?? "None"}\n*Time:* ${event.timestamp}${event.executionId ? `\n*Execution:* ${event.executionId}` : ""}`;
+    const content = describeEvent(event);
+    const lines = [`${content.icon} *${escapeSlack(content.title)}*`, escapeSlack(content.text), ...content.facts.map((fact) => `*${fact.name}:* ${escapeSlack(fact.value)}`)];
+    if (content.link) lines.push(`<${content.link}|Open the approvals inbox>`);
     await fetch(webhookUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text: lines.join("\n") })
     });
   }
 
   private async sendTeams(config: Record<string, unknown>, event: NotificationEvent): Promise<void> {
     const webhookUrl = String(config.webhookUrl ?? "");
     if (!webhookUrl) return;
+    const content = describeEvent(event);
     const card = {
       "@type": "MessageCard",
-      themeColor: event.type === "execution.failure" ? "FF0000" : "00FF00",
-      title: `Workflow ${event.type === "execution.failure" ? "Failed" : "Succeeded"}: ${event.workflowName}`,
-      text: event.error ?? "Execution completed",
-      sections: [{
-        facts: [
-          { name: "Workflow", value: event.workflowName },
-          { name: "Workflow ID", value: event.workflowId },
-          ...(event.executionId ? [{ name: "Execution ID", value: event.executionId }] : []),
-          { name: "Timestamp", value: event.timestamp }
-        ]
-      }]
+      themeColor: content.color,
+      title: escapeTeams(content.title),
+      text: escapeTeams(content.text),
+      sections: [{ facts: content.facts.map((fact) => ({ name: escapeTeams(fact.name), value: escapeTeams(fact.value) })) }],
+      ...(content.link ? { potentialAction: [{ "@type": "OpenUri", name: "Open the approvals inbox", targets: [{ os: "default", uri: content.link }] }] } : {})
     };
     await fetch(webhookUrl, {
       method: "POST",
@@ -138,19 +218,19 @@ export class NotificationService {
         secure: Boolean(config.secure),
         ...(config.user ? { auth: { user: String(config.user), pass: String(config.pass ?? "") } } : {})
       });
-      const label = event.type === "execution.failure" ? "Failed" : "Succeeded";
+      const content = describeEvent(event);
+      const rows = content.facts
+        .map((fact) => `<tr><td style="padding:4px 12px;font-weight:bold;">${escapeHtml(fact.name)}</td><td style="padding:4px 12px;">${escapeHtml(fact.value)}</td></tr>`)
+        .join("\n");
       await transporter.sendMail({
         from: String(config.from ?? "notifications@ai-orchestrator"),
         to,
-        subject: `[AI Orchestrator] Workflow ${label}: ${event.workflowName}`,
-        html: `<h2>Workflow ${label}</h2>
+        subject: `[AI Orchestrator] ${content.title.replace(/[\r\n]+/g, " ")}`,
+        html: `<h2>${escapeHtml(content.title)}</h2>
+<p>${escapeHtml(content.text)}</p>
 <table style="border-collapse:collapse;font-family:sans-serif;">
-<tr><td style="padding:4px 12px;font-weight:bold;">Workflow</td><td style="padding:4px 12px;">${event.workflowName}</td></tr>
-<tr><td style="padding:4px 12px;font-weight:bold;">Workflow ID</td><td style="padding:4px 12px;">${event.workflowId}</td></tr>
-${event.executionId ? `<tr><td style="padding:4px 12px;font-weight:bold;">Execution ID</td><td style="padding:4px 12px;">${event.executionId}</td></tr>` : ""}
-<tr><td style="padding:4px 12px;font-weight:bold;">Timestamp</td><td style="padding:4px 12px;">${event.timestamp}</td></tr>
-${event.error ? `<tr><td style="padding:4px 12px;font-weight:bold;">Error</td><td style="padding:4px 12px;color:red;">${event.error}</td></tr>` : ""}
-</table>`
+${rows}
+</table>${content.link ? `\n<p><a href="${escapeHtml(content.link)}">Open the approvals inbox</a></p>` : ""}`
       });
     } catch (err) {
       console.warn("[Notification] Email send failed:", err);

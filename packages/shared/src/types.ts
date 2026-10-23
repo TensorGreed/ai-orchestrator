@@ -66,6 +66,7 @@ export type WorkflowNodeType =
   | "document_chunker"
   | "output_parser"
   | "human_approval"
+  | "approval_gate"
   | "input_validator"
   | "output_guardrail"
   | "guard"
@@ -209,6 +210,21 @@ export interface WorkflowSettings {
    * `readOnlyHint: true`; every other tool counts as a write tool.
    */
   noWriteTools?: boolean;
+  /**
+   * Phase 11.2 — agents in this workflow pause for a person's approval
+   * before they call an MCP write tool. Server annotations are not trusted
+   * here: a tool is read-only for this gate only when an admin marked it
+   * read-only in the tool policy; every other tool counts as a write tool.
+   */
+  writeToolApproval?: WriteToolApprovalSettings;
+}
+
+export interface WriteToolApprovalSettings {
+  enabled: boolean;
+  approverRoles?: Array<"admin" | "builder" | "operator" | "viewer">;
+  approverUsers?: string[];
+  allowSelfApproval?: boolean;
+  timeoutMinutes?: number;
 }
 
 export const DEFAULT_PROJECT_ID = "default";
@@ -455,6 +471,19 @@ export interface WorkflowExecutionState {
    * carry an approval.
    */
   approvedHandoffKeys?: string[];
+  /**
+   * Phase 11.2 — results of write-tool calls a person approved, keyed by the
+   * call's approval key, in call order. A re-run of the agent answers those
+   * calls from here instead of calling the tool again, so an approved call
+   * runs once. Written only by the engine; cleared when the node succeeds.
+   */
+  approvedToolResults?: Record<string, unknown[]>;
+  /**
+   * `approvedToolResults` sealed with the master key for storage: the API
+   * stores a paused run with this in place of the plaintext field and opens it
+   * again on resume. Written and read only by the API.
+   */
+  approvedToolResultsSealed?: string;
 }
 
 /**
@@ -468,13 +497,59 @@ export interface WorkflowExecutionState {
  */
 export type ApprovalHandoffState =
   | { kind: "route"; source: string; onApprove: unknown; onReject: unknown }
-  | { kind: "rerun"; source: string; approvalKey: string };
+  | { kind: "rerun"; source: string; approvalKey: string; request?: ApprovalRequestSpec }
+  /** Phase 11.2 — an Approval Gate node: it runs again on resume and turns the decision into its output. */
+  | { kind: "gate"; source: "approval_gate"; request: ApprovalRequestSpec }
+  /**
+   * Phase 11.2 — a sub-workflow (sync Execute Workflow node) paused: the
+   * parent pauses at that node with the child's paused state, and on resume
+   * the node resumes the child with the decision instead of starting it.
+   */
+  | { kind: "sub_workflow"; source: "execute_workflow"; workflowId: string; workflowName?: string; childState: WorkflowExecutionState };
+
+/** Phase 11.2 — what a person decided about a paused run. `timeout` is the sweeper's decision. */
+export type ApprovalDecisionValue = "approve" | "reject" | "timeout";
+
+export type ApprovalRequestKind = "approval_gate" | "human_approval" | "guard" | "agent_tool";
+
+/** Phase 11.2 — one field an approver may edit before approving (approve-with-edits). */
+export interface ApprovalEditableField {
+  key: string;
+  label?: string;
+  type: "string" | "text" | "number" | "boolean" | "json";
+  required?: boolean;
+  maxLength?: number;
+  /** The value the run proposed, rendered when the gate paused. */
+  value?: unknown;
+}
+
+/**
+ * Phase 11.2 — who may decide a paused run and what happens when nobody
+ * does. Stored on the hand-off of the paused state. Empty `approverRoles`
+ * and `approverUsers` mean any operator, builder or admin with execute
+ * access to the workflow's project.
+ */
+export interface ApprovalRequestSpec {
+  kind: ApprovalRequestKind;
+  approverRoles: Array<"admin" | "builder" | "operator" | "viewer">;
+  /** User ids or emails. */
+  approverUsers: string[];
+  /** The person who started the run may decide it. */
+  allowSelfApproval: boolean;
+  /** `fallback`: the gate's `timed_out` output; `reject`: handled as a rejection. */
+  timeoutOutcome: "fallback" | "reject";
+  /** A reason is required to reject. */
+  requireRejectReason: boolean;
+  editableFields: ApprovalEditableField[];
+}
 
 export interface WorkflowValidationIssue {
   code: string;
   message: string;
   nodeId?: string;
   edgeId?: string;
+  /** A "warning" does not make the workflow invalid. Absent means "error". */
+  severity?: "error" | "warning";
 }
 
 export interface WorkflowValidationResult {

@@ -15,6 +15,7 @@ export type AuditCategory =
   | "project"
   | "rbac"
   | "sharing"
+  | "approval"
   | "system";
 
 export interface AuditActor {

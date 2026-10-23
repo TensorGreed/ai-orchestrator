@@ -1514,6 +1514,58 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE eval_fixtures DROP COLUMN IF EXISTS recording_id;
       ALTER TABLE eval_datasets DROP COLUMN IF EXISTS workflow_id;
     `
+  },
+  {
+    version: 32,
+    description: "Phase 11.2 — Approval gates (approval_requests)",
+    up: `
+      CREATE TABLE IF NOT EXISTS approval_requests (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        project_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        node_type TEXT,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        spec_json TEXT NOT NULL,
+        path_json TEXT,
+        details_json TEXT,
+        requested_by_user_id TEXT,
+        requested_by TEXT,
+        timeout_minutes INTEGER,
+        expires_at TIMESTAMPTZ,
+        decided_by_user_id TEXT,
+        decided_by TEXT,
+        decided_at TIMESTAMPTZ,
+        reason TEXT,
+        edits_json TEXT,
+        edited_fields_json TEXT,
+        asking_workflow_id TEXT,
+        edits_salt TEXT,
+        workflow_deleted_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_approval_requests_status_expires ON approval_requests(status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_approval_requests_execution ON approval_requests(execution_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_approval_requests_project ON approval_requests(project_id, status, created_at DESC);
+      -- When approval requests came up: runs paused before it get one full timeout from here.
+      CREATE TABLE IF NOT EXISTS schema_markers (
+        name TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      INSERT INTO schema_markers (name, created_at) VALUES ('approval_requests', CURRENT_TIMESTAMP) ON CONFLICT (name) DO NOTHING;
+    `,
+    down: `
+      DROP TABLE IF EXISTS schema_markers;
+      DROP INDEX IF EXISTS idx_approval_requests_project;
+      DROP INDEX IF EXISTS idx_approval_requests_execution;
+      DROP INDEX IF EXISTS idx_approval_requests_status_expires;
+      DROP TABLE IF EXISTS approval_requests;
+    `
   }
 ];
 

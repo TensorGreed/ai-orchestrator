@@ -258,12 +258,22 @@ export const ConnectionsIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** Phase 11.2 — Approvals: a checked box with a waiting dot. */
+export const ApprovalsIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3.5" y="4.5" width="13" height="15" rx="2" />
+    <path d="M7 12l2.5 2.5L13.5 9.5" />
+    <circle cx="19" cy="6" r="2.2" />
+  </Svg>
+);
+
 export const MODE_ICONS: Record<StudioMode, (p: IconProps) => ReactElement> = {
   dashboard: HomeIcon,
   editor: EditorIcon,
   templates: TemplatesIcon,
   variables: VariablesIcon,
   executions: RunsIcon,
+  approvals: ApprovalsIcon,
   chat: ChatIcon,
   evaluations: EvaluationsIcon,
   knowledge: KnowledgeIcon,

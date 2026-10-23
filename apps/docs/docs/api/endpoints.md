@@ -194,6 +194,17 @@ See [Golden runs and replay](../product/golden-runs.md).
 - `DELETE /api/replay/recordings/:id` (builder; audited as `replay.recording.deleted`)
 - `POST /api/replay/recordings/:id/replay` (builder; `{ draft?, version?, mcpMode?, ignorePaths? (up to 32, 128 characters, eight ** each), numberTolerance? }`; a version runs under the workflow's current project; `{ recordingId, executionId, candidate, status, diff, verdict, reasons, facts }`; audited as `replay.run`)
 
+## Approvals
+
+See [Approval gates](../product/approvals.md).
+
+- `GET /api/approvals?status=pending|decided|all&workflowId=&executionId=&limit=` (viewer; `{ items }` limited to workflows the user can read, filtered before the limit; `404` when `workflowId` or `executionId` names a workflow or run the user cannot read, or one that does not exist; each item has `requestId`, `id` (the execution id), `kind`, `status`, `message`, approvers, `editableFields` with proposed values, `path`, `expiresAt`, the decision fields and `canDecide` / `cannotDecideReason`)
+- `POST /api/approvals/:id/approve` (`:id` is the execution id; `{ reason?, edits?, requestId? }`; needs execute access to the workflow's project (and to every workflow along a sub-workflow path) and a matching approver; `200` with the run result, `202 { queued: true }` with the execution queue, `400` for invalid edits (`details: [{ key, message }]`), `403` for self-approval, a non-approver or no project access, `404` when nothing is pending or the run is not visible (checked first), `409` when already decided, expired, or `requestId` is not the current request, `503` when the resume could not start (the request is pending again; decide again); audited as `approval.decided`)
+- `POST /api/approvals/:id/reject` (`{ reason?, requestId? }`; the reason is required for Approval Gates that require one and for write-tool approvals; same responses)
+- `POST /api/approvals/eligibility` (builder; `{ workflowId, projectId?, approverRoles?, approverUsers?, allowSelfApproval? }` → `{ othersCanApprove, requesterCanApprove }`; `404` for a workflow (or, unsaved, a project) the user cannot read, `403` without edit access: whether anyone but the signed-in user, and whether the signed-in user, could approve a run they start with these settings; the editor warns from it)
+- On the Postgres store every approvals route answers `501`.
+- `PUT /api/workflows/:id/pins/:nodeId` answers `400` for an Approval Gate; `/api/workflows/:id/execute` and `/api/executions/:id/retry` refuse a `startNodeId` or single-node run below an Approval Gate, and ignore pinned or seeded output for a gate.
+
 ## Secrets
 
 - `POST /api/secrets` (`{ id, name, provider, projectId, source, warnings }`; `warnings` is non-blocking and never contains the value: it flags a value that equals a word run manifests keep, such as a status)

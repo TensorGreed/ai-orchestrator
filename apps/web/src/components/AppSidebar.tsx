@@ -44,6 +44,8 @@ export interface AppSidebarProps {
    */
   drawerOpen?: boolean;
   onDrawerOpenChange?: (open: boolean) => void;
+  /** Counts shown beside an item, e.g. pending approvals; zero hides the badge. */
+  badges?: Partial<Record<StudioMode, number>>;
 }
 
 export interface SidebarMenuButtonProps {
@@ -78,7 +80,8 @@ export function AppSidebar({
   onCreateProject,
   onCollapsedChange,
   drawerOpen,
-  onDrawerOpenChange
+  onDrawerOpenChange,
+  badges
 }: AppSidebarProps) {
   const [collapsed, setCollapsed] = useState<boolean>(readSidebarCollapsed);
   const isDrawer = useMediaQuery(SHELL_DRAWER_MEDIA_QUERY);
@@ -179,7 +182,9 @@ export function AppSidebar({
     const Icon = MODE_ICONS[item.mode];
     const active = item.mode === activeMode;
     // The collapsed rail shows icons only, so the tooltip (which names the section) is the accessible name there.
-    const tooltip = item.section === "mcp" ? `MCP ${item.label.toLowerCase()}` : item.label;
+    const baseTooltip = item.section === "mcp" ? `MCP ${item.label.toLowerCase()}` : item.label;
+    const badge = badges?.[item.mode] ?? 0;
+    const tooltip = badge > 0 ? `${baseTooltip} (${badge} waiting)` : baseTooltip;
     return (
       <li key={item.mode}>
         <button
@@ -197,6 +202,11 @@ export function AppSidebar({
             <Icon />
           </span>
           <span className="sidebar-item-label">{item.label}</span>
+          {badge > 0 && (
+            <span className="sidebar-item-badge" aria-label={`${badge} waiting`}>
+              {badge > 99 ? "99+" : badge}
+            </span>
+          )}
         </button>
       </li>
     );

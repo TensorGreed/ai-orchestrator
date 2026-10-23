@@ -18,9 +18,10 @@ The manifest is a versioned JSON document (`format: "l2m.run-manifest"`, `manife
 | `mcpServers` | The registered servers the run used: adapter, transport, URL without credentials or query, catalog entry and pinned package, snapshot id and hash |
 | `prompts` | System and user prompt templates and their rendered text |
 | `citations` | Retrieved and cited chunks: marker, source, knowledge base, similarity score, retrieval mode and a digest of the chunk text |
-| `approvals` | Approval decisions: who decided, the decision, the reason and when |
+| `approvals` | Approval decisions (Human Approval nodes, guard hand-offs and Approval Gates): who decided, the decision, the reason and when |
 | `totals` | Tokens, estimated cost, model calls and tool calls for the whole run |
 | `extensions.guard` | Guard verdicts: profile id and version, detector, action, outcome and node, plus counts. No matched content and no evidence |
+| `extensions.approvals` | Every approval request of the run: request id, node, kind, outcome (including `timed_out` and `canceled`), who decided and when, the reason, the keys of edited fields and a digest of the edits, and the sub-workflow path. See [Approval gates](../product/approvals.md) |
 
 ### What is left out
 

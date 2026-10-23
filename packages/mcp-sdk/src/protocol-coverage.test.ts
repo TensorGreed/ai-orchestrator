@@ -507,7 +507,8 @@ describe("tool policy annotation conditions", () => {
 
   it("fills in the spec defaults for missing hints", () => {
     expect(effectiveToolHints(undefined)).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: true });
-    expect(effectiveToolHints({ readOnlyHint: true, destructiveHint: true })).toMatchObject({ readOnly: true, destructive: false });
+    // A server claiming both is read as destructive: destructiveHint wins over readOnlyHint.
+    expect(effectiveToolHints({ readOnlyHint: true, destructiveHint: true })).toMatchObject({ readOnly: false, destructive: true });
     expect(effectiveToolHints({ destructiveHint: false })).toMatchObject({ destructive: false });
     expect(effectiveToolHints({ destructiveHint: true }, true)).toMatchObject({ readOnly: true, destructive: false });
   });

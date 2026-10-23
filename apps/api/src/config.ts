@@ -311,6 +311,21 @@ const envSchema = z.object({
    * budget alone does not bound storage.
    */
   REPLAY_RECORDINGS_MAX_TOTAL_BYTES: z.coerce.number().int().min(16_384).max(1_099_511_627_776).default(1_073_741_824),
+  /**
+   * Phase 11.2 — how often the leader expires approval requests past their
+   * timeout (ms). Overdue requests are also expired once at startup.
+   */
+  APPROVAL_SWEEP_INTERVAL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
+  /**
+   * Phase 11.2 — the web app's public URL (for example https://l2m.example.com),
+   * used for the inbox link in approval notifications. Empty = no link.
+   */
+  APP_PUBLIC_URL: z
+    .string()
+    .default("")
+    .refine((value) => value === "" || /^https?:\/\/[^\s]+$/i.test(value), {
+      message: "APP_PUBLIC_URL must be an http(s) URL"
+    }),
   /** Phase 11.1 — largest audit bundle (zip) the API exports, in bytes. */
   AUDIT_BUNDLE_MAX_BYTES: z.coerce.number().int().min(1_024).max(2_147_483_647).default(104_857_600),
   AUDIT_EXPORT_ENABLED: booleanFromEnv.default(false),
@@ -385,6 +400,8 @@ const envSchema = z.object({
 
   // Phase 7.5 — Notifications
   NOTIFICATIONS_ENABLED: booleanFromEnv.default(false),
+  /** Phase 11.2 — channels set from the environment also send approval.requested and approval.timed_out. */
+  NOTIFICATIONS_APPROVAL_EVENTS: booleanFromEnv.default(true),
   NOTIFICATION_SMTP_HOST: z.string().optional(),
   NOTIFICATION_SMTP_PORT: z.coerce.number().int().positive().default(587),
   NOTIFICATION_SMTP_SECURE: booleanFromEnv.default(false),
