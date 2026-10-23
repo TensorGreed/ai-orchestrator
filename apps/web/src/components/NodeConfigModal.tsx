@@ -1768,10 +1768,12 @@ export function NodeInspector({
         try {
           setInlineSecretBusy(true);
           setInlineSecretError(null);
+          // Saved in the workflow's project, so the credential stays with the team that uses it.
           const created = await createSecret({
             name,
             provider: payload.provider,
-            value: payload.value
+            value: payload.value,
+            ...(workflowContext?.projectId ? { projectId: workflowContext.projectId } : {})
           });
           const createdSecret: SecretListItem = {
             id: created.id,

@@ -44,7 +44,7 @@ describe("inline credential creation", () => {
     };
   }
 
-  async function createInline(value: string, warnings: string[]) {
+  async function createInline(value: string, warnings: string[], projectId?: string) {
     vi.mocked(api.createSecret).mockResolvedValue({ id: "sec-1", name: "OpenAI Credential", provider: "openai", projectId: "default", warnings });
     const user = userEvent.setup();
     render(
@@ -52,7 +52,7 @@ describe("inline credential creation", () => {
         node={llmNode()}
         inputOptions={[]}
         executionResult={null}
-        workflowContext={{ id: "wf-1", name: "Workflow 1", vars: {} }}
+        workflowContext={{ id: "wf-1", name: "Workflow 1", vars: {}, ...(projectId ? { projectId } : {}) }}
         pinnedData={{}}
         showRuntimeInspection={false}
         secrets={[]}
@@ -75,6 +75,20 @@ describe("inline credential creation", () => {
     await createInline("success", [WARNING]);
     expect(await screen.findByRole("status")).toHaveTextContent(WARNING);
     expect(screen.getByRole("status")).not.toHaveTextContent("success");
+  });
+
+  it("saves the credential in the workflow's project, or lets the API pick when there is none", async () => {
+    vi.mocked(api.createSecret).mockClear();
+    await createInline("sk-team-value-123", [], "team");
+    await screen.findByRole("option", { name: /OpenAI Credential/ });
+    expect(api.createSecret).toHaveBeenCalledWith(expect.objectContaining({ projectId: "team" }));
+  });
+
+  it("sends no project when the workflow has none", async () => {
+    vi.mocked(api.createSecret).mockClear();
+    await createInline("sk-plain-value-123", []);
+    await screen.findByRole("option", { name: /OpenAI Credential/ });
+    expect(vi.mocked(api.createSecret).mock.calls[0]![0]).not.toHaveProperty("projectId");
   });
 
   it("shows nothing when the API returns no warnings", async () => {
