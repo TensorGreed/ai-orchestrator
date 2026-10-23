@@ -16,6 +16,7 @@ import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type { AgentRuntimeAdapter } from "@ai-orchestrator/agent-runtime";
 import { nodeDefinitions, workflowNodeSchema, type AgentRunRequest, type AgentRunState, type WorkflowEdge, type WorkflowNode } from "@ai-orchestrator/shared";
 import { executeCodeNodeSandbox, executeWorkflow } from "../executor";
+import { IN_PROCESS_CODE_SANDBOX } from "../code-sandbox";
 import { validateWorkflowGraph } from "../validation";
 import { renderExternalImportCoverageMarkdown } from "./coverage-markdown";
 import {
@@ -423,7 +424,7 @@ describe("external workflow import — schedule, code and execute workflow", () 
       code,
       input: { id: 7, results: { schedule_trigger: { timestamp: "2026-01-01T00:00:00.000Z" } } },
       timeoutMs: 2000
-    });
+    }, IN_PROCESS_CODE_SANDBOX);
     expect(result.result).toEqual({ since: "2026-01-01T00:00:00.000Z", items: [{ id: 7, results: { schedule_trigger: { timestamp: "2026-01-01T00:00:00.000Z" } } }], total: 1 });
   });
 });

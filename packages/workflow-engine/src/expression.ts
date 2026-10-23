@@ -17,6 +17,7 @@
 import {
   JMESPATH_SOURCE,
   evaluateInSandbox,
+  isExpressionSandboxFailure,
   serializeExpressionPayload,
   withExpressionSandbox,
   type SandboxEvaluate,
@@ -88,6 +89,8 @@ function evaluatorFor(context: ExpressionContext, run: (expression: string, seri
       serialized ??= serializeExpressionPayload(payloadFor(context));
       return run(trimmed, serialized);
     } catch (err) {
+      // A sandbox failure keeps its type, so templates can tell it from the expression's own error.
+      if (isExpressionSandboxFailure(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(`Expression evaluation failed for '${trimmed}': ${message}`);
     }
@@ -130,22 +133,24 @@ function stringifyResult(value: unknown): string {
   }
 }
 
+/**
+ * Renders every `{{ }}` in one sandbox session. An expression that throws or
+ * times out renders "", as it always has; a failure of the sandbox itself
+ * (ExpressionSandboxError) is thrown, so the caller fails rather than using
+ * a value that silently lost its expression.
+ */
 export function renderExpressionTemplate(template: string, context: ExpressionContext): string {
   if (typeof template !== "string" || !template.includes("{{")) return template;
-  const render = (evaluate: (expression: string) => unknown) =>
+  return withExpressionEvaluator(context, (evaluate) =>
     template.replace(TEMPLATE_REGEX, (_match, expr: string) => {
       try {
         return stringifyResult(evaluate(expr));
-      } catch {
+      } catch (error) {
+        if (isExpressionSandboxFailure(error)) throw error;
         return "";
       }
-    });
-  try {
-    return withExpressionEvaluator(context, render);
-  } catch {
-    // The sandbox could not start a session (restarting): fall back to one session per expression.
-    return render(createExpressionEvaluator(context));
-  }
+    })
+  );
 }
 
 /**

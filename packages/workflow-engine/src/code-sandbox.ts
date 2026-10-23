@@ -12,7 +12,11 @@
  *               JavaScript runs in QuickJS compiled to WebAssembly inside the
  *               API process (see quickjs-sandbox.ts): no host objects, a
  *               memory limit (CODE_SANDBOX_MEMORY_MB), a stack limit and a
- *               time limit, its result passed out as JSON. Python runs as a
+ *               time limit, its result passed out as JSON and capped at
+ *               CODE_SANDBOX_MAX_RESULT_MB. It runs synchronously on the API's
+ *               event loop, so its timeout is clamped to
+ *               CODE_SANDBOX_MAX_TIMEOUT_MS (and items x timeout to four times
+ *               that) to bound how long one node can stall it. Python runs as a
  *               host subprocess in isolated mode (`-I`) with an explicit,
  *               minimal environment, a scratch working directory and a hard
  *               kill on timeout -- but that is NOT a sandbox: it can run any
@@ -49,6 +53,10 @@ export type CodeSandboxPlan =
       reason?: string;
       /** Heap limit for one in-process JavaScript run. Default 256. */
       memoryMb?: number;
+      /** Ceiling on one in-process JavaScript run's timeout (CODE_SANDBOX_MAX_TIMEOUT_MS). Default 30000. */
+      maxTimeoutMs?: number;
+      /** Ceiling on one in-process JavaScript node's results together, in MB (CODE_SANDBOX_MAX_RESULT_MB). Default 32. */
+      maxResultMb?: number;
       /** Whether Python code nodes may run as host subprocesses. Default "allow". */
       python?: "allow" | "deny";
       /** Run host Python as this uid/gid (needs the API to hold CAP_SETUID/CAP_SETGID). */
@@ -71,6 +79,12 @@ export type CodeSandboxPlan =
     };
 
 export const IN_PROCESS_CODE_SANDBOX: CodeSandboxPlan = { kind: "in_process" };
+
+/** The engine's plan when the caller supplies none: no code runs. The API always supplies its settled plan. */
+export const NO_CODE_SANDBOX_PLAN: CodeSandboxPlan = {
+  kind: "disabled",
+  reason: "Code nodes cannot run: no code sandbox plan was supplied to the workflow engine."
+};
 
 /** The plan in force while the real one is being resolved at startup: nothing runs until it settles. */
 export const CODE_SANDBOX_INITIALISING: CodeSandboxPlan = {
@@ -101,9 +115,11 @@ export interface CodeRunOutput {
  * AsyncFunction, so it cannot break out of a wrapper, and every error is
  * caught and described inside the sandbox.
  */
-export const CODE_PRELUDE_SOURCE = String.raw`(() => {
+export function codePreludeSource(maxChars: number): string {
+  return String.raw`(() => {
   "use strict";
-  const stringify = JSON.stringify, parse = JSON.parse, toText = String;
+  const stringify = JSON.stringify, parse = JSON.parse, toText = String, MAX = ${Math.floor(maxChars)};
+  const tooLarge = () => stringify({ ok: false, error: "Code node result is too large (over " + MAX + " characters including logs; CODE_SANDBOX_MAX_RESULT_MB).", logs: [] });
   const AsyncFunction = (async function () {}).constructor;
   const logs = [];
   let code = "";
@@ -139,13 +155,22 @@ export const CODE_PRELUDE_SOURCE = String.raw`(() => {
       return "Code node execution failed.";
     }
   };
-  const finish = (value) => {
+  // The outcome is only recorded here and serialized in __l2mResult, which the host calls synchronously:
+  // QuickJS leaks objects (and then cannot free the runtime) when a large JSON.stringify runs inside a promise job.
+  let settled = null;
+  const finish = (value) => { if (!settled) settled = { ok: true, value }; };
+  const fail = (error) => { if (!settled) settled = { ok: false, error }; };
+  const render = () => {
+    if (!settled.ok) {
+      const text = stringify({ ok: false, error: describe(settled.error).slice(0, 10000), logs });
+      return typeof text === "string" && text.length > MAX ? tooLarge() : text;
+    }
+    const value = settled.value;
     let text;
     try { text = value === undefined ? "null" : stringify(value); } catch (error) { text = stringify(toText(value)); }
-    out = '{"ok":true,"result":' + (text === undefined ? "null" : text) + ',"logs":' + stringify(logs) + "}";
-  };
-  const fail = (error) => {
-    out = stringify({ ok: false, error: describe(error), logs });
+    const logText = stringify(logs);
+    if ((text === undefined ? 4 : text.length) + (typeof logText === "string" ? logText.length : 0) > MAX) return tooLarge();
+    return '{"ok":true,"result":' + (text === undefined ? "null" : text) + ',"logs":' + logText + "}";
   };
   Object.defineProperty(globalThis, "__l2mStart", {
     value: () => {
@@ -155,9 +180,27 @@ export const CODE_PRELUDE_SOURCE = String.raw`(() => {
       try { fn().then(finish, fail); } catch (error) { fail(error); }
     }
   });
-  Object.defineProperty(globalThis, "__l2mResult", { value: () => out });
+  Object.defineProperty(globalThis, "__l2mResult", { value: () => (out === undefined && settled ? (out = render()) : out) });
   Object.defineProperty(globalThis, "__l2mSet", { value: (nextCode, nextPayload) => { code = nextCode; payload = nextPayload; } });
 })();`;
+}
+
+/** Defaults for CODE_SANDBOX_MAX_TIMEOUT_MS and CODE_SANDBOX_MAX_RESULT_MB. */
+export const DEFAULT_IN_PROCESS_MAX_TIMEOUT_MS = 30_000;
+export const DEFAULT_CODE_MAX_RESULT_MB = 32;
+
+/** The harness with the default result cap (the container runner's copy). */
+export const CODE_PRELUDE_SOURCE = codePreludeSource(DEFAULT_CODE_MAX_RESULT_MB * 1024 * 1024);
+
+const preludes = new Map<number, string>([[DEFAULT_CODE_MAX_RESULT_MB * 1024 * 1024, CODE_PRELUDE_SOURCE]]);
+function preludeFor(maxChars: number): string {
+  let source = preludes.get(maxChars);
+  if (!source) {
+    source = codePreludeSource(maxChars);
+    if (preludes.size < 16) preludes.set(maxChars, source);
+  }
+  return source;
+}
 
 const NEVER_SETTLED = "Code node did not finish: it waits on a promise that never settles (timers and network are not available in the sandbox).";
 
@@ -177,12 +220,28 @@ function parseHarnessOutput(raw: unknown): CodeRunOutput {
   throw new Error(`Code node sandbox error: ${typeof parsed.error === "string" ? parsed.error : "Code node execution failed."}`);
 }
 
+/** The harness's `{ error }` field, or undefined; never throws, whatever the guest made of its result. */
+function harnessError(raw: string): unknown {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** One JavaScript run in a fresh QuickJS runtime and context of this process. */
-export function runJavaScriptInProcess(code: string, input: unknown, timeoutMs: number, memoryMb: number = DEFAULT_IN_PROCESS_MEMORY_MB): CodeRunOutput {
+export function runJavaScriptInProcess(
+  code: string,
+  input: unknown,
+  timeoutMs: number,
+  memoryMb: number = DEFAULT_IN_PROCESS_MEMORY_MB,
+  maxResultMb: number = DEFAULT_CODE_MAX_RESULT_MB
+): CodeRunOutput & { resultChars: number } {
   let raw: string | undefined;
   try {
     raw = withQuickJs({ memoryBytes: Math.floor(memoryMb * 1024 * 1024), stackBytes: QUICKJS_STACK_BYTES, timeoutMs }, (session) => {
-      session.evaluateTrusted(CODE_PRELUDE_SOURCE, "l2m-code-prelude.js");
+      session.evaluateTrusted(preludeFor(Math.floor(maxResultMb * 1024 * 1024)), "l2m-code-prelude.js");
       session.callGlobal("__l2mSet", [code, toSandboxJson(input)]);
       session.callGlobal("__l2mStart", []);
       let result = session.callGlobal("__l2mResult", []);
@@ -191,9 +250,10 @@ export function runJavaScriptInProcess(code: string, input: unknown, timeoutMs: 
         return result !== undefined;
       });
       const final = result ?? session.callGlobal("__l2mResult", []);
-      // The time limit interrupting an awaited job reaches the harness as a rejection named "interrupted".
-      if (final !== undefined && session.remainingMs() <= 0 && (JSON.parse(final) as { error?: unknown }).error === "interrupted") {
-        throw new SandboxTimeoutError(timeoutMs);
+      // The interrupt (time or memory) stopping an awaited job reaches the harness as a rejection named "interrupted".
+      if (final !== undefined && harnessError(final) === "interrupted") {
+        if (session.memoryExceeded()) throw new GuestError(`out of memory (limit ${memoryMb} MB)`);
+        if (session.remainingMs() <= 0) throw new SandboxTimeoutError(timeoutMs);
       }
       return final;
     });
@@ -202,7 +262,26 @@ export function runJavaScriptInProcess(code: string, input: unknown, timeoutMs: 
     const message = error instanceof SandboxTimeoutError || error instanceof GuestError || error instanceof SandboxFailureError ? error.message : "Code node execution failed.";
     throw new Error(`Code node sandbox error: ${message}`);
   }
-  return parseHarnessOutput(raw);
+  return { ...parseHarnessOutput(raw), resultChars: typeof raw === "string" ? raw.length : 0 };
+}
+
+/**
+ * The timeout an in-process JavaScript run actually gets: the node's own,
+ * clamped to the plan's ceiling, since the run holds the API's event loop.
+ * Refuses a node whose items together could hold it more than four times
+ * the ceiling.
+ */
+export function inProcessTimeout(plan: Extract<CodeSandboxPlan, { kind: "in_process" }>, timeoutMs: number, items: number): number {
+  const ceiling = plan.maxTimeoutMs ?? DEFAULT_IN_PROCESS_MAX_TIMEOUT_MS;
+  const clamped = Math.max(1, Math.min(timeoutMs, ceiling));
+  if (items > 1 && clamped * items > ceiling * 4) {
+    throw new WorkflowError(
+      `This code node would run ${items} items for up to ${clamped}ms each in the API process, more than ${ceiling * 4}ms in all (4 x CODE_SANDBOX_MAX_TIMEOUT_MS). Lower its timeout, run once for all items, or use the container sandbox.`,
+      ErrorCategory.NODE_CONFIG,
+      false
+    );
+  }
+  return clamped;
 }
 
 /** Hardening for the V8 realm the container runner builds (the container is the boundary; this is defence in depth). */
@@ -352,7 +431,19 @@ function containerFailure(plan: Extract<CodeSandboxPlan, { kind: "container" }>,
  */
 export async function runJavaScriptCode(plan: CodeSandboxPlan, code: string, inputs: unknown[], timeoutMs: number): Promise<CodeRunOutput[]> {
   if (plan.kind === "disabled") throw codeNodesDisabledError(plan);
-  if (plan.kind === "in_process") return inputs.map((input) => runJavaScriptInProcess(code, input, timeoutMs, plan.memoryMb));
+  if (plan.kind === "in_process") {
+    const timeout = inProcessTimeout(plan, timeoutMs, inputs.length);
+    const maxResultMb = plan.maxResultMb ?? DEFAULT_CODE_MAX_RESULT_MB;
+    const maxChars = maxResultMb * 1024 * 1024;
+    let total = 0;
+    return inputs.map((input) => {
+      const { resultChars, ...output } = runJavaScriptInProcess(code, input, timeout, plan.memoryMb, maxResultMb);
+      total += resultChars;
+      // Each run is capped inside the sandbox; this caps the node's items together.
+      if (total > maxChars) throw new Error(`Code node sandbox error: the results of this node's items are too large together (over ${maxResultMb} MB; CODE_SANDBOX_MAX_RESULT_MB).`);
+      return output;
+    });
+  }
   const job = JSON.stringify({ code, timeoutMs, payloads: inputs.map((input) => toSandboxJson(input)) });
   const budgetMs = plan.startupMs + timeoutMs * Math.max(1, inputs.length);
   const run = await runContainer(plan, plan.jsImage, "node", ["-e", CONTAINER_JS_RUNNER], job, budgetMs);
@@ -386,6 +477,16 @@ export function pythonHostEnv(workdir: string): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * The uid/gid host Python runs as. With only a uid set, the gid is the same
+ * number: otherwise the child would keep the API's primary group and could
+ * read files that group can read.
+ */
+export function pythonIdentity(plan: Extract<CodeSandboxPlan, { kind: "in_process" }>): { uid?: number; gid?: number } {
+  if (plan.pythonUid === undefined) return plan.pythonGid !== undefined ? { gid: plan.pythonGid } : {};
+  return { uid: plan.pythonUid, gid: plan.pythonGid ?? plan.pythonUid };
+}
+
 /** Runs a Python code node under the plan. */
 export async function runPythonCode(plan: CodeSandboxPlan, input: PythonExecutionInput): Promise<PythonExecutionResult> {
   if (plan.kind === "disabled") throw codeNodesDisabledError(plan);
@@ -393,10 +494,11 @@ export async function runPythonCode(plan: CodeSandboxPlan, input: PythonExecutio
   if (plan.kind === "in_process") {
     if (plan.python === "deny") throw new WorkflowError(PYTHON_IN_PROCESS_DENIED_MESSAGE, ErrorCategory.CONFIGURATION, false);
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-py-"));
+    const { uid: pythonUid, gid: pythonGid } = pythonIdentity(plan);
     try {
-      if (plan.pythonUid !== undefined) {
+      if (pythonUid !== undefined) {
         try {
-          fs.chownSync(workdir, plan.pythonUid, plan.pythonGid ?? -1);
+          fs.chownSync(workdir, pythonUid, pythonGid ?? -1);
         } catch (error) {
           throw new WorkflowError(
             `CODE_SANDBOX_PYTHON_UID is set but the API cannot hand its scratch directory to uid ${plan.pythonUid} (${(error as Error).message}); the API needs CAP_CHOWN and CAP_SETUID.`,
@@ -411,8 +513,8 @@ export async function runPythonCode(plan: CodeSandboxPlan, input: PythonExecutio
         env: pythonHostEnv(workdir),
         cwd: workdir,
         isolated: true,
-        uid: plan.pythonUid,
-        gid: plan.pythonGid
+        uid: pythonUid,
+        gid: pythonGid
       });
     } finally {
       fs.rmSync(workdir, { recursive: true, force: true });
@@ -438,9 +540,13 @@ export interface CodeSandboxSettings {
   instanceLabel: string;
   /** Whether Python may run as a host subprocess when there is no container plan. Default "allow". */
   pythonInProcess?: "allow" | "deny";
-  /** Optional uid / gid for host Python subprocesses. */
+  /** Optional uid / gid for host Python subprocesses (the gid defaults to the uid). */
   pythonUid?: number;
   pythonGid?: number;
+  /** Ceiling on an in-process JavaScript run's timeout (CODE_SANDBOX_MAX_TIMEOUT_MS). */
+  maxTimeoutMs?: number;
+  /** Ceiling on an in-process JavaScript node's results (CODE_SANDBOX_MAX_RESULT_MB). */
+  maxResultMb?: number;
 }
 
 /** Checks whether an image is present locally (nothing is pulled). Seam for tests. */
@@ -492,6 +598,8 @@ export async function resolveCodeSandboxPlan(
       reason,
       memoryMb: settings.memoryMb,
       python,
+      ...(settings.maxTimeoutMs !== undefined ? { maxTimeoutMs: settings.maxTimeoutMs } : {}),
+      ...(settings.maxResultMb !== undefined ? { maxResultMb: settings.maxResultMb } : {}),
       ...(settings.pythonUid !== undefined ? { pythonUid: settings.pythonUid } : {}),
       ...(settings.pythonGid !== undefined ? { pythonGid: settings.pythonGid } : {})
     } as CodeSandboxPlan,

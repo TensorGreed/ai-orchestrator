@@ -102,7 +102,8 @@ import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
 import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch";
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
-import { IN_PROCESS_CODE_SANDBOX, codeNodesDisabledError, runJavaScriptCode, runPythonCode, type CodeSandboxPlan } from "./code-sandbox";
+import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPythonCode, type CodeSandboxPlan } from "./code-sandbox";
+import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
@@ -2756,11 +2757,6 @@ function toJsonSafeValue(value: unknown): unknown {
   }
 }
 
-/**
- * Runs code-node JavaScript under a sandbox plan (default: an isolated realm
- * in this process; see code-sandbox.ts). `input` is what the code sees as
- * `input`; the result and logs come back as JSON-safe values.
- */
 /** The outbound guard's pinned fetch, for RAG endpoints that come from a node's own config. */
 function guardedRagFetch(dependencies: { outboundGuard?: OutboundGuardConfig; outboundDnsResolver?: (hostname: string) => Promise<string[]> }): RagFetch {
   return (url, init) =>
@@ -2770,7 +2766,12 @@ function guardedRagFetch(dependencies: { outboundGuard?: OutboundGuardConfig; ou
     });
 }
 
-export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput, plan: CodeSandboxPlan = IN_PROCESS_CODE_SANDBOX): Promise<CodeNodeExecutionOutput> {
+/**
+ * Runs code-node JavaScript under a sandbox plan (see code-sandbox.ts; with no
+ * plan, code is refused). `input` is what the code sees as `input`; the
+ * result and logs come back as JSON-safe values.
+ */
+export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput, plan: CodeSandboxPlan = NO_CODE_SANDBOX_PLAN): Promise<CodeNodeExecutionOutput> {
   const [output] = await runJavaScriptCode(plan, String(input.code ?? ""), [input.input], codeNodeTimeout(input.timeoutMs));
   return output!;
 }
@@ -3480,7 +3481,7 @@ async function executeNode(
       const language = typeof config.language === "string" ? config.language : "javascript";
       const mode = config.mode === "runOnceForEachItem" ? "runOnceForEachItem" : "runOnceForAllItems";
 
-      const codeSandbox = dependencies.codeSandbox ?? IN_PROCESS_CODE_SANDBOX;
+      const codeSandbox = dependencies.codeSandbox ?? NO_CODE_SANDBOX_PLAN;
       if (codeSandbox.kind === "disabled") throw codeNodesDisabledError(codeSandbox);
 
       if (language === "python") {
@@ -6215,14 +6216,19 @@ export async function executeWorkflow(
   request: ExecuteWorkflowRequest,
   dependencies: WorkflowExecutionDependencies
 ): Promise<WorkflowExecutionResult> {
-  // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
-  if (dependencies.activityRecorder) {
-    return executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined });
-  }
-  const recorder = createNodeActivityRecorder(dependencies.onNodeActivity);
-  const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
-  attachNodeActivity(result.nodeResults, recorder);
-  return result;
+  // Sandbox sessions started by this run count against its workflow's circuit breaker (see quickjs-sandbox.ts).
+  const owner = (request.resumeState?.workflow ?? request.workflow)?.id;
+  const run = async (): Promise<WorkflowExecutionResult> => {
+    // A sub-workflow run reuses its parent's dependencies: its nodes report nothing of their own.
+    if (dependencies.activityRecorder) {
+      return executeWorkflowRun(request, { ...dependencies, activityRecorder: NOOP_ACTIVITY_RECORDER, onNodeActivity: undefined });
+    }
+    const recorder = createNodeActivityRecorder(dependencies.onNodeActivity);
+    const result = await executeWorkflowRun(request, { ...dependencies, activityRecorder: recorder });
+    attachNodeActivity(result.nodeResults, recorder);
+    return result;
+  };
+  return owner ? runWithSandboxOwner(`workflow:${owner}`, run) : run();
 }
 
 /** Copies each node's recorded activity onto its results; nodes restored from a paused run keep theirs. */

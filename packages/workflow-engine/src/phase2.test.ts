@@ -12,6 +12,7 @@ import type {
 } from "@ai-orchestrator/shared";
 import type { AgentRuntimeAdapter } from "@ai-orchestrator/agent-runtime";
 import { executeWorkflow, type WorkflowExecutionDependencies } from "./executor";
+import { IN_PROCESS_CODE_SANDBOX } from "./code-sandbox";
 import { evaluateExpression, jmespath, renderExpressionTemplate } from "./expression";
 import { isPythonAvailable, executePythonCodeNode } from "./python-runner";
 import {
@@ -59,6 +60,7 @@ function makeDeps(overrides?: Partial<WorkflowExecutionDependencies>): WorkflowE
     connectorRegistry: createDefaultConnectorRegistry(),
     agentRuntime: new FakeAgentRuntime(),
     resolveSecret: async () => undefined,
+    codeSandbox: IN_PROCESS_CODE_SANDBOX,
     ...overrides
   };
 }

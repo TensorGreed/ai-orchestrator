@@ -1,4 +1,5 @@
 import { withExpressionEvaluator, isComplexExpression, type ExpressionContext } from "./expression";
+import { isExpressionSandboxFailure } from "./expression-sandbox";
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -50,7 +51,10 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
           if (typeof result === "string") return result;
           if (typeof result === "number" || typeof result === "boolean") return String(result);
           try { return JSON.stringify(result); } catch { return String(result); }
-        } catch {
+        } catch (error) {
+          // The expression's own error or timeout renders "". A sandbox failure fails the node instead:
+          // an IF or Switch must never branch on a value that silently lost its expression.
+          if (isExpressionSandboxFailure(error)) throw error;
           return "";
         }
       }
@@ -64,12 +68,8 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
     return !SIMPLE_PATH.test(trimmed) && isComplexExpression(trimmed);
   });
   if (!hasExpression) return render(null);
-  try {
-    return withExpressionEvaluator(expressionContextFor(values), render);
-  } catch {
-    // No session could start (the sandbox is restarting): expressions render empty, as a failed expression always has.
-    return render(null);
-  }
+  // A session that cannot start throws ExpressionSandboxError (retryable when no instance was ready).
+  return withExpressionEvaluator(expressionContextFor(values), render);
 }
 
 export function renderTemplate(template: string, values: Record<string, unknown>): string {

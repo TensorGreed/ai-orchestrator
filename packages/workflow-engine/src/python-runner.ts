@@ -80,6 +80,9 @@ export function parsePythonRunnerOutput(stdout: string, stderr: string): PythonE
   throw new WorkflowError(`Python error: ${parsed.error ?? "unknown"}`, ErrorCategory.UNKNOWN, false, { trace: parsed.trace });
 }
 
+/** How long to keep reading output after Python exits, before its pipes are dropped. */
+const EXIT_OUTPUT_GRACE_MS = 100;
+
 export async function executePythonCodeNode(input: PythonExecutionInput): Promise<PythonExecutionResult> {
   const timeoutMs = input.timeoutMs ?? 15000;
   const pythonBin =
@@ -90,6 +93,16 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
   const env = input.env ?? { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" };
   const args = [...(input.isolated === false ? [] : ["-I"]), "-c", PY_RUNNER];
 
+  const spawnFailure = (err: NodeJS.ErrnoException): WorkflowError => {
+    if (err.code === "EPERM" && (input.uid !== undefined || input.gid !== undefined)) {
+      return new WorkflowError(
+        `CODE_SANDBOX_PYTHON_UID/GID is set (uid ${input.uid ?? "unchanged"}, gid ${input.gid ?? "unchanged"}) but the API is not allowed to switch to it (${err.message}); the API needs CAP_SETUID and CAP_SETGID, or unset both.`,
+        ErrorCategory.CONFIGURATION,
+        false
+      );
+    }
+    return new WorkflowError(`Python runtime '${pythonBin}' is not available: ${err.message}`, ErrorCategory.CONFIGURATION, false);
+  };
   return new Promise<PythonExecutionResult>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
@@ -104,13 +117,7 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
         ...(input.gid !== undefined ? { gid: input.gid } : {})
       });
     } catch (err) {
-      reject(
-        new WorkflowError(
-          `Python runtime '${pythonBin}' is not available: ${(err as Error).message}`,
-          ErrorCategory.CONFIGURATION,
-          false
-        )
-      );
+      reject(spawnFailure(err as NodeJS.ErrnoException));
       return;
     }
 
@@ -142,15 +149,7 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
     }, timeoutMs);
 
     child.on("error", (err) => {
-      finalize(() =>
-        reject(
-          new WorkflowError(
-            `Python runtime '${pythonBin}' is not available: ${err.message}`,
-            ErrorCategory.CONFIGURATION,
-            false
-          )
-        )
-      );
+      finalize(() => reject(spawnFailure(err as NodeJS.ErrnoException)));
     });
     child.stdout?.on("data", (chunk) => {
       stdout += chunk.toString();
@@ -158,7 +157,13 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-    child.on("close", (code) => {
+    // Settle when Python itself exits, not when its pipes close: a process the code detached (setsid)
+    // keeps them open. Output still in flight is read during a short grace, then the pipes are dropped.
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    const settleExit = (code: number | null) => {
+      if (exitTimer) clearTimeout(exitTimer);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       finalize(() => {
         if (code !== 0 && !stdout) {
           reject(
@@ -176,7 +181,11 @@ export async function executePythonCodeNode(input: PythonExecutionInput): Promis
           reject(error);
         }
       });
+    };
+    child.on("exit", (code) => {
+      exitTimer = setTimeout(() => settleExit(code), EXIT_OUTPUT_GRACE_MS);
     });
+    child.on("close", (code) => settleExit(code));
     child.stdin?.on("error", () => undefined);
     child.stdin?.write(JSON.stringify({ items: input.items, mode: input.mode, code: input.code }));
     child.stdin?.end();

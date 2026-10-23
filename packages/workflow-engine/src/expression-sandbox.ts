@@ -10,7 +10,15 @@
  * Buffer or `Intl`. Data goes in as a JSON string and the result comes back as
  * a JSON string, and the context is thrown away afterwards, so nothing one
  * evaluation does (a patched prototype, a global) is seen by another.
+ *
+ * A result larger than EXPRESSION_MAX_RESULT_MB is refused inside the
+ * sandbox, and one template's expressions together get at most
+ * EXPRESSION_TEMPLATE_BUDGET_MS. When the sandbox itself fails (no instance
+ * ready, an instance crashed, the workflow's circuit breaker is open) callers
+ * get `ExpressionSandboxError`, which templates rethrow so the node fails
+ * instead of rendering an empty value.
  */
+import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 import { GuestError, QUICKJS_STACK_BYTES, SandboxFailureError, SandboxTimeoutError, withQuickJs } from "./quickjs-sandbox";
 
 /** The jmespath subset, as plain JavaScript so it can be built in the sandbox and in the host from one source. */
@@ -87,27 +95,32 @@ export const JMESPATH_SOURCE = String.raw`function jmespath(input, path) {
 /**
  * The evaluator inside the sandbox. `__l2mRun(operation, expression, payload)`
  * runs one job and returns a JSON string: `{"u":1}` undefined, `{"d":iso}` a
- * Date, `{"v":value}` anything else, `{"e":message}` an error.
+ * Date, `{"v":value}` anything else, `{"e":message}` an error. Results longer
+ * than `maxChars` become an error. `__l2mRun` and `__l2mSetJmes` are
+ * non-writable and non-configurable, and the built-ins it needs are captured
+ * before any user code runs.
  *
  * Kept short on purpose: every evaluation compiles it in a fresh context, and
  * QuickJS compile time grows with the source. `$jmespath` is compiled from the
- * string in `__l2mJmes`, which is only sent when the expression names it.
+ * source passed to `__l2mSetJmes`, which is only sent when the expression names it.
  */
-const EVALUATOR_SOURCE = String.raw`(() => {
-  const P = JSON.parse, S = JSON.stringify, D = Date, T = String, K = Object.keys;
-  let jm = null;
+function evaluatorSource(maxChars: number): string {
+  return String.raw`(() => {
+  const P = JSON.parse, S = JSON.stringify, D = Date, T = String, K = Object.keys, F = Function, DP = Object.defineProperty, M = ${maxChars};
+  let jmSrc = null, jm = null;
   const jmespath = (input, path) => {
     if (!jm) {
-      if (typeof globalThis.__l2mJmes !== "string") throw new Error("$jmespath is not available here");
-      jm = new Function("return (" + globalThis.__l2mJmes + ");")();
+      if (typeof jmSrc !== "string") throw new Error("$jmespath is not available here");
+      jm = new F("return (" + jmSrc + ");")();
     }
     return jm(input, path);
   };
   const empty = (v) => v == null || (typeof v === "string" || Array.isArray(v) ? v.length === 0 : typeof v === "object" && K(v).length === 0);
+  const cap = (text) => (typeof text === "string" && text.length > M ? S({ e: "Expression result is too large (over " + M + " characters)" }) : text);
   const enc = (v) => {
     if (v === undefined) return '{"u":1}';
     if (v instanceof D) return S({ d: Number.isNaN(v.getTime()) ? null : v.toISOString() });
-    try { return S({ v }, (k, e) => (typeof e === "bigint" ? T(e) : e)); } catch (e) { return S({ v: T(v) }); }
+    try { return cap(S({ v }, (k, e) => (typeof e === "bigint" ? T(e) : e))); } catch (e) { return cap(S({ v: T(v) })); }
   };
   const scope = (c) => {
     const input = c.input, outputs = c.nodeOutputs || {}, now = new D();
@@ -123,47 +136,112 @@ const EVALUATOR_SOURCE = String.raw`(() => {
     for (const k of ["process", "require", "global", "globalThis", "Function", "eval"]) s[k] = undefined;
     return s;
   };
-  globalThis.__l2mRun = (op, x, p) => {
+  const run = (op, x, p) => {
     try {
       if (op === "sortKeys") {
-        const fn = new Function("item", "$json", "return (" + x + ");");
+        const fn = new F("item", "$json", "return (" + x + ");");
         return enc(P(p).map((item) => { const key = fn(item, item); return key instanceof D ? key.getTime() : key; }));
       }
-      return enc(new Function("__scope", "with (__scope) { return (" + x + "); }")(scope(P(p))));
+      return enc(new F("__scope", "with (__scope) { return (" + x + "); }")(scope(P(p))));
     } catch (e) {
       let m;
       try { m = e && typeof e === "object" && "message" in e ? T(e.message) : T(e); } catch (inner) { m = "error"; }
-      return S({ e: m });
+      return S({ e: m.slice(0, 2000) });
     }
   };
+  DP(globalThis, "__l2mRun", { value: run, writable: false, configurable: false });
+  DP(globalThis, "__l2mSetJmes", { value: (source) => { jmSrc = source; }, writable: false, configurable: false });
 })();`;
+}
 
-const JMESPATH_PRELUDE = `globalThis.__l2mJmes = ${JSON.stringify(JMESPATH_SOURCE)};`;
+const MB = 1024 * 1024;
 
-let settings = { timeoutMs: 1000, memoryBytes: 64 * 1024 * 1024 };
+/** Defaults for EXPRESSION_TIMEOUT_MS, EXPRESSION_MEMORY_MB, EXPRESSION_MAX_RESULT_MB and EXPRESSION_TEMPLATE_BUDGET_MS. */
+export const EXPRESSION_SANDBOX_DEFAULTS = { timeoutMs: 1000, memoryMb: 64, maxResultMb: 8, templateBudgetMs: 5000 } as const;
 
-/** Sets the per-evaluation limits (API startup, from EXPRESSION_TIMEOUT_MS and EXPRESSION_MEMORY_MB). */
-export function configureExpressionSandbox(options: { timeoutMs?: number; memoryMb?: number }): void {
-  if (typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
-    settings = { ...settings, timeoutMs: Math.floor(options.timeoutMs) };
-  }
-  if (typeof options.memoryMb === "number" && Number.isFinite(options.memoryMb) && options.memoryMb > 0) {
-    settings = { ...settings, memoryBytes: Math.floor(options.memoryMb * 1024 * 1024) };
+let settings: { timeoutMs: number; memoryBytes: number; maxResultChars: number; templateBudgetMs: number } = {
+  timeoutMs: EXPRESSION_SANDBOX_DEFAULTS.timeoutMs,
+  memoryBytes: EXPRESSION_SANDBOX_DEFAULTS.memoryMb * MB,
+  maxResultChars: EXPRESSION_SANDBOX_DEFAULTS.maxResultMb * MB,
+  templateBudgetMs: EXPRESSION_SANDBOX_DEFAULTS.templateBudgetMs
+};
+let evaluatorPrelude = evaluatorSource(settings.maxResultChars);
+
+const positive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
+
+/**
+ * Sets the limits (API startup): EXPRESSION_TIMEOUT_MS and EXPRESSION_MEMORY_MB
+ * per evaluation, EXPRESSION_MAX_RESULT_MB per result and
+ * EXPRESSION_TEMPLATE_BUDGET_MS for one template's expressions together.
+ */
+export function configureExpressionSandbox(options: { timeoutMs?: number; memoryMb?: number; maxResultMb?: number; templateBudgetMs?: number }): void {
+  if (positive(options.timeoutMs)) settings = { ...settings, timeoutMs: Math.floor(options.timeoutMs) };
+  if (positive(options.memoryMb)) settings = { ...settings, memoryBytes: Math.floor(options.memoryMb * MB) };
+  if (positive(options.templateBudgetMs)) settings = { ...settings, templateBudgetMs: Math.floor(options.templateBudgetMs) };
+  if (positive(options.maxResultMb)) {
+    settings = { ...settings, maxResultChars: Math.floor(options.maxResultMb * MB) };
+    evaluatorPrelude = evaluatorSource(settings.maxResultChars);
   }
 }
 
 /** The limits in force, for startup logs. */
-export function expressionSandboxLimits(): { timeoutMs: number; memoryMb: number; engine: "quickjs-wasm" } {
-  return { timeoutMs: settings.timeoutMs, memoryMb: Math.round(settings.memoryBytes / (1024 * 1024)), engine: "quickjs-wasm" };
+export function expressionSandboxLimits(): { timeoutMs: number; memoryMb: number; maxResultMb: number; templateBudgetMs: number; engine: "quickjs-wasm" } {
+  return {
+    timeoutMs: settings.timeoutMs,
+    memoryMb: Math.round(settings.memoryBytes / MB),
+    maxResultMb: Math.round(settings.maxResultChars / MB),
+    templateBudgetMs: settings.templateBudgetMs,
+    engine: "quickjs-wasm"
+  };
 }
 
+/**
+ * The sandbox itself failed, so an expression has no value: no instance was
+ * ready (retryable), an instance crashed on this expression, or this
+ * workflow's circuit breaker is open. Templates rethrow it instead of
+ * rendering "", so an IF, Switch, URL or prompt never sees a silent empty
+ * value.
+ */
+export class ExpressionSandboxError extends WorkflowError {
+  constructor(message: string, retryable: boolean) {
+    super(
+      `expression sandbox error: ${message}`,
+      ErrorCategory.UNKNOWN,
+      retryable,
+      { sandbox: "expression" },
+      retryable
+        ? "The expression sandbox was briefly unavailable. Run the workflow again (or enable Retry on Fail for this node)."
+        : "An expression in this node crashed the expression sandbox (for example a result nested thousands of levels deep). Simplify the expression."
+    );
+    this.name = "ExpressionSandboxError";
+  }
+}
+
+/** True for a failure of the sandbox itself (inside or outside a session), which must never be rendered as an empty value. */
+export function isExpressionSandboxFailure(error: unknown): boolean {
+  return error instanceof ExpressionSandboxError || error instanceof SandboxFailureError;
+}
+
+/** Decodes `__l2mRun`'s answer. Anything but the plain shape it builds is the guest's doing (a patched toJSON, say), so it is a guest error. */
 function decode(raw: unknown): unknown {
-  if (typeof raw !== "string") throw new GuestError("Expression sandbox returned an invalid result");
-  const parsed = JSON.parse(raw) as { u?: 1; d?: string | null; v?: unknown; e?: string };
-  if (typeof parsed.e === "string") throw new GuestError(parsed.e);
-  if (parsed.u === 1) return undefined;
-  if ("d" in parsed) return parsed.d === null ? new Date(Number.NaN) : new Date(parsed.d as string);
-  return parsed.v;
+  if (typeof raw !== "string") throw new GuestError("Expression returned an invalid result");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new GuestError("Expression returned an invalid result");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new GuestError("Expression returned an invalid result");
+  const answer = parsed as { u?: unknown; d?: unknown; v?: unknown; e?: unknown };
+  if (typeof answer.e === "string") throw new GuestError(answer.e);
+  if (answer.u === 1) return undefined;
+  if (Object.prototype.hasOwnProperty.call(answer, "d")) {
+    if (answer.d === null) return new Date(Number.NaN);
+    if (typeof answer.d === "string") return new Date(answer.d);
+    throw new GuestError("Expression returned an invalid result");
+  }
+  if (!Object.prototype.hasOwnProperty.call(answer, "v")) throw new GuestError("Expression returned an invalid result");
+  return answer.v;
 }
 
 /** Evaluates one expression per call against a serialized payload, all in one sandbox session. */
@@ -171,7 +249,7 @@ export type SandboxEvaluate = (operation: "expr" | "sortKeys", expression: strin
 
 /** The error callers see: the expression's own message, a timeout, or a sandbox failure. */
 function publicError(error: unknown): unknown {
-  if (error instanceof SandboxFailureError) return new Error(`expression sandbox error: ${error.message}`);
+  if (error instanceof SandboxFailureError) return new ExpressionSandboxError(error.message, error.retryable);
   if (error instanceof GuestError || error instanceof SandboxTimeoutError) return new Error(error.message);
   return error;
 }
@@ -180,19 +258,24 @@ function publicError(error: unknown): unknown {
  * Opens one sandbox session (a fresh QuickJS runtime and context) for
  * `body`, which may evaluate several expressions in it — one template's
  * expressions, which share an author and a payload. Each evaluation has its
- * own time limit and re-parses its payload, so one cannot change the data
- * another sees. The session is disposed when `body` returns.
+ * own time limit (all of them together at most EXPRESSION_TEMPLATE_BUDGET_MS)
+ * and re-parses its payload, so one cannot change the data another sees. The
+ * session is disposed when `body` returns.
  */
 export function withExpressionSandbox<R>(body: (evaluate: SandboxEvaluate) => R): R {
+  const prelude = evaluatorPrelude;
   try {
-    return withQuickJs({ memoryBytes: settings.memoryBytes, stackBytes: QUICKJS_STACK_BYTES, timeoutMs: settings.timeoutMs }, (session) => {
-      session.evaluateTrusted(EVALUATOR_SOURCE, "l2m-expression-prelude.js");
+    return withQuickJs(
+      { memoryBytes: settings.memoryBytes, stackBytes: QUICKJS_STACK_BYTES, timeoutMs: settings.timeoutMs, sessionBudgetMs: settings.templateBudgetMs },
+      (session) => {
+      session.evaluateTrusted(prelude, "l2m-expression-prelude.js");
       let jmespathLoaded = false;
       return body((operation, expression, payload) => {
         try {
           session.resetDeadline(settings.timeoutMs);
           if (!jmespathLoaded && expression.includes("jmespath")) {
-            session.evaluateTrusted(JMESPATH_PRELUDE, "l2m-jmespath.js");
+            // A trusted, non-writable setter: earlier expressions in the session cannot intercept it.
+            session.callGlobal("__l2mSetJmes", [JMESPATH_SOURCE]);
             jmespathLoaded = true;
           }
           return decode(session.callGlobal("__l2mRun", [operation, expression, payload]));
@@ -202,7 +285,8 @@ export function withExpressionSandbox<R>(body: (evaluate: SandboxEvaluate) => R)
           throw new SandboxFailureError(error instanceof Error ? error.message : String(error));
         }
       });
-    });
+      }
+    );
   } catch (error) {
     throw publicError(error);
   }

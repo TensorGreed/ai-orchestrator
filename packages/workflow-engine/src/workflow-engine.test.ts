@@ -5,6 +5,7 @@ import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import { ProviderRegistry, type LLMProviderAdapter } from "@ai-orchestrator/provider-sdk";
 import type { AgentRunRequest, AgentRunState, Workflow } from "@ai-orchestrator/shared";
 import { executeWorkflow } from "./executor";
+import { IN_PROCESS_CODE_SANDBOX } from "./code-sandbox";
 import { exportWorkflowToJson, importWorkflowFromJson } from "./serialization";
 import { validateWorkflowGraph } from "./validation";
 
@@ -266,7 +267,8 @@ describe("workflow engine", () => {
         connectorRegistry: createDefaultConnectorRegistry(),
         mcpRegistry: createDefaultMCPRegistry(),
         agentRuntime: new FakeAgentRuntime(),
-        resolveSecret: async () => undefined
+        resolveSecret: async () => undefined,
+        codeSandbox: IN_PROCESS_CODE_SANDBOX
       }
     );
 
@@ -289,7 +291,8 @@ describe("workflow engine", () => {
         connectorRegistry: createDefaultConnectorRegistry(),
         mcpRegistry: createDefaultMCPRegistry(),
         agentRuntime: new FakeAgentRuntime(),
-        resolveSecret: async () => undefined
+        resolveSecret: async () => undefined,
+        codeSandbox: IN_PROCESS_CODE_SANDBOX
       }
     );
 
@@ -1664,7 +1667,8 @@ describe("workflow engine", () => {
         connectorRegistry: createDefaultConnectorRegistry(),
         mcpRegistry: createDefaultMCPRegistry(),
         agentRuntime: new FakeAgentRuntime(),
-        resolveSecret: async () => undefined
+        resolveSecret: async () => undefined,
+        codeSandbox: IN_PROCESS_CODE_SANDBOX
       }
     );
 
@@ -1718,7 +1722,8 @@ describe("workflow engine", () => {
         connectorRegistry: createDefaultConnectorRegistry(),
         mcpRegistry: createDefaultMCPRegistry(),
         agentRuntime: new FakeAgentRuntime(),
-        resolveSecret: async () => undefined
+        resolveSecret: async () => undefined,
+        codeSandbox: IN_PROCESS_CODE_SANDBOX
       }
     );
 
@@ -1772,7 +1777,8 @@ describe("workflow engine", () => {
         connectorRegistry: createDefaultConnectorRegistry(),
         mcpRegistry: createDefaultMCPRegistry(),
         agentRuntime: new FakeAgentRuntime(),
-        resolveSecret: async () => undefined
+        resolveSecret: async () => undefined,
+        codeSandbox: IN_PROCESS_CODE_SANDBOX
       }
     );
 
@@ -1829,7 +1835,8 @@ describe("workflow engine", () => {
         connectorRegistry: createDefaultConnectorRegistry(),
         mcpRegistry: createDefaultMCPRegistry(),
         agentRuntime: new FakeAgentRuntime(),
-        resolveSecret: async () => undefined
+        resolveSecret: async () => undefined,
+        codeSandbox: IN_PROCESS_CODE_SANDBOX
       }
     );
 
@@ -2829,6 +2836,7 @@ function makeDeps(overrides?: Partial<WorkflowExecutionDependencies>): WorkflowE
     connectorRegistry: fakeConnectorRegistry,
     agentRuntime: new FakeAgentRuntime(),
     resolveSecret: async () => undefined,
+    codeSandbox: IN_PROCESS_CODE_SANDBOX,
     ...overrides
   };
 }

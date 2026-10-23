@@ -11,7 +11,9 @@ import path from "node:path";
 import {
   CODE_NODES_DISABLED_MESSAGE,
   CODE_SANDBOX_INITIALISING,
+  IN_PROCESS_CODE_SANDBOX,
   PYTHON_IN_PROCESS_DENIED_MESSAGE,
+  pythonIdentity,
   resolveCodeSandboxPlan,
   runJavaScriptCode,
   runPythonCode,
@@ -21,7 +23,7 @@ import {
 import { configureExpressionSandbox } from "./expression-sandbox";
 import { evaluateExpression } from "./expression";
 import { executeCodeNodeSandbox } from "./executor";
-import { isPythonAvailable } from "./python-runner";
+import { executePythonCodeNode, isPythonAvailable } from "./python-runner";
 import { renderTemplate } from "./template";
 import { sortItems } from "./transformations";
 
@@ -89,7 +91,11 @@ describe("JavaScript code node sandbox (in-process QuickJS)", () => {
   });
 
   it("surfaces a thrown error with its message, not a host stack", async () => {
-    await expect(executeCodeNodeSandbox({ code: "throw new Error('boom')", input: {} })).rejects.toThrow(/boom/);
+    await expect(executeCodeNodeSandbox({ code: "throw new Error('boom')", input: {} }, IN_PROCESS_CODE_SANDBOX)).rejects.toThrow(/boom/);
+  });
+
+  it("the engine runs no code when the caller supplies no sandbox plan (L-d)", async () => {
+    await expect(executeCodeNodeSandbox({ code: "return 1", input: {} })).rejects.toThrow(/no code sandbox plan was supplied/);
   });
 
   it("mutating a frozen intrinsic does not corrupt the next run", async () => {
@@ -223,6 +229,55 @@ describe("Python on the host: what it can still do, and the switches", () => {
   });
 });
 
+describe("host Python edge cases (REREVIEW-A12 L-c)", () => {
+  it("a child the code detached with setsid does not stall a run that finished (py PoC)", async () => {
+    if (process.platform === "win32" || !(await isPythonAvailable())) return;
+    const started = Date.now();
+    const res = await runPythonCode({ kind: "in_process" }, {
+      code: "import subprocess\np = subprocess.Popen(['sleep', '30'], start_new_session=True)\nresult = p.pid",
+      items: [{}],
+      mode: "runOnceForAllItems",
+      timeoutMs: 5000
+    });
+    const pid = res.result as number;
+    try {
+      // Before: the detached child held stdout open, so the run waited for the timeout and reported "timed out".
+      expect(typeof pid).toBe("number");
+      expect(Date.now() - started).toBeLessThan(3000);
+    } finally {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  });
+
+  it("output written just before exit is still read", async () => {
+    if (!(await isPythonAvailable())) return;
+    const res = await runPythonCode({ kind: "in_process" }, {
+      code: "result = 'y' * 200000",
+      items: [{}],
+      mode: "runOnceForAllItems",
+      timeoutMs: 5000
+    });
+    expect((res.result as string).length).toBe(200000);
+  });
+
+  it("spawn EPERM under a configured uid is reported as a setuid configuration error", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0 || !(await isPythonAvailable())) return;
+    await expect(executePythonCodeNode({ code: "result = 1", items: [{}], mode: "runOnceForAllItems", uid: 0, gid: 0 })).rejects.toThrow(
+      /CODE_SANDBOX_PYTHON_UID\/GID is set .*CAP_SETUID/
+    );
+  });
+
+  it("with only CODE_SANDBOX_PYTHON_UID set, the gid defaults to the same number", () => {
+    expect(pythonIdentity({ kind: "in_process", pythonUid: 4242 })).toEqual({ uid: 4242, gid: 4242 });
+    expect(pythonIdentity({ kind: "in_process", pythonUid: 4242, pythonGid: 99 })).toEqual({ uid: 4242, gid: 99 });
+    expect(pythonIdentity({ kind: "in_process" })).toEqual({});
+  });
+});
+
 describe("disabled code nodes", () => {
   it("fail with a clear configuration error for both languages", async () => {
     const plan = { kind: "disabled", reason: CODE_NODES_DISABLED_MESSAGE } as const;
@@ -283,6 +338,11 @@ describe("resolveCodeSandboxPlan", () => {
     const { plan, warning } = await resolveCodeSandboxPlan({ ...base, pythonUid: 65534, pythonGid: 65534 }, { locator: locator([]) });
     expect(plan).toMatchObject({ kind: "in_process", pythonUid: 65534, pythonGid: 65534 });
     expect(warning).toMatch(/as uid 65534/);
+  });
+
+  it("the timeout ceiling and result cap are carried into the in-process plan", async () => {
+    const { plan } = await resolveCodeSandboxPlan({ ...base, maxTimeoutMs: 5000, maxResultMb: 4 }, { locator: locator([]) });
+    expect(plan).toMatchObject({ kind: "in_process", maxTimeoutMs: 5000, maxResultMb: 4 });
   });
 
   it("auto falls back in-process when the images are not present locally", async () => {
