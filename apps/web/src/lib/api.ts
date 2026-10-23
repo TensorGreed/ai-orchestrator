@@ -27,6 +27,25 @@ import type {
   McpImportDecision,
   McpPlaygroundCallResponse
 } from "@ai-orchestrator/shared";
+import { EVAL_RUN_FINISHED_STATUSES } from "@ai-orchestrator/shared";
+import type {
+  EvalCaseDetail,
+  EvalCaseResult,
+  EvalCaseStatus,
+  EvalRunEvent,
+  EvalRunProgress,
+  EvalRunSummary,
+  EvalRunView,
+  EvalScoreDetail,
+  EvalScorerSpec,
+  EvalScorerType,
+  LlmJudgeMode,
+  ReplayCaseDiff,
+  ReplayJobCandidate,
+  ReplayJobOptions,
+  ReplayJobRequest,
+  ToolSequenceMode
+} from "@ai-orchestrator/shared";
 import type {
   ReplayGoldenBadge,
   ReplayMcpMode,
@@ -2424,25 +2443,38 @@ export async function reloadCommunityNodes() {
 // Phase 7.3 — Agent eval framework
 // ---------------------------------------------------------------------------
 
-export type EvalScorerSpec =
-  | { type: "exact_match"; path?: string; ignoreCase?: boolean }
-  | { type: "contains"; path?: string; needle?: string; ignoreCase?: boolean }
-  | { type: "regex"; path?: string; pattern?: string; flags?: string }
-  // Phase 9.5 — RAG-specific scorers
-  | { type: "context_precision"; contextPath?: string; threshold?: number; relevanceThreshold?: number }
-  | { type: "context_recall"; contextPath?: string; threshold?: number }
-  | { type: "faithfulness"; contextPath?: string; answerPath?: string; providerId?: string; model?: string; threshold?: number }
-  | { type: "answer_relevance"; questionPath?: string; answerPath?: string; providerId?: string; model?: string; threshold?: number };
+export type {
+  EvalCaseDetail,
+  EvalCaseResult,
+  EvalCaseStatus,
+  EvalRunEvent,
+  EvalRunProgress,
+  EvalRunSummary,
+  EvalRunView,
+  EvalScoreDetail,
+  EvalScorerSpec,
+  EvalScorerType,
+  LlmJudgeMode,
+  ReplayCaseDiff,
+  ReplayJobCandidate,
+  ReplayJobOptions,
+  ReplayJobRequest,
+  ToolSequenceMode
+};
 
 export interface EvalDataset {
   id: string;
   name: string;
   description: string | null;
   projectId: string | null;
+  /** Phase 15.2 — set on a golden set: the workflow its golden runs belong to. */
+  workflowId: string | null;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
   fixtureCount: number;
+  /** Phase 15.2 — cases that replay a golden run. */
+  goldenRunCount: number;
 }
 
 export interface EvalFixture {
@@ -2452,60 +2484,32 @@ export interface EvalFixture {
   input: unknown;
   expected: unknown | null;
   scorers: EvalScorerSpec[] | null;
+  /** Phase 15.2 — the golden run this case replays; null on a hand-written fixture. */
+  recordingId: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface EvalRunSummary {
-  total: number;
-  pass: number;
-  fail: number;
-  error: number;
-  passRate: number;
-  totalTokenInput: number;
-  totalTokenOutput: number;
-  totalTokenTotal: number;
-  totalDurationMs: number;
-  avgDurationMs: number;
-}
-
-export interface EvalRun {
-  id: string;
-  datasetId: string;
-  workflowId: string;
-  workflowName: string | null;
-  status: string;
-  startedAt: string;
-  completedAt: string | null;
-  triggeredBy: string | null;
-  summary: EvalRunSummary | null;
-  error: string | null;
+export type EvalRun = EvalRunView & {
   /** Phase 10.8 — how many cassettes the run recorded. */
   mcpCassettes?: number;
-}
+};
 
-export interface EvalResult {
-  id: string;
-  runId: string;
-  fixtureId: string;
-  fixtureName: string | null;
-  status: string;
-  executionId: string | null;
-  score: { pass: boolean; details: Array<{ type: string; path?: string; pass: boolean; reason: string }> } | null;
-  output: unknown;
-  error: string | null;
-  durationMs: number | null;
-  tokenInput: number | null;
-  tokenOutput: number | null;
-  tokenTotal: number | null;
-}
+export type EvalResult = EvalCaseResult & { output: unknown };
 
-export async function fetchEvalDatasets(projectId?: string) {
-  const q = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+/** A replay job as `GET /api/replay/runs/:id` returns it: the run with its case results (without outputs). */
+export type ReplayJobDetail = EvalRunView & { results: EvalCaseResult[] };
+
+export async function fetchEvalDatasets(projectId?: string, filter: { workflowId?: string } = {}) {
+  const params = new URLSearchParams();
+  if (projectId) params.set("projectId", projectId);
+  if (filter.workflowId) params.set("workflowId", filter.workflowId);
+  const q = params.toString() ? `?${params.toString()}` : "";
   return apiRequest<{ datasets: EvalDataset[] }>(`/api/eval/datasets${q}`);
 }
 
-export async function createEvalDataset(payload: { name: string; description?: string; projectId?: string }) {
+/** `workflowId` makes the dataset a golden set of that workflow (Phase 15.2). */
+export async function createEvalDataset(payload: { name: string; description?: string; projectId?: string; workflowId?: string }) {
   return apiRequest<{ dataset: EvalDataset }>("/api/eval/datasets", {
     method: "POST",
     body: JSON.stringify(payload)
@@ -2531,7 +2535,7 @@ export async function deleteEvalFixture(id: string) {
   return apiRequest<{ ok: boolean }>(`/api/eval/fixtures/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function startEvalRun(payload: {
+export interface StartEvalRunPayload {
   datasetId: string;
   workflowId: string;
   scorers?: EvalScorerSpec[];
@@ -2539,17 +2543,21 @@ export async function startEvalRun(payload: {
   record?: boolean;
   /** Phase 10.8 — answer MCP calls from an earlier run's cassettes, or from one cassette. */
   replay?: { evalRunId?: string; cassetteId?: string; mode?: McpReplayMode };
-}) {
-  return apiRequest<{ ok: boolean; runId: string; summary: EvalRunSummary }>("/api/eval/runs", {
+}
+
+/** Phase 15.2 — queues the run and answers 202 at once; follow it with `subscribeEvalRun` or `fetchEvalRun`. */
+export async function startEvalRun(payload: StartEvalRunPayload) {
+  return apiRequest<{ run: EvalRunView; runId: string }>("/api/eval/runs", {
     method: "POST",
     body: JSON.stringify(payload)
   });
 }
 
-export async function fetchEvalRuns(filter: { datasetId?: string; workflowId?: string; limit?: number } = {}) {
+export async function fetchEvalRuns(filter: { datasetId?: string; workflowId?: string; kind?: "eval" | "replay"; limit?: number } = {}) {
   const params = new URLSearchParams();
   if (filter.datasetId) params.set("datasetId", filter.datasetId);
   if (filter.workflowId) params.set("workflowId", filter.workflowId);
+  if (filter.kind) params.set("kind", filter.kind);
   if (filter.limit) params.set("limit", String(filter.limit));
   const q = params.toString() ? `?${params.toString()}` : "";
   return apiRequest<{ runs: EvalRun[] }>(`/api/eval/runs${q}`);
@@ -2557,6 +2565,133 @@ export async function fetchEvalRuns(filter: { datasetId?: string; workflowId?: s
 
 export async function fetchEvalRun(id: string) {
   return apiRequest<EvalRun & { results: EvalResult[] }>(`/api/eval/runs/${encodeURIComponent(id)}`);
+}
+
+export async function cancelEvalRun(id: string) {
+  return apiRequest<{ run: EvalRunView }>(`/api/eval/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+}
+
+// --- Phase 15.2: golden sets and replay jobs ----------------------------------
+
+/** Adds a golden run of the set's workflow to a golden set as a case. */
+export async function addGoldenRunToSet(datasetId: string, payload: { recordingId: string; name?: string; scorers?: EvalScorerSpec[] }) {
+  return apiRequest<{ fixture: EvalFixture }>(`/api/eval/datasets/${encodeURIComponent(datasetId)}/recordings`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function startReplayJob(payload: ReplayJobRequest) {
+  return apiRequest<{ run: EvalRunView }>("/api/replay/runs", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function fetchReplayJobs(filter: { workflowId?: string; datasetId?: string; limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (filter.workflowId) params.set("workflowId", filter.workflowId);
+  if (filter.datasetId) params.set("datasetId", filter.datasetId);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{ runs: EvalRunView[] }>(`/api/replay/runs${q}`);
+}
+
+export async function fetchReplayJob(id: string) {
+  return apiRequest<{ run: ReplayJobDetail }>(`/api/replay/runs/${encodeURIComponent(id)}`);
+}
+
+export async function fetchReplayJobCase(runId: string, resultId: string) {
+  return apiRequest<{ result: EvalCaseDetail }>(`/api/replay/runs/${encodeURIComponent(runId)}/results/${encodeURIComponent(resultId)}`);
+}
+
+/** 409 when the job already finished; the error payload then carries the finished `run`. */
+export async function cancelReplayJob(id: string) {
+  return apiRequest<{ run: EvalRunView }>(`/api/replay/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+}
+
+/** Whether an eval run or replay job is still queued or running. */
+export function isEvalRunActive(run: Pick<EvalRunView, "status">): boolean {
+  return run.status === "queued" || run.status === "running";
+}
+
+export const EVAL_RUN_POLL_INTERVAL_MS = 1500;
+
+export interface SubscribeEvalRunOptions {
+  /** Used when server-sent events are unavailable; defaults to `GET /api/replay/runs/:id`. */
+  poll?: (runId: string) => Promise<EvalRunView>;
+  pollIntervalMs?: number;
+}
+
+/**
+ * Follows a run until it finishes: server-sent events from
+ * `/api/eval/runs/:id/events` (same origin, with the session cookie), and
+ * polling every ~1.5 s when the stream errors before the run is done or
+ * EventSource does not exist. Calls `onEvent` with each update and once with
+ * `type: "done"`. Returns an unsubscribe function.
+ */
+export function subscribeEvalRun(runId: string, onEvent: (event: EvalRunEvent) => void, options: SubscribeEvalRunOptions = {}): () => void {
+  const poll = options.poll ?? (async (id: string) => (await fetchReplayJob(id)).run);
+  const interval = options.pollIntervalMs ?? EVAL_RUN_POLL_INTERVAL_MS;
+  let stopped = false;
+  let source: EventSource | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const emit = (run: EvalRunView) => {
+    if (stopped) return;
+    const done = EVAL_RUN_FINISHED_STATUSES.has(run.status);
+    onEvent(done ? { type: "done", run } : { type: "progress", run });
+    if (done) stop();
+  };
+
+  const startPolling = () => {
+    if (stopped || timer) return;
+    const tick = async () => {
+      timer = null;
+      if (stopped) return;
+      try {
+        emit(await poll(runId));
+      } catch {
+        // A failed poll is retried on the next tick.
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), interval);
+    };
+    void tick();
+  };
+
+  const stop = () => {
+    stopped = true;
+    source?.close();
+    source = null;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+
+  if (typeof EventSource === "undefined") {
+    startPolling();
+    return stop;
+  }
+
+  try {
+    source = new EventSource(`${API_BASE}/api/eval/runs/${encodeURIComponent(runId)}/events`, { withCredentials: true });
+  } catch {
+    startPolling();
+    return stop;
+  }
+  const handle = (message: MessageEvent<string>) => {
+    try {
+      const parsed = JSON.parse(message.data) as Partial<EvalRunEvent>;
+      if (parsed.run) emit(parsed.run);
+    } catch {
+      // Ignore a malformed frame; the next one, or polling, catches up.
+    }
+  };
+  source.addEventListener("progress", handle as EventListener);
+  source.addEventListener("done", handle as EventListener);
+  source.onerror = () => {
+    if (stopped) return;
+    source?.close();
+    source = null;
+    startPolling();
+  };
+  return stop;
 }
 
 // ---------------------------------------------------------------------------
