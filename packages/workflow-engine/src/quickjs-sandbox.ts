@@ -175,6 +175,17 @@ export async function quickJsSandboxReady(): Promise<void> {
   }
 }
 
+/**
+ * Swaps in a fresh instance (counted as a recycle) and waits for the pool. For
+ * tests: the memory check measures heap growth, so a session on an instance an
+ * earlier session already grew can reuse that space without tripping it.
+ */
+export async function recycleQuickJsInstanceForTesting(): Promise<void> {
+  await quickJsSandboxReady();
+  if (active) retire(active, false);
+  await quickJsSandboxReady();
+}
+
 /** How many WebAssembly instances have been retired after a failure since start (tests, diagnostics). */
 export function quickJsRetiredInstances(): number {
   return retiredCount;
