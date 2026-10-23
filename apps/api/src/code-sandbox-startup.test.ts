@@ -116,4 +116,22 @@ describe("code sandbox configuration", () => {
     expect(parseConfig(baseEnv()).EXPRESSION_MEMORY_MB).toBe(64);
     expect(() => parseConfig(baseEnv({ EXPRESSION_MEMORY_MB: "2" }))).toThrow(/EXPRESSION_MEMORY_MB/);
   });
+
+  it("validates the re-review limits: code timeout ceiling, result caps and the template budget", () => {
+    expect(parseConfig(baseEnv())).toMatchObject({
+      CODE_SANDBOX_MAX_TIMEOUT_MS: 30000,
+      CODE_SANDBOX_MAX_RESULT_MB: 32,
+      EXPRESSION_MAX_RESULT_MB: 8,
+      EXPRESSION_TEMPLATE_BUDGET_MS: 5000
+    });
+    expect(parseConfig(baseEnv({ CODE_SANDBOX_MAX_TIMEOUT_MS: "5000", EXPRESSION_TEMPLATE_BUDGET_MS: "2000" }))).toMatchObject({
+      CODE_SANDBOX_MAX_TIMEOUT_MS: 5000,
+      EXPRESSION_TEMPLATE_BUDGET_MS: 2000
+    });
+    expect(() => parseConfig(baseEnv({ CODE_SANDBOX_MAX_TIMEOUT_MS: "50" }))).toThrow(/CODE_SANDBOX_MAX_TIMEOUT_MS/);
+    expect(() => parseConfig(baseEnv({ CODE_SANDBOX_MAX_TIMEOUT_MS: "300001" }))).toThrow(/CODE_SANDBOX_MAX_TIMEOUT_MS/);
+    expect(() => parseConfig(baseEnv({ CODE_SANDBOX_MAX_RESULT_MB: "0" }))).toThrow(/CODE_SANDBOX_MAX_RESULT_MB/);
+    expect(() => parseConfig(baseEnv({ EXPRESSION_MAX_RESULT_MB: "abc" }))).toThrow(/EXPRESSION_MAX_RESULT_MB/);
+    expect(() => parseConfig(baseEnv({ EXPRESSION_TEMPLATE_BUDGET_MS: "10" }))).toThrow(/EXPRESSION_TEMPLATE_BUDGET_MS/);
+  });
 });

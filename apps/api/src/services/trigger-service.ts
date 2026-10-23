@@ -15,7 +15,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Workflow, WorkflowNode, WorkflowNodeType } from "@ai-orchestrator/shared";
-import { isExecutionEdge } from "@ai-orchestrator/workflow-engine";
+import {
+  DEFAULT_OUTBOUND_GUARD,
+  guardedFetch,
+  isExecutionEdge,
+  nodeDnsResolver,
+  type OutboundGuardConfig
+} from "@ai-orchestrator/workflow-engine";
 import { SqliteStore } from "../db/database";
 
 export interface TriggerExecutionInput {
@@ -27,6 +33,7 @@ export interface TriggerExecutionInput {
 
 type TriggerExecutionHandler = (input: TriggerExecutionInput) => Promise<void>;
 type SecretResolver = (secretRef?: { secretId: string }) => Promise<string | undefined>;
+type DnsResolver = (hostname: string) => Promise<string[]>;
 type Logger = (level: "info" | "warn" | "error", message: string, metadata?: unknown) => void;
 
 type PollingTriggerType = "file_trigger" | "rss_trigger";
@@ -162,8 +169,27 @@ export class TriggerService {
       // eslint-disable-next-line no-console
       console[level](`[triggers] ${message}${suffix}`);
     },
-    private readonly fetchImpl: typeof fetch = globalThis.fetch
+    /** Test seam: replaces the pinned fetch. URLs are still checked against the outbound guard. */
+    private readonly fetchImpl?: typeof fetch
   ) {}
+
+  private outboundGuard: OutboundGuardConfig = DEFAULT_OUTBOUND_GUARD;
+  private outboundResolver: DnsResolver = nodeDnsResolver;
+
+  /** The deployment's outbound URL policy (createApp); RSS and SSE URLs are user-configured, so they go through it. */
+  setOutboundGuard(config: OutboundGuardConfig, resolver: DnsResolver = nodeDnsResolver): void {
+    this.outboundGuard = config;
+    this.outboundResolver = resolver;
+  }
+
+  /** Fetches a node-configured URL through the outbound guard (each redirect re-checked, the connection pinned). */
+  private fetchGuarded(url: string, init: RequestInit): Promise<Response> {
+    return guardedFetch(url, init, {
+      config: this.outboundGuard,
+      resolver: this.outboundResolver,
+      ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {})
+    });
+  }
 
   setExecutionHandler(handler: TriggerExecutionHandler): void {
     this.executeHandler = handler;
@@ -383,7 +409,7 @@ export class TriggerService {
 
     const tick = async () => {
       try {
-        const res = await this.fetchImpl(feedUrl, { headers: extraHeaders });
+        const res = await this.fetchGuarded(feedUrl, { headers: extraHeaders });
         if (!res.ok) {
           this.logger("warn", "rss_trigger fetch non-ok", {
             workflowId: workflow.id,
@@ -460,7 +486,7 @@ export class TriggerService {
             if (token) headers.authorization = `Bearer ${token}`;
           }
           controller = new AbortController();
-          const res = await this.fetchImpl(url, { headers, signal: controller.signal });
+          const res = await this.fetchGuarded(url, { headers, signal: controller.signal });
           if (!res.ok || !res.body) {
             throw new Error(`status=${res.status}`);
           }

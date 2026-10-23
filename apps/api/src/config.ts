@@ -226,12 +226,24 @@ const envSchema = z.object({
   CODE_SANDBOX_PYTHON_IN_PROCESS: z.enum(["allow", "deny"]).default("allow"),
   /** Run host Python as this uid (the API needs CAP_SETUID and CAP_CHOWN, e.g. root in a container). Unset: the API's own user. */
   CODE_SANDBOX_PYTHON_UID: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().int().min(0).max(4294967294).optional()),
-  /** Run host Python with this gid (needs CAP_SETGID). */
+  /** Run host Python with this gid (needs CAP_SETGID). Unset with a uid set: the same number as the uid. */
   CODE_SANDBOX_PYTHON_GID: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().int().min(0).max(4294967294).optional()),
+  /**
+   * Ceiling on an in-process JavaScript code node's timeout (ms). The run
+   * holds the API's event loop, so a node's own timeout is clamped to this,
+   * and a per-item node may not exceed four times it in all.
+   */
+  CODE_SANDBOX_MAX_TIMEOUT_MS: z.coerce.number().int().min(100).max(300000).default(30000),
+  /** Ceiling on what one in-process JavaScript code node returns, results and logs of all items together (MB). */
+  CODE_SANDBOX_MAX_RESULT_MB: z.coerce.number().int().min(1).max(512).default(32),
   /** Time limit for a single `{{ }}` or Sort-node expression (ms). */
   EXPRESSION_TIMEOUT_MS: z.coerce.number().int().min(50).max(60000).default(1000),
   /** Heap limit for a single expression evaluation (MB). */
   EXPRESSION_MEMORY_MB: z.coerce.number().int().min(4).max(1024).default(64),
+  /** Largest result one expression may return (MB, as JSON). */
+  EXPRESSION_MAX_RESULT_MB: z.coerce.number().int().min(1).max(256).default(8),
+  /** Time budget for all the expressions of one template together (ms); never less than EXPRESSION_TIMEOUT_MS. */
+  EXPRESSION_TEMPLATE_BUDGET_MS: z.coerce.number().int().min(100).max(600000).default(5000),
   // Outbound URL guard for nodes that fetch a user-supplied URL (HTTP Request,
   // Web Browse, Chart data.url, HTML-render PDF).
   /** Block private ranges and localhost for those nodes. Metadata and link-local are always blocked. */

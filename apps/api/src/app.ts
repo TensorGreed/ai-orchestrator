@@ -70,6 +70,7 @@ import {
   exportWorkflowToJson,
   importWorkflowFromJson,
   renderExpressionTemplate,
+  runWithSandboxOwner,
   validateWorkflowGraph,
   KnowledgeBaseVectorStoreAdapter,
   TokenEmbeddingAdapter,
@@ -1286,7 +1287,12 @@ export function createApp(
   // runtime/image check) code nodes are refused, and the server does not
   // accept requests (the onReady hook below waits for it), so nothing runs
   // under a plan the admin did not choose.
-  configureExpressionSandbox({ timeoutMs: config.EXPRESSION_TIMEOUT_MS, memoryMb: config.EXPRESSION_MEMORY_MB });
+  configureExpressionSandbox({
+    timeoutMs: config.EXPRESSION_TIMEOUT_MS,
+    memoryMb: config.EXPRESSION_MEMORY_MB,
+    maxResultMb: config.EXPRESSION_MAX_RESULT_MB,
+    templateBudgetMs: config.EXPRESSION_TEMPLATE_BUDGET_MS
+  });
   // Outbound URL policy for nodes that fetch a user-supplied URL.
   const outboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
   let codeSandboxPlan: CodeSandboxPlan = CODE_SANDBOX_INITIALISING;
@@ -1304,7 +1310,9 @@ export function createApp(
       instanceLabel: crypto.createHash("sha256").update(`l2m-code:${store.storageLocation()}`).digest("hex").slice(0, 16),
       pythonInProcess: config.CODE_SANDBOX_PYTHON_IN_PROCESS,
       pythonUid: config.CODE_SANDBOX_PYTHON_UID,
-      pythonGid: config.CODE_SANDBOX_PYTHON_GID
+      pythonGid: config.CODE_SANDBOX_PYTHON_GID,
+      maxTimeoutMs: config.CODE_SANDBOX_MAX_TIMEOUT_MS,
+      maxResultMb: config.CODE_SANDBOX_MAX_RESULT_MB
     },
     options.codeSandboxDeps
   )
@@ -2640,6 +2648,7 @@ export function createApp(
   if (triggerService) {
     triggerService.setExecutionHandler(async (payload) => executeTriggeredWorkflow(payload));
     triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
+    triggerService.setOutboundGuard(outboundGuard, nodeDnsResolver);
     app.addHook("onClose", async () => {
       await triggerService.stop();
     });
@@ -7669,11 +7678,13 @@ export function createApp(
       return { error: codeSandboxPlan.reason };
     }
     try {
-      const result = await executeCodeNodeSandbox({
-        code: parsed.data.code,
-        timeoutMs: parsed.data.timeout,
-        input: parsed.data.input ?? {}
-      }, codeSandboxPlan);
+      const result = await runWithSandboxOwner(`user:${user.id}`, () =>
+        executeCodeNodeSandbox({
+          code: parsed.data.code,
+          timeoutMs: parsed.data.timeout,
+          input: parsed.data.input ?? {}
+        }, codeSandboxPlan)
+      );
       return result;
     } catch (error) {
       reply.code(400);
@@ -7927,10 +7938,12 @@ export function createApp(
     };
 
     try {
-      const result =
+      // Previews count against the user's own sandbox circuit breaker, not a workflow's.
+      const result = runWithSandboxOwner(`user:${user.id}`, () =>
         parsed.data.mode === "template" || parsed.data.expression.includes("{{")
           ? renderExpressionTemplate(parsed.data.expression, expressionContext)
-          : evaluateExpression(parsed.data.expression, expressionContext);
+          : evaluateExpression(parsed.data.expression, expressionContext)
+      );
       return {
         ok: true,
         result
