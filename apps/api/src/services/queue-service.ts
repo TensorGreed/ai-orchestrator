@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteStore } from "../db/database.js";
+import { STUCK_JOB_MARGIN_MS } from "../db/queue-timeouts.js";
 
 export interface QueuedExecutionPayload {
   workflowId: string;
@@ -23,8 +24,7 @@ export interface QueueServiceConfig {
   executionTimeoutMs?: number;
 }
 
-/** Margin on top of the run time limit before a running job counts as stuck. */
-export const STUCK_JOB_MARGIN_MS = 60_000;
+export { STUCK_JOB_MARGIN_MS };
 
 /** A running job can legitimately take the whole run time limit, so the stuck threshold must exceed it. */
 export function resolveStuckJobTimeoutMs(stuckJobTimeoutMs: number, executionTimeoutMs: number): number {
@@ -37,7 +37,8 @@ export class QueueService {
   private readonly store: SqliteStore;
   private readonly config: Required<QueueServiceConfig>;
   private running = 0;
-  private readonly inFlight = new Set<string>();
+  private readonly inFlight = new Map<string, number>();
+  private readonly warnedStuck = new Set<string>();
   private handler: ExecutionHandler | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private stuckTimer: NodeJS.Timeout | null = null;
@@ -68,15 +69,32 @@ export class QueueService {
 
     // Check for stuck items every 60 seconds
     this.stuckTimer = setInterval(() => {
-      try {
-        const requeued = this.store.requeueStuckItems(this.config.stuckJobTimeoutMs, [...this.inFlight]);
-        if (requeued > 0) {
-          console.info(`[queue] Re-queued ${requeued} stuck job(s)`);
-        }
-      } catch (error) {
-        console.error("[queue] Failed to requeue stuck items", error);
-      }
+      this.sweepStuck();
     }, 60_000);
+  }
+
+  private sweepStuck(): void {
+    const nowMs = Date.now();
+    for (const [id, startedAtMs] of this.inFlight) {
+      if (nowMs - startedAtMs > this.config.stuckJobTimeoutMs && !this.warnedStuck.has(id)) {
+        this.warnedStuck.add(id);
+        console.warn(`[queue] Job ${id} still running after ${nowMs - startedAtMs}ms; it is not re-queued while this process holds it`);
+      }
+    }
+    try {
+      // A shared database can hold running jobs of other instances; the store applies each job's own run time limit.
+      Promise.resolve(this.store.requeueStuckItems(this.config.stuckJobTimeoutMs, [...this.inFlight.keys()], STUCK_JOB_MARGIN_MS))
+        .then((requeued) => {
+          if (requeued > 0) {
+            console.info(`[queue] Re-queued ${requeued} stuck job(s)`);
+          }
+        })
+        .catch((error: unknown) => {
+          console.error("[queue] Failed to requeue stuck items", error);
+        });
+    } catch (error) {
+      console.error("[queue] Failed to requeue stuck items", error);
+    }
   }
 
   stop(): void {
@@ -145,7 +163,7 @@ export class QueueService {
 
     for (const item of items) {
       this.running++;
-      this.inFlight.add(item.id);
+      this.inFlight.set(item.id, Date.now());
       void this.executeItem(item);
     }
   }
@@ -157,6 +175,7 @@ export class QueueService {
     if (!handler) {
       this.running--;
       this.inFlight.delete(item.id);
+      this.warnedStuck.delete(item.id);
       try {
         this.store.markQueueItemFailed(item.id, "No handler registered");
       } catch {
@@ -180,6 +199,7 @@ export class QueueService {
     } finally {
       this.running--;
       this.inFlight.delete(item.id);
+      this.warnedStuck.delete(item.id);
     }
   }
 }

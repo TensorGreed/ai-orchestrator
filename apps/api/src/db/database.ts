@@ -50,6 +50,7 @@ import {
   type McpSandboxSettings,
   type McpSandboxStatus
 } from "@ai-orchestrator/shared";
+import { queuedRunTimeoutMs, STUCK_JOB_MARGIN_MS } from "./queue-timeouts.js";
 
 type BindParams = unknown[];
 
@@ -4487,14 +4488,21 @@ export class SqliteStore {
     this.persist();
   }
 
-  requeueStuckItems(stuckAfterMs = 600_000, excludeIds: string[] = []): number {
-    const stuckBefore = new Date(Date.now() - stuckAfterMs).toISOString();
-    const now = new Date().toISOString();
+  requeueStuckItems(stuckAfterMs = 600_000, excludeIds: string[] = [], marginMs = STUCK_JOB_MARGIN_MS): number {
+    const nowMs = Date.now();
+    const stuckBefore = new Date(nowMs - stuckAfterMs).toISOString();
+    const now = new Date(nowMs).toISOString();
     const skip = new Set(excludeIds);
-    const stuck = this.queryAll<ExecutionQueueRow>(
-      `SELECT id FROM execution_queue WHERE status = 'running' AND started_at <= ?`,
+    const stuck = this.queryAll<ExecutionQueueRow & { started_at: unknown; payload_json: unknown }>(
+      `SELECT id, started_at, payload_json FROM execution_queue WHERE status = 'running' AND started_at <= ?`,
       [stuckBefore]
-    ).filter((row) => !skip.has(toString(row.id)));
+    ).filter((row) => {
+      if (skip.has(toString(row.id))) return false;
+      // A job may carry its own, longer run time limit; it is not stuck before that limit and the margin have passed.
+      const runTimeout = queuedRunTimeoutMs(row.payload_json);
+      if (runTimeout === null) return true;
+      return Date.parse(toString(row.started_at)) <= nowMs - Math.max(stuckAfterMs, runTimeout + marginMs);
+    });
 
     for (const row of stuck) {
       this.exec(
