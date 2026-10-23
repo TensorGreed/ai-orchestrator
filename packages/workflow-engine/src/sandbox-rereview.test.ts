@@ -58,13 +58,15 @@ describe("N1: memory is bounded for many small allocations, results are capped, 
     expect(quickJsActiveHeapBytes()).toBeGreaterThanOrEqual(16 * MB);
   });
 
-  it("many small strings hit the expression limit, and the heap grows by at most the limit plus slack (mem2 PoC)", () => {
+  it("many small strings hit the expression limit, and the heap grows by at most the limit plus slack (mem2 PoC)", { timeout: 60_000 }, () => {
+    // A long deadline, so the memory limit is what stops each run even on a slow machine (filling 64 MB takes about 1 s on Node 20).
+    configureExpressionSandbox({ ...EXPRESSION_SANDBOX_DEFAULTS, timeoutMs: 20_000 });
     for (const body of ["a.push('x'.repeat(1000))", "a.push(String(a.length).padStart(1000, 'x'))", "a.push('x'.repeat(1000) + a.length)"]) {
       const before = quickJsActiveHeapBytes();
       const started = Date.now();
       expect(() => evaluateExpression(`(() => { const a = []; for (;;) ${body}; })()`, {})).toThrow(/out of memory \(limit 64 MB\)/);
-      // Before the fix this ran to the 1 s deadline after growing the heap to over 1 GB.
-      expect(Date.now() - started).toBeLessThan(5000);
+      // Before the fix this ran to the deadline after growing the heap to over 1 GB.
+      expect(Date.now() - started).toBeLessThan(15_000);
       expect(quickJsActiveHeapBytes() - before).toBeLessThanOrEqual(64 * MB + 32 * MB);
     }
   });
@@ -191,14 +193,24 @@ describe("N2: a sandbox failure never renders as an empty value", () => {
   it("the reviewer's nested-result trigger is either the expression's own error or a sandbox error, never a quiet retire", () => {
     const retired = quickJsRetiredInstances();
     let caught: unknown;
+    let result: unknown;
     try {
-      evaluateExpression(NESTED_RESULT, {});
+      result = evaluateExpression(NESTED_RESULT, {});
     } catch (error) {
       caught = error;
     }
-    expect(caught).toBeInstanceOf(Error);
     if (quickJsRetiredInstances() > retired) expect(caught).toBeInstanceOf(ExpressionSandboxError);
-    else expect((caught as Error).message).toMatch(/stack/i);
+    else if (caught !== undefined) expect((caught as Error).message).toMatch(/stack/i);
+    else {
+      // Whether 5000 levels fit the stack depends on the host; when they do, the whole value must come back.
+      let depth = 0;
+      let value = result;
+      while (Array.isArray(value)) {
+        value = value[0];
+        depth += 1;
+      }
+      expect([depth, value]).toEqual([5000, 1]);
+    }
   });
 
   it("with the pool drained, a victim's IF condition throws a retryable error instead of rendering '' (ifmisroute PoC)", async () => {

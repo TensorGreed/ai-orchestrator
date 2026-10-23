@@ -366,7 +366,8 @@ export function withQuickJs<T>(limits: QuickJsLimits, body: (session: QuickJsSes
     const guestFailure = (handle: QuickJSHandle): Error => {
       const message = describe(handle);
       handle.dispose();
-      if (overMemory) return memoryError();
+      // QuickJS's own malloc limit can fire before the heap-growth check; both are the same stop.
+      if (overMemory || message === "out of memory") return memoryError();
       return Date.now() >= deadline ? timeoutError() : new GuestError(message);
     };
     const session: QuickJsSession = {
