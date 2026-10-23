@@ -92,7 +92,7 @@ async function login(context: TestContext, role: Role, name: string = role): Pro
   return { cookie: cookie.split(";")[0]!, id: user.id };
 }
 
-const call = (context: TestContext, method: "GET" | "POST" | "DELETE", url: string, cookie: string, payload?: unknown) =>
+const call = (context: TestContext, method: "GET" | "POST" | "PUT" | "DELETE", url: string, cookie: string, payload?: unknown) =>
   context.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
