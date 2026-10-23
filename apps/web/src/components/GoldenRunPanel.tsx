@@ -412,13 +412,30 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
             {recording && (
               <p className="golden-meta">
                 <span className="mono-cell">{recording.id.slice(0, 12)}</span>
-                <span>
-                  from run <span className="mono-cell">{recording.sourceExecutionId?.slice(0, 8) ?? "—"}</span> ({recording.sourceStatus})
-                </span>
+                {recording.capabilities.origin === "imported" ? (
+                  <span>
+                    <span className="golden-origin-badge">imported</span> from a golden-set file
+                    {recording.capabilities.sourceWorkflowId ? (
+                      <>
+                        {" "}
+                        of workflow <span className="mono-cell">{recording.capabilities.sourceWorkflowId}</span>
+                      </>
+                    ) : null}{" "}
+                    ({recording.sourceStatus})
+                    {recording.capabilities.importedAt ? <> · imported {new Date(recording.capabilities.importedAt).toLocaleString()}</> : null}
+                  </span>
+                ) : (
+                  <span>
+                    from run <span className="mono-cell">{recording.sourceExecutionId?.slice(0, 8) ?? "—"}</span> ({recording.sourceStatus})
+                  </span>
+                )}
                 <span>
                   {nodeCount} node{nodeCount === 1 ? "" : "s"} · {recording.mcpCallCount} MCP call{recording.mcpCallCount === 1 ? "" : "s"} · {formatBytes(recording.bytes)}
                 </span>
-                <span>{new Date(recording.createdAt).toLocaleString()}</span>
+                <span title={recording.capabilities.origin === "imported" ? "When the file says the run was recorded" : undefined}>
+                  {recording.capabilities.origin === "imported" ? "recorded " : ""}
+                  {new Date(recording.createdAt).toLocaleString()}
+                </span>
               </p>
             )}
           </div>
