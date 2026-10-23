@@ -110,6 +110,7 @@ import {
   ALL_PERMISSIONS,
   RbacService,
   isProjectRole,
+  strictIsolationStartupWarning,
   type Permission,
   type ProjectRole
 } from "./services/rbac-service";
@@ -2593,6 +2594,8 @@ export function createApp(
   const apiKeyService = new ApiKeyService(store, config.API_KEY_DEFAULT_EXPIRY_DAYS);
   const mfaService = new MfaService(store, config.SECRET_MASTER_KEY_BASE64, config.MFA_ISSUER);
   const rbacService = new RbacService(store, config.PROJECT_ISOLATION);
+  const isolationWarning = strictIsolationStartupWarning(config.PROJECT_ISOLATION, store.countProjectMemberships());
+  if (isolationWarning) app.log.warn(isolationWarning);
   const runAccess = createRunAccess({
     getWorkflow: (id) => store.getWorkflow(id),
     listWorkflows: () => store.listWorkflows(),
@@ -9713,6 +9716,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         externalProviderId: parsed.data.externalProviderId ?? undefined
       }
     });
+    const warnings = source === "local" ? scrubExemptionWarnings(parsed.data.value as string) : [];
+    if (!parsed.data.projectId) {
+      warnings.push(
+        config.PROJECT_ISOLATION === "role"
+          ? "Saved to the default project, which every project can use in role isolation. Pick a project to keep it to one team."
+          : "Saved to the default project. Only default-project workflows can use it until it is shared to other projects."
+      );
+    }
     return {
       id: secretRef.secretId,
       name: parsed.data.name,
@@ -9720,7 +9731,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       projectId: parsed.data.projectId ?? "default",
       source,
       // Non-blocking: the secret is saved; the warning never carries the value.
-      warnings: source === "local" ? scrubExemptionWarnings(parsed.data.value as string) : []
+      warnings
     };
   });
 
@@ -11370,7 +11381,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
     let wfData: Record<string, unknown>;
     if (parsed.data.workflowId) {
-      const access = runAccess.workflow(user, parsed.data.workflowId, "workflow:read");
+      // Publishing a template shows the workflow's configuration to every
+      // user, so it takes write access to the source, not only read.
+      const access = runAccess.workflow(user, parsed.data.workflowId, "workflow:write");
       if (!access.ok) return denyRunAccess(reply, access);
       wfData = { ...access.workflow };
     } else if (parsed.data.workflowJson) {

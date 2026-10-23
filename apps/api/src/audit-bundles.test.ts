@@ -149,7 +149,7 @@ interface RunSetup {
 
 /** rag_retrieve → agent (fake model + registry MCP mock tool) → extract_citations → output. */
 async function runAuditedWorkflow(context: TestContext, cookie: string, options: { echoAuth?: boolean; workflowId?: string; projectId?: string; finalContent?: string } = {}): Promise<RunSetup> {
-  const secret = await call(context, "POST", "/api/secrets", cookie, { name: "Model key", provider: "openai", value: PLANTED });
+  const secret = await call(context, "POST", "/api/secrets", cookie, { name: "Model key", provider: "openai", value: PLANTED, projectId: "default" });
   expect(secret.statusCode).toBe(200);
   const secretId = secret.json<{ id: string }>().id;
   const server = await call(context, "POST", "/api/mcp/servers", cookie, { name: "Mock tools", adapterId: "mock-mcp", probeEnabled: false });
@@ -512,7 +512,7 @@ describe("secrets equal to words the manifest schema fixes", () => {
     const { executionId } = await runAuditedWorkflow(context, admin.cookie, { finalContent: "success" });
     const history = JSON.stringify(context.store.getExecutionHistory(executionId));
     expect(history).toContain('"answer":"success"');
-    const secret = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Status word", provider: "custom", value: "success" });
+    const secret = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Status word", provider: "custom", value: "success", projectId: "default" });
     expect(secret.statusCode).toBe(200);
 
     const response = await call(context, "GET", `/api/executions/${executionId}/manifest`, admin.cookie);
@@ -555,7 +555,7 @@ describe("secrets equal to words the manifest schema fixes", () => {
     const { executionId } = await runAuditedWorkflow(context, admin.cookie);
     const workflowHash = (context.store.getExecutionManifest(executionId)!.runContext as { workflowHash: string }).workflowHash;
     expect(workflowHash).toMatch(/^[a-f0-9]{64}$/);
-    const secret = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Digest fragment", provider: "custom", value: workflowHash.slice(8, 24) });
+    const secret = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Digest fragment", provider: "custom", value: workflowHash.slice(8, 24), projectId: "default" });
     expect(secret.statusCode).toBe(200);
     expect(secret.json<{ warnings: string[] }>().warnings).toEqual([]);
 
@@ -570,7 +570,7 @@ describe("secret save warnings", () => {
   it("warns, without echoing the value, when a secret matches a word run records keep", async () => {
     const context = await createTestContext();
     const admin = await login(context, "admin");
-    const flagged = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Status word", provider: "custom", value: "success" });
+    const flagged = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Status word", provider: "custom", value: "success", projectId: "default" });
     expect(flagged.statusCode).toBe(200);
     const body = flagged.json<{ id: string; warnings: string[] }>();
     expect(body.id).toBeTruthy();
@@ -580,7 +580,7 @@ describe("secret save warnings", () => {
     // The secret is still saved.
     expect(await context.secretService.resolveSecret({ secretId: body.id })).toBe("success");
 
-    const unique = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Model key", provider: "openai", value: PLANTED });
+    const unique = await call(context, "POST", "/api/secrets", admin.cookie, { name: "Model key", provider: "openai", value: PLANTED, projectId: "default" });
     expect(unique.statusCode).toBe(200);
     expect(unique.json<{ warnings: string[] }>().warnings).toEqual([]);
     expect(unique.body).not.toContain(PLANTED);

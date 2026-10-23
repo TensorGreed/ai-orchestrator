@@ -71,6 +71,15 @@ const GLOBAL_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   viewer: ["workflow:read", "secret:read"]
 };
 
+/**
+ * The startup warning for strict isolation with no memberships at all: only
+ * admins can see anything until they add members. Null when there is none.
+ */
+export function strictIsolationStartupWarning(isolation: ProjectIsolationMode, membershipCount: number): string | null {
+  if (isolation !== "strict" || membershipCount > 0) return null;
+  return "PROJECT_ISOLATION=strict is on and no user has a project membership: only admins can see anything. Add members (including to the default project) under Projects.";
+}
+
 export function isProjectRole(value: string): value is ProjectRole {
   return value === "project_admin" || value === "editor" || value === "viewer";
 }
@@ -283,10 +292,11 @@ export class RbacService {
     const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
     if (this.can(user, owningProject, permission)) return true;
 
-    // Check if the workflow is shared to any of the user's projects.
+    // Check if the workflow is shared to any of the user's projects. Running
+    // it through an execute share needs execute in that project, not only read.
     const shares = this.store.listWorkflowShares(workflow.id);
     for (const share of shares) {
-      if (!this.can(user, share.projectId, "workflow:read")) continue;
+      if (!this.can(user, share.projectId, permission === "workflow:execute" ? "workflow:execute" : "workflow:read")) continue;
       if (permission === "workflow:read") return true;
       if (permission === "workflow:execute" && share.accessLevel === "execute") return true;
     }

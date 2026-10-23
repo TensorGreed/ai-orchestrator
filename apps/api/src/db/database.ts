@@ -5165,6 +5165,11 @@ export class SqliteStore {
   // Phase 5.2 — Project-level roles
   // ---------------------------------------------------------------------------
 
+  countProjectMemberships(): number {
+    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) as count FROM user_project_roles`);
+    return row ? toNumber(row.count) : 0;
+  }
+
   listProjectMembers(projectId: string): Array<{
     userId: string;
     projectId: string;
