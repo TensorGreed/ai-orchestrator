@@ -1234,3 +1234,18 @@ describe("a real replay job proves a release (M8)", () => {
     expect(context.store.getPublishedVersion("wf-real")).toBe(good);
   });
 });
+
+describe("the kill switch (L9)", () => {
+  it("deactivating the workflow stops production for a published version; the draft's test route still runs; activating restores it", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const v1 = save(context, hookWorkflow("wf-kill", "live"));
+    expect((await call(context, "POST", "/api/workflows/wf-kill/publish", builder.cookie, { version: v1 })).statusCode).toBe(200);
+    expect(await prodHook(context, "hook-wf-kill")).toMatchObject({ status: 200, output: { result: "live" } });
+    expect((await call(context, "POST", "/api/workflows/wf-kill/deactivate", builder.cookie, {})).statusCode).toBe(200);
+    expect((await prodHook(context, "hook-wf-kill")).status).toBe(404);
+    expect(await testHook(context, "hook-wf-kill")).toMatchObject({ output: { result: "live" } });
+    expect((await call(context, "POST", "/api/workflows/wf-kill/activate", builder.cookie, {})).statusCode).toBe(200);
+    expect(await prodHook(context, "hook-wf-kill")).toMatchObject({ status: 200, output: { result: "live" } });
+  });
+});

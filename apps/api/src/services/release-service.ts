@@ -246,6 +246,12 @@ function routingPath(value: unknown, fallback: string): string {
  * count by path whatever their method, as `/webhook/:path` routing matches
  * the path first; an empty path falls back to the node id, as routing does.
  */
+/** Whether the workflow was deactivated (`POST /api/workflows/:id/deactivate`), which is stored on the draft. */
+function isDeactivated(workflow: Workflow): boolean {
+  const settings = workflow.settings as Record<string, unknown> | undefined;
+  return Boolean(settings && typeof settings === "object" && settings.active === false);
+}
+
 export function productionRoutingKeys(workflow: Pick<Workflow, "nodes">): ProductionRoutingKey[] {
   const keys = new Map<string, string>();
   for (const node of workflow.nodes ?? []) {
@@ -313,6 +319,8 @@ export class ReleaseService {
   resolveRunnableWorkflow(workflowId: string, channel: ReleaseChannel): Workflow | null {
     const draft = this.store.getWorkflow(workflowId);
     if (!draft || channel === "draft" || !this.options.available) return draft;
+    // Deactivating the workflow is the kill switch: it stops production whatever version is published.
+    if (isDeactivated(draft)) return null;
     const published = this.store.getPublishedVersion(workflowId);
     if (published === null) {
       // A gate that is on always has a published version, except for a workflow created again under a gated id: fail closed.
