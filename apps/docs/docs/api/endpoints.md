@@ -136,7 +136,7 @@ See [Testing MCP workflows](../product/testing-mcp-workflows.md).
 - `DELETE /api/mcp/cassettes/:id` (admin; audit event `mcp_cassette.deleted`)
 - `POST /api/executions/:id/replay` (builder; `{ mode?, cassetteId? }` → run result with `executionId` and `mcpReplay: { cassetteId, mode, matched, reused, live, unmatched[] }`; a strict replay with unmatched calls has status `error`)
 - `POST /api/eval/runs` answers `202 { run, runId }` and runs in the background (`?wait=true` keeps the old blocking `200` for one release); golden sets, replay jobs and scorers are in [Golden sets and replay jobs](../product/golden-sets.md)
-- `POST /api/eval/runs` gains `record: true` (one cassette per fixture) and `replay: { evalRunId? | cassetteId?, mode? }` (400 when combined with `record`, 404 for an unknown cassette); `GET /api/eval/runs` adds `mcpCassettes`
+- `POST /api/eval/runs` gains `record: true` (one cassette per fixture) and `replay: { evalRunId? | cassetteId?, mode? }` (400 when combined with `record`, 404 for a cassette or eval run whose workflow you cannot read); `GET /api/eval/runs` adds `mcpCassettes`
 - `GET /api/mcp/servers/:id/snapshot/export` (builder; the accepted snapshot as an `l2m.mcp-snapshot` file with resources and prompts; 409 before the first snapshot)
 - `POST /api/mcp/check` (builder, API keys; `{ serverIds?, toolsetId?, workflowIds?, failOnUnreachable?, failOnPolicyBlocked? }` → `{ ok, checkedAt, servers[], blockedTools[], failures[] }`; probes without storing anything; 404 for unknown servers or toolsets)
 - MCP adapter `snapshot_mock` (connection `{ sourceServerId | snapshot, cassetteId?, fixedText? }`) for registry servers that serve a snapshot offline
