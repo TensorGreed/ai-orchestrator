@@ -14,6 +14,14 @@ export function parseArgs(argv: string[], booleanFlags: string[]): ParsedArgs {
   const booleanSet = new Set(booleanFlags);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
+    if (arg === "-o") {
+      // The one short flag: -o <file> is --out <file>.
+      const value = argv[index + 1];
+      if (value === undefined) throw new UsageError("-o needs a file");
+      values.set("out", [...(values.get("out") ?? []), value]);
+      index += 1;
+      continue;
+    }
     if (!arg.startsWith("--")) {
       positionals.push(arg);
       continue;
