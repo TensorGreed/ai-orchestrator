@@ -19,6 +19,11 @@
  *                     Phase 15.2 — with --set, start a replay job over one or
  *                     more golden sets, wait for it and gate on its cases.
  *
+ *                     Phase 15.5 adds the candidate file, overrides, estimate and
+ *                     JUnit output (replay-job.ts), `l2m replay status`, `l2m release
+ *                     publish` (release.ts) and golden-set files, `l2m golden
+ *                     export|import|verify` (golden.ts).
+ *
  * Exit codes: 0 clean, 1 the check found problems (or a request failed),
  * 2 usage errors, 3 an audit bundle is internally consistent but its signer
  * was not verified (no --public-key), 4 a replay is inconclusive (the
@@ -31,12 +36,6 @@ import {
   DEFAULT_ZIP_MAX_TOTAL_BYTES,
   judgeMcpCheck,
   judgeReplayDiff,
-  REPLAY_IGNORE_PATHS_MAX,
-  REPLAY_MCP_MODES,
-  replayIgnorePathSchema,
-  replayJobExitCode,
-  type EvalCaseResult,
-  type EvalRunView,
   type ReplayRunResponse,
   type McpCheckReport,
   type McpCheckServerResult,
@@ -55,18 +54,15 @@ import {
   type MCPExecutionContext,
   type MCPServerAdapter
 } from "@ai-orchestrator/mcp-sdk";
-import { listFlag, oneFlag, parseArgs, splitCommand, UsageError, type ParsedArgs } from "./args";
+import { checkCommandFlags, listFlag, oneFlag, parseArgs, splitCommand, UsageError, type CommandFlags, type ParsedArgs } from "./args";
+import { apiRequest, apiTarget, isObject, readJsonFile, RequestError, write, type CliIo } from "./api";
+import { runGoldenExport, runGoldenImport, runGoldenVerify } from "./golden";
+import { JOB_ONLY_BOOLEANS, JOB_ONLY_FLAGS, replayFlags, runReplayJob, runReplayStatus } from "./replay-job";
+import { runReleasePublish } from "./release";
 import { formatAuditVerifyResult, parsePublicKeyInput, PublicKeyInputError, verifyAuditBundle } from "./audit-verify";
 
-export interface CliIo {
-  stdin: NodeJS.ReadableStream;
-  stdout: NodeJS.WritableStream;
-  stderr: NodeJS.WritableStream;
-  env: Record<string, string | undefined>;
-  fetch?: typeof fetch;
-  /** Waits between polls of a replay job (tests pass an instant one). */
-  sleep?: (ms: number) => Promise<void>;
-}
+export type { CliIo } from "./api";
+export { cleanServerText } from "./api";
 
 export const EXIT_OK = 0;
 export const EXIT_FAILED = 1;
@@ -77,6 +73,10 @@ export const EXIT_SIGNER_UNVERIFIED = 3;
 export const EXIT_INCOMPLETE = 4;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+/** `replay run --recording` waits for the whole replay in one request. */
+const SINGLE_REPLAY_TIMEOUT_MS = 900_000;
+/** `mcp check` against the API waits for every server to be probed. */
+const MCP_CHECK_TIMEOUT_MS = 300_000;
 
 const USAGE = `Usage:
   l2m mcp check [--server <id>]... [--toolset <id>] [--workflow <id>]...
@@ -91,36 +91,48 @@ const USAGE = `Usage:
   l2m replay run --recording <id> [--draft | --version <n>] [--mcp strict|lenient]
                  [--ignore-path <glob>]... [--number-tolerance <n>]
                  [--api-url <url>] [--api-key <key>] [--json]
-  l2m replay run --set <goldenSetId>... [--draft | --version <n>] [--mcp strict|lenient]
-                 [--ignore-path <glob>]... [--number-tolerance <n>] [--max-cost <usd>]
-                 [--timeout <seconds>] [--api-url <url>] [--api-key <key>] [--json]
+  l2m replay run --set <goldenSetId>... [--draft | --version <n> | --file <workflow.json>]
+                 [--mcp strict|lenient] [--ignore-path <glob>]... [--number-tolerance <n>]
+                 [--model <nodeId>=<model>]... [--provider-model <provider>=<model>]...
+                 [--model-secret <nodeId or provider>=<secretId>]...
+                 [--guard-profile <id>[@<version>]] [--mcp-server <id>=strict|lenient|live_read_only]...
+                 [--live-read <nodeId>]... [--models live|replay] [--compare recording|baseline_rerun]
+                 [--repeats <1-5>] [--aggregate all|majority|any] [--max-cost <usd>]
+                 [--estimate] [--no-wait] [--timeout <seconds>] [--junit <file>]
+                 [--api-url <url>] [--api-key <key>] [--json]
+  l2m replay status <runId> [--wait] [--timeout <seconds>] [--junit <file>] [--json]
+  l2m release publish <workflowId> --version <n> [--hash <workflowHash>] [--run <replayRunId>]
+                      [--override-reason <text> | --request-approval <reason>] [--json]
+  l2m golden export <goldenSetId> -o <file> [--sign]
+  l2m golden import <file> --workflow <id> [--project <id>] [--name <name>] [--public-key <file|base64>]
+                    [--allow-other-workflow] [--json]
+  l2m golden verify <file> [--public-key <file|base64>] [--trust-embedded-key] [--json]
 
-The API URL and key default to L2M_API_URL and L2M_API_KEY.
+The API URL and key come from L2M_API_URL and L2M_API_KEY. Prefer the
+environment for the key: --api-key works but shows in the process list and
+CI logs, and the CLI warns when it is used. Each command refuses flags it
+does not take (exit 2); switches never take a value (--sign, not --sign=true).
+Requests give up after 60 s (golden export and import, mcp check: 300 s;
+replay run --recording: 900 s; replay run --set: also what is left of
+--timeout); replay job status polls are retried twice on 5xx or no answer.
+Files written with -o and --junit get mode 0600 and are never written through
+a symlink.
+
 Exit codes: 0 clean (replay: pass), 1 problems found or a request failed
-(replay: the candidate differs from the golden run; --set: a case failed),
-2 usage error (replay: also flags the API rejects),
-3 audit bundle signer not verified (no --public-key; see --trust-embedded-key),
+(replay: the candidate differs from the golden run; --set: a case failed;
+a replay job status poll refused with 400; golden import: 409 for another
+workflow's file without --allow-other-workflow),
+2 usage error (replay and golden import: also flags or files the API rejects
+with 400 when the request is made),
+3 signer not verified (audit verify, golden verify: no --public-key; see --trust-embedded-key),
 4 a replay is inconclusive (--set: a case was inconclusive, or the job did
-not complete: canceled, over budget, interrupted or past --timeout).
+not complete: canceled, over budget, interrupted or past --timeout), or
+release publish needs approval. replay run and replay status also exit 4
+when a request fails (unreachable, no answer, 401, 403, 404, 5xx): that is
+long-standing behaviour, kept so existing pipelines keep their meaning.
+release publish: 0 published, 1 blocked by the gate or failed, 4 needs approval.
+golden export, import and verify: request failures exit 1.
 `;
-
-function write(stream: NodeJS.WritableStream, text: string): void {
-  stream.write(text.endsWith("\n") ? text : `${text}\n`);
-}
-
-function readJsonFile(file: string): unknown {
-  let text: string;
-  try {
-    text = fs.readFileSync(file, "utf8");
-  } catch (error) {
-    throw new UsageError(`Cannot read ${file}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new UsageError(`${file} is not JSON`);
-  }
-}
 
 function loadSnapshot(file: string): McpSnapshotFile {
   try {
@@ -129,60 +141,6 @@ function loadSnapshot(file: string): McpSnapshotFile {
     if (error instanceof UsageError) throw error;
     throw new UsageError(`${file}: ${error instanceof Error ? error.message : String(error)}`);
   }
-}
-
-interface ApiTarget {
-  url: string;
-  key: string;
-  fetch: typeof fetch;
-}
-
-function apiTarget(args: ParsedArgs, io: CliIo): ApiTarget {
-  const url = (oneFlag(args, "api-url") ?? io.env.L2M_API_URL ?? "").trim().replace(/\/+$/, "");
-  const key = (oneFlag(args, "api-key") ?? io.env.L2M_API_KEY ?? "").trim();
-  if (!url) throw new UsageError("Set --api-url or L2M_API_URL");
-  if (!key) throw new UsageError("Set --api-key or L2M_API_KEY");
-  return { url, key, fetch: io.fetch ?? fetch };
-}
-
-class RequestError extends Error {
-  constructor(
-    message: string,
-    /** The HTTP status, when the API answered. */
-    readonly status: number | null = null
-  ) {
-    super(message);
-  }
-}
-
-async function apiRequest<T>(target: ApiTarget, method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
-  let response: Response;
-  try {
-    response = await target.fetch(`${target.url}${path}`, {
-      method,
-      headers: { authorization: `Bearer ${target.key}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {})
-    });
-  } catch (error) {
-    throw new RequestError(`Cannot reach ${target.url}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  let text: string;
-  try {
-    text = await response.text();
-  } catch (error) {
-    throw new RequestError(`${method} ${path}: the response could not be read: ${error instanceof Error ? error.message : String(error)}`, response.status);
-  }
-  let parsed: unknown = null;
-  try {
-    parsed = text ? JSON.parse(text) : null;
-  } catch {
-    parsed = null;
-  }
-  if (!response.ok) {
-    const message = parsed && typeof parsed === "object" && "error" in parsed ? String((parsed as { error: unknown }).error) : text.slice(0, 200);
-    throw new RequestError(`${method} ${path} failed with ${response.status}: ${message}`, response.status);
-  }
-  return parsed as T;
 }
 
 // --- check -------------------------------------------------------------------
@@ -313,13 +271,20 @@ async function runCheck(args: ParsedArgs, io: CliIo): Promise<number> {
     const toolset = oneFlag(args, "toolset");
     const servers = listFlag(args, "server");
     const workflows = listFlag(args, "workflow");
-    report = await apiRequest<McpCheckReport>(target, "POST", "/api/mcp/check", {
-      ...(servers.length > 0 ? { serverIds: servers } : {}),
-      ...(toolset ? { toolsetId: toolset } : {}),
-      ...(workflows.length > 0 ? { workflowIds: workflows } : {}),
-      failOnUnreachable,
-      failOnPolicyBlocked
-    });
+    report = await apiRequest<McpCheckReport>(
+      target,
+      "POST",
+      "/api/mcp/check",
+      {
+        ...(servers.length > 0 ? { serverIds: servers } : {}),
+        ...(toolset ? { toolsetId: toolset } : {}),
+        ...(workflows.length > 0 ? { workflowIds: workflows } : {}),
+        failOnUnreachable,
+        failOnPolicyBlocked
+      },
+      // The server probes every server it checks before it answers.
+      { timeoutMs: MCP_CHECK_TIMEOUT_MS }
+    );
   }
   write(io.stdout, json ? JSON.stringify(report, null, 2) : formatReport(report, snapshotFiles.length > 0));
   return report.ok ? EXIT_OK : EXIT_FAILED;
@@ -434,7 +399,6 @@ function formatReplay(result: ReplayRunResponse, verdict: string, reasons: strin
   return lines.join("\n");
 }
 
-const isObject = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
 /** Whether a 2xx body has everything the verdict and the report are built from. */
 function isReplayRunResponse(value: unknown): value is ReplayRunResponse {
@@ -453,58 +417,32 @@ function isReplayRunResponse(value: unknown): value is ReplayRunResponse {
   );
 }
 
-interface ReplayFlags {
-  version?: number;
-  mcpMode?: string;
-  ignorePaths: string[];
-  numberTolerance?: number;
-}
-
-/** The candidate and comparison flags `replay run` takes with --recording and with --set. */
-function replayFlags(args: ParsedArgs): ReplayFlags {
-  const versionFlag = oneFlag(args, "version");
-  const draft = args.booleans.has("draft");
-  if (draft && versionFlag !== undefined) throw new UsageError("Choose --draft or --version, not both");
-  let version: number | undefined;
-  if (versionFlag !== undefined) {
-    if (!/^\d+$/.test(versionFlag.trim()) || Number(versionFlag) <= 0) throw new UsageError("--version must be a positive whole number");
-    version = Number(versionFlag);
-  }
-  const mcpMode = oneFlag(args, "mcp");
-  if (mcpMode !== undefined && !(REPLAY_MCP_MODES as readonly string[]).includes(mcpMode)) throw new UsageError("--mcp must be strict or lenient");
-  const toleranceFlag = oneFlag(args, "number-tolerance");
-  let numberTolerance: number | undefined;
-  if (toleranceFlag !== undefined) {
-    numberTolerance = Number(toleranceFlag);
-    if (!Number.isFinite(numberTolerance) || numberTolerance < 0) throw new UsageError("--number-tolerance must be a number of at least 0");
-  }
-  const ignorePaths = listFlag(args, "ignore-path");
-  // The API's own limits, checked here so a bad flag is a usage error and nothing is sent.
-  if (ignorePaths.length > REPLAY_IGNORE_PATHS_MAX) throw new UsageError(`--ignore-path can be given at most ${REPLAY_IGNORE_PATHS_MAX} times`);
-  for (const pattern of ignorePaths) {
-    const checked = replayIgnorePathSchema.safeParse(pattern);
-    if (!checked.success) throw new UsageError(`--ignore-path ${JSON.stringify(pattern.slice(0, 40))}: ${checked.error.issues[0]?.message ?? "invalid"}`);
-  }
-  return { ...(version !== undefined ? { version } : {}), ...(mcpMode ? { mcpMode } : {}), ignorePaths, ...(numberTolerance !== undefined ? { numberTolerance } : {}) };
-}
-
 async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
   const recording = oneFlag(args, "recording");
   const sets = listFlag(args, "set");
   if (recording && sets.length > 0) throw new UsageError("Choose --recording or --set, not both");
   if (sets.length > 0) return runReplayJob(args, io, sets);
   if (!recording) throw new UsageError("l2m replay run needs --recording <id> or --set <goldenSetId>");
+  const jobOnly = [...JOB_ONLY_FLAGS.filter((flag) => args.values.has(flag)), ...JOB_ONLY_BOOLEANS.filter((flag) => args.booleans.has(flag))];
+  if (jobOnly.length > 0) throw new UsageError(`--${jobOnly.join(", --")} only work with --set`);
   const { version, mcpMode, ignorePaths, numberTolerance } = replayFlags(args);
   const target = apiTarget(args, io);
 
   let result: unknown;
   try {
-    result = await apiRequest<unknown>(target, "POST", `/api/replay/recordings/${encodeURIComponent(recording)}/replay`, {
-      ...(version !== undefined ? { version } : { draft: true }),
-      ...(mcpMode ? { mcpMode } : {}),
-      ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
-      ...(numberTolerance !== undefined ? { numberTolerance } : {})
-    });
+    result = await apiRequest<unknown>(
+      target,
+      "POST",
+      `/api/replay/recordings/${encodeURIComponent(recording)}/replay`,
+      {
+        ...(version !== undefined ? { version } : { draft: true }),
+        ...(mcpMode ? { mcpMode } : {}),
+        ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
+        ...(numberTolerance !== undefined ? { numberTolerance } : {})
+      },
+      // The server runs the whole replay before it answers.
+      { timeoutMs: SINGLE_REPLAY_TIMEOUT_MS }
+    );
   } catch (error) {
     if (error instanceof RequestError) {
       // A 400 is the API refusing the flags: a usage error, like one caught here.
@@ -535,123 +473,70 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
   }
 }
 
-// --- replay run --set ---------------------------------------------------------
-
-const JOB_POLL_MS = 2_000;
-const DEFAULT_JOB_TIMEOUT_S = 1_800;
-
-function isRunView(value: unknown): value is EvalRunView & { results?: EvalCaseResult[] } {
-  return isObject(value) && typeof value.id === "string" && typeof value.status === "string";
-}
-
-/**
- * Server text (run errors, case names, score reasons) can carry a replayed
- * output's bytes; control characters are dropped so it cannot drive the
- * terminal or a CI log (ANSI escapes, carriage returns).
- */
-export function cleanServerText(value: unknown): string {
-  return String(value ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
-}
-
-function formatJob(run: EvalRunView & { results?: EvalCaseResult[] }, code: number): string {
-  const lines: string[] = [];
-  const candidate = run.candidate ? (run.candidate.kind === "version" ? `version ${cleanServerText(run.candidate.version)}` : "draft") : "candidate";
-  const verdict = code === EXIT_OK ? "PASS" : code === EXIT_FAILED ? "FAIL" : "INCONCLUSIVE";
-  lines.push(`Replay job ${cleanServerText(run.id)} against the ${candidate}${run.candidate ? ` (${cleanServerText(run.candidate.workflowHash).slice(0, 12)})` : ""}: ${verdict} (${cleanServerText(run.status)})`);
-  const summary = run.summary;
-  if (summary) {
-    lines.push(
-      `  ${summary.pass} passed, ${summary.fail} failed, ${summary.error} inconclusive${summary.skipped ? `, ${summary.skipped} skipped` : ""} of ${summary.total}; spent $${(summary.costUsd ?? 0).toFixed(4)}${summary.costUnknown ? " or more (some calls are unpriced)" : ""}`
-    );
-    for (const warning of summary.warnings ?? []) lines.push(`  warning: ${cleanServerText(warning)}`);
-  }
-  if (run.error) lines.push(`  ${cleanServerText(run.error)}`);
-  for (const result of run.results ?? []) {
-    if (result.status === "pass") continue;
-    const failed = (result.score?.details ?? []).filter((detail) => !detail.pass).map((detail) => `${cleanServerText(detail.type)}: ${cleanServerText(detail.reason)}`);
-    lines.push(`  ${cleanServerText(result.status)} ${cleanServerText(result.fixtureName ?? result.fixtureId)}${result.error ? `: ${cleanServerText(result.error)}` : ""}`);
-    for (const reason of failed) lines.push(`    - ${reason}`);
-  }
-  return lines.join("\n");
-}
-
-async function runReplayJob(args: ParsedArgs, io: CliIo, sets: string[]): Promise<number> {
-  const { version, mcpMode, ignorePaths, numberTolerance } = replayFlags(args);
-  const maxCostFlag = oneFlag(args, "max-cost");
-  let maxCostUsd: number | undefined;
-  if (maxCostFlag !== undefined) {
-    maxCostUsd = Number(maxCostFlag);
-    if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) throw new UsageError("--max-cost must be a number of US dollars above 0");
-  }
-  const timeoutFlag = oneFlag(args, "timeout");
-  const timeoutS = timeoutFlag === undefined ? DEFAULT_JOB_TIMEOUT_S : Number(timeoutFlag);
-  if (!Number.isFinite(timeoutS) || timeoutS <= 0) throw new UsageError("--timeout must be a number of seconds above 0");
-  const target = apiTarget(args, io);
-  const sleep = io.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-
-  let run: EvalRunView & { results?: EvalCaseResult[] };
-  try {
-    const started = await apiRequest<{ run?: unknown }>(target, "POST", "/api/replay/runs", {
-      datasetIds: sets,
-      ...(version !== undefined ? { version } : { draft: true }),
-      ...(mcpMode ? { mcpMode } : {}),
-      ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
-      ...(numberTolerance !== undefined ? { numberTolerance } : {}),
-      ...(maxCostUsd !== undefined ? { maxCostUsd } : {})
-    });
-    if (!isRunView(started?.run)) {
-      write(io.stderr, "l2m: replay job is inconclusive: the API's answer is not a replay job (is the CLI the same version as the API?)");
-      return EXIT_INCOMPLETE;
-    }
-    run = started.run;
-    const deadline = Date.now() + timeoutS * 1000;
-    while (run.status === "queued" || run.status === "running") {
-      if (Date.now() >= deadline) {
-        write(io.stderr, `l2m: replay job ${run.id} is still ${run.status} after ${timeoutS} s; it keeps running on the server.`);
-        return EXIT_INCOMPLETE;
-      }
-      await sleep(JOB_POLL_MS);
-      const polled = await apiRequest<{ run?: unknown }>(target, "GET", `/api/replay/runs/${encodeURIComponent(run.id)}`);
-      if (!isRunView(polled?.run)) {
-        write(io.stderr, "l2m: replay job is inconclusive: the API's answer is not a replay job");
-        return EXIT_INCOMPLETE;
-      }
-      run = polled.run;
-    }
-  } catch (error) {
-    if (error instanceof RequestError) {
-      if (error.status === 400) {
-        write(io.stderr, `l2m: ${cleanServerText(error.message)}`);
-        return EXIT_USAGE;
-      }
-      write(io.stderr, `l2m: replay job is inconclusive: ${cleanServerText(error.message)}`);
-      return EXIT_INCOMPLETE;
-    }
-    throw error;
-  }
-  const code = replayJobExitCode(run);
-  if (args.booleans.has("json")) io.stdout.write(`${JSON.stringify({ ...run, exitCode: code }, null, 2)}\n`);
-  else write(io.stdout, formatJob(run, code));
-  return code;
-}
-
 // --- entry -------------------------------------------------------------------
 
-const BOOLEAN_FLAGS = ["json", "allow-unreachable", "allow-policy-blocked", "verbose", "help", "trust-embedded-key", "draft"];
+const API = ["api-url", "api-key"] as const;
+
+/** Every command and the flags it takes; anything else is a usage error (exit 2). */
+const COMMANDS: Record<string, CommandFlags> = {
+  "mcp check": {
+    values: [...API, "server", "toolset", "workflow", "snapshot", "stdio", "url", "against", "timeout"],
+    booleans: ["allow-unreachable", "allow-policy-blocked", "json"]
+  },
+  "mcp mock": { values: ["snapshot", "cassette", "fixed-text"], booleans: ["verbose"] },
+  "mcp snapshot export": { values: [...API, "server", "out"], booleans: [] },
+  "audit verify": { values: ["public-key", "max-bytes"], booleans: ["trust-embedded-key", "json"] },
+  "replay run": {
+    values: [...API, "recording", "set", "version", "mcp", "ignore-path", "number-tolerance", ...JOB_ONLY_FLAGS],
+    booleans: ["draft", "json", ...JOB_ONLY_BOOLEANS]
+  },
+  "replay status": { values: [...API, "timeout", "junit"], booleans: ["wait", "json"] },
+  "release publish": { values: [...API, "version", "hash", "run", "override-reason", "request-approval"], booleans: ["json"] },
+  "golden export": { values: [...API, "out"], booleans: ["sign"] },
+  "golden import": { values: [...API, "workflow", "project", "name", "public-key"], booleans: ["allow-other-workflow", "json"] },
+  "golden verify": { values: ["public-key"], booleans: ["trust-embedded-key", "json"] }
+};
+
+const BOOLEAN_FLAGS = [...new Set(["help", ...Object.values(COMMANDS).flatMap((flags) => flags.booleans)])];
+const VALUE_FLAGS = [...new Set(Object.values(COMMANDS).flatMap((flags) => flags.values))];
+
+/** The command a command line names (`mcp snapshot export` has three words), or null. */
+function commandOf(positionals: string[]): string | null {
+  const [group, command, sub] = positionals;
+  if (group === "mcp" && command === "snapshot" && sub === "export") return "mcp snapshot export";
+  const name = `${group} ${command}`;
+  if (!(name in COMMANDS) || name === "mcp snapshot") return null;
+  // These take no further positional word.
+  if (sub !== undefined && (name === "mcp check" || name === "mcp mock" || name === "replay run")) return null;
+  return name;
+}
 
 export async function main(argv: string[], io: CliIo): Promise<number> {
   try {
-    const args = parseArgs(argv, BOOLEAN_FLAGS);
-    const [group, command, sub] = args.positionals;
+    const args = parseArgs(argv, BOOLEAN_FLAGS, VALUE_FLAGS);
+    const [group] = args.positionals;
     if (args.booleans.has("help") || !group) {
       write(args.booleans.has("help") ? io.stdout : io.stderr, USAGE);
       return args.booleans.has("help") ? EXIT_OK : EXIT_USAGE;
     }
-    if (group === "mcp" && command === "check" && !sub) return await runCheck(args, io);
-    if (group === "mcp" && command === "mock" && !sub) return await runMock(args, io);
-    if (group === "mcp" && command === "snapshot" && sub === "export") return await runSnapshotExport(args, io);
-    if (group === "audit" && command === "verify") return runAuditVerify(args, io);
-    if (group === "replay" && command === "run" && !sub) return await runReplay(args, io);
+    // A flag no command knows comes first: it did not take a value, so its value now reads as a stray word.
+    if (args.unknown.length > 0) throw new UsageError(`Unknown flag${args.unknown.length === 1 ? "" : "s"}: ${[...new Set(args.unknown)].map((name) => `--${name}`).join(", ")}`);
+    const command = commandOf(args.positionals);
+    if (!command) throw new UsageError(`Unknown command: ${args.positionals.join(" ")}`);
+    checkCommandFlags(args, `l2m ${command}`, COMMANDS[command]!);
+    if (args.values.has("api-key")) {
+      write(io.stderr, "l2m: warning: --api-key puts the key in the process list and in CI logs; set L2M_API_KEY in the environment instead.");
+    }
+    if (command === "mcp check") return await runCheck(args, io);
+    if (command === "mcp mock") return await runMock(args, io);
+    if (command === "mcp snapshot export") return await runSnapshotExport(args, io);
+    if (command === "audit verify") return runAuditVerify(args, io);
+    if (command === "replay run") return await runReplay(args, io);
+    if (command === "replay status") return await runReplayStatus(args, io);
+    if (command === "release publish") return await runReleasePublish(args, io);
+    if (command === "golden export") return await runGoldenExport(args, io);
+    if (command === "golden import") return await runGoldenImport(args, io);
+    if (command === "golden verify") return runGoldenVerify(args, io);
     throw new UsageError(`Unknown command: ${args.positionals.join(" ")}`);
   } catch (error) {
     if (error instanceof UsageError) {

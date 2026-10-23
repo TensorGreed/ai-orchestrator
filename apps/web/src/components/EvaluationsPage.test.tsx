@@ -227,6 +227,17 @@ describe("EvaluationsPage — golden sets", () => {
     await waitFor(() => expect(api.addGoldenRunToSet).toHaveBeenCalledWith("set_1", { recordingId: "rec_bbb", name: "Exchange baseline" }));
   });
 
+  it("marks golden runs imported from a golden-set file", async () => {
+    const imported = recording("rec_ccc", "Imported baseline");
+    imported.capabilities = { ...imported.capabilities, origin: "imported", recordedAt: "2024-01-02T03:04:05.000Z", sourceWorkflowId: "wf-0" };
+    vi.mocked(api.fetchReplayRecordings).mockResolvedValue({ items: [recording("rec_aaa", "Refund baseline"), imported], total: 2 });
+    const user = renderPage();
+    await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
+    const add = await screen.findByRole("region", { name: "Add golden runs" });
+    await within(add).findByText("Imported baseline");
+    expect(within(add).getAllByText("imported")).toHaveLength(1);
+  });
+
   it("removes a case and deletes a set after confirming", async () => {
     vi.mocked(api.deleteEvalFixture).mockResolvedValue({ ok: true });
     vi.mocked(api.deleteEvalDataset).mockResolvedValue({ ok: true });

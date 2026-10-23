@@ -54,6 +54,7 @@ export default defineConfig({
           { text: "Golden runs and replay", link: "/product/golden-runs" },
           { text: "Golden sets and replay jobs", link: "/product/golden-sets" },
           { text: "Release gate and publish", link: "/product/release-gate" },
+          { text: "Replay in CI and the release gate", link: "/product/replay-and-release-gate" },
           { text: "Approval gates", link: "/product/approvals" },
           { text: "Guard engine", link: "/product/guard-engine" },
           { text: "Guard in workflows", link: "/product/guard" }

@@ -593,6 +593,12 @@ function GoldenSetDetail({ set, workflowName, canEdit, onBack, onChanged, onDele
                       <span className="evals-row-title">{recording.name}</span>
                       <span className="evals-row-sub">
                         <span className="mono-cell">{recording.id}</span> · {recording.sourceStatus} · {formatDate(recording.createdAt)}
+                        {recording.capabilities?.origin === "imported" && (
+                          <>
+                            {" · "}
+                            <span className="golden-origin-badge">imported</span>
+                          </>
+                        )}
                       </span>
                     </span>
                     <span className="evals-row-actions">

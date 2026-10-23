@@ -354,7 +354,8 @@ export class ReplayService {
     const scrubber = this.options.recordings.scrubber();
     const plan = buildReplayPlan(candidate.workflow, recording.nodes, {
       recordedWorkflow: ReplayRecordingService.capturedWorkflow(recording),
-      normaliseConfig: (config) => this.options.recordings.storedConfig(config, scrubber),
+      // An imported golden run carries no secret references, so only for one the candidate's are left out of the comparison too.
+      normaliseConfig: (config) => this.options.recordings.storedConfig(config, scrubber, { imported: recording.capabilities.origin === "imported" }),
       ...(liveReadNodes.length > 0 ? { liveNodes: new Set(liveReadNodes) } : {})
     });
     const mcpPlan = this.options.cassettes.planOfflineReplay(recording.mcpCassette, mcpMode, `${recording.id}:cassette`, {

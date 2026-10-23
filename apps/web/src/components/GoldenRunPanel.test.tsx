@@ -268,6 +268,19 @@ describe("GoldenRunViewer", () => {
     expect(await screen.findByText("Golden run not found")).toBeInTheDocument();
   });
 
+  it("marks a golden run imported from a golden-set file, with its source workflow", async () => {
+    vi.mocked(api.fetchReplayRecording).mockResolvedValueOnce({
+      recording: recording({
+        sourceExecutionId: null,
+        capabilities: { mcp: "cassette", models: "live", memory: "empty", workflowSource: "captured", origin: "imported", recordedAt: "2024-01-02T03:04:05.000Z", importedAt: "2026-10-24T08:00:00.000Z", sourceWorkflowId: "wf-source" }
+      })
+    });
+    render(<GoldenRunViewer recordingId="rec_imported" canReplay={false} onClose={vi.fn()} />);
+    expect(await screen.findByText("imported")).toBeInTheDocument();
+    expect(screen.getByText("wf-source")).toBeInTheDocument();
+    expect(screen.queryByText(/from run/)).not.toBeInTheDocument();
+  });
+
   it("labels an inconclusive replay as inconclusive", () => {
     render(<ReplayResultView result={result({ verdict: "error", reasons: ["1 MCP call had no recorded answer"] })} />);
     expect(screen.getByText("Inconclusive")).toBeInTheDocument();

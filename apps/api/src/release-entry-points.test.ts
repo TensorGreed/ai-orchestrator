@@ -118,6 +118,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "mcp-control-plane-routes.ts", match: "const workflow = store.getWorkflow(summary.id);", kind: "not_run", why: "MCP server usages" },
   { file: "guard-routes.ts", match: "const workflow = store.getWorkflow(binding.scopeId);", kind: "not_run", why: "guard binding project" },
   { file: "guard-routes.ts", match: "store.getWorkflow(event.workflowId)?.name", kind: "not_run", why: "guard event names" },
+  { file: "golden-set-file-routes.ts", match: "store.getWorkflow(", kind: "not_run", why: "the exported file names the golden set's workflow (id and name); nothing runs", count: 1 },
   { file: "eval-routes.ts", match: "store.getWorkflow(", kind: "not_run", why: "golden set and run projects, judge and model-override secret scope, the replay job audit's project", count: 5 },
   { file: "services/approval-service.ts", match: "this.store.getWorkflow(record.workflowId)?.projectId", kind: "not_run", why: "a paused run's current project" },
   { file: "services/eval-service.ts", match: "const workflow = this.store.getWorkflow(request.workflowId);", kind: "draft", why: "an eval run runs the draft" },

@@ -58,6 +58,17 @@
   height: 15px;
 }
 
+/* A golden run that came from a golden-set file rather than a run on this deployment. */
+.golden-origin-badge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
 .golden-meta {
   display: flex;
   flex-wrap: wrap;
