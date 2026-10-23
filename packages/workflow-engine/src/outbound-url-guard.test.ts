@@ -16,6 +16,7 @@ import {
   guardedFetch,
   pinnedLookup,
   playwrightOutboundGuard,
+  playwrightWebSocketGuard,
   type OutboundGuardConfig
 } from "./outbound-url-guard";
 
@@ -262,5 +263,36 @@ describe("guardedFetch — the connection is pinned to the vetted address (DNS r
     expect(portAllowlisted.result).toEqual([{ address: "10.0.0.5", family: 4 }]);
     const v6Only = await lookup(allow, ["93.184.216.34", "2606:2800:220:1::1"], { family: 6 });
     expect(v6Only.result).toEqual(["2606:2800:220:1::1", 6]);
+  });
+});
+
+describe("playwrightWebSocketGuard", () => {
+  const fakeSocket = (url: string) => {
+    const calls: string[] = [];
+    return {
+      calls,
+      url: () => url,
+      connectToServer: () => { calls.push("connect"); },
+      close: async (options?: { code?: number }) => { calls.push(`close:${options?.code ?? ""}`); }
+    };
+  };
+  const resolver = resolverFor({ "chat.example": ["93.184.216.34"], "rebind.example": ["169.254.169.254"] });
+
+  it("connects an allowed ws/wss URL and closes a blocked one before any connection", async () => {
+    const guard = playwrightWebSocketGuard(allow, resolver);
+    const ok = fakeSocket("wss://chat.example/socket");
+    await guard(ok);
+    expect(ok.calls).toEqual(["connect"]);
+    for (const blocked of ["ws://169.254.169.254/", "ws://rebind.example/", "ws://[fd00:ec2::254]/"]) {
+      const socket = fakeSocket(blocked);
+      await guard(socket);
+      expect(socket.calls, blocked).toEqual(["close:1008"]);
+    }
+  });
+
+  it("applies OUTBOUND_DENY_PRIVATE to WebSockets too", async () => {
+    const socket = fakeSocket("ws://10.0.0.8:9000/");
+    await playwrightWebSocketGuard({ denyPrivate: true, allowlist: [] }, resolver)(socket);
+    expect(socket.calls).toEqual(["close:1008"]);
   });
 });

@@ -15,6 +15,7 @@ vi.mock("playwright", () => ({
     launch: vi.fn(async () => ({
       newPage: vi.fn(async () => ({
         route: vi.fn(async () => undefined),
+        routeWebSocket: vi.fn(async () => undefined),
         setContent: vi.fn(async (html: string) => {
           playwrightMockState.lastHtml = html;
         }),

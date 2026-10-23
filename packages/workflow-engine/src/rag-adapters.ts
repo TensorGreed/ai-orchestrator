@@ -21,6 +21,14 @@ export interface VectorStoreAdapter {
   similaritySearch(query: string, topK: number, embedder: EmbeddingAdapter): Promise<ConnectorDocument[]>;
 }
 
+/**
+ * The fetch an adapter uses. When its endpoint comes from a node's own
+ * config (not deployment settings), the executor passes the outbound URL
+ * guard's pinned fetch, so a workflow cannot point a vector store or
+ * embedder at a metadata or link-local address.
+ */
+export type RagFetch = (url: string, init: RequestInit) => Promise<Response>;
+
 export interface RetrieverAdapter {
   id: string;
   retrieve(query: string, documents: ConnectorDocument[], topK: number): Promise<ConnectorDocument[]>;
@@ -60,13 +68,13 @@ export class TokenEmbeddingAdapter implements SyncEmbeddingAdapter {
 export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
   readonly id = "openai-embedder";
 
-  constructor(private config: { baseUrl?: string; model?: string; apiKey: string }) {}
+  constructor(private config: { fetcher?: RagFetch; baseUrl?: string; model?: string; apiKey: string }) {}
 
   async embed(text: string): Promise<number[]> {
     const baseUrl = this.config.baseUrl || "https://api.openai.com/v1";
     const model = this.config.model || "text-embedding-3-small";
     
-    const response = await fetch(`${baseUrl}/embeddings`, {
+    const response = await (this.config.fetcher ?? fetch)(`${baseUrl}/embeddings`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -92,7 +100,7 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
   readonly id = "azure-openai-embedder";
 
   constructor(
-    private config: { endpoint: string; deployment: string; apiVersion?: string; apiKey: string }
+    private config: { fetcher?: RagFetch; endpoint: string; deployment: string; apiVersion?: string; apiKey: string }
   ) {}
 
   async embed(text: string): Promise<number[]> {
@@ -108,7 +116,7 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
     const authHeaderName = isBearer ? "Authorization" : "api-key";
     const authHeaderValue = isBearer ? `Bearer ${trimmedAuth.replace(/^bearer\s+/i, "").trim()}` : trimmedAuth;
 
-    const response = await fetch(
+    const response = await (this.config.fetcher ?? fetch)(
       `${endpoint}/openai/deployments/${encodeURIComponent(deployment)}/embeddings?api-version=${encodeURIComponent(apiVersion)}`,
       {
         method: "POST",
@@ -327,6 +335,7 @@ export class AzureAiSearchVectorStoreAdapter implements VectorStoreAdapter {
 
   constructor(
     private config: {
+      fetcher?: RagFetch;
       endpoint: string;
       indexName: string;
       apiKey: string;
@@ -384,7 +393,7 @@ export class AzureAiSearchVectorStoreAdapter implements VectorStoreAdapter {
     );
 
     const auth = this.authHeader;
-    const response = await fetch(this.buildIndexUrl("docs/index"), {
+    const response = await (this.config.fetcher ?? fetch)(this.buildIndexUrl("docs/index"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -407,7 +416,7 @@ export class AzureAiSearchVectorStoreAdapter implements VectorStoreAdapter {
     const vector = await embedder.embed(query);
     const auth = this.authHeader;
 
-    const response = await fetch(this.buildIndexUrl("docs/search"), {
+    const response = await (this.config.fetcher ?? fetch)(this.buildIndexUrl("docs/search"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -454,6 +463,7 @@ export class QdrantVectorStoreAdapter implements VectorStoreAdapter {
 
   constructor(
     private config: {
+      fetcher?: RagFetch;
       endpoint: string;
       collectionName: string;
       apiKey?: string;
@@ -506,7 +516,7 @@ export class QdrantVectorStoreAdapter implements VectorStoreAdapter {
       }))
     );
 
-    const response = await fetch(this.collectionPath("/points?wait=true"), {
+    const response = await (this.config.fetcher ?? fetch)(this.collectionPath("/points?wait=true"), {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({ points })
@@ -524,7 +534,7 @@ export class QdrantVectorStoreAdapter implements VectorStoreAdapter {
 
     const { contentField, metadataField } = this.fields;
     const vector = await embedder.embed(query);
-    const response = await fetch(this.collectionPath("/points/search"), {
+    const response = await (this.config.fetcher ?? fetch)(this.collectionPath("/points/search"), {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({
@@ -629,7 +639,7 @@ export class HuggingFaceEmbeddingAdapter implements EmbeddingAdapter {
 
 export class ChromaVectorStoreAdapter implements VectorStoreAdapter {
   readonly id = "chroma-vector-store";
-  constructor(private config: { endpoint: string; collectionName: string; apiKey?: string }) {}
+  constructor(private config: { fetcher?: RagFetch; endpoint: string; collectionName: string; apiKey?: string }) {}
 
   async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
     const ids: string[] = [];
@@ -645,7 +655,7 @@ export class ChromaVectorStoreAdapter implements VectorStoreAdapter {
     const endpoint = this.config.endpoint.replace(/\/+$/, "");
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
-    await fetch(`${endpoint}/api/v1/collections/${this.config.collectionName}/upsert`, {
+    await (this.config.fetcher ?? fetch)(`${endpoint}/api/v1/collections/${this.config.collectionName}/upsert`, {
       method: "POST", headers,
       body: JSON.stringify({ ids, embeddings, documents: docs, metadatas })
     });
@@ -656,7 +666,7 @@ export class ChromaVectorStoreAdapter implements VectorStoreAdapter {
     const endpoint = this.config.endpoint.replace(/\/+$/, "");
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
-    const res = await fetch(`${endpoint}/api/v1/collections/${this.config.collectionName}/query`, {
+    const res = await (this.config.fetcher ?? fetch)(`${endpoint}/api/v1/collections/${this.config.collectionName}/query`, {
       method: "POST", headers,
       body: JSON.stringify({ query_embeddings: [queryEmbedding], n_results: topK })
     });
@@ -671,7 +681,7 @@ export class ChromaVectorStoreAdapter implements VectorStoreAdapter {
 
 export class WeaviateVectorStoreAdapter implements VectorStoreAdapter {
   readonly id = "weaviate-vector-store";
-  constructor(private config: { endpoint: string; className: string; apiKey?: string }) {}
+  constructor(private config: { fetcher?: RagFetch; endpoint: string; className: string; apiKey?: string }) {}
 
   async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
     const endpoint = this.config.endpoint.replace(/\/+$/, "");
@@ -679,7 +689,7 @@ export class WeaviateVectorStoreAdapter implements VectorStoreAdapter {
     if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     for (const doc of documents) {
       const vector = await embedder.embed(doc.text);
-      await fetch(`${endpoint}/v1/objects`, {
+      await (this.config.fetcher ?? fetch)(`${endpoint}/v1/objects`, {
         method: "POST", headers,
         body: JSON.stringify({ class: this.config.className, id: doc.id, properties: { content: doc.text, metadata: JSON.stringify(doc.metadata ?? {}) }, vector })
       });
@@ -692,7 +702,7 @@ export class WeaviateVectorStoreAdapter implements VectorStoreAdapter {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     const graphql = { query: `{ Get { ${this.config.className}(limit: ${topK}, nearVector: { vector: [${queryVector.join(",")}] }) { content metadata _additional { id distance } } } }` };
-    const res = await fetch(`${endpoint}/v1/graphql`, { method: "POST", headers, body: JSON.stringify(graphql) });
+    const res = await (this.config.fetcher ?? fetch)(`${endpoint}/v1/graphql`, { method: "POST", headers, body: JSON.stringify(graphql) });
     if (!res.ok) return [];
     const json = await res.json() as { data?: { Get?: Record<string, Array<{ content: string; metadata?: string; _additional?: { id: string } }>> } };
     const results = json.data?.Get?.[this.config.className] ?? [];
@@ -702,7 +712,7 @@ export class WeaviateVectorStoreAdapter implements VectorStoreAdapter {
 
 export class RedisVectorStoreAdapter implements VectorStoreAdapter {
   readonly id = "redis-vector-store";
-  constructor(private config: { endpoint: string; indexName: string; apiKey?: string }) {}
+  constructor(private config: { fetcher?: RagFetch; endpoint: string; indexName: string; apiKey?: string }) {}
 
   async upsert(documents: ConnectorDocument[], embedder: EmbeddingAdapter): Promise<void> {
     // Redis vector store uses the Redis Stack JSON + Search API via HTTP
@@ -711,7 +721,7 @@ export class RedisVectorStoreAdapter implements VectorStoreAdapter {
     if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     for (const doc of documents) {
       const vector = await embedder.embed(doc.text);
-      await fetch(`${endpoint}/JSON.SET/${this.config.indexName}:${doc.id}/$`, {
+      await (this.config.fetcher ?? fetch)(`${endpoint}/JSON.SET/${this.config.indexName}:${doc.id}/$`, {
         method: "POST", headers,
         body: JSON.stringify({ content: doc.text, metadata: doc.metadata ?? {}, embedding: vector })
       });
@@ -724,7 +734,7 @@ export class RedisVectorStoreAdapter implements VectorStoreAdapter {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     const vectorStr = queryVector.map(v => v.toFixed(6)).join(",");
-    const res = await fetch(`${endpoint}/FT.SEARCH/${this.config.indexName}/*=>[KNN ${topK} @embedding $vec AS score]/PARAMS/2/vec/${vectorStr}/SORTBY/score/LIMIT/0/${topK}`, {
+    const res = await (this.config.fetcher ?? fetch)(`${endpoint}/FT.SEARCH/${this.config.indexName}/*=>[KNN ${topK} @embedding $vec AS score]/PARAMS/2/vec/${vectorStr}/SORTBY/score/LIMIT/0/${topK}`, {
       method: "POST", headers
     });
     if (!res.ok) return [];

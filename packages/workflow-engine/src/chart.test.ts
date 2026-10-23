@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { REPLAY_BLOCKED_LOAD_MARKER } from "@ai-orchestrator/shared";
-import { injectData, renderChart } from "./chart.js";
+import { MAX_INLINE_CHART_IMAGE_CHARS, injectData, renderChart } from "./chart.js";
 
 describe("chart", () => {
   describe("injectData", () => {
@@ -195,5 +195,60 @@ describe("chart links never crash the process", () => {
     expect(run.unhandled).toEqual([]);
     expect(run.outcome.ok).toBe(false);
     if (!run.outcome.ok) expect(String(run.outcome.error)).toContain(REPLAY_BLOCKED_LOAD_MARKER);
+  });
+});
+
+describe("chart with the outbound guard (live)", () => {
+  const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  const imageSpec = (u: string) => ({
+    mark: "image",
+    data: { values: [{ u, x: 1 }] },
+    encoding: { url: { field: "u", type: "nominal" }, x: { field: "x", type: "quantitative" } }
+  });
+
+  it("embeds an inline data:image without a guard check or a fetch", async () => {
+    const guarded: string[] = [];
+    const fetched: string[] = [];
+    const result = await renderChart({
+      spec: imageSpec(png),
+      urlGuard: async (url) => { guarded.push(url); },
+      fetcher: async (url) => { fetched.push(url); return new Response("[]"); }
+    });
+    expect(result.svg).toContain(png.slice(0, 60));
+    expect(guarded).toEqual([]);
+    expect(fetched).toEqual([]);
+  });
+
+  it("decodes an inline data:image load locally, and refuses one above the size cap, never fetching either", async () => {
+    const calls: string[] = [];
+    const deps = {
+      urlGuard: async (url: string) => { calls.push(`guard:${url.slice(0, 20)}`); },
+      fetcher: async (url: string) => { calls.push(`fetch:${url.slice(0, 20)}`); return new Response("[]"); }
+    };
+    // A data: image is a load, not a link, when a spec names it as a data source.
+    const rows = Buffer.from(JSON.stringify([{ a: "inline-row", b: 3 }])).toString("base64");
+    const small = { mark: "bar", data: { url: `data:image/svg+xml;base64,${rows}`, format: { type: "json" } }, encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" } } };
+    const drawn = await renderChart({ spec: small, ...deps });
+    expect(drawn.svg).toContain("inline-row");
+    const huge = { ...small, data: { url: "data:image/png;base64," + "A".repeat(MAX_INLINE_CHART_IMAGE_CHARS), format: { type: "json" } } };
+    const refused = await renderChart({ spec: huge, ...deps }).then((result) => result.svg, (error: Error) => error.message);
+    expect(refused).not.toContain("inline-row");
+    expect(calls).toEqual([]);
+  });
+
+  it("loads data.url through the guarded fetcher, after the guard check", async () => {
+    const calls: string[] = [];
+    const spec = { mark: "bar", data: { url: "https://charts.example/data.json" }, encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" } } };
+    const result = await renderChart({
+      spec,
+      urlGuard: async (url) => { calls.push(`guard:${url}`); },
+      fetcher: async (url) => {
+        calls.push(`fetch:${url}`);
+        return new Response(JSON.stringify([{ a: "x", b: 3 }]), { headers: { "content-type": "application/json" } });
+      }
+    });
+    expect(calls[0]).toBe("guard:https://charts.example/data.json");
+    expect(calls.at(-1)).toBe("fetch:https://charts.example/data.json");
+    expect(result.svg).toContain("<path");
   });
 });

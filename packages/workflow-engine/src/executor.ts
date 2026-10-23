@@ -67,7 +67,8 @@ import {
   type RerankAdapter,
   type EmbeddingRegistry,
   type VectorStoreRegistry,
-  type KnowledgeBaseStore
+  type KnowledgeBaseStore,
+  type RagFetch
 } from "./rag-adapters";
 import {
   extractCitationsFromText,
@@ -80,6 +81,8 @@ import {
   assertOutboundUrlAllowed,
   guardedFetch,
   playwrightOutboundGuard,
+  playwrightWebSocketGuard,
+  OutboundUrlBlockedError,
   type OutboundGuardConfig
 } from "./outbound-url-guard";
 import { renderTemplate, tryParseJson } from "./template";
@@ -1991,6 +1994,8 @@ async function createHtmlPdfBuffer(input: {
     // Every sub-resource the HTML loads (<img>, <script>, fetch) is checked; a
     // blocked one is aborted, so an injected URL cannot read internal hosts.
     await page.route("**/*", playwrightOutboundGuard(input.outboundGuard, input.resolver));
+    // WebSockets bypass page.route; they get the same check.
+    await page.routeWebSocket(/.*/, playwrightWebSocketGuard(input.outboundGuard, input.resolver));
     await page.setContent(input.html, {
       waitUntil: "networkidle",
       timeout: input.timeoutMs
@@ -2756,6 +2761,15 @@ function toJsonSafeValue(value: unknown): unknown {
  * in this process; see code-sandbox.ts). `input` is what the code sees as
  * `input`; the result and logs come back as JSON-safe values.
  */
+/** The outbound guard's pinned fetch, for RAG endpoints that come from a node's own config. */
+function guardedRagFetch(dependencies: { outboundGuard?: OutboundGuardConfig; outboundDnsResolver?: (hostname: string) => Promise<string[]> }): RagFetch {
+  return (url, init) =>
+    guardedFetch(url, init, {
+      config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+      ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+    });
+}
+
 export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput, plan: CodeSandboxPlan = IN_PROCESS_CODE_SANDBOX): Promise<CodeNodeExecutionOutput> {
   const [output] = await runJavaScriptCode(plan, String(input.code ?? ""), [input.input], codeNodeTimeout(input.timeoutMs));
   return output!;
@@ -3923,6 +3937,8 @@ async function executeNode(
 
       const embedder = new AzureOpenAIEmbeddingAdapter({
         endpoint,
+        // The endpoint is node config, so it goes through the outbound guard (pinned).
+        fetcher: guardedRagFetch(dependencies),
         deployment,
         apiVersion:
           typeof config.apiVersion === "string" && config.apiVersion.trim()
@@ -3951,6 +3967,9 @@ async function executeNode(
       const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
       const vectorStoreId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
       const vectorStoreConfig = toRecord(config.vectorStoreConfig);
+      // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound guard.
+      const nodeFetch = (key: "endpoint" | "baseUrl") =>
+        typeof vectorStoreConfig[key] === "string" && String(vectorStoreConfig[key]).trim() ? guardedRagFetch(dependencies) : undefined;
 
       let embedder = dependencies.embeddingRegistry?.get(embedderId);
       if (!embedder) {
@@ -3958,7 +3977,7 @@ async function executeNode(
         else if (embedderId === "openai-embedder") {
            const apiKeyRef = config.embeddingSecretRef;
            const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.OPENAI_API_KEY;
-           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...vectorStoreConfig });
+           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...vectorStoreConfig, fetcher: nodeFetch("baseUrl") });
         } else if (embedderId === "azure-openai-embedder") {
            const apiKeyRef = config.embeddingSecretRef;
            const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.AZURE_OPENAI_API_KEY;
@@ -3971,6 +3990,7 @@ async function executeNode(
                  : "text-embedding-3-small";
            embedder = new AzureOpenAIEmbeddingAdapter({
              endpoint: endpoint || "",
+             fetcher: nodeFetch("endpoint"),
              deployment,
              apiVersion: typeof vectorStoreConfig.apiVersion === "string" ? vectorStoreConfig.apiVersion : process.env.AZURE_OPENAI_API_VERSION,
              apiKey: apiKey || ""
@@ -4010,6 +4030,7 @@ async function executeNode(
            const apiKeyRef = config.embeddingSecretRef;
            const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.AZURE_AI_SEARCH_API_KEY;
            store = new AzureAiSearchVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_AI_SEARCH_ENDPOINT || "",
              indexName: typeof vectorStoreConfig.indexName === "string" ? vectorStoreConfig.indexName : "",
              apiVersion: typeof vectorStoreConfig.apiVersion === "string" ? vectorStoreConfig.apiVersion : undefined,
@@ -4043,6 +4064,7 @@ async function executeNode(
              return undefined;
            })();
            store = new QdrantVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint:
                typeof vectorStoreConfig.endpoint === "string"
                  ? vectorStoreConfig.endpoint
@@ -4072,6 +4094,7 @@ async function executeNode(
            const apiKeyRef = config.embeddingSecretRef;
            const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.CHROMA_API_KEY;
            store = new ChromaVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.CHROMA_ENDPOINT || "http://localhost:8000",
              collectionName: typeof vectorStoreConfig.collectionName === "string" ? vectorStoreConfig.collectionName : "",
              apiKey: apiKey || undefined
@@ -4080,6 +4103,7 @@ async function executeNode(
            const apiKeyRef = config.embeddingSecretRef;
            const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.WEAVIATE_API_KEY;
            store = new WeaviateVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.WEAVIATE_ENDPOINT || "http://localhost:8080",
              className: typeof vectorStoreConfig.className === "string" ? vectorStoreConfig.className : "",
              apiKey: apiKey || undefined
@@ -4088,6 +4112,7 @@ async function executeNode(
            const apiKeyRef = config.embeddingSecretRef;
            const apiKey = typeof apiKeyRef === "object" && apiKeyRef ? await dependencies.resolveSecret(apiKeyRef as SecretReference) : process.env.REDIS_API_KEY;
            store = new RedisVectorStoreAdapter({
+             fetcher: nodeFetch("endpoint"),
              endpoint: typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.REDIS_ENDPOINT || "http://localhost:6379",
              indexName: typeof vectorStoreConfig.indexName === "string" ? vectorStoreConfig.indexName : "",
              apiKey: apiKey || undefined
@@ -4272,7 +4297,8 @@ async function executeNode(
         ...(typeof config.waitForSelector === "string" && config.waitForSelector.trim()
           ? { waitForSelector: config.waitForSelector.trim() }
           : {}),
-        requestGuard: playwrightOutboundGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver)
+        requestGuard: playwrightOutboundGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver),
+        webSocketGuard: playwrightWebSocketGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver)
       };
 
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim()
@@ -4347,8 +4373,13 @@ async function executeNode(
         config: themeConfig,
         // Phase 15.1 — a replay never lets a chart load data from a URL or file.
         offline: Boolean(dependencies.replayNodeHook),
-        // Live charts run every data/image URL through the outbound guard.
-        urlGuard: (url: string) => assertOutboundUrlAllowed(url, dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver)
+        // Live charts run every data/image URL through the outbound guard, and fetch over a pinned connection.
+        urlGuard: (url: string) => assertOutboundUrlAllowed(url, dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver),
+        fetcher: (url: string) =>
+          guardedFetch(url, {}, {
+            config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+            ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+          })
       });
 
       return {
@@ -6030,6 +6061,10 @@ async function executeNodeWithRetry(
     } catch (error) {
       // Phase 12.1 — a guard block or an approval pause is a decision, not a transient failure.
       if (isCancellationError(error) || dependencies.abortSignal?.aborted || isMcpToolPolicyBlock(error) || isGuardBlockedError(error) || isApprovalHandoffSignal(error)) {
+        throw error;
+      }
+      // A URL the outbound guard refuses is refused again on every attempt.
+      if (error instanceof OutboundUrlBlockedError) {
         throw error;
       }
       if (error instanceof WorkflowError) {

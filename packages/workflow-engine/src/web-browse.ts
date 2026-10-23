@@ -48,6 +48,8 @@ export interface WebBrowseOptions {
    * injected `<img>`/`<script>` src or a fetch inside the page is stopped.
    */
   requestGuard?: (route: { request(): { url(): string }; continue(): Promise<void>; abort(errorCode?: string): Promise<void> }) => Promise<void>;
+  /** The same check for WebSockets the page opens (`context.route` does not see them). */
+  webSocketGuard?: (ws: { url(): string; connectToServer(): unknown; close(options?: { code?: number; reason?: string }): Promise<void> }) => Promise<void>;
   /**
    * Whether to capture a screenshot. Default true.
    * - `false` skips entirely (smallest output, fastest).
@@ -145,6 +147,9 @@ export async function browseUrl(options: WebBrowseOptions): Promise<WebBrowseRes
     });
     if (options.requestGuard) {
       await context.route("**/*", options.requestGuard);
+    }
+    if (options.webSocketGuard) {
+      await context.routeWebSocket(/.*/, options.webSocketGuard);
     }
     const page = await context.newPage();
     const timeoutMs = options.timeoutMs ?? 30_000;

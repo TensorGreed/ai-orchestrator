@@ -16,7 +16,7 @@
  *
  * DNS rebinding: the host is resolved and every returned address is
  * classified, so a name that resolves to a blocked address is refused.
- * `guardedFetch` also pins the connection: its dispatcher's `lookup` resolves
+ * `guardedFetch` also pins the connection: its undici dispatcher's `lookup` resolves
  * the name once at connect time, checks every address and hands the socket
  * only those, so a name cannot pass the check with one address and connect to
  * another. The URL keeps its hostname, so TLS SNI, certificate checks and the
@@ -26,7 +26,7 @@
  */
 import dns from "node:dns/promises";
 import type { LookupAddress, LookupOptions } from "node:dns";
-import { Agent, fetch as undiciFetch } from "undici";
+import { Agent } from "undici";
 import { classifyIp, parseIp, type DnsResolver, type IpClass } from "@ai-orchestrator/guard-sdk";
 
 export interface OutboundGuardConfig {
@@ -282,8 +282,8 @@ async function pinnedFetch(url: string, init: RequestInit, options: GuardedFetch
   const parsed = new URL(url);
   const dispatcher = createPinnedDispatcher(parsed.port || DEFAULT_PORTS[parsed.protocol] || "", options.config, resolver);
   try {
-    const response = await undiciFetch(url, { ...(init as Record<string, unknown>), dispatcher } as Parameters<typeof undiciFetch>[1]);
-    return response as unknown as Response;
+    // The runtime's fetch takes an undici dispatcher; the pinned Agent decides which address the socket reaches.
+    return await fetch(url, { ...init, dispatcher } as RequestInit);
   } catch (error) {
     // Surface a block from the pinned lookup as the guard's own error, not a generic "fetch failed".
     const cause = (error as { cause?: unknown }).cause;
@@ -318,5 +318,29 @@ export function playwrightOutboundGuard(config: OutboundGuardConfig, resolver: D
     const check = await checkOutboundUrl(url, config, resolver);
     if (check.ok) await route.continue();
     else await route.abort("blockedbyclient");
+  };
+}
+
+/** Minimal shape of a Playwright `WebSocketRoute`. */
+export interface PlaywrightWebSocketRouteLike {
+  url(): string;
+  connectToServer(): unknown;
+  close(options?: { code?: number; reason?: string }): Promise<void>;
+}
+
+/**
+ * A Playwright `routeWebSocket` handler: a page's `new WebSocket(url)` is
+ * connected only when the URL's host passes the same policy as http(s)
+ * requests (`ws:`/`wss:` are checked as `http:`/`https:`); otherwise the
+ * socket is closed before any connection is made. `context.route` does not
+ * see WebSockets, so the browser-based nodes install both.
+ */
+export function playwrightWebSocketGuard(config: OutboundGuardConfig, resolver: DnsResolver = nodeDnsResolver): (ws: PlaywrightWebSocketRouteLike) => Promise<void> {
+  return async (ws) => {
+    const url = ws.url();
+    const asHttp = url.replace(/^ws(s?):/i, "http$1:");
+    const check = /^wss?:/i.test(url) ? await checkOutboundUrl(asHttp, config, resolver) : { ok: false };
+    if (check.ok) ws.connectToServer();
+    else await ws.close({ code: 1008, reason: "Blocked by the outbound URL guard" });
   };
 }
