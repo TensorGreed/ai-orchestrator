@@ -316,10 +316,26 @@ export class ReplayRecordingService {
     const { models: rawTape, memorySeed: rawSeed, ...mcpOnly } = cassetteRecord?.cassette ?? ({} as Partial<McpCassette>);
     const cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(mcpOnly) as McpCassette) : null;
     const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
-    const modelTape: ModelTape | null = rawTape ? (scrubber.tree(rawTape) as ModelTape) : null;
-    const modelTapeJson = modelTape ? this.serialise(modelTape, scrubber) : null;
-    const memorySeed: ModelMemorySeed | null = rawSeed ? (scrubber.tree(rawSeed) as ModelMemorySeed) : null;
-    const memorySeedJson = memorySeed ? this.serialise(memorySeed, scrubber) : null;
+    let modelTape: ModelTape | null = rawTape ? (scrubber.tree(rawTape) as ModelTape) : null;
+    let modelTapeJson = modelTape ? this.serialise(modelTape, scrubber) : null;
+    let memorySeed: ModelMemorySeed | null = rawSeed ? (scrubber.tree(rawSeed) as ModelMemorySeed) : null;
+    let memorySeedJson = memorySeed ? this.serialise(memorySeed, scrubber) : null;
+    // Phase 15.3 — the tape and the seed count toward REPLAY_RECORDING_MAX_BYTES with the node outputs. What does
+    // not fit is cut: the tape keeps its first calls (`truncated: true`), then the seed keeps the sessions that fit.
+    const left = this.options.maxBytes - fixedBytes - byteLength(nodesJson);
+    if (modelTape && modelTapeJson && byteLength(modelTapeJson) > left) {
+      const cut = this.cutTape(modelTape, left, scrubber);
+      modelTape = cut.tape;
+      modelTapeJson = cut.json;
+      truncated = true;
+    }
+    const leftForSeed = left - (modelTapeJson ? byteLength(modelTapeJson) : 0);
+    if (memorySeed && memorySeedJson && byteLength(memorySeedJson) > leftForSeed) {
+      const cut = this.cutSeed(memorySeed, leftForSeed, scrubber);
+      memorySeed = cut.seed;
+      memorySeedJson = cut.json;
+      truncated = true;
+    }
     const bytes =
       fixedBytes +
       byteLength(nodesJson) +
@@ -352,6 +368,36 @@ export class ReplayRecordingService {
       createdAt: this.now().toISOString(),
       createdBy
     });
+  }
+
+  /** The longest prefix of the tape (in call order) that fits in `maxBytes`, marked truncated. */
+  private cutTape(tape: ModelTape, maxBytes: number, scrubber: SecretScrubber): { tape: ModelTape; json: string } {
+    const entries = [...tape.entries].sort((a, b) => a.seq - b.seq);
+    const empty: ModelTape = { ...tape, entries: [], truncated: true, bytes: 0 };
+    let used = jsonBytes(empty) + 64;
+    const kept: ModelTape["entries"] = [];
+    for (const entry of entries) {
+      const size = jsonBytes(entry) + 1;
+      if (used + size > maxBytes) break;
+      used += size;
+      kept.push(entry);
+    }
+    const cut: ModelTape = { ...tape, entries: kept, truncated: true, bytes: jsonBytes(kept) };
+    return { tape: cut, json: this.serialise(cut, scrubber) };
+  }
+
+  /** The sessions of the seed that fit in `maxBytes`, marked truncated. */
+  private cutSeed(seed: ModelMemorySeed, maxBytes: number, scrubber: SecretScrubber): { seed: ModelMemorySeed; json: string } {
+    let used = jsonBytes({ sessions: [], truncated: true }) + 8;
+    const kept: ModelMemorySeed["sessions"] = [];
+    for (const session of seed.sessions) {
+      const size = jsonBytes(session) + 1;
+      if (used + size > maxBytes) continue;
+      used += size;
+      kept.push(session);
+    }
+    const cut: ModelMemorySeed = { sessions: kept, truncated: true };
+    return { seed: cut, json: this.serialise(cut, scrubber) };
   }
 
   private tooLargeMessage(): string {

@@ -143,6 +143,34 @@ export class MemorySeedCapture {
   }
 }
 
+/**
+ * Phase 15.3 — a cassette as a user who may read but not edit its workflow
+ * sees it: model tape entries without their request and response bodies,
+ * and no memory seed (only how many sessions it held).
+ */
+export function cassetteSummaryView<T extends { cassette: McpCassette }>(record: T): T {
+  const cassette = record.cassette;
+  if (!cassette || (!cassette.models && !cassette.memorySeed)) return record;
+  const { memorySeed, models, ...rest } = cassette;
+  const view: McpCassette = {
+    ...rest,
+    ...(models
+      ? {
+          models: {
+            ...models,
+            entries: models.entries.map(({ request: _request, response: _response, ...entry }) => entry as unknown as (typeof models.entries)[number])
+          }
+        }
+      : {}),
+    omitted: {
+      modelTapeBodies: Boolean(models),
+      memorySeedSessions: memorySeed ? memorySeed.sessions.length : null,
+      reason: "Model prompts and answers and the memory seed are shown to users who may edit this workflow (workflow:write)."
+    }
+  };
+  return { ...record, cassette: view };
+}
+
 export interface McpCassetteRunPlan {
   /** The registry the run uses instead of the deployment's. */
   registry: MCPRegistry;
@@ -223,7 +251,10 @@ export class McpCassetteService {
    * Strict misses fail; lenient misses go to `live` (counted in the report).
    */
   planModelReplay(tape: ModelTape, mode: ModelTapeMode, live: ProviderRegistry): ModelReplayPlan {
-    return createModelTapeReplayRegistry(tape, { mode, ...(mode === "lenient" ? { live } : {}), scrub: this.tapeScrub() });
+    // The live registry is always passed so every provider the deployment has gets a replay adapter (a strict
+    // call to a provider the tape never saw is then a tape miss, not "unknown provider"); the player only calls
+    // it in lenient mode.
+    return createModelTapeReplayRegistry(tape, { mode, live, scrub: this.tapeScrub() });
   }
 
   /**

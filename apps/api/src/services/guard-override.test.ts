@@ -68,4 +68,32 @@ describe("guard profile override", () => {
     expect(guard.profileOverrideProblem({ profileId: "nope" })).toMatch(/not found/);
     expect(() => guard.resolveRun({ workflowId: "wf", profileOverride: { profileId: "nope" } })).toThrow(GuardNotFoundError);
   });
+
+  it("pins the latest version when the override names none, with its hash", async () => {
+    const { guard } = await setup();
+    const resolved = guard.resolveProfileOverride({ profileId: "candidate" }, { workflowId: "wf", isAdmin: false });
+    expect(resolved).toMatchObject({ ok: true, profile: { profileId: "candidate", version: 2 } });
+    if (resolved.ok) expect(resolved.profile.hash).toBe(guard.loadProfile("candidate", 2)!.hash);
+    expect(guard.resolveProfileOverride({ profileId: "candidate", version: 9 }, { workflowId: "wf", isAdmin: true })).toMatchObject({ ok: false, problem: expect.stringMatching(/Version 9/) });
+  });
+
+  it("refuses an older version of a bound profile to a non-admin, and lets an admin use it", async () => {
+    const { guard } = await setup();
+    const document = { ...(createDefaultGuardProfile() as unknown as Record<string, unknown>), name: "Bound v2" };
+    guard.updateProfile("bound", { document }, null);
+    // The workflow binding applies "bound" at its latest version (2).
+    const refused = guard.resolveProfileOverride({ profileId: "bound", version: 1 }, { workflowId: "wf", isAdmin: false });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.problem).toMatch(/older than version 2.*workflow binding.*Only an admin/);
+    expect(guard.resolveProfileOverride({ profileId: "bound", version: 1 }, { workflowId: "wf", isAdmin: true })).toMatchObject({ ok: true, profile: { version: 1 } });
+    expect(guard.resolveProfileOverride({ profileId: "bound", version: 2 }, { workflowId: "wf", isAdmin: false }).ok).toBe(true);
+    // The project's enforced binding counts too.
+    guard.setBinding("workflow", "wf", { mode: "inherit" }, null);
+    guard.setBinding("project", "default", { mode: "enforced", profileId: "bound" }, null);
+    const enforced = guard.resolveProfileOverride({ profileId: "bound", version: 1 }, { workflowId: "wf", projectId: "default", isAdmin: false });
+    expect(enforced.ok).toBe(false);
+    if (!enforced.ok) expect(enforced.problem).toMatch(/project binding \(enforced\)/);
+    // An older version of a profile nothing binds is fine.
+    expect(guard.resolveProfileOverride({ profileId: "candidate", version: 1 }, { workflowId: "wf", isAdmin: false }).ok).toBe(true);
+  });
 });

@@ -354,6 +354,41 @@ export class GuardService {
     return null;
   }
 
+  /**
+   * Phase 15.3 — a replay job's guard profile override, resolved once for
+   * the whole job: the version that will run (the latest one now when the
+   * override names none) and its hash. Refused when the profile or version
+   * does not exist, or, for a user who is not an admin, when it is an older
+   * version of a profile the workflow's project or workflow binding applies
+   * now (bindings always apply the latest version): a builder cannot replay
+   * under a weaker copy of the profile an admin bound.
+   */
+  resolveProfileOverride(
+    override: { profileId: string; version?: number },
+    context: { workflowId: string; projectId?: string | null; isAdmin: boolean }
+  ): { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string } {
+    const problem = this.profileOverrideProblem(override);
+    if (problem) return { ok: false, problem };
+    const resolved = this.loadProfile(override.profileId, override.version)!;
+    if (!context.isAdmin) {
+      const project = this.getBinding("project", context.projectId ?? "default");
+      const workflow = this.getBinding("workflow", context.workflowId);
+      const bound = [
+        project.mode === "enforced" || project.mode === "override" ? { level: "project", mode: project.mode, profileId: project.profileId } : null,
+        workflow.mode === "override" ? { level: "workflow", mode: workflow.mode, profileId: workflow.profileId } : null
+      ].filter((entry) => entry && entry.profileId === resolved.profileId);
+      const current = bound.length > 0 ? this.loadProfile(resolved.profileId) : undefined;
+      if (current && resolved.version < current.version) {
+        const where = bound.map((entry) => `the ${entry!.level} binding (${entry!.mode})`).join(" and ");
+        return {
+          ok: false,
+          problem: `Guard profile ${resolved.profileId} version ${resolved.version} is older than version ${current.version}, which ${where} applies to this workflow now. Only an admin can replay under an older version of a bound profile.`
+        };
+      }
+    }
+    return { ok: true, profile: { profileId: resolved.profileId, version: resolved.version, hash: resolved.hash } };
+  }
+
   resolveRun(context: { workflowId: string; projectId?: string | null; profileOverride?: GuardRunContext["profileOverride"] }): GuardRunResolution {
     if (context.profileOverride) return this.resolveOverride(context.profileOverride, context.projectId ?? "default");
     const projectId = context.projectId ?? "default";

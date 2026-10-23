@@ -111,6 +111,13 @@ export interface RecordExecutionInput {
   durationMs: number;
   /** Raw nodeResults map from the executor (Record<nodeId, output>). */
   nodeResults: Record<string, unknown>;
+  /**
+   * Phase 15.3 — the model calls that really reached a model, in place of the
+   * node telemetry: a replay that answered model calls from a golden run's
+   * model tape records only its live calls (none in strict mode), so tape
+   * answers never show as spend.
+   */
+  liveModelCalls?: Array<{ providerId: string; model: string; inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null }>;
 }
 
 export class UsageService {
@@ -155,7 +162,14 @@ export class UsageService {
     costUsd: number;
     llmCallCount: number;
   } {
-    const telemetries = collectTelemetry(input.nodeResults);
+    const telemetries: NodeTelemetry[] = input.liveModelCalls
+      ? input.liveModelCalls.map((call) => ({
+          providerId: call.providerId,
+          model: call.model,
+          usage: { inputTokens: call.inputTokens ?? 0, outputTokens: call.outputTokens ?? 0, cachedInputTokens: call.cachedInputTokens ?? 0 },
+          llmCallCount: 1
+        }))
+      : collectTelemetry(input.nodeResults);
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedInputTokens = 0;

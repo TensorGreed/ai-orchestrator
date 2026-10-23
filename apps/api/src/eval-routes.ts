@@ -629,6 +629,13 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       reply.code(400);
       return { ok: false, response: { error: scorerProblem } };
     }
+    // Phase 15.3 — a model override's secret is used like any other: the user must be allowed to use it in this workflow's project.
+    for (const override of parsed.data.overrides?.models ?? []) {
+      if (override.secretRef && !deps.canUseSecret(user, override.secretRef.secretId, store.getWorkflow(workflowId) ?? { id: workflowId })) {
+        reply.code(400);
+        return { ok: false, response: { error: `The model override's secret ${override.secretRef.secretId} was not found or cannot be used in this workflow's project.` } };
+      }
+    }
     return { ok: true, request: parsed.data, workflowId };
   };
 
@@ -673,7 +680,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const checked = checkReplayJobRequest(user, request.body, reply);
     if (!checked.ok) return checked.response;
     try {
-      return evals.estimateReplayJob(checked.request, { workflowId: checked.workflowId });
+      return evals.estimateReplayJob(checked.request, { workflowId: checked.workflowId, actor: user });
     } catch (error) {
       return evalRunError(reply, error);
     }

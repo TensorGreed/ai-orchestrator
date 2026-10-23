@@ -14,7 +14,6 @@ import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
   ContainerSandboxLauncher,
-  classifyMcpTool,
   McpRuntimeGuard,
   createDefaultMCPRegistry,
   detectContainerRuntime,
@@ -99,7 +98,7 @@ import { computeTemplateDependencies } from "./services/template-dependencies";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
 import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
-import { EVAL_RUN_STALE_MS, EvalService, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
+import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
 import { AuthService, type SafeUser, type UserRole } from "./services/auth-service";
 import { SchedulerService } from "./services/scheduler-service";
@@ -2177,6 +2176,8 @@ export function createApp(
     triggeredBy?: string;
     requestInput?: unknown;
     customData?: Record<string, unknown>;
+    /** Phase 15.3 — a model replay's live calls: only they are recorded as usage (tape answers cost nothing). */
+    liveModelCalls?: Array<{ providerId: string; model: string; inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null }>;
   }) => {
     if (input.result.status === "waiting_approval") {
       app.log.info(
@@ -2276,7 +2277,8 @@ export function createApp(
         triggerType: input.triggerType ?? null,
         status: input.result.status,
         durationMs: toDurationMs(input.result.startedAt, input.result.completedAt) ?? 0,
-        nodeResults: nodeOutputs
+        nodeResults: nodeOutputs,
+        ...(input.liveModelCalls ? { liveModelCalls: input.liveModelCalls } : {})
       });
 
       // Phase 8.3 — fire budget alerts on threshold crossings. Debounced per
@@ -3060,9 +3062,10 @@ export function createApp(
    * the workflow (the same rule as queued runs). The run then executes with
    * their policy and project scope (run-scope.ts).
    */
-  const evalRunActor = (userId: string, email: string, workflowId: string): SafeUser | null => {
+  const evalRunActor = (userId: string, email: string, workflowId: string, permission: "workflow:execute" | "workflow:write" = "workflow:execute"): SafeUser | null => {
     const actor = evalPolicyActor(userId, email);
-    return actor && runAccess.workflow(actor, workflowId, "workflow:execute").ok ? actor : null;
+    if (!actor || !runAccess.workflow(actor, workflowId, "workflow:execute").ok) return null;
+    return permission === "workflow:execute" || runAccess.workflow(actor, workflowId, permission).ok ? actor : null;
   };
 
   const evalService = new EvalService(store, async (input) => {
@@ -3160,6 +3163,7 @@ export function createApp(
   }, evalLlmJudge, {
     concurrency: config.REPLAY_CONCURRENCY,
     maxCases: config.REPLAY_JOB_MAX_CASES,
+    maxExecutions: config.REPLAY_JOB_MAX_EXECUTIONS ?? REPLAY_JOB_MAX_EXECUTIONS_DEFAULT,
     defaultMaxCostUsd: config.REPLAY_JOB_DEFAULT_MAX_COST_USD,
     evalRunMaxCostUsd: config.EVAL_RUN_MAX_COST_USD,
     judgeCallCeilingUsd,
@@ -3170,7 +3174,7 @@ export function createApp(
     // Phase 15.2 — replay jobs use the 15.1 replay machinery, built further down.
     replay: {
       // Phase 15.3 — the draft, a saved version or an inline workflow file, with the overrides applied.
-      resolveCandidate: (workflowId, request) => replayService.resolveJobCandidate(workflowId, request),
+      resolveCandidate: (workflowId, request, context) => replayService.resolveJobCandidate(workflowId, request, context),
       getRecording: (id) => store.getReplayRecording(id),
       // The candidate was resolved when the job started; it runs in the workflow's current project.
       replayCase: ({ recording, candidate, request, actor, executionId, models, overrides, baseline, role, repeatIndex }) => {
@@ -3189,7 +3193,8 @@ export function createApp(
       },
       baselineFor: (recording) => replayService.baselineFor(recording),
       priceCall: (providerId, model, inputTokens, outputTokens) => usageService.estimateCostUsd(providerId, model, inputTokens, outputTokens, 0),
-      actorFor: (userId, email, workflowId) => evalRunActor(userId, email, workflowId)
+      // Phase 15.3 — an inline or overridden candidate keeps needing workflow:write for every case.
+      actorFor: (userId, email, workflowId, permission) => evalRunActor(userId, email, workflowId, permission)
     },
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
@@ -11250,14 +11255,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     liveReads: {
       registry: mcpRegistry,
       resolve: (registryServerId) => resolveRegisteredMcpServer(registryServerId),
-      // Read-only as the tool policy classifies it: an admin's marking, else the server's annotations; unknown tools are writes.
-      isReadOnlyTool: ({ config, toolName, annotations }) =>
-        classifyMcpTool({
-          manualReadOnly: manualReadOnlyFor(store.listMcpToolClassifications(), config.registryServerId, toolName),
-          annotations: (annotations ?? null) as McpToolAnnotations | null
-        }).readOnly
+      // Read-only only when an admin marked the tool read-only in tool policy. A server's own
+      // annotations (readOnlyHint) are its claim, not proof: unmarked and unknown tools are writes.
+      isReadOnlyTool: ({ config, toolName }) => manualReadOnlyFor(store.listMcpToolClassifications(), config.registryServerId, toolName) === true
     },
-    guardProfileProblem: (override) => guardService.profileOverrideProblem(override),
+    resolveGuardProfile: (override, context) =>
+      guardService.resolveProfileOverride(override, { workflowId: context.workflowId, projectId: context.projectId, isAdmin: context.actor?.role === "admin" }),
     execute: async (replay, actor) => {
       const storedInput = asRecord(replay.recording.input);
       const executed = await runWorkflowExecution({
@@ -11292,7 +11295,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         triggerType: REPLAY_TRIGGER_TYPE,
         triggeredBy: actor.email,
         requestInput: storedInput,
-        customData: replay.customData
+        customData: replay.customData,
+        ...(replay.modelPlan ? { liveModelCalls: replay.modelPlan.player.report().liveCalls ?? [] } : {})
       });
       return result;
     }

@@ -49,6 +49,7 @@ import {
   liveReadNodeProblems,
   normaliseCandidateOverrides,
   REPLAY_BLOCKED_LOAD_MARKER,
+  REPLAY_INLINE_WORKFLOW_MAX_BYTES,
   ReplayCandidateError,
   type ModelMemorySeed,
   type ModelTapeReport,
@@ -56,6 +57,7 @@ import {
   type ReplayHealthWarning,
   type ReplayMcpMode,
   type ReplayModelMode,
+  type ReplayModelTapeUsage,
   type ReplayRunRequest,
   type ReplayRunResponse,
   type McpReplayReport,
@@ -109,8 +111,11 @@ export interface ResolvedCandidate {
 export interface ResolvedJobCandidate extends ResolvedCandidate {
   workflowHash: string;
   baseHash: string;
+  /** The overrides, with a guard profile override's version pinned. */
   overrides: ReplayCandidateOverrides | null;
   name: string;
+  /** The guard profile override as it will run (version and hash resolved once). */
+  guardProfile: { profileId: string; version: number; hash: string } | null;
 }
 
 /** Phase 15.3 — how one case replays, on top of the request. */
@@ -148,8 +153,16 @@ export interface ReplayServiceOptions {
   providerRegistry?: ProviderRegistry;
   /** Phase 15.3 — what `live_read_only` MCP servers need to read from the live server. */
   liveReads?: OfflineReplayOptions["liveReads"];
-  /** Phase 15.3 — why a guard profile override cannot run (null when it can). */
-  guardProfileProblem?: (override: { profileId: string; version?: number }) => string | null;
+  /**
+   * Phase 15.3 — resolves a guard profile override once, for a whole job:
+   * the version that will run ("latest" pinned now) and its hash, or why it
+   * cannot run (a missing profile or version, or an older version than the
+   * workflow's bindings enforce now, for a user who is not an admin).
+   */
+  resolveGuardProfile?: (
+    override: { profileId: string; version?: number },
+    context: { workflowId: string; projectId: string | null; actor: SafeUser | null }
+  ) => { ok: true; profile: { profileId: string; version: number; hash: string } } | { ok: false; problem: string };
 }
 
 function durationOf(result: ReplayExecutionResult): number | null {
@@ -177,11 +190,18 @@ export class ReplayService {
    * Phase 15.3 — a replay job's candidate: the draft, a saved version or an
    * inline workflow file, with the model overrides applied. Checks every
    * override: a model override that matches nothing, a live read node that
-   * is not a read, a guard profile or version that does not exist.
+   * may not run live, a guard profile or version that does not exist (or is
+   * older than the bindings enforce, for a non-admin). A guard override
+   * without a version is pinned to the latest version now, so every case of
+   * the job runs the same one.
    */
-  resolveJobCandidate(workflowId: string, request: { version?: number; workflow?: Record<string, unknown>; overrides?: ReplayCandidateOverrides }): ResolvedJobCandidate {
+  resolveJobCandidate(
+    workflowId: string,
+    request: { version?: number; workflow?: Record<string, unknown>; overrides?: ReplayCandidateOverrides },
+    context: { actor?: SafeUser | null } = {}
+  ): ResolvedJobCandidate {
     const base: ResolvedCandidate = request.workflow ? this.inlineCandidate(workflowId, request.workflow) : this.resolveWorkflowCandidate(workflowId, request);
-    const overrides = normaliseCandidateOverrides(request.overrides) ?? null;
+    let overrides = normaliseCandidateOverrides(request.overrides) ?? null;
     let workflow: Workflow;
     try {
       workflow = applyCandidate(base.workflow, overrides);
@@ -191,9 +211,13 @@ export class ReplayService {
     }
     const problems = liveReadNodeProblems(workflow, overrides?.liveReadNodes ?? []);
     if (problems.length > 0) throw new ReplayRunError(problems.join(" "), "invalid");
+    let guardProfile: ResolvedJobCandidate["guardProfile"] = null;
     if (overrides?.guardProfile) {
-      const problem = this.options.guardProfileProblem?.(overrides.guardProfile);
-      if (problem) throw new ReplayRunError(problem, "invalid");
+      if (!this.options.resolveGuardProfile) throw new ReplayRunError("Guard profile overrides are not available on this server.", "invalid");
+      const resolved = this.options.resolveGuardProfile(overrides.guardProfile, { workflowId, projectId: workflow.projectId ?? null, actor: context.actor ?? null });
+      if (!resolved.ok) throw new ReplayRunError(resolved.problem, "invalid");
+      guardProfile = resolved.profile;
+      overrides = { ...overrides, guardProfile: { profileId: resolved.profile.profileId, version: resolved.profile.version } };
     }
     return {
       ...base,
@@ -201,7 +225,8 @@ export class ReplayService {
       workflowHash: ReplayService.candidateHash(workflow),
       baseHash: ReplayService.candidateHash(base.workflow),
       overrides,
-      name: workflow.name
+      name: workflow.name,
+      guardProfile
     };
   }
 
@@ -213,6 +238,10 @@ export class ReplayService {
   inlineCandidate(workflowId: string, raw: Record<string, unknown>): ResolvedCandidate {
     const current = this.options.store.getWorkflow(workflowId);
     if (!current) throw new ReplayRunError("The workflow this golden set belongs to no longer exists.", "not_found");
+    const size = Buffer.byteLength(JSON.stringify(raw) ?? "", "utf8");
+    if (size > REPLAY_INLINE_WORKFLOW_MAX_BYTES) {
+      throw new ReplayRunError(`The workflow file is ${size} bytes; an inline candidate can be at most ${REPLAY_INLINE_WORKFLOW_MAX_BYTES} bytes (2 MiB).`, "invalid");
+    }
     const inner = raw.workflow && typeof raw.workflow === "object" && !Array.isArray(raw.workflow) && !Array.isArray(raw.nodes) ? (raw.workflow as Record<string, unknown>) : raw;
     let parsed: Workflow;
     try {
@@ -401,7 +430,7 @@ export class ReplayService {
 
     const health = [...preflight, ...(preflight.some((warning) => warning.blocking) ? [] : this.health(recording, plan, result))];
     if (executeError) health.push({ kind: "replay_error", nodeId: null, message: `The replay could not run: ${executeError}`, blocking: true });
-    if (modelPlan) health.push(...this.modelHealth(modelPlan.player.report()));
+    if (modelPlan) health.push(...this.modelHealth(modelPlan.player.report(), recording.modelTape?.truncated === true));
     for (const nodeId of liveReadNodes) {
       if (plan.decisions.some((decision) => decision.nodeId === nodeId && decision.action === "live")) {
         health.push({ kind: "live_read", nodeId, message: `Node ${nodeId} read live data instead of the recorded answer; differences can come from data that changed since the golden run.`, blocking: false });
@@ -415,7 +444,7 @@ export class ReplayService {
         blocking: false
       });
     }
-    const candidateFacts = this.options.recordings.scrubFacts(
+    const builtFacts = this.options.recordings.scrubFacts(
       buildRunFacts({
         status: result.status,
         error: result.error ?? null,
@@ -427,6 +456,9 @@ export class ReplayService {
         priceTurn: this.options.priceTurn
       })
     );
+    // Phase 15.3 — tape answers cost nothing; what they cost when recorded is reported apart.
+    const tapePriced = modelPlan ? ReplayService.priceTapeReplay(builtFacts, modelPlan.player.report(), this.options.priceTurn) : null;
+    const candidateFacts = tapePriced?.facts ?? builtFacts;
     const diff = diffRunFacts(options.baseline?.facts ?? recording.facts, candidateFacts, {
       ignorePaths: request.ignorePaths,
       numberTolerance: request.numberTolerance,
@@ -441,19 +473,81 @@ export class ReplayService {
       diff,
       verdict: judged.verdict,
       reasons: judged.reasons,
-      facts: candidateFacts
+      facts: candidateFacts,
+      ...(tapePriced ? { modelTape: tapePriced.usage } : {})
+    };
+  }
+
+  /**
+   * Phase 15.3 — a model replay's facts with the calls the tape answered
+   * priced at $0 (their tokens stay, so the diff still compares them). Only
+   * the live calls of a lenient replay keep their price. What the replayed
+   * calls cost when they were recorded is returned as `usage.recordedUsage`.
+   */
+  static priceTapeReplay(facts: RunFacts, report: ModelTapeReport, priceTurn: PriceTurn): { facts: RunFacts; usage: ReplayModelTapeUsage } {
+    const liveSites = [...(report.liveCalls ?? [])];
+    const isLive = facts.modelCalls.map((call) => {
+      const index = liveSites.findIndex(
+        (site) =>
+          (site.nodeId === null || site.nodeId === call.nodeId) &&
+          site.providerId === call.providerId &&
+          site.model === call.model &&
+          (site.iteration === null || call.iteration === null || site.iteration === call.iteration)
+      );
+      if (index < 0) return false;
+      liveSites.splice(index, 1);
+      return true;
+    });
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let recordedUsd = 0;
+    let recordedPriced = false;
+    const modelCalls = facts.modelCalls.map((call, index) => {
+      if (isLive[index]) return call;
+      inputTokens += call.inputTokens ?? 0;
+      outputTokens += call.outputTokens ?? 0;
+      if (call.costUsd !== null) {
+        recordedUsd += call.costUsd;
+        recordedPriced = true;
+      }
+      return { ...call, costUsd: 0 };
+    });
+    // Live calls the facts do not show (a call outside a node) are still priced from the player's own usage.
+    let unmatchedUsd = 0;
+    let unmatchedUnknown = false;
+    for (const site of liveSites) {
+      if (site.inputTokens === null && site.outputTokens === null) continue;
+      const usd = priceTurn(site.providerId, site.model, site.inputTokens ?? 0, site.outputTokens ?? 0, site.cachedInputTokens ?? 0);
+      if (usd === null) unmatchedUnknown = true;
+      else unmatchedUsd += usd;
+    }
+    const livePriced = modelCalls.filter((call, index) => isLive[index] && call.costUsd !== null);
+    const liveUnpriced = modelCalls.some((call, index) => isLive[index] && call.costUsd === null);
+    const liveUsd = livePriced.reduce((sum, call) => sum + (call.costUsd ?? 0), 0) + unmatchedUsd;
+    const round = (value: number) => Math.round(value * 1_000_000) / 1_000_000;
+    // A replay whose only live calls are unpriced keeps `costUsd: null` (unknown); a pure tape replay costs 0.
+    const costUsd = livePriced.length > 0 || unmatchedUsd > 0 || !(liveUnpriced || unmatchedUnknown) ? round(liveUsd) : null;
+    const replayedCalls = isLive.filter((live) => !live).length;
+    return {
+      facts: { ...facts, modelCalls, totals: { ...facts.totals, costUsd } },
+      usage: {
+        replayedCalls,
+        liveCalls: report.live,
+        recordedUsage: { inputTokens, outputTokens, costUsd: recordedPriced ? round(recordedUsd) : null }
+      }
     };
   }
 
   /** Phase 15.3 — what the model tape did: a strict miss makes the case inconclusive, a live call is reported. */
-  private modelHealth(report: ModelTapeReport): ReplayHealthWarning[] {
+  private modelHealth(report: ModelTapeReport, tapeTruncated = false): ReplayHealthWarning[] {
     const warnings: ReplayHealthWarning[] = [];
     if (report.unmatched.length > 0) {
       const count = report.unmatched.length;
+      const cut = tapeTruncated ? " The golden run's model tape was cut to fit its size limit, so later calls are missing from it." : "";
       warnings.push({
         kind: "model_unmatched",
         nodeId: report.unmatched[0]!.nodeId,
-        message: `${count} model call${count === 1 ? "" : "s"} had no recorded answer on the model tape: ${report.unmatched[0]!.reason}`,
+        message: `${count} model call${count === 1 ? "" : "s"} had no recorded answer on the model tape: ${report.unmatched[0]!.reason}${cut}`,
         blocking: true
       });
     }

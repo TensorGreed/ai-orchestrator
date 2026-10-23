@@ -11,12 +11,14 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { EvalCaseDetail, EvalCaseResult, EvalRunView, ReplayJobEstimate, ReplayRecordingSummary, Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import { SqliteStore } from "./db/database.js";
+import { projectSessionNamespace } from "./run-scope.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 
@@ -264,12 +266,16 @@ async function caseDetail(context: TestContext, cookie: string, runId: string, r
   return response.json<{ result: EvalCaseDetail }>().result;
 }
 
-async function agentSetup(answer?: (model: string) => string, golden = 2, body?: Record<string, unknown>) {
+async function agentSetup(answer?: (model: string) => string, golden = 2, body?: Record<string, unknown>, options: { config?: Record<string, string>; saveVersion?: boolean } = {}) {
   const model = await startModel(answer);
-  const context = await createTestContext({ REPLAY_CONCURRENCY: "2" });
+  const context = await createTestContext({ REPLAY_CONCURRENCY: "2", ...options.config });
   const builder = await login(context, "builder");
   const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
   context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+  // Saved as version 1, so a baseline rerun replays that version (not the scrubbed captured copy).
+  if (options.saveVersion !== false) {
+    context.store.writeWorkflowVersion({ id: "wf-cand-v1", workflowId: "wf-cand", version: 1, workflowJson: JSON.stringify(context.store.getWorkflow("wf-cand")) });
+  }
   const recordings = await goldenRuns(context, builder.cookie, "wf-cand", golden, body);
   const setId = await goldenSet(context, builder.cookie, "wf-cand", recordings);
   return { context, builder, model, setId, recordings, secret };
@@ -464,4 +470,379 @@ describe("replay candidates and fair comparison", () => {
     const plain = await runJob(context, builder.cookie, { datasetIds: [teamSet] });
     expect(plain.status, plain.error ?? "").toBe("completed");
   }, 90_000);
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes (H1, M1-M4, L1-L9)
+// ---------------------------------------------------------------------------
+
+/** An OpenAI-style endpoint that keeps every request body; `delayMs` slows each answer, `failFirst` fails the first call. */
+async function startRecordingModel(options: { answer?: string; delayMs?: number; failFirst?: number; contentBytes?: number } = {}) {
+  const bodies: Array<{ model: string; messages: Array<{ role: string; content: unknown }> }> = [];
+  let failures = options.failFirst ?? 0;
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as { model?: string; messages?: Array<{ role: string; content: unknown }> };
+      bodies.push({ model: String(body.model ?? ""), messages: body.messages ?? [] });
+      const reply = () => {
+        if (failures > 0) {
+          failures -= 1;
+          response.writeHead(500, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { message: "temporarily unavailable" } }));
+          return;
+        }
+        const content = options.contentBytes ? "the quick brown fox. ".repeat(Math.ceil(options.contentBytes / 21)) : (options.answer ?? "hello");
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ choices: [{ message: { role: "assistant", content } }], usage: { prompt_tokens: 400, completion_tokens: 20 } }));
+      };
+      if (options.delayMs) setTimeout(reply, options.delayMs);
+      else reply();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Unable to bind fake model");
+  closers.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  return { baseUrl: `http://127.0.0.1:${address.port}/v1`, bodies };
+}
+
+async function registerMockServer(context: TestContext, adminCookie: string): Promise<string> {
+  const created = await call(context, "POST", "/api/mcp/servers", adminCookie, { name: "Mock", adapterId: "mock-mcp", probeEnabled: false });
+  expect(created.statusCode, created.body).toBe(201);
+  const id = created.json<{ server: { id: string } }>().server.id;
+  expect((await call(context, "POST", `/api/mcp/servers/${id}/probe`, adminCookie)).statusCode).toBe(200);
+  return id;
+}
+
+/** start → MCP clock tool → output. */
+function clockWorkflow(serverId: string): Workflow {
+  return {
+    id: "wf-clock",
+    name: "Clock",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    projectId: "default",
+    nodes: [
+      { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+      { id: "tool", type: "mcp_tool", name: "Clock", position: { x: 150, y: 0 }, config: { registryServerId: serverId, toolName: "get_current_time", argsTemplate: JSON.stringify({ tz: "UTC" }), retry: { enabled: false } } },
+      { id: "output", type: "output", name: "Output", position: { x: 300, y: 0 }, config: { responseTemplate: "at {{results.tool.tool_output}}" } }
+    ],
+    edges: [
+      { id: "e1", source: "start", target: "tool" },
+      { id: "e2", source: "tool", target: "output" }
+    ]
+  } as Workflow;
+}
+
+describe("replay candidates: review fixes", () => {
+  it("refuses polling triggers, browser nodes and other unlisted nodes as live reads, naming the node (H1, M4)", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const counter = await startCounter();
+    context.store.upsertWorkflow(writeWorkflow(counter.base));
+    const setId = await goldenSet(context, builder.cookie, "wf-write", await goldenRuns(context, builder.cookie, "wf-write", 1));
+    // The draft gains nodes after the golden run; naming them as live reads is refused before anything runs.
+    const draft = writeWorkflow(counter.base);
+    const extra = [
+      { id: "redis_in", type: "redis_trigger", config: { key: "jobs" } },
+      { id: "pg_in", type: "postgres_trigger", config: { query: "UPDATE jobs SET picked = true RETURNING *" } },
+      { id: "browse", type: "web_browse", config: { urlTemplate: "https://example.com" } },
+      { id: "pdf", type: "pdf_output", config: { renderMode: "html" } },
+      { id: "fetch", type: "http_request", config: { method: "GET", urlTemplate: `${counter.base}/get` } }
+    ];
+    draft.nodes.push(...(extra.map((node) => ({ ...node, name: node.id, position: { x: 0, y: 300 } })) as Workflow["nodes"]));
+    context.store.upsertWorkflow(draft);
+    for (const nodeId of ["redis_in", "pg_in", "browse", "pdf"]) {
+      for (const url of ["/api/replay/runs", "/api/replay/estimate"]) {
+        const response = await call(context, "POST", url, builder.cookie, { datasetIds: [setId], overrides: { liveReadNodes: [nodeId] } });
+        expect(response.statusCode, `${url} ${nodeId}`).toBe(400);
+        expect(response.json<{ error: string }>().error).toContain(`node ${nodeId}`);
+      }
+    }
+    // A GET request is on the allow-list.
+    expect((await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { liveReadNodes: ["fetch"] } })).statusCode).toBe(200);
+  }, 60_000);
+
+  it("counts model calls answered from the tape as zero spend and reports their recorded cost apart (M1)", async () => {
+    const { context, builder, setId } = await agentSetup();
+    const estimate = (await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], models: "replay", compare: "baseline_rerun", repeats: 2 })).json<ReplayJobEstimate>();
+    expect(estimate).toMatchObject({ cases: 2, runsPerCase: 4, modelCallsEstimate: 0, estimatedCostUsd: 0, executions: 8 });
+
+    const job = await runJob(context, builder.cookie, { datasetIds: [setId], models: "replay", compare: "baseline_rerun", repeats: 2 });
+    expect(job.status, job.error ?? "").toBe("completed");
+    expect(job.summary).toMatchObject({ total: 2, pass: 2, costUsd: 0, replayedModelCalls: 8 });
+    expect(job.progress!.spentUsd).toBe(0);
+    expect(job.summary!.recordedCostUsd ?? 0).toBeGreaterThan(0);
+    const detail = await caseDetail(context, builder.cookie, job.id, job.results[0]!.id);
+    expect(detail.costUsd).toBe(0);
+    expect(detail.replay).toMatchObject({ modelTape: { replayedCalls: 1, liveCalls: 0 } });
+    expect(detail.replay!.modelTape!.recordedUsage.inputTokens).toBe(400);
+    // The cost dashboards record no spend for the replay executions either.
+    const usage = new Database(context.dbPath, { readonly: true });
+    try {
+      const rows = usage.prepare("SELECT cost_usd, input_tokens, llm_call_count FROM usage_events WHERE trigger_type = 'replay'").all() as Array<{ cost_usd: number; input_tokens: number; llm_call_count: number }>;
+      expect(rows).toHaveLength(8);
+      expect(rows.every((row) => row.cost_usd === 0 && row.input_tokens === 0 && row.llm_call_count === 0)).toBe(true);
+    } finally {
+      usage.close();
+    }
+  }, 60_000);
+
+  it("budgets only the live calls of a lenient tape miss (M1, L9)", async () => {
+    const { context, builder, setId } = await agentSetup(undefined, 1);
+    const job = await runJob(context, builder.cookie, { datasetIds: [setId], overrides: { models: [{ nodeId: "agent_1", model: "gpt-4o" }] }, models: "replay", mcpMode: "lenient" });
+    expect(job.summary).toMatchObject({ total: 1, pass: 1 });
+    expect(job.summary!.replayedModelCalls ?? 0).toBe(0);
+    expect(job.progress!.spentUsd).toBeGreaterThan(0);
+    const detail = await caseDetail(context, builder.cookie, job.id, job.results[0]!.id);
+    expect(detail.replay).toMatchObject({ modelTape: { replayedCalls: 0, liveCalls: 1 } });
+  }, 60_000);
+
+  it("stores release eligibility and pins the guard profile version a job runs (M2)", async () => {
+    const { context, builder, setId } = await agentSetup(undefined, 1);
+    const plain = await runJob(context, builder.cookie, { datasetIds: [setId] });
+    expect(plain.candidate).toMatchObject({ kind: "draft", releaseEligible: true, releaseIneligibleReasons: [] });
+    const version = await runJob(context, builder.cookie, { datasetIds: [setId], version: 1 });
+    expect(version.candidate).toMatchObject({ kind: "version", version: 1, releaseEligible: true });
+
+    // "latest" is resolved once, when the job is created, and stored with its hash.
+    const guarded = await runJob(context, builder.cookie, { datasetIds: [setId], overrides: { guardProfile: { profileId: "default" } } });
+    const latest = context.store.getGuardProfileVersion("default");
+    expect(guarded.candidate!.overrides!.guardProfile).toEqual({ profileId: "default", version: latest!.version });
+    expect(guarded.candidate!.guardProfile).toEqual({ profileId: "default", version: latest!.version, hash: latest!.hash });
+    expect(guarded.candidate!.releaseEligible).toBe(false);
+    expect(guarded.candidate!.releaseIneligibleReasons!.join(" ")).toMatch(/guard profile/);
+    // Stored on the job, not only in the response.
+    const stored = context.store.getEvalRun(guarded.id)!.candidate as { releaseEligible?: boolean; guardProfile?: { version: number } };
+    expect(stored).toMatchObject({ releaseEligible: false, guardProfile: { version: latest!.version } });
+
+    const taped = await runJob(context, builder.cookie, { datasetIds: [setId], models: "replay" });
+    expect(taped.candidate!.releaseEligible).toBe(false);
+    expect(taped.candidate!.releaseIneligibleReasons!.join(" ")).toMatch(/model tape/);
+    const lenient = await runJob(context, builder.cookie, { datasetIds: [setId], mcpMode: "lenient" });
+    expect(lenient.candidate!.releaseIneligibleReasons!.join(" ")).toMatch(/Lenient/);
+  }, 90_000);
+
+  it("refuses an older version of a bound guard profile to a builder, and lets an admin replay it (M2)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    expect((await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: emailProfile("allow") })).statusCode).toBe(201);
+    expect((await call(context, "PUT", "/api/guard/profiles/cand-guard", admin.cookie, { document: emailProfile("block") })).statusCode).toBe(200);
+    context.store.upsertWorkflow(guardWorkflow());
+    const setId = await goldenSet(context, builder.cookie, "wf-guarded", await goldenRuns(context, builder.cookie, "wf-guarded", 1, { record: true, user_prompt: "Write to someone@example.com please" }));
+    // The project enforces cand-guard (latest: version 2).
+    expect((await call(context, "PUT", "/api/guard/bindings/projects/default", admin.cookie, { mode: "enforced", profileId: "cand-guard" })).statusCode).toBe(200);
+    const refused = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId], overrides: { guardProfile: { profileId: "cand-guard", version: 1 } } });
+    expect(refused.statusCode, refused.body).toBe(400);
+    expect(refused.json<{ error: string }>().error).toMatch(/older than version 2.*Only an admin/);
+    expect((await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { guardProfile: { profileId: "cand-guard", version: 1 } } })).statusCode).toBe(400);
+    const asAdmin = await runJob(context, admin.cookie, { datasetIds: [setId], overrides: { guardProfile: { profileId: "cand-guard", version: 1 } } });
+    expect(asAdmin.candidate!.guardProfile).toMatchObject({ profileId: "cand-guard", version: 1 });
+    expect(asAdmin.candidate!.releaseEligible).toBe(false);
+  }, 60_000);
+
+  it("caps executions per job and reserves each execution's cost before it runs (M3, L8)", async () => {
+    const capped = await agentSetup(undefined, 2, undefined, { config: { REPLAY_JOB_MAX_EXECUTIONS: "4" } });
+    const body = { datasetIds: [capped.setId], repeats: 3 };
+    const estimate = (await call(capped.context, "POST", "/api/replay/estimate", capped.builder.cookie, body)).json<ReplayJobEstimate>();
+    expect(estimate).toMatchObject({ executions: 6, maxExecutions: 4 });
+    expect(estimate.warnings.join(" ")).toContain("REPLAY_JOB_MAX_EXECUTIONS");
+    const refused = await call(capped.context, "POST", "/api/replay/runs", capped.builder.cookie, body);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json<{ error: string }>().error).toContain("REPLAY_JOB_MAX_EXECUTIONS");
+    expect((await call(capped.context, "POST", "/api/replay/runs", capped.builder.cookie, { datasetIds: [capped.setId], repeats: 2 })).statusCode).toBe(202);
+
+    // One golden run, three repeats, a budget for about one execution: the second is skipped before it runs.
+    const { context, builder, model, setId } = await agentSetup(undefined, 1);
+    const perExecution = (await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId] })).json<ReplayJobEstimate>().estimatedCostUsd;
+    expect(perExecution).toBeGreaterThan(0);
+    const before = model.calls.length;
+    const job = await runJob(context, builder.cookie, { datasetIds: [setId], repeats: 3, maxCostUsd: perExecution * 1.5 });
+    expect(job.status).toBe("failed");
+    expect(job.error).toContain("budget_exhausted");
+    expect(model.calls.length - before).toBe(1);
+    // Never more than the budget: the next execution was reserved, did not fit and never started.
+    expect(job.progress!.spentUsd).toBeLessThanOrEqual(perExecution * 1.5);
+    // The repeat that ran passed, but one of three repeats does not decide the case (L8).
+    expect(job.results[0]).toMatchObject({ status: "error", repeats: { total: 1, pass: 1 } });
+    expect(job.results[0]!.error).toContain("budget_exhausted");
+  }, 90_000);
+
+  it("makes a baseline rerun of a golden run with no saved version inconclusive, and warns in the estimate (L7)", async () => {
+    const { context, builder, model, setId } = await agentSetup(undefined, 1, undefined, { saveVersion: false });
+    const body = { datasetIds: [setId], compare: "baseline_rerun" };
+    const estimate = (await call(context, "POST", "/api/replay/estimate", builder.cookie, body)).json<ReplayJobEstimate>();
+    expect(estimate.warnings.join(" ")).toContain("no saved version to rerun as the baseline");
+    const before = model.calls.length;
+    const job = await runJob(context, builder.cookie, body);
+    expect(job.summary).toMatchObject({ total: 1, error: 1 });
+    expect(job.results[0]!.error).toMatch(/No baseline to rerun: .*scrubbed/);
+    expect(model.calls.length).toBe(before);
+  }, 60_000);
+
+  it("re-checks workflow:write for every case of an overridden job (L3)", async () => {
+    const model = await startRecordingModel({ delayMs: 400 });
+    const context = await createTestContext({ REPLAY_CONCURRENCY: "1" });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    context.store.upsertProject({ id: "team", name: "Team" });
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, "team", "wf-team-agent"));
+    const setId = await goldenSet(context, admin.cookie, "wf-team-agent", await goldenRuns(context, admin.cookie, "wf-team-agent", 3));
+    const started = await call(context, "POST", "/api/replay/runs", builder.cookie, { datasetIds: [setId], overrides: { models: [{ nodeId: "agent_1", model: "gpt-5-mini" }] } });
+    expect(started.statusCode, started.body).toBe(202);
+    // Write access goes; run access stays.
+    context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
+    const runId = started.json<{ run: EvalRunView }>().run.id;
+    await call(context, "GET", `/api/replay/runs/${runId}?wait=true`, admin.cookie);
+    let run: JobView | null = null;
+    for (let index = 0; index < 400; index += 1) {
+      run = (await call(context, "GET", `/api/replay/runs/${runId}`, admin.cookie)).json<{ run: JobView }>().run;
+      if (!["queued", "running"].includes(run.status)) break;
+      await sleep(50);
+    }
+    const refusedCases = run!.results.filter((result) => result.status === "error" && (result.error ?? "").includes("workflow:write"));
+    expect(refusedCases.length).toBeGreaterThanOrEqual(2);
+  }, 90_000);
+
+  it("refuses a provider switch on a node with its own secret unless the override names a usable secret (L4)", async () => {
+    const { context, builder, setId, secret } = await agentSetup(undefined, 1);
+    const switched = { nodeId: "model", provider: "anthropic", model: "claude-sonnet-5-5" };
+    const refused = await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { models: [switched] } });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json<{ error: string }>().error).toContain("secretRef");
+    const unknown = await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { models: [{ ...switched, secretRef: { secretId: "sec_missing" } }] } });
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.json<{ error: string }>().error).toContain("sec_missing");
+    const other = context.secretService.createSecret({ name: "Anthropic key", provider: "anthropic", value: "sk-ant-other-0123456789abcdef" });
+    expect((await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { models: [{ ...switched, secretRef: { secretId: other.secretId } }] } })).statusCode).toBe(200);
+    // A model change on the same provider keeps the node's secret, with no secretRef needed.
+    expect((await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], overrides: { models: [{ nodeId: "model", model: "gpt-5-mini" }] } })).statusCode).toBe(200);
+    expect(secret.secretId).toBeTruthy();
+  }, 60_000);
+
+  it("shows model tape bodies and the memory seed to editors only; export needs workflow:write (L5)", async () => {
+    const model = await startRecordingModel();
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    context.store.upsertProject({ id: "team", name: "Team" });
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId, "team", "wf-team-agent"));
+    const run = await call(context, "POST", "/api/workflows/wf-team-agent/execute", admin.cookie, { record: true });
+    const cassetteId = run.json<{ mcpCassette?: { id: string } }>().mcpCassette!.id;
+    const full = (await call(context, "GET", `/api/mcp/cassettes/${cassetteId}`, builder.cookie)).json<{ cassette: { cassette: { models: { entries: Array<Record<string, unknown>> }; omitted?: unknown } } }>().cassette.cassette;
+    expect(full.models.entries[0]!.request).toBeTruthy();
+    expect(full.omitted).toBeUndefined();
+
+    context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
+    context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
+    const limited = await call(context, "GET", `/api/mcp/cassettes/${cassetteId}`, builder.cookie);
+    expect(limited.statusCode).toBe(200);
+    const view = limited.json<{ cassette: { cassette: { models: { entries: Array<Record<string, unknown>> }; memorySeed?: unknown; omitted?: { modelTapeBodies: boolean } } } }>().cassette.cassette;
+    expect(view.models.entries).toHaveLength(1);
+    expect(view.models.entries[0]).toMatchObject({ providerId: "openai", model: "gpt-4o-mini" });
+    expect(view.models.entries[0]!.request).toBeUndefined();
+    expect(view.models.entries[0]!.response).toBeUndefined();
+    expect(view.memorySeed).toBeUndefined();
+    expect(view.omitted).toMatchObject({ modelTapeBodies: true });
+    expect(limited.body).not.toContain("Say hi");
+    expect((await call(context, "GET", `/api/mcp/cassettes/${cassetteId}/export`, builder.cookie)).statusCode).toBe(403);
+    expect((await call(context, "GET", `/api/mcp/cassettes/${cassetteId}/export`, admin.cookie)).statusCode).toBe(200);
+  }, 60_000);
+
+  it("caps an inline candidate at 2 MiB, and cuts a model tape that does not fit the golden run's size limit (L6)", async () => {
+    const model = await startRecordingModel({ contentBytes: 12_000 });
+    const context = await createTestContext({ REPLAY_RECORDING_MAX_BYTES: "16384" });
+    const builder = await login(context, "builder");
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    context.store.upsertWorkflow(agentWorkflow(model.baseUrl, secret.secretId));
+    const recordings = await goldenRuns(context, builder.cookie, "wf-cand", 1);
+    expect(recordings[0]!.truncated).toBe(true);
+    const stored = context.store.getReplayRecording(recordings[0]!.id)!;
+    expect(stored.modelTape).toMatchObject({ truncated: true, entries: [] });
+    expect(stored.bytes).toBeLessThanOrEqual(16384);
+    const setId = await goldenSet(context, builder.cookie, "wf-cand", recordings);
+    const job = await runJob(context, builder.cookie, { datasetIds: [setId], models: "replay" });
+    expect(job.summary).toMatchObject({ error: 1 });
+    const detail = await caseDetail(context, builder.cookie, job.id, job.results[0]!.id);
+    expect(detail.replay!.diff.health.find((warning) => warning.kind === "model_unmatched")!.message).toContain("cut to fit");
+
+    const big = agentWorkflow(model.baseUrl, secret.secretId) as Workflow & { description?: string };
+    big.description = "x".repeat(2 * 1024 * 1024 + 10);
+    const tooBig = await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [setId], workflow: big as unknown as Record<string, unknown> });
+    expect(tooBig.statusCode).toBe(400);
+    expect(tooBig.json<{ error: string }>().error).toContain("2 MiB");
+  }, 60_000);
+
+  it("answers read-only tools live on a live_read_only server only when an admin marked them read-only (L1, L2, L9)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const serverId = await registerMockServer(context, admin.cookie);
+    context.store.upsertWorkflow(clockWorkflow(serverId));
+    const setId = await goldenSet(context, builder.cookie, "wf-clock", await goldenRuns(context, builder.cookie, "wf-clock", 1));
+    const body = { datasetIds: [setId], overrides: { mcpServers: { [serverId]: "live_read_only" } } };
+    // The mock server annotates get_current_time readOnlyHint: true. That claim alone keeps it on the cassette.
+    const annotatedOnly = await runJob(context, builder.cookie, body);
+    expect(annotatedOnly.summary).toMatchObject({ total: 1, pass: 1 });
+    const first = await caseDetail(context, builder.cookie, annotatedOnly.id, annotatedOnly.results[0]!.id);
+    expect(first.replay!.diff.health.map((warning) => warning.kind)).not.toContain("mcp_live_read");
+
+    context.store.setMcpToolClassification({ registryServerId: serverId, toolName: "get_current_time", readOnly: true, setBy: admin.id });
+    const marked = await runJob(context, builder.cookie, body);
+    const second = await caseDetail(context, builder.cookie, marked.id, marked.results[0]!.id);
+    expect(second.replay!.diff.health.map((warning) => warning.kind)).toContain("mcp_live_read");
+    expect(marked.candidate!.releaseEligible).toBe(false);
+  }, 60_000);
+
+  it("seeds a replay's session memory from the golden run: the agent reads the recorded history (L9)", async () => {
+    const model = await startRecordingModel();
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    const workflow = agentWorkflow(model.baseUrl, secret.secretId);
+    workflow.nodes.push({ id: "memory", type: "local_memory", name: "Memory", position: { x: 300, y: 160 }, config: { namespace: "seed-mem", sessionIdTemplate: "{{session_id}}" } } as Workflow["nodes"][number]);
+    workflow.edges.push({ id: "e4", source: "agent_1", sourceHandle: "memory", target: "memory" });
+    context.store.upsertWorkflow(workflow);
+    // A first run fills the session; the recorded second run starts from it.
+    expect((await call(context, "POST", "/api/workflows/wf-cand/execute", builder.cookie, { session_id: "s-1" })).statusCode).toBe(200);
+    const recordings = await goldenRuns(context, builder.cookie, "wf-cand", 1, { record: true, session_id: "s-1" });
+    expect(recordings[0]!.capabilities.memory).toBe("seeded");
+    const recordedMessages = model.bodies[1]!.messages.length;
+    expect(recordedMessages).toBeGreaterThan(model.bodies[0]!.messages.length);
+    const memoryBefore = context.store.loadSessionMemory(projectSessionNamespace("default", "seed-mem"), "s-1");
+    expect(memoryBefore.length).toBeGreaterThan(0);
+
+    const setId = await goldenSet(context, builder.cookie, "wf-cand", recordings);
+    const job = await runJob(context, builder.cookie, { datasetIds: [setId] });
+    expect(job.summary, job.error ?? "").toMatchObject({ total: 1, pass: 1 });
+    // The replay's model call carried the seeded history, as the recorded run's did.
+    expect(model.bodies.at(-1)!.messages.length).toBe(recordedMessages);
+    // Nothing the replay did reached the real session.
+    expect(context.store.loadSessionMemory(projectSessionNamespace("default", "seed-mem"), "s-1")).toEqual(memoryBefore);
+  }, 60_000);
+
+  it("leaves a live run's answer and retries unchanged when its model calls are recorded (L9)", async () => {
+    const model = await startRecordingModel({ failFirst: 1, answer: "steady" });
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const secret = context.secretService.createSecret({ name: "Model key", provider: "openai", value: MODEL_KEY });
+    const workflow = agentWorkflow(model.baseUrl, secret.secretId);
+    workflow.nodes = workflow.nodes.map((node) =>
+      node.id === "model" ? ({ ...node, config: { provider: { providerId: "openai", model: "gpt-4o-mini", baseUrl: model.baseUrl, secretRef: { secretId: secret.secretId }, extra: { maxRetries: 1 } } } } as typeof node) : node
+    );
+    context.store.upsertWorkflow(workflow);
+    const recorded = await call(context, "POST", "/api/workflows/wf-cand/execute", builder.cookie, { record: true });
+    expect(recorded.json<{ status: string }>().status).toBe("success");
+    // The failed first call was retried, as in an unrecorded run.
+    expect(model.bodies).toHaveLength(2);
+    const plain = await call(context, "POST", "/api/workflows/wf-cand/execute", builder.cookie, {});
+    expect(plain.json<{ output: unknown }>().output).toEqual(recorded.json<{ output: unknown }>().output);
+    expect(JSON.stringify(recorded.json<{ output: unknown }>().output)).toContain("steady");
+  }, 60_000);
 });
