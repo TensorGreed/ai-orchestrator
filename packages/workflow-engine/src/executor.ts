@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import vm from "node:vm";
 import type { AgentRuntimeAdapter, AgentSessionMemoryStore, AgentSessionToolDataStore } from "@ai-orchestrator/agent-runtime";
 import type { ConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import {
@@ -93,7 +92,7 @@ import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
 import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch";
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
-import { executePythonCodeNode } from "./python-runner";
+import { IN_PROCESS_CODE_SANDBOX, codeNodesDisabledError, runJavaScriptCode, runPythonCode, type CodeSandboxPlan } from "./code-sandbox";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
 import { ErrorCategory, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
@@ -223,6 +222,8 @@ export interface WorkflowExecutionDependencies {
   onMcpElicitation?: McpElicitationHandlerOptions["onElicitation"];
   /** Phase 10.5 — size limit for `resources/read` in MCP Tool nodes (bytes). */
   mcpResourceMaxBytes?: number;
+  /** Where code nodes run (container, isolated in-process realm, or disabled). Default: in-process. */
+  codeSandbox?: CodeSandboxPlan;
   abortSignal?: AbortSignal;
   logger?: (message: string, metadata?: unknown) => void;
   /**
@@ -2730,88 +2731,18 @@ function toJsonSafeValue(value: unknown): unknown {
   }
 }
 
-function toErrorMessage(error: unknown, fallback: string): string {
-  if (error && typeof error === "object") {
-    const record = error as Record<string, unknown>;
-    if (typeof record.message === "string" && record.message.trim()) {
-      return record.message.trim();
-    }
-    if (typeof record.name === "string" && record.name.trim()) {
-      return record.name.trim();
-    }
-    try {
-      const serialized = JSON.stringify(record);
-      if (serialized && serialized !== "{}") {
-        return serialized;
-      }
-    } catch {
-      // Ignore serialization errors and fallback to string coercion.
-    }
-  }
-  const coerced = String(error ?? "").trim();
-  return coerced || fallback;
+/**
+ * Runs code-node JavaScript under a sandbox plan (default: an isolated realm
+ * in this process; see code-sandbox.ts). `input` is what the code sees as
+ * `input`; the result and logs come back as JSON-safe values.
+ */
+export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput, plan: CodeSandboxPlan = IN_PROCESS_CODE_SANDBOX): Promise<CodeNodeExecutionOutput> {
+  const [output] = await runJavaScriptCode(plan, String(input.code ?? ""), [input.input], codeNodeTimeout(input.timeoutMs));
+  return output!;
 }
 
-export async function executeCodeNodeSandbox(input: CodeNodeExecutionInput): Promise<CodeNodeExecutionOutput> {
-  const code = String(input.code ?? "");
-  const timeoutMs =
-    typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs) && input.timeoutMs > 0
-      ? Math.floor(input.timeoutMs)
-      : 1500;
-  const logs: string[] = [];
-
-  const sandboxConsole = {
-    log: (...args: unknown[]) => {
-      logs.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "));
-    },
-    error: (...args: unknown[]) => {
-      logs.push(`ERROR: ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`);
-    },
-    warn: (...args: unknown[]) => {
-      logs.push(`WARN: ${args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}`);
-    },
-    info: (...args: unknown[]) => {
-      logs.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "));
-    }
-  };
-
-  const contextObject: Record<string, unknown> = {
-    input: toJsonSafeValue(input.input),
-    JSON,
-    Math,
-    Number,
-    String,
-    Boolean,
-    Array,
-    Object,
-    Date,
-    Buffer,
-    console: sandboxConsole,
-    require: undefined,
-    process: undefined,
-    fs: undefined,
-    fetch: undefined,
-    globalThis: undefined,
-    Function: undefined,
-    eval: undefined
-  };
-
-  const context = vm.createContext(contextObject);
-  const wrappedCode = `(async () => {\n${code}\n})()`;
-
-  try {
-    const runResult = vm.runInContext(wrappedCode, context, {
-      timeout: timeoutMs
-    });
-    const resolvedResult = await Promise.resolve(runResult);
-    return {
-      result: toJsonSafeValue(resolvedResult),
-      logs
-    };
-  } catch (error) {
-    const message = toErrorMessage(error, "Code node execution failed.");
-    throw new Error(`Code node sandbox error: ${message}`);
-  }
+function codeNodeTimeout(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 1500;
 }
 
 interface GraphIndexes {
@@ -3512,11 +3443,14 @@ async function executeNode(
       const language = typeof config.language === "string" ? config.language : "javascript";
       const mode = config.mode === "runOnceForEachItem" ? "runOnceForEachItem" : "runOnceForAllItems";
 
+      const codeSandbox = dependencies.codeSandbox ?? IN_PROCESS_CODE_SANDBOX;
+      if (codeSandbox.kind === "disabled") throw codeNodesDisabledError(codeSandbox);
+
       if (language === "python") {
         const items = Array.isArray(templateData.items)
           ? (templateData.items as unknown[])
           : [templateData];
-        const py = await executePythonCodeNode({ code, items, mode, timeoutMs: timeout });
+        const py = await runPythonCode(codeSandbox, { code, items, mode, timeoutMs: timeout });
         if (py.result && typeof py.result === "object" && !Array.isArray(py.result)) {
           return {
             ...(py.result as Record<string, unknown>),
@@ -3529,16 +3463,11 @@ async function executeNode(
 
       // JS path — supports runOnceForEachItem too
       if (mode === "runOnceForEachItem" && Array.isArray(templateData.items)) {
-        const outputs: unknown[] = [];
-        const allLogs: string[] = [];
-        for (let i = 0; i < (templateData.items as unknown[]).length; i++) {
-          const item = (templateData.items as unknown[])[i];
-          const itemInput = { ...templateData, item, _itemIndex: i, input: { ...templateData, item } };
-          const r = await executeCodeNodeSandbox({ code, input: itemInput, timeoutMs: timeout });
-          outputs.push(r.result);
-          allLogs.push(...r.logs);
-        }
-        return { code_result: outputs, items: outputs, code_logs: allLogs };
+        // One sandbox for all items (one container, or a fresh realm per item in-process).
+        const itemInputs = (templateData.items as unknown[]).map((item, i) => ({ ...templateData, item, _itemIndex: i, input: { ...templateData, item } }));
+        const runs = await runJavaScriptCode(codeSandbox, code, itemInputs, timeout);
+        const outputs = runs.map((r) => r.result);
+        return { code_result: outputs, items: outputs, code_logs: runs.flatMap((r) => r.logs) };
       }
 
       const sandboxInput = {
@@ -3549,7 +3478,7 @@ async function executeNode(
         code,
         input: sandboxInput,
         timeoutMs: timeout
-      });
+      }, codeSandbox);
 
       if (result.result && typeof result.result === "object" && !Array.isArray(result.result)) {
         return {

@@ -1,4 +1,4 @@
-import { evaluateExpression, isComplexExpression } from "./expression";
+import { createExpressionEvaluator, isComplexExpression } from "./expression";
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -6,6 +6,8 @@ function toRecord(value: unknown): Record<string, unknown> {
 
 export function renderTemplateAdvanced(template: string, values: Record<string, unknown>): { rendered: string; unresolvedKeys: string[] } {
   const unresolvedKeys: string[] = [];
+  // One evaluator per render, so `values` is serialized for the sandbox at most once.
+  let evaluate: ((expression: string) => unknown) | null = null;
   // Match either a simple dotted-path token (back-compat) or any {{ ... }} body.
   const rendered = template.replace(/{{\s*([\s\S]+?)\s*}}/g, (_match, body: string) => {
     const trimmed = body.trim();
@@ -24,7 +26,7 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
       try {
         const workflowContext = toRecord(values.$workflow ?? values.workflow);
         const executionContext = toRecord(values.$execution ?? values.execution);
-        const result = evaluateExpression(trimmed, {
+        evaluate ??= createExpressionEvaluator({
           $input: values,
           $json: values,
           $workflow: {
@@ -38,6 +40,7 @@ export function renderTemplateAdvanced(template: string, values: Record<string, 
           $vars: (values.vars && typeof values.vars === "object" ? values.vars : {}) as Record<string, unknown>,
           extras: values
         });
+        const result = evaluate(trimmed);
         if (result === undefined || result === null) return "";
         if (typeof result === "string") return result;
         if (typeof result === "number" || typeof result === "boolean") return String(result);

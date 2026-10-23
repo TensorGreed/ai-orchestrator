@@ -11,15 +11,15 @@ import type { WorkflowNodeType } from "./types";
  * node answered from the recording instead of being run, and compares the
  * two runs.
  *
- * What this does not cover yet: user expressions inside nodes that do run
- * (`{{ }}` templates, sort expressions) are evaluated in the host realm, as
- * in any run, so an expression written to make a network call can still
- * make one in a replay. Sandboxing those expressions is separate work.
+ * User expressions inside nodes that do run (`{{ }}` templates, sort
+ * expressions) are evaluated in an isolated realm with no host access (see
+ * workflow-engine/expression-sandbox.ts), so they cannot reach the network or
+ * the file system, in a replay or any other run.
  *
  * What a node does in a replay is decided by its class:
  *
  *   trigger    the run's own input; the recorded output is replayed
- *   logic      transforms and control flow; runs (user expressions in them run too)
+ *   logic      transforms and control flow; runs (user expressions in them run in an isolated realm)
  *   model      model calls; run live (they are usually what is under test)
  *   guard      guard checks; run live
  *   mcp        MCP calls; answered from the recording's cassette, never a live server

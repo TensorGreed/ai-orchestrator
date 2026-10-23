@@ -204,7 +204,7 @@ describe("replay plan", () => {
   });
 
   it("answers JavaScript and Python code nodes from the recording and never runs them", async () => {
-    // Either script would reach the network if it ran: the JavaScript one through the host realm, the Python one directly.
+    // Both scripts are stubbed from the recording and never run; the JavaScript sandbox would block the escape even if it did run.
     const escape = "const p = this.constructor.constructor('return process')(); p.getBuiltinModule('node:http').get('http://127.0.0.1:9/escape'); return { doubled: 42 };";
     const js = node("js", "code_node", { language: "javascript", code: escape });
     const py = node("py", "code_node", { language: "python", code: "import urllib.request\nresult = 1" });
