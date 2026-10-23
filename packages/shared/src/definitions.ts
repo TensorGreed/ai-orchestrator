@@ -1212,6 +1212,37 @@ const baseNodeDefinitions: NodeDefinition[] = [
     }
   },
   {
+    type: "approval_gate",
+    label: "Approval Gate",
+    category: "Utility",
+    description:
+      "Pauses the run until an assigned approver approves (optionally editing listed fields) or rejects; routes to approved, rejected or timed_out.",
+    configSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string" },
+        approverRoles: { type: "array", items: { type: "string", enum: ["admin", "builder", "operator", "viewer"] } },
+        approverUsers: { type: "array", items: { type: "string" } },
+        allowSelfApproval: { type: "boolean" },
+        timeoutMinutes: { type: "number" },
+        timeoutOutcome: { type: "string", enum: ["fallback", "reject"] },
+        requireRejectReason: { type: "boolean" },
+        editableFields: { type: "array", items: { type: "object" } }
+      },
+      required: ["message"]
+    },
+    sampleConfig: {
+      message: "Approve this reply before it is sent?",
+      approverRoles: ["operator", "builder", "admin"],
+      approverUsers: [],
+      allowSelfApproval: false,
+      timeoutMinutes: 1440,
+      timeoutOutcome: "reject",
+      requireRejectReason: true,
+      editableFields: []
+    }
+  },
+  {
     type: "input_validator",
     label: "Input Validator",
     category: "Utility",

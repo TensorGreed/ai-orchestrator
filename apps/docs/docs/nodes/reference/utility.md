@@ -8,7 +8,7 @@
 
 DAG control flow: branching, looping, merging, sub-workflows, code execution, set/wait.
 
-42 nodes.
+43 nodes.
 
 ---
 ### `aggregate_node` — Aggregate
@@ -32,6 +32,44 @@ Groups items and aggregates a numeric/text field (sum, avg, min, max, count, con
   "operation": "sum",
   "field": "amount",
   "inputKey": "items"
+}
+```
+
+---
+
+### `approval_gate` — Approval Gate
+
+Pauses the run until an assigned approver approves (optionally editing listed fields) or rejects; routes to approved, rejected or timed_out.
+
+**Config fields**
+
+| Field | Type | Required | Values |
+|---|---|---|---|
+| `message` | `string` | yes | — |
+| `approverRoles` | `array<string>` | no | — |
+| `approverUsers` | `array<string>` | no | — |
+| `allowSelfApproval` | `boolean` | no | — |
+| `timeoutMinutes` | `number` | no | — |
+| `timeoutOutcome` | `string` | no | `fallback` \| `reject` |
+| `requireRejectReason` | `boolean` | no | — |
+| `editableFields` | `array<object>` | no | — |
+
+**Example config**
+
+```json
+{
+  "message": "Approve this reply before it is sent?",
+  "approverRoles": [
+    "operator",
+    "builder",
+    "admin"
+  ],
+  "approverUsers": [],
+  "allowSelfApproval": false,
+  "timeoutMinutes": 1440,
+  "timeoutOutcome": "reject",
+  "requireRejectReason": true,
+  "editableFields": []
 }
 ```
 

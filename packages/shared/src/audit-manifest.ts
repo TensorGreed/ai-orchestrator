@@ -242,15 +242,42 @@ export const runManifestGuardExtensionSchema = z.object({
 });
 
 /**
+ * Phase 11.2 — one approval request of the run, from the approvals store:
+ * who decided, what, why and which fields were edited (the edited values
+ * themselves stay in the node output; only their digest is recorded).
+ */
+export const runManifestApprovalRequestSchema = z.object({
+  requestId: z.string(),
+  nodeId: z.string(),
+  kind: z.enum(["approval_gate", "human_approval", "guard", "agent_tool"]),
+  outcome: z.enum(["pending", "approved", "rejected", "timed_out", "canceled"]),
+  requestedAt: nullableString,
+  expiresAt: nullableString,
+  decidedBy: nullableString,
+  decidedAt: nullableString,
+  reason: nullableString,
+  editedFields: z.array(z.string()),
+  editsDigest: sha256Hex.nullable(),
+  /** Execute Workflow node ids from the top-level run down to the asking workflow; empty for the run itself. */
+  subWorkflowPath: z.array(z.string())
+});
+
+export const runManifestApprovalsExtensionSchema = z.object({
+  requests: z.array(runManifestApprovalRequestSchema)
+});
+
+/**
  * Typed, optional extensions. Known keys are validated; other keys are kept
  * as-is so a newer deployment's additions (for example approval-gate
  * decisions from Phase 11.2) do not break older verifiers.
  *
  *   - `guard` — the run's guard verdicts (Phase 12.7).
+ *   - `approvals` — the run's approval requests and decisions (Phase 11.2).
  */
 export const runManifestExtensionsSchema = z
   .object({
-    guard: runManifestGuardExtensionSchema.optional()
+    guard: runManifestGuardExtensionSchema.optional(),
+    approvals: runManifestApprovalsExtensionSchema.optional()
   })
   .catchall(z.unknown());
 
@@ -336,6 +363,7 @@ export type RunManifestMcpServer = z.infer<typeof runManifestMcpServerSchema>;
 export type RunManifestPrompt = z.infer<typeof runManifestPromptSchema>;
 export type RunManifestCitation = z.infer<typeof runManifestCitationSchema>;
 export type RunManifestApproval = z.infer<typeof runManifestApprovalSchema>;
+export type RunManifestApprovalRequest = z.infer<typeof runManifestApprovalRequestSchema>;
 export type RunManifestGuardVerdict = z.infer<typeof runManifestGuardVerdictSchema>;
 export type RunManifestGuardExtension = z.infer<typeof runManifestGuardExtensionSchema>;
 

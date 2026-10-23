@@ -152,6 +152,7 @@ export const REPLAY_NODE_CLASSES: Readonly<Record<WorkflowNodeType, ReplayNodeCl
 
   // People and time.
   human_approval: "approval",
+  approval_gate: "approval",
   wait_node: "wait",
 
   // External reads.
