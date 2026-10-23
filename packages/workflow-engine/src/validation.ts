@@ -1,5 +1,6 @@
 import { createDefaultGuardProfile, mergeGuardProfileOverride } from "@ai-orchestrator/guard-sdk";
 import {
+  approvalGateConfigSchema,
   guardNodeConfigSchema,
   guardProtectionNodeConfigSchema,
   workflowSchema,
@@ -700,6 +701,24 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         issues.push({
           code: "invalid_human_approval_timeout",
           message: "Human Approval node requires timeoutMinutes >= 1.",
+          nodeId: node.id
+        });
+      }
+    }
+
+    if (node.type === "approval_gate") {
+      const parsed = approvalGateConfigSchema.safeParse(node.config ?? {});
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) {
+          issues.push({ code: "invalid_approval_gate_config", message: `Approval Gate ${issue.path.join(".") || "config"}: ${issue.message}`, nodeId: node.id });
+        }
+      }
+      // Loop bodies run inline and cannot be paused and resumed part-way.
+      const inLoop = workflow.edges.some((edge) => edge.target === node.id && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node");
+      if (inLoop) {
+        issues.push({
+          code: "approval_gate_in_loop",
+          message: "An Approval Gate cannot be a Loop node's body. Gate the loop's input or its output instead.",
           nodeId: node.id
         });
       }

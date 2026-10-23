@@ -10,9 +10,12 @@ import type { ApprovalHandoffState } from "@ai-orchestrator/shared";
  * - `route`: record `onApprove` or `onReject` as the node's output and route
  *   from it (the guard node sends rejected items to `blocked`);
  * - `rerun`: on approval run the node again with `approvalKey` accepted, on
- *   rejection fail the node (an agent whose guard asked mid-loop).
- *
- * Approval gates (11.2) build on this: they only need to throw the signal.
+ *   rejection fail the node (an agent whose guard asked mid-loop, or the
+ *   11.2 write-tool gate before an MCP write tool);
+ * - `gate` (11.2): an Approval Gate runs again with the decision and turns
+ *   it into its approved / rejected / timed_out output;
+ * - `sub_workflow` (11.2): a sync Execute Workflow node whose child paused
+ *   runs again and resumes the child's paused state with the decision.
  */
 
 export interface ApprovalHandoffRequest {
