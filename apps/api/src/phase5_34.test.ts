@@ -163,6 +163,8 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     CODE_SANDBOX_PIDS_LIMIT: 128,
     CODE_SANDBOX_STARTUP_MS: 8000,
     EXPRESSION_TIMEOUT_MS: 1000,
+    OUTBOUND_DENY_PRIVATE: false,
+    OUTBOUND_ALLOWLIST: [],
     AUDIT_EXPORT_FILE_ROOT: "apps/api/data",
     EVAL_JUDGE_ENABLED: false,
     EVAL_JUDGE_PROVIDER_ID: "openai",

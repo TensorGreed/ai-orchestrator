@@ -75,6 +75,13 @@ import {
 } from "./citations";
 import { renderChart } from "./chart";
 import { browseUrl, type WebBrowseOptions } from "./web-browse";
+import {
+  DEFAULT_OUTBOUND_GUARD,
+  assertOutboundUrlAllowed,
+  guardedFetch,
+  playwrightOutboundGuard,
+  type OutboundGuardConfig
+} from "./outbound-url-guard";
 import { renderTemplate, tryParseJson } from "./template";
 import {
   createMcpElicitationHandler,
@@ -224,6 +231,14 @@ export interface WorkflowExecutionDependencies {
   mcpResourceMaxBytes?: number;
   /** Where code nodes run (container, isolated in-process realm, or disabled). Default: in-process. */
   codeSandbox?: CodeSandboxPlan;
+  /**
+   * Policy for URLs that user-supplied nodes fetch (HTTP Request, Web Browse,
+   * Chart data.url, HTML-render PDF). When unset, the default policy applies
+   * (block file/data/other schemes, metadata and link-local; allow private
+   * and localhost). A custom DNS resolver can be injected for tests.
+   */
+  outboundGuard?: OutboundGuardConfig;
+  outboundDnsResolver?: (hostname: string) => Promise<string[]>;
   abortSignal?: AbortSignal;
   logger?: (message: string, metadata?: unknown) => void;
   /**
@@ -1951,6 +1966,8 @@ async function createHtmlPdfBuffer(input: {
   format: PdfPageFormat;
   printBackground: boolean;
   timeoutMs: number;
+  outboundGuard: OutboundGuardConfig;
+  resolver?: (hostname: string) => Promise<string[]>;
 }): Promise<Buffer> {
   type PlaywrightModule = typeof import("playwright");
   let playwright: PlaywrightModule;
@@ -1971,6 +1988,9 @@ async function createHtmlPdfBuffer(input: {
 
   try {
     const page = await browser.newPage();
+    // Every sub-resource the HTML loads (<img>, <script>, fetch) is checked; a
+    // blocked one is aborted, so an injected URL cannot read internal hosts.
+    await page.route("**/*", playwrightOutboundGuard(input.outboundGuard, input.resolver));
     await page.setContent(input.html, {
       waitUntil: "networkidle",
       timeout: input.timeoutMs
@@ -2982,7 +3002,10 @@ async function executeNode(
           requestInit.body = renderedBody;
         }
 
-        const response = await fetch(renderedUrl, requestInit);
+        const response = await guardedFetch(renderedUrl, requestInit, {
+          config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+        });
         const responseHeaders: Record<string, string> = {};
         response.headers.forEach((value, key) => {
           responseHeaders[key] = value;
@@ -4248,7 +4271,8 @@ async function executeNode(
         ...(config.extractImages === false ? { extractImages: false } : {}),
         ...(typeof config.waitForSelector === "string" && config.waitForSelector.trim()
           ? { waitForSelector: config.waitForSelector.trim() }
-          : {})
+          : {}),
+        requestGuard: playwrightOutboundGuard(dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver)
       };
 
       const outputKey = typeof config.outputKey === "string" && config.outputKey.trim()
@@ -4322,7 +4346,9 @@ async function executeNode(
         height,
         config: themeConfig,
         // Phase 15.1 — a replay never lets a chart load data from a URL or file.
-        offline: Boolean(dependencies.replayNodeHook)
+        offline: Boolean(dependencies.replayNodeHook),
+        // Live charts run every data/image URL through the outbound guard.
+        urlGuard: (url: string) => assertOutboundUrlAllowed(url, dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD, dependencies.outboundDnsResolver)
       });
 
       return {
@@ -5674,7 +5700,9 @@ async function executeNode(
           html,
           format: pageFormat,
           printBackground,
-          timeoutMs: htmlRenderTimeoutMs
+          timeoutMs: htmlRenderTimeoutMs,
+          outboundGuard: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
         });
       } else {
         let sourceText = textTemplate.trim() ? renderTemplate(textTemplate, templateData) : toPdfSourceText(resolvedSource);

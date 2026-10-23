@@ -14,6 +14,7 @@ vi.mock("playwright", () => ({
   chromium: {
     launch: vi.fn(async () => ({
       newPage: vi.fn(async () => ({
+        route: vi.fn(async () => undefined),
         setContent: vi.fn(async (html: string) => {
           playwrightMockState.lastHtml = html;
         }),
@@ -2821,6 +2822,7 @@ const fakeConnectorRegistry = createDefaultConnectorRegistry();
 
 function makeDeps(overrides?: Partial<WorkflowExecutionDependencies>): WorkflowExecutionDependencies {
   return {
+    outboundDnsResolver: async () => ["93.184.216.34"],
     providerRegistry: fakeProviderRegistry,
     mcpRegistry: fakeMcpRegistry,
     connectorRegistry: fakeConnectorRegistry,

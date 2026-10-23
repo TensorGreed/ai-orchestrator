@@ -149,7 +149,9 @@ import {
   describeCodeSandboxPlan,
   configureExpressionSandbox,
   expressionRealmIsShared,
-  type CodeSandboxPlan
+  nodeDnsResolver,
+  type CodeSandboxPlan,
+  type OutboundGuardConfig
 } from "@ai-orchestrator/workflow-engine";
 import {
   McpCassetteService,
@@ -1278,6 +1280,8 @@ export function createApp(
   // runtime/image check), code nodes use the in-process isolate, which is
   // always safe to run — the plan only decides host-isolate vs container.
   configureExpressionSandbox({ timeoutMs: config.EXPRESSION_TIMEOUT_MS });
+  // Outbound URL policy for nodes that fetch a user-supplied URL.
+  const outboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
   let codeSandboxPlan: CodeSandboxPlan = IN_PROCESS_CODE_SANDBOX;
   void resolveCodeSandboxPlan({
     enabled: config.CODE_NODES_ENABLED,
@@ -1772,6 +1776,9 @@ export function createApp(
           mcpResourceMaxBytes: config.MCP_RESOURCE_MAX_BYTES,
           // Where code nodes run (container, in-process isolate, or disabled).
           codeSandbox: codeSandboxPlan,
+          // SSRF/egress policy for HTTP Request, Web Browse, Chart data.url and HTML PDF.
+          outboundGuard,
+          outboundDnsResolver: nodeDnsResolver,
           onMcpListChanged: input.replay ? undefined : (event) => mcpProbeService.onListChanged(event),
           onMcpElicitation: input.replay
             ? input.replay.sandbox.onMcpElicitation
@@ -1859,7 +1866,9 @@ export function createApp(
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
                   loadMcpToolPolicy,
-                  codeSandbox: codeSandboxPlan
+                  codeSandbox: codeSandboxPlan,
+                  outboundGuard,
+                  outboundDnsResolver: nodeDnsResolver
                 }
               );
             } catch (err) {

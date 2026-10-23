@@ -55,6 +55,12 @@ export interface ChartRenderOptions {
    * spec names. The render fails instead of drawing a chart without data.
    */
   offline?: boolean;
+  /**
+   * When set (and not offline), every data/image URL the spec loads is checked
+   * against the outbound URL guard first, and `file:` loads are refused. The
+   * HTTP(S) check is async, so Vega's loader is wrapped accordingly.
+   */
+  urlGuard?: (url: string) => Promise<void>;
 }
 
 export interface ChartRenderResult {
@@ -93,7 +99,11 @@ export async function renderChart(options: ChartRenderOptions): Promise<ChartRen
   let view: vega.View;
   try {
     const runtime = vega.parse(vegaSpec, options.config);
-    const loader = options.offline ? offlineLoader(() => (blocked = true)) : linkSafeLoader(vega.loader());
+    const loader = options.offline
+      ? offlineLoader(() => (blocked = true))
+      : options.urlGuard
+        ? guardedLoader(vega.loader(), options.urlGuard)
+        : linkSafeLoader(vega.loader());
     view = new vega.View(runtime, { renderer: "none", loader });
   } catch (err) {
     throw new Error(`vega parse failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -143,6 +153,32 @@ function linkSafeLoader(base: vega.Loader): vega.Loader {
  * `sanitize`, which does no I/O, so a replayed chart draws the same links as
  * the live run.
  */
+/**
+ * A live Vega loader that runs the outbound URL guard before every data or
+ * image load and refuses `file:` loads outright. Links (`href`) are not loads
+ * and go through the link-safe sanitizer unchanged.
+ */
+function guardedLoader(base: vega.Loader, guard: (url: string) => Promise<void>): vega.Loader {
+  const safe = linkSafeLoader(base);
+  const load = safe.load.bind(safe);
+  const http = safe.http?.bind(safe);
+  safe.load = (async (uri: string, options?: unknown) => {
+    await guard(uri);
+    return load(uri, options as never);
+  }) as vega.Loader["load"];
+  if (http) {
+    safe.http = (async (uri: string, options?: unknown) => {
+      await guard(uri);
+      return http(uri, options as never);
+    }) as vega.Loader["http"];
+  }
+  // A chart must never read the server's disk; file loads are always refused.
+  safe.file = (async (filename: string) => {
+    throw new Error(`A chart may not load a local file ('${filename}').`);
+  }) as vega.Loader["file"];
+  return safe;
+}
+
 function offlineLoader(onBlocked: () => void): vega.Loader {
   const links = linkSafeLoader(vega.loader());
   const refuse = async (): Promise<never> => {

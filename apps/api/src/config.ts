@@ -218,6 +218,15 @@ const envSchema = z.object({
   CODE_SANDBOX_STARTUP_MS: z.coerce.number().int().min(1000).max(120000).default(8000),
   /** Time limit for a single `{{ }}` or Sort-node expression (ms). */
   EXPRESSION_TIMEOUT_MS: z.coerce.number().int().min(50).max(60000).default(1000),
+  // Outbound URL guard for nodes that fetch a user-supplied URL (HTTP Request,
+  // Web Browse, Chart data.url, HTML-render PDF).
+  /** Block private ranges and localhost for those nodes. Metadata and link-local are always blocked. */
+  OUTBOUND_DENY_PRIVATE: booleanFromEnv.default(false),
+  /** Comma-separated hosts or CIDRs allowed through when OUTBOUND_DENY_PRIVATE is on (e.g. 10.0.0.0/8, *.internal:8080). */
+  OUTBOUND_ALLOWLIST: z
+    .string()
+    .default("")
+    .transform((value) => value.split(",").map((entry) => entry.trim()).filter(Boolean)),
   /**
    * Phase 11.1 — Ed25519 private key (base64 of the 32-byte seed) that signs
    * run manifests and audit bundles. When unset, the API generates one on
