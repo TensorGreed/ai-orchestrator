@@ -338,6 +338,8 @@ EVAL_JUDGE_MAX_TOKENS=512
 
 The judge uses the standard provider-config + secret-resolution path — same OPENAI_API_KEY (or secretRef) that drives normal LLM calls.
 
+Golden sets, replay jobs and the newer scorers (JSON, schema, tool sequence, guard, budget, rubric and pairwise judges with a `secretRef`) are described in [Golden sets, replay jobs and scorers](../product/golden-sets.md).
+
 ### Workflow output shape
 
 The scorers expect a workflow output like:
