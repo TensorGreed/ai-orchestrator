@@ -58,6 +58,7 @@ import {
   type ReleaseGateSettingsInput,
   type ReleaseGateView,
   type ReleasePublishInput,
+  type ReleasePublishPreview,
   type ReleaseRollbackInput,
   type ReleaseStateView,
   type ReleaseVerdict,
@@ -420,12 +421,12 @@ export class ReleaseService {
   }
 
   /** The publish dialog's preview: the verdict publishing would get now. */
-  preview(user: SafeUser, workflowId: string, version: number, replayRunId?: string) {
+  preview(user: SafeUser, workflowId: string, version: number, replayRunId?: string): ReleasePublishPreview {
     this.requireAvailable();
     this.check(user, workflowId, "workflow:read");
     const gate = this.settingsOf(this.store.getReleaseGate(workflowId), workflowId);
     const { workflowHash } = this.versionCandidate(workflowId, version);
-    if (!gate.enabled) return { version, workflowHash, gateEnabled: false, verdict: "passed" as const, reasons: [], replayRunId: null, stats: null, canRequestApproval: false };
+    if (!gate.enabled) return { version, workflowHash, gateEnabled: false, verdict: "passed", reasons: [], replayRunId: null, stats: null, canRequestApproval: false };
     const { judgement, replayRunId: judgedRun } = this.judge(gate, workflowId, workflowHash, replayRunId);
     return {
       version,

@@ -446,6 +446,20 @@ export function releaseGateLoosening(before: ReleaseGateSettings, after: Release
 // The editor's version pill
 // ---------------------------------------------------------------------------
 
+/** `GET /api/workflows/:id/publish-preview`: the verdict publishing a version would get now. */
+export interface ReleasePublishPreview {
+  version: number;
+  workflowHash: string;
+  gateEnabled: boolean;
+  verdict: ReleaseGateVerdict;
+  reasons: string[];
+  /** The replay job the verdict was judged on, when there is one. */
+  replayRunId: string | null;
+  stats: ReleaseGateStats | null;
+  /** The gate has approvers, so a blocked publish can be sent to them. */
+  canRequestApproval: boolean;
+}
+
 export interface ReleaseStateView {
   /** The newest saved version (the draft). */
   draftVersion: number | null;
