@@ -21,9 +21,9 @@
  *               minimal environment, a scratch working directory and a hard
  *               kill on timeout -- but that is NOT a sandbox: it can run any
  *               command, open network connections the outbound URL guard
- *               never sees, and read whatever the API user can read. The API
- *               warns at startup, and CODE_SANDBOX_PYTHON_IN_PROCESS=deny
- *               turns it off.
+ *               never sees, and read whatever the API user can read. So it is
+ *               off unless CODE_SANDBOX_PYTHON_IN_PROCESS=allow, and the API
+ *               warns at startup when it is on.
  *   disabled    CODE_NODES_ENABLED=false (or the plan is still being
  *               resolved): every code node fails with a clear error.
  *
@@ -591,7 +591,7 @@ export async function resolveCodeSandboxPlan(
   deps: { locator?: RuntimeLocator; imagePresent?: ImagePresenceCheck } = {}
 ): Promise<{ plan: CodeSandboxPlan; warning: string | null }> {
   if (!settings.enabled) return { plan: { kind: "disabled", reason: CODE_NODES_DISABLED_MESSAGE }, warning: null };
-  const python = settings.pythonInProcess ?? "allow";
+  const python = settings.pythonInProcess ?? "deny";
   const onHost = (reason: string) => ({
     plan: {
       kind: "in_process",

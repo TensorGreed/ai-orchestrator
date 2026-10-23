@@ -312,14 +312,15 @@ describe("resolveCodeSandboxPlan", () => {
     expect(warning).toBeNull();
   });
 
-  it("auto falls back in-process, with a warning, when no runtime is installed", async () => {
+  it("auto falls back in-process, with a warning and host Python off, when no runtime is installed", async () => {
     const { plan, warning } = await resolveCodeSandboxPlan(base, { locator: locator([]) });
-    expect(plan).toMatchObject({ kind: "in_process", python: "allow", memoryMb: 256 });
+    expect(plan).toMatchObject({ kind: "in_process", python: "deny", memoryMb: 256 });
     expect(warning).toMatch(/run on the API host/);
+    expect(warning).toMatch(/Python code nodes are disabled/);
   });
 
-  it("the in-process warning says plainly what host Python can do", async () => {
-    const { warning } = await resolveCodeSandboxPlan(base, { locator: locator([]) });
+  it("the in-process warning says plainly what host Python can do when it is allowed", async () => {
+    const { warning } = await resolveCodeSandboxPlan({ ...base, pythonInProcess: "allow" }, { locator: locator([]) });
     expect(warning).toMatch(/NOT sandboxed/);
     expect(warning).toMatch(/any OS command/);
     expect(warning).toMatch(/bypass the outbound URL guard/);
@@ -335,7 +336,7 @@ describe("resolveCodeSandboxPlan", () => {
   });
 
   it("a configured Python uid is carried into the plan", async () => {
-    const { plan, warning } = await resolveCodeSandboxPlan({ ...base, pythonUid: 65534, pythonGid: 65534 }, { locator: locator([]) });
+    const { plan, warning } = await resolveCodeSandboxPlan({ ...base, pythonInProcess: "allow", pythonUid: 65534, pythonGid: 65534 }, { locator: locator([]) });
     expect(plan).toMatchObject({ kind: "in_process", pythonUid: 65534, pythonGid: 65534 });
     expect(warning).toMatch(/as uid 65534/);
   });

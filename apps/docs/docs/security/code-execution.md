@@ -123,8 +123,13 @@ done in this release.
 
 ### Python on the host
 
+Without a container, Python code nodes are **off by default**
+(`CODE_SANDBOX_PYTHON_IN_PROCESS=deny`): they fail with a clear error, and
+JavaScript keeps working in the QuickJS sandbox. Setting it to `allow` runs them
+on the host, with the risks below.
+
 ::: danger Not a sandbox
-Without a container, a Python code node runs as a **host subprocess**. It gets
+With `CODE_SANDBOX_PYTHON_IN_PROCESS=allow` and no container, a Python code node runs as a **host subprocess**. It gets
 `python -I` (isolated mode), an explicit minimal environment (the API's own
 variables are not passed in), a scratch working directory, and a hard kill of
 its process group on timeout. A process the code detaches with `setsid` leaves
@@ -150,9 +155,9 @@ What you can do about it, from strongest to weakest:
 1. **Use the container plan.** Install docker or podman and pull the two
    images (`CODE_SANDBOX_MODE=container`). Python then runs with no network,
    no host files and no environment.
-2. **Turn host Python off** with `CODE_SANDBOX_PYTHON_IN_PROCESS=deny`. Python
-   code nodes fail with a clear error, and JavaScript keeps working in the
-   QuickJS sandbox.
+2. **Keep host Python off** with `CODE_SANDBOX_PYTHON_IN_PROCESS=deny`, the
+   default. Python code nodes fail with a clear error, and JavaScript keeps
+   working in the QuickJS sandbox.
 3. **Run host Python as another user** with `CODE_SANDBOX_PYTHON_UID` and
    `CODE_SANDBOX_PYTHON_GID`, for example the `nobody` user (65534). A
    different uid cannot read the API's `/proc` entries or files only the API
@@ -196,7 +201,7 @@ then fails with a configuration error, and the Code node tester
 | `CODE_SANDBOX_CPUS` | `1` | Container CPU ceiling (cores). |
 | `CODE_SANDBOX_PIDS_LIMIT` | `128` | Container process ceiling. |
 | `CODE_SANDBOX_STARTUP_MS` | `8000` | Extra time for a container to start, on top of the code's own timeout (ms). |
-| `CODE_SANDBOX_PYTHON_IN_PROCESS` | `allow` | `deny` refuses Python code nodes when there is no container plan. |
+| `CODE_SANDBOX_PYTHON_IN_PROCESS` | `deny` | `deny` refuses Python code nodes when there is no container plan; `allow` runs them on the host, unsandboxed. |
 | `CODE_SANDBOX_PYTHON_UID` / `CODE_SANDBOX_PYTHON_GID` | unset | Run host Python as this uid / gid (the gid defaults to the uid). |
 | `CODE_SANDBOX_MAX_TIMEOUT_MS` | `30000` | Ceiling on an in-process JavaScript code node's timeout (100 to 300000 ms); a per-item node may not exceed four times it in all. |
 | `CODE_SANDBOX_MAX_RESULT_MB` | `32` | Largest result (results and logs of all items) an in-process JavaScript code node may return (MB). |

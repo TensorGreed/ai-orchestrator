@@ -107,7 +107,8 @@ describe("code sandbox plan at startup", () => {
 
 describe("code sandbox configuration", () => {
   it("validates CODE_SANDBOX_PYTHON_IN_PROCESS, the Python uid/gid and EXPRESSION_MEMORY_MB", () => {
-    expect(parseConfig(baseEnv()).CODE_SANDBOX_PYTHON_IN_PROCESS).toBe("allow");
+    expect(parseConfig(baseEnv()).CODE_SANDBOX_PYTHON_IN_PROCESS).toBe("deny");
+    expect(parseConfig(baseEnv({ CODE_SANDBOX_PYTHON_IN_PROCESS: "allow" })).CODE_SANDBOX_PYTHON_IN_PROCESS).toBe("allow");
     expect(parseConfig(baseEnv({ CODE_SANDBOX_PYTHON_IN_PROCESS: "deny" })).CODE_SANDBOX_PYTHON_IN_PROCESS).toBe("deny");
     expect(() => parseConfig(baseEnv({ CODE_SANDBOX_PYTHON_IN_PROCESS: "sometimes" }))).toThrow(/CODE_SANDBOX_PYTHON_IN_PROCESS/);
     expect(parseConfig(baseEnv({ CODE_SANDBOX_PYTHON_UID: "" })).CODE_SANDBOX_PYTHON_UID).toBeUndefined();

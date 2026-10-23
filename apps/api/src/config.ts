@@ -223,7 +223,7 @@ const envSchema = z.object({
    * open network connections the outbound guard never sees and read what the
    * API user can read. `deny` makes Python code nodes fail instead.
    */
-  CODE_SANDBOX_PYTHON_IN_PROCESS: z.enum(["allow", "deny"]).default("allow"),
+  CODE_SANDBOX_PYTHON_IN_PROCESS: z.enum(["allow", "deny"]).default("deny"),
   /** Run host Python as this uid (the API needs CAP_SETUID and CAP_CHOWN, e.g. root in a container). Unset: the API's own user. */
   CODE_SANDBOX_PYTHON_UID: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().int().min(0).max(4294967294).optional()),
   /** Run host Python with this gid (needs CAP_SETGID). Unset with a uid set: the same number as the uid. */
