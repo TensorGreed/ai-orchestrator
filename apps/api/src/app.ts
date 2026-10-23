@@ -1230,6 +1230,41 @@ async function verifyWebhookRequestAuth(input: {
   return { ok: true };
 }
 
+const TOOL_RESULTS_PURPOSE = "approval_tool_results";
+
+/**
+ * Phase 11.2 — approved write-tool results answer a re-run of the agent, so
+ * the agent must get them back exactly. A paused state is stored with them
+ * sealed with the master key (and no plaintext copy), through every
+ * sub-workflow's state too.
+ */
+function sealToolResults(secretService: SecretService, state: WorkflowExecutionState): WorkflowExecutionState {
+  const { approvedToolResults, ...rest } = state;
+  const out: WorkflowExecutionState = approvedToolResults
+    ? { ...rest, approvedToolResultsSealed: secretService.sealValue(TOOL_RESULTS_PURPOSE, JSON.stringify(approvedToolResults)) }
+    : { ...rest };
+  const handoff = state.approvalHandoff;
+  if (handoff?.kind === "sub_workflow") out.approvalHandoff = { ...handoff, childState: sealToolResults(secretService, handoff.childState) };
+  return out;
+}
+
+/** The inverse of sealToolResults. A value that cannot be opened is dropped, so the run asks again. */
+function openToolResults(secretService: SecretService, state: WorkflowExecutionState): WorkflowExecutionState {
+  const { approvedToolResultsSealed, ...rest } = state;
+  const out: WorkflowExecutionState = { ...rest };
+  if (approvedToolResultsSealed) {
+    try {
+      const opened = JSON.parse(secretService.openValue(TOOL_RESULTS_PURPOSE, approvedToolResultsSealed)) as unknown;
+      if (opened && typeof opened === "object" && !Array.isArray(opened)) out.approvedToolResults = opened as Record<string, unknown[]>;
+    } catch {
+      delete out.approvedToolResults;
+    }
+  }
+  const handoff = state.approvalHandoff;
+  if (handoff?.kind === "sub_workflow") out.approvalHandoff = { ...handoff, childState: openToolResults(secretService, handoff.childState) };
+  return out;
+}
+
 export interface CreateAppOptions {
   /** Runtime/image detection seams for the code sandbox plan (tests). */
   codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
@@ -1864,10 +1899,8 @@ export function createApp(
               triggerType: paused.triggerType,
               triggeredBy: paused.triggeredBy,
               startedAt: paused.startedAt,
-              // Approved tool results are kept to answer a re-run: store them redacted.
-              state: paused.state.approvedToolResults
-                ? { ...paused.state, approvedToolResults: secretService.redact(paused.state.approvedToolResults) as Record<string, unknown[]> }
-                : paused.state
+              // Approved tool results answer a re-run, so they are stored encrypted, not redacted.
+              state: sealToolResults(secretService, paused.state)
             });
             // Phase 11.2 — who may decide, when it expires; audited and notified.
             if (!approvalsSupported) return;
@@ -3404,11 +3437,12 @@ export function createApp(
     approvalResumes.run(job, async () => {
       const pending = store.getWorkflowExecutionState(job.executionId);
       if (!pending || pending.status !== "resuming") return null;
-      const state = pending.state as WorkflowExecutionState | null;
-      if (!state || typeof state !== "object" || !state.workflow) {
+      const storedState = pending.state as WorkflowExecutionState | null;
+      if (!storedState || typeof storedState !== "object" || !storedState.workflow) {
         store.releaseWorkflowExecutionClaim(job.executionId);
         return null;
       }
+      const state = openToolResults(secretService, storedState);
       // The decision comes from the request row, never from the job payload: a stale
       // queued job must not apply an earlier decision to a request decided again since.
       const request = store.getApprovalRequest(job.requestId);

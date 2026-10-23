@@ -478,6 +478,12 @@ export interface WorkflowExecutionState {
    * runs once. Written only by the engine; cleared when the node succeeds.
    */
   approvedToolResults?: Record<string, unknown[]>;
+  /**
+   * `approvedToolResults` sealed with the master key for storage: the API
+   * stores a paused run with this in place of the plaintext field and opens it
+   * again on resume. Written and read only by the API.
+   */
+  approvedToolResultsSealed?: string;
 }
 
 /**
