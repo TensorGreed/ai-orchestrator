@@ -15,3 +15,4 @@ export * from "./replay";
 export * from "./evals";
 export * from "./regex-safety";
 export * from "./approval-gate";
+export * from "./release";

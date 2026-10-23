@@ -484,6 +484,12 @@ export interface WorkflowExecutionState {
    * again on resume. Written and read only by the API.
    */
   approvedToolResultsSealed?: string;
+  /**
+   * Phase 15.4 — the release channel the run started on. A resumed
+   * production run keeps calling the published versions of its
+   * sub-workflows. Written and read only by the API; absent means draft.
+   */
+  releaseChannel?: "production" | "draft";
 }
 
 /**
