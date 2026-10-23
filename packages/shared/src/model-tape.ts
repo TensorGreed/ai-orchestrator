@@ -77,6 +77,8 @@ export interface ModelTapeReport {
   reused: number;
   /** Calls sent to the live model (lenient only). */
   live: number;
+  /** The live calls' sites and usage, so only they are priced (tape answers cost nothing). */
+  liveCalls?: Array<ModelTapeCallSite & { providerId: string; model: string; inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null }>;
   unmatched: Array<ModelTapeCallSite & { providerId: string; model: string; reason: string }>;
 }
 

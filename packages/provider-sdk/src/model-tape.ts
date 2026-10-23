@@ -337,6 +337,7 @@ export class ModelTapePlayer {
   private matched = 0;
   private reused = 0;
   private live = 0;
+  private readonly liveCalls: NonNullable<ModelTapeReport["liveCalls"]> = [];
   private readonly unmatched: ModelTapeReport["unmatched"] = [];
   private readonly unmatchedKeys = new Set<string>();
 
@@ -382,7 +383,18 @@ export class ModelTapePlayer {
     const liveAdapter = this.liveRegistry?.tryGet(call.providerId);
     if (liveAdapter) {
       this.live += 1;
-      return { response: await liveAdapter.generate(request, context), streamed: false };
+      const response = await liveAdapter.generate(request, context);
+      const usage = (response as { usage?: Record<string, unknown> }).usage ?? {};
+      const tokens = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+      this.liveCalls.push({
+        ...call.site,
+        providerId: call.providerId,
+        model: call.model,
+        inputTokens: tokens(usage.inputTokens),
+        outputTokens: tokens(usage.outputTokens),
+        cachedInputTokens: tokens(usage.cachedInputTokens)
+      });
+      return { response, streamed: false };
     }
     if (!this.unmatchedKeys.has(key)) {
       this.unmatchedKeys.add(key);
@@ -405,7 +417,7 @@ export class ModelTapePlayer {
   }
 
   report(): ModelTapeReport {
-    return { mode: this.mode, matched: this.matched, reused: this.reused, live: this.live, unmatched: [...this.unmatched] };
+    return { mode: this.mode, matched: this.matched, reused: this.reused, live: this.live, liveCalls: this.liveCalls.map((entry) => ({ ...entry })), unmatched: [...this.unmatched] };
   }
 }
 

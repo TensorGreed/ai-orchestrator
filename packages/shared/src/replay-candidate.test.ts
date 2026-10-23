@@ -8,7 +8,7 @@ import {
   ReplayCandidateError,
   replayCandidateOverridesSchema
 } from "./replay";
-import { replayJobRequestSchema } from "./evals";
+import { replayJobReleaseIneligibleReasons, replayJobRequestSchema } from "./evals";
 import { mcpCassetteSchema } from "./mcp-testing";
 import type { Workflow } from "./types";
 
@@ -49,6 +49,22 @@ describe("applyCandidate", () => {
     expect(out.nodes.find((node) => node.id === "model_2")!.config).toEqual({ provider: { providerId: "anthropic", model: "claude-sonnet", temperature: 0 } });
   });
 
+  it("refuses a provider change on a node with its own secret or base URL unless the override names a secret", () => {
+    const keyed = workflow();
+    keyed.nodes = keyed.nodes.map((node) =>
+      node.id === "model_2" ? ({ ...node, config: { provider: { providerId: "openai", model: "gpt-4o-mini", secretRef: { secretId: "sec_openai" }, baseUrl: "https://proxy.example.com/v1" } } } as typeof node) : node
+    );
+    expect(() => applyCandidate(keyed, { models: [{ nodeId: "model_2", provider: "anthropic", model: "claude-sonnet" }] })).toThrow(/needs the override to name the secret/);
+    const out = applyCandidate(keyed, { models: [{ nodeId: "model_2", provider: "anthropic", model: "claude-sonnet", secretRef: { secretId: "sec_anthropic" } }] });
+    // The new provider gets the named secret and not the old endpoint.
+    expect(out.nodes.find((node) => node.id === "model_2")!.config).toEqual({ provider: { providerId: "anthropic", model: "claude-sonnet", secretRef: { secretId: "sec_anthropic" } } });
+    // A model change on the same provider keeps the node's secret and endpoint.
+    const same = applyCandidate(keyed, { models: [{ nodeId: "model_2", provider: "openai", model: "gpt-5" }] });
+    expect(same.nodes.find((node) => node.id === "model_2")!.config).toMatchObject({ provider: { providerId: "openai", model: "gpt-5", secretRef: { secretId: "sec_openai" }, baseUrl: "https://proxy.example.com/v1" } });
+    // Only LLM Call nodes take a secret.
+    expect(() => applyCandidate(keyed, { models: [{ nodeId: "model_1", model: "gpt-5", secretRef: { secretId: "s" } }] })).toThrow(/only be given for an LLM Call/);
+  });
+
   it("refuses a provider change on a typed chat model node", () => {
     expect(() => applyCandidate(workflow(), { models: [{ nodeId: "model_1", provider: "anthropic", model: "x" }] })).toThrow(ReplayCandidateError);
   });
@@ -80,6 +96,52 @@ describe("liveReadNodeProblems", () => {
     expect(liveReadNodeProblems(workflow(), ["slack"])[0]).toMatch(/never run those live/);
     expect(liveReadNodeProblems(workflow(), ["agent_1"])[0]).toMatch(/not an external read/);
     expect(liveReadNodeProblems(workflow(), ["nope"])[0]).toMatch(/no node nope/);
+  });
+
+  it("refuses polling triggers, browser nodes and reads that are not on the allow-list, naming the node", () => {
+    const base = workflow();
+    const extra = [
+      { id: "redis_in", type: "redis_trigger", config: { key: "jobs" } },
+      { id: "pg_in", type: "postgres_trigger", config: { query: "UPDATE jobs SET picked = true RETURNING *" } },
+      { id: "mail_in", type: "imap_email_trigger", config: {} },
+      { id: "browse", type: "web_browse", config: { urlTemplate: "https://example.com/{{x}}" } },
+      { id: "pdf", type: "pdf_output", config: { renderMode: "html" } },
+      { id: "pdf_text", type: "pdf_output", config: { renderMode: "text" } },
+      { id: "source", type: "connector_source", config: {} },
+      { id: "soql", type: "salesforce_query", config: {} },
+      { id: "post", type: "http_request", config: { method: "POST", urlTemplate: "https://example.com" } },
+      { id: "get", type: "http_request", config: { method: "get", urlTemplate: "https://example.com" } }
+    ];
+    const wf = { ...base, nodes: [...base.nodes, ...extra.map((node) => ({ ...node, name: node.id, position: { x: 0, y: 0 } }))] } as Workflow;
+    for (const id of ["redis_in", "pg_in", "mail_in"]) expect(liveReadNodeProblems(wf, [id])[0], id).toMatch(new RegExp(`node ${id} .*trigger`));
+    for (const id of ["browse", "pdf", "pdf_text", "source", "soql", "post"]) {
+      const problems = liveReadNodeProblems(wf, [id]);
+      expect(problems, id).toHaveLength(1);
+      expect(problems[0], id).toContain(`node ${id}`);
+    }
+    expect(liveReadNodeProblems(wf, ["post"])[0]).toContain("GET");
+    expect(liveReadNodeProblems(wf, ["get"])).toEqual([]);
+  });
+});
+
+describe("replayJobReleaseIneligibleReasons", () => {
+  it("is empty only for a plain draft or version job with live models and strict MCP", () => {
+    expect(replayJobReleaseIneligibleReasons({ kind: "draft", overrides: null }, { mcpMode: "strict", models: "live" })).toEqual([]);
+    expect(replayJobReleaseIneligibleReasons({ kind: "version", overrides: undefined }, { mcpMode: "strict" })).toEqual([]);
+    const cases: Array<[Parameters<typeof replayJobReleaseIneligibleReasons>[0], Parameters<typeof replayJobReleaseIneligibleReasons>[1], RegExp]> = [
+      [{ kind: "inline", overrides: null }, { mcpMode: "strict", models: "live" }, /workflow file/],
+      [{ kind: "draft", overrides: { models: [{ nodeId: "a", model: "x" }] } }, { mcpMode: "strict", models: "live" }, /Model overrides/],
+      [{ kind: "draft", overrides: { guardProfile: { profileId: "p", version: 3 } } }, { mcpMode: "strict", models: "live" }, /guard profile/],
+      [{ kind: "draft", overrides: { mcpServers: { s: "strict" } } }, { mcpMode: "strict", models: "live" }, /MCP modes/],
+      [{ kind: "draft", overrides: { liveReadNodes: ["sheet"] } }, { mcpMode: "strict", models: "live" }, /live data/],
+      [{ kind: "draft", overrides: null }, { mcpMode: "strict", models: "replay" }, /model tape/],
+      [{ kind: "draft", overrides: null }, { mcpMode: "lenient", models: "live" }, /Lenient/]
+    ];
+    for (const [candidate, options, reason] of cases) {
+      const reasons = replayJobReleaseIneligibleReasons(candidate, options);
+      expect(reasons, String(reason)).toHaveLength(1);
+      expect(reasons[0]).toMatch(reason);
+    }
   });
 });
 

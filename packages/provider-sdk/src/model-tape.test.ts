@@ -124,6 +124,8 @@ describe("model tape", () => {
     expect((await registry.get("openai").generate(request("new"), context("agent_1", 0))).content).toBe("answer 1 to new");
     expect(live.calls).toHaveLength(1);
     expect(player.report()).toMatchObject({ matched: 1, reused: 1, live: 1, unmatched: [] });
+    // Only the live call is reported with its usage, so only it is priced.
+    expect(player.report().liveCalls).toEqual([{ nodeId: "agent_1", iteration: 0, providerId: "openai", model: expect.any(String), inputTokens: 10, outputTokens: 2, cachedInputTokens: null }]);
   });
 
   it("records a stream as its answer, and replays it for both kinds of call", async () => {

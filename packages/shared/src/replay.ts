@@ -566,6 +566,23 @@ export interface ReplayRunResponse {
   verdict: ReplayVerdict;
   reasons: string[];
   facts: RunFacts;
+  /**
+   * Phase 15.3 — set when model calls were answered from the golden run's
+   * model tape (`models: "replay"`). Tape answers cost nothing: their cost is
+   * left out of `facts` (their tokens stay, so the diff still compares
+   * them), and is shown here as what the recorded run spent on them.
+   */
+  modelTape?: ReplayModelTapeUsage;
+}
+
+/** Phase 15.3 — what a model replay answered from the tape, and what those calls cost when they were recorded. */
+export interface ReplayModelTapeUsage {
+  /** Model calls answered from the tape (no model was called). */
+  replayedCalls: number;
+  /** Model calls that went to the live model (lenient misses); priced in `facts`. */
+  liveCalls: number;
+  /** The recorded usage of the replayed calls. `costUsd` is null when none of them has a price. */
+  recordedUsage: { inputTokens: number; outputTokens: number; costUsd: number | null };
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +611,8 @@ export type ReplayCompareMode = (typeof REPLAY_COMPARE_MODES)[number];
 export const REPLAY_AGGREGATE_RULES = ["all", "majority", "any"] as const;
 export type ReplayAggregateRule = (typeof REPLAY_AGGREGATE_RULES)[number];
 export const REPLAY_REPEATS_MAX = 5;
+/** The largest inline candidate (a workflow file in the request), as JSON bytes: 2 MiB. */
+export const REPLAY_INLINE_WORKFLOW_MAX_BYTES = 2 * 1024 * 1024;
 /** Golden runs older than this are compared with a baseline rerun rather than with the recording (decision 3). */
 export const REPLAY_STALE_RECORDING_DAYS = 30;
 
@@ -605,7 +624,14 @@ export const replayModelOverrideSchema = z
     nodeId: idSchema.optional(),
     /** Without `nodeId`: the provider whose nodes change. With it: the new provider (LLM Call nodes only). */
     provider: z.string().trim().min(1).max(120).optional(),
-    model: z.string().trim().min(1).max(200)
+    model: z.string().trim().min(1).max(200),
+    /**
+     * The secret the node uses after the override. Required when the override
+     * changes the provider of a node that has a secret or a base URL (the old
+     * key must not go to another vendor); the user must be allowed to use it
+     * in the workflow's project.
+     */
+    secretRef: z.object({ secretId: idSchema }).strict().optional()
   })
   .strict()
   .refine((value) => value.nodeId !== undefined || value.provider !== undefined, { message: "A model override names a node, a provider or both" });
@@ -620,7 +646,7 @@ export const replayCandidateOverridesSchema = z
       .record(idSchema, z.enum(REPLAY_SERVER_MODES))
       .refine((value) => Object.keys(value).length <= 50, { message: "At most 50 MCP server modes" })
       .optional(),
-    /** Read-class nodes (`replayNodeClass` is `read`) that run live instead of being answered from the recording. */
+    /** Nodes that run live instead of being answered from the recording: only types `REPLAY_LIVE_READ_POLICY` allows (400 otherwise). */
     liveReadNodes: z.array(idSchema).max(100).optional()
   })
   .strict();
@@ -711,11 +737,28 @@ export function effectiveModelFor(workflow: Pick<Workflow, "nodes" | "edges">, n
   return last ? chatModelOf(last) : null;
 }
 
-function setModel(node: WorkflowNode, model: string, provider: string | undefined): WorkflowNode {
+function setModel(node: WorkflowNode, model: string, provider: string | undefined, secretRef?: { secretId: string }): WorkflowNode {
   const config = { ...recordOf(node.config) };
   if (node.type === "llm_call") {
-    config.provider = { ...recordOf(config.provider), ...(provider ? { providerId: provider } : {}), model };
+    const current = recordOf(config.provider);
+    const currentProvider = typeof current.providerId === "string" ? current.providerId.trim() : "";
+    const switching = Boolean(provider && provider !== currentProvider);
+    const hasSecret = Boolean(recordOf(current.secretRef).secretId);
+    const hasBaseUrl = typeof current.baseUrl === "string" && current.baseUrl.trim() !== "";
+    if (switching && (hasSecret || hasBaseUrl) && !secretRef) {
+      throw new ReplayCandidateError(
+        `Model override: node ${node.id} calls ${currentProvider || "its provider"} with ${hasSecret ? "its own secret" : "its own base URL"}; switching it to ${provider} needs the override to name the secret to use (secretRef), so the node's key is never sent to another provider.`
+      );
+    }
+    const next: Record<string, unknown> = { ...current, ...(provider ? { providerId: provider } : {}), model };
+    // A new provider does not inherit the old one's endpoint.
+    if (switching) delete next.baseUrl;
+    if (secretRef) next.secretRef = { secretId: secretRef.secretId };
+    config.provider = next;
   } else {
+    if (secretRef) {
+      throw new ReplayCandidateError(`Model override: node ${node.id} is a ${node.type} node; a secretRef can only be given for an LLM Call node.`);
+    }
     const current = chatModelOf(node);
     if (provider && current && provider !== current.providerId) {
       throw new ReplayCandidateError(
@@ -745,21 +788,214 @@ export function applyCandidate(workflow: Workflow, overrides: ReplayCandidateOve
       const targets = isChatModelNode(node) ? [node] : attachedChatModels(out, node.id);
       if (targets.length === 0) throw new ReplayCandidateError(`Model override: node ${override.nodeId} (${node.type}) has no model to change.`);
       const ids = new Set(targets.map((target) => target.id));
-      out.nodes = out.nodes.map((entry) => (ids.has(entry.id) ? setModel(entry, override.model, override.provider) : entry));
+      out.nodes = out.nodes.map((entry) => (ids.has(entry.id) ? setModel(entry, override.model, override.provider, override.secretRef) : entry));
       continue;
     }
     let matched = 0;
     out.nodes = out.nodes.map((entry) => {
       if (!isChatModelNode(entry) || chatModelOf(entry)?.providerId !== override.provider) return entry;
       matched += 1;
-      return setModel(entry, override.model, undefined);
+      return setModel(entry, override.model, undefined, override.secretRef);
     });
     if (matched === 0) throw new ReplayCandidateError(`Model override: no node of the workflow calls provider ${override.provider}.`);
   }
   return out;
 }
 
-/** Problems with `liveReadNodes`: a node that is not in the candidate, or that is not a read (writes never run live in a replay). */
+
+// ---------------------------------------------------------------------------
+// Phase 15.3 — which nodes may run live in a replay (`liveReadNodes`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a node type may run live in a replay when a candidate names it in
+ * `overrides.liveReadNodes`. This is a decision per node type, separate from
+ * the replay class: many `read` nodes are only classed that way so that they
+ * are always answered from the recording, and running them live is not safe.
+ *
+ *   safe      a pure read with no side effects (a list, get or search call)
+ *   get_only  safe only when its configuration makes it a read: an HTTP
+ *             Request node with `method: "GET"`
+ *   refused   never runs live: every trigger (a poll can consume a queue
+ *             item or run arbitrary SQL), every node that launches a browser
+ *             (Web Browse, PDF Output), Connector Source (connector-defined),
+ *             raw query nodes (SQL, SOQL), writes, models, code and the rest
+ *
+ * A type this table does not list is refused. The drift test in
+ * replay-live-read-drift.test.ts fails when a node type is added without a
+ * decision here, or when the set of types that may run live changes.
+ */
+export type ReplayLiveReadDecision = "safe" | "get_only" | "refused";
+
+export const REPLAY_LIVE_READ_POLICY: Readonly<Record<WorkflowNodeType, ReplayLiveReadDecision>> = {
+  schedule_trigger: "refused",
+  webhook_input: "refused",
+  manual_trigger: "refused",
+  form_trigger: "refused",
+  chat_trigger: "refused",
+  file_trigger: "refused",
+  rss_trigger: "refused",
+  sse_trigger: "refused",
+  mcp_server_trigger: "refused",
+  kafka_trigger: "refused",
+  rabbitmq_trigger: "refused",
+  mqtt_trigger: "refused",
+  sub_workflow_trigger: "refused",
+  error_trigger: "refused",
+  slack_trigger: "refused",
+  github_webhook_trigger: "refused",
+  stripe_webhook_trigger: "refused",
+  telegram_trigger: "refused",
+  discord_trigger: "refused",
+  imap_email_trigger: "refused",
+  google_sheets_trigger: "refused",
+  postgres_trigger: "refused",
+  redis_trigger: "refused",
+  google_drive_trigger: "refused",
+  text_input: "refused",
+  system_prompt: "refused",
+  user_prompt: "refused",
+  prompt_template: "refused",
+  loop_node: "refused",
+  merge_node: "refused",
+  set_node: "refused",
+  chat_intent_router: "refused",
+  helper_chat_response: "refused",
+  input_validator: "refused",
+  if_node: "refused",
+  switch_node: "refused",
+  try_catch: "refused",
+  filter_node: "refused",
+  stop_and_error: "refused",
+  noop_node: "refused",
+  aggregate_node: "refused",
+  split_out_node: "refused",
+  sort_node: "refused",
+  limit_node: "refused",
+  remove_duplicates_node: "refused",
+  summarize_node: "refused",
+  compare_datasets_node: "refused",
+  rename_keys_node: "refused",
+  edit_fields_node: "refused",
+  date_time_node: "refused",
+  crypto_node: "refused",
+  jwt_node: "refused",
+  xml_node: "refused",
+  html_node: "refused",
+  convert_to_file_node: "refused",
+  extract_from_file_node: "refused",
+  compression_node: "refused",
+  edit_image_node: "refused",
+  extract_citations: "refused",
+  document_chunker: "refused",
+  chart: "refused",
+  pdf_output: "refused",
+  output: "refused",
+  webhook_response: "refused",
+  sticky_note: "refused",
+  llm_call: "refused",
+  openai_chat_model: "refused",
+  anthropic_chat_model: "refused",
+  ollama_chat_model: "refused",
+  openai_compatible_chat_model: "refused",
+  ai_gateway_chat_model: "refused",
+  azure_openai_chat_model: "refused",
+  google_gemini_chat_model: "refused",
+  agent_orchestrator: "refused",
+  supervisor_node: "refused",
+  basic_llm_chain: "refused",
+  qa_chain: "refused",
+  summarization_chain: "refused",
+  information_extractor: "refused",
+  text_classifier: "refused",
+  sentiment_analysis: "refused",
+  ai_transform: "refused",
+  output_parser: "refused",
+  guard: "refused",
+  guard_protection: "refused",
+  output_guardrail: "refused",
+  mcp_tool: "refused",
+  code_node: "refused",
+  local_memory: "refused",
+  session_artifact_save: "refused",
+  session_artifact_load: "refused",
+  human_approval: "refused",
+  approval_gate: "refused",
+  wait_node: "refused",
+  web_browse: "refused",
+  connector_source: "refused",
+  google_drive_source: "safe",
+  rag_retrieve: "safe",
+  rerank: "refused",
+  embeddings_azure_openai: "refused",
+  google_sheets_read: "safe",
+  notion_query_database: "safe",
+  airtable_list_records: "safe",
+  jira_search_issues: "safe",
+  salesforce_query: "refused",
+  hubspot_get_contact: "safe",
+  aws_s3_get_object: "safe",
+  aws_s3_list_objects: "safe",
+  google_calendar_list_events: "safe",
+  http_request: "get_only",
+  azure_storage: "refused",
+  azure_cosmos_db: "refused",
+  azure_monitor_http: "refused",
+  azure_ai_search_vector_store: "refused",
+  qdrant_vector_store: "refused",
+  execute_workflow: "refused",
+  slack_send_message: "refused",
+  smtp_send_email: "refused",
+  google_sheets_append: "refused",
+  google_sheets_update: "refused",
+  postgres_query: "refused",
+  mysql_query: "refused",
+  mongo_operation: "refused",
+  redis_command: "refused",
+  github_action: "refused",
+  teams_send_message: "refused",
+  notion_create_page: "refused",
+  airtable_create_record: "refused",
+  airtable_update_record: "refused",
+  jira_create_issue: "refused",
+  salesforce_create_record: "refused",
+  hubspot_create_contact: "refused",
+  stripe_create_customer: "refused",
+  stripe_create_charge: "refused",
+  aws_s3_put_object: "refused",
+  telegram_send_message: "refused",
+  discord_send_message: "refused",
+  google_calendar_create_event: "refused",
+  twilio_send_sms: "refused"
+};
+
+/**
+ * Why a node may not run live in a replay, or null when it may. Unknown
+ * types (and prototype keys) are refused.
+ */
+export function replayLiveReadRefusal(node: { id?: string; type: string; config?: unknown }): string | null {
+  const label = `${node.id ? `node ${node.id} ` : ""}(${node.type})`;
+  if (!Object.prototype.hasOwnProperty.call(REPLAY_LIVE_READ_POLICY, node.type)) {
+    return `Live read: ${label} is not a node type that may run live in a replay.`;
+  }
+  const decision = REPLAY_LIVE_READ_POLICY[node.type as WorkflowNodeType];
+  if (decision === "safe") return null;
+  if (decision === "get_only") {
+    const config = node.config && typeof node.config === "object" ? (node.config as Record<string, unknown>) : {};
+    const method = typeof config.method === "string" ? config.method.trim().toUpperCase() : "";
+    return method === "GET" ? null : `Live read: ${label} runs live only as a GET request (it is ${method || "not set"}).`;
+  }
+  const nodeClass = replayNodeClass(node);
+  if (nodeClass === "write") return `Live read: ${label} can change external systems, and replays never run those live.`;
+  if (nodeClass === "trigger" || node.type.endsWith("_trigger")) return `Live read: ${label} is a trigger; triggers never run live in a replay (a poll can consume or change what it reads).`;
+  if (nodeClass === "read") return `Live read: ${label} is not on the list of reads that may run live in a replay.`;
+  return `Live read: ${label} is not an external read (it is a ${nodeClass} node).`;
+}
+/**
+ * Problems with `liveReadNodes`: a node that is not in the candidate, or
+ * whose type may not run live (`replayLiveReadRefusal`; writes, triggers and
+ * anything not on `REPLAY_LIVE_READ_POLICY` never run live in a replay).
+ */
 export function liveReadNodeProblems(workflow: Pick<Workflow, "nodes">, nodeIds: readonly string[]): string[] {
   const problems: string[] = [];
   for (const nodeId of nodeIds) {
@@ -768,14 +1004,8 @@ export function liveReadNodeProblems(workflow: Pick<Workflow, "nodes">, nodeIds:
       problems.push(`Live read: the workflow has no node ${nodeId}.`);
       continue;
     }
-    const nodeClass = replayNodeClass(node);
-    if (nodeClass !== "read") {
-      problems.push(
-        nodeClass === "write"
-          ? `Live read: node ${nodeId} (${node.type}) can change external systems, and replays never run those live.`
-          : `Live read: node ${nodeId} (${node.type}) is not an external read (it is a ${nodeClass} node).`
-      );
-    }
+    const refusal = replayLiveReadRefusal(node);
+    if (refusal) problems.push(refusal);
   }
   return problems;
 }

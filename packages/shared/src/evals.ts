@@ -237,6 +237,13 @@ export interface EvalRunSummary {
   flaky?: number;
   /** Phase 15.3 — executions the job ran: candidate repeats plus baseline reruns. */
   executions?: number;
+  /**
+   * Phase 15.3 — model calls answered from model tapes (`models: "replay"`).
+   * They cost nothing and are not in `costUsd` or the budget.
+   */
+  replayedModelCalls?: number;
+  /** Phase 15.3 — what the replayed model calls cost when they were recorded (USD; unpriced models left out). */
+  recordedCostUsd?: number;
 }
 
 /**
@@ -255,6 +262,47 @@ export interface ReplayJobCandidate {
   overrides?: ReplayCandidateOverrides | null;
   /** Phase 15.3 — an inline candidate's workflow name (it may differ from the saved one). */
   name?: string;
+  /**
+   * Phase 15.3 — the guard profile override as it ran: the version is
+   * resolved once when the job is created ("latest" is pinned then) and every
+   * case runs it. Also mirrored in `overrides.guardProfile.version`.
+   */
+  guardProfile?: { profileId: string; version: number; hash: string } | null;
+  /**
+   * Phase 15.3 — computed by the server when the job is created: whether
+   * this job may count as release proof for `workflowHash`. False when the
+   * job changed anything about how the candidate ran or was compared: any
+   * override (models, guard profile, MCP server modes, live reads), models
+   * answered from the tape, lenient MCP, or an inline (file) candidate.
+   * A release gate requires `true` and never re-derives it from the
+   * options. Jobs made before this field existed have it absent: not
+   * eligible.
+   */
+  releaseEligible?: boolean;
+  /** Why the job is not release proof (empty when `releaseEligible`). */
+  releaseIneligibleReasons?: string[];
+}
+
+/**
+ * Phase 15.3 — why a replay job cannot count as release proof (empty: it
+ * can). Comparison settings the release gate fixes in its own candidate
+ * options (ignore paths, number tolerance, scorers, compare, repeats,
+ * aggregate) are left to the gate, which compares them with its options.
+ */
+export function replayJobReleaseIneligibleReasons(
+  candidate: Pick<ReplayJobCandidate, "kind" | "overrides">,
+  options: Pick<ReplayJobOptions, "mcpMode" | "models">
+): string[] {
+  const reasons: string[] = [];
+  if (candidate.kind === "inline") reasons.push("The candidate is a workflow file, not the draft or a saved version.");
+  const overrides = candidate.overrides ?? null;
+  if (overrides?.models && overrides.models.length > 0) reasons.push("Model overrides change the workflow under test.");
+  if (overrides?.guardProfile) reasons.push("A guard profile override replaced the workflow's guard bindings.");
+  if (overrides?.mcpServers && Object.keys(overrides.mcpServers).length > 0) reasons.push("Per-server MCP modes changed how MCP calls were answered.");
+  if (overrides?.liveReadNodes && overrides.liveReadNodes.length > 0) reasons.push("Some nodes read live data instead of the recording.");
+  if ((options.models ?? "live") !== "live") reasons.push('Model calls were answered from the model tape (models "replay"), so the models were not exercised.');
+  if (options.mcpMode === "lenient") reasons.push("Lenient MCP mode lets calls the recording never saw reach the live server.");
+  return reasons;
 }
 
 /** Replay-job options kept on the run. */
@@ -425,6 +473,10 @@ export interface ReplayJobEstimate {
   /** Some model has no price: `estimatedCostUsd` leaves it out. */
   costUnknown: boolean;
   warnings: string[];
+  /** Phase 15.3 — executions the job would run (cases x runsPerCase). */
+  executions?: number;
+  /** Phase 15.3 — the most executions one job may run (REPLAY_JOB_MAX_EXECUTIONS); a request over it is refused. */
+  maxExecutions?: number;
 }
 
 /** A golden set: an eval dataset tied to a workflow. */

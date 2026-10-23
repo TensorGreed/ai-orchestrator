@@ -105,6 +105,13 @@ export interface McpCassette {
   models?: ModelTape;
   /** Phase 15.3 — session memory as the run first read it. */
   memorySeed?: ModelMemorySeed;
+  /**
+   * Phase 15.3 — set on a cassette read by a user who may read the workflow
+   * but not edit it: the model tape's request and response bodies and the
+   * memory seed are left out (the tape keeps one summary line per call).
+   * Users with workflow:write get the full cassette and its export.
+   */
+  omitted?: { modelTapeBodies: boolean; memorySeedSessions: number | null; reason: string };
 }
 
 export type McpCassetteSource = "manual" | "eval" | "replay" | "import";

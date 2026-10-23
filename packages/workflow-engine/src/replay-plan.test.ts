@@ -307,6 +307,27 @@ describe("live read nodes (Phase 15.3)", () => {
     for (const id of ["slack", "code", "approve"]) expect(plan.decisions.find((decision) => decision.nodeId === id)?.action).toBe("recorded");
     expect(plan.hook(node("slack", "slack_send_message"))).toEqual({ kind: "output", output: { ok: true } });
   });
+
+  it("keeps triggers, browser nodes and non-GET HTTP stubbed even when named, and runs a GET request live", () => {
+    const nodes = [
+      node("redis", "redis_trigger", { key: "jobs" }),
+      node("pg", "postgres_trigger", { query: "UPDATE jobs SET picked = true RETURNING *" }),
+      node("browse", "web_browse", { urlTemplate: "https://example.com" }),
+      node("pdf", "pdf_output", { renderMode: "html" }),
+      node("source", "connector_source"),
+      node("post", "http_request", { method: "POST", urlTemplate: "https://example.com" }),
+      node("get", "http_request", { method: "GET", urlTemplate: "https://example.com" })
+    ];
+    const workflow = chain([node("start", "manual_trigger"), ...nodes]);
+    const rec = recorded(nodes.map((entry) => ({ nodeId: entry.id, nodeType: entry.type, output: { recorded: entry.id } })));
+    const plan = buildReplayPlan(workflow, rec, { liveNodes: new Set(nodes.map((entry) => entry.id)) });
+    for (const entry of nodes.filter((candidate) => candidate.id !== "get")) {
+      expect(plan.decisions.find((decision) => decision.nodeId === entry.id)?.action, entry.id).not.toBe("live");
+      expect(plan.hook(entry), entry.id).toEqual({ kind: "output", output: { recorded: entry.id } });
+    }
+    expect(plan.decisions.find((decision) => decision.nodeId === "get")?.action).toBe("live");
+    expect(plan.hook(node("get", "http_request", { method: "GET", urlTemplate: "https://example.com" }))).toBeNull();
+  });
 });
 
 describe("recorded stubs that no longer match the candidate", () => {
