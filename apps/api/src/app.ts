@@ -139,7 +139,8 @@ import { environmentSecretValues, scrubExemptionWarnings } from "./services/audi
 import { AuditSigningService } from "./services/audit-signing-service.js";
 import { GuardService } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
-import { createRunAccess, type RunAccessDenial } from "./run-access.js";
+import { createRunAccess } from "./run-access.js";
+import { createRunScope } from "./run-scope.js";
 import {
   McpCassetteService,
   applyReplayOutcome,
@@ -1651,6 +1652,7 @@ export function createApp(
       variables: { ...projectVars, ...(input.workflow.variables ?? {}) }
     };
     const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
+    const scoped = runScope.dependenciesFor(mergedWorkflow, input.policyActor);
     // The execution timeout aborts the run's signal, so it interrupts a
     // model call, MCP call or retry wait that is in flight instead of only
     // being checked between nodes. The reason marks it as a timeout, which
@@ -1693,60 +1695,19 @@ export function createApp(
           connectorRegistry,
           mcpRegistry: input.mcpPlan?.registry ?? mcpRegistry,
           agentRuntime,
-          memoryStore: input.replay?.sandbox.memoryStore ?? {
-            loadMessages: async (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
-            saveMessages: async (namespace, sessionId, messages) => {
-              store.saveSessionMemory(namespace, sessionId, messages);
-            }
-          },
-          toolDataStore: input.replay?.sandbox.toolDataStore ?? {
-            saveToolCall: async (payload) =>
-              store.saveSessionToolCall({
-                namespace: payload.namespace,
-                sessionId: payload.sessionId,
-                toolName: payload.toolName,
-                toolCallId: payload.toolCallId,
-                args: payload.args,
-                output: payload.output,
-                error: payload.error,
-                summary: payload.summary
-              }),
-            listToolCalls: async (payload) =>
-              store.listSessionToolCalls({
-                namespace: payload.namespace,
-                sessionId: payload.sessionId,
-                toolName: payload.toolName,
-                limit: payload.limit
-              }),
-            getToolCall: async (payload) =>
-              store.getSessionToolCall({
-                namespace: payload.namespace,
-                sessionId: payload.sessionId,
-                id: payload.id
-              })
-          },
-          sessionArtifactStore: input.replay?.sandbox.sessionArtifactStore ?? {
-            saveArtifact: async (payload) =>
-              store.saveSessionArtifact({
-                namespace: payload.namespace,
-                sessionId: payload.sessionId,
-                artifactKey: payload.artifactKey,
-                value: payload.value
-              }),
-            loadArtifact: async (payload) =>
-              store.loadSessionArtifact({
-                namespace: payload.namespace,
-                sessionId: payload.sessionId,
-                artifactKey: payload.artifactKey
-              })
-          },
+          // Session state, secrets, knowledge bases and sub-workflows are
+          // scoped to the workflow's project (run-scope.ts); a sub-workflow
+          // gets its own project's scope through scopeSubWorkflow.
+          ...scoped,
+          memoryStore: input.replay?.sandbox.memoryStore ?? scoped.memoryStore,
+          toolDataStore: input.replay?.sandbox.toolDataStore ?? scoped.toolDataStore,
+          sessionArtifactStore: input.replay?.sandbox.sessionArtifactStore ?? scoped.sessionArtifactStore,
           // A replay never starts a sub-workflow (Execute Workflow nodes are stubbed).
-          loadWorkflow: input.replay ? undefined : (workflowId) => store.getWorkflow(workflowId) ?? undefined,
-          // Phase 9.1 — built-in persistent vector store. The SqliteStore
-          // implements the minimal KnowledgeBaseStore interface declared in
-          // workflow-engine/rag-adapters.ts.
-          knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, knowledgeBaseStoreForRun(mergedWorkflow.projectId)),
-          resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+          loadWorkflow: input.replay ? undefined : scoped.loadWorkflow,
+          scopeSubWorkflow: input.replay ? undefined : scoped.scopeSubWorkflow,
+          // Phase 9.1 — built-in persistent vector store, limited to the
+          // workflow's project and the shared knowledge bases.
+          knowledgeBaseStore: replayKnowledgeBaseStore(input.replay?.sandbox, scoped.knowledgeBaseStore),
           guard: guardService.runtimeFor({ executionId: input.executionId, workflowId: mergedWorkflow.id, projectId: mergedWorkflow.projectId ?? "default" }),
           replayNodeHook: input.replay?.hook,
           resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer ?? resolveRegisteredMcpServer,
@@ -1803,12 +1764,16 @@ export function createApp(
             }).catch(err => {
               app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Notification send failed");
             });
-            // Execute the designated error handler workflow
-            const errorWf = store.getWorkflow(payload.errorWorkflowId);
-            if (!errorWf) {
-              app.log.warn({ errorWorkflowId: payload.errorWorkflowId }, "Error workflow not found");
+            // Execute the designated error handler workflow: one in the same
+            // project, a shared one, or one the run's user may execute.
+            const failingWorkflow = payload.sourceWorkflowId === mergedWorkflow.id ? mergedWorkflow : store.getWorkflow(payload.sourceWorkflowId) ?? mergedWorkflow;
+            const errorTarget = runScope.errorWorkflowFor(failingWorkflow, input.policyActor, payload.errorWorkflowId);
+            if ("error" in errorTarget) {
+              app.log.warn({ errorWorkflowId: payload.errorWorkflowId, sourceWorkflowId: payload.sourceWorkflowId, reason: errorTarget.error }, "Error workflow not run");
               return;
             }
+            const errorWf = errorTarget.workflow;
+            const errorScoped = runScope.dependenciesFor(errorWf, input.policyActor);
             try {
               await executeWorkflow(
                 {
@@ -1830,17 +1795,7 @@ export function createApp(
                   connectorRegistry,
                   mcpRegistry,
                   agentRuntime,
-                  memoryStore: {
-                    loadMessages: async (ns, sid) => store.loadSessionMemory(ns, sid),
-                    saveMessages: async (ns, sid, msgs) => { store.saveSessionMemory(ns, sid, msgs); }
-                  },
-                  sessionArtifactStore: {
-                    saveArtifact: async (artifact) => store.saveSessionArtifact(artifact),
-                    loadArtifact: async (artifact) => store.loadSessionArtifact(artifact)
-                  },
-                  loadWorkflow: (wid) => store.getWorkflow(wid) ?? undefined,
-                  knowledgeBaseStore: knowledgeBaseStoreForRun(errorWf.projectId),
-                  resolveSecret: (ref) => secretService.resolveSecret(ref),
+                  ...errorScoped,
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({ workflowId: errorWf.id, projectId: errorWf.projectId ?? "default" }),
                   resolveRegisteredMcpServer,
@@ -2650,16 +2605,75 @@ export function createApp(
   };
   // Saving a workflow needs write access to the one it replaces (same id) and
   // to the project it lands in (its own projectId, else the replaced one's).
-  const workflowSaveDenial = (user: SafeUser, workflow: { id: string; projectId?: string | null }): RunAccessDenial | null => {
+  // Test and discovery routes resolve a secretRef the caller typed in. They
+  // may only use a secret the caller could use in a run: `secret:use` in the
+  // secret's project or in a project it is shared to.
+  const resolveSecretForUser = (user: SafeUser) => async (secretRef?: SecretReference): Promise<string | undefined> => {
+    if (!secretRef?.secretId) return undefined;
+    const row = store.getSecret(secretRef.secretId);
+    if (!row) return undefined;
+    const usable =
+      rbacService.can(user, row.projectId ?? DEFAULT_PROJECT_ID, "secret:use") ||
+      rbacService.listSecretShares(row.id).some((share) => rbacService.can(user, share.projectId, "secret:use"));
+    if (!usable) throw new Error(`Secret '${secretRef.secretId}' is not available to you.`);
+    return secretService.resolveSecret(secretRef);
+  };
+  // What a run can reach once it is going: sub-workflows, secrets, knowledge
+  // bases and session state of its own project (see run-scope.ts).
+  const runScope = createRunScope({
+    getWorkflow: (id) => store.getWorkflow(id),
+    listWorkflowShares: (workflowId) => store.listWorkflowShares(workflowId),
+    canExecuteWorkflow: (user, workflow) => runAccess.workflow(user, workflow.id, "workflow:execute").ok,
+    getSecretProjectId: (secretId) => store.getSecret(secretId)?.projectId ?? null,
+    listSecretIdsSharedToProject: (projectId) => store.listSecretsSharedToProject(projectId),
+    canUseSecretsInProject: (user, projectId) => rbacService.can(user, projectId, "secret:use"),
+    resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+    knowledgeBaseStoreFor: (projectId) => knowledgeBaseStoreForRun(projectId),
+    sessions: {
+      loadMemory: (namespace, sessionId) => store.loadSessionMemory(namespace, sessionId),
+      saveMemory: (namespace, sessionId, messages) => store.saveSessionMemory(namespace, sessionId, messages),
+      saveToolCall: (input) => store.saveSessionToolCall(input),
+      listToolCalls: (input) => store.listSessionToolCalls(input),
+      getToolCall: (input) => store.getSessionToolCall(input),
+      saveArtifact: (input) => store.saveSessionArtifact(input),
+      loadArtifact: (input) => store.loadSessionArtifact(input)
+    }
+  });
+  // A changed placement must name a project that exists and, with a folder,
+  // a folder of that same project. Unchanged placements are left alone.
+  const workflowPlacementError = (
+    workflow: { projectId?: string | null; folderId?: string | null },
+    existing?: { projectId?: string | null; folderId?: string | null } | null
+  ): string | null => {
+    const projectId = workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID;
+    const folderId = workflow.folderId ?? null;
+    if (existing && projectId === (existing.projectId ?? DEFAULT_PROJECT_ID) && folderId === (existing.folderId ?? null)) return null;
+    if (projectId !== DEFAULT_PROJECT_ID && !store.getProject(projectId)) return "Target project does not exist";
+    if (folderId) {
+      const folder = store.getFolder(folderId);
+      if (!folder) return "Target folder does not exist";
+      if (folder.projectId !== projectId) return "Target folder belongs to a different project";
+    }
+    return null;
+  };
+  // Saving a workflow needs write access to the one it replaces (same id) and
+  // to the project it lands in (its own projectId, else the replaced one's),
+  // and a placement that exists (400 otherwise).
+  const workflowSaveDenial = (
+    user: SafeUser,
+    workflow: { id: string; projectId?: string | null; folderId?: string | null }
+  ): { ok: false; status: 400 | 403 | 404; error: string } | null => {
     const existing = store.getWorkflow(workflow.id);
     if (existing) {
       const access = runAccess.workflow(user, existing.id, "workflow:write");
       if (!access.ok) return access;
     }
     const target = runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
-    return target.ok ? null : target;
+    if (!target.ok) return target;
+    const placement = workflowPlacementError(workflow, existing);
+    return placement ? { ok: false, status: 400, error: placement } : null;
   };
-  const denyRunAccess = (reply: FastifyReply, denial: RunAccessDenial) => {
+  const denyRunAccess = (reply: FastifyReply, denial: { status: number; error: string }) => {
     reply.code(denial.status);
     return { error: denial.error };
   };
