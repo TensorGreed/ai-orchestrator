@@ -62,6 +62,27 @@ function continuingGate(message: string, via: "onError" | "errorConfig" = "onErr
   };
 }
 
+function continuingHumanApproval(message: string, via: "onError" | "errorConfig" = "onError"): Workflow {
+  const config = { approvalMessage: message, timeoutMinutes: 5 };
+  return {
+    id: "wf-human-continue",
+    name: "wf-human-continue",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [
+      node("in", "webhook_input"),
+      via === "onError"
+        ? node("ask", "human_approval", { ...config, onError: "continue" })
+        : { ...node("ask", "human_approval", config), errorConfig: { continueOnFail: true } },
+      node("send", "output", { responseTemplate: "SENT" })
+    ],
+    edges: [
+      { id: "e0", source: "in", target: "ask" },
+      { id: "e1", source: "ask", target: "send" }
+    ]
+  };
+}
+
 function deps(paused: WorkflowExecutionState[]): WorkflowExecutionDependencies {
   return {
     providerRegistry: new ProviderRegistry(),
@@ -98,5 +119,28 @@ describe("a failed Approval Gate set to continue on error", () => {
     expect(result.status).toBe("error");
     expect(last(result, "gate")).toMatchObject({ status: "error", error: expect.stringContaining("expression sandbox error") });
     expect(last(result, "on_approved")?.status).not.toBe("success");
+  });
+});
+
+describe("a failed Human Approval set to continue on error", () => {
+  for (const via of ["onError", "errorConfig"] as const) {
+    it(`does not run the next step after a rejection (${via})`, async () => {
+      const paused: WorkflowExecutionState[] = [];
+      const first = await executeWorkflow({ workflow: continuingHumanApproval("ok?", via), executionId: "exec-human-reject" }, deps(paused));
+      expect(first.status).toBe("waiting_approval");
+      const rejected = await resumeWorkflowExecution({ executionId: "exec-human-reject", state: paused[0]!, decision: "reject", actedBy: "lead@example.com", reason: "No" }, deps(paused));
+      expect(rejected.status).toBe("error");
+      expect(last(rejected, "ask")?.status).toBe("error");
+      expect(last(rejected, "send")?.status).not.toBe("success");
+    });
+  }
+
+  it("does not run the next step when the expression sandbox cannot render the message", async () => {
+    const paused: WorkflowExecutionState[] = [];
+    const result = await executeWorkflow({ workflow: continuingHumanApproval("Send {{ crash }}?"), executionId: "exec-human-crash" }, deps(paused));
+    expect(paused).toEqual([]);
+    expect(result.status).toBe("error");
+    expect(last(result, "ask")).toMatchObject({ status: "error", error: expect.stringContaining("expression sandbox error") });
+    expect(last(result, "send")?.status).not.toBe("success");
   });
 });

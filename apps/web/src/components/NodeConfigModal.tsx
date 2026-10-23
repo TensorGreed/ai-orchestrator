@@ -9071,8 +9071,8 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, onError: next }))}
               options={[
                 { value: "stop", label: "Stop Execution" },
-                // A gate that continued past a failure would run its approved branch with no decision.
-                ...(node.data.nodeType === "approval_gate" ? [] : [{ value: "continue", label: "Continue Anyway" }]),
+                // A gate or approval that continued past a failure would run the next step with no decision.
+                ...(node.data.nodeType === "approval_gate" || node.data.nodeType === "human_approval" ? [] : [{ value: "continue", label: "Continue Anyway" }]),
                 { value: "branch", label: "Execute Fallback Branch" }
               ]}
             />

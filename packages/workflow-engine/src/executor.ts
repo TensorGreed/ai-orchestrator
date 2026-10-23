@@ -6921,7 +6921,9 @@ async function executeWorkflowRun(
       }
 
       if (!caughtByTryCatch) {
-        const onError = getOnError(toRecord(waitingNode.config));
+        // A rejected Approval Gate or Human Approval never continues (see the node loop below).
+        const requestedOnError = getOnError(toRecord(waitingNode.config));
+        const onError = requestedOnError === "continue" && (waitingNode.type === "approval_gate" || waitingNode.type === "human_approval") ? "stop" : requestedOnError;
         if (onError === "continue") {
           nodeOutputs.set(waitingNode.id, {
             ...decisionPayload,
@@ -7299,10 +7301,10 @@ async function executeWorkflowRun(
     const nodeConfig = toRecord(node.config);
     const requestedOnError: "stop" | "continue" | "branch" =
       node.errorConfig?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
-    // Phase 11.2 — a failed Approval Gate (rejected with nowhere to go, or a
-    // request that could not be rendered) never continues: "continue" would
-    // run its approved branch with no decision. The error branch still works.
-    const onError = node.type === "approval_gate" && requestedOnError === "continue" ? "stop" : requestedOnError;
+    // Phase 11.2 — a failed Approval Gate or Human Approval (rejected with
+    // nowhere to go, or a request that could not be rendered) never continues:
+    // "continue" would run the next step with nobody asked. The error branch still works.
+    const onError = (node.type === "approval_gate" || node.type === "human_approval") && requestedOnError === "continue" ? "stop" : requestedOnError;
     const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
     const parentOutputs: Record<string, unknown> = {};
     for (const parentId of parentIds) {

@@ -713,6 +713,15 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           nodeId: node.id
         });
       }
+      // Continuing past a failed Human Approval (a rejection, or a message that cannot be rendered) would run the next step with nobody asked.
+      // (The engine also refuses it at run time, for errorConfig.continueOnFail too.)
+      if (config.onError === "continue") {
+        issues.push({
+          code: "human_approval_continue_on_error",
+          message: "A Human Approval node cannot continue on error: that would run the next step with nobody asked. Stop, or use the error branch.",
+          nodeId: node.id
+        });
+      }
     }
 
     if (node.type === "approval_gate") {

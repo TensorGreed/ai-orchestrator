@@ -751,6 +751,19 @@ describe("a failed Approval Gate never continues", () => {
   });
 });
 
+describe("a failed Human Approval never continues", () => {
+  it("refuses a Human Approval set to continue on error; the error branch is fine", async () => {
+    const ask = (config: Record<string, unknown>) =>
+      workflow("wf-human-continue", [node("in", "manual_trigger"), node("ask", "human_approval", { approvalMessage: "ok?", timeoutMinutes: 5, ...config }), node("after", "output")], [{ source: "in", target: "ask" }, { source: "ask", target: "after" }]);
+    expect(validateWorkflowGraph(ask({ onError: "continue" })).issues.map((issue) => issue.code)).toContain("human_approval_continue_on_error");
+    expect(validateWorkflowGraph(ask({ onError: "branch" })).issues.map((issue) => issue.code)).not.toContain("human_approval_continue_on_error");
+    const paused: WorkflowExecutionState[] = [];
+    const refused = await executeWorkflow({ workflow: ask({ onError: "continue" }), executionId: "exec-human-continue" }, deps({ paused }));
+    expect(refused.status).toBe("error");
+    expect(paused).toEqual([]);
+  });
+});
+
 describe("approval pauses with retries and loops", () => {
   it("restarts a resumed child on retry of the Execute Workflow node, so it asks again", async () => {
     const child = workflow(
