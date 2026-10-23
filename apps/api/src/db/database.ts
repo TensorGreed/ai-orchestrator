@@ -9399,12 +9399,17 @@ export class SqliteStore {
     ).map(mapMcpCassetteSummary);
   }
 
-  listMcpCassettes(options: { workflowId?: string; projectId?: string; evalRunId?: string; limit?: number; offset?: number } = {}): {
+  listMcpCassettes(options: { workflowId?: string; projectId?: string; evalRunId?: string; workflowIds?: string[]; limit?: number; offset?: number } = {}): {
     items: McpCassetteSummary[];
     total: number;
   } {
     const where: string[] = [];
     const params: Array<string | number> = [];
+    // Project scope: only cassettes of these workflows (an empty list matches nothing).
+    if (options.workflowIds) {
+      where.push(options.workflowIds.length > 0 ? `workflow_id IN (${options.workflowIds.map(() => "?").join(", ")})` : "1 = 0");
+      params.push(...options.workflowIds);
+    }
     if (options.workflowId) {
       where.push("workflow_id = ?");
       params.push(options.workflowId);

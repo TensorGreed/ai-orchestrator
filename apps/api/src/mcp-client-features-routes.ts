@@ -25,6 +25,7 @@ import type { McpServerRecord, SqliteStore } from "./db/database.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { McpElicitationAnswerError, toElicitationView, type McpElicitationService } from "./services/mcp-elicitation-service.js";
+import type { RunAccess } from "./run-access.js";
 import { captureCatalog } from "./services/mcp-probe-service.js";
 import { evaluateToolForContext } from "./services/mcp-tool-policy.js";
 
@@ -42,6 +43,8 @@ export interface McpClientFeatureDeps {
   withScopedMcpContext: <T>(run: (context: MCPExecutionContext) => Promise<T>) => Promise<T>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   canExecuteInProject: (user: SafeUser, projectId: string) => boolean;
+  /** Project scope: an elicitation follows the workflow whose run asked it. */
+  runAccess: RunAccess;
   auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
 }
 
@@ -374,8 +377,11 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
   // Elicitations
   // ---------------------------------------------------------------------------
 
-  const visibleTo = (user: SafeUser) => (record: { createdBy: string | null }) =>
-    user.role === "admin" || user.role === "operator" || !record.createdBy || record.createdBy === user.id;
+  // Like approvals: only users who can read the run's workflow see the
+  // request; answering it needs `workflow:execute` there.
+  const visibleTo = (user: SafeUser) => (record: { createdBy: string | null; workflowId: string }) =>
+    (user.role === "admin" || user.role === "operator" || !record.createdBy || record.createdBy === user.id) &&
+    deps.runAccess.workflow(user, record.workflowId, "workflow:read").ok;
 
   app.get("/api/mcp/elicitations", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["viewer"]);
@@ -414,6 +420,16 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     if (!parsed.success) {
       reply.code(400);
       return { error: "Invalid elicitation answer", details: parsed.error.issues };
+    }
+    const record = deps.elicitations.get(request.params.id);
+    if (!record || !visibleTo(user)(record)) {
+      reply.code(404);
+      return { error: "Elicitation request not found" };
+    }
+    const access = deps.runAccess.workflow(user, record.workflowId, "workflow:execute");
+    if (!access.ok) {
+      reply.code(access.status);
+      return { error: access.error };
     }
     try {
       const settled = deps.elicitations.answer(

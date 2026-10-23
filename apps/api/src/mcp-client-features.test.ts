@@ -372,9 +372,9 @@ describe("elicitation", () => {
     expect(pending).toMatchObject({ workflowId: "wf-ask", nodeId: "tool", toolName: "ask_user", message: "Which region?", serverName: "Mock", registryServerId: serverId, createdBy: builder.id, triggerType: "manual_stream" });
     expect(pending.requestedSchema.properties.answer).toMatchObject({ type: "string", enum: ["eu", "us"] });
 
-    // Another builder cannot see or answer it; a viewer-level list shows only your own.
+    // Another builder cannot see or answer it (it reads as missing); a viewer-level list shows only your own.
     expect((await call(context, "GET", "/api/mcp/elicitations", other.cookie)).json<{ items: unknown[] }>().items).toHaveLength(0);
-    expect((await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, other.cookie, { action: "accept", content: { answer: "eu" } })).statusCode).toBe(403);
+    expect((await call(context, "POST", `/api/mcp/elicitations/${pending.id}/answer`, other.cookie, { action: "accept", content: { answer: "eu" } })).statusCode).toBe(404);
     // Operators see it, and the owner sees it.
     expect((await call(context, "GET", "/api/mcp/elicitations", operator.cookie)).json<{ items: McpElicitationView[] }>().items[0].id).toBe(pending.id);
     expect((await call(context, "GET", `/api/mcp/elicitations?executionId=${pending.executionId}`, builder.cookie)).json<{ items: McpElicitationView[] }>().items).toHaveLength(1);
