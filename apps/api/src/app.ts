@@ -9673,7 +9673,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return { error: "Invalid secret payload", details: [{ path: ["provider"], message: "Unsupported provider" }] };
     }
     const targetProject = parsed.data.projectId ?? DEFAULT_PROJECT_ID;
-    if (!rbacService.can(user, targetProject, "secret:write")) {
+    // Editors may create secrets for their project (workflow:write + secret:use);
+    // changing, deleting and sharing stay on secret:write.
+    const mayCreate =
+      rbacService.can(user, targetProject, "secret:write") ||
+      (rbacService.can(user, targetProject, "workflow:write") && rbacService.can(user, targetProject, "secret:use"));
+    if (!mayCreate) {
       reply.code(403);
       return { error: "Permission 'secret:write' required in the target project" };
     }
