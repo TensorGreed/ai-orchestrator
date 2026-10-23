@@ -8,10 +8,17 @@
  * not know are ignored; a server that does not know a request field answers
  * 400 and the CLI says which, with exit 2.
  *
- * Exit codes: 0 every case passed, 1 a case failed, 2 usage, 4 inconclusive
- * (a case could not be judged, the job did not complete, the request failed).
+ * Exit codes: 0 every case passed, 1 a case failed (or the server refused a
+ * status poll with 400), 2 usage (also flags the API refuses with 400 when the
+ * job is started), 4 inconclusive (a case could not be judged, the job did
+ * not complete, or a request failed: unreachable, timed out, 401, 403, 404
+ * or 5xx). Exit 4 for failed requests is the Phase 15.2 behaviour and is
+ * kept so existing pipelines do not change meaning.
+ *
+ * Every request gives up after 60 s, or what is left of --timeout if that
+ * is less. Status polls (GET) are tried again twice, after 1 s and 3 s, when
+ * the server cannot be reached, does not answer in time or answers 5xx.
  */
-import fs from "node:fs";
 import {
   REPLAY_IGNORE_PATHS_MAX,
   REPLAY_MCP_MODES,
@@ -20,7 +27,7 @@ import {
   type EvalCaseResult,
   type EvalRunView
 } from "@ai-orchestrator/shared";
-import { apiRequest, apiTarget, cleanServerText, isObject, readJsonFile, RequestError, write, type ApiTarget, type CliIo } from "./api";
+import { apiGetWithRetry, apiRequest, apiTarget, cleanServerText, isObject, readJsonFile, REQUEST_TIMEOUT_MS, RequestError, write, writePrivateFile, type ApiTarget, type CliIo } from "./api";
 import { listFlag, oneFlag, UsageError, type ParsedArgs } from "./args";
 import { buildJunit } from "./junit";
 
@@ -231,7 +238,7 @@ function writeJunit(args: ParsedArgs, io: CliIo, run: JobView | null, message: s
   const file = oneFlag(args, "junit");
   if (!file) return;
   try {
-    fs.writeFileSync(file, buildJunit({ run, message }));
+    writePrivateFile(file, buildJunit({ run, message }));
   } catch (error) {
     write(io.stderr, `l2m: cannot write ${file}: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -247,17 +254,32 @@ function timeoutSeconds(args: ParsedArgs): number {
 const JOB_POLL_MS = 2_000;
 const DEFAULT_JOB_TIMEOUT_S = 1_800;
 
+/** A failed status poll (GET): a 400 there is not the caller's flags, so it exits 1 rather than 2. */
+class PollRequestError extends RequestError {}
+
+const sleeper = (io: CliIo) => io.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+/** One status poll, tried again on network errors, timeouts and 5xx. */
+async function pollJob(target: ApiTarget, io: CliIo, runId: string, deadline: number): Promise<JobView> {
+  let polled: { run?: unknown };
+  try {
+    polled = await apiGetWithRetry<{ run?: unknown }>(target, `/api/replay/runs/${encodeURIComponent(runId)}`, { sleep: sleeper(io), deadline });
+  } catch (error) {
+    if (error instanceof RequestError) throw new PollRequestError(error.message, error.status, error.body);
+    throw error;
+  }
+  if (!isRunView(polled?.run)) throw new RequestError("the API's answer is not a replay job");
+  return polled.run;
+}
+
 /** Polls until the job leaves queued and running, or the time is up (`timedOut`). */
-async function waitForJob(target: ApiTarget, io: CliIo, first: JobView, timeoutS: number): Promise<{ run: JobView; timedOut: boolean }> {
-  const sleep = io.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const deadline = Date.now() + timeoutS * 1000;
+async function waitForJob(target: ApiTarget, io: CliIo, first: JobView, deadline: number): Promise<{ run: JobView; timedOut: boolean }> {
+  const sleep = sleeper(io);
   let run = first;
   while (run.status === "queued" || run.status === "running") {
     if (Date.now() >= deadline) return { run, timedOut: true };
     await sleep(JOB_POLL_MS);
-    const polled = await apiRequest<{ run?: unknown }>(target, "GET", `/api/replay/runs/${encodeURIComponent(run.id)}`);
-    if (!isRunView(polled?.run)) throw new RequestError("the API's answer is not a replay job");
-    run = polled.run;
+    run = await pollJob(target, io, run.id, deadline);
   }
   return { run, timedOut: false };
 }
@@ -272,6 +294,11 @@ function conclude(args: ParsedArgs, io: CliIo, run: JobView): number {
 }
 
 function requestFailed(args: ParsedArgs, io: CliIo, error: RequestError, what: string, run: JobView | null): number {
+  if (error.status === 400 && error instanceof PollRequestError) {
+    write(io.stderr, `l2m: ${what} status could not be read: ${cleanServerText(error.message)}`);
+    writeJunit(args, io, run, cleanServerText(error.message));
+    return EXIT_FAILED;
+  }
   if (error.status === 400) {
     write(io.stderr, `l2m: ${rejectedMessage(error)}`);
     return EXIT_USAGE;
@@ -305,11 +332,13 @@ function formatEstimate(estimate: JobEstimate): string {
 export async function runReplayJob(args: ParsedArgs, io: CliIo, sets: string[]): Promise<number> {
   const body = jobRequestBody(args, sets);
   const timeoutS = timeoutSeconds(args);
+  const deadline = Date.now() + timeoutS * 1000;
+  const requestTimeout = Math.min(REQUEST_TIMEOUT_MS, timeoutS * 1000);
   const target = apiTarget(args, io);
 
   if (args.booleans.has("estimate")) {
     try {
-      const estimate = await apiRequest<unknown>(target, "POST", "/api/replay/estimate", body);
+      const estimate = await apiRequest<unknown>(target, "POST", "/api/replay/estimate", body, { timeoutMs: requestTimeout });
       if (!isObject(estimate) || typeof estimate.cases !== "number") {
         write(io.stderr, "l2m: the estimate is inconclusive: the API's answer is not an estimate (does the server have the estimate route, Phase 15.3?)");
         return EXIT_INCOMPLETE;
@@ -336,7 +365,7 @@ export async function runReplayJob(args: ParsedArgs, io: CliIo, sets: string[]):
 
   let run: JobView | null = null;
   try {
-    const started = await apiRequest<{ run?: unknown }>(target, "POST", "/api/replay/runs", body);
+    const started = await apiRequest<{ run?: unknown }>(target, "POST", "/api/replay/runs", body, { timeoutMs: requestTimeout });
     if (!isRunView(started?.run)) {
       write(io.stderr, "l2m: replay job is inconclusive: the API's answer is not a replay job (is the CLI the same version as the API?)");
       writeJunit(args, io, null, "the API's answer is not a replay job");
@@ -348,7 +377,7 @@ export async function runReplayJob(args: ParsedArgs, io: CliIo, sets: string[]):
       else write(io.stdout, `Started replay job ${cleanServerText(run.id)} (${cleanServerText(run.status)}). Follow it with: l2m replay status ${cleanServerText(run.id)} --wait`);
       return EXIT_OK;
     }
-    const waited = await waitForJob(target, io, run, timeoutS);
+    const waited = await waitForJob(target, io, run, deadline);
     run = waited.run;
     if (waited.timedOut) {
       const message = `replay job ${run.id} is still ${run.status} after ${timeoutS} s; it keeps running on the server.`;
@@ -369,17 +398,21 @@ export async function runReplayStatus(args: ParsedArgs, io: CliIo): Promise<numb
   const [, , runId, extra] = args.positionals;
   if (!runId || extra) throw new UsageError("l2m replay status needs exactly one replay job id");
   const timeoutS = timeoutSeconds(args);
+  const deadline = Date.now() + timeoutS * 1000;
   const target = apiTarget(args, io);
   let run: JobView | null = null;
   try {
-    const fetched = await apiRequest<{ run?: unknown }>(target, "GET", `/api/replay/runs/${encodeURIComponent(runId)}`);
-    if (!isRunView(fetched?.run)) {
-      write(io.stderr, "l2m: replay job is inconclusive: the API's answer is not a replay job");
-      return EXIT_INCOMPLETE;
+    try {
+      run = await pollJob(target, io, runId, deadline);
+    } catch (error) {
+      if (error instanceof RequestError && !(error instanceof PollRequestError)) {
+        write(io.stderr, "l2m: replay job is inconclusive: the API's answer is not a replay job");
+        return EXIT_INCOMPLETE;
+      }
+      throw error;
     }
-    run = fetched.run;
     if (args.booleans.has("wait")) {
-      const waited = await waitForJob(target, io, run, timeoutS);
+      const waited = await waitForJob(target, io, run, deadline);
       run = waited.run;
       if (waited.timedOut) {
         const message = `replay job ${run.id} is still ${run.status} after ${timeoutS} s; it keeps running on the server.`;

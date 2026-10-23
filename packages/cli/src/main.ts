@@ -54,7 +54,7 @@ import {
   type MCPExecutionContext,
   type MCPServerAdapter
 } from "@ai-orchestrator/mcp-sdk";
-import { listFlag, oneFlag, parseArgs, splitCommand, UsageError, type ParsedArgs } from "./args";
+import { checkCommandFlags, listFlag, oneFlag, parseArgs, splitCommand, UsageError, type CommandFlags, type ParsedArgs } from "./args";
 import { apiRequest, apiTarget, isObject, readJsonFile, RequestError, write, type CliIo } from "./api";
 import { runGoldenExport, runGoldenImport, runGoldenVerify } from "./golden";
 import { JOB_ONLY_BOOLEANS, JOB_ONLY_FLAGS, replayFlags, runReplayJob, runReplayStatus } from "./replay-job";
@@ -73,6 +73,10 @@ export const EXIT_SIGNER_UNVERIFIED = 3;
 export const EXIT_INCOMPLETE = 4;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+/** `replay run --recording` waits for the whole replay in one request. */
+const SINGLE_REPLAY_TIMEOUT_MS = 900_000;
+/** `mcp check` against the API waits for every server to be probed. */
+const MCP_CHECK_TIMEOUT_MS = 300_000;
 
 const USAGE = `Usage:
   l2m mcp check [--server <id>]... [--toolset <id>] [--workflow <id>]...
@@ -100,17 +104,33 @@ const USAGE = `Usage:
                       [--override-reason <text> | --request-approval <reason>] [--json]
   l2m golden export <goldenSetId> -o <file> [--sign]
   l2m golden import <file> --workflow <id> [--project <id>] [--name <name>] [--public-key <file|base64>]
+                    [--allow-other-workflow] [--json]
   l2m golden verify <file> [--public-key <file|base64>] [--trust-embedded-key] [--json]
 
-The API URL and key default to L2M_API_URL and L2M_API_KEY.
+The API URL and key come from L2M_API_URL and L2M_API_KEY. Prefer the
+environment for the key: --api-key works but shows in the process list and
+CI logs, and the CLI warns when it is used. Each command refuses flags it
+does not take (exit 2); switches never take a value (--sign, not --sign=true).
+Requests give up after 60 s (golden export and import, mcp check: 300 s;
+replay run --recording: 900 s; replay run --set: also what is left of
+--timeout); replay job status polls are retried twice on 5xx or no answer.
+Files written with -o and --junit get mode 0600 and are never written through
+a symlink.
+
 Exit codes: 0 clean (replay: pass), 1 problems found or a request failed
-(replay: the candidate differs from the golden run; --set: a case failed),
-2 usage error (replay and golden import: also flags or files the API rejects),
+(replay: the candidate differs from the golden run; --set: a case failed;
+a replay job status poll refused with 400; golden import: 409 for another
+workflow's file without --allow-other-workflow),
+2 usage error (replay and golden import: also flags or files the API rejects
+with 400 when the request is made),
 3 signer not verified (audit verify, golden verify: no --public-key; see --trust-embedded-key),
 4 a replay is inconclusive (--set: a case was inconclusive, or the job did
-not complete: canceled, over budget, interrupted or past --timeout; also a
-request that failed), or release publish needs approval.
+not complete: canceled, over budget, interrupted or past --timeout), or
+release publish needs approval. replay run and replay status also exit 4
+when a request fails (unreachable, no answer, 401, 403, 404, 5xx): that is
+the Phase 15.2 behaviour, kept so existing pipelines keep their meaning.
 release publish: 0 published, 1 blocked by the gate or failed, 4 needs approval.
+golden export, import and verify: request failures exit 1.
 `;
 
 function loadSnapshot(file: string): McpSnapshotFile {
@@ -250,13 +270,20 @@ async function runCheck(args: ParsedArgs, io: CliIo): Promise<number> {
     const toolset = oneFlag(args, "toolset");
     const servers = listFlag(args, "server");
     const workflows = listFlag(args, "workflow");
-    report = await apiRequest<McpCheckReport>(target, "POST", "/api/mcp/check", {
-      ...(servers.length > 0 ? { serverIds: servers } : {}),
-      ...(toolset ? { toolsetId: toolset } : {}),
-      ...(workflows.length > 0 ? { workflowIds: workflows } : {}),
-      failOnUnreachable,
-      failOnPolicyBlocked
-    });
+    report = await apiRequest<McpCheckReport>(
+      target,
+      "POST",
+      "/api/mcp/check",
+      {
+        ...(servers.length > 0 ? { serverIds: servers } : {}),
+        ...(toolset ? { toolsetId: toolset } : {}),
+        ...(workflows.length > 0 ? { workflowIds: workflows } : {}),
+        failOnUnreachable,
+        failOnPolicyBlocked
+      },
+      // The server probes every server it checks before it answers.
+      { timeoutMs: MCP_CHECK_TIMEOUT_MS }
+    );
   }
   write(io.stdout, json ? JSON.stringify(report, null, 2) : formatReport(report, snapshotFiles.length > 0));
   return report.ok ? EXIT_OK : EXIT_FAILED;
@@ -402,12 +429,19 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
 
   let result: unknown;
   try {
-    result = await apiRequest<unknown>(target, "POST", `/api/replay/recordings/${encodeURIComponent(recording)}/replay`, {
-      ...(version !== undefined ? { version } : { draft: true }),
-      ...(mcpMode ? { mcpMode } : {}),
-      ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
-      ...(numberTolerance !== undefined ? { numberTolerance } : {})
-    });
+    result = await apiRequest<unknown>(
+      target,
+      "POST",
+      `/api/replay/recordings/${encodeURIComponent(recording)}/replay`,
+      {
+        ...(version !== undefined ? { version } : { draft: true }),
+        ...(mcpMode ? { mcpMode } : {}),
+        ...(ignorePaths.length > 0 ? { ignorePaths } : {}),
+        ...(numberTolerance !== undefined ? { numberTolerance } : {})
+      },
+      // The server runs the whole replay before it answers.
+      { timeoutMs: SINGLE_REPLAY_TIMEOUT_MS }
+    );
   } catch (error) {
     if (error instanceof RequestError) {
       // A 400 is the API refusing the flags: a usage error, like one caught here.
@@ -440,26 +474,68 @@ async function runReplay(args: ParsedArgs, io: CliIo): Promise<number> {
 
 // --- entry -------------------------------------------------------------------
 
-const BOOLEAN_FLAGS = ["json", "allow-unreachable", "allow-policy-blocked", "verbose", "help", "trust-embedded-key", "draft", "estimate", "no-wait", "wait", "sign"];
+const API = ["api-url", "api-key"] as const;
+
+/** Every command and the flags it takes; anything else is a usage error (exit 2). */
+const COMMANDS: Record<string, CommandFlags> = {
+  "mcp check": {
+    values: [...API, "server", "toolset", "workflow", "snapshot", "stdio", "url", "against", "timeout"],
+    booleans: ["allow-unreachable", "allow-policy-blocked", "json"]
+  },
+  "mcp mock": { values: ["snapshot", "cassette", "fixed-text"], booleans: ["verbose"] },
+  "mcp snapshot export": { values: [...API, "server", "out"], booleans: [] },
+  "audit verify": { values: ["public-key", "max-bytes"], booleans: ["trust-embedded-key", "json"] },
+  "replay run": {
+    values: [...API, "recording", "set", "version", "mcp", "ignore-path", "number-tolerance", ...JOB_ONLY_FLAGS],
+    booleans: ["draft", "json", ...JOB_ONLY_BOOLEANS]
+  },
+  "replay status": { values: [...API, "timeout", "junit"], booleans: ["wait", "json"] },
+  "release publish": { values: [...API, "version", "hash", "run", "override-reason", "request-approval"], booleans: ["json"] },
+  "golden export": { values: [...API, "out"], booleans: ["sign"] },
+  "golden import": { values: [...API, "workflow", "project", "name", "public-key"], booleans: ["allow-other-workflow", "json"] },
+  "golden verify": { values: ["public-key"], booleans: ["trust-embedded-key", "json"] }
+};
+
+const BOOLEAN_FLAGS = [...new Set(["help", ...Object.values(COMMANDS).flatMap((flags) => flags.booleans)])];
+const VALUE_FLAGS = [...new Set(Object.values(COMMANDS).flatMap((flags) => flags.values))];
+
+/** The command a command line names (`mcp snapshot export` has three words), or null. */
+function commandOf(positionals: string[]): string | null {
+  const [group, command, sub] = positionals;
+  if (group === "mcp" && command === "snapshot" && sub === "export") return "mcp snapshot export";
+  const name = `${group} ${command}`;
+  if (!(name in COMMANDS) || name === "mcp snapshot") return null;
+  // These take no further positional word.
+  if (sub !== undefined && (name === "mcp check" || name === "mcp mock" || name === "replay run")) return null;
+  return name;
+}
 
 export async function main(argv: string[], io: CliIo): Promise<number> {
   try {
-    const args = parseArgs(argv, BOOLEAN_FLAGS);
-    const [group, command, sub] = args.positionals;
+    const args = parseArgs(argv, BOOLEAN_FLAGS, VALUE_FLAGS);
+    const [group] = args.positionals;
     if (args.booleans.has("help") || !group) {
       write(args.booleans.has("help") ? io.stdout : io.stderr, USAGE);
       return args.booleans.has("help") ? EXIT_OK : EXIT_USAGE;
     }
-    if (group === "mcp" && command === "check" && !sub) return await runCheck(args, io);
-    if (group === "mcp" && command === "mock" && !sub) return await runMock(args, io);
-    if (group === "mcp" && command === "snapshot" && sub === "export") return await runSnapshotExport(args, io);
-    if (group === "audit" && command === "verify") return runAuditVerify(args, io);
-    if (group === "replay" && command === "run" && !sub) return await runReplay(args, io);
-    if (group === "replay" && command === "status") return await runReplayStatus(args, io);
-    if (group === "release" && command === "publish") return await runReleasePublish(args, io);
-    if (group === "golden" && command === "export") return await runGoldenExport(args, io);
-    if (group === "golden" && command === "import") return await runGoldenImport(args, io);
-    if (group === "golden" && command === "verify") return runGoldenVerify(args, io);
+    // A flag no command knows comes first: it did not take a value, so its value now reads as a stray word.
+    if (args.unknown.length > 0) throw new UsageError(`Unknown flag${args.unknown.length === 1 ? "" : "s"}: ${[...new Set(args.unknown)].map((name) => `--${name}`).join(", ")}`);
+    const command = commandOf(args.positionals);
+    if (!command) throw new UsageError(`Unknown command: ${args.positionals.join(" ")}`);
+    checkCommandFlags(args, `l2m ${command}`, COMMANDS[command]!);
+    if (args.values.has("api-key")) {
+      write(io.stderr, "l2m: warning: --api-key puts the key in the process list and in CI logs; set L2M_API_KEY in the environment instead.");
+    }
+    if (command === "mcp check") return await runCheck(args, io);
+    if (command === "mcp mock") return await runMock(args, io);
+    if (command === "mcp snapshot export") return await runSnapshotExport(args, io);
+    if (command === "audit verify") return runAuditVerify(args, io);
+    if (command === "replay run") return await runReplay(args, io);
+    if (command === "replay status") return await runReplayStatus(args, io);
+    if (command === "release publish") return await runReleasePublish(args, io);
+    if (command === "golden export") return await runGoldenExport(args, io);
+    if (command === "golden import") return await runGoldenImport(args, io);
+    if (command === "golden verify") return runGoldenVerify(args, io);
     throw new UsageError(`Unknown command: ${args.positionals.join(" ")}`);
   } catch (error) {
     if (error instanceof UsageError) {

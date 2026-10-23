@@ -347,7 +347,7 @@ function goldenFile(): GoldenSetFile {
     name: "Regression suite",
     exportedAt: "2026-10-24T08:00:00.000Z",
     exportedBy: "ci@example.com",
-    cases: [{ name: "Case", recording: { name: "Case", sourceStatus: "success", workflowHash: "h", workflow: { nodes: [] }, input: { q: 1 }, nodes: {}, facts, cassette: null } }]
+    cases: [{ name: "Case", recording: { name: "Case", sourceStatus: "success", workflowHash: "h", recordedAt: "2026-10-20T08:00:00.000Z", workflow: { nodes: [] }, input: { q: 1 }, nodes: {}, facts, cassette: null } }]
   } as GoldenSetFile;
 }
 
@@ -476,5 +476,144 @@ describe("l2m golden verify", () => {
     expect(await main(["golden", "verify", file, "--public-key", sign(goldenFile()).publicKey], harness([]).cli)).toBe(EXIT_FAILED);
     expect(await main(["golden", "verify", file, "--public-key", publicKey, "--trust-embedded-key"], harness([]).cli)).toBe(EXIT_USAGE);
     expect(await main(["golden", "verify"], harness([]).cli)).toBe(EXIT_USAGE);
+  });
+});
+
+// --- review fixes: flag checking, timeouts and retries, private files --------------------------
+
+describe("flag checking", () => {
+  it("refuses unknown flags and flags of another command with exit 2, sending nothing", async () => {
+    for (const argv of [
+      ["release", "publish", "wf-1", "--version", "2", "--override-reson", "hotfix"],
+      ["replay", "run", "--set", "ds_1", "--live-reads", "fetch"],
+      ["replay", "run", "--set", "ds_1", "--repeat", "3"],
+      ["replay", "run", "--set", "ds_1", "--no-wiat"],
+      ["replay", "status", "run_1", "--set", "ds_1"],
+      ["golden", "export", "ds_1", "--workflow", "wf-1"],
+      ["golden", "import", "x.json", "--workflow", "wf-1", "--allow-other"],
+      ["golden", "verify", "x.json", "--api-url", "http://l2m.test"],
+      ["audit", "verify", "b.zip", "--sign"]
+    ]) {
+      const fake = harness([{ status: 200, body: {} }]);
+      expect(await main(argv, fake.cli), argv.join(" ")).toBe(EXIT_USAGE);
+      expect(fake.requests, argv.join(" ")).toHaveLength(0);
+      expect(fake.err(), argv.join(" ")).toMatch(/Unknown flag/);
+    }
+  });
+
+  it("refuses =value on a switch, so --sign=false cannot read as true", async () => {
+    for (const argv of [
+      ["golden", "export", "ds_1", "--sign=false"],
+      ["replay", "status", "run_1", "--wait=true"],
+      ["replay", "run", "--set", "ds_1", "--estimate=no"]
+    ]) {
+      const fake = harness([{ status: 200, body: {} }]);
+      expect(await main(argv, fake.cli), argv.join(" ")).toBe(EXIT_USAGE);
+      expect(fake.requests).toHaveLength(0);
+      expect(fake.err()).toContain("takes no value");
+    }
+    // A value flag still takes --name=value.
+    const fake = harness([{ status: 200, body: { run: job("completed", { pass: 1 }) } }]);
+    expect(await main(["replay", "status", "run_1", "--timeout=5"], fake.cli)).toBe(EXIT_OK);
+  });
+
+  it("warns on stderr when the key is given with --api-key, never printing it", async () => {
+    const fake = harness([{ status: 200, body: { run: job("completed", { pass: 1 }) } }]);
+    expect(await main(["replay", "status", "run_1", "--api-key", "secret-key-value"], fake.cli)).toBe(EXIT_OK);
+    expect(fake.err()).toContain("set L2M_API_KEY");
+    expect(fake.err()).not.toContain("secret-key-value");
+    expect(fake.out()).not.toContain("secret-key-value");
+    const quiet = harness([{ status: 200, body: { run: job("completed", { pass: 1 }) } }]);
+    expect(await main(["replay", "status", "run_1"], quiet.cli)).toBe(EXIT_OK);
+    expect(quiet.err()).not.toContain("L2M_API_KEY");
+  });
+});
+
+describe("status polls: retries, timeouts and exit codes", () => {
+  it("retries a poll after a 5xx and a network error, then judges the job", async () => {
+    const fake = harness([
+      { status: 202, body: { run: job("running") } },
+      { status: 503, body: { error: "restarting" } },
+      { status: 0 },
+      { status: 200, body: { run: job("completed", { pass: 2 }) } }
+    ]);
+    const sleeps: number[] = [];
+    fake.cli.sleep = async (ms) => void sleeps.push(ms);
+    expect(await main(["replay", "run", "--set", "ds_1"], fake.cli), fake.err()).toBe(EXIT_OK);
+    expect(fake.requests.map((request) => request.method)).toEqual(["POST", "GET", "GET", "GET"]);
+    expect(sleeps).toEqual([2_000, 1_000, 3_000]);
+  });
+
+  it("gives up after two retries with exit 4, and a 400 from a poll exits 1, not 2", async () => {
+    const down = harness([{ status: 202, body: { run: job("running") } }, { status: 502, body: { error: "bad gateway" } }]);
+    expect(await main(["replay", "run", "--set", "ds_1"], down.cli)).toBe(EXIT_INCOMPLETE);
+    expect(down.requests).toHaveLength(4);
+    const bad = harness([{ status: 202, body: { run: job("running") } }, { status: 400, body: { error: "bad id" } }]);
+    expect(await main(["replay", "run", "--set", "ds_1"], bad.cli)).toBe(EXIT_FAILED);
+    expect(bad.requests).toHaveLength(2);
+    expect(await main(["replay", "status", "run_1"], harness([{ status: 400, body: { error: "bad id" } }]).cli)).toBe(EXIT_FAILED);
+    // 4xx other than 400 are final at once and keep exit 4 (Phase 15.2 behaviour).
+    const missing = harness([{ status: 404, body: { error: "Replay job not found" } }]);
+    expect(await main(["replay", "status", "run_1"], missing.cli)).toBe(EXIT_INCOMPLETE);
+    expect(missing.requests).toHaveLength(1);
+    // A 400 when the job is started is still the flags: exit 2.
+    expect(await main(["replay", "run", "--set", "ds_1"], harness([{ status: 400, body: { error: "Invalid" } }]).cli)).toBe(EXIT_USAGE);
+  });
+
+  it("gives up on a server that accepts the connection and never answers, within --timeout", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    let err = "";
+    stderr.on("data", (chunk: Buffer) => (err += chunk.toString()));
+    const hanging = ((_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })) as typeof fetch;
+    const cli: CliIo = { stdin: new PassThrough(), stdout, stderr, env: { L2M_API_URL: "http://l2m.test", L2M_API_KEY: "k" }, fetch: hanging, sleep: async () => undefined };
+    const started = Date.now();
+    expect(await main(["replay", "status", "run_1", "--timeout", "1"], cli)).toBe(EXIT_INCOMPLETE);
+    expect(Date.now() - started).toBeLessThan(20_000);
+    expect(err).toContain("no answer");
+  }, 30_000);
+});
+
+describe("private output files", () => {
+  it("writes golden-set files and JUnit reports with mode 0600", async () => {
+    const out = path.join(dir, "suite.json");
+    fs.writeFileSync(out, "old", { mode: 0o644 });
+    expect(await main(["golden", "export", "ds_1", "-o", out], harness([{ status: 200, body: goldenFile() }]).cli)).toBe(EXIT_OK);
+    expect(fs.statSync(out).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(out, "utf8")).format).toBe("l2m.golden-set");
+    const junit = path.join(dir, "junit.xml");
+    expect(await main(["replay", "status", "run_1", "--junit", junit], harness([{ status: 200, body: { run: job("completed", { pass: 1 }) } }]).cli)).toBe(EXIT_OK);
+    expect(fs.statSync(junit).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses to write through a symlink", async () => {
+    const victim = path.join(dir, "victim.txt");
+    fs.writeFileSync(victim, "keep me");
+    const link = path.join(dir, "link.json");
+    fs.symlinkSync(victim, link);
+    const fake = harness([{ status: 200, body: goldenFile() }]);
+    expect(await main(["golden", "export", "ds_1", "-o", link], fake.cli)).toBe(EXIT_FAILED);
+    expect(fake.err()).toContain("symbolic link");
+    const junit = harness([{ status: 200, body: { run: job("completed", { pass: 1 }) } }]);
+    expect(await main(["replay", "status", "run_1", "--junit", link], junit.cli)).toBe(EXIT_OK);
+    expect(junit.err()).toContain("symbolic link");
+    expect(fs.readFileSync(victim, "utf8")).toBe("keep me");
+  });
+});
+
+describe("l2m golden import --allow-other-workflow", () => {
+  it("asks the server to accept another workflow's file, and a refusal (409) exits 1", async () => {
+    const file = path.join(dir, "other.json");
+    fs.writeFileSync(file, JSON.stringify(goldenFile()));
+    const allowed = harness([{ status: 201, body: { dataset: { id: "d", name: "n" }, imported: 1, warnings: [] } }]);
+    expect(await main(["golden", "import", file, "--workflow", "wf-2", "--allow-other-workflow"], allowed.cli)).toBe(EXIT_OK);
+    expect(allowed.requests[0]!.body).toMatchObject({ workflowId: "wf-2", allowWorkflowMismatch: true });
+    const refused = harness([{ status: 409, body: { error: "The file was exported from workflow wf-1", code: "workflow_mismatch" } }]);
+    expect(await main(["golden", "import", file, "--workflow", "wf-2"], refused.cli)).toBe(EXIT_FAILED);
+    expect(refused.requests[0]!.body).not.toHaveProperty("allowWorkflowMismatch");
+    expect(refused.err()).toContain("exported from workflow wf-1");
   });
 });

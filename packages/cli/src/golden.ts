@@ -2,14 +2,18 @@
  * `l2m golden export|import|verify`: golden-set files (`l2m.golden-set` v1,
  * packages/shared golden-set-file.ts).
  *
- * Exit codes: 0 ok, 1 a request failed or a signature did not verify, 2
- * usage (also a file or flags the API rejects with 400), 3 `verify` found a
+ * Exit codes: 0 ok, 1 a request failed or a signature did not verify (also
+ * an import of another workflow's file without --allow-other-workflow, 409),
+ * 2 usage (also a file or flags the API rejects with 400), 3 `verify` found a
  * consistent signature but no trusted public key was given.
+ *
+ * Exported files are written with mode 0600 and never through a symlink.
+ * Export and import give up after 300 s.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { goldenSetFileSchema, goldenSetSignedBytes, type GoldenSetFile } from "@ai-orchestrator/shared";
-import { apiCall, apiTarget, cleanServerText, isObject, readJsonFile, replyError, RequestError, write, type CliIo } from "./api";
+import { apiCall, apiTarget, cleanServerText, isObject, readJsonFile, replyError, RequestError, write, writePrivateFile, type CliIo } from "./api";
 import { oneFlag, UsageError, type ParsedArgs } from "./args";
 import { keyIdForPublicKey, parsePublicKeyInput, PublicKeyInputError } from "./audit-verify";
 
@@ -17,6 +21,9 @@ const EXIT_OK = 0;
 const EXIT_FAILED = 1;
 const EXIT_USAGE = 2;
 const EXIT_SIGNER_UNVERIFIED = 3;
+
+/** Export and import move whole files and the server scrubs every case: they get longer than other requests. */
+const GOLDEN_REQUEST_TIMEOUT_MS = 300_000;
 
 /** Refuse to read files larger than this into memory. */
 const MAX_FILE_BYTES = 1024 * 1024 * 1024;
@@ -162,7 +169,7 @@ export async function runGoldenExport(args: ParsedArgs, io: CliIo): Promise<numb
   const target = apiTarget(args, io);
   let reply;
   try {
-    reply = await apiCall(target, "GET", `/api/eval/datasets/${encodeURIComponent(datasetId)}/export${sign ? "?sign=true" : ""}`);
+    reply = await apiCall(target, "GET", `/api/eval/datasets/${encodeURIComponent(datasetId)}/export${sign ? "?sign=true" : ""}`, undefined, { timeoutMs: GOLDEN_REQUEST_TIMEOUT_MS });
   } catch (error) {
     if (error instanceof RequestError) {
       write(io.stderr, `l2m: export failed: ${cleanServerText(error.message)}`);
@@ -186,7 +193,7 @@ export async function runGoldenExport(args: ParsedArgs, io: CliIo): Promise<numb
   const text = `${JSON.stringify(reply.body, null, 2)}\n`;
   if (out) {
     try {
-      fs.writeFileSync(out, text);
+      writePrivateFile(out, text);
     } catch (error) {
       write(io.stderr, `l2m: cannot write ${out}: ${error instanceof Error ? error.message : String(error)}`);
       return EXIT_FAILED;
@@ -225,10 +232,17 @@ export async function runGoldenImport(args: ParsedArgs, io: CliIo): Promise<numb
   }
   const project = oneFlag(args, "project");
   const name = oneFlag(args, "name");
+  const allowOther = args.booleans.has("allow-other-workflow");
   const target = apiTarget(args, io);
   let reply;
   try {
-    reply = await apiCall(target, "POST", "/api/eval/datasets/import", { file: raw, workflowId, ...(project ? { projectId: project } : {}), ...(name ? { name } : {}) });
+    reply = await apiCall(
+      target,
+      "POST",
+      "/api/eval/datasets/import",
+      { file: raw, workflowId, ...(project ? { projectId: project } : {}), ...(name ? { name } : {}), ...(allowOther ? { allowWorkflowMismatch: true } : {}) },
+      { timeoutMs: GOLDEN_REQUEST_TIMEOUT_MS }
+    );
   } catch (error) {
     if (error instanceof RequestError) {
       write(io.stderr, `l2m: import failed: ${cleanServerText(error.message)}`);
