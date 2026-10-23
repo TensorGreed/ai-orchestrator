@@ -203,8 +203,10 @@ test.describe("golden journeys", () => {
 
     const approveResponse = await page.request.post(`/api/approvals/${pending!.id}/approve`, { data: {} });
     expect(approveResponse.ok()).toBeTruthy();
-    const approveBody = await approveResponse.json();
-    expect(approveBody.status).toBe("success");
+    // With the execution queue in use the resume is queued (202); otherwise it runs inline.
+    const approveBody = (await approveResponse.json()) as { queued?: boolean; status?: string };
+    if (approveBody.queued) expect(approveResponse.status()).toBe(202);
+    else expect(approveBody.status).toBe("success");
 
     await expect.poll(async () => {
       const history = await page.request.get(`/api/executions/${pending!.id}`);
