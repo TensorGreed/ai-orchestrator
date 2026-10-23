@@ -87,6 +87,21 @@ const envSchema = z.object({
   EVAL_JUDGE_MODEL: z.string().default("gpt-4o-mini"),
   EVAL_JUDGE_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
   EVAL_JUDGE_MAX_TOKENS: z.coerce.number().int().positive().default(512),
+  /**
+   * Phase 15.2 — base URL for judge calls (an OpenAI-compatible or Ollama
+   * endpoint inside the deployment). Set by the operator only: scorers can
+   * name a provider, model and secretRef, never a URL.
+   */
+  EVAL_JUDGE_BASE_URL: z.string().url().optional(),
+  /**
+   * Phase 15.2 — replay jobs and eval runs run in the background: how many
+   * cases run at once across the deployment's runs, the most cases one run
+   * may have, and a replay job's spend limit (model plus judge calls, USD)
+   * when the request names none.
+   */
+  REPLAY_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(2),
+  REPLAY_JOB_MAX_CASES: z.coerce.number().int().min(1).max(5_000).default(200),
+  REPLAY_JOB_DEFAULT_MAX_COST_USD: z.coerce.number().positive().max(100_000).default(5),
 
   // Phase 8.4 — Audit export to long-term sinks (SIEM, archive, etc.)
   // Phase 10.1 — MCP server registry health probes. 0 turns the background loop off.

@@ -273,7 +273,7 @@ describe("eval runs against cassettes", () => {
       expect(fixture.statusCode).toBe(200);
     }
 
-    const recorded = await call(context, "POST", "/api/eval/runs", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", record: true });
+    const recorded = await call(context, "POST", "/api/eval/runs?wait=true", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", record: true });
     expect(recorded.statusCode).toBe(200);
     const recordedRunId = recorded.json<{ runId: string }>().runId;
     const cassettes = (await call(context, "GET", `/api/mcp/cassettes?evalRunId=${recordedRunId}`, admin.cookie)).json<{ items: McpCassetteSummary[] }>().items;
@@ -283,7 +283,7 @@ describe("eval runs against cassettes", () => {
     expect(runs.find((run) => run.id === recordedRunId)?.mcpCassettes).toBe(2);
 
     await sleep(1100);
-    const replayed = await call(context, "POST", "/api/eval/runs", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", replay: { evalRunId: recordedRunId } });
+    const replayed = await call(context, "POST", "/api/eval/runs?wait=true", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", replay: { evalRunId: recordedRunId } });
     expect(replayed.statusCode).toBe(200);
     expect(replayed.json<{ summary: { pass: number; error: number } }>().summary).toMatchObject({ pass: 2, error: 0 });
     const outputs = async (runId: string) =>
@@ -294,7 +294,7 @@ describe("eval runs against cassettes", () => {
     expect(await outputs(replayed.json<{ runId: string }>().runId)).toEqual(await outputs(recordedRunId));
 
     // One cassette for every fixture.
-    const single = await call(context, "POST", "/api/eval/runs", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", replay: { cassetteId: cassettes[0].id } });
+    const single = await call(context, "POST", "/api/eval/runs?wait=true", admin.cookie, { datasetId: dataset.id, workflowId: "wf-eval", replay: { cassetteId: cassettes[0].id } });
     expect(single.json<{ summary: { pass: number } }>().summary.pass).toBe(2);
 
     // Bad option combinations.

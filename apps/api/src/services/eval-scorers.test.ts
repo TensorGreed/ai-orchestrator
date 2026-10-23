@@ -14,7 +14,7 @@ function block(detectorId: string, action = "block", shadow = false): RunFactGua
   return { nodeId: "agent", placement: "input", channel: "prompt", detectorId, effectiveAction: action, shadow };
 }
 
-function facts(overrides: Partial<RunFacts> & { totals?: Partial<RunFacts["totals"]> } = {}): RunFacts {
+function facts(overrides: Omit<Partial<RunFacts>, "totals"> & { totals?: Partial<RunFacts["totals"]> } = {}): RunFacts {
   const { totals, ...rest } = overrides;
   return {
     status: "success",

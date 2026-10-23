@@ -103,10 +103,15 @@ export class ReplayService {
    * never replays under its old project).
    */
   resolveCandidate(recording: ReplayRecordingRecord, request: ReplayRunRequest): { workflow: Workflow; kind: "draft" | "version"; version: number | null } {
-    const current = this.options.store.getWorkflow(recording.workflowId);
+    return this.resolveWorkflowCandidate(recording.workflowId, request);
+  }
+
+  /** The candidate for a workflow: the draft, or one of its saved versions (see `resolveCandidate`). */
+  resolveWorkflowCandidate(workflowId: string, request: { version?: number }): { workflow: Workflow; kind: "draft" | "version"; version: number | null } {
+    const current = this.options.store.getWorkflow(workflowId);
     if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
     if (request.version === undefined) return { workflow: current, kind: "draft", version: null };
-    const entry = this.options.store.getWorkflowVersion(recording.workflowId, request.version);
+    const entry = this.options.store.getWorkflowVersion(workflowId, request.version);
     if (!entry) throw new ReplayRunError(`Version ${request.version} of this workflow was not found.`, "not_found");
     let parsed: Workflow;
     try {
@@ -119,7 +124,7 @@ export class ReplayService {
     return {
       workflow: {
         ...snapshot,
-        id: recording.workflowId,
+        id: workflowId,
         ...(current.projectId !== undefined ? { projectId: current.projectId } : {}),
         ...(current.folderId !== undefined ? { folderId: current.folderId } : {})
       },
@@ -128,9 +133,27 @@ export class ReplayService {
     };
   }
 
-  async replay(recording: ReplayRecordingRecord, request: ReplayRunRequest, actor: SafeUser): Promise<ReplayRunResponse> {
-    const candidate = this.resolveCandidate(recording, request);
-    const workflowHash = sha256Hex(canonicalJson(workflowForHash(candidate.workflow)));
+  /**
+   * The candidate's hash: the same hash the run manifest and golden runs use.
+   */
+  static candidateHash(workflow: Workflow): string {
+    return sha256Hex(canonicalJson(workflowForHash(workflow)));
+  }
+
+  /**
+   * Replays a golden run. `options.candidate` is a candidate a replay job
+   * resolved once for all its cases (so a draft saved mid-job does not
+   * change what the job tests); `options.executionId` lets the job cancel
+   * the run.
+   */
+  async replay(
+    recording: ReplayRecordingRecord,
+    request: ReplayRunRequest,
+    actor: SafeUser,
+    options: { candidate?: { workflow: Workflow; kind: "draft" | "version"; version: number | null }; executionId?: string } = {}
+  ): Promise<ReplayRunResponse> {
+    const candidate = options.candidate ?? this.resolveCandidate(recording, request);
+    const workflowHash = ReplayService.candidateHash(candidate.workflow);
     const mcpMode: ReplayMcpMode = request.mcpMode ?? "strict";
     const scrubber = this.options.recordings.scrubber();
     const plan = buildReplayPlan(candidate.workflow, recording.nodes, {
@@ -138,7 +161,7 @@ export class ReplayService {
       normaliseConfig: (config) => this.options.recordings.storedConfig(config, scrubber)
     });
     const mcpPlan = this.options.cassettes.planOfflineReplay(recording.mcpCassette, mcpMode, `${recording.id}:cassette`);
-    const executionId = randomUUID();
+    const executionId = options.executionId ?? randomUUID();
     const customData = {
       replay: {
         recordingId: recording.id,
