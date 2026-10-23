@@ -4676,11 +4676,11 @@ export class SqliteStore {
     return row ? toString(row.created_at) : null;
   }
 
-  /** Phase 11.2 — whether a queue item with this id, or a retry of it (`<id>:retry-…`), is still waiting or running. */
+  /** Phase 11.2 — whether a queue item with this id, or one that extends it (`<id>:…`), is still waiting or running. */
   hasActiveQueueItem(id: string): boolean {
     const row = this.queryOne<{ id: string }>(
       `SELECT id FROM execution_queue WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status IN ('pending', 'running') LIMIT 1`,
-      [id, `${id.replace(/[\\%_]/g, "\\$&")}:retry-%`]
+      [id, `${id.replace(/[\\%_]/g, "\\$&")}:%`]
     );
     return Boolean(row);
   }

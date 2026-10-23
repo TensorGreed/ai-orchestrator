@@ -142,6 +142,11 @@ const SYSTEM_ACTOR = "system";
 const QUEUE_RECOVERY_GRACE_MS = 60_000;
 const DECIDED_STATUSES = new Set(["approved", "rejected", "timed_out"]);
 
+/** The decision a request status stands for; null while it is pending or expired without a decision. */
+export function approvalDecisionOf(status: string): ApprovalDecisionValue | null {
+  return status === "approved" ? "approve" : status === "rejected" ? "reject" : status === "timed_out" ? "timeout" : null;
+}
+
 function describeApprovers(spec: ApprovalRequestSpec): string {
   const parts = [...spec.approverRoles.map((role) => `role ${role}`), ...spec.approverUsers];
   return parts.length > 0 ? parts.join(", ") : "operators, builders and admins";
@@ -344,11 +349,27 @@ export class ApprovalService {
    * workflow if `requester` started the run: project execute access and the
    * approver check, as at decision time.
    */
-  eligibility(input: { workflow: WorkflowRef; spec: Pick<ApprovalRequestSpec, "approverRoles" | "approverUsers" | "allowSelfApproval">; requester: SafeUser }): ApprovalEligibilityView {
+  /**
+   * `accountBlind` callers (no right to see the project's members) get an answer that
+   * does not depend on which accounts exist: any approver user other than themselves
+   * counts as "someone else could approve", and admins do not count through roles.
+   */
+  eligibility(input: {
+    workflow: WorkflowRef;
+    spec: Pick<ApprovalRequestSpec, "approverRoles" | "approverUsers" | "allowSelfApproval">;
+    requester: SafeUser;
+    accountBlind?: boolean;
+  }): ApprovalEligibilityView {
     const requester = { userId: input.requester.id, email: input.requester.email };
-    const can = (user: SafeUser) => this.options.canExecute(user, input.workflow) && checkApprover(input.spec, user, requester).allowed;
+    const blind = input.accountBlind === true;
+    const isRequester = (entry: string) => entry === requester.userId || entry.toLowerCase() === requester.email.toLowerCase();
+    const named = blind ? input.spec.approverUsers.filter(isRequester) : input.spec.approverUsers;
+    const spec = { ...input.spec, approverUsers: named };
+    const can = (user: SafeUser) => this.options.canExecute(user, input.workflow) && checkApprover(spec, user, requester).allowed;
+    const someoneElseNamed = blind && input.spec.approverUsers.some((entry) => !isRequester(entry));
+    const others = this.options.listUsers().filter((user) => user.id !== input.requester.id && (!blind || user.role !== "admin"));
     return {
-      othersCanApprove: this.options.listUsers().some((user) => user.id !== input.requester.id && can(user)),
+      othersCanApprove: someoneElseNamed || others.some(can),
       requesterCanApprove: can(input.requester)
     };
   }
@@ -626,7 +647,7 @@ export class ApprovalService {
       }
       if (this.options.queueMode && this.store.hasActiveQueueItem(`${executionId}:${latest.id}`)) continue;
       recovered += 1;
-      const decision: ApprovalDecisionValue = latest.status === "approved" ? "approve" : latest.status === "rejected" ? "reject" : "timeout";
+      const decision: ApprovalDecisionValue = approvalDecisionOf(latest.status) ?? "timeout";
       const job: ApprovalResumeJob = {
         executionId,
         requestId: latest.id,

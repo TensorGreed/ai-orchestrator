@@ -427,6 +427,31 @@ function rejectFailsWorkflow(id: string): Workflow {
 }
 
 describe("nothing skips an Approval Gate over the API", () => {
+  it("refuses a start node on a sibling branch that merges below the gate", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    const wf = {
+      id: "wf-merge-skip",
+      name: "Merge skip",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [node("in", "manual_trigger"), node("x", "noop_node"), node("gate", "approval_gate", GATE), node("send", "output", { responseTemplate: "SENT" })],
+      edges: [
+        { id: "e1", source: "in", target: "gate" },
+        { id: "e2", source: "gate", sourceHandle: "approved", target: "send" },
+        { id: "e3", source: "in", target: "x" },
+        { id: "e4", source: "x", target: "send" }
+      ]
+    } as Workflow;
+    context.store.upsertWorkflow(wf);
+    const skipped = (await call(context, "POST", `/api/workflows/${wf.id}/execute`, builder.cookie, { startNodeId: "x" })).json<RunResult>();
+    expect(skipped.status).toBe("error");
+    expect(skipped.error).toContain("Approval Gate 'gate'");
+    expect(skipped.nodeResults.find((entry) => entry.nodeId === "send")).toBeUndefined();
+    expect(context.store.listApprovalRequestsForExecution(skipped.executionId ?? "none")).toEqual([]);
+  });
+
   it("refuses execute and retry that start after the gate, ignores a pinned gate output, and refuses pinning a gate", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
@@ -501,9 +526,37 @@ describe("a recorded decision is never lost", () => {
     const again = await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, { requestId: item!.requestId });
     expect(again.statusCode).toBe(202);
     // The queued resume carries the run timeout, so the stuck-job check follows it.
-    const queued = rawDb(context).prepare("SELECT payload_json FROM execution_queue WHERE id = ?").get(`${run.executionId}:${item!.requestId}`) as { payload_json: string };
+    const queued = rawDb(context).prepare("SELECT payload_json FROM execution_queue WHERE id LIKE ?").get(`${run.executionId}:${item!.requestId}:%`) as { payload_json: string };
     expect(JSON.parse(queued.payload_json).executionTimeoutMs).toBe(context.config.WORKFLOW_EXECUTION_TIMEOUT_MS);
     await waitFor(() => context.store.getExecutionHistory(run.executionId!)?.status === "success");
+  });
+
+  it("applies the new decision, once, when a queued resume fails and the request is decided again", async () => {
+    const context = await createTestContext({ queue: true });
+    const requester = await login(context, "builder", "requester");
+    const lead = await login(context, "builder", "lead");
+    const run = await startRun(context, gateWorkflow("wf-redecide", GATE), requester.cookie);
+    const [item] = await inbox(context, lead.cookie);
+    vi.spyOn(context.store, "listVariables").mockImplementationOnce(() => {
+      throw new Error("database hiccup");
+    });
+    const first = await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, { edits: { reply: "first words" } });
+    expect(first.statusCode).toBe(202);
+    await waitFor(() => (context.store.getApprovalRequest(item!.requestId)?.status === "pending" ? true : null));
+    await waitFor(() => (context.store.getWorkflowExecutionState(run.executionId!)?.status === "waiting_approval" ? true : null));
+    const second = await call(context, "POST", `/api/approvals/${run.executionId}/approve`, lead.cookie, { requestId: item!.requestId, edits: { reply: "second words" } });
+    expect(second.statusCode).toBe(202);
+    const history = await waitFor(() => {
+      const entry = context.store.getExecutionHistory(run.executionId!);
+      return entry && entry.status === "success" ? entry : null;
+    });
+    const sent = (history.nodeResults as Array<{ nodeId: string; output?: Record<string, any> }>).find((entry) => entry.nodeId === "sent");
+    expect(JSON.stringify(sent?.output)).toContain("second words");
+    expect(JSON.stringify(sent?.output)).not.toContain("first words");
+    // One queue item per decision, neither retried by the queue itself.
+    const rows = rawDb(context).prepare("SELECT id, max_attempts FROM execution_queue WHERE id LIKE ?").all(`${run.executionId}:${item!.requestId}:%`) as Array<{ id: string; max_attempts: number }>;
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.max_attempts === 1)).toBe(true);
   });
 
   it("hands the request back with its expiry when the resume throws", async () => {
@@ -706,6 +759,28 @@ describe("who may see and decide", () => {
     expect((await call(context, "POST", "/api/approvals/eligibility", viewer.cookie, { workflowId: "wf-unsaved" })).statusCode).toBe(403);
   });
 
+  it("answers the same for an existing and a missing approver account when the caller cannot see the project's accounts", async () => {
+    const context = await createTestContext();
+    await login(context, "admin", "root");
+    const colleague = await login(context, "operator", "colleague");
+    const editor = await login(context, "builder", "editor");
+    const reader = await login(context, "builder", "reader");
+    context.store.upsertCustomRole({ id: "editor-only", projectId: "default", name: "Editor", permissions: ["workflow:read", "workflow:write", "workflow:execute"] });
+    context.store.upsertProjectRole({ userId: editor.id, projectId: "default", role: "custom", customRoleId: "editor-only" });
+    context.store.upsertCustomRole({ id: "read-only", projectId: "default", name: "Reader", permissions: ["workflow:read", "workflow:execute"] });
+    context.store.upsertProjectRole({ userId: reader.id, projectId: "default", role: "custom", customRoleId: "read-only" });
+    const probe = (cookie: string, email: string, extra: Record<string, unknown> = {}) =>
+      call(context, "POST", "/api/approvals/eligibility", cookie, { workflowId: "wf-unsaved", approverUsers: [email], approverRoles: [], ...extra });
+    const existing = await probe(editor.cookie, colleague.email);
+    const missing = await probe(editor.cookie, "nobody@example.com");
+    expect(existing.body).toContain("othersCanApprove");
+    expect(existing.json()).toEqual(missing.json());
+    // Admins are not revealed through roles either.
+    expect((await call(context, "POST", "/api/approvals/eligibility", editor.cookie, { workflowId: "wf-unsaved", approverRoles: ["admin"], approverUsers: [] })).json()).toMatchObject({ othersCanApprove: false });
+    // Read access is not enough to ask.
+    expect((await probe(reader.cookie, colleague.email)).statusCode).toBe(403);
+  });
+
   it("requires execute access on every project along a sub-workflow path, two levels deep", async () => {
     const context = await createTestContext();
     const requester = await login(context, "builder", "requester");
@@ -794,6 +869,7 @@ describe("what approvals record and send", () => {
 
   it("escapes Teams Markdown so run input cannot add links", () => {
     expect(escapeTeams("see [click](https://phish) *now* _x_ `y`")).toBe("see \\[click\\]\\(https://phish\\) \\*now\\* \\_x\\_ \\`y\\`");
+    expect(escapeTeams("<b>a</b> & c")).toBe("&lt;b&gt;a&lt;/b&gt; &amp; c");
   });
 
   it("validates APP_PUBLIC_URL", () => {
@@ -806,7 +882,7 @@ describe("what approvals record and send", () => {
   it("answers 501 when the store has no approval requests", async () => {
     const app = Fastify();
     const user = { id: "u1", email: "u@example.com", role: "admin" as const };
-    registerApprovalRoutes({ app, approvals: {} as never, available: false, loadWorkflow: () => null, canReadWorkflow: () => true, requireRole: async () => user, dispatch: async () => null });
+    registerApprovalRoutes({ app, approvals: {} as never, available: false, loadWorkflow: () => null, canReadWorkflow: () => true, canUpdateWorkflow: () => true, canSeeProjectAccounts: () => true, requireRole: async () => user, dispatch: async () => null });
     await app.ready();
     const listed = await app.inject({ method: "GET", url: "/api/approvals" });
     expect(listed.statusCode).toBe(501);

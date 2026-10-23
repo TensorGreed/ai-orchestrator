@@ -82,12 +82,16 @@ function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-/** Slack mrkdwn treats `<`, `>` and `&` as control characters. */
-/** Teams renders MessageCard text as Markdown: escape it so run input cannot add links, images or emphasis. */
+/** Teams renders MessageCard text as Markdown, and some clients a little HTML: escape both so run input cannot add links, images, emphasis or markup. */
 export function escapeTeams(value: string): string {
-  return value.replace(/[\\`*_[\]()]/g, (char) => `\\${char}`);
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/[\\`*_[\]()]/g, (char) => `\\${char}`);
 }
 
+/** Slack mrkdwn treats `<`, `>` and `&` as control characters. */
 function escapeSlack(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

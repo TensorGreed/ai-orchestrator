@@ -127,10 +127,10 @@ export class QueueService {
   }
 
   async enqueue(
-    payload: Omit<QueuedExecutionPayload, "executionId"> & { executionId?: string; priority?: number; queueItemId?: string }
+    payload: Omit<QueuedExecutionPayload, "executionId"> & { executionId?: string; priority?: number; queueItemId?: string; maxAttempts?: number }
   ): Promise<string> {
     const executionId = payload.executionId ?? randomUUID();
-    const { priority, executionId: _id, queueItemId, ...rest } = payload;
+    const { priority, executionId: _id, queueItemId, maxAttempts, ...rest } = payload;
 
     this.store.enqueueExecution({
       // A resume reuses its run's execution id, so its queue item needs its own id.
@@ -139,7 +139,7 @@ export class QueueService {
       workflowName: undefined,
       payload: { executionId, ...rest } as Record<string, unknown>,
       priority: priority ?? 0,
-      maxAttempts: 3
+      maxAttempts: maxAttempts ?? 3
     });
 
     return executionId;

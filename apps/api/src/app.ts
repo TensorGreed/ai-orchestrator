@@ -137,7 +137,7 @@ import { registerReplayRoutes } from "./replay-routes.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
-import { ApprovalResumeRunner, ApprovalService, type ApprovalResumeJob } from "./services/approval-service.js";
+import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, type ApprovalResumeJob } from "./services/approval-service.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
 import { ReplayRunError, ReplayService } from "./services/replay-service.js";
 import { buildRunFacts } from "./services/run-facts.js";
@@ -1864,7 +1864,10 @@ export function createApp(
               triggerType: paused.triggerType,
               triggeredBy: paused.triggeredBy,
               startedAt: paused.startedAt,
-              state: paused.state
+              // Approved tool results are kept to answer a re-run: store them redacted.
+              state: paused.state.approvedToolResults
+                ? { ...paused.state, approvedToolResults: secretService.redact(paused.state.approvedToolResults) as Record<string, unknown[]> }
+                : paused.state
             });
             // Phase 11.2 — who may decide, when it expires; audited and notified.
             if (!approvalsSupported) return;
@@ -3406,15 +3409,21 @@ export function createApp(
         store.releaseWorkflowExecutionClaim(job.executionId);
         return null;
       }
+      // The decision comes from the request row, never from the job payload: a stale
+      // queued job must not apply an earlier decision to a request decided again since.
+      const request = store.getApprovalRequest(job.requestId);
+      const decided = request ? approvalDecisionOf(request.status) : null;
+      if (!request || !decided || decided !== job.decision) return null;
       try {
-        const actorRecord = job.actorUserId ? store.getUserById(job.actorUserId) : null;
+        const actorRecord = request.decidedByUserId ? store.getUserById(request.decidedByUserId) : null;
         const actor: SafeUser | null = actorRecord ? { id: actorRecord.id, email: actorRecord.email, role: actorRecord.role as UserRole } : null;
+        const actedBy = request.decidedBy ?? job.actedBy;
         const approvalDecision = {
-          decision: job.decision,
-          actedBy: job.actedBy,
-          ...(job.reason ? { reason: job.reason } : {}),
-          ...(job.edits ? { edits: job.edits } : {}),
-          ...(job.editedFields ? { editedFields: job.editedFields } : {}),
+          decision: decided,
+          actedBy,
+          ...(request.reason ? { reason: request.reason } : {}),
+          ...(request.edits ? { edits: request.edits } : {}),
+          ...(request.editedFields.length > 0 ? { editedFields: request.editedFields } : {}),
           requestId: job.requestId
         };
         const result = await runWorkflowExecution({
@@ -3422,7 +3431,7 @@ export function createApp(
           workflow: state.workflow,
           executionId: job.executionId,
           triggerType: "approval_resume",
-          triggeredBy: job.actedBy,
+          triggeredBy: actedBy,
           resumeState: state,
           approvalDecision
         });
@@ -3431,13 +3440,13 @@ export function createApp(
           workflow: state.workflow,
           result,
           triggerType: "approval_resume",
-          triggeredBy: job.actedBy,
+          triggeredBy: actedBy,
           requestInput: {
-            decision: job.decision,
+            decision: decided,
             approvalId: job.executionId,
             requestId: job.requestId,
-            ...(job.reason ? { reason: job.reason } : {}),
-            ...(job.editedFields ? { editedFields: job.editedFields } : {})
+            ...(request.reason ? { reason: request.reason } : {}),
+            ...(request.editedFields.length > 0 ? { editedFields: request.editedFields } : {})
           }
         });
         return result;
@@ -3450,10 +3459,14 @@ export function createApp(
   const dispatchApprovalResume = async (job: ApprovalResumeJob): Promise<{ queued: true } | { queued: false; result: Awaited<ReturnType<typeof runWorkflowExecution>> } | null> => {
     if (queueService) {
       const pending = store.getWorkflowExecutionState(job.executionId);
+      // One item per decision: a request that is reopened and decided again must not collide with the first.
+      const decidedAt = Date.parse(store.getApprovalRequest(job.requestId)?.decidedAt ?? "") || Date.now();
       await queueService.enqueue({
         workflowId: pending?.workflowId ?? "",
         executionId: job.executionId,
-        queueItemId: `${job.executionId}:${job.requestId}${job.retryTag ? `:retry-${job.retryTag}` : ""}`,
+        queueItemId: `${job.executionId}:${job.requestId}:${decidedAt}${job.retryTag ? `:retry-${job.retryTag}` : ""}`,
+        // A failed resume reopens the request, so the queue does not retry it on its own.
+        maxAttempts: 1,
         triggerType: "approval_resume",
         triggeredBy: job.actedBy,
         // The queue's stuck-job threshold follows the run's own timeout.
@@ -8393,6 +8406,8 @@ export function createApp(
     available: approvalsSupported,
     loadWorkflow: (id) => store.getWorkflow(id) ?? null,
     canReadWorkflow: (user, workflow) => rbacService.canAccessWorkflow(user, workflow, "workflow:read"),
+    canUpdateWorkflow: (user, workflow) => rbacService.canAccessWorkflow(user, workflow, "workflow:write"),
+    canSeeProjectAccounts: (user, workflow) => user.role === "admin" || rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume
   });

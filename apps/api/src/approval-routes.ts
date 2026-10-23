@@ -4,7 +4,7 @@
  *   GET  /api/approvals                  requests the user can see (pending by default; ?status=decided|all, ?workflowId, ?executionId)
  *   POST /api/approvals/:id/approve      approve the run paused as execution :id, optionally with edits and a reason
  *   POST /api/approvals/:id/reject       reject it, with a reason when the request requires one
- *   POST /api/approvals/eligibility      who could approve with these approver settings (editor warning)
+ *   POST /api/approvals/eligibility      who could approve with these approver settings (editor warning; needs workflow:write)
  *
  * Listing needs `workflow:read` on the workflow's project; deciding needs
  * `workflow:execute` on it and must satisfy the request's approvers and its
@@ -32,6 +32,10 @@ export interface ApprovalRoutesDeps {
   /** The workflow as stored, for the eligibility check; null when it does not exist. */
   loadWorkflow: (id: string) => { id: string; projectId?: string } | null;
   canReadWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
+  /** Edit rights on the workflow (or, for an unsaved one, on the project it will be saved in). */
+  canUpdateWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
+  /** May list the accounts of the workflow's project (admins, or `project:invite`). */
+  canSeeProjectAccounts: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
   /** Resumes the run: inline (resolves with the run result) or on the queue (resolves with `{ queued: true }`). */
   dispatch: (job: ApprovalResumeJob) => Promise<{ queued: true } | { queued: false; result: { status: string } } | null>;
 }
@@ -125,7 +129,12 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       reply.code(404);
       return { error: "Workflow not found" };
     }
-    return approvals.eligibility({ workflow, spec: parsed.data, requester: user });
+    // Only an editor configuring the gate needs this answer.
+    if (!deps.canUpdateWorkflow(user, workflow)) {
+      reply.code(403);
+      return { error: "Editing the workflow is required to check its approvers" };
+    }
+    return approvals.eligibility({ workflow, spec: parsed.data, requester: user, accountBlind: !deps.canSeeProjectAccounts(user, workflow) });
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/approvals/:id/approve", (request, reply) => decide(request, reply, "approve"));
