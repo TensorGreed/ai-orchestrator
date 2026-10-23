@@ -12,3 +12,4 @@ export * from "./schema-constants";
 export * from "./zip-archive";
 export * from "./replay";
 export * from "./evals";
+export * from "./regex-safety";

@@ -1,5 +1,5 @@
 import { Ajv, type ValidateFunction } from "ajv";
-import type { MCPToolResult } from "@ai-orchestrator/shared";
+import { JSON_SCHEMA_SCORER_MAX_BYTES, jsonSchemaRegexProblem, type MCPToolResult } from "@ai-orchestrator/shared";
 
 /**
  * Phase 10.5 — structured tool output (`outputSchema` / `structuredContent`).
@@ -101,18 +101,92 @@ export function checkStructuredContent(
 
 export type JsonSchemaCheck = { ok: true } | { ok: false; invalidSchema: true; errors: string[] } | { ok: false; invalidSchema: false; errors: string[] };
 
+/*
+ * Phase 15.2 — eval scorer schemas are written by builders, so they get their
+ * own Ajv instance: an `$id` in a scorer schema can never collide with (and
+ * so switch off) an MCP tool's outputSchema, and the scorer cache can free
+ * what it compiled. `allErrors: false` stops at the first error, which also
+ * limits the work done on invalid data.
+ */
+const scorerAjv = new Ajv({ allErrors: false, strict: false, validateSchema: false, allowUnionTypes: true, addUsedSchema: false });
+const scorerCache = new Map<string, { validate: ValidateFunction | null; compiled: Record<string, unknown> | null; problem: string | null }>();
+const MAX_CACHED_SCORER_SCHEMAS = 200;
+const MAX_SCORER_SCHEMA_DEPTH = 32;
+/** Keywords that name a schema globally or point at a meta-schema; a scorer schema never needs them. */
+const SCORER_SCHEMA_ID_KEYS = new Set(["$id", "$schema", "$anchor", "$dynamicAnchor"]);
+
+class SchemaTooDeep extends Error {}
+
+/** A deep copy without `$id`, `$schema` and anchors (string values only, so a property named "$id" survives). */
+function stripSchemaIds(value: unknown, depth: number): unknown {
+  if (depth > MAX_SCORER_SCHEMA_DEPTH) throw new SchemaTooDeep();
+  if (Array.isArray(value)) return value.map((item) => stripSchemaIds(item, depth + 1));
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (SCORER_SCHEMA_ID_KEYS.has(key) && typeof entry === "string") continue;
+    out[key] = stripSchemaIds(entry, depth + 1);
+  }
+  return out;
+}
+
+function compileScorer(schema: Record<string, unknown>): { validate: ValidateFunction | null; problem: string | null } {
+  const key = JSON.stringify(schema);
+  const hit = scorerCache.get(key);
+  if (hit) {
+    // Least recently used goes first: a hit moves to the end.
+    scorerCache.delete(key);
+    scorerCache.set(key, hit);
+    return hit;
+  }
+  let entry: { validate: ValidateFunction | null; compiled: Record<string, unknown> | null; problem: string | null };
+  if (key.length > JSON_SCHEMA_SCORER_MAX_BYTES) {
+    entry = { validate: null, compiled: null, problem: `The schema is over ${JSON_SCHEMA_SCORER_MAX_BYTES} bytes of JSON.` };
+  } else {
+    const regexProblem = jsonSchemaRegexProblem(schema);
+    if (regexProblem) {
+      entry = { validate: null, compiled: null, problem: `${regexProblem.charAt(0).toUpperCase()}${regexProblem.slice(1)}.` };
+    } else {
+      try {
+        const compiled = stripSchemaIds(schema, 0) as Record<string, unknown>;
+        entry = { validate: scorerAjv.compile(compiled), compiled, problem: null };
+      } catch (error) {
+        entry = { validate: null, compiled: null, problem: error instanceof SchemaTooDeep ? `The schema is nested deeper than ${MAX_SCORER_SCHEMA_DEPTH} levels.` : "The schema could not be compiled." };
+      }
+    }
+  }
+  if (scorerCache.size >= MAX_CACHED_SCORER_SCHEMAS) {
+    const oldest = scorerCache.keys().next().value;
+    if (oldest !== undefined) {
+      const evicted = scorerCache.get(oldest);
+      scorerCache.delete(oldest);
+      // Ajv keeps every compiled schema object; free it with the cache entry.
+      if (evicted?.compiled) scorerAjv.removeSchema(evicted.compiled);
+    }
+  }
+  scorerCache.set(key, entry);
+  return entry;
+}
+
 /**
  * Phase 15.2 — validate any JSON value against a JSON Schema (the eval
- * `json_schema` scorer). Uses the same Ajv instance and validator cache as
- * tool output checks; remote `$ref`s are never fetched. A schema Ajv cannot
- * compile is reported as such instead of passing.
+ * `json_schema` scorer). Uses the scorer Ajv instance and cache, never the
+ * one MCP tool output checks use; remote `$ref`s are never fetched. A schema
+ * that cannot compile, is too large or too deep, or holds a pattern that can
+ * backtrack exponentially is reported as such instead of passing.
  */
 export function validateJsonSchema(schema: Record<string, unknown>, value: unknown, maxErrors = 5): JsonSchemaCheck {
-  const validate = compile(schema);
-  if (!validate) return { ok: false, invalidSchema: true, errors: ["The schema could not be compiled."] };
+  const { validate, problem } = compileScorer(schema);
+  if (!validate) return { ok: false, invalidSchema: true, errors: [problem ?? "The schema could not be compiled."] };
   if (validate(value)) return { ok: true };
   const errors = (validate.errors ?? []).slice(0, maxErrors).map((entry) => `${entry.instancePath || "(root)"} ${entry.message ?? "is invalid"}`);
   return { ok: false, invalidSchema: false, errors: errors.length > 0 ? errors : ["validation failed"] };
+}
+
+/** Test hook: how many scorer schemas are cached, and how many compiled schemas the scorer Ajv still holds. */
+export function __scorerSchemaCacheStats(): { cached: number; ajvSchemas: number } {
+  const internal = scorerAjv as unknown as { _cache?: Map<unknown, unknown> };
+  return { cached: scorerCache.size, ajvSchemas: internal._cache?.size ?? -1 };
 }
 
 /** Text of the content blocks: one string for a single block, an array for several. */

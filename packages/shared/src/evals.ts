@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { REPLAY_MCP_MODES, replayIgnorePathSchema, REPLAY_IGNORE_PATHS_MAX, type ReplayRunResponse } from "./replay";
+import { checkRegexSafety, jsonSchemaRegexProblem } from "./regex-safety";
 
 /**
  * Phase 15.2 — golden sets, replay jobs and scorers: the shared contract.
@@ -35,8 +36,14 @@ export type LlmJudgeMode = (typeof LLM_JUDGE_MODES)[number];
 
 /** Longest rubric an LLM-judge scorer may carry. */
 export const LLM_JUDGE_RUBRIC_MAX = 4000;
-/** Most judge calls one LLM-judge scorer makes per case (pairwise makes two per vote). */
+/** Most votes one LLM-judge scorer takes per case (pairwise makes two judge calls per vote). */
 export const LLM_JUDGE_VOTES_MAX = 5;
+/** Most judge calls all of a case's scorers make together; the next call fails the scorer. */
+export const EVAL_JUDGE_CALLS_PER_CASE_MAX = 50;
+/** Sampling temperature for a judge that takes several votes (one vote is asked at temperature 0). */
+export const LLM_JUDGE_VOTE_TEMPERATURE = 0.7;
+/** Most text (UTF-16 code units of the output, or of its JSON) a regex or json_schema scorer matches against. */
+export const EVAL_SCORER_INPUT_MAX_BYTES = 262_144;
 /** Most scorers on one case or one run. */
 export const EVAL_SCORERS_MAX = 20;
 /** Largest JSON Schema a json_schema scorer may carry, as JSON text. */
@@ -45,7 +52,19 @@ export const JSON_SCHEMA_SCORER_MAX_BYTES = 65_536;
 export const evalScorerSpecSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("exact_match"), path: pathSchema.optional(), ignoreCase: z.boolean().optional() }),
   z.object({ type: z.literal("contains"), path: pathSchema.optional(), needle: z.string().max(2000).optional(), ignoreCase: z.boolean().optional() }),
-  z.object({ type: z.literal("regex"), path: pathSchema.optional(), pattern: z.string().max(2000).optional(), flags: z.string().max(8).optional() }),
+  z.object({
+    type: z.literal("regex"),
+    path: pathSchema.optional(),
+    pattern: z
+      .string()
+      .max(2000)
+      .superRefine((value, ctx) => {
+        const check = checkRegexSafety(value);
+        if (!check.safe) ctx.addIssue({ code: "custom", message: `This pattern is not allowed: ${check.reason}` });
+      })
+      .optional(),
+    flags: z.string().max(8).optional()
+  }),
   z.object({ type: z.literal("context_precision"), contextPath: pathSchema.optional(), threshold: thresholdSchema.optional(), relevanceThreshold: thresholdSchema.optional() }),
   z.object({ type: z.literal("context_recall"), contextPath: pathSchema.optional(), threshold: thresholdSchema.optional() }),
   z.object({
@@ -79,6 +98,10 @@ export const evalScorerSpecSchema = z.discriminatedUnion("type", [
     schema: z
       .record(z.string(), z.unknown())
       .refine((value) => JSON.stringify(value).length <= JSON_SCHEMA_SCORER_MAX_BYTES, { message: `The schema must be at most ${JSON_SCHEMA_SCORER_MAX_BYTES} bytes of JSON` })
+      .superRefine((value, ctx) => {
+        const problem = jsonSchemaRegexProblem(value);
+        if (problem) ctx.addIssue({ code: "custom", message: problem.charAt(0).toUpperCase() + problem.slice(1) });
+      })
   }),
   z.object({
     type: z.literal("text_similarity"),
@@ -137,6 +160,8 @@ export interface EvalScoreDetail {
   reason: string;
   /** LLM-judge scorers: what the judge calls cost, in USD, when the model is priced. */
   costUsd?: number;
+  /** A judge call had no price (an unpriced model): `costUsd` is a lower bound. */
+  costUnknown?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,8 +190,10 @@ export interface EvalRunProgress {
   fail: number;
   error: number;
   skipped: number;
-  /** Model and judge spend so far, in USD (unpriced models count as 0). */
+  /** Model and judge spend so far, in USD: a lower bound when `costUnknown`. */
   spentUsd: number;
+  /** A model or judge call of this run had no price, so `spentUsd` leaves it out and the budget cannot count it. */
+  costUnknown?: boolean;
   updatedAt: string;
 }
 
@@ -187,6 +214,10 @@ export interface EvalRunSummary {
   costUsd?: number;
   /** Phase 15.2 — the judge's share of `costUsd`. */
   judgeCostUsd?: number;
+  /** Phase 15.2 — some model or judge call had no price: `costUsd` is a lower bound. */
+  costUnknown?: boolean;
+  /** Phase 15.2 — what the reader should know about the numbers (an unpriced model, a budget estimate). */
+  warnings?: string[];
 }
 
 export interface ReplayJobCandidate {
