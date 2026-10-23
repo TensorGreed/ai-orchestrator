@@ -27,7 +27,9 @@ Settings:
 | Require a reason to reject | on | Rejections without a reason are refused. |
 | Editable fields | none | Up to 20 fields the approver may edit before approving (see below). |
 
-With no roles and no users listed, any operator, builder or admin may decide. In every case the approver must have **execute** access to the workflow's project: a user who cannot run the workflow cannot approve it, whatever the gate lists.
+With no roles and no users listed, any operator, builder or admin may decide. In every case the approver must have **execute** access to the workflow's project: a user who cannot run the workflow cannot approve it, whatever the gate lists. For a gate inside a sub-workflow, that means execute access to the project of every workflow from the top-level run down to the gate. Roles and project access are checked again when the decision is taken, so a demotion or a removal from the project takes effect at once.
+
+Self-approval is checked against the person who started the run. A run started by a webhook, a schedule or another automatic trigger has no known requester; the card says **Requester unknown (automatic trigger)**, and anyone who passes the approver check may decide it, including whoever sent the webhook if they are also an approver.
 
 The approved output carries the incoming fields, the edited values and an `approval` record:
 
@@ -48,7 +50,17 @@ The approved output carries the incoming fields, the edited values and an `appro
 }
 ```
 
-A gate cannot be the body of a Loop node: loop bodies run inline and cannot pause part-way. Gate the loop's input or its output instead.
+A gate cannot be the body of a Loop node: loop bodies run inline and cannot pause part-way. Gate the loop's input or its output instead. Any other approval inside a Loop body (an Execute Workflow node whose sub-workflow has a gate, or an agent with the write-tool gate) fails the loop with "Approvals cannot pause inside a Loop body".
+
+### Nothing skips a gate
+
+A gate is a separation-of-duties control, so whoever can start a run cannot step around it:
+
+- A gate's output never comes from pinned data or from `nodeOutputs` sent with a run. A workflow with a pinned gate does not validate, the pin route refuses an Approval Gate (`400`), and the editor offers no **Pin output** for one.
+- A run that would start after a gate is refused before any node runs: `startNodeId` or a single-node run of a node downstream of a gate, on `/api/workflows/:id/execute` and on `/api/executions/:id/retry`, fails with "This run would start after Approval Gate '…'. Start at or before the gate." Starting at the gate itself is allowed; it pauses as usual.
+- [Replays](./golden-runs.md) are the exception: they answer a gate from the decision the golden run recorded.
+
+Human Approval nodes keep their earlier behaviour here (pins and start nodes work as before).
 
 ### Approve with edits
 
@@ -62,7 +74,9 @@ Edits are checked before the run resumes: only listed keys, values of the field'
 
 On the **Runs** page, a run waiting for approval has **Review approval**, which opens the inbox at that run.
 
-Only one decision counts. Once a person decides (or the request times out), any other decision for the same request answers `409`. A decision sent for an older request of a run that has since paused again answers `409` too.
+Only one decision counts. Once a person decides (or the request times out), any other decision for the same request answers `409`. A decision sent for an older request of a run that has since paused again answers `409` too, and so does a decision on a request past its expiry (its timeout outcome applies instead). A run you cannot see answers `404`, whatever state it is in.
+
+A recorded decision is never lost. Claiming the paused run and recording the decision happen in one transaction. If the resume then cannot start (the queue refuses it) or fails, the run waits again and the request is pending again with the same expiry; the decision answers `503` "Could not resume the run; decide again".
 
 ### What else asks for approval
 
@@ -79,12 +93,22 @@ Human Approval nodes and guard hand-offs keep their earlier behaviour (the perso
 
 ## Timeouts
 
-Each request expires at the time it paused plus its timeout. The instance holding the leader lease checks for expired requests every `APPROVAL_SWEEP_INTERVAL_MS` (default one minute) and once at startup, so requests that expired while the API was down are handled as soon as it is back. An expired request resumes the run with a timeout:
+Each request expires at the time it paused plus its timeout. The instance holding the leader lease checks for expired requests every `APPROVAL_SWEEP_INTERVAL_MS` (default one minute) and once at startup, so requests that expired while the API was down are handled as soon as it is back. An expired request resumes the run with a timeout, decided by `system`:
 
 - an Approval Gate goes to `timed_out` (fallback outcome, when connected) or is handled as a rejection;
 - every other kind is handled as a rejection ("Human approval timed out").
 
-Human Approval nodes now enforce the timeout they always stored. A run that paused before this release gets its request when the API starts, expiring from when it paused, so a Human Approval run older than its timeout is rejected at the first startup after upgrading.
+| Kind | Timeout |
+| --- | --- |
+| Approval Gate | The gate's setting (default 1440 minutes, one day) |
+| Agent write tool | `writeToolApproval.timeoutMinutes` (default 1440) |
+| Human Approval node | The node's `timeoutMinutes` |
+| Guard node (route hand-off) and an agent's guard port | The guard node's `timeoutMinutes` (default now 1440, was 60) |
+| Automatic guard profiles on an agent (no guard node) | 1440 minutes |
+
+::: warning Behaviour change on upgrade
+Before this release, Human Approval and guard hand-off timeouts were stored but never enforced. They are now. A run that was already waiting when you upgrade is **not** rejected at once: it gets one full timeout counted from the upgrade (the first start of the API with migration 32), and the API logs the ids of those runs once. Guard hand-offs without their own timeout now wait one day instead of an hour.
+:::
 
 ## Sub-workflows
 
@@ -93,12 +117,12 @@ A gate inside a sub-workflow called by a sync **Execute Workflow** node pauses t
 Limits:
 
 - Only the top-level run is saved. The sub-workflow's paused state travels inside the parent's, and the sub-workflow resumes with the definition it had when it paused.
-- If the sub-workflow fails after it resumes and the Execute Workflow node has retries, a retry starts the sub-workflow from the beginning (it may ask for approval again).
+- If the sub-workflow fails after it resumes and the Execute Workflow node has retries, a retry starts the sub-workflow from the beginning, so it asks for approval again; the decision is never reused for the retry.
 - An **async** Execute Workflow node starts its sub-workflow without waiting; a gate there pauses that sub-workflow as a separate run of its own.
 
 ## Approval before write tools
 
-A workflow can require approval before any of its agents calls an MCP **write** tool. Turn on **Require approval before write tools** in the workflow settings (`settings.writeToolApproval`):
+A workflow can require approval before any of its agents calls an MCP **write** tool. In the editor, open **⋯ › Ask before write tools…** and turn it on (`settings.writeToolApproval`):
 
 ```json
 {
@@ -107,14 +131,16 @@ A workflow can require approval before any of its agents calls an MCP **write** 
     "approverRoles": ["admin"],
     "approverUsers": [],
     "allowSelfApproval": false,
-    "timeoutMinutes": 60
+    "timeoutMinutes": 1440
   }
 }
 ```
 
-A tool is a read-only tool when an admin marked it so on the MCP servers page or its server annotates it with `readOnlyHint: true`; every other tool, including one without annotations, counts as a write tool. This is the same classification the [No write tools](./mcp-tool-policy.md#no-write-tools) setting uses.
+`allowSelfApproval` is off by default, as on a gate. On a single-user install that means nobody can approve your own runs; the dialog warns when nobody but you could approve, so add another approver or turn on **Let the person who started the run approve it**.
 
-Before the agent calls a write tool, the run pauses. The request shows the tool, its server and a preview of the arguments (up to 2,000 characters). Approving runs the agent node again with that one call allowed: the approval covers this agent node, this server and tool and these exact arguments. If the model asks for the tool with other arguments on the re-run, the run asks again. Rejecting fails the agent node with the reason. A timeout rejects. Supervisor workers follow the same setting; a sub-workflow follows its own.
+For this gate a tool is read-only only when an admin marked it read-only in the tool policy (the MCP servers page). The server's own `readOnlyHint` annotation is not trusted here: any server, including an inline one nobody reviewed, can label `delete_records` read-only. Every other tool, including one without annotations, counts as a write tool. (A server that claims both `readOnlyHint: true` and `destructiveHint: true` counts as a write tool everywhere, the [No write tools](./mcp-tool-policy.md#no-write-tools) setting included.)
+
+Before the agent calls a write tool, the run pauses. The request shows the tool, its server and a preview of the arguments (up to 2,000 characters). The approval covers one call: this agent node, this server and tool and these exact arguments. Approving runs the agent node again; the approved call runs once and its result is kept in the paused run. When the agent pauses again for its next write tool and that one is approved, the next re-run answers the earlier call from its stored result and never calls the tool again. If the model repeats an approved call with the same arguments within one re-run, or asks for the tool with other arguments, the run asks again. Rejecting fails the agent node with the reason. A timeout rejects. Supervisor workers follow the same setting (the approval is keyed to the worker node); a sub-workflow follows its own.
 
 The gate applies to tools reached through an agent's tool port. A direct **MCP Tool** node is not gated by this setting; put an Approval Gate before it.
 
@@ -133,7 +159,7 @@ Audit entries, in the `approval` category:
 | `approval.timed_out` | The sweeper expired a request |
 | `approval.canceled` | The paused run was canceled |
 
-Decisions record the reason, the keys of the edited fields and a SHA-256 digest of the edits, not the edited values.
+Decisions record the reason, the keys of the edited fields and a digest of the edits, not the edited values. The digest is HMAC-SHA256 over the canonical JSON of the edits, keyed with a random salt kept on the request row, so the audit entry and the manifest carry the same digest and a short edit cannot be guessed from an exported manifest. Reasons are masked for secret-looking values in both.
 
 The [run manifest](../security/audit-bundles.md) lists gate decisions in `approvals` (like Human Approval decisions) and every request in `extensions.approvals.requests`: request id, node, kind, outcome (`approved`, `rejected`, `timed_out`, `canceled`, `pending`), who decided and when, the reason, the edited field keys, the edits digest and the sub-workflow path.
 
@@ -143,7 +169,12 @@ Decided requests are pruned with execution history (`EXECUTION_HISTORY_RETENTION
 
 When the API runs with the execution queue, a decision resumes the run on the queue: approve and reject answer `202 { queued: true }` and the run continues on a worker. Without the queue the resume runs inline and the response is the run result, as before.
 
-If the API stops after a decision but before the resumed run is saved, the leader resumes it again with the recorded decision at the next startup (without the queue; with the queue, the queue retries its job).
+If the API stops after a decision but before the resumed run is saved, the run stays in `resuming`. The leader re-drives it with the decision recorded for the pause it is in (never a decision from an earlier pause):
+
+- at startup, at once on a single instance (`HA_ENABLED=false`);
+- on every sweep, with or without the queue: with the queue when no queue item for that resume is waiting or running (after a one-minute grace); without the queue once the claim is older than `WORKFLOW_EXECUTION_TIMEOUT_MS` plus a margin, so a resume still running on another instance is never started twice.
+
+Resumes are **at-least-once**: a recovered resume runs the nodes after the gate again, so a side effect there can happen twice if the API stopped mid-resume.
 
 ## Replays
 
@@ -151,7 +182,8 @@ If the API stops after a decision but before the resumed run is saved, the leade
 
 ## Not covered yet
 
-- Postgres deployments: the `approval_requests` table is created by migration 32, but the Postgres store does not implement the approvals methods yet.
+- Postgres deployments: migration 32 creates the tables, but the Postgres store does not implement approvals yet. On Postgres the approvals routes answer `501`, no requests are recorded and no timeouts run; paused runs stay paused.
 - Escalation, reminders and one-click approve links inside Slack, Teams or email messages.
 - Groups as approvers; approvers are roles or individual users.
 - Approval Gates inside Loop node bodies.
+- Teams messages escape Markdown links and emphasis; a bare URL in a message may still be turned into a link by Teams.
