@@ -93,6 +93,7 @@ import {
   type TraceStreamHandlers
 } from "./lib/run-trace";
 import { computeAttachmentSlots, orbitPositions } from "./lib/stages";
+import { newNodeConfig } from "./lib/trigger-paths";
 import {
   deleteTabWipWorkflow,
   preferTabWip,
@@ -129,7 +130,8 @@ import { McpServersPage } from "./components/McpServersPage";
 import { McpOverviewPage } from "./components/McpOverviewPage";
 import { McpMyConnectionsPage } from "./components/McpRuntimeSafety";
 import { GuardSecurityPage } from "./components/GuardSecurityPage";
-import { EvaluationsPage } from "./components/EvaluationsPage";
+import { EvaluationsPage, type EvaluationsTab } from "./components/EvaluationsPage";
+import { ReleasePill } from "./components/ReleaseControls";
 import { ApprovalsPage } from "./components/ApprovalsPage";
 import { McpToolsPage } from "./components/McpToolsPage";
 import { McpChangesPage } from "./components/McpChangesPage";
@@ -1132,6 +1134,9 @@ function StudioApp() {
   );
   // Phase 10.8 — "Record MCP calls" for manual editor runs; off again on reload.
   const [recordMcp, setRecordMcp] = useState(false);
+  // Phase 15.4 — reloads the editor's version pill after a save; the Evaluations tab the pill's "Set up a gate" opens.
+  const [releaseRefreshKey, setReleaseRefreshKey] = useState(0);
+  const [evaluationsTab, setEvaluationsTab] = useState<EvaluationsTab>("sets");
   const [chatInput, setChatInput] = useState("");
   const [chatPendingImages, setChatPendingImages] = useState<Array<{ data: string; mimeType: string }>>([]);
   const [chatSystemPrompt, setChatSystemPrompt] = useState("You are a precise tool-using AI assistant.");
@@ -2853,8 +2858,15 @@ function StudioApp() {
     setWorkflowList(workflows);
     setCurrentWorkflow(saved);
     storeLocalWipWorkflow(saved);
+    // Phase 15.4 — a save is a new version: the version pill reloads.
+    setReleaseRefreshKey((key) => key + 1);
     return saved;
   }, [buildCurrentWorkflow]);
+
+  // The pill opens Evaluations on Release gates once; the next visit starts on Golden sets.
+  useEffect(() => {
+    if (activeMode !== "evaluations") setEvaluationsTab("sets");
+  }, [activeMode]);
 
   const handleSave = useCallback(async () => {
     try {
@@ -4151,7 +4163,7 @@ function StudioApp() {
         data: {
           label: definition.label,
           nodeType: definition.type as EditorNodeData["nodeType"],
-          config: definition.sampleConfig ?? {}
+          config: newNodeConfig(definition.type, definition.sampleConfig)
         }
       };
 
@@ -4650,6 +4662,20 @@ function StudioApp() {
             void handleCreateProject();
           }}
           runStatus={deriveRunStatus(busy, executionResult)}
+          releaseControl={
+            currentWorkflowExists ? (
+              <ReleasePill
+                workflowId={currentWorkflow.id}
+                refreshKey={releaseRefreshKey}
+                canPublish={canManageWorkflows}
+                isAdmin={authUser.role === "admin"}
+                onOpenGates={() => {
+                  setEvaluationsTab("gates");
+                  setActiveMode("evaluations");
+                }}
+              />
+            ) : undefined
+          }
           onRun={() => {
             void handleExecute();
           }}
@@ -5292,6 +5318,9 @@ function StudioApp() {
 
           {activeMode === "evaluations" && authUser && (
             <EvaluationsPage
+              key={evaluationsTab}
+              initialTab={evaluationsTab}
+              currentWorkflowId={currentWorkflowExists ? currentWorkflow.id : undefined}
               workflows={workflowList}
               activeProjectId={activeProjectId}
               role={authUser.role}

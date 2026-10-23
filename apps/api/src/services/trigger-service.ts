@@ -160,6 +160,7 @@ function parseFeed(xml: string): RssItem[] {
 export class TriggerService {
   private readonly active = new Map<string, ActiveTrigger>();
   private executeHandler: TriggerExecutionHandler | null = null;
+  private loadWorkflow: (workflowId: string) => Workflow | null = (workflowId) => this.store.getWorkflow(workflowId);
   private resolveSecret: SecretResolver = async () => undefined;
 
   constructor(
@@ -195,6 +196,14 @@ export class TriggerService {
     this.executeHandler = handler;
   }
 
+  /**
+   * Phase 15.4 — which version a trigger registers from: the published one
+   * when the workflow has one (production traffic), else the draft.
+   */
+  setWorkflowLoader(loader: (workflowId: string) => Workflow | null): void {
+    this.loadWorkflow = loader;
+  }
+
   setSecretResolver(resolver: SecretResolver): void {
     this.resolveSecret = resolver;
   }
@@ -206,14 +215,14 @@ export class TriggerService {
   reloadAllWorkflows(): void {
     this.stopAll();
     for (const summary of this.store.listWorkflows()) {
-      const workflow = this.store.getWorkflow(summary.id);
+      const workflow = this.loadWorkflow(summary.id);
       if (workflow) this.registerWorkflow(workflow);
     }
   }
 
   reloadWorkflow(workflowId: string): void {
     this.unregisterWorkflow(workflowId);
-    const workflow = this.store.getWorkflow(workflowId);
+    const workflow = this.loadWorkflow(workflowId);
     if (workflow) this.registerWorkflow(workflow);
   }
 

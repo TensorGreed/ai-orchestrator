@@ -17,6 +17,12 @@
  * queue and the decision answers 202; otherwise it runs inline and answers
  * with the run result, as before.
  *
+ * Phase 15.4 — release requests (publishing a workflow version that its
+ * release gate sends to approvers) are listed in the same inbox with
+ * `kind: "release"`, and `/api/approvals/:id/approve|reject` decide them
+ * when `:id` is a release request id (`rar_…`); see release-service.ts.
+ * They are left out when the inbox is filtered to one execution.
+ *
  * A decision is never lost: when its resume cannot be started the request
  * goes back to pending and the route answers 503, so it can be decided
  * again. Approvals need the SQLite store in this release; on Postgres every
@@ -24,10 +30,18 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { approvalApproveInputSchema, approvalEligibilityInputSchema, approvalRejectInputSchema } from "@ai-orchestrator/shared";
+import {
+  approvalApproveInputSchema,
+  approvalEligibilityInputSchema,
+  approvalRejectInputSchema,
+  isReleaseApprovalRequestId,
+  type ApprovalRequestView,
+  type ReleaseApprovalRequestView
+} from "@ai-orchestrator/shared";
 import type { RunAccess, RunAccessDenial } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { ApprovalDecisionError, type ApprovalResumeJob, type ApprovalService } from "./services/approval-service.js";
+import { ReleaseError, type ReleaseService } from "./services/release-service.js";
 
 export interface ApprovalRoutesDeps {
   app: FastifyInstance;
@@ -44,6 +58,15 @@ export interface ApprovalRoutesDeps {
   canSeeProjectAccounts: (user: SafeUser, workflow: { id: string; projectId?: string }) => boolean;
   /** Resumes the run: inline (resolves with the run result) or on the queue (resolves with `{ queued: true }`). */
   dispatch: (job: ApprovalResumeJob) => Promise<{ queued: true } | { queued: false; result: { status: string } } | null>;
+  /** Phase 15.4 — release requests in the same inbox. */
+  releases?: Pick<ReleaseService, "listRequests" | "decide">;
+}
+
+/** Newest first, by when it was asked (pending) or decided (decided, all). */
+function inboxTime(item: { createdAt: string; decidedAt: string | null }, status: string): number {
+  const value = status === "pending" ? item.createdAt : item.decidedAt ?? item.createdAt;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 const STATUS_FILTERS = new Set(["pending", "decided", "all"]);
@@ -74,14 +97,21 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       const access = deps.runAccess.run(user, deps.loadRun(query.executionId), "workflow:read");
       if (!access.ok) return deny(reply, access);
     }
-    return {
-      items: approvals.list(user, {
-        status,
-        ...(query.workflowId ? { workflowId: query.workflowId } : {}),
-        ...(query.executionId ? { executionId: query.executionId } : {}),
-        ...(limit && Number.isFinite(limit) ? { limit } : {})
-      })
-    };
+    const capped = limit && Number.isFinite(limit) ? Math.max(1, Math.min(500, limit)) : undefined;
+    const runItems: Array<ApprovalRequestView | ReleaseApprovalRequestView> = approvals.list(user, {
+      status,
+      ...(query.workflowId ? { workflowId: query.workflowId } : {}),
+      ...(query.executionId ? { executionId: query.executionId } : {}),
+      ...(capped ? { limit: capped } : {})
+    });
+    if (query.executionId || !deps.releases) return { items: runItems };
+    const releaseItems = deps.releases.listRequests(user, {
+      status,
+      ...(query.workflowId ? { workflowId: query.workflowId } : {}),
+      ...(capped ? { limit: capped } : {})
+    });
+    const items = [...runItems, ...releaseItems].sort((a, b) => inboxTime(b, status) - inboxTime(a, status)).slice(0, capped ?? 200);
+    return { items };
   });
 
   const decide = async (request: FastifyRequest<{ Params: { id: string }; Body: unknown }>, reply: FastifyReply, decision: "approve" | "reject") => {
@@ -94,6 +124,17 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       return { error: decision === "approve" ? "Invalid approval payload" : "Invalid rejection payload", details: parsed.error.issues };
     }
     const body = parsed.data as { reason?: string; edits?: Record<string, unknown>; requestId?: string };
+    if (deps.releases && isReleaseApprovalRequestId(request.params.id)) {
+      try {
+        return deps.releases.decide(user, request.params.id, decision, body.reason);
+      } catch (error) {
+        if (error instanceof ReleaseError) {
+          reply.code(error.statusCode);
+          return { error: error.message };
+        }
+        throw error;
+      }
+    }
     let job: ApprovalResumeJob;
     try {
       job = approvals.decide({

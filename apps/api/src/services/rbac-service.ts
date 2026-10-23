@@ -10,6 +10,8 @@ export type Permission =
   | "workflow:write"
   | "workflow:execute"
   | "workflow:delete"
+  /** Phase 15.4 — move the published version (publish, rollback, approve a release request). */
+  | "workflow:publish"
   | "secret:read"
   | "secret:write"
   | "secret:use"
@@ -22,6 +24,7 @@ export const ALL_PERMISSIONS: Permission[] = [
   "workflow:write",
   "workflow:execute",
   "workflow:delete",
+  "workflow:publish",
   "secret:read",
   "secret:write",
   "secret:use",
@@ -36,6 +39,7 @@ const PROJECT_ROLE_PERMISSIONS: Record<ProjectRole, Permission[]> = {
     "workflow:write",
     "workflow:execute",
     "workflow:delete",
+    "workflow:publish",
     "secret:read",
     "secret:write",
     "secret:use",
@@ -47,6 +51,7 @@ const PROJECT_ROLE_PERMISSIONS: Record<ProjectRole, Permission[]> = {
     "workflow:read",
     "workflow:write",
     "workflow:execute",
+    "workflow:publish",
     "secret:read",
     "secret:use"
   ],
@@ -61,6 +66,7 @@ const GLOBAL_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     "workflow:write",
     "workflow:execute",
     "workflow:delete",
+    "workflow:publish",
     "secret:read",
     "secret:write",
     "secret:use",

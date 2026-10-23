@@ -1,0 +1,266 @@
+/* ---------------------------------------------------------------------------
+   release.css — Phase 15.4: the editor's version pill, the Publish dialog,
+   Evaluations → Release gates and release requests in Approvals.
+   Tokens only; both themes come from tokens.css.
+   --------------------------------------------------------------------------- */
+
+.hud-release-pill {
+  gap: 8px;
+  color: var(--fg-muted);
+  max-width: 280px;
+}
+
+.hud-release-pill.is-live .hud-dot {
+  background: var(--ok);
+  box-shadow: 0 0 10px var(--ok);
+}
+
+.hud-release-pill.is-ahead {
+  color: var(--fg);
+}
+
+.hud-release-pill.is-ahead .hud-dot {
+  background: var(--warn);
+  box-shadow: 0 0 10px var(--warn);
+}
+
+.hud-release-gate {
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.hud-release-gate.is-refused {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.release-modal {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.release-empty {
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+
+.release-verdict {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 12px;
+  background: var(--bg-elev-2);
+}
+
+.release-verdict.is-passed {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.release-verdict.is-blocked {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+
+.release-verdict.is-needs_approval {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.release-verdict-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: var(--fs-sm);
+}
+
+.release-verdict-badge {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.release-verdict code,
+.release-history code,
+.approval-meta code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.release-job {
+  color: var(--fg-muted);
+}
+
+.release-stats {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+
+.release-reasons,
+.approval-release-reasons ul,
+.release-form-errors {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-sm);
+}
+
+.release-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.release-actions .cfg-field {
+  flex: 1 1 260px;
+  display: grid;
+  gap: 6px;
+}
+
+.release-override {
+  border-top: 1px dashed var(--line-strong);
+  padding-top: 10px;
+}
+
+.release-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.release-workflow-pick {
+  max-width: 420px;
+}
+
+.release-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.release-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--r-lg);
+  background: var(--card-bg);
+  padding: 16px;
+  min-width: 0;
+}
+
+.release-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.release-card-head h3 {
+  margin: 0;
+  font-size: var(--fs-md);
+}
+
+.release-tag {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.release-tag.is-ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.release-tag.is-warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.release-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.release-sets {
+  display: grid;
+  gap: 4px;
+}
+
+.release-policy {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  gap: 10px;
+}
+
+.release-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.release-history li {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 10px;
+  justify-items: start;
+}
+
+.release-history li.is-live {
+  border-color: var(--ok);
+}
+
+.release-history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.release-history-reason {
+  font-size: var(--fs-sm);
+  color: var(--fg);
+}
+
+.release-rollback {
+  display: grid;
+  gap: 6px;
+}
+
+.approval-release-reasons {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 10px;
+}
+
+@media (max-width: 640px) {
+  .hud-release-pill {
+    max-width: 160px;
+  }
+
+  .hud-release-gate {
+    display: none;
+  }
+}

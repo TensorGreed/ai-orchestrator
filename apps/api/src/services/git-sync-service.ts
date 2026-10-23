@@ -20,8 +20,19 @@ export interface GitSyncResult {
   error?: string;
   workflowsExported?: number;
   workflowsImported?: number;
+  /** Phase 15.4 — workflows a pull did not import, each with the reason (the others import). */
+  workflowsRefused?: GitSyncRefusal[];
   variablesSynced?: number;
 }
+
+export interface GitSyncRefusal {
+  workflowId: string;
+  file: string;
+  reason: string;
+}
+
+/** Why a pulled workflow may not be saved (for example a production path another workflow serves); null when it may. */
+export type GitSyncImportCheck = (workflow: Workflow) => string | null;
 
 export interface ConfigureGitInput {
   repoUrl: string;
@@ -200,7 +211,7 @@ export class GitSyncService {
     }
   }
 
-  async pull(options: { branch?: string; createdBy?: string }): Promise<GitSyncResult> {
+  async pull(options: { branch?: string; createdBy?: string; canImport?: GitSyncImportCheck }): Promise<GitSyncResult> {
     const config = this.requireConfig();
     const dir = this.ensureClone(config, options.branch);
     try {
@@ -208,7 +219,8 @@ export class GitSyncService {
       this.runGit(dir, ["fetch", this.remoteUrl(config), branch]).throwOnFailure();
       this.runGit(dir, ["checkout", "-B", branch, "FETCH_HEAD"]).throwOnFailure();
 
-      const workflowsImported = this.readWorkflows(dir, config, options.createdBy ?? null);
+      const workflowsRefused: GitSyncRefusal[] = [];
+      const workflowsImported = this.readWorkflows(dir, config, options.createdBy ?? null, options.canImport, workflowsRefused);
       const variablesSynced = this.readVariables(dir, config, options.createdBy ?? null);
 
       const commitRes = this.runGit(dir, ["rev-parse", "HEAD"]);
@@ -218,6 +230,7 @@ export class GitSyncService {
         branch,
         commit: commitRes.status === 0 ? commitRes.stdout.trim() : undefined,
         workflowsImported,
+        ...(workflowsRefused.length > 0 ? { workflowsRefused } : {}),
         variablesSynced
       };
     } catch (err) {
@@ -395,7 +408,13 @@ export class GitSyncService {
     return rows.length;
   }
 
-  private readWorkflows(dir: string, config: GitSyncConfig, createdBy: string | null): number {
+  private readWorkflows(
+    dir: string,
+    config: GitSyncConfig,
+    createdBy: string | null,
+    canImport?: GitSyncImportCheck,
+    refused: GitSyncRefusal[] = []
+  ): number {
     const workflowsDir = path.join(dir, config.workflowsDir);
     if (!fs.existsSync(workflowsDir)) return 0;
     const files = fs.readdirSync(workflowsDir).filter((f) => f.endsWith(".json"));
@@ -410,6 +429,11 @@ export class GitSyncService {
       }
       if (!parsed || typeof parsed !== "object" || !parsed.id || !Array.isArray(parsed.nodes)) continue;
       const resolved = this.resolveCredentials(parsed);
+      const reason = canImport?.(resolved) ?? null;
+      if (reason) {
+        refused.push({ workflowId: resolved.id, file, reason });
+        continue;
+      }
       const now = new Date().toISOString();
       resolved.updatedAt = now;
       if (!resolved.createdAt) resolved.createdAt = now;

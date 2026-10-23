@@ -27,6 +27,8 @@ export interface NotificationEvent {
     /** For approval.timed_out: what the run does now. */
     outcome?: string;
   };
+  /** Phase 15.4 — set when the approval is a release request: which version waits to be published. */
+  release?: { version: number };
 }
 
 /** Phase 11.2 — approval events channels subscribe to alongside execution events. */
@@ -52,6 +54,7 @@ function describeEvent(event: NotificationEvent): NotificationContent {
   if (event.type === "approval.requested" || event.type === "approval.timed_out") {
     const approval = event.approval;
     const requested = event.type === "approval.requested";
+    if (event.release) facts.push({ name: "Version", value: String(event.release.version) });
     if (approval) {
       facts.push({ name: "Approvers", value: approval.approvers });
       if (requested && approval.expiresAt) facts.push({ name: "Expires", value: approval.expiresAt });
@@ -64,7 +67,13 @@ function describeEvent(event: NotificationEvent): NotificationContent {
       facts,
       // Channels are not scoped to a project, so the run's own text (the
       // request message, proposed values) stays in the project-scoped inbox.
-      text: requested ? "A run is waiting for approval. Open the approvals inbox to see the request." : "Nobody decided before the approval expired.",
+      text: event.release
+        ? requested
+          ? "A workflow version is waiting for approval to be published. Open the approvals inbox to see the request."
+          : "Nobody decided on the release request before it expired, so the version was not published."
+        : requested
+          ? "A run is waiting for approval. Open the approvals inbox to see the request."
+          : "Nobody decided before the approval expired.",
       ...(approval?.link ? { link: approval.link } : {})
     };
   }

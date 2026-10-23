@@ -90,6 +90,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type { EvalFixtureRecord, EvalResultRecord, EvalRunRecord, ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import type { SafeUser } from "./auth-service.js";
+import { goldenSetSnapshots } from "./release-snapshot.js";
 import { applyScorer, judgeCallsFor, __scorerTest__, type EvalJudgeContext, type EvalLlmJudge } from "./eval-scorers.js";
 
 export type { EvalLlmJudge, EvalJudgeContext, EvalJudgeResponse } from "./eval-scorers.js";
@@ -609,6 +610,15 @@ export class EvalService {
       options: options as unknown as Record<string, unknown>,
       progress: progress as unknown as Record<string, unknown>
     });
+    // Phase 15.4 — what each set holds now (the job's own cases); the release gate accepts the job only while its sets still match.
+    // Taken here, after the job row exists, never in the estimate path.
+    try {
+      this.store.setEvalRunSetSnapshot(runId, goldenSetSnapshots(datasetIds, (datasetId) => this.store.listEvalFixtures(datasetId)));
+    } catch (error) {
+      // Never leave a job queued that will not launch.
+      this.store.finalizeEvalRun({ id: runId, status: "errored", error: "The golden sets could not be recorded for this job." });
+      throw error;
+    }
     const job: ReplayJobContext = {
       actorUserId: context.actor.id,
       actorEmail: context.actor.email,

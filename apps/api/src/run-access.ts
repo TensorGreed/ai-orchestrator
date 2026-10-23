@@ -22,7 +22,7 @@
 import { DEFAULT_PROJECT_ID, type Workflow } from "@ai-orchestrator/shared";
 import type { SafeUser } from "./services/auth-service.js";
 
-export type RunPermission = "workflow:read" | "workflow:write" | "workflow:execute" | "workflow:delete";
+export type RunPermission = "workflow:read" | "workflow:write" | "workflow:execute" | "workflow:delete" | "workflow:publish";
 
 export type RunAccessDenial = { ok: false; status: 403 | 404; error: string };
 export type RunAccessResult<T> = ({ ok: true } & T) | RunAccessDenial;

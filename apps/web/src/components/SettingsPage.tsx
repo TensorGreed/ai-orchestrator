@@ -1512,6 +1512,8 @@ const AUDIT_CATEGORIES = [
   "project",
   "rbac",
   "sharing",
+  "approval",
+  "release",
   "system"
 ];
 
@@ -2564,6 +2566,15 @@ function SourceControlTab() {
                   } · ${lastResult.variablesSynced ?? 0} variable(s) · commit ${lastResult.commit?.slice(0, 8) ?? "—"}`
                 : `✗ ${lastResult.error ?? "failed"}`}
             </p>
+          )}
+          {lastResult?.ok && lastResult.workflowsRefused && lastResult.workflowsRefused.length > 0 && (
+            <ul className="settings-muted" style={{ fontSize: "0.85rem", marginTop: "4px" }} aria-label="Workflows not imported">
+              {lastResult.workflowsRefused.map((entry) => (
+                <li key={`${entry.file}-${entry.workflowId}`}>
+                  Not imported: {entry.workflowId} ({entry.file}). {entry.reason}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       )}

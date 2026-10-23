@@ -56,6 +56,7 @@ import {
   type MCPServerConfig,
   type NodeActivityEvent,
   type NodeProgressSnapshot,
+  type ReleaseChannel,
   type SecretReference,
   type Workflow,
   type WorkflowExecutionState,
@@ -136,6 +137,8 @@ import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerApprovalRoutes } from "./approval-routes.js";
+import { registerReleaseRoutes } from "./release-routes.js";
+import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
 import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
@@ -594,15 +597,29 @@ function normalizeWorkflowIdCandidate(value: string): string {
   return normalized || "workflow-copy";
 }
 
+/**
+ * Phase 15.4 — whether an id is taken: by a workflow, or by the release gate
+ * or release history a deleted workflow left behind (a new, unrelated
+ * workflow must not inherit them).
+ */
+function workflowIdTaken(store: SqliteStore, id: string): boolean {
+  if (store.getWorkflow(id)) return true;
+  try {
+    return store.getReleaseGate(id) !== null || store.listWorkflowReleases(id, 1).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function makeUniqueWorkflowId(store: SqliteStore, preferredId: string): string {
   const base = normalizeWorkflowIdCandidate(preferredId);
-  if (!store.getWorkflow(base)) {
+  if (!workflowIdTaken(store, base)) {
     return base;
   }
 
   for (let index = 2; index <= 10_000; index += 1) {
     const candidate = `${base}-${index}`;
-    if (!store.getWorkflow(candidate)) {
+    if (!workflowIdTaken(store, candidate)) {
       return candidate;
     }
   }
@@ -807,6 +824,9 @@ function isLocalDevOrigin(origin: string): boolean {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
 }
 
+/** Phase 15.4 — which version a lookup sees: the draft by default, the published one for production routes. */
+type WorkflowLoader = (id: string) => Workflow | null;
+
 /**
  * Picks the workflow for the signed-in compat webhook routes. `canUse` hides
  * workflows the caller may not read: an explicit id, a path match and the
@@ -817,22 +837,23 @@ async function selectWebhookWorkflow(
   workflowId?: string,
   webhookPath?: string,
   webhookMethod = "POST",
-  canUse: (workflow: Workflow) => boolean = () => true
+  canUse: (workflow: Workflow) => boolean = () => true,
+  load: WorkflowLoader = (id) => store.getWorkflow(id)
 ): Promise<Workflow | null> {
   if (workflowId) {
-    const workflow = store.getWorkflow(workflowId);
+    const workflow = load(workflowId);
     return workflow && canUse(workflow) ? workflow : null;
   }
 
   if (webhookPath) {
-    const match = await selectWebhookByPath(store, webhookPath, webhookMethod, canUse);
+    const match = await selectWebhookByPath(store, webhookPath, webhookMethod, canUse, load);
     return match?.workflow ?? null;
   }
 
   const workflows = store.listWorkflows();
   let firstUsable: Workflow | null = null;
   for (const workflowSummary of workflows) {
-    const workflow = store.getWorkflow(workflowSummary.id);
+    const workflow = load(workflowSummary.id);
     if (!workflow || !canUse(workflow)) {
       continue;
     }
@@ -957,14 +978,15 @@ function listWebhookEndpoints(workflow: Workflow): WebhookEndpoint[] {
 
 async function listWebhookEndpointMatchesByPath(
   store: SqliteStore,
-  path: string
+  path: string,
+  load: WorkflowLoader = (id) => store.getWorkflow(id)
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
   const normalizedPath = normalizeWebhookPath(path, "").toLowerCase();
   const matches: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
 
   const workflows = store.listWorkflows();
   for (const workflowSummary of workflows) {
-    const workflow = store.getWorkflow(workflowSummary.id);
+    const workflow = load(workflowSummary.id);
     if (!workflow) {
       continue;
     }
@@ -1022,13 +1044,14 @@ function listMcpServerUsages(
 }
 
 async function listAllWebhookEndpoints(
-  store: SqliteStore
+  store: SqliteStore,
+  load: WorkflowLoader = (id) => store.getWorkflow(id)
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
   const endpoints: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
   const workflows = store.listWorkflows();
 
   for (const workflowSummary of workflows) {
-    const workflow = store.getWorkflow(workflowSummary.id);
+    const workflow = load(workflowSummary.id);
     if (!workflow) {
       continue;
     }
@@ -1051,14 +1074,15 @@ async function selectWebhookByPath(
   store: SqliteStore,
   path: string,
   method: string,
-  canUse: (workflow: Workflow) => boolean = () => true
+  canUse: (workflow: Workflow) => boolean = () => true,
+  load: WorkflowLoader = (id) => store.getWorkflow(id)
 ): Promise<{ workflow: Workflow; endpoint: WebhookEndpoint } | null> {
   const normalizedPath = normalizeWebhookPath(path, "").toLowerCase();
   const normalizedMethod = normalizeWebhookMethod(method);
 
   const workflows = store.listWorkflows();
   for (const workflowSummary of workflows) {
-    const workflow = store.getWorkflow(workflowSummary.id);
+    const workflow = load(workflowSummary.id);
     if (!workflow || !canUse(workflow)) {
       continue;
     }
@@ -1729,6 +1753,16 @@ export function createApp(
     }
   };
 
+  /**
+   * Phase 15.4 — runs in flight, the channel each runs on and, for
+   * production, the published version (null: no published version, the
+   * draft). Every run's history records its channel, so a retry can tell an
+   * editor run from a production one; a run whose channel went unrecorded
+   * retries fail closed (see the retry route).
+   */
+  // Bounded: a run whose history is never persisted must not grow it forever.
+  const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
+
   const runWorkflowExecution = async (input: {
     workflow: Workflow;
     startNodeId?: string;
@@ -1786,7 +1820,23 @@ export function createApp(
     providerRegistry?: ProviderRegistry;
     /** Phase 15.3 — a replay candidate's guard profile, evaluated in place of the bindings. */
     guardProfileOverride?: { profileId: string; version?: number };
+    /**
+     * Phase 15.4 — `production` for production traffic (the caller resolved
+     * the published version): sub-workflows and the error workflow load their
+     * published versions too, and a pause remembers it for the resume.
+     * Default `draft`.
+     */
+    channel?: ReleaseChannel;
+    /** The published version a production run runs (default: the version the resolver returned this workflow object as). */
+    releaseVersion?: number | null;
   }) => {
+    const channel: ReleaseChannel = input.channel ?? "draft";
+    const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
+    // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
+    if (input.executionId && !input.replay) {
+      if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
+      runReleases.set(input.executionId, { channel, version: releaseVersion });
+    }
     const controller = input.executionId
       ? registerActiveExecution({
           executionId: input.executionId,
@@ -1803,7 +1853,8 @@ export function createApp(
     const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
     const scoped = runScope.dependenciesFor(mergedWorkflow, {
       actor: input.policyActor,
-      resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer
+      resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer,
+      channel
     });
     // The execution timeout aborts the run's signal, so it interrupts a
     // model call, MCP call or retry wait that is in flight instead of only
@@ -1912,8 +1963,10 @@ export function createApp(
               triggeredBy: paused.triggeredBy,
               startedAt: paused.startedAt,
               // Approved tool results answer a re-run, so they are stored encrypted, not redacted.
-              state: sealToolResults(secretService, paused.state)
+              state: sealToolResults(secretService, channel === "production" ? { ...paused.state, releaseChannel: "production", releaseVersion } : paused.state)
             });
+            // The paused state carries the version now; the resume records it again.
+            runReleases.delete(paused.executionId);
             // Phase 11.2 — who may decide, when it expires; audited and notified.
             if (!approvalsSupported) return;
             try {
@@ -1949,8 +2002,11 @@ export function createApp(
             });
             // Execute the designated error handler workflow: one in the same
             // project or one shared to it with execute.
-            const failingWorkflow = payload.sourceWorkflowId === mergedWorkflow.id ? mergedWorkflow : store.getWorkflow(payload.sourceWorkflowId) ?? mergedWorkflow;
-            const errorTarget = runScope.errorWorkflowFor(failingWorkflow, payload.errorWorkflowId);
+            const failingWorkflow =
+              payload.sourceWorkflowId === mergedWorkflow.id
+                ? mergedWorkflow
+                : (channel === "production" ? productionWorkflow(payload.sourceWorkflowId) : store.getWorkflow(payload.sourceWorkflowId)) ?? mergedWorkflow;
+            const errorTarget = runScope.errorWorkflowFor(failingWorkflow, payload.errorWorkflowId, channel);
             if ("error" in errorTarget) {
               app.log.warn({ errorWorkflowId: payload.errorWorkflowId, sourceWorkflowId: payload.sourceWorkflowId, reason: errorTarget.error }, "Error workflow not run");
               return;
@@ -1958,7 +2014,7 @@ export function createApp(
             const errorWf = errorTarget.workflow;
             // Like a sub-workflow: the run's user carries over only within the same project.
             const sameProject = (errorWf.projectId ?? DEFAULT_PROJECT_ID) === (failingWorkflow.projectId ?? DEFAULT_PROJECT_ID);
-            const errorScoped = runScope.dependenciesFor(errorWf, { actor: sameProject ? input.policyActor : null });
+            const errorScoped = runScope.dependenciesFor(errorWf, { actor: sameProject ? input.policyActor : null, channel });
             try {
               await executeWorkflow(
                 {
@@ -2215,6 +2271,16 @@ export function createApp(
       triggerType: input.triggerType,
       status: input.result.status
     });
+
+    const ranOn = runReleases.get(input.executionId);
+    runReleases.delete(input.executionId);
+    if (persisted && ranOn !== undefined && releaseService.available) {
+      try {
+        store.setExecutionRelease(input.executionId, ranOn.channel, ranOn.version);
+      } catch (error) {
+        app.log.warn({ executionId: input.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record the published version a run ran");
+      }
+    }
 
     if (persisted) {
       deleteWorkflowExecutionSafely(input.executionId, input.workflow.id);
@@ -2642,14 +2708,16 @@ export function createApp(
     timezone: string;
     firedAt: string;
   }) => {
-    const workflow = store.getWorkflow(input.workflowId);
+    // Schedules are production traffic: the published version when there is one.
+    const workflow = productionWorkflow(input.workflowId);
     if (!workflow) {
       app.log.warn(
         {
           workflowId: input.workflowId,
-          scheduleNodeId: input.scheduleNodeId
+          scheduleNodeId: input.scheduleNodeId,
+          reason: releaseService.productionRefusal(input.workflowId) ?? "not found"
         },
-        "Skipped scheduled execution because workflow was not found"
+        "Skipped scheduled execution because production has no workflow to run"
       );
       return;
     }
@@ -2674,7 +2742,8 @@ export function createApp(
       },
       executionId,
       triggerType: "cron",
-      triggeredBy: "scheduler"
+      triggeredBy: "scheduler",
+      channel: "production"
     });
 
     persistExecutionHistory({
@@ -2699,6 +2768,8 @@ export function createApp(
   };
 
   if (schedulerService) {
+    // A scheduler test double that only fires schedules has no loader.
+    schedulerService.setWorkflowLoader?.((workflowId) => productionWorkflow(workflowId));
     schedulerService.setExecutionHandler((input) => executeScheduledWorkflow(input));
     app.addHook("onClose", async () => {
       schedulerService.stop();
@@ -2729,7 +2800,9 @@ export function createApp(
       executionId,
       triggerType: input.triggerType,
       triggeredBy: "trigger-service",
-      hooks: progressHooks
+      hooks: progressHooks,
+      // App triggers register from the production version (setWorkflowLoader below).
+      channel: "production"
     });
     persistExecutionHistory({
       executionId,
@@ -2742,6 +2815,7 @@ export function createApp(
   };
 
   if (triggerService) {
+    triggerService.setWorkflowLoader((workflowId) => productionWorkflow(workflowId));
     triggerService.setExecutionHandler(async (payload) => executeTriggeredWorkflow(payload));
     triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
     triggerService.setOutboundGuard(outboundGuard, nodeDnsResolver);
@@ -2845,6 +2919,8 @@ export function createApp(
   // bases and session state of its own project (see run-scope.ts).
   const runScope = createRunScope({
     getWorkflow: (id) => store.getWorkflow(id),
+    getRunnableWorkflow: (id, runChannel) => releaseService.resolveRunnableWorkflow(id, runChannel),
+    productionRefusal: (id) => releaseService.productionRefusal(id),
     listWorkflowShares: (workflowId) => store.listWorkflowShares(workflowId),
     getSecretProjectId: (secretId) => store.getSecret(secretId)?.projectId ?? null,
     listSecretIdsSharedToProject: (projectId) => store.listSecretsSharedToProject(projectId),
@@ -2890,8 +2966,8 @@ export function createApp(
   // and a placement that exists (400 otherwise).
   const workflowSaveDenial = (
     user: SafeUser,
-    workflow: { id: string; projectId?: string | null; folderId?: string | null }
-  ): { ok: false; status: 400 | 403 | 404; error: string } | null => {
+    workflow: { id: string; projectId?: string | null; folderId?: string | null; nodes?: Workflow["nodes"] }
+  ): { ok: false; status: 400 | 403 | 404 | 409; error: string } | null => {
     const existing = store.getWorkflow(workflow.id);
     if (existing) {
       const access = runAccess.workflow(user, existing.id, "workflow:write");
@@ -2900,7 +2976,13 @@ export function createApp(
     const target = runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
     if (!target.ok) return target;
     const placement = workflowPlacementError(workflow, existing);
-    return placement ? { ok: false, status: 400, error: placement } : null;
+    if (placement) return { ok: false, status: 400, error: placement };
+    // Phase 15.4 — a production path of a published or gated workflow cannot be taken over by another one.
+    if (Array.isArray(workflow.nodes)) {
+      const conflict = releaseService.claimConflict(user, workflow as Workflow);
+      if (conflict) return { ok: false, status: 409, error: conflict };
+    }
+    return null;
   };
   const denyRunAccess = (reply: FastifyReply, denial: { status: number; error: string }) => {
     reply.code(denial.status);
@@ -3092,6 +3174,8 @@ export function createApp(
     }
     try {
       const executed = await runWorkflowExecution({
+        // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
+        channel: "draft",
         workflow,
         executionId,
         directInput: { trigger_type: "eval", eval_run_id: input.runId, eval_fixture_name: input.fixtureName, ...fixtureRecord },
@@ -3565,7 +3649,10 @@ export function createApp(
           triggerType: "approval_resume",
           triggeredBy: actedBy,
           resumeState: { ...state, workflow: resumeWorkflow },
-          approvalDecision
+          approvalDecision,
+          // The run resumes on the version it started with (the paused state's workflow), on its channel.
+          channel: state.releaseChannel === "production" ? "production" : "draft",
+          releaseVersion: typeof state.releaseVersion === "number" ? state.releaseVersion : null
         });
         persistExecutionHistory({
           executionId: job.executionId,
@@ -3652,6 +3739,77 @@ export function createApp(
   app.addHook("onClose", async () => {
     approvalService.stop();
   });
+
+  // Phase 15.4 — release gate and publish. Production entry points run the
+  // published version through `productionWorkflow`; the editor, manual runs
+  // and /webhook-test/ run the draft. Postgres: releases answer 501 and every
+  // entry point runs the draft (approvalsSupported is the same store check).
+  const releaseService = new ReleaseService({
+    store,
+    available: approvalsSupported,
+    resolveVersion: (workflowId, version) => replayService.resolveWorkflowCandidate(workflowId, { version }).workflow,
+    hashOf: (workflow) => ReplayService.candidateHash(workflow),
+    loadJob: (runId) => evalService.getRun(runId),
+    loadCase: (runId, resultId) => evalService.getCase(runId, resultId),
+    recordingCreatedAt: (recordingId) => store.getReplayRecordingSummary(recordingId)?.createdAt ?? null,
+    access: (user, workflowId, permission) => runAccess.workflow(user, workflowId, permission),
+    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
+    audit: (event) => {
+      auditService.record(event);
+      logStreamingService.dispatchAudit(event);
+    },
+    notify: (event) => notificationService.notify(event),
+    redact: (value) => String(secretService.redact(value)),
+    onPublished: (workflowId) => {
+      schedulerService?.reloadWorkflow(workflowId);
+      triggerService?.reloadWorkflow(workflowId);
+    },
+    snapshotDraft: (workflowId, actor) => {
+      const draft = store.getWorkflow(workflowId);
+      if (!draft) throw new Error("Workflow not found");
+      return workflowVersionService.snapshot({ workflow: draft, createdBy: actor.id, changeNote: "baseline for the release gate" }).version;
+    },
+    appPublicUrl: config.APP_PUBLIC_URL,
+    logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
+  /** The workflow production traffic runs: the published version when there is one, else the draft. */
+  const productionWorkflow = (workflowId: string): Workflow | null => releaseService.resolveRunnableWorkflow(workflowId, "production");
+  /** Phase 15.4 — what a production entry point answers when it has no workflow to run: why production refuses it (409), or 404. */
+  const productionMissing = (reply: FastifyReply, workflowId: string): { error: string } => {
+    const refusal = releaseService.productionRefusal(workflowId);
+    reply.code(refusal ? 409 : 404);
+    return { error: refusal ?? "Workflow not found" };
+  };
+  /** Phase 15.4 — the deactivated gated workflow whose published version has a node matching `matches`, for a "deactivated" answer. */
+  const deactivatedMatch = (matches: (workflow: Workflow) => boolean): Workflow | null => {
+    for (const summary of store.listWorkflows()) {
+      const workflow = releaseService.deactivatedProductionWorkflow(summary.id);
+      if (workflow && matches(workflow)) return workflow;
+    }
+    return null;
+  };
+  /**
+   * Phase 15.4 — the channel `/execute` runs on: an integration calling with
+   * an API key is production traffic (the published version), and may ask
+   * for the draft with `?channel=draft` when it may change the workflow; a
+   * person in the editor runs the draft.
+   */
+  const executeChannelFor = (
+    request: FastifyRequest,
+    user: SafeUser,
+    workflowId: string
+  ): { channel: ReleaseChannel } | { ok: false; status: 400 | 403 | 404; error: string } => {
+    const asked = asRecord(request.query).channel;
+    if (asked !== undefined && asked !== "draft") {
+      return { ok: false, status: 400, error: "channel can only be draft" };
+    }
+    const viaKey = Boolean(authenticateApiKey(request.headers as Record<string, unknown>));
+    if (!viaKey) return { channel: "draft" };
+    if (asked === undefined) return { channel: "production" };
+    const write = runAccess.workflow(user, workflowId, "workflow:write");
+    if (!write.ok) return { ok: false, status: write.status, error: "Running the draft with an API key (channel=draft) needs workflow:write on the workflow." };
+    return { channel: "draft" };
+  };
 
   const pruneAuditLogs = (reason: "startup" | "interval") => {
     const retentionDays = config.AUDIT_LOG_RETENTION_DAYS;
@@ -5157,7 +5315,8 @@ export function createApp(
     canUseSecret: canUseJudgeSecret,
     audit: (request, user, event) => audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
-    strictIsolation: config.PROJECT_ISOLATION === "strict"
+    strictIsolation: config.PROJECT_ISOLATION === "strict",
+    goldenSetChangeDenial: (user, datasetId, change) => releaseService.goldenSetChangeDenial(user, datasetId, change)
   });
 
   app.get("/widget.js", async (_request, reply) => {
@@ -6408,7 +6567,8 @@ export function createApp(
       return { error: "Invalid pull payload", details: parsed.error.issues };
     }
     try {
-      const result = await gitSyncService.pull({ ...parsed.data, createdBy: user.id });
+      // Phase 15.4 — a pulled workflow may not take a production path another workflow serves: that one is refused, the rest import.
+      const result = await gitSyncService.pull({ ...parsed.data, createdBy: user.id, canImport: (workflow) => releaseService.claimConflict(user, workflow) });
       audit(request, user, {
         category: "system",
         eventType: "git.pull",
@@ -6420,6 +6580,7 @@ export function createApp(
           branch: result.branch,
           commit: result.commit,
           workflowsImported: result.workflowsImported,
+          workflowsRefused: result.workflowsRefused?.map((entry) => ({ workflowId: entry.workflowId, reason: entry.reason })),
           variablesSynced: result.variablesSynced,
           error: result.error
         }
@@ -7029,6 +7190,9 @@ export function createApp(
 
     const access = runAccess.workflow(user, request.params.id, "workflow:delete");
     if (!access.ok) return denyRunAccess(reply, access);
+    // Phase 15.4 — the gate and release history outlive the workflow; an enforced gate's workflow is the admin's to delete.
+    const releaseDenial = releaseService.deleteDenial(user, request.params.id);
+    if (releaseDenial) return denyRunAccess(reply, { status: 403, error: releaseDenial });
 
     try {
       const deleted = store.deleteWorkflow(request.params.id);
@@ -7083,6 +7247,10 @@ export function createApp(
     duplicatedWorkflow.id = duplicateId;
     duplicatedWorkflow.name = duplicateName;
     duplicatedWorkflow.workflowVersion = 1;
+    // Phase 15.4 — a copy never answers on its source's trigger paths: taken ones get a -copy suffix.
+    duplicatedWorkflow.nodes = withUniqueTriggerPaths(duplicatedWorkflow, releaseService.usedRoutingKeys()).nodes;
+    const duplicateDenial = workflowSaveDenial(user, duplicatedWorkflow);
+    if (duplicateDenial) return denyRunAccess(reply, duplicateDenial);
 
     const savedWorkflow = store.upsertWorkflow(duplicatedWorkflow, { createdBy: user.id });
     schedulerService?.reloadWorkflow(savedWorkflow.id);
@@ -7101,6 +7269,12 @@ export function createApp(
     const settings = typeof workflow.settings === "object" && workflow.settings ? { ...workflow.settings } : {};
     settings.active = true;
     workflow.settings = settings;
+    // Phase 15.4 — an active ungated workflow serves production on its paths: not on one another workflow serves.
+    const claim = releaseService.claimConflict(user, workflow);
+    if (claim) {
+      reply.code(409);
+      return { error: claim };
+    }
     store.upsertWorkflow(workflow);
     schedulerService?.reloadWorkflow(workflow.id);
     triggerService?.reloadWorkflow(workflow.id);
@@ -7292,6 +7466,10 @@ export function createApp(
         report: conversion.report
       };
     }
+
+    // Phase 15.4 — the same checks as any other save, the production path claim included.
+    const externalDenial = workflowSaveDenial(user, workflow);
+    if (externalDenial) return denyRunAccess(reply, externalDenial);
 
     if (parsed.data.dryRun === true) {
       return { workflow, report: conversion.report, dryRun: true };
@@ -7704,7 +7882,13 @@ export function createApp(
 
     const access = runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
+    const executeChannel = executeChannelFor(request, user, access.workflow.id);
+    if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
+    const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;
+    if (!workflow) {
+      reply.code(409);
+      return { error: releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
+    }
 
     // Phase 8.3 — pre-execution budget check. Block-action budgets reject
     // here (HTTP 402); warn-action budgets only fire post-execution.
@@ -7762,6 +7946,8 @@ export function createApp(
     // Phase 10.8 — "Record MCP calls": every MCP call of the run goes into a cassette.
     const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
     const executed = await runWorkflowExecution({
+      // Phase 15.4: API-key callers run the published version; the editor runs the draft.
+      channel: executeChannel.channel,
       mcpPlan,
       policyActor: user,
       workflow,
@@ -7813,7 +7999,13 @@ export function createApp(
 
     const access = runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
+    const executeChannel = executeChannelFor(request, user, access.workflow.id);
+    if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
+    const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;
+    if (!workflow) {
+      reply.code(409);
+      return { error: releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
+    }
 
     const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -7898,6 +8090,8 @@ export function createApp(
       });
       const mcpPlan = parsed.data.record ? mcpCassetteService.planRecording(mcpRegistry, providerRegistry) : undefined;
       const executed = await runWorkflowExecution({
+        // Phase 15.4: API-key callers run the published version; the editor runs the draft.
+        channel: executeChannel.channel,
         mcpPlan,
         policyActor: user,
         workflow,
@@ -8311,11 +8505,19 @@ export function createApp(
       return { error: "Only failed or canceled executions can be retried from history" };
     }
 
-    const workflow = store.getWorkflow(sourceExecution.workflowId);
-    if (!workflow) {
-      reply.code(404);
-      return { error: "Workflow not found" };
-    }
+    // Phase 15.4 — a retry runs on the failed run's channel. A production run is retried as production runs now:
+    // the version published today (never a superseded or rolled-back one, nor the draft once a version is
+    // published), and not at all while a gated workflow is deactivated. An editor run retries the draft.
+    // A run whose channel went unrecorded (older history, a record that failed to save, a run that fell out of
+    // the in-flight bookkeeping) fails closed: on a gated workflow it retries as production, never the draft.
+    const ranOn = releaseService.available ? store.getExecutionRelease(sourceExecution.id) : null;
+    const retryChannel: ReleaseChannel = ranOn
+      ? ranOn.channel
+      : releaseService.available && store.getReleaseGate(sourceExecution.workflowId)?.enabled
+        ? "production"
+        : "draft";
+    const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);
+    if (!workflow) return productionMissing(reply, sourceExecution.workflowId);
 
     const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -8348,6 +8550,8 @@ export function createApp(
     });
 
     const result = await runWorkflowExecution({
+      // Phase 15.4: the failed run's channel; a production retry records the version it runs now.
+      channel: retryChannel,
       policyActor: user,
       workflow,
       startNodeId: executionPayload.startNodeId,
@@ -8438,6 +8642,8 @@ export function createApp(
       mcpReplay: { sourceExecutionId: source.id, cassetteId: cassette.id, mode }
     };
     const executed = await runWorkflowExecution({
+      // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
+      channel: "draft",
       ...replayRunInputFor(source.triggerType, storedInput),
       mcpPlan,
       policyActor: user,
@@ -8540,7 +8746,14 @@ export function createApp(
     runAccess,
     canSeeProjectAccounts: (user, workflow) => user.role === "admin" || rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
-    dispatch: dispatchApprovalResume
+    dispatch: dispatchApprovalResume,
+    releases: releaseService
+  });
+
+  registerReleaseRoutes({
+    app,
+    releases: releaseService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 
   app.post<{ Body: unknown }>("/api/webhooks/execute", async (request, reply) => {
@@ -8563,11 +8776,15 @@ export function createApp(
       parsed.data.workflow_id,
       inferAgentWebhookPath(parsed.data),
       "POST",
-      (candidate) => runAccess.workflow(user, candidate.id, "workflow:read").ok
+      (candidate) => runAccess.workflow(user, candidate.id, "workflow:read").ok,
+      productionWorkflow
     );
     if (!workflow) {
-      reply.code(404);
-      return { error: "No workflows available" };
+      // Phase 15.4 — a named workflow production refuses (deactivated, or nothing published under its gate): say why, to a reader.
+      const named = parsed.data.workflow_id;
+      const refusal = named && runAccess.workflow(user, named, "workflow:read").ok ? releaseService.productionRefusal(named) : null;
+      reply.code(refusal ? 409 : 404);
+      return { error: refusal ?? "No workflows available" };
     }
     const executeAccess = runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
@@ -8582,6 +8799,7 @@ export function createApp(
       customData: parsed.data.customData
     });
     const result = await runWorkflowExecution({
+      channel: "production",
       policyActor: user,
       workflow,
       webhookPayload: {
@@ -8635,11 +8853,8 @@ export function createApp(
     "/api/webhooks/slack/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = store.getWorkflow(request.params.workflowId);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const workflow = productionWorkflow(request.params.workflowId);
+      if (!workflow) return productionMissing(reply, request.params.workflowId);
       const slackNode = workflow.nodes.find((n) => n.type === "slack_trigger");
       if (!slackNode) {
         reply.code(400);
@@ -8688,6 +8903,7 @@ export function createApp(
         requestInput: body ?? {}
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow,
         webhookPayload: (body as Record<string, unknown>) ?? {},
         executionId,
@@ -8715,11 +8931,8 @@ export function createApp(
     "/api/webhooks/github/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = store.getWorkflow(request.params.workflowId);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const workflow = productionWorkflow(request.params.workflowId);
+      if (!workflow) return productionMissing(reply, request.params.workflowId);
       const ghNode = workflow.nodes.find((n) => n.type === "github_webhook_trigger");
       if (!ghNode) {
         reply.code(400);
@@ -8752,6 +8965,7 @@ export function createApp(
         requestInput: body ?? {}
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow,
         webhookPayload: (body as Record<string, unknown>) ?? {},
         executionId,
@@ -8776,11 +8990,8 @@ export function createApp(
     "/api/webhooks/stripe/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = store.getWorkflow(request.params.workflowId);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const workflow = productionWorkflow(request.params.workflowId);
+      if (!workflow) return productionMissing(reply, request.params.workflowId);
       const stripeNode = workflow.nodes.find((n) => n.type === "stripe_webhook_trigger");
       if (!stripeNode) {
         reply.code(400);
@@ -8828,6 +9039,7 @@ export function createApp(
         requestInput: body ?? {}
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow,
         webhookPayload: body ?? {},
         executionId,
@@ -8852,11 +9064,8 @@ export function createApp(
     "/api/webhooks/telegram/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = store.getWorkflow(request.params.workflowId);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const workflow = productionWorkflow(request.params.workflowId);
+      if (!workflow) return productionMissing(reply, request.params.workflowId);
       const tgNode = workflow.nodes.find((n) => n.type === "telegram_trigger");
       if (!tgNode) {
         reply.code(400);
@@ -8882,6 +9091,7 @@ export function createApp(
         requestInput: body ?? {}
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow,
         webhookPayload: body ?? {},
         executionId,
@@ -8906,11 +9116,8 @@ export function createApp(
     "/api/webhooks/discord/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = store.getWorkflow(request.params.workflowId);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const workflow = productionWorkflow(request.params.workflowId);
+      if (!workflow) return productionMissing(reply, request.params.workflowId);
       const dcNode = workflow.nodes.find((n) => n.type === "discord_trigger");
       if (!dcNode) {
         reply.code(400);
@@ -8965,6 +9172,7 @@ export function createApp(
         requestInput: body ?? {}
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow,
         webhookPayload: body ?? {},
         executionId,
@@ -9012,6 +9220,8 @@ export function createApp(
         requestInput: body
       });
       const result = await runWorkflowExecution({
+        // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
+        channel: "draft",
         policyActor: user,
         workflow,
         directInput: { trigger_type: "manual", trigger_node_id: manualNode.id, ...body },
@@ -9033,17 +9243,18 @@ export function createApp(
   );
 
   // Form trigger — GET renders an HTML form, POST processes submission.
+  const formNodeFor = (workflow: Workflow, formPath: string): WorkflowNode | null =>
+    workflow.nodes.find((node) => {
+      if (node.type !== "form_trigger") return false;
+      const cfg = asRecord(node.config);
+      return typeof cfg.path === "string" && cfg.path.trim() === formPath;
+    }) ?? null;
   const findFormWorkflow = (formPath: string): { workflow: Workflow; node: WorkflowNode } | null => {
     for (const summary of store.listWorkflows()) {
-      const wf = store.getWorkflow(summary.id);
+      const wf = productionWorkflow(summary.id);
       if (!wf) continue;
-      for (const node of wf.nodes) {
-        if (node.type !== "form_trigger") continue;
-        const cfg = asRecord(node.config);
-        if (typeof cfg.path === "string" && cfg.path.trim() === formPath) {
-          return { workflow: wf, node };
-        }
-      }
+      const node = formNodeFor(wf, formPath);
+      if (node) return { workflow: wf, node };
     }
     return null;
   };
@@ -9105,9 +9316,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     async (request, reply) => {
       const found = findFormWorkflow(request.params.path);
       if (!found) {
-        reply.code(404);
+        const deactivated = deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
+        reply.code(deactivated ? 409 : 404);
         reply.type("text/html");
-        return "<h1>Form not found</h1>";
+        return deactivated ? `<h1>${escapeHtml(DEACTIVATED_MESSAGE)}</h1>` : "<h1>Form not found</h1>";
       }
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "session") {
@@ -9131,8 +9343,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     async (request, reply) => {
       const found = findFormWorkflow(request.params.path);
       if (!found) {
-        reply.code(404);
-        return { error: "Form not found" };
+        const deactivated = deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
+        reply.code(deactivated ? 409 : 404);
+        return { error: deactivated ? DEACTIVATED_MESSAGE : "Form not found" };
       }
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "session") {
@@ -9152,6 +9365,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         requestInput: submission
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow: found.workflow,
         directInput: {
           trigger_type: "form",
@@ -9187,11 +9401,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.post<{ Params: { workflowId: string }; Body: unknown }>(
     "/api/chat/:workflowId",
     async (request, reply) => {
-      const workflow = store.getWorkflow(request.params.workflowId);
-      if (!workflow) {
-        reply.code(404);
-        return { error: "Workflow not found" };
-      }
+      const workflow = productionWorkflow(request.params.workflowId);
+      if (!workflow) return productionMissing(reply, request.params.workflowId);
       const chatNode = workflow.nodes.find((n) => n.type === "chat_trigger");
       if (!chatNode) {
         reply.code(400);
@@ -9243,6 +9454,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         requestInput: body
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow,
         directInput: {
           trigger_type: "chat",
@@ -9277,27 +9489,31 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   );
 
   // MCP server trigger — expose workflow as a tool callable via HTTP.
+  const mcpServerNodeFor = (workflow: Workflow, p: string): WorkflowNode | null =>
+    workflow.nodes.find((node) => {
+      if (node.type !== "mcp_server_trigger") return false;
+      const cfg = asRecord(node.config);
+      return typeof cfg.path === "string" && cfg.path.trim() === p;
+    }) ?? null;
   const findMcpServerWorkflow = (p: string): { workflow: Workflow; node: WorkflowNode } | null => {
     for (const summary of store.listWorkflows()) {
-      const wf = store.getWorkflow(summary.id);
+      const wf = productionWorkflow(summary.id);
       if (!wf) continue;
-      for (const node of wf.nodes) {
-        if (node.type !== "mcp_server_trigger") continue;
-        const cfg = asRecord(node.config);
-        if (typeof cfg.path === "string" && cfg.path.trim() === p) {
-          return { workflow: wf, node };
-        }
-      }
+      const node = mcpServerNodeFor(wf, p);
+      if (node) return { workflow: wf, node };
     }
     return null;
+  };
+  /** Phase 15.4 — the answer when no active workflow serves an MCP trigger path: deactivated (409) or not found (404). */
+  const mcpServerMissing = (reply: FastifyReply, p: string): { error: string } => {
+    const deactivated = deactivatedMatch((workflow) => mcpServerNodeFor(workflow, p) !== null);
+    reply.code(deactivated ? 409 : 404);
+    return { error: deactivated ? DEACTIVATED_MESSAGE : "MCP server not found" };
   };
 
   app.get<{ Params: { path: string } }>("/api/mcp-server/:path/manifest", async (request, reply) => {
     const found = findMcpServerWorkflow(request.params.path);
-    if (!found) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    if (!found) return mcpServerMissing(reply, request.params.path);
     const cfg = asRecord(found.node.config);
     return {
       name: cfg.toolName ?? "",
@@ -9310,10 +9526,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     "/api/mcp-server/:path/invoke",
     async (request, reply) => {
       const found = findMcpServerWorkflow(request.params.path);
-      if (!found) {
-        reply.code(404);
-        return { error: "MCP server not found" };
-      }
+      if (!found) return mcpServerMissing(reply, request.params.path);
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "bearer") {
         const secret = await secretService.resolveSecret(toSecretReference(cfg.secretRef));
@@ -9339,6 +9552,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         requestInput: body
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow: found.workflow,
         directInput: {
           trigger_type: "mcp_server",
@@ -9379,6 +9593,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runAccess,
     config,
     store,
+    loadProductionWorkflow: productionWorkflow,
+    productionRefusal: (id) => releaseService.productionRefusal(id),
     mcpRegistry,
     providerRegistry,
     resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
@@ -9405,6 +9621,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         workflow: input.workflow,
         directInput: {
           trigger_type: triggerType,
@@ -9453,11 +9670,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       parsed.data.workflow_id,
       inferAgentWebhookPath(parsed.data),
       "POST",
-      (candidate) => runAccess.workflow(user, candidate.id, "workflow:read").ok
+      (candidate) => runAccess.workflow(user, candidate.id, "workflow:read").ok,
+      productionWorkflow
     );
     if (!workflow) {
-      reply.code(404);
-      return { error: "No workflows available" };
+      // Phase 15.4 — a named workflow production refuses (deactivated, or nothing published under its gate): say why, to a reader.
+      const named = parsed.data.workflow_id;
+      const refusal = named && runAccess.workflow(user, named, "workflow:read").ok ? releaseService.productionRefusal(named) : null;
+      reply.code(refusal ? 409 : 404);
+      return { error: refusal ?? "No workflows available" };
     }
     const executeAccess = runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
@@ -9524,6 +9745,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
       });
       const result = await runWorkflowExecution({
+        channel: "production",
         policyActor: user,
         workflow,
         webhookPayload: {
@@ -9573,6 +9795,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
     const isTestRoute = routePath.startsWith("/webhook-test");
+    // Phase 15.4 — /webhook/ is production traffic (the published version when there is one); /webhook-test/ runs the draft.
+    const loadForRoute = (id: string) => (isTestRoute ? store.getWorkflow(id) : productionWorkflow(id));
     app.route<{ Params: { path: string }; Body: unknown }>({
       method: ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
       url: routePath,
@@ -9592,9 +9816,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           return null;
         }
 
-        const match = await selectWebhookByPath(store, request.params.path, request.method);
+        const match = await selectWebhookByPath(store, request.params.path, request.method, () => true, loadForRoute);
         if (!match) {
-          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path);
+          // Phase 15.4 — a deactivated gated workflow on this path: say so rather than "not found".
+          if (!isTestRoute) {
+            const wanted = normalizeWebhookPath(request.params.path, "").toLowerCase();
+            const deactivated = deactivatedMatch((workflow) => listWebhookEndpoints(workflow).some((endpoint) => endpoint.path.toLowerCase() === wanted));
+            if (deactivated) {
+              reply.code(409);
+              return { error: DEACTIVATED_MESSAGE, path: request.params.path };
+            }
+          }
+          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute);
           if (pathMatches.length > 0) {
             const allowedMethods = [...new Set(pathMatches.map((entry) => entry.method))];
             reply.code(405);
@@ -9607,7 +9840,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               matches: pathMatches
             };
           }
-          const allEndpoints = await listAllWebhookEndpoints(store);
+          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute);
           const methodMatches = allEndpoints.filter((entry) => entry.method === request.method).slice(0, 20);
           reply.code(404);
           return {
@@ -9836,7 +10069,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           executionId,
           triggerType,
           triggeredBy: "webhook",
-          hooks: progressHooks
+          hooks: progressHooks,
+          channel: isTestRoute ? "draft" : "production"
         });
 
         persistExecutionHistory({
@@ -11264,6 +11498,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     execute: async (replay, actor) => {
       const storedInput = asRecord(replay.recording.input);
       const executed = await runWorkflowExecution({
+        // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
+        channel: "draft",
         ...replayRunInputFor(replay.recording.sourceTriggerType, storedInput),
         // The workflow's pinned outputs are not part of the candidate under test.
         usePinnedData: false,
@@ -11308,7 +11544,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     replays: replayService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
-    audit: (request, user, event) => audit(request, user, event)
+    audit: (request, user, event) => audit(request, user, event),
+    recordingDeleteDenial: (user, workflowId, recordingId) => releaseService.recordingDeleteDenial(user, workflowId, recordingId)
   });
 
   registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
@@ -11342,9 +11579,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         app.log.info({ executionId: payload.resume.executionId, status: resumed?.status ?? "skipped" }, "Queued approval resume completed");
         return;
       }
-      const workflow = store.getWorkflow(payload.workflowId);
+      // Queued runs (`POST /api/workflows/:id/enqueue`) are production traffic: the version published when the job runs.
+      const workflow = productionWorkflow(payload.workflowId);
       if (!workflow) {
-        throw new Error(`Workflow not found: ${payload.workflowId}`);
+        throw new Error(releaseService.productionRefusal(payload.workflowId) ?? `Workflow not found: ${payload.workflowId}`);
       }
       // A job a user enqueued runs only if that user may still run the
       // workflow: a revoked membership or a deleted account stops it.
@@ -11386,7 +11624,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         triggerType: payload.triggerType ?? "queue",
         triggeredBy: payload.triggeredBy,
         executionTimeoutMs: payload.executionTimeoutMs,
-        customData: payload.customData
+        customData: payload.customData,
+        channel: "production"
       });
       persistExecutionHistory({
         executionId: payload.executionId,
@@ -11741,6 +11980,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     imported.projectId = target.data.projectId ?? DEFAULT_PROJECT_ID;
     imported.folderId = target.data.folderId;
     delete imported.pinnedData;
+    // Phase 15.4 — like a duplicate, a workflow made from a template gets trigger paths nobody uses.
+    imported.nodes = withUniqueTriggerPaths(imported, releaseService.usedRoutingKeys()).nodes;
     const saveDenial = workflowSaveDenial(user, imported);
     if (saveDenial) return denyRunAccess(reply, saveDenial);
     store.upsertWorkflow(imported, { createdBy: user.id });
@@ -11795,6 +12036,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const imported = importWorkflowFromJson(json);
       imported.id = crypto.randomUUID();
       imported.name = `${imported.name} (imported)`;
+      // Phase 15.4 — a shared copy gets trigger paths nobody uses, like a duplicate.
+      imported.nodes = withUniqueTriggerPaths(imported, releaseService.usedRoutingKeys()).nodes;
       const saveDenial = workflowSaveDenial(user, imported);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
       store.upsertWorkflow(imported, { createdBy: user.id });

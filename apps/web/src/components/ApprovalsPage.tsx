@@ -1,5 +1,6 @@
 /**
- * Phase 11.2 — Approvals: runs paused on a person.
+ * Phase 11.2 — Approvals: runs paused on a person, and (Phase 15.4)
+ * requests to publish a workflow version past its release gate.
  *
  * Pending lists every request the user can see, with what the run asks,
  * who may decide and when it expires; approvers can edit the gate's fields,
@@ -9,8 +10,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ApprovalEditableField, ApprovalRequestView } from "@ai-orchestrator/shared";
-import { ApiError, approveApproval, listApprovals, rejectApproval } from "../lib/api";
+import type { ApprovalEditableField, ApprovalRequestView, ReleaseApprovalRequestView } from "@ai-orchestrator/shared";
+import { ApiError, approveApproval, decideReleaseRequest, listApprovals, rejectApproval, type ApprovalInboxItem } from "../lib/api";
 import {
   approvalKindLabel,
   approvalStatusLabel,
@@ -19,8 +20,11 @@ import {
   decisionError,
   decisionOutcome,
   initialFieldDrafts,
+  isReleaseInboxItem,
   matchesApprovalFilter,
+  matchesFocus,
   relativeTime,
+  releaseDecisionOutcome,
   type FieldDrafts
 } from "../lib/approvals";
 
@@ -67,7 +71,7 @@ export interface ApprovalsPageProps {
 
 export function ApprovalsPage({ focusRequestId, focusExecutionId, onOpenRun, onPendingCountChange }: ApprovalsPageProps) {
   const [tab, setTab] = useState<Tab>("pending");
-  const [items, setItems] = useState<ApprovalRequestView[]>([]);
+  const [items, setItems] = useState<ApprovalInboxItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -102,7 +106,7 @@ export function ApprovalsPage({ focusRequestId, focusExecutionId, onOpenRun, onP
   const switchedForFocus = useRef(false);
   useEffect(() => {
     if (!focusId || loading || switchedForFocus.current || tab !== "pending") return;
-    if (!items.some((item) => item.requestId === focusId || item.executionId === focusId)) {
+    if (!items.some((item) => matchesFocus(item, focusId))) {
       switchedForFocus.current = true;
       setTab("decided");
     }
@@ -123,7 +127,7 @@ export function ApprovalsPage({ focusRequestId, focusExecutionId, onOpenRun, onP
       <header className="page-head">
         <div className="page-head-copy">
           <h2 className="page-title">Approvals</h2>
-          <p className="page-sub">Runs paused on a person: approval gates, human approvals, guard reviews and write tools an agent wants to call.</p>
+          <p className="page-sub">Runs paused on a person: approval gates, human approvals, guard reviews and write tools an agent wants to call, and versions waiting to be published.</p>
         </div>
         <div className="approvals-head-actions">
           <div className="finops-range" role="tablist" aria-label="Approval views">
@@ -188,7 +192,11 @@ export function ApprovalsPage({ focusRequestId, focusExecutionId, onOpenRun, onP
       <ul className="approvals-list" aria-busy={loading}>
         {visible.map((item) => (
           <li key={item.requestId}>
-            <ApprovalCard view={item} focused={focusId !== null && (item.requestId === focusId || item.executionId === focusId)} onDecided={handleDecided} {...(onOpenRun ? { onOpenRun } : {})} />
+            {isReleaseInboxItem(item) ? (
+              <ReleaseRequestCard view={item} focused={matchesFocus(item, focusId)} onDecided={handleDecided} />
+            ) : (
+              <ApprovalCard view={item} focused={matchesFocus(item, focusId)} onDecided={handleDecided} {...(onOpenRun ? { onOpenRun } : {})} />
+            )}
           </li>
         ))}
       </ul>
@@ -418,6 +426,171 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
           <button type="button" className="pg-btn small ghost" onClick={() => onOpenRun(view.executionId)}>
             Open run
           </button>
+        </div>
+      )}
+    </article>
+  );
+}
+
+interface ReleaseRequestCardProps {
+  view: ReleaseApprovalRequestView;
+  focused: boolean;
+  onDecided: (message: string) => void;
+}
+
+/** Phase 15.4 — a request to publish one exact version (by hash); approving publishes it. */
+export function ReleaseRequestCard({ view, focused, onDecided }: ReleaseRequestCardProps) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+  const [reasonError, setReasonError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const cardRef = useRef<HTMLElement | null>(null);
+  const pending = view.status === "pending";
+  const idBase = `approval-${view.requestId}`;
+
+  useEffect(() => {
+    if (focused) cardRef.current?.scrollIntoView?.({ block: "center" });
+  }, [focused]);
+
+  const decide = async (decision: "approve" | "reject") => {
+    setError(null);
+    setReasonError(null);
+    const trimmed = reason.trim();
+    if (decision === "reject" && !trimmed) {
+      setReasonError("A reason is required to reject a release");
+      return;
+    }
+    setBusy(decision);
+    try {
+      const response = await decideReleaseRequest(view.requestId, decision, trimmed || undefined);
+      onDecided(releaseDecisionOutcome(decision, view.version, Boolean(response.release)));
+    } catch (err) {
+      setError(formatError(err));
+      // Decided elsewhere, expired, or stale (the gate or the published version changed): reload.
+      if (err instanceof ApiError && err.status === 409) onDecided(formatError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const disabled = !pending || !view.canDecide || busy !== null;
+
+  return (
+    <article
+      ref={cardRef}
+      className={["approval-card", "is-release", `is-${view.status}`, focused && "is-focused"].filter(Boolean).join(" ")}
+      aria-labelledby={`${idBase}-title`}
+      data-request-id={view.requestId}
+    >
+      <header className="approval-card-head">
+        <div className="approval-card-title">
+          <span className={`approval-status approval-status-${view.status}`}>{approvalStatusLabel(view.status)}</span>
+          <span className="approval-kind">{approvalKindLabel(view.kind)}</span>
+          <h3 id={`${idBase}-title`}>{view.message}</h3>
+        </div>
+        <div className="approval-card-when">
+          <span title={formatWhen(view.createdAt)}>asked {relativeTime(view.createdAt)}</span>
+          {pending && view.expiresAt && (
+            <span title={formatWhen(view.expiresAt)}>
+              {Date.parse(view.expiresAt) > Date.now() ? "expires " : "expired "}
+              {relativeTime(view.expiresAt)}
+            </span>
+          )}
+        </div>
+      </header>
+
+      <dl className="approval-meta">
+        <div>
+          <dt>Workflow</dt>
+          <dd>{view.workflowName ?? view.workflowId}</dd>
+        </div>
+        <div>
+          <dt>Version</dt>
+          <dd>
+            v{view.version} <code title={view.workflowHash}>{view.workflowHash.slice(0, 12)}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>Why</dt>
+          <dd>{view.origin === "blocked" ? "The gate blocked this publish; the requester asks to ship it anyway." : "This gate sends every publish to an approver."}</dd>
+        </div>
+        {view.replayRunId && (
+          <div>
+            <dt>Replay job</dt>
+            <dd>
+              <code>{view.replayRunId}</code>
+            </dd>
+          </div>
+        )}
+        <div>
+          <dt>Requested by</dt>
+          <dd>
+            {view.requestedBy ?? "unknown"}
+            {view.requestReason ? <span className="approval-reason">“{view.requestReason}”</span> : null}
+          </dd>
+        </div>
+        <div>
+          <dt>Approvers</dt>
+          <dd>{approversSummary(view)}</dd>
+        </div>
+        {!pending && (
+          <div>
+            <dt>Decided</dt>
+            <dd>
+              {view.decidedBy ?? "the timeout"} {view.decidedAt ? <span title={formatWhen(view.decidedAt)}>{relativeTime(view.decidedAt)}</span> : null}
+              {view.reason ? <span className="approval-reason">“{view.reason}”</span> : null}
+            </dd>
+          </div>
+        )}
+      </dl>
+
+      {view.gateReasons.length > 0 && (
+        <div className="approval-release-reasons">
+          <div className="approval-tool-head">
+            <span>Gate findings</span>
+          </div>
+          <ul>
+            {view.gateReasons.map((entry) => (
+              <li key={entry}>{entry}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {pending && (
+        <div className="approval-decide">
+          <label className="approval-reason-input" htmlFor={`${idBase}-reason`}>
+            <span>Reason (required to reject)</span>
+            <textarea
+              id={`${idBase}-reason`}
+              rows={2}
+              maxLength={2000}
+              value={reason}
+              disabled={disabled}
+              aria-invalid={reasonError ? true : undefined}
+              aria-describedby={reasonError ? `${idBase}-reason-error` : undefined}
+              onChange={(event) => setReason(event.target.value)}
+            />
+            {reasonError && (
+              <span id={`${idBase}-reason-error`} className="approval-field-error">
+                {reasonError}
+              </span>
+            )}
+          </label>
+          {error && (
+            <div className="approvals-error" role="alert">
+              {error}
+            </div>
+          )}
+          <div className="approval-actions">
+            {!view.canDecide && view.cannotDecideReason && <span className="approval-cannot">{view.cannotDecideReason}</span>}
+            <button type="button" className="pg-btn small danger" disabled={disabled} onClick={() => void decide("reject")}>
+              {busy === "reject" ? "Rejecting…" : "Reject"}
+            </button>
+            <button type="button" className="pg-btn small primary" disabled={disabled} onClick={() => void decide("approve")}>
+              {busy === "approve" ? "Publishing…" : `Approve and publish v${view.version}`}
+            </button>
+          </div>
         </div>
       )}
     </article>

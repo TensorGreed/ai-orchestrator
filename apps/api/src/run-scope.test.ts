@@ -309,4 +309,19 @@ describe("run scope: session memory, tool cache and artifacts", () => {
   it("namespace keys are unambiguous even when project ids contain the separator", () => {
     expect(projectSessionNamespace("x", "y:ns")).not.toBe(projectSessionNamespace("x:y", "ns"));
   });
+
+  it("a production run fails on a deactivated gated child and skips such an error workflow, with the reason (Phase 15.4)", () => {
+    const deactivated = "This workflow is deactivated, so production runs are refused.";
+    const { scope, workflows } = scopeFixture({
+      getRunnableWorkflow: (id, channel) => (channel === "production" && id === "a-2" ? null : ({ "a-1": workflow("a-1", "pa"), "a-2": workflow("a-2", "pa") } as Record<string, Workflow>)[id] ?? null),
+      productionRefusal: (id) => (id === "a-2" ? deactivated : null)
+    });
+    const production = scope.dependenciesFor(workflows["a-1"]!, { channel: "production" });
+    expect(() => production.loadWorkflow!("a-2")).toThrow(/Sub-workflow 'a-2': This workflow is deactivated/);
+    expect(production.loadWorkflow!("missing")).toBeUndefined();
+    expect(scope.errorWorkflowFor(workflows["a-1"]!, "a-2", "production")).toEqual({ error: expect.stringMatching(/Error workflow 'a-2': This workflow is deactivated/) });
+    // A draft run (the editor) still calls the child's draft.
+    expect(scope.dependenciesFor(workflows["a-1"]!).loadWorkflow!("a-2")?.id).toBe("a-2");
+    expect(scope.errorWorkflowFor(workflows["a-1"]!, "a-2")).toEqual({ workflow: workflows["a-2"] });
+  });
 });

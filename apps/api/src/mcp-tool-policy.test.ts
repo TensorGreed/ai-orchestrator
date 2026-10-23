@@ -464,7 +464,8 @@ describe("workflows.created_by", () => {
       method: "POST",
       url: "/api/workflows/import",
       headers: { cookie: other.cookie },
-      payload: { workflow: { ...workflow, id: "wf-imported" } }
+      // Its own webhook path: an active workflow's path is not free for another one (Phase 15.4).
+      payload: { workflow: calculatorWorkflow("wf-imported", serverId) }
     });
     expect(imported.statusCode).toBe(200);
     expect(context.store.getWorkflowCreatedBy("wf-imported")).toBe(other.id);

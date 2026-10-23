@@ -38,6 +38,7 @@ function isValidTimeZone(value: string): boolean {
 export class SchedulerService {
   private readonly jobs = new Map<string, ScheduledTask>();
   private executeHandler: SchedulerExecutionHandler | null = null;
+  private loadWorkflow: (workflowId: string) => Workflow | null = (workflowId) => this.store.getWorkflow(workflowId);
 
   constructor(
     private readonly store: SqliteStore,
@@ -52,6 +53,14 @@ export class SchedulerService {
     this.executeHandler = handler;
   }
 
+  /**
+   * Phase 15.4 — which version a schedule registers from: the published one
+   * when the workflow has one (production traffic), else the draft.
+   */
+  setWorkflowLoader(loader: (workflowId: string) => Workflow | null): void {
+    this.loadWorkflow = loader;
+  }
+
   initialize(): void {
     this.reloadAllSchedules();
   }
@@ -60,7 +69,7 @@ export class SchedulerService {
     this.clearAllSchedules();
 
     for (const workflowSummary of this.store.listWorkflows()) {
-      const workflow = this.store.getWorkflow(workflowSummary.id);
+      const workflow = this.loadWorkflow(workflowSummary.id);
       if (!workflow) {
         continue;
       }
@@ -70,7 +79,7 @@ export class SchedulerService {
 
   reloadWorkflow(workflowId: string): void {
     this.unregisterWorkflow(workflowId);
-    const workflow = this.store.getWorkflow(workflowId);
+    const workflow = this.loadWorkflow(workflowId);
     if (!workflow) {
       return;
     }

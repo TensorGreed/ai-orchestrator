@@ -1566,6 +1566,86 @@ export const MIGRATIONS: Migration[] = [
       DROP INDEX IF EXISTS idx_approval_requests_status_expires;
       DROP TABLE IF EXISTS approval_requests;
     `
+  },
+  {
+    version: 33,
+    description: "Phase 15.4 — Release gate and publish (published versions, gates, releases, release approval requests)",
+    up: `
+      ALTER TABLE workflows ADD COLUMN IF NOT EXISTS published_version INTEGER;
+      ALTER TABLE workflow_versions ADD COLUMN IF NOT EXISTS pinned INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS set_snapshot_json TEXT;
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS release_channel TEXT;
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS release_version INTEGER;
+      CREATE TABLE IF NOT EXISTS release_gates (
+        workflow_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        enforced INTEGER NOT NULL DEFAULT 0,
+        dataset_ids_json TEXT NOT NULL,
+        candidate_options_json TEXT,
+        policy_json TEXT NOT NULL,
+        require_approval INTEGER NOT NULL DEFAULT 0,
+        approvers_json TEXT,
+        updated_at TIMESTAMPTZ NOT NULL,
+        updated_by TEXT
+      );
+      CREATE TABLE IF NOT EXISTS workflow_releases (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        workflow_hash TEXT NOT NULL,
+        previous_version INTEGER,
+        replay_run_id TEXT,
+        verdict TEXT NOT NULL,
+        reason TEXT,
+        gate_reasons_json TEXT,
+        approval_json TEXT,
+        published_at TIMESTAMPTZ NOT NULL,
+        published_by TEXT,
+        published_by_user_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_releases_workflow ON workflow_releases(workflow_id, published_at DESC);
+      CREATE TABLE IF NOT EXISTS release_approval_requests (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        project_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        workflow_hash TEXT NOT NULL,
+        replay_run_id TEXT,
+        origin TEXT NOT NULL,
+        gate_reasons_json TEXT,
+        gate_updated_at TIMESTAMPTZ,
+        published_version_at_request INTEGER,
+        spec_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        request_reason TEXT,
+        requested_by_user_id TEXT,
+        requested_by TEXT,
+        expires_at TIMESTAMPTZ,
+        decided_by_user_id TEXT,
+        decided_by TEXT,
+        decided_at TIMESTAMPTZ,
+        decision_reason TEXT,
+        release_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_release_approval_requests_workflow ON release_approval_requests(workflow_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_release_approval_requests_status ON release_approval_requests(status, created_at DESC);
+    `,
+    down: `
+      DROP INDEX IF EXISTS idx_release_approval_requests_status;
+      DROP INDEX IF EXISTS idx_release_approval_requests_workflow;
+      DROP TABLE IF EXISTS release_approval_requests;
+      DROP INDEX IF EXISTS idx_workflow_releases_workflow;
+      DROP TABLE IF EXISTS workflow_releases;
+      DROP TABLE IF EXISTS release_gates;
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS release_version;
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS release_channel;
+      ALTER TABLE eval_runs DROP COLUMN IF EXISTS set_snapshot_json;
+      ALTER TABLE workflow_versions DROP COLUMN IF EXISTS pinned;
+      ALTER TABLE workflows DROP COLUMN IF EXISTS published_version;
+    `
   }
 ];
 
