@@ -15,8 +15,9 @@ async function ensureAuthenticated(page: Page): Promise<void> {
   await expect
     .poll(
       async () => {
-        const response = await page.request.get(`${API_URL}/health`);
-        return response.ok();
+        // The API may still be starting: a refused connection is "not yet", not a failure.
+        const response = await page.request.get(`${API_URL}/health`).catch(() => null);
+        return response?.ok() ?? false;
       },
       { timeout: 60_000 }
     )
@@ -78,6 +79,18 @@ test.describe("golden journeys", () => {
     const hud = page.getByRole("banner");
     await hud.getByRole("button", { name: "Save", exact: true }).click();
     await hud.getByRole("button", { name: "Run workflow" }).click();
+
+    // Wait until the run is in the history, so the Runs page lists it when it loads.
+    await expect
+      .poll(
+        async () => {
+          const history = await page.request.get("/api/executions?page=1&pageSize=1");
+          if (!history.ok()) return 0;
+          return ((await history.json()) as { items?: unknown[] }).items?.length ?? 0;
+        },
+        { timeout: 60_000 }
+      )
+      .toBeGreaterThan(0);
 
     // Inspect history in the Runs workspace.
     await sidebarItem(page, "Runs").click();
