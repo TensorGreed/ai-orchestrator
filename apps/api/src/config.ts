@@ -197,9 +197,10 @@ const envSchema = z.object({
   CODE_NODES_ENABLED: booleanFromEnv.default(true),
   /**
    * Where code nodes run: `auto` uses a container when docker or podman is
-   * installed and both images are present locally, otherwise an in-process
-   * isolate with a startup warning; `container` insists on a container (code
-   * nodes fail without a runtime); `in_process` always runs on the host.
+   * installed and both images are present locally, otherwise in process (JS
+   * in a QuickJS WebAssembly sandbox, Python as a host subprocess) with a
+   * startup warning; `container` insists on a container (code nodes fail
+   * without a runtime); `in_process` always runs on the host.
    */
   CODE_SANDBOX_MODE: z.enum(["auto", "container", "in_process"]).default("auto"),
   /** Container runtime for code sandboxes: `auto` prefers docker, then podman. */
@@ -208,7 +209,7 @@ const envSchema = z.object({
   CODE_SANDBOX_JS_IMAGE: z.string().trim().min(1).default("node:22.11.0-alpine3.20"),
   /** Pinned image with `python3` on PATH, for Python code nodes in container mode. */
   CODE_SANDBOX_PYTHON_IMAGE: z.string().trim().min(1).default("python:3.12.7-alpine3.20"),
-  /** Memory ceiling for a code sandbox container (MB). */
+  /** Memory ceiling for a code sandbox container, and for one in-process JavaScript run (MB). */
   CODE_SANDBOX_MEMORY_MB: z.coerce.number().int().min(32).max(16384).default(256),
   /** CPU ceiling for a code sandbox container (cores). */
   CODE_SANDBOX_CPUS: z.coerce.number().min(0.1).max(16).default(1),
@@ -216,8 +217,21 @@ const envSchema = z.object({
   CODE_SANDBOX_PIDS_LIMIT: z.coerce.number().int().min(8).max(4096).default(128),
   /** Time allowed for a code sandbox container to start, on top of the code's own timeout (ms). */
   CODE_SANDBOX_STARTUP_MS: z.coerce.number().int().min(1000).max(120000).default(8000),
+  /**
+   * Whether Python code nodes may run as host subprocesses when there is no
+   * container sandbox. Host Python is not sandboxed: it can run commands,
+   * open network connections the outbound guard never sees and read what the
+   * API user can read. `deny` makes Python code nodes fail instead.
+   */
+  CODE_SANDBOX_PYTHON_IN_PROCESS: z.enum(["allow", "deny"]).default("allow"),
+  /** Run host Python as this uid (the API needs CAP_SETUID and CAP_CHOWN, e.g. root in a container). Unset: the API's own user. */
+  CODE_SANDBOX_PYTHON_UID: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().int().min(0).max(4294967294).optional()),
+  /** Run host Python with this gid (needs CAP_SETGID). */
+  CODE_SANDBOX_PYTHON_GID: z.preprocess((value) => (value === "" ? undefined : value), z.coerce.number().int().min(0).max(4294967294).optional()),
   /** Time limit for a single `{{ }}` or Sort-node expression (ms). */
   EXPRESSION_TIMEOUT_MS: z.coerce.number().int().min(50).max(60000).default(1000),
+  /** Heap limit for a single expression evaluation (MB). */
+  EXPRESSION_MEMORY_MB: z.coerce.number().int().min(4).max(1024).default(64),
   // Outbound URL guard for nodes that fetch a user-supplied URL (HTTP Request,
   // Web Browse, Chart data.url, HTML-render PDF).
   /** Block private ranges and localhost for those nodes. Metadata and link-local are always blocked. */

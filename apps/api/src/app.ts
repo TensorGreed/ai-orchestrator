@@ -144,7 +144,7 @@ import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError } from "./db/store-errors.js";
 import { createRunScope } from "./run-scope.js";
 import {
-  IN_PROCESS_CODE_SANDBOX,
+  CODE_SANDBOX_INITIALISING,
   resolveCodeSandboxPlan,
   describeCodeSandboxPlan,
   configureExpressionSandbox,
@@ -1227,6 +1227,11 @@ async function verifyWebhookRequestAuth(input: {
   return { ok: true };
 }
 
+export interface CreateAppOptions {
+  /** Runtime/image detection seams for the code sandbox plan (tests). */
+  codeSandboxDeps?: Parameters<typeof resolveCodeSandboxPlan>[1];
+}
+
 export function createApp(
   config: AppConfig,
   store: SqliteStore,
@@ -1234,7 +1239,8 @@ export function createApp(
   authService: AuthService,
   schedulerService?: SchedulerService,
   queueService?: QueueService,
-  triggerService?: TriggerService
+  triggerService?: TriggerService,
+  options: CreateAppOptions = {}
 ) {
   // Phase 4.4 — Request-ID propagation.
   // - `requestIdHeader: "x-request-id"` makes Fastify honor an incoming
@@ -1276,25 +1282,32 @@ export function createApp(
     onWarning: (message, fields) => app.log.warn(fields ?? {}, message)
   });
 
-  // Code nodes: pick a sandbox plan at startup. Until it resolves (one async
-  // runtime/image check), code nodes use the in-process isolate, which is
-  // always safe to run — the plan only decides host-isolate vs container.
-  configureExpressionSandbox({ timeoutMs: config.EXPRESSION_TIMEOUT_MS });
+  // Code nodes: pick a sandbox plan at startup. Until it settles (one async
+  // runtime/image check) code nodes are refused, and the server does not
+  // accept requests (the onReady hook below waits for it), so nothing runs
+  // under a plan the admin did not choose.
+  configureExpressionSandbox({ timeoutMs: config.EXPRESSION_TIMEOUT_MS, memoryMb: config.EXPRESSION_MEMORY_MB });
   // Outbound URL policy for nodes that fetch a user-supplied URL.
   const outboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
-  let codeSandboxPlan: CodeSandboxPlan = IN_PROCESS_CODE_SANDBOX;
-  void resolveCodeSandboxPlan({
-    enabled: config.CODE_NODES_ENABLED,
-    mode: config.CODE_SANDBOX_MODE,
-    runtime: config.CODE_SANDBOX_RUNTIME,
-    jsImage: config.CODE_SANDBOX_JS_IMAGE,
-    pythonImage: config.CODE_SANDBOX_PYTHON_IMAGE,
-    memoryMb: config.CODE_SANDBOX_MEMORY_MB,
-    cpus: config.CODE_SANDBOX_CPUS,
-    pidsLimit: config.CODE_SANDBOX_PIDS_LIMIT,
-    startupMs: config.CODE_SANDBOX_STARTUP_MS,
-    instanceLabel: crypto.createHash("sha256").update(`l2m-code:${store.storageLocation()}`).digest("hex").slice(0, 16)
-  })
+  let codeSandboxPlan: CodeSandboxPlan = CODE_SANDBOX_INITIALISING;
+  const codeSandboxSettled = resolveCodeSandboxPlan(
+    {
+      enabled: config.CODE_NODES_ENABLED,
+      mode: config.CODE_SANDBOX_MODE,
+      runtime: config.CODE_SANDBOX_RUNTIME,
+      jsImage: config.CODE_SANDBOX_JS_IMAGE,
+      pythonImage: config.CODE_SANDBOX_PYTHON_IMAGE,
+      memoryMb: config.CODE_SANDBOX_MEMORY_MB,
+      cpus: config.CODE_SANDBOX_CPUS,
+      pidsLimit: config.CODE_SANDBOX_PIDS_LIMIT,
+      startupMs: config.CODE_SANDBOX_STARTUP_MS,
+      instanceLabel: crypto.createHash("sha256").update(`l2m-code:${store.storageLocation()}`).digest("hex").slice(0, 16),
+      pythonInProcess: config.CODE_SANDBOX_PYTHON_IN_PROCESS,
+      pythonUid: config.CODE_SANDBOX_PYTHON_UID,
+      pythonGid: config.CODE_SANDBOX_PYTHON_GID
+    },
+    options.codeSandboxDeps
+  )
     .then(({ plan, warning }) => {
       codeSandboxPlan = plan;
       const described = describeCodeSandboxPlan(plan);
@@ -1302,9 +1315,13 @@ export function createApp(
       else app.log.info({ codeSandbox: described.mode, detail: described.detail, expressions: expressionSandboxLimits() }, "Code node sandbox ready");
     })
     .catch((error) => {
-      // Keep the safe in-process default if the check throws.
-      app.log.warn({ err: error instanceof Error ? error.message : String(error) }, "Could not resolve the code sandbox plan; code nodes run in-process");
+      // Fail closed: an unknown environment never falls back to running code on the host.
+      codeSandboxPlan = { kind: "disabled", reason: "Code nodes are unavailable: the code sandbox could not be set up at startup. Check the API logs." };
+      app.log.error({ err: error instanceof Error ? error.message : String(error) }, "Could not resolve the code sandbox plan; code nodes are disabled");
     });
+  app.addHook("onReady", async () => {
+    await codeSandboxSettled;
+  });
   // Phase 10.7 — rate limits, concurrency caps and circuit breakers. State is
   // in memory, per API instance, keyed by registry server id; it is shared by
   // workflow runs, the gateway and the playground of this process.
