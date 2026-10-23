@@ -259,6 +259,10 @@ export interface ReleaseGateJob {
   scorerMismatch?: string | null;
   /** Gate golden sets whose contents (cases, golden runs, case scorers) changed since the job was queued, or that the job holds no snapshot of. */
   staleSets?: string[];
+  /** The job holds no snapshot of its sets: it was queued before release gates existed. */
+  noSetSnapshot?: boolean;
+  /** The job repeated its cases and the replay recorded latency or guard verdicts for only one repeat of some case. */
+  repeatsUnchecked?: boolean;
 }
 
 export interface ReleaseGateEvidence {
@@ -406,8 +410,15 @@ export function judgeReleaseGate(
     const why = job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? ` (${job.releaseIneligibleReasons.join("; ")})` : "";
     reasons.push(`Replay job ${job.id} is not eligible to prove a release${why}.`);
   }
+  if (job.repeatsUnchecked && (policy.maxP95LatencyIncreasePct !== undefined || policy.noNewGuardBlocks)) {
+    reasons.push(
+      `This gate checks latency and guard limits per run, but replay job ${job.id} repeated its cases and recorded them for only one repeat: run the gate's suite with repeats 1, or remove those limits.`
+    );
+  }
   if (job.scorerMismatch) reasons.push(`Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);
-  if (job.staleSets && job.staleSets.length > 0) {
+  if (job.noSetSnapshot) {
+    reasons.push(`Replay job ${job.id} was queued before release gates existed, so it holds no record of the golden sets it ran on: run the gate again.`);
+  } else if (job.staleSets && job.staleSets.length > 0) {
     reasons.push(
       `The golden set${job.staleSets.length === 1 ? "" : "s"} ${job.staleSets.join(", ")} changed after replay job ${job.id} was queued (cases, golden runs or case scorers): run the gate again.`
     );

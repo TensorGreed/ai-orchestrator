@@ -1589,3 +1589,56 @@ describe("enforced gates and golden runs, turning a gate on (N7, N8)", () => {
     expect(context.store.getReleaseGate("wf-n7")?.enabled ?? false).toBe(false);
   });
 });
+
+describe("repeats and old jobs (M1, L2, L3)", () => {
+  const withAttempts = (costs: number[], extra: Record<string, unknown> = {}) => ({
+    ...plainDiff,
+    diff: { ...plainDiff.diff, attempts: costs.map((costUsd, repeatIndex) => ({ repeatIndex, status: "pass", costUsd, ...extra })) }
+  });
+  const publish = async (context: TestContext, cookie: string, id: string, version: number) => call(context, "POST", `/api/workflows/${id}/publish`, cookie, { version });
+
+  async function setup(id: string, policy: Record<string, unknown>, repeats = 2) {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    save(context, hookWorkflow(id, "v1"));
+    await enableGate(context, admin.cookie, id, { policy, candidateOptions: { repeats, aggregate: "all" } });
+    const version = save(context, hookWorkflow(id, "v2"));
+    const hash = await versionHash(context, admin.cookie, id, version);
+    return { context, admin, version, hash };
+  }
+
+  it("judges cost at the worst repeat", async () => {
+    const { context, admin, version, hash } = await setup("wf-rep-cost", { maxCostIncreasePct: 20 });
+    seedJob(context, { workflowId: "wf-rep-cost", datasetIds: ["set-wf-rep-cost"], version, hash, statuses: ["pass", "pass", "pass"], options: { repeats: 2, aggregate: "all" }, diff: withAttempts([0.0105, 0.018], { latencyMs: 100, newGuardBlocks: 0 }) });
+    const blocked = await publish(context, admin.cookie, "wf-rep-cost", version);
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/Cost rose 80/);
+  });
+
+  it("blocks a latency limit with repeats above 1 unless every attempt has latency and guard data", async () => {
+    const { context, admin, version, hash } = await setup("wf-rep-lat", { maxP95LatencyIncreasePct: 50 });
+    seedJob(context, { workflowId: "wf-rep-lat", datasetIds: ["set-wf-rep-lat"], version, hash, statuses: ["pass", "pass", "pass"], options: { repeats: 2, aggregate: "all" }, diff: withAttempts([0.01, 0.01]) });
+    const blocked = await publish(context, admin.cookie, "wf-rep-lat", version);
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json<{ reasons: string[] }>().reasons.join()).toMatch(/repeats 1, or remove those limits/);
+    seedJob(context, { workflowId: "wf-rep-lat", datasetIds: ["set-wf-rep-lat"], version, hash, statuses: ["pass", "pass", "pass"], options: { repeats: 2, aggregate: "all" }, diff: withAttempts([0.01, 0.01], { latencyMs: 100, newGuardBlocks: 0 }) });
+    expect((await publish(context, admin.cookie, "wf-rep-lat", version)).statusCode).toBe(200);
+  });
+
+  it("leaves repeats 1 unchanged", async () => {
+    const { context, admin, version, hash } = await setup("wf-rep-one", { maxP95LatencyIncreasePct: 50 }, 1);
+    seedJob(context, { workflowId: "wf-rep-one", datasetIds: ["set-wf-rep-one"], version, hash, statuses: ["pass", "pass", "pass"] });
+    expect((await publish(context, admin.cookie, "wf-rep-one", version)).statusCode).toBe(200);
+  });
+
+  it("names a job queued before gates existed", async () => {
+    const { context, admin, version, hash } = await setup("wf-old", {}, 1);
+    const job = seedJob(context, { workflowId: "wf-old", datasetIds: ["set-wf-old"], version, hash, statuses: ["pass", "pass", "pass"] });
+    const preview = async () => (await call(context, "GET", `/api/workflows/wf-old/publish-preview?version=${version}&replayRunId=${job}`, admin.cookie)).json<{ preview: { reasons: string[] } }>().preview;
+    expect((await preview()).reasons).toEqual([]);
+    context.store.setEvalRunSetSnapshot(job, {});
+    expect((await preview()).reasons.join()).toMatch(/changed after replay job/);
+    (context.store as unknown as { exec: (sql: string, params: unknown[]) => void }).exec("UPDATE eval_runs SET set_snapshot_json = NULL WHERE id = ?", [job]);
+    expect((await preview()).reasons.join()).toMatch(/queued before release gates existed/);
+  });
+});

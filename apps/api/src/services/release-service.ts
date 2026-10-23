@@ -837,6 +837,7 @@ export class ReleaseService {
       groups.set(key, list);
     }
     const cases: ReleaseGateCase[] = [];
+    let repeatsUnchecked = false;
     for (const [key, results] of groups) {
       const status = aggregateReleaseRepeats(results.map((result) => caseStatus(result.status)), aggregate);
       const scorerPass = new Map<string, boolean>();
@@ -867,9 +868,18 @@ export class ReleaseService {
         const latency = asRecord(totals.latencyMs);
         costBaseline = numberOrNull(cost.baseline) ?? costBaseline;
         latencyBaseline = numberOrNull(latency.baseline) ?? latencyBaseline;
-        const candidateCost = numberOrNull(cost.candidate);
+        // Repeats: the row's totals come from one attempt; cost is kept for every attempt, so the worst one counts.
+        const attempts = Array.isArray(diff.attempts) ? (diff.attempts as unknown[]).map(asRecord) : [];
+        const attemptCosts = attempts.map((attempt) => numberOrNull(attempt.costUsd)).filter((value): value is number => value !== null);
+        const candidateCost = attemptCosts.length > 0 ? Math.max(...attemptCosts) : numberOrNull(cost.candidate);
         if (candidateCost !== null) costs.push(candidateCost);
-        const candidateLatency = numberOrNull(latency.candidate);
+        // Latency and guard verdicts are per attempt only when the replay recorded them for every attempt.
+        const attemptLatencies = attempts.map((attempt) => numberOrNull(attempt.latencyMs)).filter((value): value is number => value !== null);
+        const attemptGuards = attempts.map((attempt) => numberOrNull(attempt.newGuardBlocks)).filter((value): value is number => value !== null);
+        const perAttemptLatency = attempts.length > 1 && attemptLatencies.length === attempts.length;
+        const perAttemptGuard = attempts.length > 1 && attemptGuards.length === attempts.length;
+        if (attempts.length > 1 && !(perAttemptLatency && perAttemptGuard)) repeatsUnchecked = true;
+        const candidateLatency = perAttemptLatency ? Math.max(...attemptLatencies) : numberOrNull(latency.candidate);
         if (candidateLatency !== null) latencies.push(candidateLatency);
         const added = (guard.added as unknown[]).map(asRecord).filter((verdict) => !verdict.shadow && blocking(verdict.effectiveAction)).length;
         const escalated = (guard.changed as unknown[])
@@ -878,7 +888,7 @@ export class ReleaseService {
             const after = asRecord(change.candidate);
             return !after.shadow && blocking(after.effectiveAction) && !blocking(asRecord(change.baseline).effectiveAction);
           }).length;
-        newGuardBlocks = Math.max(newGuardBlocks, added + escalated);
+        newGuardBlocks = Math.max(newGuardBlocks, perAttemptGuard ? Math.max(...attemptGuards) : added + escalated);
       }
       const costCandidate = costs.length > 0 ? Math.max(...costs) : null;
       const latencyCandidate = latencies.length > 0 ? Math.max(...latencies) : null;
@@ -921,7 +931,9 @@ export class ReleaseService {
         ...(eligible !== undefined ? { releaseEligible: eligible === true ? true : false } : {}),
         ...(Array.isArray(ineligible) ? { releaseIneligibleReasons: ineligible.map((entry) => String(entry)) } : {}),
         scorerMismatch,
-        staleSets
+        staleSets: jobSnapshot ? staleSets : [],
+        ...(jobSnapshot ? {} : { noSetSnapshot: true }),
+        ...(repeatsUnchecked ? { repeatsUnchecked: true } : {})
       },
       cases
     };

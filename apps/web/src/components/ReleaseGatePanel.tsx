@@ -193,7 +193,7 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
             </label>
             <select id="gate-mcp-mode" className="cfg-input" value={form.mcpMode} disabled={locked} onChange={(event) => update({ mcpMode: event.target.value === "lenient" ? "lenient" : "strict" })}>
               <option value="strict">Strict: every call must match a recorded one</option>
-              <option value="lenient">Lenient: unmatched calls fail the call, not the job</option>
+              <option value="lenient">Lenient: unmatched calls fail the call, not the job (replay jobs run leniently never prove a release, so only strict jobs pass this gate)</option>
             </select>
           </div>
           <label className="guard-check">

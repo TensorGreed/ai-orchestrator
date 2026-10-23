@@ -213,6 +213,8 @@ describe("Phase 15.4 review fixes", () => {
   it("refuses a job judged with other scorers or over sets that changed since it was queued (H2, M4)", () => {
     expect(judgeReleaseGate(evidence(cases, { scorerMismatch: "ran with its own scorers (regex)" }), policy(), { expected, now: NOW }).reasons.join()).toMatch(/its own scorers \(regex\).*the gate judges with its own scorers/);
     expect(judgeReleaseGate(evidence(cases, { staleSets: ["set_a"] }), policy(), { expected, now: NOW }).reasons.join()).toMatch(/set_a changed after replay job/);
+    expect(judgeReleaseGate(evidence(cases, { noSetSnapshot: true }), policy(), { expected, now: NOW }).reasons.join()).toMatch(/queued before release gates existed/);
+    expect(judgeReleaseGate(evidence(cases, { repeatsUnchecked: true }), policy({ maxP95LatencyIncreasePct: 10 }), { expected, now: NOW }).reasons.join()).toMatch(/repeats 1, or remove those limits/);
     expect(releaseScorersMatch(undefined, null)).toBe(true);
     expect(releaseScorersMatch([], [])).toBe(true);
     expect(releaseScorersMatch(undefined, [{ type: "status" }])).toBe(false);

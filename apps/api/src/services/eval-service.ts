@@ -612,7 +612,13 @@ export class EvalService {
     });
     // Phase 15.4 — what each set holds now (the job's own cases); the release gate accepts the job only while its sets still match.
     // Taken here, after the job row exists, never in the estimate path.
-    this.store.setEvalRunSetSnapshot(runId, goldenSetSnapshots(datasetIds, (datasetId) => this.store.listEvalFixtures(datasetId)));
+    try {
+      this.store.setEvalRunSetSnapshot(runId, goldenSetSnapshots(datasetIds, (datasetId) => this.store.listEvalFixtures(datasetId)));
+    } catch (error) {
+      // Never leave a job queued that will not launch.
+      this.store.finalizeEvalRun({ id: runId, status: "errored", error: "The golden sets could not be recorded for this job." });
+      throw error;
+    }
     const job: ReplayJobContext = {
       actorUserId: context.actor.id,
       actorEmail: context.actor.email,
