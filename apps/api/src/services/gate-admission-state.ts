@@ -8,8 +8,10 @@
  * it or a gate approver approves an `admit_cases` request. Required cases
  * (golden-run cases an admin marked) must pass whatever the pass rate.
  *
- * Unenforced gates have no admission state: every case counts and required
- * marks are ignored, exactly as before admission existed.
+ * Unenforced gates judge with no admission state: every case counts and
+ * required marks are ignored, exactly as before admission existed. The list
+ * a gate stored while enforced is kept when enforcement is lifted, so cases
+ * that were waiting for admission still wait when the gate is enforced again.
  */
 
 import type { ReleaseGateAdmission, ReleaseGateAdmissionState } from "@ai-orchestrator/shared";
@@ -20,9 +22,15 @@ export interface GateAdmissionSnapshot {
   /** Every case of the gate's golden sets, in set order. */
   fixtures: EvalFixtureRecord[];
   admittedIds: Set<string>;
-  /** Required golden-run cases of the gate's sets. */
+  /** Required golden-run cases of the gate's sets; only admitted cases can be required. */
   requiredIds: string[];
   names: Record<string, string>;
+  /**
+   * True when the gate is enforced but has no stored admission (a save
+   * interrupted half-way, or a store edited by hand): it counts nothing
+   * until an admin admits its cases.
+   */
+  admissionMissing: boolean;
 }
 
 /** The admission state of an enforced gate; null for a gate that is missing or not enforced. */
@@ -37,17 +45,19 @@ export function gateAdmissionSnapshot(store: Pick<SqliteStore, "listEvalFixtures
       fixtures.push(fixture);
     }
   }
-  // A gate enforced without a stored admission (set straight in the store) counts every case, as before admission existed.
+  // Fails closed: an enforced gate without a stored admission counts nothing until an admin admits its cases.
   const stored = gate.admittedFixtureIds;
-  const admittedIds = new Set(stored === null || stored === undefined ? fixtures.map((fixture) => fixture.id) : stored.filter((id) => seen.has(id)));
+  const admissionMissing = stored === null || stored === undefined;
+  const admittedIds = new Set(admissionMissing ? [] : stored.filter((id) => seen.has(id)));
   const names: Record<string, string> = {};
   for (const fixture of fixtures) names[fixture.id] = fixture.name;
   return {
     workflowId: gate.workflowId,
     fixtures,
     admittedIds,
-    requiredIds: fixtures.filter((fixture) => fixture.required && fixture.recordingId).map((fixture) => fixture.id),
-    names
+    requiredIds: fixtures.filter((fixture) => fixture.required && fixture.recordingId && admittedIds.has(fixture.id)).map((fixture) => fixture.id),
+    names,
+    admissionMissing
   };
 }
 
@@ -63,29 +73,31 @@ export function admissionState(snapshot: GateAdmissionSnapshot): ReleaseGateAdmi
 }
 
 /**
- * The admitted cases to store when a gate is saved:
- *   - not enforced: none (null);
- *   - enforced now (an admin): every case of its sets;
- *   - already enforced, saved by an admin: the cases admitted before, plus
- *     every case of a golden set the admin adds to the gate;
- *   - already enforced, saved by a builder: the cases admitted before (cases
- *     of a set a builder adds are pending until admitted).
- * Ids of cases no longer in the gate's sets are dropped.
+ * The admitted cases to store when a gate is saved. Nothing is ever admitted
+ * silently except on a gate's first enforcement:
+ *   - not enforced: the stored list is kept as it is (null when the gate was
+ *     never enforced), so enforcing again restores it;
+ *   - enforced for the first time (an admin; nothing stored yet): every case
+ *     its sets hold now;
+ *   - enforced again, or already enforced: the cases admitted before that
+ *     its sets still hold. Cases added meanwhile, and cases of golden sets
+ *     the save adds, wait for admission, unless an admin passes
+ *     `admitAddedSetCases`: then the cases of the added sets are admitted.
  */
 export function nextAdmittedIds(
   store: Pick<SqliteStore, "listEvalFixtures">,
   before: ReleaseGateRecord | null,
   after: { enforced: boolean; datasetIds: string[] },
-  byAdmin: boolean
+  options: { byAdmin: boolean; admitAddedSetCases: boolean }
 ): string[] | null {
-  if (!after.enforced) return null;
+  const stored = before?.admittedFixtureIds ?? null;
+  if (!after.enforced) return stored;
   const idsOf = (datasetIds: readonly string[]) => datasetIds.flatMap((datasetId) => store.listEvalFixtures(datasetId).map((fixture) => fixture.id));
   const current = new Set(idsOf(after.datasetIds));
-  if (!before?.enforced) return [...current];
-  const previous = gateAdmissionSnapshot(store, before)?.admittedIds ?? new Set<string>();
-  const admitted = new Set([...previous].filter((id) => current.has(id)));
-  if (byAdmin) {
-    const added = after.datasetIds.filter((datasetId) => !before.datasetIds.includes(datasetId));
+  if (!before?.enforced && stored === null) return [...current];
+  const admitted = new Set((stored ?? []).filter((id) => current.has(id)));
+  if (options.byAdmin && options.admitAddedSetCases) {
+    const added = after.datasetIds.filter((datasetId) => !(before?.datasetIds ?? []).includes(datasetId));
     for (const id of idsOf(added)) admitted.add(id);
   }
   return [...admitted];

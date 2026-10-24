@@ -194,7 +194,7 @@ describe("migration 32", () => {
       expect(columns).toEqual(
         expect.arrayContaining(["id", "execution_id", "project_id", "kind", "status", "spec_json", "requested_by_user_id", "expires_at", "decided_by", "reason", "edits_json", "edited_fields_json", "asking_workflow_id", "edits_salt", "workflow_deleted_at"])
       );
-      expect(db.prepare("SELECT name FROM schema_markers").all()).toEqual([{ name: "approval_requests" }]);
+      expect(db.prepare("SELECT name FROM schema_markers WHERE name = 'approval_requests'").all()).toEqual([{ name: "approval_requests" }]);
     } finally {
       db.close();
     }

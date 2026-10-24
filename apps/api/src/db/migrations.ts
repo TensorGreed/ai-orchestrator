@@ -1728,6 +1728,7 @@ export const MIGRATIONS: Migration[] = [
         action TEXT NOT NULL,
         fixtures_json TEXT NOT NULL,
         spec_json TEXT NOT NULL,
+        gate_updated_at TIMESTAMPTZ,
         status TEXT NOT NULL,
         request_reason TEXT,
         requested_by_user_id TEXT,

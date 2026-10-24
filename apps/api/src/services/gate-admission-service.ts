@@ -17,10 +17,15 @@
  *     (so approvers are project-scoped), satisfies the approver list, and is
  *     not the requester unless the gate allows self-approval.
  *
- * Approving applies the request to the cases it still fits (pending cases
- * not yet admitted, admitted cases still there); a request that fits none,
- * or whose gate is no longer enforced, is stale: refused with 409 and
- * canceled. Every change and request event is audited (category `release`).
+ * A request is decided against the gate as it is at decision time: the
+ * approver must satisfy the gate's current approvers and self-approval
+ * setting (never the ones in force when it was asked). Any later save of the
+ * gate's settings (approvers, enforcement, golden sets, policy) makes open
+ * requests stale, as does the gate no longer being enforced or none of the
+ * request's cases still fitting (pending cases not yet admitted, admitted
+ * cases still there): a stale request cannot be approved, says why, and an
+ * attempt to approve it cancels it with 409. Every change and request event
+ * is audited (category `release`).
  * Gate case requests need the SQLite store; on Postgres the routes answer 501.
  */
 
@@ -151,7 +156,7 @@ export class GateAdmissionService {
     this.sweepExpired();
     const asked = new Map<string, { id: string; kind: GateCaseRequestKind }>();
     for (const request of this.store.listPendingGateCaseRequests(workflowId)) {
-      if (this.expired(request)) continue;
+      if (this.expired(request) || this.staleReason(request, gate)) continue;
       for (const entry of request.fixtures) {
         if (!asked.has(entry.fixtureId)) asked.set(entry.fixtureId, { id: request.id, kind: request.action === "remove" ? "remove_cases" : "admit_cases" });
       }
@@ -235,10 +240,12 @@ export class GateAdmissionService {
     const [fixture] = this.casesOf(snapshot, [fixtureId]);
     if (!fixture!.recordingId) throw new ReleaseError("Only a golden-run case can be required: replay jobs skip hand-written fixtures.", 400);
     const before = admissionState(snapshot);
-    if (required && !snapshot.admittedIds.has(fixtureId)) {
-      this.applyAdmit(user, workflowId, snapshot, [fixtureId], { reason: "Marked required", requestId: null });
-    }
-    if (fixture!.required !== required) this.store.setEvalFixtureRequired(fixtureId, required);
+    this.store.transaction(() => {
+      if (required && !snapshot.admittedIds.has(fixtureId)) {
+        this.applyAdmit(user, workflowId, snapshot, [fixtureId], { reason: "Marked required", requestId: null });
+      }
+      if (fixture!.required !== required) this.store.setEvalFixtureRequired(fixtureId, required);
+    });
     const after = { admittedIds: [...new Set([...before.admittedIds, ...(required ? [fixtureId] : [])])], requiredIds: required ? [...new Set([...before.requiredIds, fixtureId])] : before.requiredIds.filter((id) => id !== fixtureId) };
     this.auditEvent(user, workflowId, "release.gate.case_required", "update", {
       fixtureId,
@@ -290,6 +297,11 @@ export class GateAdmissionService {
     const action = input.action;
     const ids = new Set(cases.map((fixture) => fixture.id));
     for (const existing of this.store.listPendingGateCaseRequests(workflowId)) {
+      const stale = this.staleReason(existing, gate);
+      if (stale) {
+        this.close(existing, "canceled", `Stale: ${stale}`, null);
+        continue;
+      }
       if (existing.action !== action) continue;
       const overlap = existing.fixtures.filter((entry) => ids.has(entry.fixtureId));
       if (overlap.length === 0) continue;
@@ -309,6 +321,7 @@ export class GateAdmissionService {
       action,
       fixtures: cases.map((fixture) => ({ fixtureId: fixture.id, name: fixture.name, datasetId: fixture.datasetId })),
       spec: { approverRoles: approvers.approverRoles, approverUsers: approvers.approverUsers, allowSelfApproval: approvers.allowSelfApproval },
+      gateUpdatedAt: gate.updatedAt,
       status: "pending",
       requestReason: input.reason,
       requestedByUserId: user.id,
@@ -359,17 +372,26 @@ export class GateAdmissionService {
     }
   }
 
-  private personCheck(record: GateCaseRequestRecord, user: SafeUser): { allowed: true } | { allowed: false; code: string; message: string } {
+  /**
+   * Why approving this request now would decide on a gate other than the one
+   * it was asked of; null when it still holds. `gate` is the current gate
+   * (read when not given).
+   */
+  private staleReason(record: GateCaseRequestRecord, gate: ReleaseGateRecord | null = this.store.getReleaseGate(record.workflowId)): string | null {
+    if (!gate?.enforced) return "The release gate is no longer enforced, so every case counts.";
+    if (gate.updatedAt !== record.gateUpdatedAt) return "The release gate's settings (its approvers, enforcement, golden sets or policy) changed after the request was made.";
+    return null;
+  }
+
+  /** Checks the person against the gate's approvers and self-approval setting as they are now. */
+  private personCheck(record: GateCaseRequestRecord, user: SafeUser, gate: ReleaseGateRecord | null): { allowed: true } | { allowed: false; code: string; message: string } {
     if (!this.options.access(user, record.workflowId, "workflow:publish").ok) {
       return { allowed: false, code: "project_access", message: "You may not publish this workflow, so you cannot decide its gate's cases." };
     }
-    const spec = asRecord(record.spec);
+    if (!gate) return { allowed: false, code: "stale", message: "This workflow no longer has a release gate." };
+    const approvers = this.approversOf(gate);
     const check = checkApprover(
-      {
-        approverRoles: (Array.isArray(spec.approverRoles) ? spec.approverRoles : []) as ReleaseApprovers["approverRoles"],
-        approverUsers: (Array.isArray(spec.approverUsers) ? spec.approverUsers : []) as string[],
-        allowSelfApproval: spec.allowSelfApproval === true
-      },
+      { approverRoles: approvers.approverRoles, approverUsers: approvers.approverUsers, allowSelfApproval: approvers.allowSelfApproval },
       { id: user.id, email: user.email, role: user.role },
       { userId: record.requestedByUserId, email: record.requestedBy }
     );
@@ -385,9 +407,13 @@ export class GateAdmissionService {
   }
 
   private toView(record: GateCaseRequestRecord, user: SafeUser): GateCaseRequestView {
-    const spec = asRecord(record.spec);
     const status = record.status === "pending" && this.expired(record) ? "timed_out" : record.status;
-    const check = status === "pending" ? this.personCheck(record, user) : { allowed: false as const, message: "Already decided." };
+    const gate = this.store.getReleaseGate(record.workflowId);
+    const stale = status === "pending" ? this.staleReason(record, gate) : null;
+    const check = status !== "pending" ? { allowed: false as const, message: "Already decided." } : stale ? { allowed: false as const, message: `This request is stale: ${stale} Ask again.` } : this.personCheck(record, user, gate);
+    // The approvers who decide now: the gate's current ones (the ones asked when the gate is gone).
+    const spec = asRecord(record.spec);
+    const current = gate ? this.approversOf(gate) : null;
     return {
       kind: record.action === "remove" ? "remove_cases" : "admit_cases",
       requestId: record.id,
@@ -399,9 +425,9 @@ export class GateAdmissionService {
       message: this.message(record),
       cases: record.fixtures,
       requestReason: record.requestReason ? this.options.redact(record.requestReason) : null,
-      approverRoles: (Array.isArray(spec.approverRoles) ? spec.approverRoles : []) as string[],
-      approverUsers: (Array.isArray(spec.approverUsers) ? spec.approverUsers : []) as string[],
-      allowSelfApproval: spec.allowSelfApproval === true,
+      approverRoles: current ? [...current.approverRoles] : ((Array.isArray(spec.approverRoles) ? spec.approverRoles : []) as string[]),
+      approverUsers: current ? [...current.approverUsers] : ((Array.isArray(spec.approverUsers) ? spec.approverUsers : []) as string[]),
+      allowSelfApproval: current ? current.allowSelfApproval : spec.allowSelfApproval === true,
       requestedBy: record.requestedBy,
       createdAt: record.createdAt,
       expiresAt: record.expiresAt,
@@ -453,7 +479,7 @@ export class GateAdmissionService {
       this.close(record, "timed_out", "Nobody decided before the request expired", null);
       throw new ReleaseError("This request expired; ask again", 409);
     }
-    const check = this.personCheck(record, user);
+    const check = this.personCheck(record, user, this.store.getReleaseGate(record.workflowId));
     if (!check.allowed) {
       this.auditEvent(user, record.workflowId, "release.gate.case_request.decided", decision, { requestId: record.id, action: record.action, refused: check.code }, "denied");
       throw new ReleaseError(check.message, 403);
@@ -473,7 +499,8 @@ export class GateAdmissionService {
       this.close(record, "canceled", `Stale: ${why}`, user);
       throw new ReleaseError(`This request is stale and was canceled: ${why} Ask again.`, 409);
     };
-    if (!snapshot) return stale("The release gate is no longer enforced, so every case counts.");
+    const why = this.staleReason(record, gate);
+    if (why || !snapshot) return stale(why ?? "The release gate is no longer enforced, so every case counts.");
     const inGate = new Set(snapshot.fixtures.map((fixture) => fixture.id));
     const asked = record.fixtures.map((entry) => entry.fixtureId);
     const fits = record.action === "admit" ? asked.filter((id) => inGate.has(id) && !snapshot.admittedIds.has(id)) : asked.filter((id) => snapshot.admittedIds.has(id));

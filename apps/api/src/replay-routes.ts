@@ -33,6 +33,8 @@ export interface ReplayRoutesDeps {
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
   /** Phase 15.4 — why `user` may not delete a golden run (an enforced release gate's case uses it); null when they may. */
   recordingDeleteDenial?: (user: SafeUser, workflowId: string, recordingId: string) => string | null;
+  /** Release gate admission — before deleting a golden run that admitted cases of an enforced gate replay: a function that audits it once done. */
+  gateCasesRemoval?: (user: SafeUser, workflowId: string, target: { via: "golden_run"; recordingId: string }) => (() => void) | null;
 }
 
 const RECORDING_STATUS: Record<ReplayRecordingError["code"], number> = {
@@ -131,7 +133,9 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
       reply.code(403);
       return { error: gateDenial };
     }
+    const gateCasesRemoved = deps.gateCasesRemoval?.(user, summary.workflowId, { via: "golden_run", recordingId: summary.id }) ?? null;
     store.deleteReplayRecording(summary.id);
+    gateCasesRemoved?.();
     deps.audit(request, user, {
       eventType: "replay.recording.deleted",
       category: "workflow",

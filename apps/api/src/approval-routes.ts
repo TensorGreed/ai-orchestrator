@@ -144,7 +144,7 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       } catch (error) {
         if (error instanceof ReleaseError) {
           reply.code(error.statusCode);
-          return { error: error.message };
+          return { error: error.message, ...(error.details ? { details: error.details } : {}) };
         }
         throw error;
       }

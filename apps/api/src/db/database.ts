@@ -1833,8 +1833,9 @@ export interface ReleaseGateRecord {
   updatedAt: string;
   updatedBy: string | null;
   /**
-   * Migration 36 — the cases an enforced gate counts; null when the gate is
-   * not enforced. Saved by `setReleaseGateAdmission`, never by `upsertReleaseGate`.
+   * Migration 36 — the cases an enforced gate counts; null when the gate was
+   * never enforced (kept while enforcement is lifted, and ignored then).
+   * Saved by `setReleaseGateAdmission`, never by `upsertReleaseGate`.
    */
   admittedFixtureIds?: string[] | null;
   admissionUpdatedAt?: string | null;
@@ -1850,7 +1851,10 @@ export interface GateCaseRequestRecord {
   action: "admit" | "remove";
   /** The cases asked about, with their names and sets when asked. */
   fixtures: Array<{ fixtureId: string; name: string; datasetId: string | null }>;
+  /** The approvers when asked, for display; the decision checks the gate's current approvers. */
   spec: Record<string, unknown>;
+  /** The gate's `updated_at` when asked: any later save of the gate's settings makes the request stale. */
+  gateUpdatedAt: string | null;
   status: string;
   requestReason: string | null;
   requestedByUserId: string | null;
@@ -1955,6 +1959,7 @@ function mapGateCaseRequestRow(row: Record<string, unknown>): GateCaseRequestRec
           .filter((entry) => entry.fixtureId)
       : [],
     spec: parseJsonObject(row.spec_json),
+    gateUpdatedAt: nullableText(row.gate_updated_at),
     status: String(row.status),
     requestReason: nullableText(row.request_reason),
     requestedByUserId: nullableText(row.requested_by_user_id),
@@ -3557,6 +3562,7 @@ export class SqliteStore {
         action TEXT NOT NULL,
         fixtures_json TEXT NOT NULL,
         spec_json TEXT NOT NULL,
+        gate_updated_at TEXT,
         status TEXT NOT NULL,
         request_reason TEXT,
         requested_by_user_id TEXT,
@@ -3572,21 +3578,27 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_gate_case_requests_workflow ON gate_case_requests(workflow_id, status, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_gate_case_requests_status ON gate_case_requests(status, created_at DESC);
     `);
-    // Gates enforced before admission existed admit every case their sets hold now, so they judge as before.
-    for (const row of this.queryAll<{ workflow_id: string; dataset_ids_json: string }>(
-      `SELECT workflow_id, dataset_ids_json FROM release_gates WHERE enforced = 1 AND admitted_fixture_ids_json IS NULL`
-    )) {
-      const datasetIds = parseJsonArray(row.dataset_ids_json);
-      const ids = datasetIds.flatMap((datasetId) =>
-        this.queryAll<{ id: string }>(`SELECT id FROM eval_fixtures WHERE dataset_id = ?`, [datasetId]).map((fixture) => toString(fixture.id))
-      );
-      this.exec(`UPDATE release_gates SET admitted_fixture_ids_json = ?, admission_updated_at = ?, admission_updated_by = ? WHERE workflow_id = ?`, [
-        JSON.stringify([...new Set(ids)].sort()),
-        new Date().toISOString(),
-        "migration 36",
-        toString(row.workflow_id)
-      ]);
-    }
+    this.ensureColumn("gate_case_requests", "gate_updated_at", "TEXT");
+    // Gates enforced before admission existed admit every case their sets hold now, so they judge as before. Once only:
+    // afterwards an enforced gate without a stored admission fails closed (counts nothing until an admin admits its cases).
+    this.transaction(() => {
+      if (this.queryOne<{ name: string }>(`SELECT name FROM schema_markers WHERE name = 'gate_admission_backfill'`)) return;
+      for (const row of this.queryAll<{ workflow_id: string; dataset_ids_json: string }>(
+        `SELECT workflow_id, dataset_ids_json FROM release_gates WHERE enforced = 1 AND admitted_fixture_ids_json IS NULL`
+      )) {
+        const datasetIds = parseJsonArray(row.dataset_ids_json);
+        const ids = datasetIds.flatMap((datasetId) =>
+          this.queryAll<{ id: string }>(`SELECT id FROM eval_fixtures WHERE dataset_id = ?`, [datasetId]).map((fixture) => toString(fixture.id))
+        );
+        this.exec(`UPDATE release_gates SET admitted_fixture_ids_json = ?, admission_updated_at = ?, admission_updated_by = ? WHERE workflow_id = ?`, [
+          JSON.stringify([...new Set(ids)].sort()),
+          new Date().toISOString(),
+          "migration 36",
+          toString(row.workflow_id)
+        ]);
+      }
+      this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('gate_admission_backfill', ?)`, [new Date().toISOString()]);
+    });
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -3899,6 +3911,15 @@ export class SqliteStore {
         const now = new Date().toISOString();
         this.exec(
           `UPDATE release_approval_requests SET status = 'canceled', decided_by = 'system', decided_at = ?, decision_reason = 'The workflow was deleted', updated_at = ?
+           WHERE workflow_id = ? AND status = 'pending'`,
+          [now, now, id]
+        );
+      }
+      // Migration 36 — pending gate case requests end too: a workflow created again with this id must not inherit them.
+      if (hasTable("gate_case_requests")) {
+        const now = new Date().toISOString();
+        this.exec(
+          `UPDATE gate_case_requests SET status = 'canceled', decided_by = 'system', decided_at = ?, decision_reason = 'The workflow was deleted', updated_at = ?
            WHERE workflow_id = ? AND status = 'pending'`,
           [now, now, id]
         );
@@ -8006,9 +8027,9 @@ export class SqliteStore {
   insertGateCaseRequest(record: GateCaseRequestRecord): GateCaseRequestRecord {
     this.exec(
       `INSERT INTO gate_case_requests (
-         id, workflow_id, workflow_name, project_id, action, fixtures_json, spec_json, status, request_reason, requested_by_user_id,
+         id, workflow_id, workflow_name, project_id, action, fixtures_json, spec_json, gate_updated_at, status, request_reason, requested_by_user_id,
          requested_by, expires_at, decided_by_user_id, decided_by, decided_at, decision_reason, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.id,
         record.workflowId,
@@ -8017,6 +8038,7 @@ export class SqliteStore {
         record.action,
         JSON.stringify(record.fixtures),
         JSON.stringify(record.spec),
+        record.gateUpdatedAt,
         record.status,
         record.requestReason,
         record.requestedByUserId,

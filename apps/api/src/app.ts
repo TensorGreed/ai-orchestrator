@@ -149,7 +149,6 @@ import { registerReleaseRoutes } from "./release-routes.js";
 import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
 import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
 import { GateAdmissionService } from "./services/gate-admission-service.js";
-import { gateAdmissionSnapshot } from "./services/gate-admission-state.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
 import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
@@ -5450,21 +5449,8 @@ export function createApp(
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
     strictIsolation: config.PROJECT_ISOLATION === "strict",
     goldenSetChangeDenial: (user, datasetId, change, target) => releaseService.goldenSetChangeDenial(user, datasetId, change, target),
-    releaseGateAdmission: (workflowId, datasetIds) => {
-      if (!approvalsSupported) return null;
-      const gate = store.getReleaseGate(workflowId);
-      if (!gate?.enforced || !gate.datasetIds.some((datasetId) => datasetIds.includes(datasetId))) return null;
-      const snapshot = gateAdmissionSnapshot(store, gate);
-      if (!snapshot) return null;
-      const policy = gate.policy as { errorsCountAsFailures?: unknown };
-      return {
-        enforced: true,
-        admittedFixtureIds: [...snapshot.admittedIds],
-        pendingFixtureIds: snapshot.fixtures.map((fixture) => fixture.id).filter((id) => !snapshot.admittedIds.has(id)),
-        requiredFixtureIds: snapshot.requiredIds,
-        errorsCountAsFailures: policy.errorsCountAsFailures !== false
-      };
-    }
+    releaseGateAdmission: (run) => releaseService.jobGateAdmission(run),
+    gateCasesRemoval: (user, workflowId, target) => releaseService.gateCasesRemoval(user, workflowId, target)
   });
 
   app.get("/widget.js", async (_request, reply) => {
@@ -7341,6 +7327,8 @@ export function createApp(
     // Phase 15.4 — the gate and release history outlive the workflow; an enforced gate's workflow is the admin's to delete.
     const releaseDenial = releaseService.deleteDenial(user, request.params.id);
     if (releaseDenial) return denyRunAccess(reply, { status: 403, error: releaseDenial });
+    // Deleting the workflow deletes its golden runs: an enforced gate's admitted cases can no longer pass, which is audited.
+    const gateCasesRemoved = releaseService.gateCasesRemoval(user, request.params.id, { via: "workflow" });
 
     try {
       const deleted = store.deleteWorkflow(request.params.id);
@@ -7348,6 +7336,7 @@ export function createApp(
         reply.code(404);
         return { error: "Workflow not found" };
       }
+      gateCasesRemoved?.();
 
       schedulerService?.removeWorkflow(request.params.id);
       triggerService?.removeWorkflow(request.params.id);
@@ -11796,7 +11785,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
     audit: (request, user, event) => audit(request, user, event),
-    recordingDeleteDenial: (user, workflowId, recordingId) => releaseService.recordingDeleteDenial(user, workflowId, recordingId)
+    recordingDeleteDenial: (user, workflowId, recordingId) => releaseService.recordingDeleteDenial(user, workflowId, recordingId),
+    gateCasesRemoval: (user, workflowId, target) => releaseService.gateCasesRemoval(user, workflowId, target)
   });
 
   registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });

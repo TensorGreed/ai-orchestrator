@@ -58,6 +58,7 @@ import {
   goldenSetCreateSchema,
   GUARD_SIMULATION_JOB_DATASET_PREFIX,
   replayJobRequestSchema,
+  type EvalCaseResult,
   type EvalRunView,
   type EvalScorerSpec,
   type ReleaseGateJobAdmission,
@@ -95,10 +96,17 @@ export interface EvalRoutesDeps {
   goldenSetChangeDenial?: (user: SafeUser, datasetId: string, change: "remove_case" | "delete_set" | "add_case_with_scorers", target?: { fixtureId?: string }) => string | null;
   /**
    * Release gate admission — the admitted and required cases of the
-   * workflow's enforced gate when it uses one of these golden sets, for the
-   * replay job view; null otherwise.
+   * workflow's enforced gate when it uses one of the job's golden sets, and
+   * how the gate judges the job's case results, for the replay job view;
+   * null otherwise.
    */
-  releaseGateAdmission?: (workflowId: string, datasetIds: string[]) => ReleaseGateJobAdmission | null;
+  releaseGateAdmission?: (run: EvalRunView & { results: EvalCaseResult[] }) => ReleaseGateJobAdmission | null;
+  /**
+   * Release gate admission — before a delete that can take admitted cases
+   * from the workflow's enforced gate: a function that audits it once the
+   * delete is done; null when it takes none.
+   */
+  gateCasesRemoval?: (user: SafeUser, workflowId: string, target: { via: "fixture"; fixtureId: string } | { via: "golden_set"; datasetId: string }) => (() => void) | null;
 }
 
 const EVAL_RUN_ERROR_STATUS: Record<EvalRunError["code"], number> = { not_found: 404, invalid: 400, limit: 409 };
@@ -283,7 +291,9 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const dataset = access.dataset;
     const gateDenial = deps.goldenSetChangeDenial?.(user, dataset.id, "delete_set");
     if (gateDenial) return denyRunAccess(reply, { status: 403, error: gateDenial });
+    const gateCasesRemoved = dataset.workflowId ? deps.gateCasesRemoval?.(user, dataset.workflowId, { via: "golden_set", datasetId: dataset.id }) : null;
     evals.deleteDataset(dataset.id);
+    gateCasesRemoved?.();
     if (dataset.workflowId) {
       deps.audit(request, user, {
         eventType: "replay.golden_set.deleted",
@@ -402,7 +412,9 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     }
     const gateDenial = dataset ? deps.goldenSetChangeDenial?.(user, dataset.id, "remove_case", { fixtureId: fixture.id }) : null;
     if (gateDenial) return denyRunAccess(reply, { status: 403, error: gateDenial });
+    const gateCasesRemoved = dataset?.workflowId ? deps.gateCasesRemoval?.(user, dataset.workflowId, { via: "fixture", fixtureId: fixture.id }) : null;
     evals.deleteFixture(fixture.id);
+    gateCasesRemoved?.();
     return { ok: true };
   });
 
@@ -744,7 +756,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const access = runAccess.run(user, found?.kind === "replay" ? found : null, "workflow:read", "Replay job");
     if (!access.ok) return denyRunAccess(reply, access);
     const run = access.run;
-    const releaseGate = deps.releaseGateAdmission?.(run.workflowId, run.datasetIds ?? []) ?? null;
+    const releaseGate = deps.releaseGateAdmission?.(run) ?? null;
     return { run: { ...run, ...(releaseGate ? { releaseGate } : {}), results: run.results.map(({ output: _output, ...result }) => result) } };
   });
 
