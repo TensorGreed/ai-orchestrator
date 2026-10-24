@@ -28,8 +28,10 @@ export interface JunitInput {
     required: number;
     pendingIds: ReadonlySet<string>;
     requiredIds: ReadonlySet<string>;
-    /** Required cases that block a publish: failed, inconclusive (when errors count) or not run. */
-    requiredFailingIds: ReadonlySet<string>;
+    /** Required cases that block a publish: failed, inconclusive or not run. */
+    requiredFailures: ReadonlyArray<{ id: string; name: string; problem: string }>;
+    /** How the gate judges the job's case results, when the server said. */
+    verdict?: string | null;
   };
 }
 
@@ -53,11 +55,14 @@ export function buildJunit(input: JunitInput): string {
   let skipped = 0;
   let totalMs = 0;
   const gate = input.gate;
+  const requiredFailingIds = new Set((gate?.requiredFailures ?? []).map((failure) => failure.id));
+  const seen = new Set<string>();
   for (const result of run?.results ?? []) {
+    seen.add(result.fixtureId);
     const name = result.fixtureName ?? result.fixtureId;
     totalMs += result.durationMs ?? 0;
     const open = `    <testcase classname="${esc(classname)}" name="${esc(name)}" time="${seconds(result.durationMs)}"`;
-    const requiredFailing = Boolean(gate?.requiredFailingIds.has(result.fixtureId));
+    const requiredFailing = requiredFailingIds.has(result.fixtureId);
     const note = gate?.pendingIds.has(result.fixtureId) ? "pending admission, not counted by the release gate: " : "";
     if (result.status === "pass") {
       cases.push(`${open}/>`);
@@ -80,8 +85,16 @@ export function buildJunit(input: JunitInput): string {
       cases.push(`${open}>\n      <skipped message="${esc(result.status)}"/>\n    </testcase>`);
     }
   }
+  // A required case the job has no result for at all still blocks a publish: one failing test case each.
+  for (const failure of gate?.requiredFailures ?? []) {
+    if (seen.has(failure.id)) continue;
+    failures += 1;
+    cases.push(
+      `    <testcase classname="${esc(classname)}" name="${esc(failure.name)}" time="0.000">\n      <failure message="required case: it did not run" type="required_case">${esc(`required case ${failure.problem}`)}</failure>\n    </testcase>`
+    );
+  }
   const finished = run && run.status === "completed";
-  if (cases.length === 0 || (!finished && errors === 0 && failures === 0)) {
+  if (seen.size === 0 || (!finished && errors === 0 && failures === 0)) {
     // No case results, or the job stopped before every case ran: say so as a failing test.
     const why = input.message ?? run?.error ?? (run ? `the replay job is ${run.status}` : "the replay did not run");
     errors += 1;
@@ -108,7 +121,8 @@ export function buildJunit(input: JunitInput): string {
               `      <property name="gateAdmittedCases" value="${gate.admitted}"/>`,
               `      <property name="gatePendingCases" value="${gate.pending}"/>`,
               `      <property name="gateRequiredCases" value="${gate.required}"/>`,
-              `      <property name="gateRequiredFailing" value="${gate.requiredFailingIds.size}"/>`
+              `      <property name="gateRequiredFailing" value="${gate.requiredFailures.length}"/>`,
+              ...(gate.verdict ? [`      <property name="gateVerdict" value="${esc(gate.verdict)}"/>`] : [])
             ]
           : [])
       ].join("\n")

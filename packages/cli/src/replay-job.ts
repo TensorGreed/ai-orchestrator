@@ -19,7 +19,11 @@
  * also says how the gate counts its cases: admitted, pending admission (run
  * but not counted) and required, with every required case that would block
  * a publish; the counts come from the same shared function the gate judges
- * with. The exit code stays the job's own verdict.
+ * with. The server judges the job's case results as the gate does, and for
+ * a completed job the exit code follows that verdict: 1 when the gate
+ * blocks (a failing admitted or required case, the pass rate, a limit), 0
+ * when it does not (a failing pending case does not count). Whether the job
+ * may prove a release is reported on its own line.
  *
  * Every request gives up after 60 s, or what is left of --timeout if that
  * is less. Status polls (GET) are tried again twice, after 1 s and 3 s, when
@@ -40,6 +44,7 @@ import {
   summarizeReleaseGateAdmission,
   type ReleaseCaseStatus,
   type ReleaseGateAdmissionStats,
+  type ReleaseGateVerdict,
   type EvalCaseResult,
   type EvalRunView,
   type ReplayCandidateOverrides,
@@ -247,7 +252,9 @@ const caseStatus = (status: unknown): ReleaseCaseStatus => (status === "pass" ||
  * over no enforced gate's sets): repeats aggregated as the job did, through
  * the same `summarizeReleaseGateAdmission` the gate judges with.
  */
-export function gateAdmissionOf(run: JobView): (ReleaseGateAdmissionStats & { pendingIds: Set<string>; requiredIds: Set<string> }) | null {
+export function gateAdmissionOf(
+  run: JobView
+): (ReleaseGateAdmissionStats & { pendingIds: Set<string>; requiredIds: Set<string>; verdict: ReleaseGateVerdict | null; reasons: string[] }) | null {
   const gate = run.releaseGate;
   if (!isObject(gate) || !Array.isArray(gate.admittedFixtureIds) || !Array.isArray(gate.requiredFixtureIds)) return null;
   const admitted = gate.admittedFixtureIds.map(String);
@@ -262,8 +269,25 @@ export function gateAdmissionOf(run: JobView): (ReleaseGateAdmissionStats & { pe
     names[result.fixtureId] = result.fixtureName ?? result.fixtureId;
   }
   const cases = [...groups].map(([id, statuses]) => ({ id, status: aggregateReleaseRepeats(statuses, aggregate as "all" | "majority" | "any") }));
-  const stats = summarizeReleaseGateAdmission(cases, { admittedIds: admitted, requiredIds: gate.requiredFixtureIds.map(String), caseNames: names }, { errorsCountAsFailures: gate.errorsCountAsFailures !== false });
-  return { ...stats, pendingIds: new Set(pending), requiredIds: new Set(gate.requiredFixtureIds.map(String)) };
+  const requiredNames = isObject(gate.requiredCaseNames) ? gate.requiredCaseNames : {};
+  for (const id of gate.requiredFixtureIds.map(String)) names[id] ??= typeof requiredNames[id] === "string" ? String(requiredNames[id]) : id;
+  const stats = summarizeReleaseGateAdmission(cases, { admittedIds: admitted, requiredIds: gate.requiredFixtureIds.map(String), caseNames: names });
+  const verdict = gate.verdict === "passed" || gate.verdict === "blocked" || gate.verdict === "needs_approval" ? gate.verdict : null;
+  const reasons = Array.isArray(gate.reasons) ? gate.reasons.map(String) : [];
+  return { ...stats, pendingIds: new Set(pending), requiredIds: new Set(gate.requiredFixtureIds.map(String)), verdict, reasons };
+}
+
+/**
+ * The exit code: the job's own verdict, or, for a completed job over an
+ * enforced release gate's sets, the gate's verdict on its case results
+ * (1 when it blocks, else 0).
+ */
+export function jobExitCode(run: JobView): number {
+  const own = replayJobExitCode(run);
+  if (run.status !== "completed") return own;
+  const gate = gateAdmissionOf(run);
+  if (!gate?.verdict) return own;
+  return gate.verdict === "blocked" ? EXIT_FAILED : EXIT_OK;
 }
 
 export function formatJob(run: JobView, code: number): string {
@@ -289,6 +313,10 @@ export function formatJob(run: JobView, code: number): string {
       `  enforced release gate: ${gate.admitted} admitted, ${gate.pending} pending admission (they run but do not count yet), ${gate.required} required`
     );
     for (const failure of gate.requiredFailures) lines.push(`    - required case "${cleanServerText(failure.name)}" ${cleanServerText(failure.problem)}: it blocks a publish whatever the pass rate`);
+    if (gate.verdict === "blocked") {
+      lines.push("  the release gate blocks these results:");
+      for (const reason of gate.reasons) lines.push(`    - ${cleanServerText(reason)}`);
+    } else if (gate.verdict) lines.push("  the release gate accepts these results");
   }
   for (const result of run.results ?? []) {
     if (result.status === "pass") continue;
@@ -312,7 +340,19 @@ function writeJunit(args: ParsedArgs, io: CliIo, run: JobView | null, message: s
       buildJunit({
         run,
         message,
-        ...(gate ? { gate: { admitted: gate.admitted, pending: gate.pending, required: gate.required, pendingIds: gate.pendingIds, requiredIds: gate.requiredIds, requiredFailingIds: new Set(gate.requiredFailures.map((failure) => failure.id)) } } : {})
+        ...(gate
+          ? {
+              gate: {
+                admitted: gate.admitted,
+                pending: gate.pending,
+                required: gate.required,
+                pendingIds: gate.pendingIds,
+                requiredIds: gate.requiredIds,
+                requiredFailures: gate.requiredFailures,
+                verdict: gate.verdict
+              }
+            }
+          : {})
       })
     );
   } catch (error) {
@@ -362,7 +402,7 @@ async function waitForJob(target: ApiTarget, io: CliIo, first: JobView, deadline
 
 /** Prints the verdict of a finished job, writes the JUnit file and returns the exit code. */
 function conclude(args: ParsedArgs, io: CliIo, run: JobView): number {
-  const code = replayJobExitCode(run);
+  const code = jobExitCode(run);
   if (args.booleans.has("json")) io.stdout.write(`${JSON.stringify({ ...run, exitCode: code }, null, 2)}\n`);
   else write(io.stdout, formatJob(run, code));
   writeJunit(args, io, run, null);

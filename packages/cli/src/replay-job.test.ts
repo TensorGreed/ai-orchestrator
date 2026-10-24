@@ -153,6 +153,58 @@ describe("an enforced release gate in the job output", () => {
     expect(fake.out()).toContain("error Easy (pending admission, not counted): cassette miss");
   });
 
+  it("follows the gate's verdict on the case results when the server judged them: a failing pending case does not fail the run", async () => {
+    const passing = { ...gated(), releaseGate: { ...gated().releaseGate, requiredFixtureIds: [], verdict: "passed", reasons: [] } };
+    const fake = io([{ status: 200, body: { run: passing } }]);
+    expect(await main(["replay", "status", "run_1"], fake.cli)).toBe(EXIT_OK);
+    expect(fake.out()).toContain("the release gate accepts these results");
+  });
+
+  it("exits 1 when the gate blocks although every case the job ran passed, and lists why", async () => {
+    const allPass = results.slice(1, 2);
+    const blocked = {
+      ...job("completed", { pass: 1 }, allPass),
+      releaseGate: {
+        enforced: true,
+        admittedFixtureIds: ["f1", "f2"],
+        pendingFixtureIds: [],
+        requiredFixtureIds: ["f1"],
+        requiredCaseNames: { f1: "Refund" },
+        errorsCountAsFailures: false,
+        verdict: "blocked",
+        reasons: ['Required case "Refund" did not run: a required case must pass whatever the pass rate.']
+      }
+    };
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-junit-"));
+    try {
+      const file = path.join(dir, "out.xml");
+      const fake = io([{ status: 200, body: { run: blocked } }]);
+      expect(await main(["replay", "status", "run_1", "--junit", file], fake.cli)).toBe(EXIT_FAILED);
+      expect(fake.out()).toContain('required case "Refund" did not run');
+      expect(fake.out()).toContain("the release gate blocks these results:");
+      const xml = fs.readFileSync(file, "utf8");
+      // The required case has no result at all: it still shows as a failing test case.
+      expect(xml).toContain('<testcase classname="l2m.replay.wf" name="Refund" time="0.000">');
+      expect(xml).toContain('type="required_case">required case did not run</failure>');
+      expect(xml).toContain('<property name="gateVerdict" value="blocked"/>');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an inconclusive required case fails whatever errorsCountAsFailures says", async () => {
+    const erroring = {
+      ...job("completed", { pass: 1, error: 1 }, [{ id: "r1", fixtureId: "f1", fixtureName: "Refund", status: "error", error: "model tape miss" }, results[1]!]),
+      releaseGate: { enforced: true, admittedFixtureIds: ["f1", "f2"], pendingFixtureIds: [], requiredFixtureIds: ["f1"], errorsCountAsFailures: false }
+    };
+    const fake = io([{ status: 200, body: { run: erroring } }]);
+    await main(["replay", "status", "run_1"], fake.cli);
+    expect(fake.out()).toContain('required case "Refund" was inconclusive: it blocks a publish whatever the pass rate');
+  });
+
   it("says nothing about a gate when the job ran over no enforced gate's sets", async () => {
     const fake = io([{ status: 200, body: { run: job("completed", { pass: 1, fail: 1 }, results.slice(0, 2)) } }]);
     await main(["replay", "status", "run_1"], fake.cli);

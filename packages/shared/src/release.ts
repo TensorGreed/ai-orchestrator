@@ -114,7 +114,13 @@ export const releaseGateSettingsSchema = z
     /** Every publish waits for an approver, even when the replay job passed. */
     requireApproval: z.boolean().default(false),
     /** Who may approve; also what makes "request approval" possible for a blocked publish. */
-    approvers: releaseApproversSchema.nullable().default(null)
+    approvers: releaseApproversSchema.nullable().default(null),
+    /**
+     * Admins, on an enforced gate: admit the cases of the golden sets this
+     * save adds. Not stored. Without it those cases wait for admission, as
+     * does every case added to a set after the gate was enforced.
+     */
+    admitAddedSetCases: z.boolean().optional()
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -131,7 +137,7 @@ export const releaseGateSettingsSchema = z
 export type ReleaseGateSettingsInput = z.input<typeof releaseGateSettingsSchema>;
 export type ReleaseGateSettings = z.output<typeof releaseGateSettingsSchema>;
 
-export interface ReleaseGateView extends Omit<ReleaseGateSettings, "enforced"> {
+export interface ReleaseGateView extends Omit<ReleaseGateSettings, "enforced" | "admitAddedSetCases"> {
   workflowId: string;
   enforced: boolean;
   updatedAt: string | null;
@@ -392,9 +398,11 @@ export function judgeReleaseGate(
     now?: Date;
     /**
      * Enforced gates: the admitted cases and the required ones. Cases not
-     * admitted run and are reported but count toward nothing; a required case
-     * that fails (or errors, when errors count as failures) blocks whatever
-     * the pass rate. Without it every case counts, as before admission existed.
+     * admitted run and are reported but count toward nothing; an admitted
+     * required case that does not pass (it failed, was inconclusive, was
+     * skipped or did not run) blocks whatever the pass rate, whether or not
+     * errors count as failures. Without it every case counts, as before
+     * admission existed.
      */
     admission?: ReleaseGateAdmission | null;
   }
@@ -450,7 +458,7 @@ export function judgeReleaseGate(
   const admission = options.admission ?? null;
   const { counted, pending } = splitAdmittedCases(judged.cases, admission);
   const stats: ReleaseGateStats = statsOf({ ...judged, cases: counted }, policy, now);
-  if (admission) stats.admission = summarizeReleaseGateAdmission(judged.cases, admission, policy);
+  if (admission) stats.admission = summarizeReleaseGateAdmission(judged.cases, admission);
   const waiting = pending.filter((entry) => entry.status !== "skipped").length;
   if (stats.cases < policy.minCases) {
     const more = waiting > 0 ? ` (${waiting} more ${waiting === 1 ? "is" : "are"} waiting for admission and do not count yet)` : "";
@@ -500,12 +508,12 @@ export function judgeReleaseGate(
  * a gate approver approves an `admit_cases` request. A pending case runs and
  * is reported, but counts toward nothing: not the pass rate, not minCases,
  * not regressions or any other limit. Required cases (admins only) must pass
- * whatever the pass rate.
+ * whatever the pass rate; only an admitted case can be required.
  */
 export interface ReleaseGateAdmission {
   /** Case (fixture) ids the gate counts. */
   admittedIds: readonly string[];
-  /** Case ids that must pass on every publish. */
+  /** Case ids that must pass on every publish (ids that are not admitted are ignored). */
   requiredIds?: readonly string[];
   /** Case names, for reasons people read. */
   caseNames?: Readonly<Record<string, string>>;
@@ -545,28 +553,21 @@ export function splitAdmittedCases<T extends { id: string }>(cases: readonly T[]
  * Admitted, pending and required counts over a job's cases (one entry per
  * case, repeats already aggregated), and the required cases that block.
  * Shared by the gate judge and the CLI, so both report the same numbers.
- * A required case blocks when it failed, when it was inconclusive and errors
- * count as failures, or when the job did not run it.
+ * A required case must pass: it blocks when it failed, when it was
+ * inconclusive (whatever `errorsCountAsFailures` says: a candidate can make
+ * a case inconclusive on its own, by a new MCP call or a model-tape miss),
+ * or when the job skipped it or did not run it. Only admitted cases can be
+ * required; a required mark on a pending case has no effect.
  */
-export function summarizeReleaseGateAdmission(
-  cases: ReadonlyArray<{ id: string; status: ReleaseCaseStatus }>,
-  admission: ReleaseGateAdmission,
-  policy: Pick<ReleaseGatePolicy, "errorsCountAsFailures">
-): ReleaseGateAdmissionStats {
+export function summarizeReleaseGateAdmission(cases: ReadonlyArray<{ id: string; status: ReleaseCaseStatus }>, admission: ReleaseGateAdmission): ReleaseGateAdmissionStats {
   const { counted, pending } = splitAdmittedCases(cases, admission);
   const byId = new Map(cases.map((entry) => [entry.id, entry]));
-  const requiredIds = [...new Set(admission.requiredIds ?? [])];
+  const admitted = new Set(admission.admittedIds);
+  const requiredIds = [...new Set(admission.requiredIds ?? [])].filter((id) => admitted.has(id));
   const requiredFailures: ReleaseGateRequiredFailure[] = [];
   for (const id of requiredIds) {
     const entry = byId.get(id);
-    const problem =
-      !entry || entry.status === "skipped"
-        ? "did not run"
-        : entry.status === "fail"
-          ? "failed"
-          : entry.status === "error" && policy.errorsCountAsFailures
-            ? "was inconclusive"
-            : null;
+    const problem = !entry || entry.status === "skipped" ? "did not run" : entry.status === "fail" ? "failed" : entry.status === "error" ? "was inconclusive" : null;
     if (problem) requiredFailures.push({ id, name: admission.caseNames?.[id] ?? id, problem });
   }
   return {
@@ -613,7 +614,17 @@ export interface ReleaseGateJobAdmission {
   /** Cases of the gate's sets waiting for admission: they run but do not count. */
   pendingFixtureIds: string[];
   requiredFixtureIds: string[];
+  /** Names of the required cases, so one the job has no result for can still be named. */
+  requiredCaseNames?: Record<string, string>;
   errorsCountAsFailures: boolean;
+  /**
+   * How the gate judges this job's case results under its current policy and
+   * admission (pass rate, minCases, regressions, required cases, scorers and
+   * limits). Whether the job may prove a release (eligibility, hash, sets) is
+   * reported on its own. The CLI's exit code follows it: 1 when it blocks.
+   */
+  verdict?: ReleaseGateVerdict;
+  reasons?: string[];
 }
 
 /** One case of an enforced gate's golden sets, as the gate's Cases panel shows it. */
