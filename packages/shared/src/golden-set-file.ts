@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AUDIT_SIGNING_ALGORITHM, canonicalJsonBytes } from "./audit-manifest";
 import { evalScorerListSchema } from "./evals";
+import { dataClassNameSchema, dataLabelsSchema } from "./data-labels";
 
 /**
  * Phase 15.5 - the golden-set file: a golden set as one JSON document that
@@ -71,7 +72,17 @@ const runFactsSchema = z.object({
   error: nullableString,
   output: z.unknown(),
   nodes: z
-    .array(z.object({ nodeId: z.string(), nodeType: z.string(), status: z.string(), durationMs: nullableNumber, errorCategory: nullableString }))
+    .array(
+      z.object({
+        nodeId: z.string(),
+        nodeType: z.string(),
+        status: z.string(),
+        durationMs: nullableNumber,
+        errorCategory: nullableString,
+        /** Data classes and provenance a capture's masking pass labelled the node with. */
+        labels: dataLabelsSchema.optional()
+      })
+    )
     .max(10_000),
   toolCalls: z
     .array(
@@ -154,7 +165,9 @@ export const goldenSetFileRecordingSchema = z.object({
   memorySeed: z.unknown().optional(),
   /** Some node outputs were cut to fit the recording size limit. */
   truncated: z.boolean().optional(),
-  scrubbed: z.object({ input: z.boolean(), output: z.boolean(), nodes: z.array(z.string()) }).optional()
+  scrubbed: z.object({ input: z.boolean(), output: z.boolean(), nodes: z.array(z.string()) }).optional(),
+  /** A run captured from production: whether its personal data was masked, and the classes masked. Class names only, never values. */
+  capture: z.object({ masked: z.boolean(), dataClasses: z.array(dataClassNameSchema).max(100) }).optional()
 });
 export type GoldenSetFileRecording = z.infer<typeof goldenSetFileRecordingSchema>;
 

@@ -33,6 +33,7 @@ import {
   type McpCassetteEntry,
   type ReplayRecordedNode,
   type ReplayRecordedRun,
+  type ReplayCaptureInfo,
   type ReplayRecordingCapabilities,
   type ReplayRecordingDetail,
   type ReplayRecordingSummary,
@@ -45,6 +46,9 @@ import {
 import { canonicalJson as cassetteCanonical, hashCassetteArgs, parseCassette, scrubForCassette } from "@ai-orchestrator/mcp-sdk";
 import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import { SecretScrubber } from "./audit-scrub.js";
+import { runSteps, runStepsAsync } from "@ai-orchestrator/guard-sdk";
+import type { ProvenanceLabel } from "@ai-orchestrator/shared";
+import { maskCapturedRunSteps, withNodeLabels, type CaptureMaskOptions } from "./capture-masking.js";
 import { sanitizeConfig, sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import type { SecretService } from "./secret-service.js";
@@ -95,6 +99,23 @@ function byteLength(text: string): number {
 
 function jsonBytes(value: unknown): number {
   return byteLength(JSON.stringify(value ?? null) ?? "null");
+}
+
+/** Phase 15.6 — how `create` saves a production capture. */
+export interface CaptureOptions {
+  /** The run's own recording (MCP cassette with its model tape and memory seed); null when nothing was recorded. */
+  cassette: McpCassette | null;
+  /** Mask personal data with keyed surrogates; null when the workflow's capture masking is off. */
+  mask: CaptureMaskOptions | null;
+  rate: number;
+  publishedVersion: number | null;
+  capturedAt: string;
+  /** `api_key`: an API key started the run (server-set where the run started; stored on the capture info). */
+  source?: "api_key";
+  /** Where the run's input came from (labels); decided by the server where the run started. */
+  inputProvenance: ProvenanceLabel;
+  /** Called once the candidate is built and checked, right before it is saved (eviction makes room here). Throw to drop it. */
+  beforeSave?: (bytes: number) => void;
 }
 
 /** A golden run from a file, checked and scrubbed, ready to be saved (`ReplayRecordingService.saveImport`). */
@@ -209,8 +230,30 @@ export class ReplayRecordingService {
     return scrubber.text(JSON.stringify(value) ?? "null");
   }
 
-  /** Saves a finished execution as a golden run. */
+  /**
+   * Saves a finished execution as a golden run. Phase 15.6: with `capture`,
+   * it is saved as a *candidate* (a production capture): the cassette comes
+   * from the run's own recorder instead of the cassette table (a capture never
+   * stores an unmasked cassette there), the golden-run limits do not apply
+   * (candidates have their own cap, enforced by the caller), and with
+   * `capture.mask` every part is masked with keyed surrogates after the
+   * secret scrub; tape and cassette match keys are then taken again over the
+   * masked content, so a `models: "replay"` replay still finds its answers.
+   */
   create(input: { executionId: string; name: string; notes?: string | null }, createdBy: string | null): ReplayRecordingSummary {
+    return runSteps(this.build(input, createdBy));
+  }
+
+  /**
+   * Phase 15.6 — saves a finished production run as a capture candidate (see
+   * `create`). Masking runs in chunks, giving the event loop a turn between
+   * them, so a large capture never stalls production requests.
+   */
+  createCapture(input: { executionId: string; name: string }, capture: CaptureOptions): Promise<ReplayRecordingSummary> {
+    return runStepsAsync(this.build(input, null, capture));
+  }
+
+  private *build(input: { executionId: string; name: string; notes?: string | null }, createdBy: string | null, capture?: CaptureOptions): Generator<void, ReplayRecordingSummary, void> {
     const store = this.options.store;
     const history = store.getExecutionHistory(input.executionId);
     if (!history) throw new ReplayRecordingError("Execution not found", "not_found");
@@ -220,16 +263,20 @@ export class ReplayRecordingService {
     if (history.triggerType === "replay") {
       throw new ReplayRecordingError("A replay cannot be saved as a golden run; save the run it replayed instead.", "not_allowed");
     }
-    // One golden run per execution: a second copy of the same run adds storage and nothing to compare.
-    const existing = store.findReplayRecordingIdForExecution(history.id);
-    if (existing) {
-      throw new ReplayRecordingError(`This run is already saved as golden run ${existing}. Open that one, or delete it before saving the run again.`, "duplicate");
-    }
-    if (store.countReplayRecordingsForWorkflow(history.workflowId) >= this.options.maxPerWorkflow) {
-      throw new ReplayRecordingError(
-        `This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before saving more.`,
-        "limit"
-      );
+    if (!capture) {
+      // One golden run per execution: a second copy of the same run adds storage and nothing to compare.
+      const existing = store.findReplayRecordingIdForExecution(history.id);
+      if (existing) {
+        throw new ReplayRecordingError(`This run is already saved as golden run ${existing}. Open that one, or delete it before saving the run again.`, "duplicate");
+      }
+      if (store.countReplayRecordingsForWorkflow(history.workflowId) >= this.options.maxPerWorkflow) {
+        throw new ReplayRecordingError(
+          `This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before saving more.`,
+          "limit"
+        );
+      }
+    } else if (store.findReplayRecordingIdForExecution(history.id, "candidate")) {
+      throw new ReplayRecordingError("This run was already captured.", "duplicate");
     }
 
     const current = store.getWorkflow(history.workflowId);
@@ -286,7 +333,7 @@ export class ReplayRecordingService {
     });
 
     // Cheap size checks on the raw copy first: the clone, scrub and serialise passes below cost time on the event loop.
-    const cassetteRecord = store.getMcpCassetteForExecution(history.id);
+    const cassetteRecord = capture ? (capture.cassette ? { cassette: capture.cassette } : null) : store.getMcpCassetteForExecution(history.id);
     const rawFixed = jsonBytes(facts) + (history.input === undefined || history.input === null ? 0 : jsonBytes(history.input)) + jsonBytes(captured);
     const rawNodes = jsonBytes(nodes);
     const rawCassette = cassetteRecord ? jsonBytes(cassetteRecord.cassette) : 0;
@@ -295,12 +342,12 @@ export class ReplayRecordingService {
     }
     // Node outputs that do not fit are cut, so only an untruncated run counts them in its estimate.
     const estimate = (rawFixed + (rawFixed + rawNodes <= this.options.maxBytes ? rawNodes : 0) + rawCassette) / SCRUB_SHRINK_ALLOWANCE;
-    this.checkBudgets(history.workflowId, Math.ceil(estimate), true);
+    if (!capture) this.checkBudgets(history.workflowId, Math.ceil(estimate), true);
 
     const scrubber = this.scrubber();
-    const scrubbedNodes = this.scrubValue(nodes, scrubber);
-    const scrubbedFacts = this.scrubFacts(facts, scrubber);
-    const scrubbedInput = history.input === undefined || history.input === null ? null : this.scrubValue(history.input, scrubber);
+    let scrubbedNodes = this.scrubValue(nodes, scrubber);
+    let scrubbedFacts = this.scrubFacts(facts, scrubber);
+    let scrubbedInput = history.input === undefined || history.input === null ? null : this.scrubValue(history.input, scrubber);
     // Where scrubbing changed what the replay will feed the candidate (or compare against), so a replay can say so.
     const altered = (before: unknown, after: unknown) => canonicalJson(before ?? null) !== canonicalJson(after ?? null);
     const scrubbed: ReplayScrubbedValues = {
@@ -314,11 +361,44 @@ export class ReplayRecordingService {
     };
     const workflowJson = this.serialise(scrubber.tree(captured), scrubber);
 
-    const inputJson = scrubbedInput === null ? null : this.serialise(scrubbedInput, scrubber);
-    const factsJson = this.serialise(scrubbedFacts, scrubber);
     // Phase 15.3 — the model tape and memory seed travel in the cassette row; the golden run keeps them apart.
     const { models: rawTape, memorySeed: rawSeed, ...mcpOnly } = cassetteRecord?.cassette ?? ({} as Partial<McpCassette>);
-    const cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(mcpOnly) as McpCassette) : null;
+    let cassette: McpCassette | null = cassetteRecord ? (scrubber.tree(mcpOnly) as McpCassette) : null;
+    let modelTape: ModelTape | null = rawTape ? (scrubber.tree(rawTape) as ModelTape) : null;
+    let memorySeed: ModelMemorySeed | null = rawSeed ? (scrubber.tree(rawSeed) as ModelMemorySeed) : null;
+
+    // Phase 15.6 — a capture is masked after the secret scrub, across every part at once.
+    let captureInfo: ReplayCaptureInfo | undefined;
+    if (capture) {
+      const masked = capture.mask
+        ? yield* maskCapturedRunSteps(
+            { input: scrubbedInput, nodes: scrubbedNodes, facts: scrubbedFacts, cassette, modelTape, memorySeed },
+            { ...capture.mask, keepLiteralsFrom: JSON.parse(workflowJson) as unknown }
+          )
+        : null;
+      if (masked) {
+        scrubbedInput = (masked.input ?? null) as typeof scrubbedInput;
+        scrubbedNodes = masked.nodes;
+        scrubbedFacts = masked.facts;
+        cassette = masked.cassette;
+        modelTape = masked.modelTape;
+        memorySeed = masked.memorySeed;
+      }
+      scrubbedFacts = withNodeLabels(scrubbedFacts, masked?.report ?? null, capture.inputProvenance);
+      captureInfo = {
+        rate: capture.rate,
+        masked: Boolean(masked),
+        dataClasses: masked ? Object.keys(masked.report.values).sort() : [],
+        values: masked ? { ...masked.report.values } : {},
+        notDetectableAfterMasking: masked ? masked.report.notDetectableAfterMasking : [],
+        keptFromWorkflow: masked ? masked.report.keptFromWorkflow : 0,
+        publishedVersion: capture.publishedVersion,
+        ...(capture.source === "api_key" ? { source: "api_key" as const } : {})
+      };
+    }
+
+    const inputJson = scrubbedInput === null ? null : this.serialise(scrubbedInput, scrubber);
+    const factsJson = this.serialise(scrubbedFacts, scrubber);
     const cassetteJson = cassette ? this.serialise(cassette, scrubber) : null;
     // The MCP cassette counts toward REPLAY_RECORDING_MAX_BYTES with the rest: it cannot be cut (a cut cassette
     // answers wrongly), so the node outputs give way to it, and a run whose fixed parts do not fit is refused.
@@ -346,9 +426,7 @@ export class ReplayRecordingService {
       if (fixedBytes + byteLength(nodesJson) > this.options.maxBytes) throw new ReplayRecordingError(this.tooLargeMessage(), "too_large");
     }
 
-    let modelTape: ModelTape | null = rawTape ? (scrubber.tree(rawTape) as ModelTape) : null;
     let modelTapeJson = modelTape ? this.serialise(modelTape, scrubber) : null;
-    let memorySeed: ModelMemorySeed | null = rawSeed ? (scrubber.tree(rawSeed) as ModelMemorySeed) : null;
     let memorySeedJson = memorySeed ? this.serialise(memorySeed, scrubber) : null;
     // Phase 15.3 — the tape and the seed count toward REPLAY_RECORDING_MAX_BYTES with the node outputs. What does
     // not fit is cut: the tape keeps its first calls (`truncated: true`), then the seed keeps the sessions that fit.
@@ -371,7 +449,8 @@ export class ReplayRecordingService {
       byteLength(nodesJson) +
       (modelTapeJson ? byteLength(modelTapeJson) : 0) +
       (memorySeedJson ? byteLength(memorySeedJson) : 0);
-    this.checkBudgets(history.workflowId, bytes);
+    if (!capture) this.checkBudgets(history.workflowId, bytes);
+    capture?.beforeSave?.(bytes);
 
     return store.saveReplayRecording({
       id: `rec_${randomUUID()}`,
@@ -391,12 +470,80 @@ export class ReplayRecordingService {
       mcpCassetteJson: cassetteJson,
       modelTapeJson,
       memorySeedJson,
-      capabilities: { mcp: cassette ? "cassette" : "none", models: modelTape ? "tape" : "live", memory: memorySeed ? "seeded" : "empty", workflowSource, scrubbed },
+      capabilities: {
+        mcp: cassette ? "cassette" : "none",
+        models: modelTape ? "tape" : "live",
+        memory: memorySeed ? "seeded" : "empty",
+        workflowSource,
+        scrubbed,
+        ...(captureInfo ? { capture: captureInfo } : {})
+      },
       bytes,
       truncated,
       createdAt: this.now().toISOString(),
-      createdBy
+      createdBy: capture ? null : createdBy,
+      ...(capture ? { status: "candidate" as const, capturedAt: capture.capturedAt } : {})
     });
+  }
+
+  /**
+   * Phase 15.6 — a candidate as it becomes golden: every stored part scrubbed
+   * again with the secrets the deployment holds now (one may have been added
+   * since the capture), then the per-recording size limit, the golden-run
+   * count and the storage budgets apply, as for a run saved by hand.
+   */
+  preparePromotion(record: ReplayRecordingRecord): {
+    name: string;
+    capturedWorkflowJson: string;
+    inputJson: string | null;
+    nodeOutputsJson: string;
+    factsJson: string;
+    mcpCassetteJson: string | null;
+    modelTapeJson: string | null;
+    memorySeedJson: string | null;
+    bytes: number;
+    workflowHash: string;
+  } {
+    const scrubber = this.scrubber();
+    const workflowJson = this.serialise(scrubber.tree(record.capturedWorkflow), scrubber);
+    const inputJson = record.input === null || record.input === undefined ? null : this.serialise(this.scrubValue(record.input, scrubber), scrubber);
+    const nodesJson = this.serialise(this.scrubValue(record.nodes, scrubber), scrubber);
+    const factsJson = this.serialise(this.scrubFacts(record.facts, scrubber), scrubber);
+    const cassetteJson = record.mcpCassette ? this.serialise(this.scrubCassette(record.mcpCassette, scrubber), scrubber) : null;
+    const modelTapeJson = record.modelTape
+      ? this.serialise(ReplayRecordingService.keepTapeHashes(record.modelTape, this.scrubValue(record.modelTape, scrubber)), scrubber)
+      : null;
+    const memorySeedJson = record.memorySeed ? this.serialise(this.scrubValue(record.memorySeed, scrubber), scrubber) : null;
+    const bytes =
+      byteLength(workflowJson) +
+      (inputJson ? byteLength(inputJson) : 0) +
+      byteLength(nodesJson) +
+      byteLength(factsJson) +
+      (cassetteJson ? byteLength(cassetteJson) : 0) +
+      (modelTapeJson ? byteLength(modelTapeJson) : 0) +
+      (memorySeedJson ? byteLength(memorySeedJson) : 0);
+    if (bytes > this.options.maxBytes) throw new ReplayRecordingError(`${this.tooLargeMessage()} The captured run is ${bytes} bytes.`, "too_large");
+    if (this.options.store.countReplayRecordingsForWorkflow(record.workflowId) >= this.options.maxPerWorkflow) {
+      throw new ReplayRecordingError(
+        `This workflow already has ${this.options.maxPerWorkflow} golden runs (REPLAY_RECORDINGS_MAX_PER_WORKFLOW). Delete some before promoting more.`,
+        "limit"
+      );
+    }
+    this.checkBudgets(record.workflowId, bytes);
+    // The hash binds to the workflow as it ran (the run context's hash), as for a run saved by hand.
+    const workflowHash = record.workflowHash;
+    return {
+      name: record.name,
+      capturedWorkflowJson: workflowJson,
+      inputJson,
+      nodeOutputsJson: nodesJson,
+      factsJson,
+      mcpCassetteJson: cassetteJson,
+      modelTapeJson,
+      memorySeedJson,
+      bytes,
+      workflowHash
+    };
   }
 
   /** The longest prefix of the tape (in call order) that fits in `maxBytes`, marked truncated. */
@@ -485,7 +632,7 @@ export class ReplayRecordingService {
    * entry by it, so a blanked hash would make the whole tape unusable. A
    * hash holds no secret: it is a digest of the request.
    */
-  private static keepTapeHashes(original: unknown, scrubbed: unknown): unknown {
+  static keepTapeHashes(original: unknown, scrubbed: unknown): unknown {
     const before = asRecord(original)?.entries;
     const after = asRecord(scrubbed)?.entries;
     if (!Array.isArray(before) || !Array.isArray(after)) return scrubbed;
@@ -599,7 +746,12 @@ export class ReplayRecordingService {
       ...(record.modelTape ? { modelTape: ReplayRecordingService.keepTapeHashes(record.modelTape, this.scrubForFile(record.modelTape, scrubber)) } : {}),
       ...(record.memorySeed ? { memorySeed: this.scrubForFile(record.memorySeed, scrubber) } : {}),
       truncated: record.truncated,
-      ...(record.capabilities.scrubbed ? { scrubbed: record.capabilities.scrubbed } : {})
+      ...(record.capabilities.scrubbed ? { scrubbed: record.capabilities.scrubbed } : {}),
+      // A captured run keeps its masked flag and classes, so an importer knows the values are surrogates.
+      // An imported run's masked flag is passed on only as unverified: a file never vouches for masking it did not do here.
+      ...(record.capabilities.capture
+        ? { capture: { masked: record.capabilities.capture.masked && record.capabilities.capture.maskingVerified !== false, dataClasses: [...record.capabilities.capture.dataClasses] } }
+        : {})
     };
   }
 
@@ -665,7 +817,7 @@ export class ReplayRecordingService {
       memorySeed = this.scrubForFile(parsed.data as unknown as ModelMemorySeed, scrubber);
     }
     const nodes = this.scrubForFile(recordedNodes, scrubber);
-    const facts = this.scrubFacts(stripSecretReferences(file.facts as RunFacts), scrubber);
+    const facts = untrustedFileLabels(this.scrubFacts(stripSecretReferences(file.facts as RunFacts), scrubber));
     const scrubbedInput = file.input === undefined || file.input === null ? null : this.scrubForFile(file.input, scrubber);
     const altered = (before: unknown, after: unknown) => canonicalJson(before ?? null) !== canonicalJson(after ?? null);
     const scrubbed: ReplayScrubbedValues = {
@@ -735,7 +887,22 @@ export class ReplayRecordingService {
           origin: "imported",
           recordedAt,
           importedAt: now.toISOString(),
-          sourceWorkflowId: input.sourceWorkflowId
+          sourceWorkflowId: input.sourceWorkflowId,
+          ...(file.capture
+            ? {
+                capture: {
+                  rate: 0,
+                  // The file's word only: this server did not mask the run, so the inbox and golden-run views say "masking not verified".
+                  masked: file.capture.masked,
+                  maskingVerified: false,
+                  dataClasses: [...new Set(file.capture.dataClasses)].sort(),
+                  values: {},
+                  notDetectableAfterMasking: [],
+                  keptFromWorkflow: 0,
+                  publishedVersion: null
+                }
+              }
+            : {})
         },
         bytes,
         truncated: Boolean(file.truncated),
@@ -800,4 +967,19 @@ export class ReplayRecordingService {
   static capturedWorkflow(record: ReplayRecordingRecord): Pick<Workflow, "nodes"> {
     return { nodes: (Array.isArray(record.capturedWorkflow.nodes) ? record.capturedWorkflow.nodes : []) as Workflow["nodes"] };
   }
+}
+
+/**
+ * Phase 15.6 — labels read from an imported golden-set file are the file's
+ * claim, not a scan made here: they are marked `source: "file"`, and
+ * `trusted` provenance is dropped (only this server's scheduler earns it).
+ */
+export function untrustedFileLabels(facts: RunFacts): RunFacts {
+  if (!facts.nodes.some((node) => node.labels)) return facts;
+  return {
+    ...facts,
+    nodes: facts.nodes.map((node) =>
+      node.labels ? { ...node, labels: { ...node.labels, provenance: node.labels.provenance.filter((label) => label !== "trusted"), source: "file" as const } } : node
+    )
+  };
 }

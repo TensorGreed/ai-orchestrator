@@ -1,6 +1,7 @@
 import { createAesGcmProvider } from "./aes-gcm";
 import { createKeyedHashProvider } from "./keyed-hash";
 import { createMaskProvider } from "./mask";
+import { createSurrogateProvider } from "./surrogate";
 import { ProtectionRegistry } from "./registry";
 import { createTokenVaultProvider, InMemoryTokenVaultStorage, type TokenVaultStorage } from "./token-vault";
 import type { KeyResolver } from "./types";
@@ -11,6 +12,7 @@ export * from "./mask";
 export * from "./keyed-hash";
 export * from "./aes-gcm";
 export * from "./token-vault";
+export * from "./surrogate";
 
 export interface DefaultProtectionOptions {
   /** Key material for keyed hashing, encryption and deterministic tokens. Without it only `mask` and random tokens work. */
@@ -26,6 +28,7 @@ export function createDefaultProtectionRegistry(options: DefaultProtectionOption
   registry.register(createMaskProvider());
   registry.register(createKeyedHashProvider({ keys, defaultKeyId: options.defaultKeyId }));
   registry.register(createAesGcmProvider({ keys, defaultKeyId: options.defaultKeyId }));
+  registry.register(createSurrogateProvider({ keys, defaultKeyId: options.defaultKeyId }));
   registry.register(createTokenVaultProvider({ storage: options.vault ?? new InMemoryTokenVaultStorage(), keys, defaultKeyId: options.defaultKeyId }));
   return registry;
 }

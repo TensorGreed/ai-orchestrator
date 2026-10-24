@@ -1,4 +1,12 @@
 import type {
+  ReplayCapturePromoteOutcome,
+  ReplayCaptureSettingsUpdate,
+  ReplayCaptureSettingsView,
+  ReplayCaptureView,
+  ReplayFindSubjectDeleteResult,
+  ReplayFindSubjectMatch,
+  ReplayFindSubjectQuery,
+  ReplayFindSubjectResult,
   ApprovalRequestView,
   ReleaseApprovalRequestView,
   ReleaseGateSettingsInput,
@@ -3857,4 +3865,63 @@ export async function decideReleaseRequest(requestId: string, decision: "approve
     `/api/approvals/${encodeURIComponent(requestId)}/${decision}`,
     { method: "POST", body: JSON.stringify(reason ? { reason } : {}) }
   );
+}
+
+// --- Phase 15.6: production capture ---------------------------------------------------
+
+export type { ReplayCapturePromoteOutcome, ReplayCaptureSettingsUpdate, ReplayCaptureSettingsView, ReplayCaptureView };
+export type { ReplayCaptureStatus } from "@ai-orchestrator/shared";
+
+const capturePath = (workflowId: string, leaf: "replay-capture" | "replay-captures") => `/api/workflows/${encodeURIComponent(workflowId)}/${leaf}`;
+
+export async function fetchReplayCaptureSettings(workflowId: string) {
+  return apiRequest<{ settings: ReplayCaptureSettingsView }>(capturePath(workflowId, "replay-capture"));
+}
+
+export async function saveReplayCaptureSettings(workflowId: string, settings: ReplayCaptureSettingsUpdate) {
+  return apiRequest<{ settings: ReplayCaptureSettingsView }>(capturePath(workflowId, "replay-capture"), {
+    method: "PUT",
+    body: JSON.stringify(settings)
+  });
+}
+
+export async function fetchReplayCaptures(
+  workflowId: string,
+  filter: { runStatus?: string; trigger?: string; from?: string; to?: string; limit?: number; offset?: number } = {}
+) {
+  const params = new URLSearchParams();
+  if (filter.runStatus) params.set("runStatus", filter.runStatus);
+  if (filter.trigger) params.set("trigger", filter.trigger);
+  if (filter.from) params.set("from", filter.from);
+  if (filter.to) params.set("to", filter.to);
+  if (filter.limit) params.set("limit", String(filter.limit));
+  if (filter.offset) params.set("offset", String(filter.offset));
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiRequest<{ items: ReplayCaptureView[]; total: number }>(`${capturePath(workflowId, "replay-captures")}${q}`);
+}
+
+export async function promoteReplayCaptures(ids: string[], datasetId?: string) {
+  return apiRequest<{ results: ReplayCapturePromoteOutcome[]; promoted: number }>("/api/replay/captures/promote", {
+    method: "POST",
+    body: JSON.stringify({ ids, ...(datasetId ? { datasetId } : {}) })
+  });
+}
+
+export type { ReplayFindSubjectDeleteResult, ReplayFindSubjectMatch, ReplayFindSubjectQuery, ReplayFindSubjectResult } from "@ai-orchestrator/shared";
+
+/** Admins: where a value is stored (raw or as its surrogate). Nothing is deleted. */
+export async function findReplaySubject(query: ReplayFindSubjectQuery) {
+  return apiRequest<ReplayFindSubjectResult>("/api/replay/recordings/find-subject", { method: "POST", body: JSON.stringify(query) });
+}
+
+/** Admins: delete rows a search returned; a possible match is deleted only with `confirmPossible`. */
+export async function deleteReplaySubject(query: ReplayFindSubjectQuery, targets: Array<{ kind: ReplayFindSubjectMatch["kind"]; id: string; confirmPossible?: true }>) {
+  return apiRequest<ReplayFindSubjectDeleteResult>("/api/replay/recordings/find-subject/delete", { method: "POST", body: JSON.stringify({ ...query, targets }) });
+}
+
+export async function discardReplayCaptures(ids: string[]) {
+  return apiRequest<{ results: Array<{ id: string; ok: boolean; error?: string }>; discarded: number }>("/api/replay/captures/discard", {
+    method: "POST",
+    body: JSON.stringify({ ids })
+  });
 }

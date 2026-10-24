@@ -48,6 +48,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { candidateRefusal } from "./services/candidate-policy.js";
 import { z } from "zod";
 import {
   DEFAULT_PROJECT_ID,
@@ -348,6 +349,12 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     if (!recording || recording.workflowId !== dataset.workflowId) {
       reply.code(404);
       return { error: "Golden run not found in this workflow" };
+    }
+    // Phase 15.6 — a captured run joins a golden set by being promoted (which re-scrubs it and checks the limits).
+    const refusal = candidateRefusal(recording);
+    if (refusal) {
+      reply.code(409);
+      return { error: refusal };
     }
     if (store.findEvalFixtureByRecording(dataset.id, recording.id)) {
       reply.code(409);

@@ -14,6 +14,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { candidateRefusal } from "./services/candidate-policy.js";
 import { replayRecordingCreateSchema, replayRunRequestSchema } from "@ai-orchestrator/shared";
 import type { SqliteStore } from "./db/database.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
@@ -94,11 +95,12 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     const paging = { limit: Number.isFinite(limit) ? limit : 50, offset: Number.isFinite(offset) ? offset : 0 };
     // Admins also see golden runs of a workflow id that is gone; everyone else only readable workflows.
     const readable = runAccess.readableWorkflowIds(user);
+    // Phase 15.6 — golden runs only; captured candidates are listed by the inbox.
     if (workflowId) {
       if (readable !== null && !readable.includes(workflowId)) return { items: [], total: 0 };
-      return store.listReplayRecordings({ workflowId, ...paging });
+      return store.listReplayRecordings({ workflowId, status: "golden", ...paging });
     }
-    return store.listReplayRecordings(readable === null ? paging : { workflowIds: readable, ...paging });
+    return store.listReplayRecordings(readable === null ? { status: "golden", ...paging } : { workflowIds: readable, status: "golden", ...paging });
   });
 
   app.get<{ Params: { id: string } }>("/api/replay/recordings/:id", async (request, reply) => {
@@ -157,6 +159,11 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     }
     const access = runAccess.run(user, record, "workflow:execute", "Golden run");
     if (!access.ok) return deny(reply, access);
+    const refusal = candidateRefusal(record);
+    if (refusal) {
+      reply.code(409);
+      return { error: refusal, code: "candidate" };
+    }
     try {
       const result = await replays.replay(record, parsed.data, user);
       deps.audit(request, user, {

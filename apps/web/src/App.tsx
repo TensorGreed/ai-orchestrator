@@ -5325,6 +5325,10 @@ function StudioApp() {
               activeProjectId={activeProjectId}
               role={authUser.role}
               onOpenSettings={() => setActiveMode("settings")}
+              onOpenRun={(executionId) => {
+                setActiveMode("executions");
+                if (!expandedExecutionIds.includes(executionId)) void toggleExecutionRow(executionId);
+              }}
             />
           )}
 

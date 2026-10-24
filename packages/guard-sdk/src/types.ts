@@ -1,4 +1,5 @@
-import type { McpPolicyRole, McpToolAnnotations } from "@ai-orchestrator/shared";
+import type { McpPolicyRole, McpToolAnnotations, ProvenanceLabel } from "@ai-orchestrator/shared";
+import { PROVENANCE_LABELS as SHARED_PROVENANCE_LABELS } from "@ai-orchestrator/shared";
 
 /**
  * Phase 12.1 — core types of the guard engine. The engine is a library: it
@@ -17,10 +18,10 @@ export const GUARD_CHANNELS: readonly GuardChannel[] = [
   "final_output"
 ];
 
-/** Where the content came from. Policies key on these labels, not only on patterns. */
-export type ProvenanceLabel = "trusted" | "user" | "untrusted_external" | "sensitive";
+/** Where the content came from. Policies key on these labels, not only on patterns. The list lives in `@ai-orchestrator/shared` (data-labels.ts). */
+export type { ProvenanceLabel };
 
-export const PROVENANCE_LABELS: readonly ProvenanceLabel[] = ["trusted", "user", "untrusted_external", "sensitive"];
+export const PROVENANCE_LABELS: readonly ProvenanceLabel[] = SHARED_PROVENANCE_LABELS;
 
 /** Latency tiers, cheapest first. Evaluation runs them in this order. */
 export type DetectorTier = "rule" | "parser" | "classifier" | "judge";

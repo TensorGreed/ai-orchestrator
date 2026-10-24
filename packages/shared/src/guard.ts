@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { secretReferenceSchema } from "./schemas";
+import { PROVENANCE_LABELS } from "./data-labels";
 
 /**
  * Phase 12.1 — the workflow contract for L2M Guard: the `guard` DAG node,
@@ -32,7 +33,8 @@ export type GuardChannelValue = (typeof GUARD_CHANNEL_VALUES)[number];
 export const GUARD_ACTION_VALUES = ["allow", "block", "redact", "mask", "protect", "transform", "require_approval", "review"] as const;
 export type GuardActionValue = (typeof GUARD_ACTION_VALUES)[number];
 
-export const GUARD_PROVENANCE_VALUES = ["trusted", "user", "untrusted_external", "sensitive"] as const;
+/** Phase 15.6: the list lives in data-labels.ts. */
+export const GUARD_PROVENANCE_VALUES = PROVENANCE_LABELS;
 
 export const PROTECTION_PROVIDER_IDS = ["mask", "keyed_hash", "aes_gcm", "token_vault"] as const;
 export type ProtectionProviderIdValue = (typeof PROTECTION_PROVIDER_IDS)[number];

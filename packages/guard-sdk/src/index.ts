@@ -33,6 +33,8 @@ export * from "./detectors/egress-guard";
 export * from "./detectors/argument-validation";
 export * from "./protection/index";
 export * from "./wiring";
+export * from "./capture-mask";
+export * from "./phone";
 
 export interface DefaultGuardRegistryOptions {
   /** DNS resolver for the egress guard. Default: never resolves, so only literal addresses are judged and every hostname is unresolved. */

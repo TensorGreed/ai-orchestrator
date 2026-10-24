@@ -8,7 +8,7 @@ Everything stays on your deployment. Replays use the deployment's own providers 
 
 On the **Evaluations** page, **Golden sets** lists the sets of the workflows you can read. To build one:
 
-1. Save the runs you care about as golden runs on the **Runs** page (**Save as golden**).
+1. Save the runs you care about as golden runs on the **Runs** page (**Save as golden**), or turn on [production capture](./production-capture.md) and promote sampled production runs from the **Captured runs** inbox.
 2. Create a golden set for the workflow.
 3. Add golden runs of that workflow to the set. Each becomes a case: its recorded input is the case input, and its recorded output is what the case is compared with. A golden run can be in a set once.
 

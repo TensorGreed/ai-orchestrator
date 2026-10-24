@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Workflow, WorkflowNode, WorkflowNodeType } from "./types";
+import type { DataLabels } from "./data-labels";
 
 /**
  * Phase 15.1 — golden runs and replay: the shared contract.
@@ -248,6 +249,12 @@ export interface RunFactNode {
   status: string;
   durationMs: number | null;
   errorCategory: string | null;
+  /**
+   * Phase 15.6 — what the node's recorded content holds: the data classes a
+   * production capture's masking pass found in it (`source: "scan"`) and
+   * where it came from. Absent on runs that were not scanned.
+   */
+  labels?: DataLabels;
 }
 
 export interface RunFactToolCall {
@@ -361,6 +368,38 @@ export interface ReplayRecordingCapabilities {
   importedAt?: string;
   /** Imported runs: the workflow id the file was exported from. */
   sourceWorkflowId?: string | null;
+  /** Phase 15.6 — set on a run captured from production traffic: how it was sampled and masked. */
+  capture?: ReplayCaptureInfo;
+}
+
+/** Phase 15.6 — how a captured run was taken and masked. Counts and class names only, never values. */
+export interface ReplayCaptureInfo {
+  /** The sampling rate in force when the run started (0..1). */
+  rate: number;
+  /** Whether the masking pass ran (DLP on capture). */
+  masked: boolean;
+  /**
+   * False on a run imported from a golden-set file: the file says it was
+   * masked, but this server did not mask it, so nothing vouches for it
+   * ("imported (masking not verified)"). Absent on runs captured here.
+   */
+  maskingVerified?: boolean;
+  /** Data classes masked anywhere in the run, sorted. */
+  dataClasses: string[];
+  /** Distinct values masked, per class. */
+  values: Record<string, number>;
+  /** Masked classes the DLP scan no longer finds after masking (dictionary classes, removed secrets). */
+  notDetectableAfterMasking: string[];
+  /** Detected values left in place because the workflow definition holds them. */
+  keptFromWorkflow: number;
+  /** The published version the run ran, when the workflow has one. */
+  publishedVersion: number | null;
+  /**
+   * `api_key`: an API key started the run on the execute routes (its trigger
+   * stays `manual`). Set by the server where the run started; a golden-set
+   * import drops it.
+   */
+  source?: "api_key";
 }
 
 export interface ReplayScrubbedValues {
@@ -385,7 +424,19 @@ export interface ReplayRecordingSummary {
   truncated: boolean;
   createdAt: string;
   createdBy: string | null;
+  /**
+   * Phase 15.6 — `candidate`: captured from production and waiting in the
+   * "Captured runs" inbox; it is not a golden run until a builder promotes
+   * it, and no golden set, replay, gate or export uses it. `golden`: every
+   * golden run saved by hand, imported, or promoted.
+   */
+  status: ReplayRecordingStatus;
+  /** Phase 15.6 — when the run was captured from production (kept after promotion); null for runs saved by hand. */
+  capturedAt: string | null;
 }
+
+export const REPLAY_RECORDING_STATUSES = ["candidate", "golden"] as const;
+export type ReplayRecordingStatus = (typeof REPLAY_RECORDING_STATUSES)[number];
 
 export interface ReplayRecordingDetail extends ReplayRecordingSummary {
   input: unknown;

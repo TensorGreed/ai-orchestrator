@@ -1646,6 +1646,35 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE workflow_versions DROP COLUMN IF EXISTS pinned;
       ALTER TABLE workflows DROP COLUMN IF EXISTS published_version;
     `
+  },
+  {
+    version: 34,
+    description: "Phase 15.6 — Production capture (capture settings, candidate recordings)",
+    up: `
+      ALTER TABLE replay_recordings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'golden' CHECK (status IN ('candidate', 'golden'));
+      ALTER TABLE replay_recordings ADD COLUMN IF NOT EXISTS captured_at TIMESTAMPTZ;
+      CREATE INDEX IF NOT EXISTS idx_replay_recordings_status ON replay_recordings(workflow_id, status, captured_at DESC);
+      CREATE TABLE IF NOT EXISTS replay_capture_settings (
+        workflow_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        rate DOUBLE PRECISION NOT NULL DEFAULT 0.1,
+        max_per_day INTEGER NOT NULL DEFAULT 20,
+        only_statuses_json TEXT NOT NULL,
+        dlp INTEGER NOT NULL DEFAULT 1,
+        dlp_off_reason TEXT,
+        target_dataset_id TEXT,
+        updated_at TIMESTAMPTZ NOT NULL,
+        updated_by TEXT,
+        last_drop_outcome TEXT,
+        last_drop_at TIMESTAMPTZ
+      );
+    `,
+    down: `
+      DROP TABLE IF EXISTS replay_capture_settings;
+      DROP INDEX IF EXISTS idx_replay_recordings_status;
+      ALTER TABLE replay_recordings DROP COLUMN IF EXISTS captured_at;
+      ALTER TABLE replay_recordings DROP COLUMN IF EXISTS status;
+    `
   }
 ];
 

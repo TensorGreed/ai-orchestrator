@@ -94,6 +94,13 @@ const WORKFLOW_LOADS: LoadSite[] = [
 
   // app.ts: not a run.
   { file: "app.ts", match: "if (store.getWorkflow(id)) return true;", kind: "not_run", why: "a unique workflow id" },
+  { file: "app.ts", match: "workflowProject: (workflowId) => store.getWorkflow(workflowId)?.projectId ?? null,", kind: "not_run", why: "production capture's promote: only the workflow's project, for the auto-created golden set" },
+  {
+    file: "services/replay-capture-service.ts",
+    match: "if (!store.getExecutionHistory(input.executionId) || !store.getWorkflow(ticket.workflowId)) {",
+    kind: "not_run",
+    why: "production capture's save: only checks the workflow still exists (a capture of a deleted workflow is discarded)"
+  },
   { file: "app.ts", match: "const workflow = store.getWorkflow(summary.id);", kind: "not_run", why: "MCP server usages and the tools listing", count: 2 },
   { file: "app.ts", match: "const workflow = store.getWorkflow(item.id);", kind: "not_run", why: "session namespace owners" },
   { file: "app.ts", match: "const existing = store.getWorkflow(workflow.id);", kind: "not_run", why: "save access check" },
