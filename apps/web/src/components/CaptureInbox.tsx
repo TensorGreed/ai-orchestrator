@@ -29,6 +29,10 @@ import {
   captureStatusLabel,
   captureSummaryLine,
   captureTriggerLabel,
+  CAPTURE_PERIODS,
+  CAPTURE_TRIGGER_FILTERS,
+  capturePeriodFrom,
+  type CapturePeriod,
   dataClassLabel,
   type CaptureForm
 } from "../lib/replay-capture";
@@ -117,6 +121,8 @@ function WorkflowCapture({ workflowId, activeProjectId, canEdit, isAdmin, onOpen
   const [items, setItems] = useState<ReplayCaptureView[] | null>(null);
   const [total, setTotal] = useState(0);
   const [outcome, setOutcome] = useState<"" | ReplayCaptureStatus>("");
+  const [trigger, setTrigger] = useState<string>("");
+  const [period, setPeriod] = useState<CapturePeriod>("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [formErrors, setFormErrors] = useState<string[]>([]);
@@ -125,7 +131,13 @@ function WorkflowCapture({ workflowId, activeProjectId, canEdit, isAdmin, onOpen
 
   const loadInbox = useCallback(async () => {
     try {
-      const page = await fetchReplayCaptures(workflowId, { limit: 100, ...(outcome ? { runStatus: outcome } : {}) });
+      const from = capturePeriodFrom(period);
+      const page = await fetchReplayCaptures(workflowId, {
+        limit: 100,
+        ...(outcome ? { runStatus: outcome } : {}),
+        ...(trigger ? { trigger } : {}),
+        ...(from ? { from } : {})
+      });
       setItems(page.items);
       setTotal(page.total);
       setSelected((current) => new Set([...current].filter((id) => page.items.some((item) => item.id === id))));
@@ -133,7 +145,7 @@ function WorkflowCapture({ workflowId, activeProjectId, canEdit, isAdmin, onOpen
       setError(errorText(err, "Could not load captured runs"));
       setItems([]);
     }
-  }, [workflowId, outcome]);
+  }, [workflowId, outcome, trigger, period]);
 
   const loadSettings = useCallback(async () => {
     try {
@@ -346,6 +358,23 @@ function WorkflowCapture({ workflowId, activeProjectId, canEdit, isAdmin, onOpen
             ))}
           </select>
         </header>
+        <div className="capture-filters">
+          <select className="cfg-input" aria-label="Filter by trigger" value={trigger} onChange={(event) => setTrigger(event.target.value)}>
+            <option value="">All triggers</option>
+            {CAPTURE_TRIGGER_FILTERS.map((entry) => (
+              <option key={entry} value={entry}>
+                {captureTriggerLabel(entry)}
+              </option>
+            ))}
+          </select>
+          <select className="cfg-input" aria-label="Filter by date" value={period} onChange={(event) => setPeriod(event.target.value as CapturePeriod)}>
+            {CAPTURE_PERIODS.map((entry) => (
+              <option key={entry.value || "any"} value={entry.value}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+        </div>
         {notice && (
           <div className="approvals-notice" role="status">
             {notice}

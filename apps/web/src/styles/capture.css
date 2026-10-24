@@ -83,6 +83,18 @@
   max-width: 50%;
 }
 
+.capture-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.capture-filters .cfg-input {
+  width: auto;
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
 .capture-help {
   margin: 0;
   color: var(--fg-muted);

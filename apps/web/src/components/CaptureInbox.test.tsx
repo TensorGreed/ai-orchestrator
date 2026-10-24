@@ -135,6 +135,21 @@ describe("CaptureInbox", () => {
     await waitFor(() => expect(api.saveReplayCaptureSettings).toHaveBeenCalledWith("wf-1", { dlp: false, reason: "synthetic" }));
   });
 
+  it("filters the inbox by outcome, trigger and date", async () => {
+    vi.mocked(api.fetchReplayCaptures).mockResolvedValue({ items: [capture("a")], total: 1 });
+    render(<CaptureInbox workflows={workflows} canEdit isAdmin={false} />);
+    await screen.findByRole("list", { name: "Captured runs" });
+    await userEvent.selectOptions(screen.getByLabelText("Filter by trigger"), "api_execute");
+    await waitFor(() => expect(api.fetchReplayCaptures).toHaveBeenLastCalledWith("wf-1", { limit: 100, trigger: "api_execute" }));
+    await userEvent.selectOptions(screen.getByLabelText("Filter by outcome"), "error");
+    await userEvent.selectOptions(screen.getByLabelText("Filter by date"), "7d");
+    await waitFor(() =>
+      expect(api.fetchReplayCaptures).toHaveBeenLastCalledWith("wf-1", { limit: 100, runStatus: "error", trigger: "api_execute", from: expect.any(String) })
+    );
+    const from = vi.mocked(api.fetchReplayCaptures).mock.lastCall![1]!.from!;
+    expect(Math.abs(Date.now() - 7 * 86_400_000 - Date.parse(from))).toBeLessThan(60_000);
+  });
+
   it("is read-only for viewers", async () => {
     vi.mocked(api.fetchReplayCaptures).mockResolvedValue({ items: [capture("a")], total: 1 });
     render(<CaptureInbox workflows={workflows} canEdit={false} isAdmin={false} />);

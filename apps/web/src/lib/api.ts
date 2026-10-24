@@ -3881,10 +3881,15 @@ export async function saveReplayCaptureSettings(workflowId: string, settings: Re
   });
 }
 
-export async function fetchReplayCaptures(workflowId: string, filter: { runStatus?: string; trigger?: string; limit?: number; offset?: number } = {}) {
+export async function fetchReplayCaptures(
+  workflowId: string,
+  filter: { runStatus?: string; trigger?: string; from?: string; to?: string; limit?: number; offset?: number } = {}
+) {
   const params = new URLSearchParams();
   if (filter.runStatus) params.set("runStatus", filter.runStatus);
   if (filter.trigger) params.set("trigger", filter.trigger);
+  if (filter.from) params.set("from", filter.from);
+  if (filter.to) params.set("to", filter.to);
   if (filter.limit) params.set("limit", String(filter.limit));
   if (filter.offset) params.set("offset", String(filter.offset));
   const q = params.toString() ? `?${params.toString()}` : "";

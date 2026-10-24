@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ReplayCaptureSettingsView } from "@ai-orchestrator/shared";
-import { captureFormFrom, captureSettingsFromForm, captureSummaryLine, captureTriggerLabel, dataClassLabel, ratePercentText } from "./replay-capture";
+import { captureFormFrom, capturePeriodFrom, captureSettingsFromForm, captureSummaryLine, captureTriggerLabel, dataClassLabel, ratePercentText } from "./replay-capture";
 
 function view(overrides: Partial<ReplayCaptureSettingsView> = {}): ReplayCaptureSettingsView {
   return {
@@ -65,6 +65,11 @@ describe("capture labels", () => {
     expect(dataClassLabel("customer_id")).toBe("customer id");
     expect(captureTriggerLabel("webhook_api")).toBe("API");
     expect(captureTriggerLabel(null)).toBe("Production");
+    expect(captureTriggerLabel("api_execute")).toBe("Execute API");
+    const now = new Date("2026-10-24T12:00:00.000Z");
+    expect(capturePeriodFrom("", now)).toBeUndefined();
+    expect(capturePeriodFrom("24h", now)).toBe("2026-10-23T12:00:00.000Z");
+    expect(capturePeriodFrom("7d", now)).toBe("2026-10-17T12:00:00.000Z");
     expect(captureSummaryLine(view())).toBe("Off. Production runs are not recorded.");
     expect(captureSummaryLine(view({ enabled: true, effectiveRate: 0.1, capturedToday: 3 }))).toBe("Capturing 10% of production runs, up to 20 a day, personal data masked. 3 today.");
     expect(captureSummaryLine(view({ deployment: { enabled: false, maxRate: 1, retentionDays: 14, maxCandidates: 200 } }))).toContain("REPLAY_CAPTURE_ENABLED");

@@ -98,6 +98,8 @@ const TRIGGER_LABELS: Record<string, string> = {
   webhook: "Webhook",
   webhook_api: "API",
   webhook_api_stream: "API (stream)",
+  api_execute: "Execute API",
+  api_execute_stream: "Execute API (stream)",
   cron: "Schedule",
   schedule: "Schedule",
   chat: "Chat",
@@ -110,6 +112,24 @@ const TRIGGER_LABELS: Record<string, string> = {
   telegram_webhook: "Telegram",
   discord_webhook: "Discord"
 };
+
+/** Production triggers the inbox can filter by, in the order the filter lists them. */
+export const CAPTURE_TRIGGER_FILTERS = ["webhook", "webhook_api", "api_execute", "api_execute_stream", "cron", "chat", "form", "mcp_server", "queue", "slack_webhook", "telegram_webhook", "discord_webhook"] as const;
+
+export type CapturePeriod = "" | "24h" | "7d" | "30d";
+export const CAPTURE_PERIODS: Array<{ value: CapturePeriod; label: string }> = [
+  { value: "", label: "Any time" },
+  { value: "24h", label: "Last 24 hours" },
+  { value: "7d", label: "Last 7 days" },
+  { value: "30d", label: "Last 30 days" }
+];
+const PERIOD_MS: Record<Exclude<CapturePeriod, "">, number> = { "24h": 86_400_000, "7d": 7 * 86_400_000, "30d": 30 * 86_400_000 };
+
+/** The `from` bound (ISO) for a period, or undefined for any time. */
+export function capturePeriodFrom(period: CapturePeriod, now: Date = new Date()): string | undefined {
+  if (!period) return undefined;
+  return new Date(now.getTime() - PERIOD_MS[period]).toISOString();
+}
 
 export function captureTriggerLabel(trigger: string | null | undefined): string {
   if (!trigger) return "Production";
