@@ -282,7 +282,23 @@ export interface ReplayJobCandidate {
   releaseEligible?: boolean;
   /** Why the job is not release proof (empty when `releaseEligible`). */
   releaseIneligibleReasons?: string[];
+  /**
+   * Phase 15.6 — set on the replay jobs of a guard policy simulation: the
+   * simulation and the profile it swapped in (`version` 0 for an unsaved
+   * document). Such a job is never release proof.
+   */
+  simulation?: { id: string; profileId: string; version: number; hash: string; inline: boolean };
 }
+
+/** Phase 15.6 — why a guard policy simulation's replay job is never release proof. */
+export const GUARD_SIMULATION_RELEASE_REASON = "A guard policy simulation: it replays recent recordings under a guard profile that is not the workflow's, so it is never release proof.";
+
+/** Phase 15.6 — the dataset id a simulation's replay jobs carry (they replay recordings, not a golden set). */
+export function guardSimulationJobDatasetId(simulationId: string): string {
+  return `guard-simulation:${simulationId}`;
+}
+
+export const GUARD_SIMULATION_JOB_DATASET_PREFIX = "guard-simulation:";
 
 /**
  * Phase 15.3 — why a replay job cannot count as release proof (empty: it

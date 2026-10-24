@@ -289,6 +289,17 @@ export interface RunFactGuardVerdict {
   detectorId: string | null;
   effectiveAction: string;
   shadow: boolean;
+  /**
+   * Phase 15.6 — the finding's data class (DLP), when it has one. Absent on
+   * facts built before 15.6.
+   */
+  dataClass?: string | null;
+  /**
+   * Phase 15.6 — which verdict of the run the row belongs to (0-based, in the
+   * order verdicts were first recorded): a verdict with several findings has
+   * one row per finding. Absent on facts built before 15.6.
+   */
+  verdict?: number;
 }
 
 export interface RunFactTotals {
@@ -646,6 +657,11 @@ export interface ReplayModelTapeUsage {
   replayedCalls: number;
   /** Model calls that went to the live model (lenient misses); priced in `facts`. */
   liveCalls: number;
+  /**
+   * Phase 15.6 — model calls the tape answered with a recorded entry (a
+   * strict miss is in `replayedCalls` but not here). Absent on older jobs.
+   */
+  matchedCalls?: number;
   /** The recorded usage of the replayed calls. `costUsd` is null when none of them has a price. */
   recordedUsage: { inputTokens: number; outputTokens: number; costUsd: number | null };
 }
