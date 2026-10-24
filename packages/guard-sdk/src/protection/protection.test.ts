@@ -108,9 +108,9 @@ describe("token vault provider", () => {
 });
 
 describe("default protection registry", () => {
-  it("registers the four built-in providers and resolves by data class", () => {
+  it("registers the five built-in providers and resolves by data class", () => {
     const registry = createDefaultProtectionRegistry({ keys, defaultKeyId: "a" });
-    expect(registry.list().map((p) => p.id).sort()).toEqual(["aes_gcm", "keyed_hash", "mask", "token_vault"]);
+    expect(registry.list().map((p) => p.id).sort()).toEqual(["aes_gcm", "keyed_hash", "mask", "surrogate", "token_vault"]);
     expect(registry.resolve("mask", "email").id).toBe("mask");
     expect(() => registry.resolve("nope", "email")).toThrow(GuardProtectionError);
     registry.replace({ id: "mask", description: "", deterministic: true, reversible: false, dataClasses: ["email"], protect: async () => "x" });
