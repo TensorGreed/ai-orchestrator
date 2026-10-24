@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import type { AgentGuardCheck, AgentGuardDecision, AgentGuardHooks } from "@ai-orchestrator/agent-runtime";
 import {
@@ -78,6 +78,15 @@ export interface GuardVerdictEvent {
   toolName?: string;
   profile: GuardProfileRef;
   verdict: GuardVerdictSummary;
+  /**
+   * The check this verdict belongs to: one evaluation of the profile stack
+   * on one piece of content. Every profile's verdict of the same check
+   * carries the same `id`; `index` is the profile's position in the stack
+   * and `action` the combined action of the whole stack (what the traffic
+   * got). The stack stops at the first block, so later profiles may have no
+   * verdict.
+   */
+  check?: { id: string; index: number; action: string };
 }
 
 export interface GuardRuntimeDependencies {
@@ -254,7 +263,8 @@ export async function runGuardCheck(
     { registry, protection }
   );
   const verdicts = stack.verdicts.map((verdict, index) => ({ profile: guardProfileRef(profiles[index]!), summary: summarizeGuardVerdict(verdict) }));
-  for (const entry of verdicts) {
+  const checkId = randomUUID();
+  for (const [index, entry] of verdicts.entries()) {
     if (!scope.guard.onVerdict || !scope.executionId) continue;
     try {
       await scope.guard.onVerdict({
@@ -266,7 +276,8 @@ export async function runGuardCheck(
         channel: input.channel,
         ...(meta.toolName ? { toolName: meta.toolName } : {}),
         profile: entry.profile,
-        verdict: entry.summary
+        verdict: entry.summary,
+        check: { id: checkId, index, action: stack.action }
       });
     } catch (error) {
       // Recording a verdict must never change the verdict.

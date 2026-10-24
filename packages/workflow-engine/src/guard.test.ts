@@ -378,6 +378,26 @@ describe("agent guard port and automatic profiles", () => {
     expect(provider.calls[1]!.find((message) => message.role === "tool")!.content).toContain("withheld by the guard");
   });
 
+  it("tags every profile's verdict of one check with the same check id, its stack position and the combined action", async () => {
+    const { guard, events } = guardDeps({ enforced: "loose", stack: ["email-review"] });
+    await executeWorkflow(
+      { workflow: routedWorkflow({ profileId: "effective" }), executionId: "exec-check", webhookPayload: { user_prompt: `Write to ${EMAIL}` } },
+      deps({ guard })
+    );
+    expect(events.length).toBe(2);
+    expect(events.map((event) => event.profile.profileId)).toEqual(["loose", "email-review"]);
+    expect(events[0]!.check!.id).toBe(events[1]!.check!.id);
+    expect(events.map((event) => event.check!.index)).toEqual([0, 1]);
+    // The loose profile allowed, the second reviewed: the check's action is the stack's.
+    expect(events[0]!.verdict.action).toBe("allow");
+    expect(events.every((event) => event.check!.action === "review")).toBe(true);
+
+    // Another check gets another id.
+    const second = guardDeps({ stack: ["email-review"] });
+    await executeWorkflow({ workflow: routedWorkflow({ profileId: "effective" }), executionId: "exec-check-2", webhookPayload: { user_prompt: "hello" } }, deps({ guard: second.guard }));
+    expect(second.events[0]!.check!.id).not.toBe(events[0]!.check!.id);
+  });
+
   it("blocks a tool call whose arguments fail the guard, as a tool error the agent can reason about", async () => {
     const provider = new ToolThenAnswerProvider("docs-mcp__fetch_page", { url: "http://169.254.169.254/latest/meta-data/" });
     const { guard, events } = guardDeps({ stack: ["default"] });
