@@ -87,6 +87,8 @@ export class MetricsService {
   private executionDuration = new Histogram();
   private activeExecutionsGauge = 0;
   private nodeExecutionDuration = new Histogram([10, 50, 100, 250, 500, 1000, 5000, 10000]);
+  /** Phase 15.6 — production capture outcomes (captured, skipped_daily_limit, discarded_status, failed, ...). */
+  private replayCaptures = new Map<string, number>();
 
   private readonly startTime = Date.now();
 
@@ -123,6 +125,16 @@ export class MetricsService {
   recordNodeExecution(durationMs: number): void {
     if (!this.enabled) return;
     this.nodeExecutionDuration.observe(durationMs);
+  }
+
+  recordReplayCapture(outcome: string): void {
+    if (!this.enabled) return;
+    const key = outcome.replace(/[^a-z0-9_]/gi, "_").slice(0, 64);
+    this.replayCaptures.set(key, (this.replayCaptures.get(key) ?? 0) + 1);
+  }
+
+  replayCaptureCounts(): Record<string, number> {
+    return Object.fromEntries(this.replayCaptures);
   }
 
   setActiveExecutions(count: number): void {
@@ -214,6 +226,11 @@ export class MetricsService {
     g(`${p}_workflow_executions_active`, "Currently active workflow executions", this.activeExecutionsGauge);
     h(`${p}_workflow_execution_duration_ms`, "Workflow execution duration in ms", this.executionDuration);
     h(`${p}_node_execution_duration_ms`, "Node execution duration in ms", this.nodeExecutionDuration);
+    if (this.replayCaptures.size > 0) {
+      lines.push(`# HELP ${p}_replay_captures_total Production runs considered for capture, by outcome`);
+      lines.push(`# TYPE ${p}_replay_captures_total counter`);
+      for (const [outcome, count] of this.replayCaptures) lines.push(`${p}_replay_captures_total{outcome="${outcome}"} ${count}`);
+    }
 
     const slo = this.getSloStatus();
     g(`${p}_slo_success_rate`, "Current execution success rate", slo.currentSuccessRate);

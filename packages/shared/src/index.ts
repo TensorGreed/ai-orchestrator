@@ -13,6 +13,7 @@ export * from "./schema-constants";
 export * from "./zip-archive";
 export * from "./model-tape";
 export * from "./replay";
+export * from "./replay-capture";
 export * from "./evals";
 export * from "./regex-safety";
 export * from "./approval-gate";

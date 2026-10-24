@@ -43,9 +43,11 @@ import type {
   ReplayRecordedNode,
   RunFacts,
   ReplayRecordingCapabilities,
+  ReplayCaptureInfo,
+  ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
-import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS } from "@ai-orchestrator/shared";
+import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -1380,10 +1382,13 @@ export interface ReplayRecordingInsert {
   truncated: boolean;
   createdAt: string;
   createdBy: string | null;
+  /** Phase 15.6 — default `golden`; captures land as `candidate`. */
+  status?: "candidate" | "golden";
+  capturedAt?: string | null;
 }
 
 const REPLAY_RECORDING_SUMMARY_COLUMNS =
-  "id, workflow_id, project_id, name, notes, source_execution_id, source_trigger_type, source_status, workflow_hash, workflow_saved_version, capabilities_json, bytes, truncated, created_at, created_by";
+  "id, workflow_id, project_id, name, notes, source_execution_id, source_trigger_type, source_status, workflow_hash, workflow_saved_version, capabilities_json, bytes, truncated, created_at, created_by, status, captured_at";
 
 function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordingSummary {
   const capabilities = safeJsonParse(toString(row.capabilities_json)) as Partial<ReplayRecordingCapabilities> | null;
@@ -1419,13 +1424,75 @@ function mapReplayRecordingSummary(row: Record<string, unknown>): ReplayRecordin
             ...(typeof capabilities.importedAt === "string" ? { importedAt: capabilities.importedAt } : {}),
             sourceWorkflowId: typeof capabilities.sourceWorkflowId === "string" ? capabilities.sourceWorkflowId : null
           }
-        : {})
+        : {}),
+      ...(capabilities?.capture && typeof capabilities.capture === "object" ? { capture: mapReplayCaptureInfo(capabilities.capture) } : {})
     },
     bytes: toNumber(row.bytes),
     truncated: toNumber(row.truncated) === 1,
     createdAt: toString(row.created_at),
-    createdBy: typeof row.created_by === "string" ? row.created_by : null
+    createdBy: typeof row.created_by === "string" ? row.created_by : null,
+    status: row.status === "candidate" ? "candidate" : "golden",
+    capturedAt: typeof row.captured_at === "string" && row.captured_at ? row.captured_at : null
   };
+}
+
+function mapReplayCaptureInfo(raw: Partial<ReplayCaptureInfo>): ReplayCaptureInfo {
+  const strings = (value: unknown) => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []);
+  const counts: Record<string, number> = {};
+  if (raw.values && typeof raw.values === "object") {
+    for (const [name, count] of Object.entries(raw.values)) if (typeof count === "number") counts[name] = count;
+  }
+  return {
+    rate: typeof raw.rate === "number" ? raw.rate : 0,
+    masked: raw.masked === true,
+    dataClasses: strings(raw.dataClasses),
+    values: counts,
+    notDetectableAfterMasking: strings(raw.notDetectableAfterMasking),
+    keptFromWorkflow: typeof raw.keptFromWorkflow === "number" ? raw.keptFromWorkflow : 0,
+    publishedVersion: typeof raw.publishedVersion === "number" ? raw.publishedVersion : null
+  };
+}
+
+/** Phase 15.6 — a workflow's capture settings row. */
+export interface ReplayCaptureSettingsRecord {
+  workflowId: string;
+  enabled: boolean;
+  rate: number;
+  maxPerDay: number;
+  onlyStatuses: ReplayCaptureStatus[];
+  dlp: boolean;
+  dlpOffReason: string | null;
+  targetDatasetId: string | null;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+function mapReplayCaptureSettings(row: Record<string, unknown>): ReplayCaptureSettingsRecord {
+  const statuses = safeJsonParse(toString(row.only_statuses_json));
+  return {
+    workflowId: toString(row.workflow_id),
+    enabled: toNumber(row.enabled) === 1,
+    rate: toNumber(row.rate),
+    maxPerDay: toNumber(row.max_per_day),
+    onlyStatuses: Array.isArray(statuses)
+      ? statuses.filter((entry): entry is ReplayCaptureStatus => (REPLAY_CAPTURE_STATUSES as readonly string[]).includes(String(entry)))
+      : [...REPLAY_CAPTURE_STATUSES],
+    dlp: toNumber(row.dlp) !== 0,
+    dlpOffReason: typeof row.dlp_off_reason === "string" ? row.dlp_off_reason : null,
+    targetDatasetId: typeof row.target_dataset_id === "string" && row.target_dataset_id ? row.target_dataset_id : null,
+    updatedAt: toString(row.updated_at),
+    updatedBy: typeof row.updated_by === "string" ? row.updated_by : null
+  };
+}
+
+/** The stored text columns of a recording, for the data-subject lookup. */
+export interface ReplayRecordingTextRow {
+  id: string;
+  workflowId: string;
+  projectId: string | null;
+  name: string;
+  status: "candidate" | "golden";
+  texts: Record<"input" | "nodes" | "facts" | "cassette" | "modelTape" | "memorySeed" | "workflow" | "notes", string | null>;
 }
 
 export interface ExecutionManifestRecord {
@@ -3261,6 +3328,26 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_release_approval_requests_status ON release_approval_requests(status, created_at DESC);
     `);
 
+    // Phase 15.6 (migration 34) — production capture: per-workflow capture settings, and candidate recordings
+    // (captured runs waiting in the inbox) next to golden ones. Existing rows are golden.
+    this.ensureColumn("replay_recordings", "status", "TEXT NOT NULL", "'golden'");
+    this.ensureColumn("replay_recordings", "captured_at", "TEXT");
+    this.exec(`
+      CREATE INDEX IF NOT EXISTS idx_replay_recordings_status ON replay_recordings(workflow_id, status, captured_at DESC);
+      CREATE TABLE IF NOT EXISTS replay_capture_settings (
+        workflow_id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        rate REAL NOT NULL DEFAULT 0.1,
+        max_per_day INTEGER NOT NULL DEFAULT 20,
+        only_statuses_json TEXT NOT NULL,
+        dlp INTEGER NOT NULL DEFAULT 1,
+        dlp_off_reason TEXT,
+        target_dataset_id TEXT,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT
+      );
+    `);
+
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_secrets_project_id ON secrets(project_id)`);
@@ -3538,6 +3625,9 @@ export class SqliteStore {
 
       if (hasTable("replay_recordings")) {
         this.exec("DELETE FROM replay_recordings WHERE workflow_id = ?", [id]);
+      }
+      if (hasTable("replay_capture_settings")) {
+        this.exec("DELETE FROM replay_capture_settings WHERE workflow_id = ?", [id]);
       }
 
       if (hasTable("guard_events")) {
@@ -10984,8 +11074,9 @@ export class SqliteStore {
       `INSERT INTO replay_recordings (
          id, workflow_id, project_id, name, notes, source_execution_id, source_trigger_type, source_status,
          workflow_hash, workflow_saved_version, captured_workflow_json, input_json, node_outputs_json, facts_json,
-         mcp_cassette_json, model_tape_json, memory_seed_json, capabilities_json, bytes, truncated, created_at, created_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         mcp_cassette_json, model_tape_json, memory_seed_json, capabilities_json, bytes, truncated, created_at, created_by,
+         status, captured_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.workflowId,
@@ -11008,7 +11099,9 @@ export class SqliteStore {
         input.bytes,
         input.truncated ? 1 : 0,
         input.createdAt,
-        input.createdBy
+        input.createdBy,
+        input.status ?? "golden",
+        input.capturedAt ?? null
       ]
     );
     return this.getReplayRecordingSummary(input.id)!;
@@ -11035,9 +11128,13 @@ export class SqliteStore {
     };
   }
 
-  listReplayRecordings(options: { workflowId?: string; workflowIds?: string[]; limit?: number; offset?: number } = {}): { items: ReplayRecordingSummary[]; total: number } {
+  listReplayRecordings(options: { workflowId?: string; workflowIds?: string[]; status?: "candidate" | "golden"; limit?: number; offset?: number } = {}): { items: ReplayRecordingSummary[]; total: number } {
     const where: string[] = [];
     const params: Array<string | number> = [];
+    if (options.status) {
+      where.push("status = ?");
+      params.push(options.status);
+    }
     if (options.workflowId) {
       where.push("workflow_id = ?");
       params.push(options.workflowId);
@@ -11058,27 +11155,195 @@ export class SqliteStore {
     return { items, total: total ? toNumber(total.count) : 0 };
   }
 
-  /** Bytes one workflow's golden runs use (each row's `bytes`, cassette included). */
+  /** Bytes one workflow's golden runs use (each row's `bytes`, cassette included). Candidates have their own count cap. */
   sumReplayRecordingBytesForWorkflow(workflowId: string): number {
-    const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings WHERE workflow_id = ?`, [workflowId]);
+    const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings WHERE workflow_id = ? AND status = 'golden'`, [workflowId]);
     return row ? toNumber(row.total ?? 0) : 0;
   }
 
   /** Bytes every golden run in the deployment uses, cassettes included. */
   sumReplayRecordingBytes(): number {
-    const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings`, []);
+    const row = this.queryOne<{ total: number | null }>(`SELECT COALESCE(SUM(bytes), 0) AS total FROM replay_recordings WHERE status = 'golden'`, []);
     return row ? toNumber(row.total ?? 0) : 0;
   }
 
-  /** The golden run already saved from an execution, if any. */
-  findReplayRecordingIdForExecution(executionId: string): string | null {
-    const row = this.queryOne<{ id: string }>(`SELECT id FROM replay_recordings WHERE source_execution_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1`, [executionId]);
+  /** The golden run already saved from an execution, if any (captured candidates do not count). */
+  findReplayRecordingIdForExecution(executionId: string, status: "candidate" | "golden" = "golden"): string | null {
+    const row = this.queryOne<{ id: string }>(
+      `SELECT id FROM replay_recordings WHERE source_execution_id = ? AND status = ? ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+      [executionId, status]
+    );
     return row ? toString(row.id) : null;
   }
 
-  countReplayRecordingsForWorkflow(workflowId: string): number {
-    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE workflow_id = ?`, [workflowId]);
+  /** Recordings of a workflow with this status (golden by default: the golden cap counts golden runs only). */
+  countReplayRecordingsForWorkflow(workflowId: string, status: "candidate" | "golden" = "golden"): number {
+    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE workflow_id = ? AND status = ?`, [workflowId, status]);
     return row ? toNumber(row.count) : 0;
+  }
+
+  // Phase 15.6 — production capture ------------------------------------------
+
+  /** Captured runs in a workflow's inbox (candidates), newest first. */
+  listReplayCaptures(options: {
+    workflowId: string;
+    runStatus?: string;
+    trigger?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+    offset?: number;
+  }): { items: ReplayRecordingSummary[]; total: number } {
+    const where = ["workflow_id = ?", "status = 'candidate'"];
+    const params: Array<string | number> = [options.workflowId];
+    if (options.runStatus) {
+      where.push("source_status = ?");
+      params.push(options.runStatus);
+    }
+    if (options.trigger) {
+      where.push("source_trigger_type = ?");
+      params.push(options.trigger);
+    }
+    if (options.from) {
+      where.push("captured_at >= ?");
+      params.push(options.from);
+    }
+    if (options.to) {
+      where.push("captured_at <= ?");
+      params.push(options.to);
+    }
+    const clause = `WHERE ${where.join(" AND ")}`;
+    const total = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings ${clause}`, params);
+    const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 50)));
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const items = this.queryAll<Record<string, unknown>>(
+      `SELECT ${REPLAY_RECORDING_SUMMARY_COLUMNS} FROM replay_recordings ${clause} ORDER BY captured_at DESC, rowid DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    ).map(mapReplayRecordingSummary);
+    return { items, total: total ? toNumber(total.count) : 0 };
+  }
+
+  /** Runs captured for a workflow since `since` (ISO), promoted or not: the daily limit counts these. */
+  countReplayCapturesSince(workflowId: string, since: string): number {
+    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE workflow_id = ? AND captured_at >= ?`, [workflowId, since]);
+    return row ? toNumber(row.count) : 0;
+  }
+
+  /** The oldest `count` candidates of a workflow (eviction order). */
+  oldestReplayCaptureIds(workflowId: string, count: number): string[] {
+    if (count <= 0) return [];
+    return this.queryAll<{ id: string }>(
+      `SELECT id FROM replay_recordings WHERE workflow_id = ? AND status = 'candidate' ORDER BY captured_at ASC, rowid ASC LIMIT ?`,
+      [workflowId, count]
+    ).map((row) => toString(row.id));
+  }
+
+  /** Deletes candidates captured before `before` (retention). Golden runs are never touched. */
+  pruneReplayCaptures(before: string): number {
+    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE status = 'candidate' AND captured_at < ?`, [before]);
+    const count = row ? toNumber(row.count) : 0;
+    if (count > 0) this.exec(`DELETE FROM replay_recordings WHERE status = 'candidate' AND captured_at < ?`, [before]);
+    return count;
+  }
+
+  /** Promote: the candidate becomes golden with its re-scrubbed content. Returns false when it is no longer a candidate. */
+  promoteReplayCapture(
+    id: string,
+    input: Pick<ReplayRecordingInsert, "name" | "capturedWorkflowJson" | "inputJson" | "nodeOutputsJson" | "factsJson" | "mcpCassetteJson" | "modelTapeJson" | "memorySeedJson" | "bytes" | "workflowHash"> & {
+      createdBy: string | null;
+    }
+  ): boolean {
+    const before = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM replay_recordings WHERE id = ? AND status = 'candidate'`, [id]);
+    if (!before || toNumber(before.count) === 0) return false;
+    this.exec(
+      `UPDATE replay_recordings SET status = 'golden', name = ?, captured_workflow_json = ?, input_json = ?, node_outputs_json = ?, facts_json = ?,
+         mcp_cassette_json = ?, model_tape_json = ?, memory_seed_json = ?, bytes = ?, workflow_hash = ?, created_by = ?
+       WHERE id = ? AND status = 'candidate'`,
+      [
+        input.name,
+        input.capturedWorkflowJson,
+        input.inputJson,
+        input.nodeOutputsJson,
+        input.factsJson,
+        input.mcpCassetteJson,
+        input.modelTapeJson ?? null,
+        input.memorySeedJson ?? null,
+        input.bytes,
+        input.workflowHash,
+        input.createdBy,
+        id
+      ]
+    );
+    return true;
+  }
+
+  getReplayCaptureSettings(workflowId: string): ReplayCaptureSettingsRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM replay_capture_settings WHERE workflow_id = ?`, [workflowId]);
+    return row ? mapReplayCaptureSettings(row) : null;
+  }
+
+  saveReplayCaptureSettings(input: Omit<ReplayCaptureSettingsRecord, "updatedAt"> & { updatedAt?: string }): ReplayCaptureSettingsRecord {
+    const updatedAt = input.updatedAt ?? new Date().toISOString();
+    this.exec(
+      `INSERT INTO replay_capture_settings (workflow_id, enabled, rate, max_per_day, only_statuses_json, dlp, dlp_off_reason, target_dataset_id, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workflow_id) DO UPDATE SET
+         enabled = excluded.enabled, rate = excluded.rate, max_per_day = excluded.max_per_day,
+         only_statuses_json = excluded.only_statuses_json, dlp = excluded.dlp, dlp_off_reason = excluded.dlp_off_reason,
+         target_dataset_id = excluded.target_dataset_id, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+      [
+        input.workflowId,
+        input.enabled ? 1 : 0,
+        input.rate,
+        input.maxPerDay,
+        JSON.stringify(input.onlyStatuses),
+        input.dlp ? 1 : 0,
+        input.dlpOffReason,
+        input.targetDatasetId,
+        updatedAt,
+        input.updatedBy
+      ]
+    );
+    return this.getReplayCaptureSettings(input.workflowId)!;
+  }
+
+  /** A page of recordings' stored text, in rowid order after `afterRowid`, for the data-subject lookup. */
+  replayRecordingTextPage(afterRowid: number, limit: number): { rows: ReplayRecordingTextRow[]; lastRowid: number | null } {
+    const rows = this.queryAll<Record<string, unknown>>(
+      `SELECT rowid AS rid, id, workflow_id, project_id, name, notes, status, input_json, node_outputs_json, facts_json, mcp_cassette_json,
+              model_tape_json, memory_seed_json, captured_workflow_json
+       FROM replay_recordings WHERE rowid > ? ORDER BY rowid ASC LIMIT ?`,
+      [afterRowid, Math.max(1, Math.min(500, limit))]
+    );
+    const text = (value: unknown) => (typeof value === "string" ? value : null);
+    return {
+      rows: rows.map((row) => ({
+        id: toString(row.id),
+        workflowId: toString(row.workflow_id),
+        projectId: typeof row.project_id === "string" ? row.project_id : null,
+        name: toString(row.name),
+        status: row.status === "candidate" ? "candidate" : "golden",
+        texts: {
+          input: text(row.input_json),
+          nodes: text(row.node_outputs_json),
+          facts: text(row.facts_json),
+          cassette: text(row.mcp_cassette_json),
+          modelTape: text(row.model_tape_json),
+          memorySeed: text(row.memory_seed_json),
+          workflow: text(row.captured_workflow_json),
+          notes: text(row.notes)
+        }
+      })),
+      lastRowid: rows.length > 0 ? toNumber(rows[rows.length - 1]!.rid) : null
+    };
+  }
+
+  /** Golden-set cases made from a recording (their input is a copy of the recording's). */
+  deleteEvalFixturesForRecording(recordingId: string): number {
+    const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM eval_fixtures WHERE recording_id = ?`, [recordingId]);
+    const count = row ? toNumber(row.count) : 0;
+    if (count > 0) this.exec(`DELETE FROM eval_fixtures WHERE recording_id = ?`, [recordingId]);
+    return count;
   }
 
   /** Runs-page badges: how many golden runs were saved from each execution. */
@@ -11088,7 +11353,7 @@ export class SqliteStore {
     if (ids.length === 0) return out;
     const rows = this.queryAll<{ id: string; source_execution_id: string }>(
       `SELECT id, source_execution_id FROM replay_recordings
-       WHERE source_execution_id IN (${ids.map(() => "?").join(", ")})
+       WHERE status = 'golden' AND source_execution_id IN (${ids.map(() => "?").join(", ")})
        ORDER BY created_at ASC, rowid ASC`,
       ids
     );

@@ -349,6 +349,11 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       reply.code(404);
       return { error: "Golden run not found in this workflow" };
     }
+    // Phase 15.6 — a captured run joins a golden set by being promoted (which re-scrubs it and checks the limits).
+    if (recording.status === "candidate") {
+      reply.code(409);
+      return { error: "This is a captured run waiting in the inbox; promote it to add it to a golden set." };
+    }
     if (store.findEvalFixtureByRecording(dataset.id, recording.id)) {
       reply.code(409);
       return { error: "This golden run is already in the set." };

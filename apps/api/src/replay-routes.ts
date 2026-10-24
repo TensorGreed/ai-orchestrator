@@ -94,11 +94,12 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     const paging = { limit: Number.isFinite(limit) ? limit : 50, offset: Number.isFinite(offset) ? offset : 0 };
     // Admins also see golden runs of a workflow id that is gone; everyone else only readable workflows.
     const readable = runAccess.readableWorkflowIds(user);
+    // Phase 15.6 — golden runs only; captured candidates are listed by the inbox.
     if (workflowId) {
       if (readable !== null && !readable.includes(workflowId)) return { items: [], total: 0 };
-      return store.listReplayRecordings({ workflowId, ...paging });
+      return store.listReplayRecordings({ workflowId, status: "golden", ...paging });
     }
-    return store.listReplayRecordings(readable === null ? paging : { workflowIds: readable, ...paging });
+    return store.listReplayRecordings(readable === null ? { status: "golden", ...paging } : { workflowIds: readable, status: "golden", ...paging });
   });
 
   app.get<{ Params: { id: string } }>("/api/replay/recordings/:id", async (request, reply) => {
@@ -157,6 +158,10 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     }
     const access = runAccess.run(user, record, "workflow:execute", "Golden run");
     if (!access.ok) return deny(reply, access);
+    if (record.status === "candidate") {
+      reply.code(409);
+      return { error: "This is a captured run waiting in the inbox; promote it before replaying it.", code: "candidate" };
+    }
     try {
       const result = await replays.replay(record, parsed.data, user);
       deps.audit(request, user, {

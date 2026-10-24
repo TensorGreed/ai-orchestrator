@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+/** Phase 15.6 — production capture defaults (see the REPLAY_CAPTURE_* settings). */
+export const REPLAY_CAPTURE_DEFAULTS = { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200 } as const;
+
 const booleanFromEnv = z.preprocess((value) => {
   if (typeof value === "boolean") {
     return value;
@@ -317,6 +320,20 @@ const envSchema = z.object({
    * budget alone does not bound storage.
    */
   REPLAY_RECORDINGS_MAX_TOTAL_BYTES: z.coerce.number().int().min(16_384).max(1_099_511_627_776).default(1_073_741_824),
+  /**
+   * Phase 15.6 — production capture. REPLAY_CAPTURE_ENABLED is the
+   * deployment's kill switch (false: no workflow captures, whatever its
+   * settings say). REPLAY_CAPTURE_MAX_RATE caps every workflow's sampling
+   * rate (0..1). Captured runs nobody promoted are deleted after
+   * REPLAY_CAPTURE_RETENTION_DAYS; a workflow keeps at most
+   * REPLAY_CAPTURES_MAX_PER_WORKFLOW of them (the oldest goes first).
+   * Unset means the defaults in `REPLAY_CAPTURE_DEFAULTS` (optional in the
+   * type, so configs built in code need not name them).
+   */
+  REPLAY_CAPTURE_ENABLED: booleanFromEnv.optional(),
+  REPLAY_CAPTURE_MAX_RATE: z.coerce.number().min(0).max(1).optional(),
+  REPLAY_CAPTURE_RETENTION_DAYS: z.coerce.number().int().min(1).max(3_650).optional(),
+  REPLAY_CAPTURES_MAX_PER_WORKFLOW: z.coerce.number().int().min(1).max(10_000).optional(),
   /**
    * Phase 15.5 — the largest golden-set file `POST /api/eval/datasets/import`
    * accepts (32 MiB), and the basis of that route's request body limit. The

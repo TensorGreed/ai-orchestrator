@@ -664,7 +664,7 @@ export class EvalService {
     for (const fixture of fixtures) {
       if (!fixture.recordingId) continue;
       const recording = replay.getRecording(fixture.recordingId);
-      if (!recording || recording.workflowId !== context.workflowId) {
+      if (!recording || recording.workflowId !== context.workflowId || recording.status === "candidate") {
         missing += 1;
         continue;
       }
@@ -1397,6 +1397,8 @@ export class EvalService {
     const recording = replay.getRecording(recordingId);
     if (!recording) return { status: "error", recordingId, error: "The golden run for this case was deleted." };
     if (recording.workflowId !== workflowId) return { status: "error", recordingId, error: "The golden run for this case belongs to another workflow." };
+    // Phase 15.6 — a captured run is not a golden run until a builder promotes it.
+    if (recording.status === "candidate") return { status: "error", recordingId, error: "This case's run is a captured candidate; promote it from the Captured runs inbox first." };
     const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute");
     if (!actor) {
       return {

@@ -92,7 +92,7 @@ import {
 import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
 import { SqliteStore, type McpServerRecord } from "./db/database";
 import { PostgresStore } from "./db/postgres-store.js";
-import type { AppConfig } from "./config";
+import { REPLAY_CAPTURE_DEFAULTS, type AppConfig } from "./config";
 import { SecretService } from "./services/secret-service";
 import { McpCatalogService } from "./services/mcp-catalog.js";
 import { computeTemplateDependencies } from "./services/template-dependencies";
@@ -135,6 +135,8 @@ import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
+import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
+import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES } from "@ai-orchestrator/shared";
@@ -1692,6 +1694,25 @@ export function createApp(
     }
   };
 
+  /**
+   * Phase 15.6 — production capture. The service is created with the golden
+   * runs (further down); a run sampled for capture gets its own recorder, and
+   * its capture is queued once its final history is stored, so it never
+   * delays the run's answer.
+   */
+  let replayCapture: ReplayCaptureService | null = null;
+  const pendingCaptures = new Map<string, { ticket: CaptureTicket; plan: McpCassetteRunPlan; workflow: Workflow }>();
+  const handOffCapture = (executionId: string, status: string) => {
+    const pending = pendingCaptures.get(executionId);
+    if (!pending || !replayCapture) return;
+    pendingCaptures.delete(executionId);
+    if (status === "waiting_approval") {
+      replayCapture.abandon(pending.ticket, "skipped_paused");
+      return;
+    }
+    replayCapture.finish(pending.ticket, { executionId, workflow: pending.workflow, plan: pending.plan });
+  };
+
   const persistExecutionHistoryRecord = (
     record: ExecutionHistoryRecord,
     meta: {
@@ -1715,6 +1736,7 @@ export function createApp(
     try {
       store.saveExecutionHistory(record);
       if (meta.phase === "final") {
+        handOffCapture(meta.executionId, meta.status);
         pruneExecutionHistory("write");
         // Phase 15.1 — replays are experiments, not traffic: they stay out of execution metrics and SLOs.
         if (meta.triggerType !== REPLAY_TRIGGER_TYPE) {
@@ -1839,6 +1861,27 @@ export function createApp(
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
     }
+    // Phase 15.6 — sampled for production capture: the run records like a "Record calls" run.
+    const captureTicket =
+      replayCapture && input.executionId
+        ? replayCapture.decide({
+            workflow: input.workflow,
+            channel,
+            triggerType: input.triggerType,
+            releaseVersion,
+            excluded: Boolean(input.mcpPlan || input.replay || input.resumeState || input.approvalDecision || input.startNodeId || input.runMode === "single_node" || input.providerRegistry)
+          })
+        : null;
+    let runPlan: McpCassetteRunPlan | undefined = input.mcpPlan;
+    if (captureTicket) {
+      try {
+        runPlan = mcpCassetteService.planRecording(mcpRegistry, providerRegistry);
+      } catch (error) {
+        replayCapture?.abandon(captureTicket, "failed");
+        app.log.warn({ executionId: input.executionId, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Capture recorder could not start; the run is not captured");
+      }
+    }
+    let captureHandedOff = !captureTicket || runPlan === input.mcpPlan;
     const controller = input.executionId
       ? registerActiveExecution({
           executionId: input.executionId,
@@ -1855,7 +1898,7 @@ export function createApp(
     const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
     const scoped = runScope.dependenciesFor(mergedWorkflow, {
       actor: input.policyActor,
-      resolveRegisteredMcpServer: input.mcpPlan?.resolveRegisteredMcpServer,
+      resolveRegisteredMcpServer: runPlan?.resolveRegisteredMcpServer,
       channel
     });
     // The execution timeout aborts the run's signal, so it interrupts a
@@ -1897,9 +1940,9 @@ export function createApp(
         },
         {
           // Phase 15.3 — a recorded run records its model calls; a model replay answers them from the tape.
-          providerRegistry: input.providerRegistry ?? input.mcpPlan?.providerRegistry ?? providerRegistry,
+          providerRegistry: input.providerRegistry ?? runPlan?.providerRegistry ?? providerRegistry,
           connectorRegistry,
-          mcpRegistry: input.mcpPlan?.registry ?? mcpRegistry,
+          mcpRegistry: runPlan?.registry ?? mcpRegistry,
           agentRuntime,
           // Session state, secrets, knowledge bases and sub-workflows are
           // scoped to the workflow's project (run-scope.ts); a sub-workflow
@@ -1907,7 +1950,7 @@ export function createApp(
           ...scoped,
           memoryStore:
             input.replay?.sandbox.memoryStore ??
-            (input.mcpPlan?.memoryCapture && scoped.memoryStore ? input.mcpPlan.memoryCapture.wrap(scoped.memoryStore) : scoped.memoryStore),
+            (runPlan?.memoryCapture && scoped.memoryStore ? runPlan.memoryCapture.wrap(scoped.memoryStore) : scoped.memoryStore),
           toolDataStore: input.replay?.sandbox.toolDataStore ?? scoped.toolDataStore,
           sessionArtifactStore: input.replay?.sandbox.sessionArtifactStore ?? scoped.sessionArtifactStore,
           // A replay never starts a sub-workflow (Execute Workflow nodes are stubbed).
@@ -2060,6 +2103,17 @@ export function createApp(
         }
       );
 
+      // Phase 15.6 — the capture is taken once the run's final history is stored (persistExecutionHistoryRecord).
+      if (captureTicket && runPlan && !captureHandedOff && input.executionId) {
+        if (pendingCaptures.size >= 1_000) {
+          const [oldestId, oldest] = pendingCaptures.entries().next().value!;
+          pendingCaptures.delete(oldestId);
+          replayCapture?.abandon(oldest.ticket, "skipped_backlog");
+        }
+        pendingCaptures.set(input.executionId, { ticket: captureTicket, plan: runPlan, workflow: input.workflow });
+        captureHandedOff = true;
+      }
+
       // A person's Stop always ends as canceled. A timeout keeps the engine's
       // result: the error on the node that was running, with its remediation.
       if (runController.signal.aborted && !isExecutionTimeoutAbort(runController.signal) && result.status !== "canceled") {
@@ -2076,6 +2130,7 @@ export function createApp(
       return result;
     } finally {
       clearTimeout(executionTimeoutHandle);
+      if (captureTicket && !captureHandedOff) replayCapture?.abandon(captureTicket, "failed");
       if (input.executionId) {
         mcpElicitationService.releaseExecution(input.executionId, "The run ended before the request was answered.");
       }
@@ -11539,6 +11594,62 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return result;
     }
   });
+  // Phase 15.6 — production capture (SQLite only: Postgres answers 501, and nothing is captured there).
+  const captureAvailable = !((store as object) instanceof PostgresStore);
+  const captureService = new ReplayCaptureService({
+    store,
+    recordings: replayRecordingService,
+    datasets: evalService,
+    // SecretService refuses to start without the master key, so it is always set here.
+    surrogateKey: deriveCaptureSurrogateKey(Buffer.from(config.SECRET_MASTER_KEY_BASE64 ?? "", "base64")),
+    dictionariesFor: (workflow) => guardService.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? DEFAULT_PROJECT_ID }).stack.flatMap((entry) => entry.profile.dictionaries ?? []),
+    dictionaryClasses: () => {
+      const names = new Set<string>();
+      for (const profile of guardService.listProfiles()) {
+        for (const dictionary of guardService.loadProfile(profile.id)?.profile.dictionaries ?? []) names.add(dictionary.dataClass);
+      }
+      return [...names];
+    },
+    publishedVersion: (workflowId) => releaseService.publishedVersion(workflowId),
+    deployment: {
+      enabled: config.REPLAY_CAPTURE_ENABLED ?? REPLAY_CAPTURE_DEFAULTS.enabled,
+      maxRate: config.REPLAY_CAPTURE_MAX_RATE ?? REPLAY_CAPTURE_DEFAULTS.maxRate,
+      retentionDays: config.REPLAY_CAPTURE_RETENTION_DAYS ?? REPLAY_CAPTURE_DEFAULTS.retentionDays,
+      maxPerWorkflow: config.REPLAY_CAPTURES_MAX_PER_WORKFLOW ?? REPLAY_CAPTURE_DEFAULTS.maxPerWorkflow
+    },
+    log: { warn: (data, message) => app.log.warn(data, message), info: (data, message) => app.log.info(data, message) },
+    metric: (outcome) => metricsService.recordReplayCapture(outcome)
+  });
+  if (captureAvailable) {
+    replayCapture = captureService;
+    // Retention for captured runs nobody promoted, on the execution-history timer's interval.
+    const pruneCaptures = (reason: "startup" | "interval") => {
+      try {
+        const deleted = captureService.pruneExpired();
+        if (deleted > 0) app.log.info({ deleted, reason, retentionDays: captureService.deployment.retentionDays }, "Pruned captured runs past retention");
+      } catch (error) {
+        app.log.warn({ reason, error: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Failed to prune captured runs");
+      }
+    };
+    pruneCaptures("startup");
+    const captureRetentionTimer = setInterval(() => pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
+    (captureRetentionTimer as { unref?: () => void }).unref?.();
+    app.addHook("onClose", async () => {
+      clearInterval(captureRetentionTimer);
+      replayCapture = null;
+      await captureService.idle();
+    });
+  }
+  registerReplayCaptureRoutes({
+    app,
+    store,
+    captures: captureService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    runAccess,
+    audit: (request, user, event) => audit(request, user, event),
+    available: captureAvailable
+  });
+
   // Phase 15.5 — golden-set files (SQLite only: Postgres answers 501).
   registerGoldenSetFileRoutes({
     app,

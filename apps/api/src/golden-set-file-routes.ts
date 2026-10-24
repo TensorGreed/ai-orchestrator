@@ -165,8 +165,8 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
     let skipped = 0;
     for (const fixture of store.listEvalFixtures(dataset.id)) {
       const recording = fixture.recordingId ? store.getReplayRecording(fixture.recordingId) : null;
-      // A hand-written case, or one whose golden run was deleted, has no recording to carry.
-      if (!recording) {
+      // A hand-written case, or one whose golden run was deleted, has no recording to carry; a captured candidate is not a golden run yet.
+      if (!recording || recording.status === "candidate") {
         skipped += 1;
         continue;
       }
