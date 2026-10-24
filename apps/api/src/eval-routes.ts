@@ -56,6 +56,7 @@ import {
   evalScorerListSchema,
   goldenSetAddRecordingSchema,
   goldenSetCreateSchema,
+  GUARD_SIMULATION_JOB_DATASET_PREFIX,
   replayJobRequestSchema,
   type EvalRunView,
   type EvalScorerSpec,
@@ -504,6 +505,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
       ...(query.datasetId ? { datasetId: query.datasetId } : {}),
       ...(query.workflowId ? { workflowId: query.workflowId } : {}),
       ...(kind ? { kind: kind as "eval" | "replay" } : {}),
+      // Phase 15.6 — a guard policy simulation's jobs are listed only when their own dataset id is asked for.
+      ...(query.datasetId?.startsWith(GUARD_SIMULATION_JOB_DATASET_PREFIX) ? {} : { excludeSimulations: true }),
       limit: limitFrom(query.limit, 100)
     };
     if (query.workflowId) {

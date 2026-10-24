@@ -7711,8 +7711,9 @@ export class SqliteStore {
   /** Every completed replay job that tested exactly this workflow hash, newest first. */
   listReplayRunIdsForHash(workflowId: string, workflowHash: string): string[] {
     return this.queryAll<{ id: string }>(
-      `SELECT id FROM eval_runs WHERE kind = 'replay' AND workflow_id = ? AND workflow_hash = ? AND status = 'completed' ORDER BY started_at DESC, id DESC`,
-      [workflowId, workflowHash]
+      // Phase 15.6 — a guard policy simulation's jobs are never release proof, so the judge never falls back to one.
+      `SELECT id FROM eval_runs WHERE kind = 'replay' AND workflow_id = ? AND workflow_hash = ? AND status = 'completed' AND dataset_id NOT LIKE ? ORDER BY started_at DESC, id DESC`,
+      [workflowId, workflowHash, `${GUARD_SIMULATION_JOB_DATASET_PREFIX}%`]
     ).map((row) => toString(row.id));
   }
 
