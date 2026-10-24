@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { maskRecording, maskedClassesForNode, resolveOverlaps, type MaskPart } from "./capture-mask";
+import {
+  decodeView,
+  maskableDataClasses,
+  maskRecording,
+  maskRecordingAsync,
+  maskedClassesForNode,
+  MaskUnscannableError,
+  resolveOverlaps,
+  SubjectIndex,
+  type MaskPart
+} from "./capture-mask";
+import { createDefaultGuardProfile } from "./default-profile";
 import { ibanValid, luhnValid, scanDlp } from "./detectors/dlp";
+import { maskForDataClass } from "./masking";
 import { surrogateFor } from "./protection/surrogate";
 
 const key = Buffer.from("0123456789abcdef0123456789abcdef");
@@ -126,10 +138,10 @@ describe("maskRecording", () => {
   });
 
   it("keeps values the workflow definition holds, but never secrets", () => {
-    const workflow = JSON.stringify({ nodes: [{ config: { systemPrompt: `Escalate to support@acme.test. ${TOKEN}` } }] });
+    const workflow = { nodes: [{ config: { systemPrompt: `Escalate to support@acme.test. ${TOKEN}` } }] };
     const { parts: masked, report } = maskRecording(
       [{ id: "tape:1", value: `Escalate to support@acme.test. ${TOKEN} Customer ${EMAIL}` }],
-      { key, keepValuesIn: workflow }
+      { key, keepLiteralsFrom: workflow }
     );
     const text = masked[0]!.value as string;
     expect(text).toContain("support@acme.test");
@@ -143,5 +155,204 @@ describe("maskRecording", () => {
     const { parts: masked, report } = maskRecording([{ id: "x", value }], { key });
     expect(masked[0]!.value).toEqual(value);
     expect(report.values).toEqual({});
+  });
+
+  it("keeps only whole workflow literals: never a value inside a longer one", () => {
+    const workflow = {
+      nodes: [
+        { id: "n-4155550000", position: { x: 3456789012, y: 0 }, config: { prompt: "Write to a@b.com. Hotline +1 345 678 9012 9. Call 212-555-0187 for help." } }
+      ]
+    };
+    const { parts: masked, report } = maskRecording(
+      [{ id: "input", value: "from a@b.co, phone 345 678 9012, desk 212-555-0187, also 415-555-0000" }],
+      { key, keepLiteralsFrom: workflow }
+    );
+    const text = masked[0]!.value as string;
+    // a@b.co is not a@b.com; 345 678 9012 is only part of a longer number in the literal.
+    expect(text).not.toContain("a@b.co");
+    expect(text).not.toContain("345 678 9012");
+    // The whole literal phone number stays; ids and positions are not literals.
+    expect(text).toContain("212-555-0187");
+    expect(text).not.toContain("415-555-0000");
+    expect(report.keptFromWorkflow).toBe(1);
+  });
+
+  // The reviewer's probes: a value detected in one form, present in another.
+  it("masks the digits-only form of a phone detected with its country code", () => {
+    const { parts: masked } = maskRecording(
+      [
+        { id: "input", value: { message: "Call me on +1 415-555-1234" } },
+        { id: "facts.tool:0", value: { phone: "4155551234" } },
+        { id: "cassette:0", value: { args: { phone: "14155551234" } } }
+      ],
+      { key }
+    );
+    const text = JSON.stringify(masked.map((part) => part.value));
+    expect(text).not.toMatch(/155551234/);
+    // The same subject gets the same keyed digits in every form.
+    const tool = (masked[1]!.value as { phone: string }).phone;
+    const input = (masked[0]!.value as { message: string }).message;
+    expect(input.replace(/\D/g, "").slice(-9)).toBe(tool.slice(-9));
+  });
+
+  it("masks an SSN's digits-only form", () => {
+    const { parts: masked } = maskRecording(
+      [
+        { id: "input", value: "SSN 123-45-6788" },
+        { id: "facts.tool:0", value: { ssn: "123456788", spaced: "123 45 6788" } }
+      ],
+      { key }
+    );
+    expect(JSON.stringify(masked.map((part) => part.value))).not.toMatch(/123\D?45\D?6788/);
+  });
+
+  it("masks JSON numbers, keeping them numbers", () => {
+    const { parts: masked } = maskRecording(
+      [
+        { id: "input", value: "card 4111 1111 1111 1111, phone (415) 555-1234" },
+        { id: "facts.tool:0", value: { card: 4111111111111111, phone: 4155551234, count: 3 } }
+      ],
+      { key }
+    );
+    const args = masked[1]!.value as { card: unknown; phone: unknown; count: number };
+    expect(typeof args.card).toBe("number");
+    expect(typeof args.phone).toBe("number");
+    expect(args.card).not.toBe(4111111111111111);
+    expect(String(args.phone)).not.toContain("155551234");
+    expect(luhnValid(String(args.card))).toBe(true);
+    expect(args.count).toBe(3);
+  });
+
+  it("masks URL-encoded and JSON-escaped forms, in the same encoding", () => {
+    const { parts: masked } = maskRecording(
+      [
+        { id: "input", value: { email: EMAIL } },
+        { id: "tool", value: { url: "https://crm.test/find?email=jane.doe%40example.com&x=1", body: '{"mail":"jane.doe\\u0040example.com"}' } }
+      ],
+      { key }
+    );
+    const tool = masked[1]!.value as { url: string; body: string };
+    const surrogate = surrogateFor(EMAIL, "email", key);
+    expect(tool.url).toBe(`https://crm.test/find?email=${surrogate.replace("@", "%40")}&x=1`);
+    expect(tool.body).toBe(`{"mail":"${surrogate.replace("@", "\\u0040")}"}`);
+    expect(JSON.stringify(masked)).not.toMatch(/jane\.doe/);
+  });
+
+  it("decodes escapes in an email found only in its encoded form", () => {
+    const { parts: masked, report } = maskRecording([{ id: "tool", value: "q=jane.doe%40example.com" }], { key });
+    expect(masked[0]!.value).toBe(`q=${surrogateFor(EMAIL, "email", key).replace("@", "%40")}`);
+    expect(report.values.email).toBe(1);
+  });
+
+  it("never matches inside a longer value", () => {
+    const { parts: masked } = maskRecording(
+      [
+        { id: "input", value: "ann@x.co" },
+        { id: "other", value: "joann@x.com and ann@x.com" }
+      ],
+      { key }
+    );
+    const other = masked[1]!.value as string;
+    // Both are different subjects: masked on their own, not by ann@x.co's surrogate.
+    expect(other).not.toContain(surrogateFor("ann@x.co", "email", key));
+    expect(other).not.toContain("ann@x.co");
+  });
+
+  it("drops content nested deeper than the limit instead of storing it, even with nothing else found", () => {
+    let deep: unknown = { mail: EMAIL, card: CARD };
+    for (let i = 0; i < 70; i += 1) deep = { next: deep };
+    expect(() => maskRecording([{ id: "input", value: deep }], { key })).toThrow(MaskUnscannableError);
+    expect(() => maskRecording([{ id: "input", value: { plain: "nothing here" } }, { id: "node:x", value: deep }], { key })).toThrow(MaskUnscannableError);
+  });
+
+  it("keeps the visible tail only for classes a bound profile can mask", () => {
+    const value = `card ${CARD} ssn ${SSN}`;
+    const full = maskRecording([{ id: "input", value }], { key }).parts[0]!.value as string;
+    const withTail = maskRecording([{ id: "input", value }], { key, visibleTailClasses: ["card_number"] }).parts[0]!.value as string;
+    const cardOf = (text: string) => text.slice(5, 5 + CARD.length);
+    expect(maskForDataClass(cardOf(withTail), "card_number")).toBe(maskForDataClass(CARD, "card_number"));
+    expect(cardOf(full).slice(-4)).not.toBe("1111");
+    // SSN has no masking profile here: full surrogate either way.
+    expect(withTail.slice(-4)).not.toBe(SSN.slice(-4));
+    expect(maskableDataClasses([createDefaultGuardProfile()])).toEqual(["card_number"]);
+  });
+
+  it("property: no collected value survives in any form in any part", () => {
+    const random = (() => {
+      let state = 42;
+      return () => {
+        state = (state * 1103515245 + 12345) % 2_147_483_648;
+        return state / 2_147_483_648;
+      };
+    })();
+    const digits = (n: number) => Array.from({ length: n }, () => String(Math.floor(random() * 10))).join("");
+    const luhn = (body: string) => {
+      for (let d = 0; d <= 9; d += 1) if (luhnValid(body + d)) return body + d;
+      return body + "0";
+    };
+    const subjects: Array<{ dataClass: string; written: string; canonical: string }> = [];
+    for (let i = 0; i < 25; i += 1) {
+      const local = `user${digits(4)}.x${i}`;
+      subjects.push({ dataClass: "email", written: `${local}@example${i}.com`, canonical: `${local}@example${i}.com` });
+      const card = luhn(`5${digits(14)}`);
+      subjects.push({ dataClass: "card_number", written: card.replace(/(\d{4})(?=\d)/g, "$1 "), canonical: card });
+      const phone = `${2 + Math.floor(random() * 7)}${digits(2)}${2 + Math.floor(random() * 7)}${digits(6)}`;
+      subjects.push({ dataClass: "phone", written: `+1 (${phone.slice(0, 3)}) ${phone.slice(3, 6)}-${phone.slice(6)}`, canonical: phone });
+    }
+    // Each value appears formatted once, then in other forms elsewhere.
+    const forms = (subject: (typeof subjects)[number]): unknown[] => {
+      const c = subject.canonical;
+      if (subject.dataClass === "email") return [c.toUpperCase(), encodeURIComponent(c), c.replace("@", "\\u0040"), JSON.stringify({ to: c })];
+      return [
+        c,
+        Number(c),
+        c.replace(/(\d{3})(?=\d)/g, "$1-"),
+        c.replace(/(\d{4})(?=\d)/g, "$1.").replace(/\./g, "%20"),
+        JSON.stringify({ n: c }),
+        `${c.slice(0, 3)}\\u0020${c.slice(3)}`
+      ];
+    };
+    const parts: MaskPart[] = [
+      { id: "input", value: subjects.map((subject) => `${subject.written}`).join("; ") },
+      ...subjects.map((subject, i) => ({ id: `tool:${i}`, nodeId: `n${i % 5}`, value: { args: forms(subject), [`k-${subject.canonical}`]: [forms(subject)] } }))
+    ];
+    const { parts: masked } = maskRecording(parts, { key });
+    const decodedAll = masked
+      .map((part) => JSON.stringify(part.value))
+      .map((text) => decodeView(decodeView(text).text).text)
+      .join("\n");
+    const flat = decodedAll.replace(/[\s().\-]/g, "");
+    for (const subject of subjects) {
+      if (subject.dataClass === "email") expect(decodedAll.toLowerCase(), subject.written).not.toContain(subject.canonical);
+      else if (subject.dataClass === "phone") expect(flat, subject.written).not.toContain(subject.canonical.slice(-9));
+      else expect(flat, subject.written).not.toContain(subject.canonical);
+    }
+    // And the index finds none of them in what is stored.
+    const index = new SubjectIndex();
+    for (const subject of subjects) index.add(subject.written, subject.dataClass);
+    for (const part of masked) expect(index.matches(JSON.stringify(part.value)), part.id).toBe(false);
+  });
+
+  it("gives the event loop turns while masking a large run", async () => {
+    const big = Array.from({ length: 6_000 }, (_, i) => ({ text: `customer user${i}@example.com paid with ${CARD}`, n: i }));
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+    }, 0);
+    let immediates = 0;
+    const spin = () => {
+      immediates += 1;
+      if (immediates < 1_000_000) setImmediate(spin);
+    };
+    setImmediate(spin);
+    try {
+      const { report } = await maskRecordingAsync([{ id: "node:big", nodeId: "big", value: big }], { key });
+      expect(report.values.email).toBe(6_000);
+    } finally {
+      clearInterval(timer);
+      immediates = 1_000_000;
+    }
+    // Other work ran between the chunks.
+    expect(immediates).toBeGreaterThan(2);
   });
 });

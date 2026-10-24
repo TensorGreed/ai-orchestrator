@@ -13,10 +13,15 @@ import type { KeyResolver, ProtectionProvider } from "./types";
  * finds it as the same class:
  *
  *   - email: `u-<12 hex>@surrogate.invalid` (the `.invalid` top-level domain never resolves)
- *   - payment card: same length and separators, Luhn-valid, in the 400000 test range
+ *   - payment card: same length and separators, Luhn-valid, starting with 4. It is not from a
+ *     reserved range (no range is guaranteed unissued), so it may coincide with an issued number
  *   - IBAN: same country, length and separators, valid mod-97 check digits
- *   - US SSN: same separators, structurally valid, area 734–749 (never assigned before 2011)
- *   - phone: the same number of digits, separators and leading `+` kept
+ *   - US SSN: same separators, structurally valid, with a randomly chosen area the SSN check
+ *     accepts (001–899 except 666). Since 2011 every such area can be issued, so a surrogate
+ *     may coincide with an issued number
+ *   - phone: keyed on the last nine digits (so a number written with or without its country
+ *     code gets the same surrogate digits); the digits before those nine, the separators and a
+ *     leading `+` are kept
  *   - UK National Insurance number: same spacing, prefix `ZY`
  *   - credentials, private keys and JSON Web Tokens: fully redacted, no hash
  *   - any other class (a profile dictionary's): `[<class>:<12 hex>]`, which the
@@ -29,13 +34,15 @@ import type { KeyResolver, ProtectionProvider } from "./types";
 
 export const SURROGATE_PROVIDER_ID = "surrogate";
 export const SURROGATE_EMAIL_DOMAIN = "surrogate.invalid";
-/** The issuer prefix of every payment-card surrogate (a test range). */
-export const SURROGATE_CARD_PREFIX = "400000";
+/** The first digit of every payment-card surrogate. Not a reserved range: a surrogate may coincide with an issued card. */
+export const SURROGATE_CARD_PREFIX = "4";
 /** UK National Insurance prefix used by surrogates. */
 export const SURROGATE_NINO_PREFIX = "ZY";
-/** First and last SSN area number surrogates use. */
-export const SURROGATE_SSN_AREA_MIN = 734;
-export const SURROGATE_SSN_AREA_MAX = 749;
+/** SSN areas surrogates draw from: every area the SSN check accepts (001–899 except 666). */
+export const SURROGATE_SSN_AREA_MIN = 1;
+export const SURROGATE_SSN_AREA_MAX = 899;
+/** Phones are keyed on their last nine digits: the national number without a country code or trunk prefix in most plans. */
+export const PHONE_KEY_DIGITS = 9;
 
 const REDACTED_CLASSES = new Set<string>(["credential", "private_key", "jwt"]);
 const NINO_SHAPE = /^([A-Z]{2})(\s?)(\d{2})(\s?)(\d{2})(\s?)(\d{2})(\s?)([A-D])$/i;
@@ -59,15 +66,21 @@ export function normaliseForSurrogate(value: string, dataClass: GuardDataClass):
     case "email":
       return trimmed.toLowerCase();
     case "card_number":
-    case "phone":
     case "us_ssn":
       return trimmed.replace(/\D/g, "");
+    case "phone":
+      return phoneKey(trimmed);
     case "iban":
     case "national_id":
       return trimmed.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
     default:
       return trimmed.toLowerCase();
   }
+}
+
+/** The digits a phone number is keyed on: its last nine (all of them when it has fewer). */
+export function phoneKey(value: string): string {
+  return value.replace(/\D/g, "").slice(-PHONE_KEY_DIGITS);
 }
 
 /** A keyed byte stream for one value: HMAC-SHA-256 blocks under the key, counter-extended. */
@@ -140,12 +153,14 @@ function allSame(digits: string): boolean {
 }
 
 /**
- * The surrogate keeps the characters the guard `mask` action leaves visible
- * (`maskForDataClass`: the last four of a card, SSN or national id, the last
- * two of a phone, the country and last four of an IBAN). A masked output
- * then reads the same whether the run saw the real value or its surrogate,
- * so a replay of a captured run compares equal; nothing beyond what the mask
- * action already shows is kept.
+ * With `visibleTail`, the surrogate keeps the characters the guard `mask`
+ * action leaves visible (`maskForDataClass`: the last four of a card, SSN or
+ * national id, the last two of a phone, the last four of an IBAN). A masked
+ * output then reads the same whether the run saw the real value or its
+ * surrogate, so a replay of a captured run compares equal. Callers ask for it
+ * only for classes a guard profile can mask; otherwise the surrogate keeps no
+ * real character beyond the structure (an IBAN's country, a phone's leading
+ * digits before the last nine).
  */
 export const SURROGATE_VISIBLE_TAIL: Partial<Record<string, number>> = { card_number: 4, us_ssn: 4, national_id: 4, phone: 2, iban: 4 };
 
@@ -155,12 +170,14 @@ function keepTail(surrogate: string, value: string, count: number): string {
   return surrogate.slice(0, surrogate.length - count) + value.slice(value.length - count);
 }
 
-function cardSurrogate(value: string, stream: KeyedStream): string {
+function cardSurrogate(value: string, stream: KeyedStream, visibleTail: boolean): string {
   const length = value.replace(/\D/g, "").length;
   const bodyLength = Math.max(SURROGATE_CARD_PREFIX.length + 1, length) - 1;
   let body = SURROGATE_CARD_PREFIX;
   while (body.length < bodyLength) body += stream.digit();
-  const shaped = keepTail(reshape(value, body + luhnCheckDigit(body), isDigit), value, SURROGATE_VISIBLE_TAIL.card_number!);
+  const full = reshape(value, body + luhnCheckDigit(body), isDigit);
+  if (!visibleTail) return full;
+  const shaped = keepTail(full, value, SURROGATE_VISIBLE_TAIL.card_number!);
   // The kept tail holds the check digit: repair the checksum through the last free digit before it.
   const tailStart = shaped.length - SURROGATE_VISIBLE_TAIL.card_number!;
   let free = -1;
@@ -188,11 +205,11 @@ function mod97(text: string): number {
   return remainder;
 }
 
-function ibanSurrogate(value: string, stream: KeyedStream): string {
+function ibanSurrogate(value: string, stream: KeyedStream, visibleTail: boolean): string {
   const clean = value.replace(/[\s-]/g, "").toUpperCase();
   const country = clean.slice(0, 2);
-  // The visible tail (last four characters of the value as written) stays; count the letters and digits in it.
-  const kept = value.slice(-SURROGATE_VISIBLE_TAIL.iban!).replace(/[\s-]/g, "").length;
+  // The visible tail is the last four letters and digits, however the value is spaced.
+  const kept = visibleTail ? SURROGATE_VISIBLE_TAIL.iban! : 0;
   const original = clean.slice(4);
   const bban = Array.from(original)
     .map((c, index) => (index >= original.length - kept ? c : isDigit(c) ? stream.digit() : stream.letter()))
@@ -203,65 +220,84 @@ function ibanSurrogate(value: string, stream: KeyedStream): string {
   return reshape(value, surrogate, isAlnum);
 }
 
-function ssnSurrogate(value: string, stream: KeyedStream): string {
-  const area = SURROGATE_SSN_AREA_MIN + stream.below(SURROGATE_SSN_AREA_MAX - SURROGATE_SSN_AREA_MIN + 1);
+function ssnSurrogate(value: string, stream: KeyedStream, visibleTail: boolean): string {
+  let area = SURROGATE_SSN_AREA_MIN + stream.below(SURROGATE_SSN_AREA_MAX - SURROGATE_SSN_AREA_MIN + 1);
+  while (area === 666) area = SURROGATE_SSN_AREA_MIN + stream.below(SURROGATE_SSN_AREA_MAX - SURROGATE_SSN_AREA_MIN + 1);
   const group = 1 + stream.below(99);
   const serial = 1 + stream.below(9999);
   const originalSerial = value.replace(/\D/g, "").slice(-4);
-  const keptSerial = /^\d{4}$/.test(originalSerial) && originalSerial !== "0000" ? originalSerial : String(serial).padStart(4, "0");
-  const digits = `${area}${String(group).padStart(2, "0")}${keptSerial}`;
+  const keptSerial = visibleTail && /^\d{4}$/.test(originalSerial) && originalSerial !== "0000" ? originalSerial : String(serial).padStart(4, "0");
+  const digits = `${String(area).padStart(3, "0")}${String(group).padStart(2, "0")}${keptSerial}`;
   return /^\d{3}[- ]?\d{2}[- ]?\d{4}$/.test(value.trim()) ? reshape(value, digits, isDigit) : `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
 }
 
-function phoneSurrogate(value: string, stream: KeyedStream): string {
-  const length = value.replace(/\D/g, "").length;
+/**
+ * The surrogate digits for a phone's keyed digits (`phoneKey`): as many
+ * digits as the key has, never all one digit (the phone scan skips those);
+ * with `visibleTail`, the last two stay.
+ */
+export function phoneSurrogateDigits(keyDigits: string, key: Uint8Array, visibleTail = false): string {
+  if (key.length < 16) throw new GuardProtectionError(SURROGATE_PROVIDER_ID, "The surrogate key is shorter than 16 bytes");
+  const stream = new KeyedStream(key, `phone\u0000${keyDigits}`);
+  const tail = visibleTail ? Math.min(SURROGATE_VISIBLE_TAIL.phone!, keyDigits.length) : 0;
   for (;;) {
     let digits = "";
-    for (let i = 0; i < length; i += 1) digits += stream.digit();
-    const shaped = keepTail(reshape(value, digits, isDigit), value, SURROGATE_VISIBLE_TAIL.phone!);
-    const all = shaped.replace(/\D/g, "");
-    // Never all one digit (the phone scan skips those), never a checksum-valid card number.
-    if (allSame(all)) continue;
-    if (all.length >= 13 && luhnValid(all)) continue;
-    return shaped;
+    for (let i = 0; i < keyDigits.length - tail; i += 1) digits += stream.digit();
+    digits += keyDigits.slice(keyDigits.length - tail);
+    if (keyDigits.length > 1 && allSame(digits)) continue;
+    return digits;
   }
 }
 
-function ninoSurrogate(value: string, stream: KeyedStream): string | null {
+function phoneSurrogate(value: string, key: Uint8Array, visibleTail: boolean): string {
+  const all = value.replace(/\D/g, "");
+  const keyed = all.slice(-PHONE_KEY_DIGITS);
+  // The digits before the keyed ones (a country code, a trunk prefix) stay as written.
+  const replaced = all.slice(0, all.length - keyed.length) + phoneSurrogateDigits(keyed, key, visibleTail);
+  return reshape(value, replaced, isDigit);
+}
+
+function ninoSurrogate(value: string, stream: KeyedStream, visibleTail: boolean): string | null {
   const match = NINO_SHAPE.exec(value.trim());
   if (!match) return null;
   let digits = "";
   for (let i = 0; i < 6; i += 1) digits += stream.digit();
   const suffix = "ABCD"[stream.below(4)]!;
   const surrogate = `${SURROGATE_NINO_PREFIX}${match[2]}${digits.slice(0, 2)}${match[4]}${digits.slice(2, 4)}${match[6]}${digits.slice(4, 6)}${match[8]}${suffix}`;
-  return keepTail(surrogate, value.trim(), SURROGATE_VISIBLE_TAIL.national_id!);
+  return visibleTail ? keepTail(surrogate, value.trim(), SURROGATE_VISIBLE_TAIL.national_id!) : surrogate;
 }
 
 function classTag(dataClass: string): string {
   return dataClass.replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 64) || "data";
 }
 
+export interface SurrogateOptions {
+  /** Keep the characters the guard `mask` action shows (see `SURROGATE_VISIBLE_TAIL`). Default false. */
+  visibleTail?: boolean;
+}
+
 /**
  * The surrogate of `value` as data class `dataClass` under `key` (at least 16
  * bytes). Synchronous; the provider below resolves the key first.
  */
-export function surrogateFor(value: string, dataClass: GuardDataClass, key: Uint8Array): string {
+export function surrogateFor(value: string, dataClass: GuardDataClass, key: Uint8Array, options: SurrogateOptions = {}): string {
   if (key.length < 16) throw new GuardProtectionError(SURROGATE_PROVIDER_ID, "The surrogate key is shorter than 16 bytes");
   if (REDACTED_CLASSES.has(dataClass)) return `[redacted:${dataClass}]`;
+  const tail = options.visibleTail === true;
   const stream = new KeyedStream(key, `${dataClass}\u0000${normaliseForSurrogate(value, dataClass)}`);
   switch (dataClass) {
     case "email":
       return `u-${stream.hex(12)}@${SURROGATE_EMAIL_DOMAIN}`;
     case "card_number":
-      return cardSurrogate(value, stream);
+      return cardSurrogate(value, stream, tail);
     case "iban":
-      return /^[A-Z]{2}\d{2}[A-Z0-9]{4,}$/i.test(value.replace(/[\s-]/g, "")) ? ibanSurrogate(value, stream) : `[iban:${stream.hex(12)}]`;
+      return /^[A-Z]{2}\d{2}[A-Z0-9]{4,}$/i.test(value.replace(/[\s-]/g, "")) ? ibanSurrogate(value, stream, tail) : `[iban:${stream.hex(12)}]`;
     case "us_ssn":
-      return ssnSurrogate(value, stream);
+      return ssnSurrogate(value, stream, tail);
     case "phone":
-      return phoneSurrogate(value, stream);
+      return phoneSurrogate(value, key, tail);
     case "national_id":
-      return ninoSurrogate(value, stream) ?? `[national_id:${stream.hex(12)}]`;
+      return ninoSurrogate(value, stream, tail) ?? `[national_id:${stream.hex(12)}]`;
     default:
       return `[${classTag(dataClass)}:${stream.hex(12)}]`;
   }
@@ -285,7 +321,7 @@ export function createSurrogateProvider(options: SurrogateProviderOptions): Prot
       if (!keyId) throw new GuardProtectionError(SURROGATE_PROVIDER_ID, "No key id configured for surrogates");
       const key = await options.keys(keyId);
       if (!key || key.length < 16) throw new GuardProtectionError(SURROGATE_PROVIDER_ID, `Key '${keyId}' is missing or shorter than 16 bytes`);
-      return surrogateFor(value, context.dataClass, key);
+      return surrogateFor(value, context.dataClass, key, { visibleTail: context.options?.visibleTail === true });
     }
   };
 }

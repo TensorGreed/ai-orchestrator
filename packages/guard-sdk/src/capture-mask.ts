@@ -1,23 +1,43 @@
 import { DEFAULT_NATIONAL_IDS, scanDlp, type DlpMatch, type NationalIdSpec } from "./detectors/dlp";
-import type { GuardDictionary } from "./profile";
-import { surrogateDetectable, surrogateFor, surrogateRedacts } from "./protection/surrogate";
-import type { GuardDataClass } from "./types";
+import type { GuardDictionary, GuardProfile } from "./profile";
+import {
+  PHONE_KEY_DIGITS,
+  phoneKey,
+  phoneSurrogateDigits,
+  SURROGATE_VISIBLE_TAIL,
+  surrogateDetectable,
+  surrogateFor,
+  surrogateRedacts
+} from "./protection/surrogate";
 
 /**
  * Phase 15.6 — masking a recorded run (a production capture) before it is
  * stored: detect, then substitute, globally.
  *
- *   1. Every string in every part (values and object keys, at any depth) is
- *      scanned with the DLP patterns: the built-in classes plus the bound
- *      guard profile's dictionaries. A profile's `disable` list is not
- *      applied: capture masking always looks for every built-in class.
- *   2. The distinct values found are collected, one data class each.
- *   3. Every occurrence of every value is replaced, in every part, whether
- *      or not the scan would have found it at that spot (like the secret
- *      scrubber), with its keyed surrogate (`surrogateFor`). JSON-escaped
- *      forms of a value (inside a JSON document carried as a string) are
- *      replaced too. Replacement is a single pass, so a surrogate is never
- *      itself replaced.
+ *   1. Every string in every part (values, object keys and the decimal text
+ *      of numbers, at any depth) is scanned with the DLP patterns: the
+ *      built-in classes plus the bound guard profile's dictionaries. A
+ *      profile's `disable` list is not applied. The scan reads a decoded view
+ *      of each string: URL-encoding (`%40`) and JSON escapes (`@`, `\n`)
+ *      are decoded first, so an escaped value is found as well.
+ *   2. Each value found is reduced to its canonical form for its class:
+ *      digits only for cards and SSNs, the last nine digits for phones (a
+ *      number with or without its country code), upper-case letters and
+ *      digits for IBANs and NI numbers, lower case for emails and dictionary
+ *      terms. One canonical value is one subject.
+ *   3. Every rendering of every canonical value is replaced, in every part,
+ *      whether or not the scan would have found it at that spot: as written,
+ *      digits only, with other separators, URL-encoded, JSON-escaped, and as a
+ *      JSON number. A match is boundary-aware (`a@b.co` never matches inside
+ *      `a@b.com`; a card's digits must be whole digit groups). The surrogate is
+ *      written back in the encoding the original used at that spot.
+ *   4. The result is checked: every string the scan found something in, or
+ *      that masking changed, is scanned again, and if a collected value is
+ *      still there masking throws `MaskIncompleteError` and the caller drops
+ *      the capture.
+ *
+ * Content nested deeper than `maxDepth` cannot be scanned completely, so it
+ * throws `MaskUnscannableError` (fail closed) instead of being stored.
  *
  * The caller decides what a part is: only content (inputs, outputs, request
  * and response bodies), never identifiers or match keys, which it keeps
@@ -43,12 +63,20 @@ export interface MaskRecordingOptions {
   /** National-id specs; the built-in list covers the US SSN and the UK NI number. */
   nationalIds?: NationalIdSpec[];
   /**
-   * A value found verbatim in this text is kept (not masked): the workflow
-   * definition, whose literals the author wrote and which a replay runs
-   * unchanged, so masking them would only break the recorded model calls.
+   * The workflow definition. A detected value that equals a literal the
+   * workflow holds (a whole string-literal token, compared in canonical form)
+   * is kept: the author wrote it, and a replay runs the workflow unchanged,
+   * so masking it would only break the recorded model calls. Ids, positions
+   * and numbers are not literals. Secrets are never kept.
    */
-  keepValuesIn?: string;
-  /** Deepest nesting walked; deeper content is replaced by `[REDACTED]`. */
+  keepLiteralsFrom?: unknown;
+  /**
+   * Classes whose surrogates keep the characters the guard `mask` action
+   * shows (`SURROGATE_VISIBLE_TAIL`): the classes a guard profile bound to the
+   * workflow can mask. Every other class gets a full surrogate.
+   */
+  visibleTailClasses?: readonly string[];
+  /** Deepest nesting walked; deeper content throws `MaskUnscannableError`. */
   maxDepth?: number;
 }
 
@@ -72,6 +100,22 @@ export interface MaskRecordingResult {
   report: MaskReport;
 }
 
+/** Content that cannot be scanned completely (nested deeper than the limit). The capture must be dropped. */
+export class MaskUnscannableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MaskUnscannableError";
+  }
+}
+
+/** After masking, the scan still finds a collected value. The capture must be dropped. */
+export class MaskIncompleteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MaskIncompleteError";
+  }
+}
+
 /** When two classes claim one value, the stronger claim wins: secrets first, then the checksum-backed classes. */
 const CLASS_PRIORITY: Record<string, number> = {
   private_key: 0,
@@ -86,7 +130,9 @@ const CLASS_PRIORITY: Record<string, number> = {
 };
 
 const DEFAULT_MAX_DEPTH = 64;
-const DEPTH_MARKER = "[REDACTED]";
+/** Strings (or this many characters) processed between two yields of the stepping API. */
+const YIELD_EVERY_STRINGS = 2_000;
+const YIELD_EVERY_CHARS = 256 * 1024;
 
 function priorityOf(dataClass: string): number {
   return CLASS_PRIORITY[dataClass] ?? 9;
@@ -112,42 +158,447 @@ export function resolveOverlaps(matches: readonly DlpMatch[]): DlpMatch[] {
   return kept.sort((a, b) => a.span.start - b.span.start);
 }
 
+// ---------------------------------------------------------------------------
+// Decoded view: URL-encoding and JSON escapes decoded, mapped back to the original
+// ---------------------------------------------------------------------------
+
+type EscapeStyle = { kind: "percent"; upper: boolean } | { kind: "unicode"; slashes: string; upper: boolean } | { kind: "short"; slashes: string };
+
+/** A string as the scan reads it, with each view character's span in the original and how it was escaped there. */
+export interface DecodedView {
+  text: string;
+  /** Null when the view is the original (nothing was decoded). */
+  starts: number[] | null;
+  ends: number[] | null;
+  styles: Array<EscapeStyle | null> | null;
+}
+
+const SHORT_ESCAPES: Record<string, string> = { n: "\n", r: "\r", t: "\t", '"': '"', "/": "/" };
+const SHORT_LETTERS: Record<string, string> = { "\n": "n", "\r": "r", "\t": "t", '"': '"', "/": "/" };
+const HEX = /^[0-9a-fA-F]+$/;
+
+export function decodeView(original: string): DecodedView {
+  if (!original.includes("%") && !original.includes("\\")) return { text: original, starts: null, ends: null, styles: null };
+  let text = "";
+  const starts: number[] = [];
+  const ends: number[] = [];
+  const styles: Array<EscapeStyle | null> = [];
+  let i = 0;
+  while (i < original.length) {
+    const c = original[i]!;
+    if (c === "%" && i + 3 <= original.length && HEX.test(original.slice(i + 1, i + 3))) {
+      const hex = original.slice(i + 1, i + 3);
+      text += String.fromCharCode(parseInt(hex, 16));
+      starts.push(i);
+      ends.push(i + 3);
+      styles.push({ kind: "percent", upper: hex !== hex.toLowerCase() });
+      i += 3;
+      continue;
+    }
+    if (c === "\\") {
+      let j = i;
+      while (j < original.length && original[j] === "\\") j += 1;
+      const slashes = original.slice(i, j);
+      const next = original[j];
+      if (next === "u" && j + 5 <= original.length && HEX.test(original.slice(j + 1, j + 5))) {
+        const hex = original.slice(j + 1, j + 5);
+        text += String.fromCharCode(parseInt(hex, 16));
+        starts.push(i);
+        ends.push(j + 5);
+        styles.push({ kind: "unicode", slashes, upper: hex !== hex.toLowerCase() });
+        i = j + 5;
+        continue;
+      }
+      if (next !== undefined && SHORT_ESCAPES[next] !== undefined) {
+        text += SHORT_ESCAPES[next];
+        starts.push(i);
+        ends.push(j + 1);
+        styles.push({ kind: "short", slashes });
+        i = j + 1;
+        continue;
+      }
+      for (let k = i; k < j; k += 1) {
+        text += "\\";
+        starts.push(k);
+        ends.push(k + 1);
+        styles.push(null);
+      }
+      i = j;
+      continue;
+    }
+    text += c;
+    starts.push(i);
+    ends.push(i + 1);
+    styles.push(null);
+    i += 1;
+  }
+  return { text, starts, ends, styles };
+}
+
+function hex(code: number, width: number, upper: boolean): string {
+  const out = code.toString(16).padStart(width, "0");
+  return upper ? out.toUpperCase() : out;
+}
+
+function render(char: string, style: EscapeStyle | null): string {
+  if (!style) return char;
+  const code = char.charCodeAt(0);
+  if (style.kind === "percent") return code < 256 ? `%${hex(code, 2, style.upper)}` : encodeURIComponent(char);
+  if (style.kind === "short" && SHORT_LETTERS[char] !== undefined) return `${style.slashes}${SHORT_LETTERS[char]}`;
+  const slashes = style.slashes;
+  return `${slashes}u${hex(code, 4, style.kind === "unicode" ? style.upper : false)}`;
+}
+
+interface ViewEdit {
+  start: number;
+  end: number;
+  replacement: string;
+  /** Same length as the span: each changed character is written back on its own, in its own encoding. */
+  perChar: boolean;
+}
+
+/** Applies edits made on the view to the original string. */
+function applyEdits(original: string, view: DecodedView, edits: readonly ViewEdit[]): string {
+  if (edits.length === 0) return original;
+  const sorted = [...edits].sort((a, b) => a.start - b.start);
+  if (!view.starts) {
+    let out = "";
+    let at = 0;
+    for (const edit of sorted) {
+      out += original.slice(at, edit.start) + edit.replacement;
+      at = edit.end;
+    }
+    return out + original.slice(at);
+  }
+  const starts = view.starts;
+  const ends = view.ends!;
+  const styles = view.styles!;
+  let out = "";
+  let at = 0;
+  for (const edit of sorted) {
+    const from = starts[edit.start]!;
+    const to = ends[edit.end - 1]!;
+    out += original.slice(at, from);
+    if (edit.perChar && edit.replacement.length === edit.end - edit.start) {
+      for (let k = edit.start; k < edit.end; k += 1) {
+        const next = edit.replacement[k - edit.start]!;
+        out += next === view.text[k] ? original.slice(starts[k]!, ends[k]!) : render(next, styles[k]!);
+      }
+    } else {
+      // A replacement of another length: characters that were escaped in the span are escaped the same way.
+      const escaped = new Map<string, EscapeStyle>();
+      for (let k = edit.start; k < edit.end; k += 1) if (styles[k]) escaped.set(view.text[k]!, styles[k]!);
+      let fallback: EscapeStyle | null = null;
+      for (let k = edit.start; k < edit.end; k += 1) if (styles[k]) fallback = fallback ?? styles[k]!;
+      for (const char of edit.replacement) {
+        const style = escaped.get(char) ?? (fallback && fallback.kind === "percent" && !/[A-Za-z0-9._~-]/.test(char) ? fallback : null);
+        out += render(char, style);
+      }
+    }
+    at = to;
+  }
+  return out + original.slice(at);
+}
+
+// ---------------------------------------------------------------------------
+// Subject index: canonical values per class family, and where they occur in a text
+// ---------------------------------------------------------------------------
+
+type Family = "digits" | "phone" | "email" | "alnum" | "literal";
+
+export interface SubjectEntry {
+  dataClass: string;
+  family: Family;
+  /** Canonical form (the index key). */
+  key: string;
+}
+
+export interface SubjectSpan {
+  start: number;
+  end: number;
+  entry: SubjectEntry;
+}
+
+const EMAIL_TOKEN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,24}\b/g;
+const DIGIT_RUN = /\d+(?:[\s().\/-]{1,3}\d+)*/g;
+const DIGIT_GROUP = /\d+/g;
+const ALNUM_RUN = /[A-Za-z0-9]+(?:[\s-][A-Za-z0-9]+)*/g;
+const ALNUM_GROUP = /[A-Za-z0-9]+/g;
+const MAX_DIGIT_VALUE = 19;
+const MAX_ALNUM_VALUE = 34;
+const DIGIT_CLASSES = new Set(["card_number", "us_ssn"]);
+const ALNUM_CLASSES = new Set(["iban"]);
+
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** The form a string takes inside a JSON string literal (one level of escaping). */
-function jsonEscaped(text: string): string {
-  return JSON.stringify(text).slice(1, -1);
+/** Which family a detected value of a class belongs to, and its canonical form. */
+export function canonicalFor(raw: string, dataClass: string): { family: Family; key: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (surrogateRedacts(dataClass)) return { family: "literal", key: trimmed };
+  if (dataClass === "email") return { family: "email", key: trimmed.toLowerCase() };
+  if (dataClass === "phone") {
+    const key = phoneKey(trimmed);
+    return key.length > 0 ? { family: "phone", key } : null;
+  }
+  const letters = /[A-Za-z]/.test(trimmed);
+  const digits = trimmed.replace(/\D/g, "");
+  if (DIGIT_CLASSES.has(dataClass) || (dataClass === "national_id" && !letters && digits.length > 0)) {
+    return digits.length > 0 && digits.length <= MAX_DIGIT_VALUE ? { family: "digits", key: digits } : { family: "literal", key: trimmed.toLowerCase() };
+  }
+  if (ALNUM_CLASSES.has(dataClass) || dataClass === "national_id") {
+    const alnum = trimmed.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    return alnum.length > 0 && alnum.length <= MAX_ALNUM_VALUE ? { family: "alnum", key: alnum } : { family: "literal", key: trimmed.toLowerCase() };
+  }
+  return { family: "literal", key: trimmed.toLowerCase() };
 }
 
-function forEachString(value: unknown, visit: (text: string) => void, depth: number, maxDepth: number): void {
-  if (depth > maxDepth) return;
+/**
+ * Canonical values and a boundary-aware finder for them. Masking collects
+ * detected values here and replaces what `find` returns; the data-subject
+ * lookup puts a value (and its surrogates) here and asks whether a stored
+ * text holds any of them.
+ */
+export class SubjectIndex {
+  private readonly byFamily: Record<Family, Map<string, SubjectEntry>> = {
+    digits: new Map(),
+    phone: new Map(),
+    email: new Map(),
+    alnum: new Map(),
+    literal: new Map()
+  };
+  private literalPatterns: { exact: RegExp | null; folded: RegExp | null } | null = null;
+
+  /**
+   * @param options.boundedLiterals literal values match only as whole tokens
+   *   (the lookup's raw search); masking leaves this off, so a secret or a
+   *   dictionary term is replaced wherever it appears.
+   */
+  constructor(private readonly options: { boundedLiterals?: boolean } = {}) {}
+
+  get size(): number {
+    let total = 0;
+    for (const map of Object.values(this.byFamily)) total += map.size;
+    return total;
+  }
+
+  entries(): SubjectEntry[] {
+    return Object.values(this.byFamily).flatMap((map) => [...map.values()]);
+  }
+
+  /** Adds a value of a class; a value two classes claim keeps the stronger class. */
+  add(raw: string, dataClass: string): SubjectEntry | null {
+    const canonical = canonicalFor(raw, dataClass);
+    if (!canonical) return null;
+    const map = this.byFamily[canonical.family];
+    const previous = map.get(canonical.key);
+    if (previous && priorityOf(previous.dataClass) <= priorityOf(dataClass)) return previous;
+    const entry: SubjectEntry = { dataClass, family: canonical.family, key: canonical.key };
+    map.set(canonical.key, entry);
+    if (canonical.family === "literal") this.literalPatterns = null;
+    return entry;
+  }
+
+  /** Adds a value to be matched exactly as written (case-insensitively): for a finding in a shape the other families do not read. */
+  addLiteral(raw: string, dataClass: string): void {
+    const key = surrogateRedacts(dataClass) ? raw : raw.toLowerCase();
+    if (!key || this.byFamily.literal.has(key)) return;
+    this.byFamily.literal.set(key, { dataClass, family: "literal", key });
+    this.literalPatterns = null;
+  }
+
+  has(entry: Pick<SubjectEntry, "family" | "key">): boolean {
+    return this.byFamily[entry.family].has(entry.key);
+  }
+
+  delete(entry: Pick<SubjectEntry, "family" | "key">): void {
+    this.byFamily[entry.family].delete(entry.key);
+    if (entry.family === "literal") this.literalPatterns = null;
+  }
+
+  private literals(): { exact: RegExp | null; folded: RegExp | null } {
+    if (this.literalPatterns) return this.literalPatterns;
+    const exact: string[] = [];
+    const folded: string[] = [];
+    // A secret is matched exactly as written; everything else case-insensitively.
+    for (const entry of this.byFamily.literal.values()) (surrogateRedacts(entry.dataClass) ? exact : folded).push(entry.key);
+    const build = (keys: string[], flags: string) => {
+      if (keys.length === 0) return null;
+      const body = keys.sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
+      return this.options.boundedLiterals ? new RegExp(`(?<![\\p{L}\\p{N}_])(?:${body})(?![\\p{L}\\p{N}_])`, `${flags}u`) : new RegExp(body, flags);
+    };
+    this.literalPatterns = { exact: build(exact, "g"), folded: build(folded, "gi") };
+    return this.literalPatterns;
+  }
+
+  /** Every occurrence of an indexed value in `text` (a decoded view), without overlaps: the longest wins, then the stronger class. */
+  find(text: string): SubjectSpan[] {
+    const found: SubjectSpan[] = [];
+    const { digits, phone, email, alnum, literal } = this.byFamily;
+
+    if (digits.size > 0 || phone.size > 0) {
+      for (const run of text.matchAll(DIGIT_RUN)) {
+        const base = run.index ?? 0;
+        const groups = [...run[0].matchAll(DIGIT_GROUP)].map((group) => ({ start: base + (group.index ?? 0), digits: group[0] }));
+        // Card and SSN values are whole digit groups, joined by any separators.
+        if (digits.size > 0) {
+          for (let i = 0; i < groups.length; i += 1) {
+            let acc = "";
+            for (let j = i; j < groups.length; j += 1) {
+              acc += groups[j]!.digits;
+              if (acc.length > MAX_DIGIT_VALUE) break;
+              const entry = digits.get(acc);
+              if (entry) found.push({ start: groups[i]!.start, end: groups[j]!.start + groups[j]!.digits.length, entry });
+            }
+          }
+        }
+        // A phone is its last nine digits ending a digit group; the digits before them (a country code) stay.
+        if (phone.size > 0) {
+          const positions: number[] = [];
+          for (const group of groups) for (let k = 0; k < group.digits.length; k += 1) positions.push(group.start + k);
+          let all = "";
+          for (const group of groups) {
+            all += group.digits;
+            if (all.length < PHONE_KEY_DIGITS) continue;
+            const entry = phone.get(all.slice(-PHONE_KEY_DIGITS));
+            if (entry) found.push({ start: positions[all.length - PHONE_KEY_DIGITS]!, end: group.start + group.digits.length, entry });
+          }
+        }
+      }
+    }
+
+    if (email.size > 0) {
+      for (const match of text.matchAll(EMAIL_TOKEN)) {
+        const entry = email.get(match[0].toLowerCase());
+        if (entry) found.push({ start: match.index ?? 0, end: (match.index ?? 0) + match[0].length, entry });
+      }
+    }
+
+    if (alnum.size > 0) {
+      for (const run of text.matchAll(ALNUM_RUN)) {
+        const base = run.index ?? 0;
+        const groups = [...run[0].matchAll(ALNUM_GROUP)].map((group) => ({ start: base + (group.index ?? 0), text: group[0] }));
+        for (let i = 0; i < groups.length; i += 1) {
+          let acc = "";
+          for (let j = i; j < groups.length; j += 1) {
+            acc += groups[j]!.text.toUpperCase();
+            if (acc.length > MAX_ALNUM_VALUE) break;
+            const entry = alnum.get(acc);
+            if (entry) found.push({ start: groups[i]!.start, end: groups[j]!.start + groups[j]!.text.length, entry });
+          }
+        }
+      }
+    }
+
+    if (literal.size > 0) {
+      const { exact, folded } = this.literals();
+      for (const [pattern, fold] of [
+        [exact, false],
+        [folded, true]
+      ] as const) {
+        if (!pattern) continue;
+        pattern.lastIndex = 0;
+        for (const match of text.matchAll(pattern)) {
+          if (!match[0]) continue;
+          const entry = literal.get(fold ? match[0].toLowerCase() : match[0]);
+          if (entry) found.push({ start: match.index ?? 0, end: (match.index ?? 0) + match[0].length, entry });
+        }
+      }
+    }
+
+    if (found.length <= 1) return found;
+    const ordered = found.sort((a, b) => b.end - b.start - (a.end - a.start) || priorityOf(a.entry.dataClass) - priorityOf(b.entry.dataClass) || a.start - b.start);
+    const kept: SubjectSpan[] = [];
+    for (const span of ordered) {
+      if (kept.some((other) => span.start < other.end && other.start < span.end)) continue;
+      kept.push(span);
+    }
+    return kept.sort((a, b) => a.start - b.start);
+  }
+
+  /** True when `text` (decoded first) holds any indexed value. */
+  matches(text: string): boolean {
+    return this.find(decodeView(text).text).length > 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Walking parts
+// ---------------------------------------------------------------------------
+
+interface WalkBudget {
+  strings: number;
+  chars: number;
+}
+
+function spend(budget: WalkBudget, text: string): boolean {
+  budget.strings += 1;
+  budget.chars += text.length;
+  if (budget.strings >= YIELD_EVERY_STRINGS || budget.chars >= YIELD_EVERY_CHARS) {
+    budget.strings = 0;
+    budget.chars = 0;
+    return true;
+  }
+  return false;
+}
+
+function numberText(value: number): string | null {
+  return Number.isFinite(value) ? String(value) : null;
+}
+
+/** Visits every string, object key and number's text; throws when content is nested deeper than `maxDepth`. */
+function* forEachText(value: unknown, visit: (text: string) => void, depth: number, maxDepth: number, budget: WalkBudget, where: string): Generator<void, void, void> {
+  if (depth > maxDepth) throw new MaskUnscannableError(`Content in ${where} is nested deeper than ${maxDepth} levels and cannot be scanned completely.`);
   if (typeof value === "string") {
     visit(value);
+    if (spend(budget, value)) yield;
+    return;
+  }
+  if (typeof value === "number") {
+    const text = numberText(value);
+    if (text) visit(text);
     return;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) forEachString(entry, visit, depth + 1, maxDepth);
+    for (const entry of value) yield* forEachText(entry, visit, depth + 1, maxDepth, budget, where);
     return;
   }
   if (value && typeof value === "object") {
     for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
       visit(key);
-      forEachString(nested, visit, depth + 1, maxDepth);
+      yield* forEachText(nested, visit, depth + 1, maxDepth, budget, where);
     }
   }
 }
 
-function mapStrings(value: unknown, map: (text: string) => string, depth: number, maxDepth: number): unknown {
-  if (depth > maxDepth) return DEPTH_MARKER;
-  if (typeof value === "string") return map(value);
-  if (Array.isArray(value)) return value.map((entry) => mapStrings(entry, map, depth + 1, maxDepth));
+function* mapTexts(value: unknown, map: (text: string) => string, depth: number, maxDepth: number, budget: WalkBudget, where: string): Generator<void, unknown, void> {
+  if (depth > maxDepth) throw new MaskUnscannableError(`Content in ${where} is nested deeper than ${maxDepth} levels and cannot be scanned completely.`);
+  if (typeof value === "string") {
+    const out = map(value);
+    if (spend(budget, value)) yield;
+    return out;
+  }
+  if (typeof value === "number") {
+    const text = numberText(value);
+    if (!text) return value;
+    const out = map(text);
+    if (out === text) return value;
+    // A number whose digits were replaced stays a number when the surrogate reads back exactly; otherwise it becomes a string.
+    const parsed = Number(out);
+    return /^-?\d+$/.test(out) && Number.isSafeInteger(parsed) && String(parsed) === out ? parsed : out;
+  }
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (const entry of value) out.push(yield* mapTexts(entry, map, depth + 1, maxDepth, budget, where));
+    return out;
+  }
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
       if (nested === undefined) continue;
-      out[map(key)] = mapStrings(nested, map, depth + 1, maxDepth);
+      out[map(key)] = yield* mapTexts(nested, map, depth + 1, maxDepth, budget, where);
     }
     return out;
   }
@@ -158,81 +609,162 @@ function bump(target: Record<string, number>, key: string, by = 1): void {
   target[key] = (target[key] ?? 0) + by;
 }
 
-/** Detect, then substitute, across every part. See the module comment. */
-export function maskRecording(parts: readonly MaskPart[], options: MaskRecordingOptions): MaskRecordingResult {
+/** Keys that hold identifiers or layout in a workflow definition, never literals the author wrote. */
+const NON_LITERAL_KEYS = new Set(["id", "nodeId", "source", "target", "sourceHandle", "targetHandle", "position", "positionAbsolute", "x", "y", "width", "height", "createdAt", "updatedAt", "secretId", "secretRef"]);
+
+/** The canonical values a workflow definition holds as whole literal tokens. */
+function workflowLiterals(workflow: unknown, scanOptions: Parameters<typeof scanDlp>[1]): { index: SubjectIndex; digitRuns: Set<string>; phoneRuns: Set<string> } {
+  const index = new SubjectIndex();
+  const digitRuns = new Set<string>();
+  const phoneRuns = new Set<string>();
+  const visit = (text: string) => {
+    const view = decodeView(text).text;
+    for (const match of resolveOverlaps(scanDlp(view, scanOptions))) {
+      const dataClass = String(match.dataClass);
+      if (surrogateRedacts(dataClass)) continue;
+      index.add(view.slice(match.span.start, match.span.end), dataClass);
+    }
+    // Numbers count as written: a value is kept only when it is a whole run of digits in a literal.
+    for (const run of view.matchAll(DIGIT_RUN)) {
+      const digits = run[0].replace(/\D/g, "");
+      digitRuns.add(digits);
+      if (digits.length >= PHONE_KEY_DIGITS && digits.length <= 15) phoneRuns.add(digits.slice(-PHONE_KEY_DIGITS));
+    }
+  };
+  const walk = (value: unknown, depth: number) => {
+    if (depth > DEFAULT_MAX_DEPTH) return;
+    if (typeof value === "string") return visit(value);
+    if (Array.isArray(value)) return value.forEach((entry) => walk(entry, depth + 1));
+    if (value && typeof value === "object") {
+      for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+        if (NON_LITERAL_KEYS.has(key)) continue;
+        walk(nested, depth + 1);
+      }
+    }
+  };
+  walk(workflow, 0);
+  return { index, digitRuns, phoneRuns };
+}
+
+/** The surrogate text for a span (on the view), and whether it is the same length (written back per character). */
+function surrogateEdit(view: string, span: SubjectSpan, key: Uint8Array, tailClasses: ReadonlySet<string>): ViewEdit {
+  const raw = view.slice(span.start, span.end);
+  const dataClass = span.entry.dataClass;
+  const visibleTail = tailClasses.has(dataClass);
+  if (span.entry.family === "phone") {
+    // Only the keyed digits change, in place: separators and any digits before them stay.
+    const digits = phoneSurrogateDigits(span.entry.key, key, visibleTail);
+    let index = 0;
+    let out = "";
+    for (const char of raw) {
+      if (char >= "0" && char <= "9" && index < digits.length) out += digits[index++]!;
+      else out += char;
+    }
+    return { start: span.start, end: span.end, replacement: out, perChar: true };
+  }
+  const surrogate = surrogateFor(raw, dataClass, key, { visibleTail });
+  return { start: span.start, end: span.end, replacement: surrogate, perChar: surrogate.length === raw.length && (span.entry.family === "digits" || span.entry.family === "alnum") };
+}
+
+/** Detect, then substitute, across every part, yielding between chunks of work. See the module comment. */
+export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRecordingOptions): Generator<void, MaskRecordingResult, void> {
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
   const scanOptions = { dictionaries: options.dictionaries ?? [], nationalIds: options.nationalIds ?? DEFAULT_NATIONAL_IDS };
+  const tailClasses = new Set(options.visibleTailClasses ?? []);
+  const budget: WalkBudget = { strings: 0, chars: 0 };
 
-  // 1–2. Distinct values and their class. A value claimed by two classes keeps the stronger one.
-  const classOf = new Map<string, GuardDataClass>();
+  // 1–2. Distinct canonical values and their class.
+  const index = new SubjectIndex();
+  const samples = new Map<string, string>();
   const scanned = new Set<string>();
+  /** Texts the scan found something in: they are scanned again after masking. */
+  const withFindings = new Set<string>();
   for (const part of parts) {
-    forEachString(
+    yield* forEachText(
       part.value,
       (text) => {
         if (text.length === 0 || scanned.has(text)) return;
         scanned.add(text);
-        for (const match of resolveOverlaps(scanDlp(text, scanOptions))) {
-          const raw = text.slice(match.span.start, match.span.end);
-          if (!raw.trim()) continue;
-          const previous = classOf.get(raw);
-          if (previous === undefined || priorityOf(String(match.dataClass)) < priorityOf(String(previous))) classOf.set(raw, match.dataClass);
+        const view = decodeView(text).text;
+        const matches = resolveOverlaps(scanDlp(view, scanOptions)).filter((match) => view.slice(match.span.start, match.span.end).trim());
+        if (matches.length === 0) return;
+        withFindings.add(text);
+        for (const match of matches) {
+          const raw = view.slice(match.span.start, match.span.end);
+          const entry = index.add(raw, String(match.dataClass));
+          if (entry && !samples.has(`${entry.family}:${entry.key}`)) samples.set(`${entry.family}:${entry.key}`, raw);
+        }
+        // Every finding must be found again by the index; one in a shape it does not read is replaced as written.
+        const spans = index.find(view);
+        for (const match of matches) {
+          if (spans.some((span) => span.start < match.span.end && match.span.start < span.end)) continue;
+          index.addLiteral(view.slice(match.span.start, match.span.end).trim(), String(match.dataClass));
         }
       },
       0,
-      maxDepth
+      maxDepth,
+      budget,
+      part.id
     );
   }
+  scanned.clear();
 
+  // Values the workflow holds as whole literals stay (never secrets).
   let keptFromWorkflow = 0;
-  if (options.keepValuesIn) {
-    for (const raw of [...classOf.keys()]) {
-      // Secrets are never kept, whatever the workflow holds.
-      if (surrogateRedacts(classOf.get(raw)!)) continue;
-      if (options.keepValuesIn.includes(raw)) {
-        classOf.delete(raw);
+  if (options.keepLiteralsFrom !== undefined && index.size > 0) {
+    const literals = workflowLiterals(options.keepLiteralsFrom, scanOptions);
+    for (const entry of index.entries()) {
+      if (surrogateRedacts(entry.dataClass)) continue;
+      const kept =
+        entry.family === "digits"
+          ? literals.digitRuns.has(entry.key)
+          : entry.family === "phone"
+            ? literals.phoneRuns.has(entry.key) || literals.digitRuns.has(entry.key)
+            : literals.index.has(entry);
+      if (kept) {
+        index.delete(entry);
         keptFromWorkflow += 1;
       }
     }
+    yield;
   }
 
   const report: MaskReport = { values: {}, occurrences: {}, parts: {}, nodes: {}, notDetectableAfterMasking: [], keptFromWorkflow };
-  if (classOf.size === 0) return { parts: parts.map((part) => ({ ...part })), report };
-
-  // 3. One alternation of every value (and its JSON-escaped forms), longest first, replaced in a single pass.
-  const replacement = new Map<string, { surrogate: string; dataClass: string }>();
   const notDetectable = new Set<string>();
-  for (const [raw, dataClass] of classOf) {
-    const surrogate = surrogateFor(raw, dataClass, options.key);
-    bump(report.values, String(dataClass));
-    if (surrogateRedacts(dataClass) || !surrogateDetectable(dataClass, raw)) notDetectable.add(String(dataClass));
-    replacement.set(raw, { surrogate, dataClass: String(dataClass) });
-    let escapedRaw = raw;
-    let escapedSurrogate = surrogate;
-    for (let level = 0; level < 2; level += 1) {
-      const nextRaw = jsonEscaped(escapedRaw);
-      if (nextRaw === escapedRaw) break;
-      escapedRaw = nextRaw;
-      escapedSurrogate = jsonEscaped(escapedSurrogate);
-      if (!replacement.has(escapedRaw)) replacement.set(escapedRaw, { surrogate: escapedSurrogate, dataClass: String(dataClass) });
-    }
+  for (const entry of index.entries()) {
+    bump(report.values, entry.dataClass);
+    const sample = samples.get(`${entry.family}:${entry.key}`);
+    if (surrogateRedacts(entry.dataClass) || !surrogateDetectable(entry.dataClass, sample)) notDetectable.add(entry.dataClass);
   }
   report.notDetectableAfterMasking = [...notDetectable].sort();
-  const pattern = new RegExp([...replacement.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp).join("|"), "g");
 
-  const masked = parts.map((part) => {
+  // 3. Every rendering of every value, replaced; then 4. nothing collected may remain.
+  const masked: MaskPart[] = [];
+  for (const part of parts) {
     const counts: Record<string, number> = {};
-    const value = mapStrings(
-      part.value,
-      (text) =>
-        text.replace(pattern, (found) => {
-          const hit = replacement.get(found)!;
-          bump(counts, hit.dataClass);
-          return hit.surrogate;
-        }),
-      0,
-      maxDepth
-    );
+    const replace = (text: string): string => {
+      if (index.size === 0 || text.length === 0) return text;
+      const view = decodeView(text);
+      const spans = index.find(view.text);
+      if (spans.length === 0) return text;
+      const out = applyEdits(text, view, spans.map((span) => surrogateEdit(view.text, span, options.key, tailClasses)));
+      for (const span of spans) bump(counts, span.entry.dataClass);
+      return out;
+    };
+    const check = (text: string, original: string) => {
+      if (text === original && !withFindings.has(original)) return;
+      const view = decodeView(text).text;
+      for (const match of scanDlp(view, scanOptions)) {
+        const canonical = canonicalFor(view.slice(match.span.start, match.span.end), String(match.dataClass));
+        if (canonical && index.has(canonical)) throw new MaskIncompleteError(`A detected value could not be replaced everywhere in ${part.id}.`);
+      }
+    };
+    const replaceAndCheck = (text: string): string => {
+      const out = replace(text);
+      check(out, text);
+      return out;
+    };
+    const value = yield* mapTexts(part.value, replaceAndCheck, 0, maxDepth, budget, part.id);
     for (const [dataClass, count] of Object.entries(counts)) {
       bump(report.occurrences, dataClass, count);
       report.parts[part.id] = report.parts[part.id] ?? {};
@@ -242,12 +774,64 @@ export function maskRecording(parts: readonly MaskPart[], options: MaskRecording
         bump(report.nodes[part.nodeId]!, dataClass, count);
       }
     }
-    return { ...part, value };
-  });
+    masked.push({ ...part, value });
+  }
   return { parts: masked, report };
+}
+
+/** Runs a stepping generator to completion on the spot. */
+export function runSteps<T>(steps: Generator<void, T, void>): T {
+  for (;;) {
+    const next = steps.next();
+    if (next.done) return next.value;
+  }
+}
+
+/** Runs a stepping generator, giving the event loop a turn at every step. */
+export async function runStepsAsync<T>(steps: Generator<void, T, void>): Promise<T> {
+  for (;;) {
+    const next = steps.next();
+    if (next.done) return next.value;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+/** Detect, then substitute, across every part. See the module comment. Blocks until done; prefer `maskRecordingAsync` on a server. */
+export function maskRecording(parts: readonly MaskPart[], options: MaskRecordingOptions): MaskRecordingResult {
+  return runSteps(maskRecordingSteps(parts, options));
+}
+
+/** `maskRecording` in chunks, yielding to the event loop between them. */
+export function maskRecordingAsync(parts: readonly MaskPart[], options: MaskRecordingOptions): Promise<MaskRecordingResult> {
+  return runStepsAsync(maskRecordingSteps(parts, options));
 }
 
 /** The data classes a masking report found for one node, sorted. */
 export function maskedClassesForNode(report: MaskReport, nodeId: string): string[] {
   return Object.keys(report.nodes[nodeId] ?? {}).sort();
 }
+
+/**
+ * The data classes a guard profile can mask (an action `mask`, or `protect`
+ * that falls back to `mask`), on any channel. A rule on the whole
+ * `sensitive_data` category, or a default action, covers every class with a
+ * visible tail.
+ */
+export function maskableDataClasses(profiles: readonly GuardProfile[]): string[] {
+  const out = new Set<string>();
+  const tailClasses = Object.keys(SURROGATE_VISIBLE_TAIL);
+  for (const profile of profiles) {
+    const masks = (action: string | undefined) => action === "mask" || (action === "protect" && profile.protection?.fallback === "mask");
+    for (const channel of Object.values(profile.channels ?? {})) {
+      if (!channel) continue;
+      for (const [name, rule] of Object.entries(channel.actions ?? {})) {
+        if (!masks(rule?.action)) continue;
+        if (name === "sensitive_data") tailClasses.forEach((dataClass) => out.add(dataClass));
+        else out.add(name);
+      }
+      if (masks(channel.defaultAction?.action)) tailClasses.forEach((dataClass) => out.add(dataClass));
+    }
+  }
+  return [...out].sort();
+}
+

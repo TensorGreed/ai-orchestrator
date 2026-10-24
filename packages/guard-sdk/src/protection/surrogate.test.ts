@@ -83,7 +83,7 @@ describe("surrogateFor", () => {
     }
   });
 
-  it("SSNs are structurally valid, in the never-assigned area range, and still SSNs", () => {
+  it("SSNs are structurally valid, in an area the SSN check accepts, and still SSNs", () => {
     const seen = new Set<string>();
     for (let i = 0; i < 200; i += 1) {
       const value = `${String(100 + i).padStart(3, "0")}-${String(10 + (i % 80)).padStart(2, "0")}-${String(1000 + i * 7).padStart(4, "0")}`;
@@ -91,8 +91,9 @@ describe("surrogateFor", () => {
       expect(surrogate).toMatch(/^\d{3}-\d{2}-\d{4}$/);
       expect(usSsnValid(surrogate)).toBe(true);
       const area = Number(surrogate.slice(0, 3));
-      expect(area).toBeGreaterThanOrEqual(734);
-      expect(area).toBeLessThanOrEqual(749);
+      expect(area).toBeGreaterThanOrEqual(1);
+      expect(area).toBeLessThanOrEqual(899);
+      expect(area).not.toBe(666);
       expect(classesOf(surrogate)).toEqual(["us_ssn"]);
       seen.add(surrogate);
     }
@@ -115,7 +116,7 @@ describe("surrogateFor", () => {
     expect(classesOf(surrogate)).toEqual(["national_id"]);
   });
 
-  it("keeps exactly what the guard mask action shows, so masked output reads the same for the value and its surrogate", () => {
+  it("with visibleTail, keeps exactly what the guard mask action shows, so masked output reads the same for the value and its surrogate", () => {
     const samples: Array<[string, string]> = [
       ["card_number", "4111 1111 1111 1111"],
       ["card_number", "5500-0000-0000-0004"],
@@ -127,18 +128,55 @@ describe("surrogateFor", () => {
       ["national_id", "AB 12 34 56 C"]
     ];
     for (const [dataClass, value] of samples) {
-      const surrogate = surrogateFor(value, dataClass, key);
+      const surrogate = surrogateFor(value, dataClass, key, { visibleTail: true });
       expect(surrogate, value).not.toBe(value);
       expect(maskForDataClass(surrogate, dataClass), value).toBe(maskForDataClass(value, dataClass));
       expect(surrogate.slice(-SURROGATE_VISIBLE_TAIL[dataClass]!)).toBe(value.slice(-SURROGATE_VISIBLE_TAIL[dataClass]!));
       expect(classesOf(surrogate), value).toContain(dataClass);
     }
     // Checksums still hold with the kept tail.
+    const tail = { visibleTail: true };
+    expect(luhnValid(surrogateFor("4111 1111 1111 1111", "card_number", key, tail).replace(/\D/g, ""))).toBe(true);
+    expect(ibanValid(surrogateFor("GB82 WEST 1234 5698 7654 32", "iban", key, tail))).toBe(true);
+    expect(usSsnValid(surrogateFor("123-45-6789", "us_ssn", key, tail))).toBe(true);
+    // The rest of a card is not the original's.
+    expect(surrogateFor("4111 1111 1111 1111", "card_number", key, tail).slice(0, 14)).not.toBe("4111 1111 1111");
+  });
+
+  it("without visibleTail (the default), keeps no real tail", () => {
+    let sameTail = 0;
+    for (let i = 0; i < 50; i += 1) {
+      const card = `4111 1111 1111 ${String(1000 + i * 17).padStart(4, "0")}`;
+      const ssn = `536-90-${String(1000 + i * 13).padStart(4, "0")}`;
+      if (surrogateFor(card, "card_number", key).slice(-4) === card.slice(-4)) sameTail += 1;
+      if (surrogateFor(ssn, "us_ssn", key).slice(-4) === ssn.slice(-4)) sameTail += 1;
+    }
+    // A random tail matches by chance about once in ten thousand.
+    expect(sameTail).toBeLessThanOrEqual(1);
     expect(luhnValid(surrogateFor("4111 1111 1111 1111", "card_number", key).replace(/\D/g, ""))).toBe(true);
     expect(ibanValid(surrogateFor("GB82 WEST 1234 5698 7654 32", "iban", key))).toBe(true);
-    expect(usSsnValid(surrogateFor("123-45-6789", "us_ssn", key))).toBe(true);
-    // The rest of a card is not the original's.
-    expect(surrogateFor("4111 1111 1111 1111", "card_number", key).slice(0, 14)).not.toBe("4111 1111 1111");
+  });
+
+  it("widens the SSN and card spaces: one last four maps to many different surrogates", () => {
+    const ssns = new Set<string>();
+    const cards = new Set<string>();
+    for (let i = 0; i < 2000; i += 1) {
+      ssns.add(surrogateFor(`${String(100 + (i % 500)).padStart(3, "0")}-${String(10 + (i % 89)).padStart(2, "0")}-4399`, "us_ssn", key, { visibleTail: true }));
+      cards.add(surrogateFor(`4${String(100_000_000_000 + i * 7919).padStart(11, "0")}1111`, "card_number", key, { visibleTail: true }));
+    }
+    // 2,000 different people sharing a last four: at most a handful collide.
+    expect(ssns.size).toBeGreaterThan(1980);
+    expect(cards.size).toBeGreaterThan(1995);
+  });
+
+  it("keys a phone on its last nine digits, so it matches with or without the country code", () => {
+    const international = surrogateFor("+1 415-555-1234", "phone", key);
+    const national = surrogateFor("415-555-1234", "phone", key);
+    const digitsOnly = surrogateFor("4155551234", "phone", key);
+    expect(international.replace(/\D/g, "").slice(-9)).toBe(national.replace(/\D/g, "").slice(-9));
+    expect(digitsOnly.slice(-9)).toBe(national.replace(/\D/g, "").slice(-9));
+    expect(international.startsWith("+1 4")).toBe(true);
+    expect(international.replace(/\D/g, "")).not.toBe("14155551234");
   });
 
   it("redacts credentials, keys and tokens fully, and tags dictionary classes", () => {
