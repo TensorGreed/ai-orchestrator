@@ -133,6 +133,8 @@ import { registerMcpClientFeatureRoutes } from "./mcp-client-features-routes.js"
 import { registerMcpControlPlaneRoutes } from "./mcp-control-plane-routes.js";
 import { registerMcpTestingRoutes } from "./mcp-testing-routes.js";
 import { registerGuardRoutes } from "./guard-routes.js";
+import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
+import { GuardSimulationService } from "./services/guard-simulation-service.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
@@ -141,7 +143,7 @@ import type { CaptureInputOrigin } from "./services/capture-masking.js";
 import { maskableDataClasses } from "@ai-orchestrator/guard-sdk";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
-import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES } from "@ai-orchestrator/shared";
+import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerReleaseRoutes } from "./release-routes.js";
 import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
@@ -154,7 +156,7 @@ import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandb
 import { AuditBundleService } from "./services/audit-bundle-service.js";
 import { environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
-import { GuardService } from "./services/guard-service.js";
+import { GuardService, type GuardProfileSubstitute } from "./services/guard-service.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError } from "./db/store-errors.js";
@@ -1869,6 +1871,8 @@ export function createApp(
     providerRegistry?: ProviderRegistry;
     /** Phase 15.3 — a replay candidate's guard profile, evaluated in place of the bindings. */
     guardProfileOverride?: { profileId: string; version?: number };
+    /** Phase 15.6 — a guard policy simulation's profile, swapped in for the profile of the same id. */
+    guardSubstitute?: GuardProfileSubstitute;
     /**
      * Phase 15.4 — `production` for production traffic (the caller resolved
      * the published version): sub-workflows and the error workflow load their
@@ -2003,7 +2007,8 @@ export function createApp(
             executionId: input.executionId,
             workflowId: mergedWorkflow.id,
             projectId: mergedWorkflow.projectId ?? "default",
-            ...(input.guardProfileOverride ? { profileOverride: input.guardProfileOverride } : {})
+            ...(input.guardProfileOverride ? { profileOverride: input.guardProfileOverride } : {}),
+            ...(input.guardSubstitute ? { profileSubstitute: input.guardSubstitute } : {})
           }),
           replayNodeHook: input.replay?.hook,
           loadMcpToolPolicy,
@@ -3249,8 +3254,10 @@ export function createApp(
    * the workflow (the same rule as queued runs). The run then executes with
    * their policy and project scope (run-scope.ts).
    */
-  const evalRunActor = (userId: string, email: string, workflowId: string, permission: "workflow:execute" | "workflow:write" = "workflow:execute"): SafeUser | null => {
+  const evalRunActor = (userId: string, email: string, workflowId: string, permission: "workflow:read" | "workflow:execute" | "workflow:write" = "workflow:execute"): SafeUser | null => {
     const actor = evalPolicyActor(userId, email);
+    // Phase 15.6 — a guard policy simulation replays in projects its starter can read (models from the tape, no side effects).
+    if (permission === "workflow:read") return actor && runAccess.workflow(actor, workflowId, "workflow:read").ok ? actor : null;
     if (!actor || !runAccess.workflow(actor, workflowId, "workflow:execute").ok) return null;
     return permission === "workflow:execute" || runAccess.workflow(actor, workflowId, permission).ok ? actor : null;
   };
@@ -3366,7 +3373,7 @@ export function createApp(
       resolveCandidate: (workflowId, request, context) => replayService.resolveJobCandidate(workflowId, request, context),
       getRecording: (id) => store.getReplayRecording(id),
       // The candidate was resolved when the job started; it runs in the workflow's current project.
-      replayCase: ({ recording, candidate, request, actor, executionId, models, overrides, baseline, role, repeatIndex }) => {
+      replayCase: ({ recording, candidate, request, actor, executionId, models, overrides, baseline, role, repeatIndex, simulation }) => {
         const current = store.getWorkflow(candidate.workflow.id);
         if (!current) throw new ReplayRunError("The workflow this golden run belongs to no longer exists.", "not_found");
         const scoped = { ...candidate, workflow: { ...candidate.workflow, projectId: current.projectId, folderId: current.folderId } };
@@ -3377,7 +3384,8 @@ export function createApp(
           ...(overrides ? { overrides } : {}),
           ...(baseline ? { baseline } : {}),
           ...(role ? { role } : {}),
-          ...(repeatIndex !== undefined ? { repeatIndex } : {})
+          ...(repeatIndex !== undefined ? { repeatIndex } : {}),
+          ...(simulation ? { simulation } : {})
         });
       },
       baselineFor: (recording) => replayService.baselineFor(recording),
@@ -11623,6 +11631,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Phase 15.3 — model calls from the golden run's tape, and the candidate's guard profile.
         ...(replay.modelPlan ? { providerRegistry: replay.modelPlan.registry } : {}),
         ...(replay.guardProfileOverride ? { guardProfileOverride: replay.guardProfileOverride } : {}),
+        ...(replay.guardSubstitute ? { guardSubstitute: replay.guardSubstitute } : {}),
         policyActor: actor,
         workflow: replay.workflow,
         customData: replay.customData,
@@ -11749,6 +11758,55 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   });
 
   registerGuardRoutes({ app, store, guard: guardService, requireRole: (request, reply, roles) => requireRole(request, reply, roles), runAccess, canAccessWorkflow: (user, workflow, permission) => rbacService.canAccessWorkflow(user, workflow, permission), canInProject: (user, projectId, permission) => rbacService.can(user, projectId, permission), audit: (request, user, event) => audit(request, user, event) });
+
+  // Phase 15.6 — guard policy simulation (SQLite only: Postgres answers 501).
+  const guardSimulationService = (store as object) instanceof PostgresStore
+    ? null
+    : new GuardSimulationService({
+        store,
+        guard: guardService,
+        evals: evalService,
+        runAccess,
+        maxCases: config.REPLAY_SIMULATION_MAX_CASES ?? GUARD_SIMULATION_MAX_CASES_DEFAULT,
+        scrub: (text) => String(secretService.redact(replayRecordingService.scrubber().text(text))),
+        logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+      });
+  registerGuardSimulationRoutes({
+    app,
+    store,
+    simulations: guardSimulationService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    runAccess,
+    audit: (request, user, event) => audit(request, user, event)
+  });
+  if (guardSimulationService) {
+    const simulationService = guardSimulationService;
+    // Simulations a stopped server left running finish with what their (now interrupted) jobs recorded.
+    if (workerMode !== "webhook") {
+      try {
+        const recovered = simulationService.recover();
+        if (recovered > 0) app.log.warn({ count: recovered }, "Finished guard simulations interrupted by a restart");
+      } catch (err) {
+        app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Failed to finish interrupted guard simulations");
+      }
+    }
+    // Kept GUARD_SIMULATION_RETENTION_DAYS, pruned on the execution-history timer with their replay jobs.
+    const pruneGuardSimulations = (reason: "startup" | "interval") => {
+      const cutoff = new Date(Date.now() - GUARD_SIMULATION_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+      try {
+        const deleted = simulationService.prune(cutoff);
+        if (deleted > 0) app.log.info({ deleted, cutoff, reason }, "Pruned guard simulations");
+      } catch (err) {
+        app.log.warn({ cutoff, reason, err: err instanceof Error ? err.message : String(err) }, "Failed to prune guard simulations");
+      }
+    };
+    pruneGuardSimulations("startup");
+    const simulationPruneTimer = setInterval(() => pruneGuardSimulations("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
+    (simulationPruneTimer as { unref?: () => void }).unref?.();
+    app.addHook("onClose", async () => {
+      clearInterval(simulationPruneTimer);
+    });
+  }
 
   registerMcpTestingRoutes({
     app,
