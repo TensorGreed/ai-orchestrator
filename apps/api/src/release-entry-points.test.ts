@@ -64,6 +64,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "db/database.ts", match: "", kind: "not_run", why: "the SQLite store's own internals (upsert, delete)", count: 2 },
   { file: "db/postgres-store.ts", match: "", kind: "not_run", why: "the Postgres store's own internals (upsert, delete)", count: 2 },
   { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver, production path claims and its gate, judge and request checks", count: 19 },
+  { file: "services/gate-admission-service.ts", match: "", kind: "not_run", why: "gate admission reads only a workflow's name and project (audit, requests, inbox views)", count: 3 },
 
   // app.ts: production traffic.
   { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },

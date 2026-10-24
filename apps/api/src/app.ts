@@ -146,7 +146,10 @@ import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { GOLDEN_SET_FILE_DEFAULT_MAX_BYTES, GUARD_SIMULATION_MAX_CASES_DEFAULT, GUARD_SIMULATION_RETENTION_DAYS } from "@ai-orchestrator/shared";
 import { registerApprovalRoutes } from "./approval-routes.js";
 import { registerReleaseRoutes } from "./release-routes.js";
+import { registerGateAdmissionRoutes } from "./gate-admission-routes.js";
 import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
+import { GateAdmissionService } from "./services/gate-admission-service.js";
+import { gateAdmissionSnapshot } from "./services/gate-admission-state.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
 import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
 import { ReplayRecordingService } from "./services/replay-recording-service.js";
@@ -3887,6 +3890,21 @@ export function createApp(
     appPublicUrl: config.APP_PUBLIC_URL,
     logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
   });
+  // Release gate admission: on enforced gates, cases added after enforcement count only once admitted.
+  const gateAdmissionService = new GateAdmissionService({
+    store,
+    available: approvalsSupported,
+    access: (user, workflowId, permission) => runAccess.workflow(user, workflowId, permission),
+    readableWorkflowIds: (user) => runAccess.readableWorkflowIds(user),
+    audit: (event) => {
+      auditService.record(event);
+      logStreamingService.dispatchAudit(event);
+    },
+    notify: (event) => notificationService.notify(event),
+    redact: (value) => String(secretService.redact(value)),
+    appPublicUrl: config.APP_PUBLIC_URL,
+    logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
+  });
   /** The workflow production traffic runs: the published version when there is one, else the draft. */
   const productionWorkflow = (workflowId: string): Workflow | null => releaseService.resolveRunnableWorkflow(workflowId, "production");
   /** Phase 15.4 — what a production entry point answers when it has no workflow to run: why production refuses it (409), or 404. */
@@ -5431,7 +5449,22 @@ export function createApp(
     audit: (request, user, event) => audit(request, user, event),
     sseHeartbeatMs: config.SSE_HEARTBEAT_INTERVAL_MS,
     strictIsolation: config.PROJECT_ISOLATION === "strict",
-    goldenSetChangeDenial: (user, datasetId, change) => releaseService.goldenSetChangeDenial(user, datasetId, change)
+    goldenSetChangeDenial: (user, datasetId, change, target) => releaseService.goldenSetChangeDenial(user, datasetId, change, target),
+    releaseGateAdmission: (workflowId, datasetIds) => {
+      if (!approvalsSupported) return null;
+      const gate = store.getReleaseGate(workflowId);
+      if (!gate?.enforced || !gate.datasetIds.some((datasetId) => datasetIds.includes(datasetId))) return null;
+      const snapshot = gateAdmissionSnapshot(store, gate);
+      if (!snapshot) return null;
+      const policy = gate.policy as { errorsCountAsFailures?: unknown };
+      return {
+        enforced: true,
+        admittedFixtureIds: [...snapshot.admittedIds],
+        pendingFixtureIds: snapshot.fixtures.map((fixture) => fixture.id).filter((id) => !snapshot.admittedIds.has(id)),
+        requiredFixtureIds: snapshot.requiredIds,
+        errorsCountAsFailures: policy.errorsCountAsFailures !== false
+      };
+    }
   });
 
   app.get("/widget.js", async (_request, reply) => {
@@ -8872,12 +8905,19 @@ export function createApp(
     canSeeProjectAccounts: (user, workflow) => user.role === "admin" || rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume,
-    releases: releaseService
+    releases: releaseService,
+    gateCases: gateAdmissionService
   });
 
   registerReleaseRoutes({
     app,
     releases: releaseService,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles)
+  });
+
+  registerGateAdmissionRoutes({
+    app,
+    admission: gateAdmissionService,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 

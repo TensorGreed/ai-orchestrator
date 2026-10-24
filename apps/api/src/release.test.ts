@@ -872,10 +872,12 @@ describe("enforced gates: only admins weaken them", () => {
     const admin = await login(context, "admin");
     const builder = await login(context, "builder");
     save(context, hookWorkflow("wf-m4", "v1"));
-    await enableGate(context, admin.cookie, "wf-m4", { enforced: true });
+    await enableGate(context, admin.cookie, "wf-m4");
     const v2 = save(context, hookWorkflow("wf-m4", "v2"));
     const hash = await versionHash(context, builder.cookie, "wf-m4", v2);
     const job = seedJob(context, { workflowId: "wf-m4", datasetIds: ["set-wf-m4"], version: v2, hash, statuses: ["pass", "pass", "pass"] });
+    // Enforced once the set holds its cases, so they are admitted (cases added after enforcing wait for admission).
+    await enableGate(context, admin.cookie, "wf-m4", { enforced: true });
     const preview = async () => (await call(context, "GET", `/api/workflows/wf-m4/publish-preview?version=${v2}&replayRunId=${job}`, builder.cookie)).json<{ preview: { verdict: string; reasons: string[] } }>().preview;
     expect((await preview()).verdict).toBe("passed");
     const [first] = context.store.listEvalFixtures("set-wf-m4");

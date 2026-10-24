@@ -23,6 +23,11 @@
  * when `:id` is a release request id (`rar_…`); see release-service.ts.
  * They are left out when the inbox is filtered to one execution.
  *
+ * Gate case requests (admitting cases to an enforced release gate, or
+ * removing admitted ones) are listed the same way with `kind: "admit_cases"`
+ * or `"remove_cases"` and decided when `:id` is a `gcr_` id; see
+ * gate-admission-service.ts.
+ *
  * A decision is never lost: when its resume cannot be started the request
  * goes back to pending and the route answers 503, so it can be decided
  * again. Approvals need the SQLite store in this release; on Postgres every
@@ -34,13 +39,16 @@ import {
   approvalApproveInputSchema,
   approvalEligibilityInputSchema,
   approvalRejectInputSchema,
+  isGateCaseRequestId,
   isReleaseApprovalRequestId,
   type ApprovalRequestView,
+  type GateCaseRequestView,
   type ReleaseApprovalRequestView
 } from "@ai-orchestrator/shared";
 import type { RunAccess, RunAccessDenial } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import { ApprovalDecisionError, type ApprovalResumeJob, type ApprovalService } from "./services/approval-service.js";
+import type { GateAdmissionService } from "./services/gate-admission-service.js";
 import { ReleaseError, type ReleaseService } from "./services/release-service.js";
 
 export interface ApprovalRoutesDeps {
@@ -60,6 +68,8 @@ export interface ApprovalRoutesDeps {
   dispatch: (job: ApprovalResumeJob) => Promise<{ queued: true } | { queued: false; result: { status: string } } | null>;
   /** Phase 15.4 — release requests in the same inbox. */
   releases?: Pick<ReleaseService, "listRequests" | "decide">;
+  /** Release gate admission — requests to admit or remove cases of an enforced gate, in the same inbox. */
+  gateCases?: Pick<GateAdmissionService, "listRequests" | "decide">;
 }
 
 /** Newest first, by when it was asked (pending) or decided (decided, all). */
@@ -98,19 +108,21 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       if (!access.ok) return deny(reply, access);
     }
     const capped = limit && Number.isFinite(limit) ? Math.max(1, Math.min(500, limit)) : undefined;
-    const runItems: Array<ApprovalRequestView | ReleaseApprovalRequestView> = approvals.list(user, {
+    const runItems: Array<ApprovalRequestView | ReleaseApprovalRequestView | GateCaseRequestView> = approvals.list(user, {
       status,
       ...(query.workflowId ? { workflowId: query.workflowId } : {}),
       ...(query.executionId ? { executionId: query.executionId } : {}),
       ...(capped ? { limit: capped } : {})
     });
-    if (query.executionId || !deps.releases) return { items: runItems };
-    const releaseItems = deps.releases.listRequests(user, {
+    if (query.executionId || (!deps.releases && !deps.gateCases)) return { items: runItems };
+    const filter = {
       status,
       ...(query.workflowId ? { workflowId: query.workflowId } : {}),
       ...(capped ? { limit: capped } : {})
-    });
-    const items = [...runItems, ...releaseItems].sort((a, b) => inboxTime(b, status) - inboxTime(a, status)).slice(0, capped ?? 200);
+    };
+    const releaseItems = deps.releases ? deps.releases.listRequests(user, filter) : [];
+    const caseItems = deps.gateCases ? deps.gateCases.listRequests(user, filter) : [];
+    const items = [...runItems, ...releaseItems, ...caseItems].sort((a, b) => inboxTime(b, status) - inboxTime(a, status)).slice(0, capped ?? 200);
     return { items };
   });
 
@@ -124,9 +136,11 @@ export function registerApprovalRoutes(deps: ApprovalRoutesDeps): void {
       return { error: decision === "approve" ? "Invalid approval payload" : "Invalid rejection payload", details: parsed.error.issues };
     }
     const body = parsed.data as { reason?: string; edits?: Record<string, unknown>; requestId?: string };
-    if (deps.releases && isReleaseApprovalRequestId(request.params.id)) {
+    const id = request.params.id;
+    const special = deps.releases && isReleaseApprovalRequestId(id) ? deps.releases : deps.gateCases && isGateCaseRequestId(id) ? deps.gateCases : null;
+    if (special) {
       try {
-        return deps.releases.decide(user, request.params.id, decision, body.reason);
+        return special.decide(user, id, decision, body.reason);
       } catch (error) {
         if (error instanceof ReleaseError) {
           reply.code(error.statusCode);
