@@ -1724,6 +1724,103 @@ export const openApiSpec = {
         responses: { "200": { description: "Deleted" }, "404": { description: "Not found" } }
       }
     },
+    "/api/workflows/{id}/replay-capture": {
+      get: {
+        tags: ["Evals"],
+        summary: "Production capture settings of a workflow, the deployment's limits, candidates waiting and today's count (viewers; SQLite only)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ settings }" }, "404": { description: "Not found or not readable" }, "501": { description: "Postgres store" } }
+      },
+      put: {
+        tags: ["Evals"],
+        summary: "Change production capture settings (builders; turning masking off is admin-only with a reason)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  enabled: { type: "boolean" },
+                  rate: { type: "number", exclusiveMinimum: 0, maximum: 1 },
+                  maxPerDay: { type: "integer", minimum: 1, maximum: 1000 },
+                  onlyStatuses: { type: "array", minItems: 1, items: { type: "string", enum: ["success", "error", "canceled"] } },
+                  dlp: { type: "boolean" },
+                  targetDatasetId: { type: "string", nullable: true },
+                  reason: { type: "string", maxLength: 500 }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "{ settings }" },
+          "400": { description: "Invalid settings, a rate over REPLAY_CAPTURE_MAX_RATE, a target set of another workflow, or masking off without a reason" },
+          "403": { description: "Readable but not editable, or masking off by a non-admin" },
+          "404": { description: "Not found or not readable" },
+          "501": { description: "Postgres store" }
+        }
+      }
+    },
+    "/api/workflows/{id}/replay-captures": {
+      get: {
+        tags: ["Evals"],
+        summary: "The Captured runs inbox: candidate recordings of a workflow, newest first (viewers)",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "runStatus", in: "query", required: false, schema: { type: "string", enum: ["success", "error", "canceled"] } },
+          { name: "trigger", in: "query", required: false, schema: { type: "string" } },
+          { name: "from", in: "query", required: false, schema: { type: "string", format: "date-time" } },
+          { name: "to", in: "query", required: false, schema: { type: "string", format: "date-time" } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 200 } },
+          { name: "offset", in: "query", required: false, schema: { type: "integer", minimum: 0 } }
+        ],
+        responses: { "200": { description: "{ items, total }" }, "404": { description: "Not found or not readable" }, "501": { description: "Postgres store" } }
+      }
+    },
+    "/api/replay/captures/{id}/promote": {
+      post: {
+        tags: ["Evals"],
+        summary: "Promote a captured run into a golden set: re-scrubbed, size and count limits checked (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", additionalProperties: false, properties: { datasetId: { type: "string" }, name: { type: "string", maxLength: 120 } } } } } },
+        responses: { "200": { description: "{ result, recording }" }, "403": { description: "Readable but not editable" }, "404": { description: "Not found, not readable or no longer in the inbox" }, "409": { description: "Over a golden-run limit" }, "501": { description: "Postgres store" } }
+      }
+    },
+    "/api/replay/captures/promote": {
+      post: {
+        tags: ["Evals"],
+        summary: "Promote up to 100 captured runs; one result per id (builders)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["ids"], properties: { ids: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } }, datasetId: { type: "string" } } } } } },
+        responses: { "200": { description: "{ results, promoted }" }, "501": { description: "Postgres store" } }
+      }
+    },
+    "/api/replay/captures/{id}": {
+      delete: {
+        tags: ["Evals"],
+        summary: "Discard a captured run (builders)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ deleted: true }" }, "403": { description: "Readable but not editable" }, "404": { description: "Not found or not readable" }, "501": { description: "Postgres store" } }
+      }
+    },
+    "/api/replay/captures/discard": {
+      post: {
+        tags: ["Evals"],
+        summary: "Discard up to 100 captured runs; one result per id (builders)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["ids"], properties: { ids: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } } } } } } },
+        responses: { "200": { description: "{ results, discarded }" }, "501": { description: "Postgres store" } }
+      }
+    },
+    "/api/replay/recordings/find-subject": {
+      post: {
+        tags: ["Evals"],
+        summary: "Data-subject lookup: find (and optionally delete) every golden or captured run holding a value, raw or as its surrogate (admins; the value is never logged)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["value"], properties: { value: { type: "string", minLength: 3, maxLength: 1000 }, delete: { type: "boolean" } } } } } },
+        responses: { "200": { description: "{ classesTried, matches, deleted, casesDeleted, searched }" }, "403": { description: "Not an admin" }, "501": { description: "Postgres store" } }
+      }
+    },
     "/api/replay/recordings/{id}/replay": {
       post: {
         tags: ["Executions"],
