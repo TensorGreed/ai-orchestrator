@@ -47,7 +47,7 @@ import type {
   ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
-import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
+import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, GUARD_SIMULATION_JOB_DATASET_PREFIX, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -1346,6 +1346,25 @@ export interface GuardEventStats {
 
 /** Phase 11.1 — the cached run manifest of one execution (and the run context captured when it finished). */
 /** Phase 15.1 — a stored golden run (JSON columns parsed). Values are already scrubbed. */
+/** Phase 15.6 — a stored guard policy simulation (JSON columns parsed). */
+export interface GuardSimulationRecord {
+  id: string;
+  profileId: string;
+  sourceKind: "inline" | "version";
+  sourceVersion: number | null;
+  simulatedHash: string;
+  baseVersion: number | null;
+  jobIds: string[];
+  /** The per-workflow detail (`GuardSimulationWorkflow[]` and the empty-state reason). */
+  detail: Record<string, unknown> | null;
+  status: string;
+  error: string | null;
+  createdAt: string;
+  createdBy: string | null;
+  createdByUserId: string | null;
+  finishedAt: string | null;
+}
+
 export interface ReplayRecordingRecord extends ReplayRecordingSummary {
   capturedWorkflow: Record<string, unknown>;
   input: unknown;
@@ -3434,6 +3453,27 @@ export class SqliteStore {
     `);
     this.ensureColumn("replay_capture_settings", "last_drop_outcome", "TEXT");
     this.ensureColumn("replay_capture_settings", "last_drop_at", "TEXT");
+
+    // Phase 15.6 (migration 35) — guard policy simulations: one row per simulation, grouping its replay jobs.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS guard_simulations (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_version INTEGER,
+        simulated_hash TEXT NOT NULL,
+        base_version INTEGER,
+        job_ids_json TEXT NOT NULL,
+        summary_json TEXT,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        created_by_user_id TEXT,
+        finished_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_guard_simulations_profile ON guard_simulations(profile_id, created_at DESC);
+    `);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -8499,10 +8539,12 @@ export class SqliteStore {
     this.persist();
   }
 
-  listEvalRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; statuses?: string[]; id?: string; limit?: number; offset?: number } = {}): EvalRunRecord[] {
+  listEvalRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; statuses?: string[]; id?: string; limit?: number; offset?: number; excludeSimulations?: boolean } = {}): EvalRunRecord[] {
     const clauses: string[] = [];
     const params: BindParams = [];
     if (options.id) { clauses.push("id = ?"); params.push(options.id); }
+    // Phase 15.6 — a guard policy simulation's replay jobs are listed with their simulation, not with the workflow's jobs.
+    if (options.excludeSimulations) { clauses.push("dataset_id NOT LIKE ?"); params.push(`${GUARD_SIMULATION_JOB_DATASET_PREFIX}%`); }
     if (options.datasetId) {
       // The id is matched as a JSON string inside the list; `%`, `_` and `\` in it are literal.
       const needle = JSON.stringify(options.datasetId).replace(/[\\%_]/g, (char) => `\\${char}`);
@@ -11519,6 +11561,92 @@ export class SqliteStore {
     return true;
   }
 
+  // ---------------------------------------------------------------------------
+  // Phase 15.6 — guard policy simulations. Kept GUARD_SIMULATION_RETENTION_DAYS;
+  // pruning one deletes its replay jobs and their case results.
+  // ---------------------------------------------------------------------------
+
+  insertGuardSimulation(input: Omit<GuardSimulationRecord, "error" | "finishedAt"> & { error?: string | null; finishedAt?: string | null }): GuardSimulationRecord {
+    this.exec(
+      `INSERT INTO guard_simulations (id, profile_id, source_kind, source_version, simulated_hash, base_version, job_ids_json, summary_json, status, error, created_at, created_by, created_by_user_id, finished_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.profileId,
+        input.sourceKind,
+        input.sourceVersion,
+        input.simulatedHash,
+        input.baseVersion,
+        JSON.stringify(input.jobIds),
+        input.detail ? JSON.stringify(input.detail) : null,
+        input.status,
+        input.error ?? null,
+        input.createdAt,
+        input.createdBy,
+        input.createdByUserId,
+        input.finishedAt ?? null
+      ]
+    );
+    this.persist();
+    return this.getGuardSimulation(input.id)!;
+  }
+
+  /** Updates a simulation; `onlyFrom` limits it to rows still in one of those statuses. Returns whether a row changed. */
+  updateGuardSimulation(input: { id: string; status?: string; jobIds?: string[]; detail?: Record<string, unknown>; error?: string | null; finishedAt?: string | null; onlyFrom?: string[] }): boolean {
+    const sets: string[] = [];
+    const params: BindParams = [];
+    if (input.status !== undefined) { sets.push("status = ?"); params.push(input.status); }
+    if (input.jobIds !== undefined) { sets.push("job_ids_json = ?"); params.push(JSON.stringify(input.jobIds)); }
+    if (input.detail !== undefined) { sets.push("summary_json = ?"); params.push(JSON.stringify(input.detail)); }
+    if (input.error !== undefined) { sets.push("error = ?"); params.push(input.error); }
+    if (input.finishedAt !== undefined) { sets.push("finished_at = ?"); params.push(input.finishedAt); }
+    if (sets.length === 0) return false;
+    const guard = input.onlyFrom && input.onlyFrom.length > 0 ? ` AND status IN (${input.onlyFrom.map(() => "?").join(", ")})` : "";
+    this.exec(`UPDATE guard_simulations SET ${sets.join(", ")} WHERE id = ?${guard}`, [...params, input.id, ...(input.onlyFrom ?? [])]);
+    const row = this.queryOne<{ count: number }>("SELECT changes() as count");
+    this.persist();
+    return (row ? toNumber(row.count) : 0) > 0;
+  }
+
+  getGuardSimulation(id: string): GuardSimulationRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE id = ?`, [id]);
+    return row ? mapGuardSimulationRow(row) : null;
+  }
+
+  listGuardSimulations(options: { profileId: string; limit?: number }): GuardSimulationRecord[] {
+    const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 20)));
+    return this.queryAll<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE profile_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`, [options.profileId, limit]).map(mapGuardSimulationRow);
+  }
+
+  /** Simulations still running (a stopped server left them so). */
+  listRunningGuardSimulations(): GuardSimulationRecord[] {
+    return this.queryAll<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE status = 'running' ORDER BY created_at ASC`).map(mapGuardSimulationRow);
+  }
+
+  /** Deletes simulations created before `before`, with their replay jobs and case results. Returns how many simulations were deleted. */
+  pruneGuardSimulations(input: { before: string }): number {
+    const rows = this.queryAll<{ id: string; job_ids_json: string | null }>(`SELECT id, job_ids_json FROM guard_simulations WHERE created_at < ?`, [input.before]);
+    if (rows.length === 0) return 0;
+    const jobIds: string[] = [];
+    for (const row of rows) {
+      const parsed = row.job_ids_json ? safeJsonParse(toString(row.job_ids_json)) : null;
+      if (Array.isArray(parsed)) jobIds.push(...parsed.map((entry) => String(entry)));
+    }
+    for (let index = 0; index < jobIds.length; index += 200) {
+      const chunk = jobIds.slice(index, index + 200);
+      const marks = chunk.map(() => "?").join(", ");
+      this.exec(`DELETE FROM eval_results WHERE run_id IN (${marks})`, chunk);
+      this.exec(`DELETE FROM eval_runs WHERE id IN (${marks}) AND status NOT IN ('queued', 'running')`, chunk);
+    }
+    const ids = rows.map((row) => toString(row.id));
+    for (let index = 0; index < ids.length; index += 200) {
+      const chunk = ids.slice(index, index + 200);
+      this.exec(`DELETE FROM guard_simulations WHERE id IN (${chunk.map(() => "?").join(", ")})`, chunk);
+    }
+    this.persist();
+    return ids.length;
+  }
+
   /** MCP tool-call telemetry rows of one execution, oldest first. */
   listMcpToolCallsForExecution(executionId: string): McpToolCallRecord[] {
     return this.queryAll<McpToolCallRow>(`SELECT * FROM mcp_tool_calls WHERE execution_id = ? ORDER BY started_at, id`, [executionId]).map(mapMcpToolCall);
@@ -11661,4 +11789,27 @@ export class SqliteStore {
     this.persist();
     return project;
   }
+}
+
+function mapGuardSimulationRow(row: Record<string, unknown>): GuardSimulationRecord {
+  const jobs = typeof row.job_ids_json === "string" ? safeJsonParse(row.job_ids_json) : null;
+  const detail = typeof row.summary_json === "string" && row.summary_json ? safeJsonParse(row.summary_json) : null;
+  const optionalNumber = (value: unknown) => (value === null || value === undefined ? null : toNumber(value));
+  const optionalString = (value: unknown) => (value === null || value === undefined ? null : toString(value));
+  return {
+    id: toString(row.id),
+    profileId: toString(row.profile_id),
+    sourceKind: toString(row.source_kind) === "version" ? "version" : "inline",
+    sourceVersion: optionalNumber(row.source_version),
+    simulatedHash: toString(row.simulated_hash),
+    baseVersion: optionalNumber(row.base_version),
+    jobIds: Array.isArray(jobs) ? jobs.map((entry) => String(entry)) : [],
+    detail: detail && typeof detail === "object" && !Array.isArray(detail) ? (detail as Record<string, unknown>) : null,
+    status: toString(row.status),
+    error: optionalString(row.error),
+    createdAt: toString(row.created_at),
+    createdBy: optionalString(row.created_by),
+    createdByUserId: optionalString(row.created_by_user_id),
+    finishedAt: optionalString(row.finished_at)
+  };
 }

@@ -123,6 +123,13 @@ const envSchema = z.object({
    * the newest run of every set is always kept. 0 keeps them forever.
    */
   EVAL_RUN_RETENTION_DAYS: z.coerce.number().int().nonnegative().max(36_500).default(90),
+  /**
+   * Phase 15.6 — the most recent recordings one guard policy simulation may
+   * replay (a request asks for 50 by default and is capped here). Each
+   * recording is one replay with models from its tape, so no model is called.
+   * Default 200 (applied where it is used).
+   */
+  REPLAY_SIMULATION_MAX_CASES: z.coerce.number().int().min(1).max(5_000).optional(),
 
   // Phase 8.4 — Audit export to long-term sinks (SIEM, archive, etc.)
   // Phase 10.1 — MCP server registry health probes. 0 turns the background loop off.
