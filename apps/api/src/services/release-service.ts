@@ -137,6 +137,9 @@ export class ReleaseError extends Error {
 
 type JobView = EvalRunView & { results: EvalCaseResult[] };
 
+/** Why a job whose case results a data-subject delete removed is no longer release proof. */
+export const DATA_SUBJECT_EVIDENCE_REMOVED = "Stale: a data-subject delete removed some of this job's case results after it ran, so it can no longer prove a release. Run the job again.";
+
 export interface ReleaseServiceOptions {
   store: SqliteStore;
   /** False on stores without release tables (Postgres in this release): every channel runs the draft. */
@@ -876,7 +879,12 @@ export class ReleaseService {
   gateCasesRemoval(
     user: SafeUser,
     workflowId: string,
-    target: { via: "fixture"; fixtureId: string } | { via: "golden_set"; datasetId: string } | { via: "golden_run"; recordingId: string } | { via: "workflow" }
+    target:
+      | { via: "fixture"; fixtureId: string }
+      | { via: "golden_set"; datasetId: string }
+      | { via: "golden_run"; recordingId: string }
+      | { via: "workflow" }
+      | { via: "data_subject"; fixtureIds: readonly string[]; kind: string; id: string }
   ): (() => void) | null {
     if (!this.options.available) return null;
     const snapshot = gateAdmissionSnapshot(this.store, this.store.getReleaseGate(workflowId));
@@ -889,6 +897,8 @@ export class ReleaseService {
           return fixture.datasetId === target.datasetId;
         case "golden_run":
           return fixture.recordingId === target.recordingId;
+        case "data_subject":
+          return target.fixtureIds.includes(fixture.id);
         default:
           return Boolean(fixture.recordingId);
       }
@@ -899,7 +909,7 @@ export class ReleaseService {
     const required = snapshot.requiredIds.filter((id) => ids.includes(id));
     const before = admissionState(snapshot);
     const label = ids.map((id) => `"${snapshot.names[id] ?? id}"`).join(", ");
-    const leaves = target.via === "fixture" || target.via === "golden_set";
+    const leaves = target.via === "fixture" || target.via === "golden_set" || target.via === "data_subject";
     const loosened = leaves
       ? releaseAdmissionLoosening(before, { admittedIds: before.admittedIds.filter((id) => !ids.includes(id)), requiredIds: before.requiredIds.filter((id) => !ids.includes(id)) }, snapshot.names)
       : [`deletes the golden run${ids.length === 1 ? "" : "s"} admitted case${ids.length === 1 ? "" : "s"} ${label} replay${ids.length === 1 ? "s" : ""}, so ${ids.length === 1 ? "it is" : "they are"} inconclusive from now on`];
@@ -918,11 +928,66 @@ export class ReleaseService {
           ...(target.via === "fixture" ? { fixtureId: target.fixtureId } : {}),
           ...(target.via === "golden_set" ? { datasetId: target.datasetId } : {}),
           ...(target.via === "golden_run" ? { recordingId: target.recordingId } : {}),
+          ...(target.via === "data_subject" ? { target: `${target.kind}:${target.id}` } : {}),
           fixtureIds: ids,
           requiredFixtureIds: required,
           loosened
         }
       });
+  }
+
+  /**
+   * Before an admin's data-subject delete removes one row (find-subject):
+   * a function to call once the row is gone, or null when the row touches
+   * no golden-set case and no job's results. Erasure is a legal obligation,
+   * so it is never refused here, even for admitted cases of an enforced
+   * gate; instead
+   *   - the admitted and required cases it takes (a golden run takes every
+   *     case replaying it; a case takes itself) are audited as loosening
+   *     (`release.gate.cases_removed`, via `data_subject`), and
+   *   - every job that held a result of a removed case, or a removed
+   *     result, is stale for good: it is marked release-ineligible, so the
+   *     release gate and pending release approvals stop accepting it
+   *     (`release.jobs.evidence_removed`).
+   */
+  dataSubjectRemoval(user: SafeUser, row: { kind: string; id: string }): (() => void) | null {
+    if (!this.options.available) return null;
+    let workflowId: string | null = null;
+    let fixtureIds: string[] = [];
+    let resultIds: string[] = [];
+    if (row.kind === "recording") {
+      workflowId = this.store.getReplayRecordingSummary(row.id)?.workflowId ?? null;
+      fixtureIds = this.store.evalFixtureIdsForRecording(row.id);
+    } else if (row.kind === "fixture") {
+      const fixture = this.store.getEvalFixture(row.id);
+      if (fixture) {
+        workflowId = this.store.getEvalDataset(fixture.datasetId)?.workflowId ?? null;
+        fixtureIds = [fixture.id];
+      }
+    } else if (row.kind === "eval_result") {
+      resultIds = [row.id];
+    } else {
+      return null;
+    }
+    const runIds = this.store.evalRunIdsForResults({ fixtureIds, resultIds });
+    const casesRemoved = workflowId && fixtureIds.length > 0 ? this.gateCasesRemoval(user, workflowId, { via: "data_subject", fixtureIds, kind: row.kind, id: row.id }) : null;
+    if (!casesRemoved && runIds.length === 0) return null;
+    return () => {
+      casesRemoved?.();
+      const stale = this.store.markEvalRunsReleaseIneligible(runIds, DATA_SUBJECT_EVIDENCE_REMOVED);
+      if (stale.length === 0) return;
+      this.options.audit({
+        category: "release",
+        eventType: "release.jobs.evidence_removed",
+        action: "update",
+        outcome: "success",
+        actor: { userId: user.id, email: user.email, type: "user" },
+        resourceType: workflowId ? "workflow" : "eval_run",
+        resourceId: workflowId ?? stale[0]!,
+        projectId: workflowId ? this.projectOf(workflowId) : null,
+        metadata: { via: "data_subject", target: `${row.kind}:${row.id}`, runIds: stale, fixtureIds, resultIds }
+      });
+    };
   }
 
   /**

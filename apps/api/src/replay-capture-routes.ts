@@ -45,6 +45,12 @@ export interface ReplayCaptureRoutesDeps {
   audit: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void;
   /** False on Postgres: every route answers 501. */
   available: boolean;
+  /**
+   * Release gate admission — before a data-subject delete removes one row: a
+   * function to call once it is gone (audits admitted cases it takes as
+   * loosening, marks jobs that held its results stale), or null.
+   */
+  subjectRowRemoval?: (user: SafeUser, row: { kind: string; id: string }) => (() => void) | null;
 }
 
 const CAPTURE_ERROR_STATUS: Record<ReplayCaptureError["code"], number> = {
@@ -326,7 +332,8 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
       const result = await captures.deleteSubject(query, targets, {
         // Possible matches deleted only because the admin confirmed each one are counted apart in the trail.
         beforeDelete: (rows) =>
-          writeRows("replay.find_subject.delete_started", rows, { rows: rows.length, confirmedPossible: rows.filter((row) => row.certainty !== "exact").length })
+          writeRows("replay.find_subject.delete_started", rows, { rows: rows.length, confirmedPossible: rows.filter((row) => row.certainty !== "exact").length }),
+        beforeRowDelete: (row) => deps.subjectRowRemoval?.(user, row) ?? null
       });
       writeRows("replay.find_subject.deleted", result.removed, { deleted: result.deleted, skipped: result.skipped.length });
       return result;

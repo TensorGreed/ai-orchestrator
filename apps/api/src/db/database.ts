@@ -11846,6 +11846,54 @@ export class SqliteStore {
     ).map((row) => ({ id: toString(row.id), bytes: toNumber(row.bytes) }));
   }
 
+  /** Golden-set cases that replay a recording. */
+  evalFixtureIdsForRecording(recordingId: string): string[] {
+    return this.queryAll<{ id: string }>(`SELECT id FROM eval_fixtures WHERE recording_id = ?`, [recordingId]).map((row) => toString(row.id));
+  }
+
+  /** The runs holding a result of one of these cases, or one of these results. */
+  evalRunIdsForResults(input: { fixtureIds?: readonly string[]; resultIds?: readonly string[] }): string[] {
+    const out = new Set<string>();
+    const collect = (column: "fixture_id" | "id", ids: readonly string[] | undefined) => {
+      const unique = [...new Set(ids ?? [])];
+      for (let start = 0; start < unique.length; start += 500) {
+        const chunk = unique.slice(start, start + 500);
+        const marks = chunk.map(() => "?").join(", ");
+        for (const row of this.queryAll<{ run_id: string }>(`SELECT DISTINCT run_id FROM eval_results WHERE ${column} IN (${marks})`, chunk)) out.add(toString(row.run_id));
+      }
+    };
+    collect("fixture_id", input.fixtureIds);
+    collect("id", input.resultIds);
+    return [...out];
+  }
+
+  /**
+   * Release gate admission — runs whose evidence was removed after they ran
+   * (a data-subject delete took some of their case results): never release
+   * proof again. The reason joins the candidate's release-ineligible reasons.
+   * Returns the ids changed.
+   */
+  markEvalRunsReleaseIneligible(runIds: readonly string[], reason: string): string[] {
+    const changed: string[] = [];
+    for (const runId of new Set(runIds)) {
+      const row = this.queryOne<{ candidate_json: string | null }>(`SELECT candidate_json FROM eval_runs WHERE id = ?`, [runId]);
+      if (!row) continue;
+      let candidate: Record<string, unknown> = {};
+      try {
+        const parsed = row.candidate_json ? (JSON.parse(row.candidate_json) as unknown) : null;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) candidate = parsed as Record<string, unknown>;
+      } catch {
+        candidate = {};
+      }
+      const reasons = Array.isArray(candidate.releaseIneligibleReasons) ? candidate.releaseIneligibleReasons.map((entry) => String(entry)) : [];
+      if (candidate.releaseEligible === false && reasons.includes(reason)) continue;
+      const next = { ...candidate, releaseEligible: false, releaseIneligibleReasons: reasons.includes(reason) ? reasons : [...reasons, reason] };
+      this.exec(`UPDATE eval_runs SET candidate_json = ? WHERE id = ?`, [JSON.stringify(next), runId]);
+      changed.push(runId);
+    }
+    return changed;
+  }
+
   /** Golden-set cases made from a recording (their input is a copy of the recording's). */
   deleteEvalFixturesForRecording(recordingId: string): number {
     const row = this.queryOne<{ count: number }>(`SELECT COUNT(*) AS count FROM eval_fixtures WHERE recording_id = ?`, [recordingId]);

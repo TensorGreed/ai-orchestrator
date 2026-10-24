@@ -848,12 +848,18 @@ export class ReplayCaptureService {
    * about to be deleted before the first one is (the caller writes the
    * intent audit row; if it throws, nothing is deleted). A golden run takes
    * its golden-set cases and their results; a run takes its tool-call,
-   * guard-event and usage rows.
+   * guard-event and usage rows. `beforeRowDelete` runs before each row's
+   * delete and its result after it (the release gate audits admitted cases
+   * taken and marks jobs whose results went stale).
    */
   async deleteSubject(
     query: ReplayFindSubjectQuery,
     targets: Array<{ kind: ReplayFindSubjectKind; id: string; confirmPossible?: true }>,
-    hooks: { beforeDelete?: (rows: Array<{ kind: ReplayFindSubjectKind; id: string; certainty: ReplayFindSubjectCertainty }>) => void } = {}
+    hooks: {
+      beforeDelete?: (rows: Array<{ kind: ReplayFindSubjectKind; id: string; certainty: ReplayFindSubjectCertainty }>) => void;
+      /** Just before one row is deleted: a function called once it is gone (the release gate's audit and stale jobs), or null. */
+      beforeRowDelete?: (row: { kind: ReplayFindSubjectKind; id: string }) => (() => void) | null;
+    } = {}
   ): Promise<ReplayFindSubjectDeleteResult> {
     // A row named both with and without a confirmation is a mistake in the request, whichever comes first: refused, nothing deleted.
     const confirmations = new Map<string, boolean>();
@@ -894,7 +900,9 @@ export class ReplayCaptureService {
     for (const target of confirmed) {
       // Already removed with a golden run deleted before it (a case or a result named as a target too).
       if (gone.has(`${target.kind}:${target.id}`)) continue;
+      const afterDelete = hooks.beforeRowDelete?.({ kind: target.kind, id: target.id }) ?? null;
       const outcome = store.transaction(() => store.deleteSubjectRow(target.kind, target.id));
+      if (outcome.deleted) afterDelete?.();
       if (outcome.deleted) {
         gone.add(`${target.kind}:${target.id}`);
         deleted[target.kind] += 1;

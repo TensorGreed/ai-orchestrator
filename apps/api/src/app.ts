@@ -11760,7 +11760,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     runAccess,
     audit: (request, user, event) => audit(request, user, event),
-    available: captureAvailable
+    available: captureAvailable,
+    // Release gate admission: an erasure is never refused, but admitted cases it takes are audited and stale jobs marked.
+    subjectRowRemoval: (user, row) => releaseService.dataSubjectRemoval(user, row)
   });
 
   // Phase 15.5 — golden-set files (SQLite only: Postgres answers 501).
