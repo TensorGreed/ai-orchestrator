@@ -1716,7 +1716,9 @@ export const MIGRATIONS: Migration[] = [
            SELECT COALESCE(json_agg(f.id ORDER BY f.id)::text, '[]')
              FROM eval_fixtures f
             WHERE f.dataset_id IN (SELECT json_array_elements_text(g.dataset_ids_json::json))
-         )
+         ),
+             admission_updated_at = CURRENT_TIMESTAMP,
+             admission_updated_by = 'migration 36'
        WHERE g.enforced = 1 AND g.admitted_fixture_ids_json IS NULL;
       CREATE TABLE IF NOT EXISTS gate_case_requests (
         id TEXT PRIMARY KEY,
