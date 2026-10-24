@@ -360,7 +360,7 @@ test.describe("golden journeys", () => {
     await expect(cases.getByText(/Captured webhook/)).toBeVisible();
 
     // An admin finds the person's masked copy; bare digits offer "Read as" and a country.
-    await sidebarItem(page, "Evaluations").click();
+    await page.getByRole("button", { name: "← Golden sets" }).click();
     const lookup = page.getByRole("region", { name: "Find a person's data" });
     await lookup.getByLabel("Value").fill("4155550123");
     await lookup.getByLabel("Read as").selectOption("phone");
