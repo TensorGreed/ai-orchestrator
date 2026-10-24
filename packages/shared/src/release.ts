@@ -292,6 +292,12 @@ export interface ReleaseGateStats {
   p95LatencyIncreasePct: number | null;
   newGuardBlocks: number;
   oldestRecordingDays: number | null;
+  /**
+   * Gate admission (enforced gates only): which cases counted, which ran
+   * while pending admission, and the required cases. Absent when the gate
+   * judged every case (unenforced gates, and jobs judged without admission).
+   */
+  admission?: ReleaseGateAdmissionStats;
 }
 
 export type ReleaseGateVerdict = "passed" | "blocked" | "needs_approval";
@@ -380,7 +386,18 @@ function statsOf(evidence: ReleaseGateEvidence, policy: ReleaseGatePolicy, now: 
 export function judgeReleaseGate(
   evidence: ReleaseGateEvidence | null,
   policy: ReleaseGatePolicy,
-  options: { expected: ReleaseGateExpectation; requireApproval?: boolean; now?: Date }
+  options: {
+    expected: ReleaseGateExpectation;
+    requireApproval?: boolean;
+    now?: Date;
+    /**
+     * Enforced gates: the admitted cases and the required ones. Cases not
+     * admitted run and are reported but count toward nothing; a required case
+     * that fails (or errors, when errors count as failures) blocks whatever
+     * the pass rate. Without it every case counts, as before admission existed.
+     */
+    admission?: ReleaseGateAdmission | null;
+  }
 ): ReleaseGateJudgement {
   const now = (options.now ?? new Date()).getTime();
   const empty: ReleaseGateStats = {
@@ -430,16 +447,26 @@ export function judgeReleaseGate(
     ? { ...evidence, cases: evidence.cases.map((entry) => (entry.diffMissing && entry.status !== "skipped" ? { ...entry, status: "error" as const } : entry)) }
     : evidence;
 
-  const stats = statsOf(judged, policy, now);
-  if (stats.cases < policy.minCases) reasons.push(`Only ${stats.cases} case${stats.cases === 1 ? "" : "s"} judged; the gate needs at least ${policy.minCases}.`);
+  const admission = options.admission ?? null;
+  const { counted, pending } = splitAdmittedCases(judged.cases, admission);
+  const stats: ReleaseGateStats = statsOf({ ...judged, cases: counted }, policy, now);
+  if (admission) stats.admission = summarizeReleaseGateAdmission(judged.cases, admission, policy);
+  const waiting = pending.filter((entry) => entry.status !== "skipped").length;
+  if (stats.cases < policy.minCases) {
+    const more = waiting > 0 ? ` (${waiting} more ${waiting === 1 ? "is" : "are"} waiting for admission and do not count yet)` : "";
+    reasons.push(`Only ${stats.cases} case${stats.cases === 1 ? "" : "s"} judged${more}; the gate needs at least ${policy.minCases}.`);
+  }
   if (stats.passRate < policy.minPassRate) {
     reasons.push(`Pass rate ${Math.round(stats.passRate * 1000) / 10}% is below the required ${Math.round(policy.minPassRate * 1000) / 10}%.`);
   }
   if (stats.regressions > policy.maxRegressions) {
     reasons.push(`${stats.regressions} regression${stats.regressions === 1 ? "" : "s"}; the gate allows ${policy.maxRegressions}.`);
   }
+  for (const failure of stats.admission?.requiredFailures ?? []) {
+    reasons.push(`Required case "${failure.name}" ${failure.problem}: a required case must pass whatever the pass rate.`);
+  }
   for (const scorer of policy.requiredScorers) {
-    const failing = judged.cases.filter((entry) => entry.status !== "skipped" && !entry.scorers.some((detail) => detail.type === scorer && detail.pass));
+    const failing = counted.filter((entry) => entry.status !== "skipped" && !entry.scorers.some((detail) => detail.type === scorer && detail.pass));
     if (failing.length > 0) reasons.push(`Required scorer ${scorer} did not pass on ${failing.length} case${failing.length === 1 ? "" : "s"}.`);
   }
   if (policy.maxCostIncreasePct !== undefined && stats.costIncreasePct !== null && stats.costIncreasePct > policy.maxCostIncreasePct) {
@@ -463,15 +490,240 @@ export function judgeReleaseGate(
 }
 
 // ---------------------------------------------------------------------------
+// Gate admission and required cases (enforced gates)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which cases an enforced gate counts. When an admin enforces the gate (or
+ * adds golden sets to it) the cases of its sets are admitted; a case added
+ * afterwards, by any path, is pending admission until an admin admits it or
+ * a gate approver approves an `admit_cases` request. A pending case runs and
+ * is reported, but counts toward nothing: not the pass rate, not minCases,
+ * not regressions or any other limit. Required cases (admins only) must pass
+ * whatever the pass rate.
+ */
+export interface ReleaseGateAdmission {
+  /** Case (fixture) ids the gate counts. */
+  admittedIds: readonly string[];
+  /** Case ids that must pass on every publish. */
+  requiredIds?: readonly string[];
+  /** Case names, for reasons people read. */
+  caseNames?: Readonly<Record<string, string>>;
+}
+
+export interface ReleaseGateRequiredFailure {
+  id: string;
+  name: string;
+  /** "failed", "was inconclusive" or "did not run". */
+  problem: string;
+}
+
+export interface ReleaseGateAdmissionStats {
+  /** Admitted cases the job ran (skipped ones included). */
+  admitted: number;
+  /** Cases the job ran that are pending admission. */
+  pending: number;
+  /** Pending cases that failed or were inconclusive: reported, not counted. */
+  pendingNotPassing: number;
+  /** Required cases of the gate. */
+  required: number;
+  /** Required cases that block the publish, with why. */
+  requiredFailures: ReleaseGateRequiredFailure[];
+}
+
+/** Splits cases into those the gate counts and those pending admission; without admission every case counts. */
+export function splitAdmittedCases<T extends { id: string }>(cases: readonly T[], admission: ReleaseGateAdmission | null | undefined): { counted: T[]; pending: T[] } {
+  if (!admission) return { counted: [...cases], pending: [] };
+  const admitted = new Set(admission.admittedIds);
+  const counted: T[] = [];
+  const pending: T[] = [];
+  for (const entry of cases) (admitted.has(entry.id) ? counted : pending).push(entry);
+  return { counted, pending };
+}
+
+/**
+ * Admitted, pending and required counts over a job's cases (one entry per
+ * case, repeats already aggregated), and the required cases that block.
+ * Shared by the gate judge and the CLI, so both report the same numbers.
+ * A required case blocks when it failed, when it was inconclusive and errors
+ * count as failures, or when the job did not run it.
+ */
+export function summarizeReleaseGateAdmission(
+  cases: ReadonlyArray<{ id: string; status: ReleaseCaseStatus }>,
+  admission: ReleaseGateAdmission,
+  policy: Pick<ReleaseGatePolicy, "errorsCountAsFailures">
+): ReleaseGateAdmissionStats {
+  const { counted, pending } = splitAdmittedCases(cases, admission);
+  const byId = new Map(cases.map((entry) => [entry.id, entry]));
+  const requiredIds = [...new Set(admission.requiredIds ?? [])];
+  const requiredFailures: ReleaseGateRequiredFailure[] = [];
+  for (const id of requiredIds) {
+    const entry = byId.get(id);
+    const problem =
+      !entry || entry.status === "skipped"
+        ? "did not run"
+        : entry.status === "fail"
+          ? "failed"
+          : entry.status === "error" && policy.errorsCountAsFailures
+            ? "was inconclusive"
+            : null;
+    if (problem) requiredFailures.push({ id, name: admission.caseNames?.[id] ?? id, problem });
+  }
+  return {
+    admitted: counted.length,
+    pending: pending.length,
+    pendingNotPassing: pending.filter((entry) => entry.status === "fail" || entry.status === "error").length,
+    required: requiredIds.length,
+    requiredFailures
+  };
+}
+
+/** An enforced gate's admission state: what the loosening check compares. */
+export interface ReleaseGateAdmissionState {
+  admittedIds: readonly string[];
+  requiredIds: readonly string[];
+}
+
+/**
+ * Why going from `before` to `after` loosens an enforced gate's cases:
+ * an admitted case leaves the gate (deleted or no longer admitted), or a
+ * case stops being required. Empty when it does not. Admitting cases and
+ * marking them required only tighten the gate.
+ */
+export function releaseAdmissionLoosening(before: ReleaseGateAdmissionState, after: ReleaseGateAdmissionState, names: Readonly<Record<string, string>> = {}): string[] {
+  const reasons: string[] = [];
+  const label = (ids: string[]) => ids.map((id) => `"${names[id] ?? id}"`).join(", ");
+  const admittedAfter = new Set(after.admittedIds);
+  const removed = before.admittedIds.filter((id) => !admittedAfter.has(id));
+  if (removed.length > 0) reasons.push(`removes admitted case${removed.length === 1 ? "" : "s"} ${label(removed)}`);
+  const requiredAfter = new Set(after.requiredIds);
+  const cleared = before.requiredIds.filter((id) => !requiredAfter.has(id));
+  if (cleared.length > 0) reasons.push(`stops requiring case${cleared.length === 1 ? "" : "s"} ${label(cleared)}`);
+  return reasons;
+}
+
+/**
+ * What a replay job view carries when the workflow's enforced gate uses one
+ * of the job's golden sets (`GET /api/replay/runs/:id`): enough for the CLI
+ * to report admitted, pending and required cases as the gate counts them.
+ */
+export interface ReleaseGateJobAdmission {
+  enforced: true;
+  admittedFixtureIds: string[];
+  /** Cases of the gate's sets waiting for admission: they run but do not count. */
+  pendingFixtureIds: string[];
+  requiredFixtureIds: string[];
+  errorsCountAsFailures: boolean;
+}
+
+/** One case of an enforced gate's golden sets, as the gate's Cases panel shows it. */
+export interface ReleaseGateCaseView {
+  fixtureId: string;
+  datasetId: string;
+  datasetName: string | null;
+  name: string;
+  recordingId: string | null;
+  admission: "admitted" | "pending";
+  required: boolean;
+  /** The pending inbox request about this case, when there is one. */
+  requestId: string | null;
+  requestKind: GateCaseRequestKind | null;
+  createdAt: string;
+}
+
+/** `GET /api/workflows/:id/release-gate/cases`. Unenforced gates answer `enforced: false` and no cases. */
+export interface ReleaseGateCasesView {
+  workflowId: string;
+  enforced: boolean;
+  cases: ReleaseGateCaseView[];
+  counts: { admitted: number; pending: number; required: number };
+  /** Admins admit, reject and mark cases required directly. */
+  canAdmit: boolean;
+  /** Builders (workflow:write) ask the gate's approvers instead. */
+  canRequest: boolean;
+}
+
+const fixtureIdsSchema = z.array(idSchema).min(1, "Name at least one case").max(500);
+
+/** `POST /api/workflows/:id/release-gate/cases/admit` and `/reject` (admins). */
+export const gateCaseDecisionInputSchema = z
+  .object({
+    fixtureIds: fixtureIdsSchema,
+    reason: reasonSchema.optional()
+  })
+  .strict();
+export type GateCaseDecisionInput = z.infer<typeof gateCaseDecisionInputSchema>;
+
+/** `PUT /api/workflows/:id/release-gate/cases/:fixtureId/required` (admins). */
+export const gateCaseRequiredInputSchema = z.object({ required: z.boolean() }).strict();
+
+export const GATE_CASE_REQUEST_ACTIONS = ["admit", "remove"] as const;
+export type GateCaseRequestAction = (typeof GATE_CASE_REQUEST_ACTIONS)[number];
+export const GATE_CASE_REQUEST_KINDS = ["admit_cases", "remove_cases"] as const;
+export type GateCaseRequestKind = (typeof GATE_CASE_REQUEST_KINDS)[number];
+
+/** `POST /api/workflows/:id/release-gate/cases/requests`: a builder asks the gate's approvers. */
+export const gateCaseRequestInputSchema = z
+  .object({
+    action: z.enum(GATE_CASE_REQUEST_ACTIONS),
+    fixtureIds: fixtureIdsSchema,
+    reason: reasonSchema
+  })
+  .strict();
+export type GateCaseRequestInput = z.infer<typeof gateCaseRequestInputSchema>;
+
+export const GATE_CASE_REQUEST_PREFIX = "gcr_";
+
+/** True for an approvals-inbox id that names a gate case request (admit or remove cases). */
+export function isGateCaseRequestId(id: string): boolean {
+  return id.startsWith(GATE_CASE_REQUEST_PREFIX);
+}
+
+/**
+ * A request to admit cases to an enforced gate, or to remove admitted ones,
+ * as the approvals inbox shows it. `id` is what `/api/approvals/:id/approve`
+ * and `/reject` take.
+ */
+export interface GateCaseRequestView {
+  kind: GateCaseRequestKind;
+  requestId: string;
+  id: string;
+  workflowId: string;
+  workflowName: string | null;
+  projectId: string;
+  status: "pending" | "approved" | "rejected" | "timed_out" | "canceled";
+  message: string;
+  cases: Array<{ fixtureId: string; name: string; datasetId: string | null }>;
+  requestReason: string | null;
+  approverRoles: string[];
+  approverUsers: string[];
+  allowSelfApproval: boolean;
+  requestedBy: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  reason: string | null;
+  canDecide: boolean;
+  cannotDecideReason: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Enforced gates: what counts as loosening
 // ---------------------------------------------------------------------------
 
 /**
  * Why `after` is looser than `before`; empty when it is not. On an enforced
- * gate only admins may make such a change.
+ * gate only admins may make such a change. With `admission`, an admitted
+ * case leaving the gate or a case no longer required also loosens it
+ * (`releaseAdmissionLoosening`).
  */
-export function releaseGateLoosening(before: ReleaseGateSettings, after: ReleaseGateSettings): string[] {
-  const reasons: string[] = [];
+export function releaseGateLoosening(
+  before: ReleaseGateSettings,
+  after: ReleaseGateSettings,
+  admission?: { before: ReleaseGateAdmissionState; after: ReleaseGateAdmissionState; names?: Readonly<Record<string, string>> }
+): string[] {
+  const reasons: string[] = admission ? releaseAdmissionLoosening(admission.before, admission.after, admission.names) : [];
   const a = before.policy;
   const b = after.policy;
   if (before.enabled && !after.enabled) reasons.push("disables the gate");

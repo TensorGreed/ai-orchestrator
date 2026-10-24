@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ReleaseGateJobAdmission } from "./release";
 import {
   REPLAY_AGGREGATE_RULES,
   REPLAY_COMPARE_MODES,
@@ -374,6 +375,12 @@ export interface EvalRunView {
   candidate: ReplayJobCandidate | null;
   options: ReplayJobOptions | null;
   error: string | null;
+  /**
+   * Replay jobs over a golden set of an enforced release gate: the gate's
+   * admitted and required cases, so a client reports them as the gate counts
+   * them. Absent otherwise.
+   */
+  releaseGate?: ReleaseGateJobAdmission;
 }
 
 export interface EvalCaseResult {
