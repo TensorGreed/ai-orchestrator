@@ -1,27 +1,25 @@
 /**
- * Phase 15.6 — comparing a guard policy simulation's replay with the
- * recorded run, checkpoint by checkpoint (pure; see guard-simulation.ts in
+ * Phase 15.6 — comparing a guard policy simulation's two replays of one
+ * recording, checkpoint by checkpoint (pure; see guard-simulation.ts in
  * shared for the vocabulary).
  *
- * A checkpoint is one guard verdict at one place: node, placement and
- * channel, numbered in order when the same place checks more than once. Its
- * action is the most severe effective action of the verdict's non-shadow
- * findings (a clean verdict's own action otherwise), so a finding in shadow
- * mode never counts as a block. Recorded and replayed checkpoints are paired
- * by place and number:
+ * Both sides are fresh replays of the same workflow version from the same
+ * recording, models from its tape and strict MCP: the baseline under the
+ * profiles in force now, the candidate with the simulated profile swapped
+ * in. Any difference between them is the simulated change's.
+ *
+ * A checkpoint is one check: the profile stack evaluated once on one piece
+ * of content at one place (node, placement, channel, agent iteration and
+ * tool), numbered in order when the same place checks more than once. Its
+ * action is the stack's combined action, what the traffic got, so a
+ * checkpoint is counted once however many profiles the stack has and
+ * wherever it stopped. Per-detector changes are listed as detail.
  *
  *   - both sides: newly blocked, no longer blocked, action changed (with
- *     "now masked" when the replay masks, redacts or protects content the
- *     recording let through) or unchanged;
- *   - only the recording: not reached (the replay stopped or diverged first);
- *   - only the replay: compared with "allow" (nothing checked there before).
- *
- * Changed checkpoints list the detectors whose action changed, with their
- * data class, for the per-detector and per-data-class counts.
- *
- * Rows from facts built before 15.6 carry no verdict number; they are
- * grouped by place, a new verdict starting when a detector repeats or a
- * clean row appears.
+ *     "now masked" when the candidate masks, redacts or protects content the
+ *     baseline let through) or unchanged;
+ *   - only the baseline: not reached (the candidate stopped or diverged first);
+ *   - only the candidate: compared with "allow" (nothing checked there before).
  */
 
 import { mostSevereAction, type GuardAction } from "@ai-orchestrator/guard-sdk";
@@ -35,61 +33,16 @@ import {
   type GuardSimulationCounts,
   type GuardSimulationDetectorChange,
   type ReplayHealthWarning,
-  type ReplayToolStep,
-  type RunFactGuardVerdict
+  type ReplayRunResponse,
+  type ReplayToolStep
 } from "@ai-orchestrator/shared";
+import type { SimulatedGuardCheck } from "./guard-simulation-sink.js";
 
-interface Verdict {
-  key: string;
-  nodeId: string | null;
-  placement: string;
-  channel: string;
-  rows: RunFactGuardVerdict[];
-}
-
-const placeKey = (row: Pick<RunFactGuardVerdict, "nodeId" | "placement" | "channel">) => [row.nodeId ?? "", row.placement, row.channel].join("\u0000");
-
-/** Rows grouped into verdicts, in the order verdicts first appear. */
-export function groupGuardVerdicts(rows: readonly RunFactGuardVerdict[]): Verdict[] {
-  const verdicts: Verdict[] = [];
-  if (rows.length > 0 && rows.every((row) => typeof row.verdict === "number")) {
-    const byIndex = new Map<number, Verdict>();
-    for (const row of rows) {
-      let verdict = byIndex.get(row.verdict!);
-      if (!verdict) {
-        verdict = { key: placeKey(row), nodeId: row.nodeId, placement: row.placement, channel: row.channel, rows: [] };
-        byIndex.set(row.verdict!, verdict);
-        verdicts.push(verdict);
-      }
-      verdict.rows.push(row);
-    }
-    return verdicts;
-  }
-  const open = new Map<string, Verdict>();
-  for (const row of rows) {
-    const key = placeKey(row);
-    let verdict = open.get(key);
-    const startsNew =
-      !verdict ||
-      row.detectorId === null ||
-      verdict.rows.some((existing) => existing.detectorId === null || existing.detectorId === row.detectorId);
-    if (startsNew) {
-      verdict = { key, nodeId: row.nodeId, placement: row.placement, channel: row.channel, rows: [] };
-      open.set(key, verdict);
-      verdicts.push(verdict);
-    }
-    verdict!.rows.push(row);
-  }
-  return verdicts;
-}
+const checkPlace = (check: SimulatedGuardCheck) =>
+  [check.nodeId ?? "", check.placement, check.channel, check.iteration ?? "", check.toolName ?? ""].join("\u0000");
 
 function severest(actions: string[]): string {
   return actions.length === 0 ? "allow" : mostSevereAction(actions as GuardAction[]);
-}
-
-/** The verdict's action: the most severe non-shadow effective action ("allow" when every finding was shadow). */
-export function verdictAction(verdict: Verdict): string {
-  return severest(verdict.rows.filter((row) => !row.shadow).map((row) => row.effectiveAction));
 }
 
 export function classifyGuardChange(before: string, after: string): GuardSimulationChange {
@@ -104,19 +57,22 @@ function isNowMasked(before: string, after: string): boolean {
   return GUARD_SIMULATION_MASKING_ACTIONS.has(after) && !GUARD_SIMULATION_MASKING_ACTIONS.has(before) && !GUARD_SIMULATION_BLOCKING_ACTIONS.has(before);
 }
 
-function detectorActions(verdict: Verdict | undefined): Map<string, { action: string; dataClass: string | null }> {
+/** Each detector's most severe non-shadow action across the check's profiles. */
+function detectorActions(check: SimulatedGuardCheck | undefined): Map<string, { action: string; dataClass: string | null }> {
   const out = new Map<string, { actions: string[]; dataClass: string | null }>();
-  for (const row of verdict?.rows ?? []) {
-    if (row.detectorId === null) continue;
-    const entry = out.get(row.detectorId) ?? { actions: [], dataClass: null };
-    if (!row.shadow) entry.actions.push(row.effectiveAction);
-    entry.dataClass = entry.dataClass ?? row.dataClass ?? null;
-    out.set(row.detectorId, entry);
+  for (const verdict of check?.verdicts ?? []) {
+    for (const finding of verdict.findings) {
+      if (finding.detectorId === null) continue;
+      const entry = out.get(finding.detectorId) ?? { actions: [], dataClass: null };
+      if (!finding.shadow) entry.actions.push(finding.effectiveAction);
+      entry.dataClass = entry.dataClass ?? finding.dataClass ?? null;
+      out.set(finding.detectorId, entry);
+    }
   }
   return new Map([...out].map(([id, entry]) => [id, { action: severest(entry.actions), dataClass: entry.dataClass }]));
 }
 
-function detectorChanges(before: Verdict | undefined, after: Verdict | undefined): GuardSimulationDetectorChange[] {
+function detectorChanges(before: SimulatedGuardCheck | undefined, after: SimulatedGuardCheck | undefined): GuardSimulationDetectorChange[] {
   const left = detectorActions(before);
   const right = detectorActions(after);
   const changes: GuardSimulationDetectorChange[] = [];
@@ -130,21 +86,26 @@ function detectorChanges(before: Verdict | undefined, after: Verdict | undefined
   return changes.sort((x, y) => x.detectorId.localeCompare(y.detectorId));
 }
 
-/** Pairs the recorded and replayed verdicts and counts what changed; only changed checkpoints are listed. */
-export function compareGuardCheckpoints(
-  recorded: readonly RunFactGuardVerdict[],
-  replayed: readonly RunFactGuardVerdict[]
+/**
+ * Pairs the baseline's and the candidate's checks and counts what changed;
+ * only changed checkpoints are listed. `nodeNames` names the nodes for the
+ * details view.
+ */
+export function compareGuardChecks(
+  baseline: readonly SimulatedGuardCheck[],
+  candidate: readonly SimulatedGuardCheck[],
+  nodeNames: ReadonlyMap<string, string> = new Map()
 ): { counts: GuardSimulationCounts; checkpoints: GuardSimulationCheckpoint[] } {
   const counts = emptyGuardSimulationCounts();
   const checkpoints: GuardSimulationCheckpoint[] = [];
-  const byPlace = (verdicts: Verdict[]) => {
-    const map = new Map<string, Verdict[]>();
-    for (const verdict of verdicts) map.set(verdict.key, [...(map.get(verdict.key) ?? []), verdict]);
+  const byPlace = (checks: readonly SimulatedGuardCheck[]) => {
+    const map = new Map<string, SimulatedGuardCheck[]>();
+    for (const check of checks) map.set(checkPlace(check), [...(map.get(checkPlace(check)) ?? []), check]);
     return map;
   };
-  const left = byPlace(groupGuardVerdicts(recorded));
-  const right = byPlace(groupGuardVerdicts(replayed));
-  // Places in the order the replay reached them, then the ones only the recording has.
+  const left = byPlace(baseline);
+  const right = byPlace(candidate);
+  // Places in the order the candidate reached them, then the ones only the baseline has.
   for (const key of new Set([...right.keys(), ...left.keys()])) {
     const before = left.get(key) ?? [];
     const after = right.get(key) ?? [];
@@ -155,9 +116,9 @@ export function compareGuardCheckpoints(
         counts.notReached += 1;
         continue;
       }
-      const place = (a ?? b)!;
-      const beforeAction = b ? verdictAction(b) : null;
-      const afterAction = verdictAction(a!);
+      const place = a!;
+      const beforeAction = b ? b.action : null;
+      const afterAction = place.action;
       const change = classifyGuardChange(beforeAction ?? "allow", afterAction);
       if (change === "unchanged") {
         counts.unchanged += 1;
@@ -171,8 +132,11 @@ export function compareGuardCheckpoints(
       }
       checkpoints.push({
         nodeId: place.nodeId,
+        nodeName: place.nodeId ? (nodeNames.get(place.nodeId) ?? null) : null,
         placement: place.placement,
         channel: place.channel,
+        ...(place.iteration !== null ? { iteration: place.iteration } : {}),
+        ...(place.toolName !== null ? { toolName: place.toolName } : {}),
         occurrence: index + 1,
         before: beforeAction,
         after: afterAction,
@@ -184,43 +148,34 @@ export function compareGuardCheckpoints(
   return { counts, checkpoints };
 }
 
-/** The stored part of a replayed case the simulation reads (the replay response without its facts). */
-export interface StoredReplayCase {
+/** The part of a replay a simulation reads: its outcome and health, without its facts. */
+export interface SimulatedReplay {
   status: string;
   error: string | null;
   executionId: string | null;
-  /** `ReplayRunResponse` without `facts`, or a truncation marker. */
-  diff: unknown;
+  /** The replay response (its `diff.health`, `modelTape` and tool steps). Null when the replay threw before answering. */
+  response: Omit<ReplayRunResponse, "facts"> | null;
 }
 
-function healthOf(diff: unknown): ReplayHealthWarning[] | null {
-  const inner = diff && typeof diff === "object" ? (diff as { diff?: { health?: unknown } }).diff : undefined;
-  return inner && Array.isArray(inner.health) ? (inner.health as ReplayHealthWarning[]) : null;
+function healthOf(replay: SimulatedReplay): ReplayHealthWarning[] {
+  return replay.response?.diff.health ?? [];
 }
 
 /**
  * Where a replay ran out of recorded answers, if it did: the first model
  * call the tape could not answer (its 1-based position: calls the tape
- * answered + 1)
- * or the first tool call the cassette could not answer.
+ * answered + 1) or the first tool call the cassette could not answer.
  */
-export function divergenceOf(stored: StoredReplayCase): GuardSimulationCase["divergedAt"] | null {
-  const health = healthOf(stored.diff);
-  if (!health) {
-    // The diff was too large to store: only the error text says what happened.
-    if (stored.status === "error" && stored.error && /no recorded answer/i.test(stored.error)) {
-      return { step: null, kind: /model tape/i.test(stored.error) ? "model" : "tool", nodeId: null, message: stored.error };
-    }
-    return null;
-  }
+export function divergenceOf(replay: SimulatedReplay): GuardSimulationCase["divergedAt"] | null {
+  const health = healthOf(replay);
   const model = health.find((warning) => warning.kind === "model_unmatched" && warning.blocking);
   if (model) {
-    const matched = (stored.diff as { modelTape?: { matchedCalls?: unknown } }).modelTape?.matchedCalls;
+    const matched = replay.response?.modelTape?.matchedCalls;
     return { step: typeof matched === "number" ? matched + 1 : null, kind: "model", nodeId: model.nodeId, message: model.message };
   }
   const tool = health.find((warning) => warning.kind === "mcp_unmatched" && warning.blocking);
   if (tool) {
-    const steps = ((stored.diff as { diff?: { toolCalls?: { steps?: unknown } } }).diff?.toolCalls?.steps ?? []) as ReplayToolStep[];
+    const steps = (replay.response?.diff.toolCalls?.steps ?? []) as ReplayToolStep[];
     const index = Array.isArray(steps) ? steps.findIndex((step) => step.kind !== "matched" || step.outcomeChanged) : -1;
     const nodeId = index >= 0 ? (steps[index]!.candidate ?? steps[index]!.baseline)?.nodeId ?? null : tool.nodeId;
     return { step: index >= 0 ? index + 1 : null, kind: "tool", nodeId, message: tool.message };
@@ -228,56 +183,68 @@ export function divergenceOf(stored: StoredReplayCase): GuardSimulationCase["div
   return null;
 }
 
+/** Why a replay could not follow its recording (a blocking health warning, or no execution at all); null when it could. */
+function blockingProblem(replay: SimulatedReplay): string | null {
+  const blocking = healthOf(replay).find((warning) => warning.blocking);
+  if (blocking) return blocking.message;
+  if (!replay.executionId || !replay.response) return replay.error ?? "The replay could not run.";
+  return null;
+}
+
+export const GUARD_SIMULATION_STALE_REASON = "Not simulated: the recording is stale for the current workflow (replayed under the current profiles, it no longer follows its recorded answers)";
+
 /**
- * One case of a simulation: the checkpoints compared, and its outcome.
- * `workflowChanged` says the replayed workflow is not the one the recording
- * ran: a tape miss is then only blamed on the guard change when a guard
- * verdict changed before it.
+ * One case of a simulation, from its two replays.
+ *
+ *   - The baseline (current profiles) cannot follow the recording: the
+ *     recording is stale for the workflow version replayed, and the case is
+ *     not simulated (never counted as an impact).
+ *   - The candidate runs out of recorded answers where the baseline did not:
+ *     diverged at step k, an impact of the change (a checkpoint's action, or
+ *     what the profile does to content without changing an action, such as
+ *     spotlighting). When the simulated profile is the current one and no
+ *     checkpoint changed, the miss is not the guard's: not simulated.
+ *   - Otherwise the checkpoints are compared.
  */
 export function simulateCase(input: {
-  recording: { id: string; name: string; createdAt: string | null; guard: readonly RunFactGuardVerdict[] } | null;
   recordingId: string;
-  stored: StoredReplayCase | null;
-  replayed: readonly RunFactGuardVerdict[];
-  workflowChanged: boolean;
+  recording: { id: string; name: string; createdAt: string | null } | null;
+  baseline: { replay: SimulatedReplay; checks: readonly SimulatedGuardCheck[] } | null;
+  candidate: { replay: SimulatedReplay; checks: readonly SimulatedGuardCheck[] } | null;
+  nodeNames?: ReadonlyMap<string, string>;
+  /** The simulated profile differs from the current one (false: the same document, so only chance can tell the replays apart). */
+  profileChanged?: boolean;
   /** Text to keep out of stored reasons (secrets). */
   scrub?: (text: string) => string;
+  /** Why the case did not run (the starter lost access, the job stopped), when it did not. */
+  skipped?: string;
 }): GuardSimulationCase {
   const scrub = input.scrub ?? ((text: string) => text);
   const base = {
     recordingId: input.recordingId,
     recordingName: input.recording?.name ?? input.recordingId,
     recordedAt: input.recording?.createdAt ?? null,
-    executionId: input.stored?.executionId ?? null
+    executionId: input.candidate?.replay.executionId ?? null,
+    baselineExecutionId: input.baseline?.replay.executionId ?? null
   };
-  if (!input.recording) {
-    return { ...base, outcome: "not_simulated", reason: "The recording was deleted before it could be replayed.", counts: emptyGuardSimulationCounts(), checkpoints: [] };
-  }
-  if (!input.stored) {
-    return { ...base, outcome: "not_simulated", reason: "The replay did not run (the simulation was stopped first).", counts: emptyGuardSimulationCounts(), checkpoints: [] };
-  }
-  const { counts, checkpoints } = compareGuardCheckpoints(input.recording.guard, input.replayed);
-  const divergedAt = divergenceOf(input.stored);
+  const notSimulated = (reason: string): GuardSimulationCase => ({ ...base, outcome: "not_simulated", reason: scrub(reason), counts: emptyGuardSimulationCounts(), checkpoints: [] });
+  if (!input.recording) return notSimulated("The recording was deleted before it could be replayed.");
+  if (input.skipped) return notSimulated(input.skipped);
+  if (!input.baseline) return notSimulated("The replay did not run (the simulation was stopped first).");
+  const stale = blockingProblem(input.baseline.replay);
+  if (stale) return notSimulated(`${GUARD_SIMULATION_STALE_REASON}: ${stale}`);
+  if (!input.candidate) return notSimulated("The replay did not run (the simulation was stopped first).");
+
+  const { counts, checkpoints } = compareGuardChecks(input.baseline.checks, input.candidate.checks, input.nodeNames);
   const guardChanged = counts.newlyBlocked + counts.noLongerBlocked + counts.actionChanged > 0;
+  const divergedAt = divergenceOf(input.candidate.replay);
   if (divergedAt) {
-    if (guardChanged || !input.workflowChanged) {
-      return { ...base, outcome: "diverged", divergedAt: { ...divergedAt, message: scrub(divergedAt.message) }, counts, checkpoints };
-    }
-    return {
-      ...base,
-      outcome: "not_simulated",
-      reason: "The replay needed an answer this recording does not have, and no guard verdict had changed before it: the workflow changed since this run was recorded, so the difference is not the guard's.",
-      counts,
-      checkpoints
-    };
+    if (guardChanged || input.profileChanged !== false) return { ...base, outcome: "diverged", divergedAt: { ...divergedAt, message: scrub(divergedAt.message) }, counts, checkpoints };
+    return notSimulated(
+      "Not simulated: the replay needed an answer this recording does not have, but the simulated profile is the current one and no guard checkpoint changed, so the difference is not the guard's."
+    );
   }
-  if (input.stored.executionId === null || (input.stored.status === "error" && !input.stored.executionId)) {
-    return { ...base, outcome: "not_simulated", reason: scrub(input.stored.error ?? "The replay could not run."), counts: emptyGuardSimulationCounts(), checkpoints: [] };
-  }
-  const health = healthOf(input.stored.diff) ?? [];
-  const blocking = health.find((warning) => warning.blocking);
-  if (blocking && !guardChanged) {
-    return { ...base, outcome: "not_simulated", reason: scrub(blocking.message), counts, checkpoints };
-  }
+  const problem = blockingProblem(input.candidate.replay);
+  if (problem) return notSimulated(problem);
   return { ...base, outcome: "compared", counts, checkpoints };
 }

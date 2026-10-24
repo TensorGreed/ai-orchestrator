@@ -9,7 +9,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ReplayRunResponse, RunFacts, Workflow } from "@ai-orchestrator/shared";
 import { SqliteStore, type ReplayRecordingRecord } from "../db/database.js";
-import { EVAL_RUN_STALE_MS, EvalService, type EvalReplayDeps, type EvalWorkflowExecutor } from "./eval-service.js";
+import { EVAL_RUN_STALE_MS, EvalService, EvalSlots, type EvalReplayDeps, type EvalWorkflowExecutor } from "./eval-service.js";
+import { GuardSimulationVault } from "./guard-simulation-sink.js";
 
 let tempDir: string;
 let store: SqliteStore;
@@ -480,5 +481,88 @@ describe("review fixes: budgets, bookkeeping and storage", () => {
     const svc = new EvalService(store, async () => ({ output: null }));
     for (let index = 0; index < 505; index += 1) store.createEvalRun({ id: `run_q${index}`, datasetId: "ds", workflowId: "wf", status: "queued" });
     expect(svc.recoverInterrupted()).toBe(506);
+  });
+});
+
+describe("Phase 15.6: guard policy simulation jobs", () => {
+  it("slots: a waiting ordinary case always starts before a waiting simulation case, and simulations never take every slot", async () => {
+    const slots = new EvalSlots(2);
+    const order: string[] = [];
+    const take = (name: string, low: boolean) => slots.acquire(low).then(() => order.push(name));
+    await take("sim-1", true);
+    // The second slot is kept for other jobs: a second simulation case waits.
+    const sim2 = take("sim-2", true);
+    await take("gate-1", false);
+    expect(order).toEqual(["sim-1", "gate-1"]);
+    const gate2 = take("gate-2", false);
+    // A slot frees: the waiting gate case goes first, though the simulation case waited longer.
+    slots.release(false);
+    await gate2;
+    expect(order).toEqual(["sim-1", "gate-1", "gate-2"]);
+    slots.release(true);
+    await sim2;
+    expect(order).toEqual(["sim-1", "gate-1", "gate-2", "sim-2"]);
+    // A single-slot deployment still runs simulations (one at a time).
+    const single = new EvalSlots(1);
+    await single.acquire(true);
+    single.release(true);
+    await single.acquire(false);
+  });
+
+  it("replays each recording under the current profiles and the simulated one, and re-checks the starter's permission on every case", async () => {
+    const recording = {
+      id: "rec_a",
+      workflowId: "wf",
+      name: "rec_a",
+      createdAt: "2026-10-23T00:00:00Z",
+      facts: facts(null)
+    } as unknown as ReplayRecordingRecord;
+    const sides: Array<{ substitute: string | null; executionId: string; role: string | undefined }> = [];
+    const replay: EvalReplayDeps = {
+      resolveCandidate: (workflowId) => ({ workflow: store.getWorkflow(workflowId)!, kind: "draft", version: null, workflowHash: "cand-hash" }),
+      getRecording: (id) => (id === "rec_a" ? recording : null),
+      replayCase: async ({ executionId, simulation, role, models, request }) => {
+        expect(models).toBe("replay");
+        expect(request.mcpMode).toBe("strict");
+        sides.push({ substitute: simulation?.substitute?.profileId ?? null, executionId, role });
+        // Each side's verdicts go to its own sink: the current profile allows, the simulated one blocks.
+        simulation!.sink.record({
+          executionId,
+          workflowId: "wf",
+          nodeId: "guard",
+          placement: "node",
+          channel: "prompt",
+          profile: { profileId: "p", version: simulation!.substitute ? 0 : 1, hash: "h" },
+          verdict: { action: simulation!.substitute ? "block" : "allow", actions: [], findings: [], timings: { totalMs: 1 }, budget: { exceeded: false, skippedDetectors: [] } },
+          check: { id: `${executionId}-c`, index: 0, action: simulation!.substitute ? "block" : "allow" }
+        } as never);
+        return { recordingId: "rec_a", executionId, candidate: { kind: "draft", version: null, workflowHash: "cand-hash" }, status: "success", diff: { health: [] } as unknown as ReplayRunResponse["diff"], verdict: "pass", reasons: [], facts: facts(null) };
+      },
+      actorFor: (_userId, email) => ({ id: "u1", email, role: "builder" })
+    };
+    const svc = new EvalService(store, async () => ({ output: null }), undefined, { replay });
+    const substitute = { profileId: "p", version: 0, hash: "sim-hash", name: "P", profile: {} as never, inline: true };
+    const actor = { id: "u1", email: "b@example.com", role: "builder" as const };
+    let denial: string | null = null;
+    const base = { simulationId: "gsim_1", workflowId: "wf", recordingIds: ["rec_a"], substitute, vault: new GuardSimulationVault(), canRun: () => denial, profileChanged: true };
+
+    const job = svc.enqueueSimulationJob(base, actor);
+    expect(job.candidate).toMatchObject({ releaseEligible: false, simulation: { id: "gsim_1", inline: true } });
+    await svc.wait(job.id);
+    expect(sides.map((side) => [side.substitute, side.role])).toEqual([[null, "baseline"], ["p", "candidate"]]);
+    expect(sides[0]!.executionId).not.toBe(sides[1]!.executionId);
+    const result = svc.getRun(job.id)!.results[0]!;
+    const stored = svc.getCase(job.id, result.id)!.replay as unknown as { simulation: { outcome: string; counts: { newlyBlocked: number }; baselineExecutionId: string } };
+    expect(stored.simulation).toMatchObject({ outcome: "compared", counts: { newlyBlocked: 1 }, baselineExecutionId: sides[0]!.executionId });
+
+    // The starter lost the right to simulate (demoted, or the profile became enforced): nothing replays.
+    sides.length = 0;
+    denial = "This guard profile is enforced on a project";
+    const refused = svc.enqueueSimulationJob({ ...base, simulationId: "gsim_2" }, actor);
+    await svc.wait(refused.id);
+    expect(sides).toHaveLength(0);
+    const refusedResult = svc.getRun(refused.id)!.results[0]!;
+    expect(refusedResult).toMatchObject({ status: "error", verdict: "not_simulated" });
+    expect(refusedResult.error).toMatch(/may no longer simulate this profile: This guard profile is enforced/);
   });
 });

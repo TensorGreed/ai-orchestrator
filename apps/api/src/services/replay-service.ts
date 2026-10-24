@@ -40,11 +40,13 @@
  *     settings, and the candidate is compared with that run instead of the
  *     recording.
  *
- * Phase 15.6 — a guard policy simulation replays with one guard profile
- * swapped for the simulated one (`guardSubstitute`); everything else about
- * the run's guard resolution stays. A golden run that made no model calls
- * needs no model tape: with `models: "replay"` it replays on an empty tape,
- * so any model call the candidate makes is a strict miss, never live.
+ * Phase 15.6 — a guard policy simulation's execution (`guardSimulation`)
+ * runs either the current profiles (the baseline) or one guard profile
+ * swapped for the simulated one; everything else about the run's guard
+ * resolution stays, and its verdicts and tokens stay in the simulation.
+ * Only for a simulation, a recording that
+ * made no model calls replays on an empty model tape, so any model call is
+ * a strict miss, never live; other jobs still need a tape.
  */
 
 import { randomUUID } from "node:crypto";
@@ -81,7 +83,7 @@ import { diffRunFacts } from "./run-diff.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import { ReplayRecordingService } from "./replay-recording-service.js";
 import type { SafeUser } from "./auth-service.js";
-import type { GuardProfileSubstitute } from "./guard-service.js";
+import type { GuardSimulationRun } from "./guard-simulation-sink.js";
 
 export class ReplayRunError extends Error {
   constructor(
@@ -107,8 +109,12 @@ export interface ReplayExecutionInput {
   memorySeed?: ModelMemorySeed | null;
   /** Phase 15.3 — the candidate's guard profile. */
   guardProfileOverride?: { profileId: string; version?: number };
-  /** Phase 15.6 — a guard policy simulation's profile, swapped in for the profile of the same id. */
-  guardSubstitute?: GuardProfileSubstitute;
+  /**
+   * Phase 15.6 — a guard policy simulation's execution: the profile it swaps
+   * in (none on the baseline side), and the sink and vault its verdicts and
+   * tokens go to instead of the live tables.
+   */
+  guardSimulation?: GuardSimulationRun;
 }
 
 /** A candidate workflow, resolved once. */
@@ -141,8 +147,8 @@ export interface ReplayCaseOptions {
   /** What this execution is in the job: the candidate, or the baseline it is compared with. */
   role?: "candidate" | "baseline";
   repeatIndex?: number;
-  /** Phase 15.6 — a guard policy simulation: the simulation and the profile it swaps in. */
-  simulation?: { id: string; substitute: GuardProfileSubstitute };
+  /** Phase 15.6 — a guard policy simulation's execution (see `ReplayExecutionInput.guardSimulation`). */
+  simulation?: GuardSimulationRun;
 }
 
 export interface ReplayExecutionResult {
@@ -391,9 +397,10 @@ export class ReplayService {
           ? {
               simulation: {
                 id: options.simulation.id,
-                profileId: options.simulation.substitute.profileId,
-                version: options.simulation.substitute.version,
-                hash: options.simulation.substitute.hash
+                side: options.simulation.substitute ? "simulated" : "current",
+                ...(options.simulation.substitute
+                  ? { profileId: options.simulation.substitute.profileId, version: options.simulation.substitute.version, hash: options.simulation.substitute.hash }
+                  : {})
               }
             }
           : {}),
@@ -405,10 +412,11 @@ export class ReplayService {
     let modelPlan: ModelReplayPlan | undefined;
     const preflight: ReplayHealthWarning[] = [];
     if (models === "replay") {
-      // A golden run that made no model calls has nothing to answer from a tape: replay it on an empty one.
+      // Phase 15.6 — a simulation (always strict) replays a recording that made no model calls on an empty tape,
+      // so any model call is a strict miss. Every other job keeps the rule: no tape, inconclusive.
       const tape =
         recording.modelTape ??
-        (recording.facts.modelCalls.length === 0
+        (options.simulation && mcpMode === "strict" && recording.facts.modelCalls.length === 0
           ? { format: MODEL_TAPE_FORMAT, version: MODEL_TAPE_VERSION, recordedAt: recording.createdAt, entries: [], truncated: false, bytes: 0 }
           : null);
       if (!tape) {
@@ -443,7 +451,7 @@ export class ReplayService {
             ...(modelPlan ? { modelPlan } : {}),
             memorySeed: recording.memorySeed,
             ...(overrides?.guardProfile ? { guardProfileOverride: overrides.guardProfile } : {}),
-            ...(options.simulation ? { guardSubstitute: options.simulation.substitute } : {})
+            ...(options.simulation ? { guardSimulation: options.simulation } : {})
           },
           actor
         );
@@ -483,7 +491,8 @@ export class ReplayService {
         durationMs: durationOf(result),
         nodeResults: result.nodeResults,
         nodes: candidate.workflow.nodes,
-        guardEvents: this.options.store.listGuardEventsForExecution(executionId),
+        // A simulation's verdicts are only in its sink (never written to guard_events).
+        guardEvents: options.simulation ? options.simulation.sink.rows : this.options.store.listGuardEventsForExecution(executionId),
         priceTurn: this.options.priceTurn
       })
     );

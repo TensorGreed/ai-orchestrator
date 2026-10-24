@@ -108,6 +108,12 @@ export interface GuardRunContext {
    * profile would do. Never set on production traffic.
    */
   profileSubstitute?: GuardProfileSubstitute;
+  /**
+   * Phase 15.6 — a guard policy simulation's run: its verdicts go to the
+   * simulation's sink (never to `guard_events`) and `protect` tokens to the
+   * simulation's vault (never to the token vault table).
+   */
+  simulation?: { sink: { record(event: GuardVerdictEvent): void }; vault: TokenVaultStorage };
 }
 
 /**
@@ -512,8 +518,8 @@ export class GuardService {
           : override && override.profileId === profileId
             ? this.loadProfile(profileId, override.version)
             : this.loadProfile(profileId),
-      vault: this.vault,
-      onVerdict: (event) => this.recordVerdict(event, context)
+      vault: context.simulation?.vault ?? this.vault,
+      onVerdict: (event) => (context.simulation ? context.simulation.sink.record(event) : this.recordVerdict(event, context))
     };
   }
 
@@ -650,6 +656,7 @@ export class GuardService {
       name: record.name,
       ...(record.description ? { description: record.description } : {}),
       builtIn: record.builtIn,
+      ...(this.store.listGuardBindingsForProfile(record.id).some((binding) => binding.scope === "project" && binding.mode === "enforced") ? { enforced: true } : {}),
       latestVersion: record.latestVersion,
       hash: record.latestHash,
       createdAt: record.createdAt,

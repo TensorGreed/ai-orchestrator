@@ -156,7 +156,8 @@ import { createReplaySandbox, type ReplaySandbox } from "./services/replay-sandb
 import { AuditBundleService } from "./services/audit-bundle-service.js";
 import { environmentSecretValues, scrubExemptionWarnings } from "./services/audit-scrub.js";
 import { AuditSigningService } from "./services/audit-signing-service.js";
-import { GuardService, type GuardProfileSubstitute } from "./services/guard-service.js";
+import { GuardService } from "./services/guard-service.js";
+import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
 import { startSseHeartbeat } from "./sse-heartbeat.js";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError } from "./db/store-errors.js";
@@ -1871,8 +1872,8 @@ export function createApp(
     providerRegistry?: ProviderRegistry;
     /** Phase 15.3 — a replay candidate's guard profile, evaluated in place of the bindings. */
     guardProfileOverride?: { profileId: string; version?: number };
-    /** Phase 15.6 — a guard policy simulation's profile, swapped in for the profile of the same id. */
-    guardSubstitute?: GuardProfileSubstitute;
+    /** Phase 15.6 — a guard policy simulation's execution: the profile it swaps in, and where its verdicts and tokens go. */
+    guardSimulation?: GuardSimulationRun;
     /**
      * Phase 15.4 — `production` for production traffic (the caller resolved
      * the published version): sub-workflows and the error workflow load their
@@ -2008,7 +2009,8 @@ export function createApp(
             workflowId: mergedWorkflow.id,
             projectId: mergedWorkflow.projectId ?? "default",
             ...(input.guardProfileOverride ? { profileOverride: input.guardProfileOverride } : {}),
-            ...(input.guardSubstitute ? { profileSubstitute: input.guardSubstitute } : {})
+            ...(input.guardSimulation?.substitute ? { profileSubstitute: input.guardSimulation.substitute } : {}),
+            ...(input.guardSimulation ? { simulation: { sink: input.guardSimulation.sink, vault: input.guardSimulation.vault } } : {})
           }),
           replayNodeHook: input.replay?.hook,
           loadMcpToolPolicy,
@@ -11631,7 +11633,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Phase 15.3 — model calls from the golden run's tape, and the candidate's guard profile.
         ...(replay.modelPlan ? { providerRegistry: replay.modelPlan.registry } : {}),
         ...(replay.guardProfileOverride ? { guardProfileOverride: replay.guardProfileOverride } : {}),
-        ...(replay.guardSubstitute ? { guardSubstitute: replay.guardSubstitute } : {}),
+        ...(replay.guardSimulation ? { guardSimulation: replay.guardSimulation } : {}),
         policyActor: actor,
         workflow: replay.workflow,
         customData: replay.customData,
@@ -11768,6 +11770,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         evals: evalService,
         runAccess,
         maxCases: config.REPLAY_SIMULATION_MAX_CASES ?? GUARD_SIMULATION_MAX_CASES_DEFAULT,
+        maxCasesPerJob: config.REPLAY_JOB_MAX_CASES,
         scrub: (text) => String(secretService.redact(replayRecordingService.scrubber().text(text))),
         logger: { warn: (message, fields) => app.log.warn(fields ?? {}, message) }
       });

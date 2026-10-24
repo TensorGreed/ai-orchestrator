@@ -57,11 +57,14 @@
  *
  * Phase 15.6 — a guard policy simulation queues one replay job per workflow
  * through `enqueueSimulationJob`: its cases are recordings named directly
- * (a server-internal source; the public request only takes golden sets),
- * replayed with models from the tape, strict MCP and the simulated guard
- * profile swapped in. Such a job reads like any replay job, is never
- * release proof, and its starter needs only read access to the workflow
- * (nothing it replays reaches a model, a server or a side effect).
+ * (a server-internal source; the public request only takes golden sets).
+ * Each case replays its recording twice, models from the tape and strict
+ * MCP: under the current profiles (the baseline) and with the simulated
+ * guard profile swapped in, and stores the comparison of the two. Such a
+ * job reads like any replay job, is never release proof, yields its worker
+ * slots to every other job, and its starter needs read access to the
+ * workflow (nothing it replays reaches a model, a server or a side effect)
+ * and must still be allowed to simulate the profile, checked on every case.
  */
 
 import { CASSETTE_REDACTED } from "@ai-orchestrator/mcp-sdk";
@@ -102,6 +105,8 @@ import {
 import type { EvalFixtureRecord, EvalResultRecord, EvalRunRecord, ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import type { SafeUser } from "./auth-service.js";
 import type { GuardProfileSubstitute } from "./guard-service.js";
+import { simulateCase, type SimulatedReplay } from "./guard-simulation-diff.js";
+import { GuardSimulationSink, type GuardSimulationRun } from "./guard-simulation-sink.js";
 import { goldenSetSnapshots } from "./release-snapshot.js";
 import { applyScorer, judgeCallsFor, __scorerTest__, type EvalJudgeContext, type EvalLlmJudge } from "./eval-scorers.js";
 
@@ -214,8 +219,8 @@ export interface EvalReplayDeps {
     baseline?: { facts: RunFacts; executionId: string };
     role?: "candidate" | "baseline";
     repeatIndex?: number;
-    /** Phase 15.6 — a guard policy simulation's profile, swapped in. */
-    simulation?: { id: string; substitute: GuardProfileSubstitute };
+    /** Phase 15.6 — a guard policy simulation's execution: the profile it swaps in (none for the baseline), its sink and vault. */
+    simulation?: GuardSimulationRun;
   }) => Promise<ReplayRunResponse>;
   /**
    * Phase 15.3 — the golden run's own workflow, for a baseline rerun.
@@ -243,6 +248,12 @@ export interface SimulationJobRequest {
   substitute: GuardProfileSubstitute;
   /** The saved version to replay (the published one, when the workflow has one); the draft when absent. */
   version?: number;
+  /** The simulation's vault: `protect` tokens stay in memory. */
+  vault: GuardSimulationRun["vault"];
+  /** The simulated profile differs from the profile's latest saved version. */
+  profileChanged: boolean;
+  /** Why the starter may no longer simulate this profile (their role or the profile changed); null when they still may. Checked on every case. */
+  canRun: (actor: SafeUser) => string | null;
 }
 
 export interface EvalServiceOptions {
@@ -373,8 +384,8 @@ interface ReplayJobContext {
   actorEmail: string;
   /** Phase 15.3 — an inline or overridden candidate: every case re-checks workflow:write. */
   needsWrite: boolean;
-  /** Phase 15.6 — a guard policy simulation's job: the starter needs read access only, and the profile is swapped in. */
-  simulation?: { id: string; substitute: GuardProfileSubstitute };
+  /** Phase 15.6 — a guard policy simulation's job (see `runSimulationCase`). */
+  simulation?: { id: string; substitute: GuardProfileSubstitute; vault: GuardSimulationRun["vault"]; canRun: SimulationJobRequest["canRun"]; profileChanged: boolean };
   candidate: EvalReplayCandidate;
   options: ReplayJobOptions;
   scorers: EvalScorerSpec[] | null;
@@ -393,27 +404,49 @@ interface PreparedReplayJob {
   scorers: EvalScorerSpec[] | null;
 }
 
-/** First-in, first-out slots shared by every run. */
-class Slots {
+/**
+ * Slots shared by every run, first in, first out. Phase 15.6: a low-priority
+ * case (a guard policy simulation's) waits while any other case waits, and
+ * low-priority cases never hold more than all but one slot, so release-gate
+ * and ordinary replay jobs are never stuck behind simulations.
+ */
+export class EvalSlots {
   private free: number;
-  private readonly waiting: Array<() => void> = [];
+  private lowRunning = 0;
+  private readonly waiting: Array<{ low: boolean; start: () => void }> = [];
 
-  constructor(size: number) {
-    this.free = Math.max(1, Math.floor(size));
+  constructor(private readonly size: number) {
+    this.size = Math.max(1, Math.floor(size));
+    this.free = this.size;
   }
 
-  acquire(): Promise<void> {
-    if (this.free > 0) {
+  private get lowCap(): number {
+    return Math.max(1, this.size - 1);
+  }
+
+  acquire(low = false): Promise<void> {
+    return new Promise((resolve) => {
+      this.waiting.push({ low, start: resolve });
+      this.drain();
+    });
+  }
+
+  release(low = false): void {
+    this.free += 1;
+    if (low) this.lowRunning = Math.max(0, this.lowRunning - 1);
+    this.drain();
+  }
+
+  private drain(): void {
+    while (this.free > 0) {
+      let index = this.waiting.findIndex((entry) => !entry.low);
+      if (index < 0 && this.lowRunning < this.lowCap) index = this.waiting.findIndex((entry) => entry.low);
+      if (index < 0) return;
+      const [next] = this.waiting.splice(index, 1);
       this.free -= 1;
-      return Promise.resolve();
+      if (next!.low) this.lowRunning += 1;
+      next!.start();
     }
-    return new Promise((resolve) => this.waiting.push(resolve));
-  }
-
-  release(): void {
-    const next = this.waiting.shift();
-    if (next) next();
-    else this.free += 1;
   }
 }
 
@@ -453,7 +486,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 export class EvalService {
-  private readonly slots: Slots;
+  private readonly slots: EvalSlots;
   private readonly active = new Map<string, ActiveRun>();
   private readonly options: Required<Pick<EvalServiceOptions, "maxCases" | "defaultMaxCostUsd" | "evalRunMaxCostUsd" | "maxResultBytes" | "heartbeatMs">> & EvalServiceOptions;
 
@@ -469,7 +502,7 @@ export class EvalService {
     options: EvalServiceOptions = {}
   ) {
     this.options = { maxCases: 200, defaultMaxCostUsd: 5, evalRunMaxCostUsd: 5, maxResultBytes: 262_144, heartbeatMs: 30_000, ...options };
-    this.slots = new Slots(options.concurrency ?? 2);
+    this.slots = new EvalSlots(options.concurrency ?? 2);
   }
 
   private now(): Date {
@@ -724,7 +757,7 @@ export class EvalService {
       actorUserId: actor.id,
       actorEmail: actor.email,
       needsWrite: false,
-      simulation: { id: request.simulationId, substitute },
+      simulation: { id: request.simulationId, substitute, vault: request.vault, canRun: request.canRun, profileChanged: request.profileChanged },
       candidate,
       options,
       scorers: null
@@ -732,8 +765,9 @@ export class EvalService {
     this.launch(
       runId,
       fixtures.map((fixture) => this.caseSpec(fixture, null)),
-      (spec, executionId, caseContext) => this.runReplayCase(job, runId, request.workflowId, spec, executionId, caseContext),
-      { maxCostUsd: options.maxCostUsd }
+      (spec, executionId, caseContext) => this.runSimulationCase(job, request.workflowId, spec, executionId, caseContext),
+      // Simulations yield: another job's case always starts first, and they never take every slot.
+      { maxCostUsd: options.maxCostUsd, priority: "low" }
     );
     return this.view(this.store.getEvalRun(runId)!);
   }
@@ -772,7 +806,7 @@ export class EvalService {
       cases += 1;
       const ageDays = (nowMs - Date.parse(recording.createdAt)) / 86_400_000;
       if (Number.isFinite(ageDays) && ageDays > REPLAY_STALE_RECORDING_DAYS) stale += 1;
-      if (fromTape && !recording.modelTape && recording.facts.modelCalls.length > 0) noTape += 1;
+      if (fromTape && !recording.modelTape) noTape += 1;
       const own = this.executionEstimate(recording, candidate.workflow, options);
       modelCalls += repeats * own.calls;
       costUsd += repeats * own.usd;
@@ -1087,7 +1121,7 @@ export class EvalService {
     return { fixture, reserveUsd: roundUsd(reserveUsd * Math.max(1, repeats)), reserveUnknown };
   }
 
-  private launch(runId: string, cases: CaseSpec[], runCase: RunCaseFn, limits: { maxCostUsd?: number } = {}): void {
+  private launch(runId: string, cases: CaseSpec[], runCase: RunCaseFn, limits: { maxCostUsd?: number; priority?: "low" } = {}): void {
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
@@ -1137,7 +1171,8 @@ export class EvalService {
     return new Promise((resolve) => active.caseWaiters.push(resolve));
   }
 
-  private async execute(active: ActiveRun, cases: CaseSpec[], runCase: RunCaseFn, limits: { maxCostUsd?: number }): Promise<void> {
+  private async execute(active: ActiveRun, cases: CaseSpec[], runCase: RunCaseFn, limits: { maxCostUsd?: number; priority?: "low" }): Promise<void> {
+    const low = limits.priority === "low";
     const heartbeat = setInterval(() => {
       if (active.canceled) return;
       active.progress = { ...active.progress, updatedAt: this.now().toISOString() };
@@ -1156,14 +1191,14 @@ export class EvalService {
     let executionsHeld = 0;
     try {
       for (const spec of cases) {
-        await this.slots.acquire();
+        await this.slots.acquire(low);
         const max = limits.maxCostUsd;
         if (max !== undefined) {
           // Wait for cases in flight to give back their reservations while this one does not fit.
           while (!active.canceled && !active.budgetStop && reserved > 0 && spentNow() + reserved + spec.reserveUsd > max) await this.nextCaseDone(active);
         }
         if (active.canceled || active.budgetStop) {
-          this.slots.release();
+          this.slots.release(low);
           break;
         }
         if (max !== undefined) {
@@ -1174,7 +1209,7 @@ export class EvalService {
             budgetStop = `Stopped after ${active.progress.done} of ${cases.length} cases (${REPLAY_BUDGET_EXHAUSTED}): the next case's judge calls could cost up to $${spec.reserveUsd.toFixed(4)}, more than the $${(max - spent).toFixed(4)} left of the run's $${max} budget.`;
           }
           if (budgetStop) {
-            this.slots.release();
+            this.slots.release(low);
             break;
           }
         }
@@ -1243,7 +1278,7 @@ export class EvalService {
               outcome = { status: "error", error: error instanceof Error ? error.message : String(error), ...(spec.fixture.recordingId ? { recordingId: spec.fixture.recordingId } : {}) };
             } finally {
               for (const id of caseExecutions) active.inFlight.delete(id);
-              this.slots.release();
+              this.slots.release(low);
             }
             active.inflightUsd = Math.max(0, roundUsd(active.inflightUsd - caseSpent));
             if (outcome.budgetStop && !active.budgetStop) active.budgetStop = outcome.budgetStop;
@@ -1488,6 +1523,60 @@ export class EvalService {
     };
   }
 
+  /**
+   * Phase 15.6 — one case of a guard policy simulation: the recording
+   * replayed under the current profiles (the baseline) and with the
+   * simulated profile swapped in, both from the tape with strict MCP, their
+   * verdicts kept in memory (never in guard_events), and the comparison
+   * stored as the case's diff (`{ simulation: GuardSimulationCase }`).
+   */
+  private async runSimulationCase(job: ReplayJobContext, workflowId: string, spec: CaseSpec, executionId: string, context?: CaseRunContext): Promise<CaseOutcome> {
+    const simulation = job.simulation!;
+    const replay = this.options.replay!;
+    const recordingId = spec.fixture.recordingId!;
+    const recording = replay.getRecording(recordingId);
+    const meta = recording ? { id: recording.id, name: recording.name, createdAt: recording.createdAt } : null;
+    const finish = (entry: ReturnType<typeof simulateCase>, executions: number): CaseOutcome => ({
+      status: entry.outcome === "not_simulated" ? "error" : "pass",
+      recordingId,
+      ...(entry.executionId ? { executionId: entry.executionId } : {}),
+      ...(entry.reason ? { error: entry.reason } : {}),
+      verdict: entry.outcome,
+      diff: { simulation: entry } as unknown as ReplayCaseDiff,
+      costUsd: 0,
+      executions
+    });
+    const skip = (reason: string) => finish(simulateCase({ recordingId, recording: meta, baseline: null, candidate: null, skipped: reason, scrub: (text) => this.scrubText(text) }), 0);
+    if (!recording) return skip("The recording was deleted before it could be replayed.");
+    if (recording.workflowId !== workflowId) return skip("The recording belongs to another workflow.");
+    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, "workflow:read");
+    if (!actor) return skip(`The user who started this simulation (${job.actorEmail}) can no longer read this workflow.`);
+    const denied = simulation.canRun(actor);
+    if (denied) return skip(`The user who started this simulation (${job.actorEmail}) may no longer simulate this profile: ${denied}`);
+
+    const candidate = { workflow: job.candidate.workflow, kind: job.candidate.kind, version: job.candidate.version };
+    const request = { mcpMode: "strict" as const };
+    const side = async (substitute: GuardProfileSubstitute | null, id: string) => {
+      const run: GuardSimulationRun = { id: simulation.id, substitute, sink: new GuardSimulationSink(), vault: simulation.vault };
+      let replayed: SimulatedReplay;
+      try {
+        const response = await replay.replayCase({ recording, candidate, request, actor, executionId: id, models: "replay", overrides: null, role: substitute ? "candidate" : "baseline", simulation: run });
+        const { facts: _facts, ...rest } = response;
+        replayed = { status: response.status, error: response.verdict === "error" ? response.reasons.join(" ") || null : null, executionId: response.executionId, response: rest };
+      } catch (error) {
+        replayed = { status: "error", error: error instanceof Error ? error.message : String(error), executionId: null, response: null };
+      }
+      return { replay: replayed, checks: run.sink.checks };
+    };
+    const nodeNames = new Map(job.candidate.workflow.nodes.map((node) => [node.id, node.name] as const));
+    const baseline = await side(null, executionId);
+    if (context?.canceled()) {
+      return finish(simulateCase({ recordingId, recording: meta, baseline, candidate: null, nodeNames, scrub: (text) => this.scrubText(text) }), 1);
+    }
+    const simulated = await side(simulation.substitute, context?.nextExecutionId() ?? randomUUID());
+    return finish(simulateCase({ recordingId, recording: meta, baseline, candidate: simulated, nodeNames, profileChanged: simulation.profileChanged, scrub: (text) => this.scrubText(text) }), 2);
+  }
+
   private async runReplayCase(job: ReplayJobContext, runId: string, workflowId: string, spec: CaseSpec, executionId: string, context?: CaseRunContext): Promise<CaseOutcome> {
     const { fixture } = spec;
     const replay = this.options.replay!;
@@ -1501,14 +1590,12 @@ export class EvalService {
     // Phase 15.6 — a captured run is not a golden run until a builder promotes it.
     const refusal = candidateRefusal(recording, { allowCandidates: job.allowCandidates });
     if (refusal) return { status: "error", recordingId, error: refusal };
-    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.simulation ? "workflow:read" : job.needsWrite ? "workflow:write" : "workflow:execute");
+    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute");
     if (!actor) {
       return {
         status: "error",
         recordingId,
-        error: job.simulation
-          ? `The user who started this simulation (${job.actorEmail}) can no longer read this workflow.`
-          : job.needsWrite
+        error: job.needsWrite
           ? `The user who started this job (${job.actorEmail}) can no longer edit this workflow (workflow:write), which a job with a workflow file or overrides needs for every case.`
           : `The user who started this job (${job.actorEmail}) can no longer run this workflow.`
       };
@@ -1644,8 +1731,7 @@ export class EvalService {
           overrides,
           ...(baseline ? { baseline } : {}),
           role: "candidate",
-          repeatIndex,
-          ...(job.simulation ? { simulation: job.simulation } : {})
+          repeatIndex
         });
       } finally {
         context?.release(candidateEstimate);

@@ -10,7 +10,11 @@
  * saving a version). Everyone else gets 403; a profile or simulation that
  * does not exist gets 404. Cases come only from workflows the starter can
  * read (run-access.ts), and a viewer sees only the workflows they can read
- * now: the summary is computed from those, the rest are counted as hidden.
+ * now: the summary and progress are computed from those, and nothing is
+ * said about the others. A simulation that includes none of the viewer's
+ * readable workflows (and is not theirs) is not listed and reads as 404.
+ * One simulation runs at a time per deployment: a second start gets 409
+ * with the running simulation's id.
  *
  * SQLite only in this release: on Postgres every route answers 501.
  */
@@ -22,7 +26,7 @@ import type { RunAccess } from "./run-access.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
 import type { AuditEventInput } from "./services/audit-service.js";
 import { GuardNotFoundError, GuardValidationError } from "./services/guard-service.js";
-import type { GuardSimulationService } from "./services/guard-simulation-service.js";
+import { GuardSimulationBusyError, type GuardSimulationService } from "./services/guard-simulation-service.js";
 
 export interface GuardSimulationRoutesDeps {
   app: FastifyInstance;
@@ -42,15 +46,7 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
   };
 
   /** Why `user` may not simulate this profile (404 when it does not exist); null when they may. */
-  const editorDenial = (user: SafeUser, profileId: string): { status: 403 | 404; error: string } | null => {
-    const profile = store.getGuardProfile(profileId);
-    if (!profile) return { status: 404, error: "Guard profile not found" };
-    if (user.role === "admin") return null;
-    if (profile.builtIn) return { status: 403, error: "The built-in profile is read-only; only an admin can simulate changes to it. Duplicate it to simulate your own." };
-    const enforced = store.listGuardBindingsForProfile(profileId).some((binding) => binding.scope === "project" && binding.mode === "enforced");
-    if (enforced) return { status: 403, error: "This guard profile is enforced on a project; only an admin can change or simulate it" };
-    return null;
-  };
+  const editorDenial = (user: SafeUser, profileId: string) => simulations!.editorDenial(user, profileId);
 
   const deny = (reply: FastifyReply, denial: { status: number; error: string }) => {
     reply.code(denial.status);
@@ -69,7 +65,7 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
       return { error: "Invalid simulation request", issues: parsed.error.issues.map((issue) => ({ path: issue.path.map(String).join(".") || "(root)", message: issue.message })) };
     }
     try {
-      let simulation = simulations.start(request.params.id, parsed.data, user);
+      let simulation = await simulations.start(request.params.id, parsed.data, user);
       deps.audit(request, user, {
         eventType: "guard.simulation.started",
         category: "system",
@@ -99,6 +95,10 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
         reply.code(404);
         return { error: error.message };
       }
+      if (error instanceof GuardSimulationBusyError) {
+        reply.code(409);
+        return { error: error.message, ...(error.simulationId !== "starting" ? { simulationId: error.simulationId } : {}) };
+      }
       throw error;
     }
   });
@@ -124,6 +124,10 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
     }
     const denial = editorDenial(user, record.profileId);
     if (denial) return deny(reply, denial.status === 404 ? { status: 404, error: "Simulation not found" } : denial);
+    if (!simulations.visibleTo(record, user)) {
+      reply.code(404);
+      return { error: "Simulation not found" };
+    }
     const simulation = simulations.get(record.id, user);
     if (!simulation) {
       reply.code(404);

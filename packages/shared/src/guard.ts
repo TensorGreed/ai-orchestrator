@@ -121,6 +121,8 @@ export interface GuardProfileSummary {
   name: string;
   description?: string;
   builtIn: boolean;
+  /** Phase 15.6 — a project enforces this profile (only admins may change or simulate it). */
+  enforced?: boolean;
   latestVersion: number;
   hash: string;
   createdAt: string;

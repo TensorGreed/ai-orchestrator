@@ -3,20 +3,25 @@
  *
  * "What would this guard profile change have done to recent traffic?" A
  * simulation replays the most recent recordings of the workflows a guard
- * profile applies to, with model calls answered from each recording's model
- * tape and MCP calls from its cassette (never a live model or server), and
- * the profile swapped for the simulated one: an unsaved document from the
- * editor, or a saved version. It then compares the guard's verdicts at every
- * checkpoint with what the recorded run did.
+ * profile applies to twice, with model calls answered from each recording's
+ * model tape and MCP calls from its cassette (never a live model or
+ * server): once under the profiles in force now (the baseline) and once with
+ * the profile swapped for the simulated one (an unsaved document from the
+ * editor, or a saved version). It then compares the guard's outcome at every
+ * checkpoint of the two replays, so the result is the change compared with
+ * the current profile, whatever the profiles were when the run was recorded.
  *
- * A checkpoint is one guard verdict at one place: a node, its placement
- * (`node` or `agent`) and the channel, counted in order when the same place
- * checks more than once. Each checkpoint is newly blocked, no longer
- * blocked, changed (another action, such as now masked) or unchanged.
- * Checkpoints the replay never reached (the run stopped earlier) are counted
- * apart. When a guard change makes the replay ask for a model or tool answer
- * the recording does not have, the case "diverged at step k": an impact of
- * the change, reported as such, never a live call.
+ * A checkpoint is one guard check: the profile stack evaluated once on one
+ * piece of content at one place (a node, its placement, the channel, and for
+ * agents the iteration and tool), counted in order when the same place
+ * checks more than once. Its action is the combined action of the whole
+ * stack. Each checkpoint is newly blocked, no longer blocked, changed
+ * (another action, such as now masked) or unchanged. Checkpoints the
+ * simulated replay never reached (it stopped earlier) are counted apart.
+ * When a guard change makes the replay ask for a model or tool answer the
+ * recording does not have, the case "diverged at step k": an impact of the
+ * change, reported as such, never a live call. A recording the baseline
+ * itself cannot follow is stale for the current workflow: not simulated.
  */
 
 import { z } from "zod";
@@ -39,8 +44,8 @@ export const GUARD_SIMULATION_MASKING_ACTIONS: ReadonlySet<string> = new Set(["m
 /**
  * `POST /api/guard/profiles/:id/simulate`. Exactly one of `document` (the
  * editor's unsaved profile document; validated, hashed, never stored) or
- * `version` (a saved version, compared with what the recordings did under
- * the profile in force then).
+ * `version` (a saved version). Either is compared with the current profile
+ * (its latest saved version), replayed on the same recordings.
  */
 export const guardSimulationRequestSchema = z
   .object({
@@ -80,11 +85,19 @@ export interface GuardSimulationDetectorChange {
 
 export interface GuardSimulationCheckpoint {
   nodeId: string | null;
+  /** The node's name in the replayed workflow, for plain-language copy. */
+  nodeName?: string | null;
   placement: string;
   channel: string;
-  /** 1-based: the n-th verdict at this node, placement and channel. */
+  /** An agent check's iteration and tool, when it has them. */
+  iteration?: number;
+  toolName?: string;
+  /** 1-based: the n-th check at this place. */
   occurrence: number;
-  /** The verdict's action in the recording and in the replay; null when that side has no verdict here. */
+  /**
+   * The check's combined action (the whole profile stack) under the current
+   * profiles and under the simulated one; null when that side has no check here.
+   */
   before: string | null;
   after: string | null;
   change: GuardSimulationChange;
@@ -98,8 +111,10 @@ export interface GuardSimulationCase {
   recordingId: string;
   recordingName: string;
   recordedAt: string | null;
-  /** The replay execution; null when the case never ran. */
+  /** The simulated replay's execution; null when it never ran. */
   executionId: string | null;
+  /** The baseline replay's execution (the current profiles); null when it never ran. */
+  baselineExecutionId?: string | null;
   outcome: GuardSimulationCaseOutcome;
   /**
    * For a diverged case: the 1-based step (the n-th model call, or the n-th
@@ -107,7 +122,7 @@ export interface GuardSimulationCase {
    * diff was too large to keep that detail.
    */
   divergedAt?: { step: number | null; kind: "model" | "tool"; nodeId: string | null; message: string };
-  /** Why a case could not be simulated (no model tape, the replay failed, …). */
+  /** Why a case could not be simulated (the recording is stale, the replay failed, …). */
   reason?: string;
   counts: GuardSimulationCounts;
   /** Checkpoints whose verdict changed (unchanged ones are only counted). */
@@ -152,7 +167,8 @@ export interface GuardSimulationSummary {
   sentence: string;
 }
 
-export type GuardSimulationStatus = "running" | "completed" | "failed";
+/** `interrupted`: a replay job stopped before it finished (a restart, a cancel); no partial result is shown. */
+export type GuardSimulationStatus = "running" | "completed" | "failed" | "interrupted";
 
 export interface GuardSimulationView {
   id: string;
@@ -166,14 +182,12 @@ export interface GuardSimulationView {
   createdBy: string | null;
   finishedAt: string | null;
   jobIds: string[];
-  /** Over the workflows the viewer can read. Null while running. */
+  /** Over the workflows the viewer can read. Null unless completed. */
   summary: GuardSimulationSummary | null;
-  /** While running: recordings replayed so far, of all. */
+  /** While running: recordings replayed so far, of those in workflows the viewer can read. */
   progress?: { done: number; total: number } | null;
   /** Per-workflow detail (detail endpoint only), limited to workflows the viewer can read. */
   workflows?: GuardSimulationWorkflow[];
-  /** Workflows of this simulation the viewer cannot read (left out of the summary and detail). */
-  hiddenWorkflows?: number;
   /** Why nothing ran, for the empty state. */
   emptyReason?: string | null;
   error?: string | null;

@@ -13,6 +13,7 @@ import { createDefaultGuardProfile } from "@ai-orchestrator/guard-sdk";
 import { SqliteStore } from "../db/database.js";
 import { GuardNotFoundError, GuardService, GuardValidationError } from "./guard-service.js";
 import { SecretService } from "./secret-service.js";
+import { GuardSimulationSink, GuardSimulationVault } from "./guard-simulation-sink.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -119,5 +120,28 @@ describe("guard profile override", () => {
     expect(() => guard.simulationProfile("candidate", { version: 9 })).toThrow(GuardNotFoundError);
     expect(() => guard.simulationProfile("nope", { version: 1 })).toThrow(GuardNotFoundError);
     expect(() => guard.simulationProfile("candidate", { document: { name: "" } })).toThrow(GuardValidationError);
+  });
+
+  it("Phase 15.6: a simulated run's verdicts go to its sink and its tokens to its vault, never to the live tables", async () => {
+    const { guard, store } = await setup();
+    const sink = new GuardSimulationSink();
+    const vault = new GuardSimulationVault(guard.vault);
+    const runtime = guard.runtimeFor({ executionId: "exec-sim", workflowId: "wf", projectId: "default", simulation: { sink, vault } });
+    expect(runtime.vault).toBe(vault);
+    await runtime.onVerdict!({
+      executionId: "exec-sim",
+      workflowId: "wf",
+      nodeId: "guard",
+      placement: "node",
+      channel: "prompt",
+      profile: { profileId: "bound", version: 1, hash: "h" },
+      verdict: { action: "allow", actions: [], findings: [], timings: { totalMs: 1 }, budget: { exceeded: false, skippedDetectors: [] } },
+      check: { id: "c1", index: 0, action: "allow" }
+    } as never);
+    expect(sink.checks).toHaveLength(1);
+    expect(store.listGuardEventsForExecution("exec-sim")).toHaveLength(0);
+    await runtime.vault!.put({ token: "tok_1", dataClass: "email", value: "a@b.c", createdAt: new Date().toISOString() });
+    expect(store.getGuardVaultByToken("tok_1")).toBeFalsy();
+    expect(vault.size).toBe(1);
   });
 });
