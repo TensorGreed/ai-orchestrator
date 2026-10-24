@@ -1,10 +1,10 @@
 /**
  * Test helper: the migration versions expected from 1 up to the highest one,
- * each exactly once. Versions reserved for feature branches that land
- * separately (34 and 35, which merge before 36) may be missing; once one
- * exists it must be in place too.
+ * each exactly once. A version reserved for a feature branch that lands
+ * separately may be listed here so it can be missing; once it exists it
+ * must be in place too. None is reserved now.
  */
-const RESERVED_UNTIL_MERGED = new Set([34, 35]);
+const RESERVED_UNTIL_MERGED = new Set<number>([]);
 
 export function contiguousMigrationVersions(versions: readonly number[]): number[] {
   const max = Math.max(0, ...versions);
