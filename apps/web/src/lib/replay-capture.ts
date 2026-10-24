@@ -98,8 +98,6 @@ const TRIGGER_LABELS: Record<string, string> = {
   webhook: "Webhook",
   webhook_api: "API",
   webhook_api_stream: "API (stream)",
-  api_execute: "Execute API",
-  api_execute_stream: "Execute API (stream)",
   cron: "Schedule",
   schedule: "Schedule",
   chat: "Chat",
@@ -114,7 +112,7 @@ const TRIGGER_LABELS: Record<string, string> = {
 };
 
 /** Production triggers the inbox can filter by, in the order the filter lists them. */
-export const CAPTURE_TRIGGER_FILTERS = ["webhook", "webhook_api", "api_execute", "api_execute_stream", "cron", "chat", "form", "mcp_server", "queue", "slack_webhook", "telegram_webhook", "discord_webhook"] as const;
+export const CAPTURE_TRIGGER_FILTERS = ["webhook", "webhook_api", "cron", "chat", "form", "mcp_server", "queue", "slack_webhook", "telegram_webhook", "discord_webhook"] as const;
 
 export type CapturePeriod = "" | "24h" | "7d" | "30d";
 export const CAPTURE_PERIODS: Array<{ value: CapturePeriod; label: string }> = [

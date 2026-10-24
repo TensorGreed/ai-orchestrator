@@ -4,7 +4,7 @@ import { surrogateFor } from "@ai-orchestrator/guard-sdk";
 import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orchestrator/mcp-sdk";
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
 import { sha256Hex } from "./audit-bundle-service.js";
-import { inputProvenance, maskCapturedRun, maskCapturedRunAsync, provenanceFor, withNodeLabels } from "./capture-masking.js";
+import { inputProvenance, maskCapturedRun, maskCapturedRunAsync, provenanceFor, withNodeLabels, type CapturedRunParts } from "./capture-masking.js";
 
 const key = Buffer.from("0123456789abcdef0123456789abcdef");
 const EMAIL = "jane.doe@example.com";
@@ -95,7 +95,8 @@ describe("maskCapturedRun", () => {
     expect(inputProvenance("cron", undefined)).toBe("untrusted_external");
     expect(inputProvenance("schedule", undefined)).toBe("untrusted_external");
     expect(inputProvenance("chat", undefined)).toBe("user");
-    expect(inputProvenance("api_execute", undefined)).toBe("user");
+    // An API-key run of the execute routes keeps its `manual` trigger; the server passes its origin.
+    expect(inputProvenance("manual", "user")).toBe("user");
     expect(inputProvenance("webhook", undefined)).toBe("untrusted_external");
     expect(provenanceFor("webhook_input", "trusted")).toEqual(["trusted"]);
     expect(provenanceFor("http_request", "user")).toEqual(["untrusted_external"]);
@@ -105,5 +106,75 @@ describe("maskCapturedRun", () => {
   it("masks the same way in chunks as in one go", async () => {
     const options = { key, dictionaries: [] };
     expect(JSON.stringify(await maskCapturedRunAsync(run(), options))).toBe(JSON.stringify(maskCapturedRun(run(), options)));
+  });
+
+  // Re-review N1: a resource URI (the cassette entry's `name`) held the raw email.
+  it("masks a cassette entry's name (resource URI), server key and every other string, and a replay of the masked input asks for the masked URI", () => {
+    const base: CapturedRunParts = run();
+    const uri = `crm://customers/${EMAIL}/profile`;
+    base.cassette = {
+      ...base.cassette!,
+      servers: [{ key: `inline:http-mcp:${EMAIL}`, adapterId: "http-mcp", label: `CRM for ${EMAIL}` }],
+      entries: [
+        {
+          seq: 1,
+          server: `inline:http-mcp:${EMAIL}`,
+          method: "resources/read",
+          name: uri,
+          argsHash: "stale",
+          result: { contents: [{ uri, text: "profile" }] },
+          at: 0,
+          durationMs: 1
+        }
+      ]
+    } as McpCassette;
+    const masked = maskCapturedRun(base, { key, dictionaries: [] });
+    const surrogate = surrogateFor(EMAIL, "email", key);
+    expect(JSON.stringify(masked)).not.toContain(EMAIL);
+    const entry = masked.cassette!.entries[0]!;
+    // The workflow resolves the URI from the (masked) input, so a replay asks for exactly this name.
+    expect(entry.name).toBe(`crm://customers/${surrogate}/profile`);
+    expect(entry.server).toBe(masked.cassette!.servers[0]!.key);
+    expect(masked.cassette!.servers[0]).toMatchObject({ adapterId: "http-mcp", label: `CRM for ${surrogate}` });
+    expect(entry).toMatchObject({ seq: 1, method: "resources/read", at: 0, durationMs: 1 });
+  });
+
+  it("finds the value only in a resource URI and masks it there and everywhere else", () => {
+    const base: CapturedRunParts = run();
+    base.input = { user_prompt: "show the profile" };
+    base.nodes = {};
+    base.facts = { ...base.facts, output: null, toolCalls: [] };
+    base.modelTape = null;
+    base.memorySeed = null;
+    base.cassette = {
+      ...base.cassette!,
+      entries: [{ seq: 1, server: "crm", method: "resources/read", name: "crm://customers/jane.doe@example.com/profile", argsHash: "stale", at: 0, durationMs: 1 }]
+    } as McpCassette;
+    const masked = maskCapturedRun(base, { key, dictionaries: [] });
+    expect(masked.cassette!.entries[0]!.name).toBe(`crm://customers/${surrogateFor(EMAIL, "email", key)}/profile`);
+    expect(masked.report.values).toEqual({ email: 1 });
+  });
+
+  it("property: no detected value survives in any field of any cassette entry", () => {
+    const values = [EMAIL, "+44 20 7946 0958", "4111 1111 1111 1111", "GB82 WEST 1234 5698 7654 32", "536-90-4399"];
+    const fields = ["server", "name", "args", "result", "error", "exchanges", "futureField"] as const;
+    for (const value of values) {
+      for (const field of fields) {
+        const base: CapturedRunParts = run();
+        const entry: Record<string, unknown> = { seq: 1, server: "crm", method: "tools/call", name: "find", argsHash: "stale", at: 0, durationMs: 1 };
+        entry[field] =
+          field === "args" || field === "result"
+            ? { nested: [{ text: `see ${value}` }] }
+            : field === "exchanges"
+              ? [{ kind: "sampling", at: 0, request: { text: value }, response: { text: `ok ${value}` } }]
+              : `x ${value} y`;
+        base.input = { user_prompt: "nothing here" };
+        base.cassette = { ...base.cassette!, servers: [{ key: "crm", adapterId: "mock-mcp", label: field === "server" ? `crm ${value}` : "crm" }], entries: [entry] } as unknown as McpCassette;
+        const masked = maskCapturedRun(base, { key, dictionaries: [] });
+        const stored = JSON.stringify(masked.cassette);
+        expect(stored, `${field}: ${value}`).not.toContain(value);
+        expect(stored.replace(/\D/g, ""), `${field}: ${value}`).not.toContain(value.replace(/\D/g, "").length >= 9 ? value.replace(/\D/g, "").slice(-8) : "@@");
+      }
+    }
   });
 });

@@ -1445,6 +1445,8 @@ function mapReplayCaptureInfo(raw: Partial<ReplayCaptureInfo>): ReplayCaptureInf
   return {
     rate: typeof raw.rate === "number" ? raw.rate : 0,
     masked: raw.masked === true,
+    // An imported run keeps `maskingVerified: false`; a run captured here has no such field.
+    ...(raw.maskingVerified === false ? { maskingVerified: false } : {}),
     dataClasses: strings(raw.dataClasses),
     values: counts,
     notDetectableAfterMasking: strings(raw.notDetectableAfterMasking),
@@ -11444,6 +11446,8 @@ export class SqliteStore {
       case "execution": {
         if (!exists("execution_history")) return { deleted: false, cascaded: [] };
         this.exec(`DELETE FROM execution_history WHERE id = ?`, [id]);
+        // The run's side rows go with it: tool-call telemetry (arguments and errors), guard events and usage.
+        for (const table of ["mcp_tool_calls", "guard_events", "usage_events"]) this.exec(`DELETE FROM ${table} WHERE execution_id = ?`, [id]);
         return { deleted: true, cascaded: [] };
       }
       case "cassette":

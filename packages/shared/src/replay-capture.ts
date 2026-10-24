@@ -181,9 +181,27 @@ export interface ReplayFindSubjectMatch {
   matchedAs: string[];
   /** Which stored parts hold it (a golden run: input, nodes, facts, cassette, modelTape, memorySeed, workflow, notes). */
   fields: string[];
+  /** Why it matched, so an admin can check before deleting: up to a few hits, each with a masked excerpt. */
+  hits: ReplayFindSubjectHit[];
+}
+
+/** One place a stored row holds the value. The excerpt is masked: the match as the guard mask shows it, digits around it hidden. */
+export interface ReplayFindSubjectHit {
+  field: string;
+  /** `raw` or the data class whose surrogate matched. */
+  matchedAs: string;
+  /** The value's data class (null for a value searched as plain text). */
+  dataClass: string | null;
+  excerpt: string;
 }
 
 export interface ReplayFindSubjectResult {
+  /**
+   * The value's data class, by the DLP scan of the value itself (null: not a
+   * recognised class, searched as exact text and as each dictionary class's
+   * surrogate). Only stored values of that class match.
+   */
+  dataClass: string | null;
   /** The data classes the value was surrogated as for the search. */
   classesTried: string[];
   matches: ReplayFindSubjectMatch[];

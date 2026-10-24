@@ -11,7 +11,9 @@ import { z } from "zod";
  *     profile dictionary's class, ...).
  *   - source: `scan` when a scan of the recorded content found them (a
  *     production capture's masking pass); `propagated` is reserved for labels
- *     carried from a node's inputs to its output.
+ *     carried from a node's inputs to its output; `file` for labels read
+ *     from an imported golden-set file, which are never trusted (an import
+ *     drops `trusted` from them).
  *
  * Labels never carry values: only class names and counts.
  */
@@ -21,7 +23,7 @@ export const PROVENANCE_LABELS = ["trusted", "user", "untrusted_external", "sens
 export type ProvenanceLabel = (typeof PROVENANCE_LABELS)[number];
 export const provenanceLabelSchema = z.enum(PROVENANCE_LABELS);
 
-export const DATA_LABEL_SOURCES = ["scan", "propagated"] as const;
+export const DATA_LABEL_SOURCES = ["scan", "propagated", "file"] as const;
 export type DataLabelSource = (typeof DATA_LABEL_SOURCES)[number];
 
 /** A data class name: a built-in DLP class or a profile dictionary's class. */

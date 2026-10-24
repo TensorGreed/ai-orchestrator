@@ -139,12 +139,12 @@ describe("CaptureInbox", () => {
     vi.mocked(api.fetchReplayCaptures).mockResolvedValue({ items: [capture("a")], total: 1 });
     render(<CaptureInbox workflows={workflows} canEdit isAdmin={false} />);
     await screen.findByRole("list", { name: "Captured runs" });
-    await userEvent.selectOptions(screen.getByLabelText("Filter by trigger"), "api_execute");
-    await waitFor(() => expect(api.fetchReplayCaptures).toHaveBeenLastCalledWith("wf-1", { limit: 100, trigger: "api_execute" }));
+    await userEvent.selectOptions(screen.getByLabelText("Filter by trigger"), "webhook");
+    await waitFor(() => expect(api.fetchReplayCaptures).toHaveBeenLastCalledWith("wf-1", { limit: 100, trigger: "webhook" }));
     await userEvent.selectOptions(screen.getByLabelText("Filter by outcome"), "error");
     await userEvent.selectOptions(screen.getByLabelText("Filter by date"), "7d");
     await waitFor(() =>
-      expect(api.fetchReplayCaptures).toHaveBeenLastCalledWith("wf-1", { limit: 100, runStatus: "error", trigger: "api_execute", from: expect.any(String) })
+      expect(api.fetchReplayCaptures).toHaveBeenLastCalledWith("wf-1", { limit: 100, runStatus: "error", trigger: "webhook", from: expect.any(String) })
     );
     const from = vi.mocked(api.fetchReplayCaptures).mock.lastCall![1]!.from!;
     expect(Math.abs(Date.now() - 7 * 86_400_000 - Date.parse(from))).toBeLessThan(60_000);

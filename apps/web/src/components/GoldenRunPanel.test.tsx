@@ -281,6 +281,18 @@ describe("GoldenRunViewer", () => {
     expect(screen.queryByText(/from run/)).not.toBeInTheDocument();
   });
 
+  it("says an imported capture's masking is not verified (a file's masked flag is never trusted)", async () => {
+    const capture = { rate: 0, masked: true, maskingVerified: false, dataClasses: ["email"], values: {}, notDetectableAfterMasking: [], keptFromWorkflow: 0, publishedVersion: null };
+    vi.mocked(api.fetchReplayRecording).mockResolvedValueOnce({
+      recording: recording({
+        sourceExecutionId: null,
+        capabilities: { mcp: "none", models: "live", memory: "empty", workflowSource: "captured", origin: "imported", importedAt: "2026-10-24T08:00:00.000Z", capture }
+      })
+    });
+    render(<GoldenRunViewer recordingId="rec_imported" canReplay={false} onClose={vi.fn()} />);
+    expect(await screen.findByText(/masking not verified/)).toBeInTheDocument();
+  });
+
   it("labels an inconclusive replay as inconclusive", () => {
     render(<ReplayResultView result={result({ verdict: "error", reasons: ["1 MCP call had no recorded answer"] })} />);
     expect(screen.getByText("Inconclusive")).toBeInTheDocument();

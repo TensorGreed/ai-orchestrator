@@ -169,14 +169,38 @@ describe("surrogateFor", () => {
     expect(cards.size).toBeGreaterThan(1995);
   });
 
-  it("keys a phone on its last nine digits, so it matches with or without the country code", () => {
+  it("keys a phone on its national number: the same digits with or without the country code, which stays as written", () => {
     const international = surrogateFor("+1 415-555-1234", "phone", key);
     const national = surrogateFor("415-555-1234", "phone", key);
     const digitsOnly = surrogateFor("4155551234", "phone", key);
-    expect(international.replace(/\D/g, "").slice(-9)).toBe(national.replace(/\D/g, "").slice(-9));
-    expect(digitsOnly.slice(-9)).toBe(national.replace(/\D/g, "").slice(-9));
-    expect(international.startsWith("+1 4")).toBe(true);
-    expect(international.replace(/\D/g, "")).not.toBe("14155551234");
+    const trunk = surrogateFor("0415 555 1234", "phone", key);
+    const nationalDigits = national.replace(/\D/g, "");
+    expect(international.replace(/\D/g, "")).toBe(`1${nationalDigits}`);
+    expect(digitsOnly).toBe(nationalDigits);
+    expect(trunk.replace(/\D/g, "")).toBe(`0${nationalDigits}`);
+    expect(international.startsWith("+1 ")).toBe(true);
+    expect(nationalDigits).not.toBe("4155551234");
+    expect(nationalDigits.startsWith("0")).toBe(false);
+  });
+
+  it("an 8-digit national number keeps its country code (never rewritten) and matches its national form", () => {
+    const norway = surrogateFor("+47 2212 3456", "phone", key);
+    expect(norway.startsWith("+47 ")).toBe(true);
+    expect(norway.replace(/\D/g, "").slice(2)).toBe(surrogateFor("22123456", "phone", key));
+    const singapore = surrogateFor("+65 6123 4567", "phone", key);
+    expect(singapore.startsWith("+65 ")).toBe(true);
+    expect(singapore.slice(4).replace(/\D/g, "")).toBe(surrogateFor("61234567", "phone", key));
+  });
+
+  it("two people whose numbers share the last nine digits get different surrogates", () => {
+    const uk = surrogateFor("+44 20 7946 0958", "phone", key).replace(/\D/g, "");
+    const us = surrogateFor("+1 (207) 946-0958", "phone", key).replace(/\D/g, "");
+    // Same national digits (2079460958) in two countries: the country code tells them apart.
+    expect(uk.slice(0, 2)).toBe("44");
+    expect(us.slice(0, 1)).toBe("1");
+    const a = surrogateFor("+1 312 345 6788", "phone", key).replace(/\D/g, "");
+    const b = surrogateFor("+1 412 345 6788", "phone", key).replace(/\D/g, "");
+    expect(a.slice(-9)).not.toBe(b.slice(-9));
   });
 
   it("redacts credentials, keys and tokens fully, and tags dictionary classes", () => {

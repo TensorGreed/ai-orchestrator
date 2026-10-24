@@ -277,6 +277,41 @@ describe("maskRecording", () => {
     expect(maskableDataClasses([createDefaultGuardProfile()])).toEqual(["card_number"]);
   });
 
+  // Re-review N3: national forms of an 8-digit national number, detected with its country code.
+  it("masks the national forms of an 8-digit number detected with its country code, keeping the country code", () => {
+    for (const [international, nationalDigits] of [
+      ["+47 2212 3456", "22123456"],
+      ["+65 6123 4567", "61234567"]
+    ] as const) {
+      const cc = international.slice(1, 3);
+      const { parts: masked } = maskRecording(
+        [
+          { id: "input", value: `call ${international}` },
+          { id: "tool", value: { a: nationalDigits, b: `${nationalDigits.slice(0, 4)} ${nationalDigits.slice(4)}`, c: `00${cc} ${nationalDigits}`, d: Number(`${cc}${nationalDigits}`) } }
+        ],
+        { key }
+      );
+      const text = JSON.stringify(masked.map((part) => part.value));
+      expect(text.replace(/\D/g, ""), international).not.toContain(nationalDigits);
+      const input = masked[0]!.value as string;
+      // The country code is never rewritten.
+      expect(input.startsWith(`call +${cc} `), input).toBe(true);
+      const tool = masked[1]!.value as { a: string; b: string; c: string; d: number };
+      expect(input.slice(`call +${cc} `.length).replace(/\D/g, "")).toBe(tool.a);
+      expect(tool.b.replace(/\D/g, "")).toBe(tool.a);
+      expect(tool.c.startsWith(`00${cc} `)).toBe(true);
+      expect(String(tool.d).startsWith(cc)).toBe(true);
+    }
+  });
+
+  it("two people whose phones share the last nine digits are masked apart", () => {
+    const { parts: masked } = maskRecording([{ id: "input", value: { a: "+1 312 345 6788", b: "+1 412 345 6788", uk: "+44 20 7946 0958", us: "+1 (207) 946-0958" } }], { key });
+    const value = masked[0]!.value as Record<string, string>;
+    expect(value.a.replace(/\D/g, "").slice(-9)).not.toBe(value.b.replace(/\D/g, "").slice(-9));
+    expect(value.uk.startsWith("+44 ")).toBe(true);
+    expect(value.us.startsWith("+1 (")).toBe(true);
+  });
+
   it("property: no collected value survives in any form in any part", () => {
     const random = (() => {
       let state = 42;
@@ -298,11 +333,15 @@ describe("maskRecording", () => {
       subjects.push({ dataClass: "card_number", written: card.replace(/(\d{4})(?=\d)/g, "$1 "), canonical: card });
       const phone = `${2 + Math.floor(random() * 7)}${digits(2)}${2 + Math.floor(random() * 7)}${digits(6)}`;
       subjects.push({ dataClass: "phone", written: `+1 (${phone.slice(0, 3)}) ${phone.slice(3, 6)}-${phone.slice(6)}`, canonical: phone });
+      // An 8-digit national number (Norway), written with its country code; its national forms appear elsewhere.
+      const norway = `${2 + Math.floor(random() * 7)}${digits(7)}`;
+      subjects.push({ dataClass: "phone8", written: `+47 ${norway.slice(0, 4)} ${norway.slice(4)}`, canonical: norway });
     }
     // Each value appears formatted once, then in other forms elsewhere.
     const forms = (subject: (typeof subjects)[number]): unknown[] => {
       const c = subject.canonical;
       if (subject.dataClass === "email") return [c.toUpperCase(), encodeURIComponent(c), c.replace("@", "\\u0040"), JSON.stringify({ to: c })];
+      if (subject.dataClass === "phone8") return [c, `0${c}`, `47${c}`, `0047 ${c}`, Number(`47${c}`), `${c.slice(0, 4)} ${c.slice(4)}`, JSON.stringify({ n: c })];
       return [
         c,
         Number(c),
@@ -324,12 +363,12 @@ describe("maskRecording", () => {
     const flat = decodedAll.replace(/[\s().\-]/g, "");
     for (const subject of subjects) {
       if (subject.dataClass === "email") expect(decodedAll.toLowerCase(), subject.written).not.toContain(subject.canonical);
-      else if (subject.dataClass === "phone") expect(flat, subject.written).not.toContain(subject.canonical.slice(-9));
+      else if (subject.dataClass === "phone" || subject.dataClass === "phone8") expect(flat, subject.written).not.toContain(subject.canonical);
       else expect(flat, subject.written).not.toContain(subject.canonical);
     }
     // And the index finds none of them in what is stored.
     const index = new SubjectIndex();
-    for (const subject of subjects) index.add(subject.written, subject.dataClass);
+    for (const subject of subjects) index.add(subject.written, subject.dataClass === "phone8" ? "phone" : subject.dataClass);
     for (const part of masked) expect(index.matches(JSON.stringify(part.value)), part.id).toBe(false);
   });
 
@@ -354,5 +393,44 @@ describe("maskRecording", () => {
     }
     // Other work ran between the chunks.
     expect(immediates).toBeGreaterThan(2);
+  });
+});
+
+describe("SubjectIndex strict (the data-subject lookup never over-matches)", () => {
+  const strict = (value: string, dataClass: string) => {
+    const index = new SubjectIndex({ strict: true });
+    if (dataClass === "raw") index.addLiteral(value, "raw");
+    else index.add(value, dataClass);
+    return (text: string) => index.matches(text);
+  };
+
+  it("re-review N2 probes: another person's data never matches", () => {
+    const usPhone = strict("+1 (207) 946-0958", "phone");
+    expect(usPhone("tel +44 20 7946 0958")).toBe(false);
+    const ssn = strict("123-45-6788", "us_ssn");
+    expect(ssn("call +1 912-345-6788")).toBe(false);
+    expect(ssn("order 99123456788")).toBe(false);
+    const account = strict("123456789012", "raw");
+    expect(account("account 777456789012")).toBe(false);
+    expect(account("ref 1-123456789012")).toBe(false);
+    const phone = strict("+1 415-555-1234", "phone");
+    expect(phone("invoice no. 2024155551234")).toBe(false);
+    expect(phone("card 4000 0041 5555 1234")).toBe(false);
+    expect(phone("x4155551234")).toBe(false);
+  });
+
+  it("true matches: the same number in E.164, national, dashed and digits-only forms", () => {
+    const phone = strict("+1 415-555-1234", "phone");
+    for (const text of ["+14155551234", "(415) 555-1234", "415.555.1234", "4155551234", "14155551234", '{"phone":"+1 415 555 1234"}', "415-555-1234 / 415-555-9999"]) expect(phone(text), text).toBe(true);
+    const ssn = strict("123-45-6788", "us_ssn");
+    for (const text of ["SSN 123-45-6788.", "123456788", '{"ssn":"123 45 6788"}']) expect(ssn(text), text).toBe(true);
+    const card = strict("4111 1111 1111 1111", "card_number");
+    expect(card("4111111111111111")).toBe(true);
+    expect(card("94111 1111 1111 1111")).toBe(false);
+    expect(strict("123456789012", "raw")("account 123456789012.")).toBe(true);
+    const norway = strict("+47 2212 3456", "phone");
+    expect(norway("22123456")).toBe(true);
+    expect(norway("+47 22 12 34 56")).toBe(true);
+    expect(norway("+45 2212 3456")).toBe(false);
   });
 });

@@ -745,7 +745,10 @@ export class ReplayRecordingService {
       truncated: record.truncated,
       ...(record.capabilities.scrubbed ? { scrubbed: record.capabilities.scrubbed } : {}),
       // A captured run keeps its masked flag and classes, so an importer knows the values are surrogates.
-      ...(record.capabilities.capture ? { capture: { masked: record.capabilities.capture.masked, dataClasses: [...record.capabilities.capture.dataClasses] } } : {})
+      // An imported run's masked flag is passed on only as unverified: a file never vouches for masking it did not do here.
+      ...(record.capabilities.capture
+        ? { capture: { masked: record.capabilities.capture.masked && record.capabilities.capture.maskingVerified !== false, dataClasses: [...record.capabilities.capture.dataClasses] } }
+        : {})
     };
   }
 
@@ -811,7 +814,7 @@ export class ReplayRecordingService {
       memorySeed = this.scrubForFile(parsed.data as unknown as ModelMemorySeed, scrubber);
     }
     const nodes = this.scrubForFile(recordedNodes, scrubber);
-    const facts = this.scrubFacts(stripSecretReferences(file.facts as RunFacts), scrubber);
+    const facts = untrustedFileLabels(this.scrubFacts(stripSecretReferences(file.facts as RunFacts), scrubber));
     const scrubbedInput = file.input === undefined || file.input === null ? null : this.scrubForFile(file.input, scrubber);
     const altered = (before: unknown, after: unknown) => canonicalJson(before ?? null) !== canonicalJson(after ?? null);
     const scrubbed: ReplayScrubbedValues = {
@@ -886,7 +889,9 @@ export class ReplayRecordingService {
             ? {
                 capture: {
                   rate: 0,
+                  // The file's word only: this server did not mask the run, so the inbox and golden-run views say "masking not verified".
                   masked: file.capture.masked,
+                  maskingVerified: false,
                   dataClasses: [...new Set(file.capture.dataClasses)].sort(),
                   values: {},
                   notDetectableAfterMasking: [],
@@ -959,4 +964,19 @@ export class ReplayRecordingService {
   static capturedWorkflow(record: ReplayRecordingRecord): Pick<Workflow, "nodes"> {
     return { nodes: (Array.isArray(record.capturedWorkflow.nodes) ? record.capturedWorkflow.nodes : []) as Workflow["nodes"] };
   }
+}
+
+/**
+ * Phase 15.6 — labels read from an imported golden-set file are the file's
+ * claim, not a scan made here: they are marked `source: "file"`, and
+ * `trusted` provenance is dropped (only this server's scheduler earns it).
+ */
+export function untrustedFileLabels(facts: RunFacts): RunFacts {
+  if (!facts.nodes.some((node) => node.labels)) return facts;
+  return {
+    ...facts,
+    nodes: facts.nodes.map((node) =>
+      node.labels ? { ...node, labels: { ...node.labels, provenance: node.labels.provenance.filter((label) => label !== "trusted"), source: "file" as const } } : node
+    )
+  };
 }

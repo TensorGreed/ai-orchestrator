@@ -414,7 +414,8 @@ export function GoldenRunViewer({ recordingId, canReplay, onClose, onChanged }: 
                 <span className="mono-cell">{recording.id.slice(0, 12)}</span>
                 {recording.capabilities.origin === "imported" ? (
                   <span>
-                    <span className="golden-origin-badge">imported</span> from a golden-set file
+                    <span className="golden-origin-badge">imported</span>
+                    {recording.capabilities.capture?.maskingVerified === false ? " (masking not verified)" : null} from a golden-set file
                     {recording.capabilities.sourceWorkflowId ? (
                       <>
                         {" "}

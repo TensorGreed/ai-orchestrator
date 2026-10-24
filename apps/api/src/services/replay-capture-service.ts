@@ -58,6 +58,7 @@ import {
   type ReplayCaptureSettingsUpdate,
   type ReplayCaptureSettingsView,
   type ReplayCaptureView,
+  type ReplayFindSubjectHit,
   type ReplayFindSubjectMatch,
   type ReplayFindSubjectResult,
   type ReplayRecordingSummary,
@@ -65,13 +66,20 @@ import {
 } from "@ai-orchestrator/shared";
 import {
   decodeView,
+  findingText,
   MaskIncompleteError,
   MaskUnscannableError,
+  maskForDataClass,
+  parsePhone,
+  phoneSurrogateDigits,
+  resolveOverlaps,
   scanDlp,
+  scrubEvidenceText,
   SubjectIndex,
   surrogateFor,
   surrogateRedacts,
-  type GuardDictionary
+  type GuardDictionary,
+  type SubjectSpan
 } from "@ai-orchestrator/guard-sdk";
 import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS, type ReplayCaptureSettingsRecord, type SqliteStore, type SubjectTextRow } from "../db/database.js";
 import { inputProvenance, type CaptureInputOrigin } from "./capture-masking.js";
@@ -89,8 +97,10 @@ export function deriveCaptureSurrogateKey(masterKey: Uint8Array): Uint8Array {
 
 /**
  * Triggers that are never captured, whatever channel they report. Editor
- * runs are `manual` / `manual_stream`; the execute API with an API key runs
- * as `api_execute` / `api_execute_stream` and is captured.
+ * runs are `manual` / `manual_stream`. The execute API with an API key runs
+ * under the same triggers (the workflow and the history see `manual`, as
+ * they always have); the server marks those runs `captureSource: "api_key"`
+ * where they start, and only that marker makes them eligible.
  */
 const EXCLUDED_TRIGGERS = new Set([
   "manual",
@@ -104,6 +114,44 @@ const EXCLUDED_TRIGGERS = new Set([
   "approval_resume",
   "error"
 ]);
+
+/** Triggers an API-key run of the execute routes keeps (`manual`, `manual_stream`): eligible only with `captureSource: "api_key"`. */
+const API_KEY_TRIGGERS = new Set(["manual", "manual_stream"]);
+
+/** Server-side marker on a run: an API key started it on the production channel. Never taken from a request body. */
+export type CaptureSource = "api_key";
+
+function eligibleTrigger(triggerType: string | null | undefined, source: CaptureSource | undefined): boolean {
+  if (!triggerType) return false;
+  if (!EXCLUDED_TRIGGERS.has(triggerType)) return true;
+  return source === "api_key" && API_KEY_TRIGGERS.has(triggerType);
+}
+
+/** The metric outcome of a capture that threw. */
+function captureFailureOutcome(error: unknown): string {
+  if (error instanceof MaskUnscannableError) return "dropped_unscannable";
+  if (error instanceof MaskIncompleteError) return "dropped_incomplete_mask";
+  if (error instanceof ReplayCaptureError && error.code === "conflict") return "discarded_disabled";
+  if (error instanceof ReplayCaptureError && error.code === "not_found") return "discarded_source_deleted";
+  if (error instanceof ReplayRecordingError && error.code === "too_large") return "skipped_too_large";
+  return "failed";
+}
+
+/** What a capture failure log carries: the error's class and its message with secrets and personal data scrubbed. */
+export function captureErrorLog(error: unknown, redact: (text: string) => string = (text) => text): { errorClass: string; error: string } {
+  const errorClass = error instanceof Error ? error.name || error.constructor.name || "Error" : typeof error;
+  const message = error instanceof Error ? error.message : String(error);
+  let scrubbed: string;
+  try {
+    scrubbed = scrubEvidenceText(redact(message))
+      .replace(/\d{4,}/g, (digits) => "#".repeat(digits.length))
+      .replace(/\s+/g, " ")
+      .slice(0, 200);
+  } catch {
+    scrubbed = "";
+  }
+  return { errorClass: errorClass.slice(0, 80), error: scrubbed };
+}
 
 export class ReplayCaptureError extends Error {
   constructor(
@@ -152,6 +200,14 @@ export interface ReplayCaptureServiceOptions {
   now?: () => Date;
   log: { warn: (data: Record<string, unknown>, message: string) => void; info: (data: Record<string, unknown>, message: string) => void };
   metric?: (outcome: string) => void;
+  /** Removes secret values from a log message (SecretService.redact). */
+  redact?: (text: string) => string;
+  /**
+   * Gives back the tickets of runs that never reached their final history
+   * write (the caller's stale-ticket sweep). Called on the caller's timer and
+   * here, before a run is refused for the daily limit.
+   */
+  sweepStale?: () => void;
 }
 
 /** A sampled run's capture, from `decide` to `finish`. */
@@ -163,6 +219,8 @@ export interface CaptureTicket {
   triggerType: string;
   /** Who produced the run's input, decided where the run started (labels). */
   inputOrigin: CaptureInputOrigin;
+  /** Set by the server when an API key started the run (execute routes): the only way a `manual` run is captured. */
+  captureSource?: CaptureSource;
   /** When the ticket was given out (ms), for the stale-ticket sweep. */
   issuedAt: number;
   released?: boolean;
@@ -299,11 +357,13 @@ export class ReplayCaptureService {
     excluded: boolean;
     /** Who produced the run's input (server-side): only the scheduler earns `trusted`. Default `external`. */
     inputOrigin?: CaptureInputOrigin;
+    /** Server-side: an API key started the run (never from a request body). */
+    captureSource?: CaptureSource;
   }): CaptureTicket | null {
     try {
       const deployment = this.options.deployment;
       if (!deployment.enabled || input.excluded || input.channel !== "production") return null;
-      if (!input.triggerType || EXCLUDED_TRIGGERS.has(input.triggerType)) return null;
+      if (!input.triggerType || !eligibleTrigger(input.triggerType, input.captureSource)) return null;
       const settings = this.settings(input.workflow.id);
       if (!settings?.enabled) return null;
       const published = this.options.publishedVersion(input.workflow.id);
@@ -317,7 +377,13 @@ export class ReplayCaptureService {
         this.metric("not_sampled");
         return null;
       }
-      const used = this.options.store.countReplayCapturesSince(input.workflow.id, startOfUtcDay(this.now())) + (this.inFlight.get(input.workflow.id) ?? 0);
+      const since = startOfUtcDay(this.now());
+      let used = this.options.store.countReplayCapturesSince(input.workflow.id, since) + (this.inFlight.get(input.workflow.id) ?? 0);
+      if (used >= settings.maxPerDay && this.options.sweepStale) {
+        // Tickets of runs that never finished may hold the day's slots: give them back first.
+        this.options.sweepStale();
+        used = this.options.store.countReplayCapturesSince(input.workflow.id, since) + (this.inFlight.get(input.workflow.id) ?? 0);
+      }
       if (used >= settings.maxPerDay) {
         this.metric("skipped_daily_limit");
         return null;
@@ -330,11 +396,12 @@ export class ReplayCaptureService {
         settings,
         triggerType: input.triggerType,
         inputOrigin: input.inputOrigin ?? "external",
+        ...(input.captureSource ? { captureSource: input.captureSource } : {}),
         issuedAt: this.now().getTime()
       };
     } catch (error) {
       this.metric("failed");
-      this.options.log.warn({ workflowId: input.workflow.id, error: error instanceof Error ? error.message : String(error) }, "Capture sampling failed; the run is not captured");
+      this.options.log.warn({ workflowId: input.workflow.id, ...captureErrorLog(error, this.options.redact) }, "Capture sampling failed; the run is not captured");
       return null;
     }
   }
@@ -408,7 +475,7 @@ export class ReplayCaptureService {
         return;
       }
       // Never a run a production trigger did not start (a resume under the same execution id).
-      if (!history.triggerType || EXCLUDED_TRIGGERS.has(history.triggerType) || history.triggerType !== ticket.triggerType) {
+      if (!history.triggerType || history.triggerType !== ticket.triggerType || !eligibleTrigger(history.triggerType, ticket.captureSource)) {
         this.metric("skipped_excluded_trigger");
         return;
       }
@@ -427,7 +494,7 @@ export class ReplayCaptureService {
             visibleTailClasses: this.options.maskableClassesFor?.(input.workflow) ?? []
           }
         : null;
-      const name = `Captured ${history.triggerType ?? "run"} ${capturedAt.slice(0, 16).replace("T", " ")}`;
+      const name = `Captured ${ticket.captureSource === "api_key" ? "API-key run" : history.triggerType} ${capturedAt.slice(0, 16).replace("T", " ")}`;
       const summary = await this.options.recordings.createCapture(
         { executionId: input.executionId, name },
         {
@@ -441,6 +508,10 @@ export class ReplayCaptureService {
             // Read once more right before saving: masking ran in chunks, and capture may have been turned off meanwhile.
             const latest = this.settings(ticket.workflowId);
             if (!this.options.deployment.enabled || !latest?.enabled) throw new ReplayCaptureError("Capture was turned off while the run was being masked.", "conflict");
+            // The run or its workflow deleted meanwhile (perhaps for privacy): nothing of it is kept.
+            if (!store.getExecutionHistory(input.executionId) || !store.getWorkflow(ticket.workflowId)) {
+              throw new ReplayCaptureError("The run or its workflow was deleted while it was being captured.", "not_found");
+            }
             if (!masked && latest.dlp) throw new ReplayCaptureError("Masking was turned on while the run was being captured.", "conflict");
             this.evictFor(ticket.workflowId, bytes);
           }
@@ -449,19 +520,10 @@ export class ReplayCaptureService {
       this.metric("captured");
       this.options.log.info({ workflowId: ticket.workflowId, recordingId: summary.id, bytes: summary.bytes, masked: Boolean(mask) }, "Captured a production run");
     } catch (error) {
-      const outcome =
-        error instanceof MaskUnscannableError
-          ? "dropped_unscannable"
-          : error instanceof MaskIncompleteError
-            ? "dropped_incomplete_mask"
-            : error instanceof ReplayCaptureError && error.code === "conflict"
-              ? "discarded_disabled"
-              : error instanceof ReplayRecordingError && error.code === "too_large"
-                ? "skipped_too_large"
-                : "failed";
+      const outcome = captureFailureOutcome(error);
       this.metric(outcome);
       this.options.log.warn(
-        { workflowId: ticket.workflowId, executionId: input.executionId, outcome, error: error instanceof Error ? error.message : String(error) },
+        { workflowId: ticket.workflowId, executionId: input.executionId, outcome, ...captureErrorLog(error, this.options.redact) },
         "A production run could not be captured; the run itself is unaffected"
       );
     } finally {
@@ -569,74 +631,82 @@ export class ReplayCaptureService {
   // Data-subject lookup
   // ---------------------------------------------------------------------------
 
-  /** The built-in classes a looked-up value could have been masked as. */
-  private builtInClasses(value: string): string[] {
+  /**
+   * The looked-up value's data class: the DLP scan of the value itself, one
+   * finding covering all of it (an IBAN or NI number is also tried in upper
+   * case). Null when it is not a recognised class, or is a secret (secrets
+   * are removed outright, so there is no surrogate to find).
+   */
+  classify(value: string): string | null {
     const trimmed = value.trim();
-    const classes = new Set<string>(scanDlp(trimmed).map((match) => String(match.dataClass)));
-    const digits = trimmed.replace(/\D/g, "").length;
-    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) classes.add("email");
-    if (digits >= 13 && digits <= 19 && /^[\d\s-]+$/.test(trimmed)) classes.add("card_number");
-    if (digits >= 9 && digits <= 15 && /^[+\d\s().-]+$/.test(trimmed)) classes.add("phone");
-    if (/^\d{3}[- ]?\d{2}[- ]?\d{4}$/.test(trimmed)) classes.add("us_ssn");
-    if (/^[A-Z]{2}\d{2}[A-Z0-9\s-]{8,}$/i.test(trimmed)) classes.add("iban");
-    if (/^[A-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]$/i.test(trimmed)) classes.add("national_id");
-    // Secrets are removed outright, so there is nothing keyed to find.
-    for (const redacted of [...classes]) if (surrogateRedacts(redacted)) classes.delete(redacted);
-    return [...classes].sort();
-  }
-
-  /** The classes a looked-up value could have been masked as: the built-in ones it fits, and every dictionary class. */
-  plausibleClasses(value: string): string[] {
-    const classes = new Set(this.builtInClasses(value));
-    for (const name of this.options.dictionaryClasses()) classes.add(name);
-    return [...classes].sort();
+    const upper = trimmed.toUpperCase();
+    for (const text of upper.length === trimmed.length && upper !== trimmed ? [trimmed, upper] : [trimmed]) {
+      // A phone's `+` is part of the value even when the pattern matched from the digits after it.
+      const whole = resolveOverlaps(scanDlp(text)).find((match) => match.span.end === text.length && findingText(text, match).length === text.length);
+      if (!whole) continue;
+      const dataClass = String(whole.dataClass);
+      return surrogateRedacts(dataClass) ? null : dataClass;
+    }
+    return null;
   }
 
   /**
-   * The finders for one value: raw (boundary-aware, in canonical form per
-   * class: `ann@x.co` never matches `joann@x.com`) and, per plausible class,
-   * its surrogates (with and without the visible tail, since a capture keeps
-   * the tail only when a guard profile could mask the class). A phone is
-   * matched on its last nine digits, so it is found written with or without
-   * its country code.
+   * The finders for one value, all strict (`SubjectIndex` `strict`: whole
+   * values only; a phone equals another only as the same full number or its
+   * exact national form). A value of a recognised class matches only stored
+   * values of that class: raw, and as its surrogates (with and without the
+   * visible tail, since a capture keeps the tail only when a guard profile
+   * could mask the class). Any other value is matched as exact text, and as
+   * the surrogate of each dictionary class.
    */
-  private needlesFor(value: string): { classesTried: string[]; needles: Array<{ label: string; index: SubjectIndex }> } {
+  private needlesFor(value: string): { dataClass: string | null; classesTried: string[]; needles: Array<{ label: string; index: SubjectIndex }> } {
     const trimmed = value.trim();
-    const builtIn = this.builtInClasses(trimmed);
-    if (builtIn.length === 0 && trimmed.length < REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH) {
+    const dataClass = this.classify(trimmed);
+    if (!dataClass && trimmed.length < REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH) {
       throw new ReplayCaptureError(
         `A value that is not an email address, card, IBAN, SSN, phone or NI number needs at least ${REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH} characters.`,
         "invalid"
       );
     }
-    const classes = this.plausibleClasses(trimmed);
-    const raw = new SubjectIndex({ boundedLiterals: true });
-    for (const dataClass of builtIn) raw.add(trimmed, dataClass);
-    if (builtIn.length === 0) raw.addLiteral(trimmed, "raw");
+    const raw = new SubjectIndex({ strict: true });
+    if (dataClass) raw.add(trimmed, dataClass);
+    else raw.addLiteral(trimmed, "raw");
     const needles: Array<{ label: string; index: SubjectIndex }> = [{ label: "raw", index: raw }];
-    for (const dataClass of classes) {
-      const index = new SubjectIndex({ boundedLiterals: true });
+    const classes = dataClass ? [dataClass] : [...new Set(this.options.dictionaryClasses())].sort();
+    const key = this.options.surrogateKey;
+    for (const surrogateClass of classes) {
+      const index = new SubjectIndex({ strict: true });
       for (const visibleTail of [false, true]) {
-        const surrogate = surrogateFor(trimmed, dataClass, this.options.surrogateKey, { visibleTail });
-        if (surrogate.startsWith("[")) index.addLiteral(surrogate, dataClass);
-        else index.add(surrogate, dataClass);
+        const surrogate = surrogateFor(trimmed, surrogateClass, key, { visibleTail });
+        if (surrogate.startsWith("[")) index.addLiteral(surrogate, surrogateClass);
+        else index.add(surrogate, surrogateClass);
+        if (surrogateClass === "phone") {
+          // A capture masks a copy written without its `+` as a whole number (it cannot know the country code): its surrogate, too.
+          const phone = parsePhone(trimmed);
+          if (phone?.cc) for (const full of [phone.cc + phone.national, `${phone.cc}0${phone.national}`]) index.add(phoneSurrogateDigits(full, key, visibleTail), "phone");
+        }
       }
-      needles.push({ label: dataClass, index });
+      needles.push({ label: surrogateClass, index });
     }
-    return { classesTried: classes, needles };
+    return { dataClass, classesTried: classes, needles };
   }
 
   private matchRow(row: SubjectTextRow, needles: Array<{ label: string; index: SubjectIndex }>): ReplayFindSubjectMatch | null {
     const matchedAs = new Set<string>();
     const fields = new Set<string>();
+    const hits: ReplayFindSubjectHit[] = [];
     for (const [field, text] of Object.entries(row.texts)) {
       if (!text) continue;
       // Stored text is JSON: decode its escapes (and URL-encoding) once, then match each finder.
       const view = decodeView(decodeView(text).text).text;
       for (const needle of needles) {
-        if (needle.index.find(view).length > 0) {
-          matchedAs.add(needle.label);
-          fields.add(field);
+        const spans = needle.index.find(view);
+        if (spans.length === 0) continue;
+        matchedAs.add(needle.label);
+        fields.add(field);
+        for (const span of spans) {
+          if (hits.length >= FIND_SUBJECT_HITS_PER_ROW) break;
+          hits.push(subjectHit(view, span, field, needle.label));
         }
       }
     }
@@ -649,7 +719,8 @@ export class ReplayCaptureService {
       name: row.name,
       status: row.status,
       matchedAs: [...matchedAs].sort(),
-      fields: [...fields].sort()
+      fields: [...fields].sort(),
+      hits
     };
   }
 
@@ -660,7 +731,7 @@ export class ReplayCaptureService {
    * the event loop gets a turn between them. Nothing is deleted here.
    */
   async findSubject(value: string): Promise<ReplayFindSubjectResult> {
-    const { classesTried, needles } = this.needlesFor(value);
+    const { dataClass, classesTried, needles } = this.needlesFor(value);
     const store = this.options.store;
     const matches: ReplayFindSubjectMatch[] = [];
     const counts = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
@@ -682,52 +753,89 @@ export class ReplayCaptureService {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
     }
-    return { classesTried, matches, counts, searched, covered: FIND_SUBJECT_COVERED, notCovered: FIND_SUBJECT_NOT_COVERED };
+    return { dataClass, classesTried, matches, counts, searched, covered: FIND_SUBJECT_COVERED, notCovered: FIND_SUBJECT_NOT_COVERED };
   }
 
   /**
    * Delete: the rows a search returned. Each is checked again against the
-   * value first; one that is gone or no longer holds it is skipped, never
-   * deleted. A golden run takes its golden-set cases and their results.
+   * value first, with the same strict matching; one that is gone or no
+   * longer holds it is skipped, never deleted. `beforeDelete` gets every row
+   * about to be deleted before the first one is (the caller writes the
+   * intent audit row; if it throws, nothing is deleted). A golden run takes
+   * its golden-set cases and their results; a run takes its tool-call,
+   * guard-event and usage rows.
    */
-  async deleteSubject(value: string, targets: Array<{ kind: ReplayFindSubjectKind; id: string }>): Promise<ReplayFindSubjectDeleteResult> {
+  async deleteSubject(
+    value: string,
+    targets: Array<{ kind: ReplayFindSubjectKind; id: string }>,
+    hooks: { beforeDelete?: (rows: Array<{ kind: ReplayFindSubjectKind; id: string }>) => void } = {}
+  ): Promise<ReplayFindSubjectDeleteResult> {
     const { needles } = this.needlesFor(value);
     const store = this.options.store;
     const deleted = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
     const skipped: ReplayFindSubjectDeleteResult["skipped"] = [];
     const removed: ReplayFindSubjectDeleteResult["removed"] = [];
     const seen = new Set<string>();
+    const confirmed: Array<{ kind: ReplayFindSubjectKind; id: string }> = [];
     let checked = 0;
     for (const target of targets) {
       const key = `${target.kind}:${target.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
       const row = store.subjectTextRow(target.kind, target.id);
-      if (!row) {
-        skipped.push({ ...target, reason: "not_found" });
-        continue;
-      }
-      if (!this.matchRow(row, needles)) {
-        skipped.push({ ...target, reason: "no_match" });
-        continue;
-      }
-      const outcome = store.transaction(() => store.deleteSubjectRow(target.kind, target.id));
-      if (outcome.deleted) {
-        deleted[target.kind] += 1;
-        removed.push({ kind: target.kind, id: target.id });
-      }
-      for (const cascaded of outcome.cascaded) {
-        const cascadedKey = `${cascaded.kind}:${cascaded.id}`;
-        if (seen.has(cascadedKey)) continue;
-        seen.add(cascadedKey);
-        deleted[cascaded.kind] += 1;
-        removed.push(cascaded);
-      }
+      if (!row) skipped.push({ ...target, reason: "not_found" });
+      else if (!this.matchRow(row, needles)) skipped.push({ ...target, reason: "no_match" });
+      else confirmed.push({ kind: target.kind, id: target.id });
       checked += 1;
       if (checked % FIND_SUBJECT_PAGE === 0) await new Promise<void>((resolve) => setImmediate(resolve));
     }
+    if (confirmed.length === 0) return { deleted, removed, skipped };
+    hooks.beforeDelete?.(confirmed);
+    const gone = new Set<string>();
+    let done = 0;
+    for (const target of confirmed) {
+      // Already removed with a golden run deleted before it (a case or a result named as a target too).
+      if (gone.has(`${target.kind}:${target.id}`)) continue;
+      const outcome = store.transaction(() => store.deleteSubjectRow(target.kind, target.id));
+      if (outcome.deleted) {
+        gone.add(`${target.kind}:${target.id}`);
+        deleted[target.kind] += 1;
+        removed.push({ kind: target.kind, id: target.id });
+      } else {
+        skipped.push({ ...target, reason: "not_found" });
+      }
+      for (const cascaded of outcome.cascaded) {
+        const cascadedKey = `${cascaded.kind}:${cascaded.id}`;
+        if (gone.has(cascadedKey)) continue;
+        gone.add(cascadedKey);
+        deleted[cascaded.kind] += 1;
+        removed.push(cascaded);
+      }
+      done += 1;
+      if (done % FIND_SUBJECT_PAGE === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
     return { deleted, removed, skipped };
   }
+}
+
+/** Most hits listed per matching row in a search. */
+const FIND_SUBJECT_HITS_PER_ROW = 5;
+/** Characters of context on each side of a hit's excerpt. */
+const FIND_SUBJECT_EXCERPT_CONTEXT = 24;
+
+/**
+ * One hit for the search preview: the matched value as the guard mask
+ * action shows it, with a little context around it whose DLP findings are
+ * masked and whose digits are hidden, so the excerpt never shows another
+ * value whole.
+ */
+function subjectHit(view: string, span: SubjectSpan, field: string, matchedAs: string): ReplayFindSubjectHit {
+  const dataClass = span.entry.dataClass === "raw" ? null : span.entry.dataClass;
+  const context = (text: string) => scrubEvidenceText(text).replace(/\d/g, "#").replace(/\s+/g, " ");
+  const from = Math.max(0, span.start - FIND_SUBJECT_EXCERPT_CONTEXT);
+  const to = Math.min(view.length, span.end + FIND_SUBJECT_EXCERPT_CONTEXT);
+  const excerpt = `${from > 0 ? "…" : ""}${context(view.slice(from, span.start))}[${maskForDataClass(view.slice(span.start, span.end), dataClass ?? undefined)}]${context(view.slice(span.end, to))}${to < view.length ? "…" : ""}`;
+  return { field, matchedAs, dataClass, excerpt };
 }
 
 /** Rows read per page by the data-subject lookup (each golden run can be several megabytes). */
@@ -738,7 +846,7 @@ export const FIND_SUBJECT_COVERED = [
   "Golden runs and captured runs (replay_recordings): input, node outputs, run facts, MCP cassette, model tape, memory seed, workflow snapshot, notes",
   "Golden-set cases (eval_fixtures): input and expected output, including hand-written cases and copied inputs",
   "Replay, replay-job, gate and eval results (eval_results): output, error and diff",
-  `Runs made from golden runs and cases (execution_history with trigger ${SUBJECT_EXECUTION_TRIGGERS.join(", ")}): input, output, node results, custom data, error`,
+  `Runs made from golden runs and cases (execution_history with trigger ${SUBJECT_EXECUTION_TRIGGERS.join(", ")}): input, output, node results, custom data, error; deleting one also deletes its tool-call, guard-event and usage rows`,
   `MCP cassettes recorded by those runs (mcp_cassettes with source ${SUBJECT_CASSETTE_SOURCES.join(", ")})`
 ];
 
@@ -749,6 +857,6 @@ export const FIND_SUBJECT_NOT_COVERED = [
   "Session memory, tool data and session artifacts (their own retention)",
   "Logs, metrics and log-streaming destinations (outside the database)",
   "Audit log (AUDIT_LOG_RETENTION_DAYS; it holds ids and counts, not values)",
-  "Guard events (masked evidence only) and the guard token vault",
-  "Usage events and eval run summaries (counts and costs)"
+  "Guard events of production runs (masked evidence only) and the guard token vault",
+  "Usage events of production runs, and eval run summaries (counts and costs)"
 ];

@@ -402,23 +402,37 @@ describe("sampling and limits", () => {
     expect(view.capturedToday).toBe(0);
   });
 
-  it("captures execute-API runs made with an API key, never editor (session) runs", async () => {
+  it("captures execute-API runs made with an API key, never editor (session) runs; the run stays `manual` everywhere else", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
-    save(context, hookWorkflow("wf-api"));
+    // The output echoes the trigger the workflow sees: a template branching on trigger_type == "manual" behaves as before.
+    save(context, hookWorkflow("wf-api", "trigger={{trigger_type}}"));
     await enableCapture(context, builder.cookie, "wf-api", { maxPerDay: 10 });
     const key = (await call(context, "POST", "/api/auth/api-keys", builder.cookie, { name: "CI" })).json<{ key: string }>().key;
     const viaKey = await context.app.inject({ method: "POST", url: "/api/workflows/wf-api/execute", headers: { authorization: `Bearer ${key}` }, payload: { input: { user_prompt: `hi ${EMAIL}` } } });
     expect(viaKey.statusCode, viaKey.body).toBe(200);
+    expect(viaKey.body).toContain("trigger=manual");
     const streamed = await context.app.inject({ method: "POST", url: "/api/workflows/wf-api/execute/stream", headers: { authorization: `Bearer ${key}` }, payload: {} });
     expect(streamed.statusCode).toBe(200);
+    expect(streamed.body).toContain('"triggerType":"manual_stream"');
     expect((await call(context, "POST", "/api/workflows/wf-api/execute", builder.cookie, {})).statusCode).toBe(200);
+    // A body cannot claim the API-key marker: a session run that names it is still not captured.
+    expect((await call(context, "POST", "/api/workflows/wf-api/execute", builder.cookie, { captureSource: "api_key", input: {} })).statusCode).toBeLessThan(500);
     const items = await waitForCaptures(context, builder.cookie, "wf-api", 2);
     await settle();
     expect((await inbox(context, builder.cookie, "wf-api")).total).toBe(2);
-    expect(items.map((item) => item.sourceTriggerType).sort()).toEqual(["api_execute", "api_execute_stream"]);
-    // The editor run is still a manual run, as before.
-    expect(context.store.listExecutionHistory({ workflowId: "wf-api", page: 1, pageSize: 10 }).items.map((run) => run.triggerType)).toContain("manual");
+    expect(items.map((item) => item.sourceTriggerType).sort()).toEqual(["manual", "manual_stream"]);
+    expect(items.every((item) => item.name.startsWith("Captured API-key run"))).toBe(true);
+    // Run history and its filter are unchanged: every run of the execute routes is a manual run, API-key runs included.
+    const manual = (await call(context, "GET", "/api/executions?workflowId=wf-api&triggerType=manual&pageSize=50", builder.cookie)).json<{ items: Array<{ id: string }> }>();
+    expect(manual.items.length).toBeGreaterThanOrEqual(3);
+    const captured = items.map((item) => context.store.getReplayRecording(item.id)!.sourceExecutionId);
+    for (const executionId of captured) {
+      const history = context.store.getExecutionHistory(executionId!)!;
+      expect(["manual", "manual_stream"]).toContain(history.triggerType);
+    }
+    expect(manual.items.map((item) => item.id)).toEqual(expect.arrayContaining(captured.filter((id) => context.store.getExecutionHistory(id!)!.triggerType === "manual")));
+    expect((await call(context, "GET", "/api/executions?triggerType=api_execute", builder.cookie)).json<{ items: unknown[] }>().items).toEqual([]);
   });
 
   it("a run that pauses for approval keeps nothing and frees its slot; its resume is never captured", async () => {
@@ -885,9 +899,23 @@ describe("data-subject lookup", () => {
     // The other capture is untouched; the audit names every deleted id, never the value.
     expect((await inbox(context, builder.cookie, "wf-subject")).total).toBe(1);
     const audit = context.store.listAuditLogs({ pageSize: 200 }).items.filter((entry) => entry.eventType.startsWith("replay.find_subject"));
-    expect(audit).toHaveLength(3);
+    expect(audit.map((entry) => entry.eventType).sort()).toEqual([
+      "replay.find_subject.delete_started",
+      "replay.find_subject.deleted",
+      "replay.find_subject.searched",
+      "replay.find_subject.searched"
+    ]);
     const trail = JSON.stringify(audit.filter((entry) => entry.eventType === "replay.find_subject.deleted"));
     for (const removedRow of outcome.removed) expect(trail).toContain(`${removedRow.kind}:${removedRow.id}`);
+    // The intent row names the rows about to be deleted (the matching targets), never the skipped one.
+    const intent = JSON.stringify(audit.find((entry) => entry.eventType === "replay.find_subject.delete_started"));
+    for (const match of result.matches) expect(intent).toContain(`${match.kind}:${match.id}`);
+    expect(intent).not.toContain(other.id);
+    // Every match says why it matched, masked.
+    for (const match of result.matches) {
+      expect(match.hits.length).toBeGreaterThan(0);
+      for (const hit of match.hits) expect(hit.excerpt).not.toContain(EMAIL);
+    }
     expect(JSON.stringify(audit)).not.toContain(EMAIL);
   });
 });
@@ -907,7 +935,11 @@ describe("data-subject lookup: matching and reach", () => {
     expect((await search("ann@x.co")).json<ReplayFindSubjectResult>().matches).toEqual([]);
     expect((await search("joann@x.com")).json<ReplayFindSubjectResult>().counts.recording).toBe(1);
     expect((await search("415-555-0123")).json<ReplayFindSubjectResult>().counts.recording).toBe(1);
-    expect((await search("4155550123")).json<ReplayFindSubjectResult>().counts.recording).toBe(1);
+    expect((await search("+1 (415) 555-0123")).json<ReplayFindSubjectResult>().counts.recording).toBe(1);
+    // Digits typed without separators are not classified as a phone: they are searched as exact text only.
+    const bare = (await search("4155550123")).json<ReplayFindSubjectResult>();
+    expect(bare.dataClass).toBeNull();
+    expect(bare.counts.recording).toBe(0);
     const short = await search("inc");
     expect(short.statusCode).toBe(400);
     expect(short.body).not.toContain('"inc"');
@@ -939,4 +971,307 @@ describe("data-subject lookup: matching and reach", () => {
     const after = (await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value: EMAIL })).json<ReplayFindSubjectResult>();
     expect(after.counts).toMatchObject({ recording: 0, fixture: 0, eval_result: 0, execution: 0, cassette: 0 });
   }, 60_000);
+});
+
+describe("re-review round 2: lookup precision, lifecycle, audit and import trust", () => {
+  /** A hand-saved (unmasked) golden run holding `prompt` in its input. */
+  async function handSaved(context: TestContext, cookie: string, workflowId: string, prompt: string): Promise<string> {
+    const run = await call(context, "POST", `/api/workflows/${workflowId}/execute`, cookie, { input: { user_prompt: prompt } });
+    const saved = await call(context, "POST", "/api/replay/recordings", cookie, { executionId: run.json<{ executionId: string }>().executionId, name: prompt.slice(0, 40) });
+    expect(saved.statusCode, saved.body).toBe(201);
+    return saved.json<{ recording: ReplayRecordingSummary }>().recording.id;
+  }
+
+  it("N2: never matches another person's phone or number, still matches the same number in every form, and delete re-checks strictly", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-probe"));
+    // Other people's data (the reviewer's probes).
+    const bystanders: string[] = [];
+    for (const prompt of ["uk office +44 20 7946 0958", "call +1 912-345-6788", "order 99123456788", "account 777456789012", "invoice no. 2024155551234", "card 4000 0041 5555 1234"]) {
+      bystanders.push(await handSaved(context, builder.cookie, "wf-probe", prompt));
+    }
+    const search = async (value: string) => {
+      const response = await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value });
+      expect(response.statusCode, response.body).toBe(200);
+      return response.json<ReplayFindSubjectResult>();
+    };
+    for (const value of ["+1 (207) 946-0958", "123-45-6788", "123456789012", "+1 415-555-1234"]) {
+      expect((await search(value)).matches, value).toEqual([]);
+    }
+    expect((await search("+1 415-555-1234")).dataClass).toBe("phone");
+    expect((await search("123-45-6788")).dataClass).toBe("us_ssn");
+
+    // The same number written three ways matches; the bystanders still do not.
+    const own: string[] = [];
+    for (const prompt of ["e164 +14155551234", "national (415) 555-1234", "dashed 415-555-1234"]) own.push(await handSaved(context, builder.cookie, "wf-probe", prompt));
+    const found = await search("+1 415-555-1234");
+    expect(found.matches.map((match) => match.id).sort()).toEqual([...own].sort());
+    for (const match of found.matches) {
+      expect(match.hits[0]).toMatchObject({ matchedAs: "raw", dataClass: "phone" });
+      // A masked excerpt: the last two digits and the shape, never the number.
+      expect(match.hits[0]!.excerpt).not.toMatch(/555/);
+      expect(match.hits[0]!.excerpt).toMatch(/34\]/);
+    }
+
+    // Delete: bystanders named as targets are re-checked with the same strict test and skipped.
+    const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
+      value: "+1 415-555-1234",
+      targets: [...own, ...bystanders].map((id) => ({ kind: "recording", id }))
+    });
+    expect(removed.statusCode, removed.body).toBe(200);
+    const outcome = removed.json<ReplayFindSubjectDeleteResult>();
+    expect(outcome.deleted.recording).toBe(3);
+    expect(outcome.skipped.map((entry) => entry.id).sort()).toEqual([...bystanders].sort());
+    expect(outcome.skipped.every((entry) => entry.reason === "no_match")).toBe(true);
+    for (const id of bystanders) expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
+  });
+
+  it("N2/N3: masked captures of two people sharing nine digits are found apart, and a capture is found by its national form", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-twins"));
+    await enableCapture(context, builder.cookie, "wf-twins", { maxPerDay: 10 });
+    await hook(context, "wf-twins", { user_prompt: "call +1 312 345 6788" });
+    await hook(context, "wf-twins", { user_prompt: "call +1 412 345 6788" });
+    await hook(context, "wf-twins", { user_prompt: "ring +47 2212 3456", note: "22123456" });
+    const items = await waitForCaptures(context, builder.cookie, "wf-twins", 3);
+    for (const item of items) {
+      const text = rawRecordingText(context, item.id);
+      expect(text).not.toMatch(/345\D?6788/);
+      expect(text).not.toContain("22123456");
+      expect(text).not.toMatch(/2212 3456/);
+    }
+    const search = async (value: string) => (await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value })).json<ReplayFindSubjectResult>();
+    const first = await search("+1 312 345 6788");
+    expect(first.matches).toHaveLength(1);
+    expect(first.matches[0]!.matchedAs).toEqual(["phone"]);
+    expect((await search("+1 412 345 6788")).matches).toHaveLength(1);
+    expect(first.matches[0]!.id).not.toBe((await search("+1 412 345 6788")).matches[0]!.id);
+    const norway = await search("+47 2212 3456");
+    expect(norway.matches).toHaveLength(1);
+    expect(norway.matches[0]!.hits.length).toBeGreaterThan(0);
+  });
+
+  function lifecycleService(context: TestContext, overrides: Partial<ConstructorParameters<typeof ReplayCaptureService>[0]> = {}) {
+    const outcomes: string[] = [];
+    const warnings: Array<Record<string, unknown>> = [];
+    const service = new ReplayCaptureService({
+      store: context.store,
+      recordings: { createCapture: async () => ({ id: "x", bytes: 1 }) } as never,
+      datasets: {} as never,
+      surrogateKey: SURROGATE_KEY,
+      dictionariesFor: () => [],
+      dictionaryClasses: () => [],
+      publishedVersion: () => null,
+      deployment: { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
+      log: { warn: (data) => warnings.push(data), info: () => undefined },
+      metric: (outcome) => outcomes.push(outcome),
+      ...overrides
+    });
+    return { service, outcomes, warnings };
+  }
+
+  const settings = (workflowId: string, maxPerDay = 10) => ({
+    workflowId,
+    enabled: true,
+    rate: 1,
+    maxPerDay,
+    onlyStatuses: ["success" as const],
+    dlp: true,
+    dlpOffReason: null,
+    targetDatasetId: null,
+    updatedBy: null
+  });
+
+  it("N5: leaked tickets are swept before a run is refused for the daily limit", async () => {
+    const context = await createTestContext();
+    save(context, hookWorkflow("wf-leak"));
+    context.store.saveReplayCaptureSettings(settings("wf-leak", 1));
+    const leaked: Array<ReturnType<ReplayCaptureService["decide"]>> = [];
+    let sweeps = 0;
+    const { service, outcomes } = lifecycleService(context, {
+      sweepStale: () => {
+        sweeps += 1;
+        // The caller's sweep gives back tickets whose run never wrote its final history.
+        for (const ticket of leaked.splice(0)) if (ticket) service.abandon(ticket, "skipped_stale");
+      }
+    });
+    const decide = () => service.decide({ workflow: { id: "wf-leak" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false });
+    leaked.push(decide());
+    expect(service.inFlightFor("wf-leak")).toBe(1);
+    // The day's only slot is held by a leaked ticket: the sweep frees it and this run is sampled.
+    expect(decide()).not.toBeNull();
+    expect(sweeps).toBe(1);
+    expect(outcomes).toContain("skipped_stale");
+    // Still over the limit after a sweep: refused.
+    expect(decide()).toBeNull();
+    expect(outcomes).toContain("skipped_daily_limit");
+  });
+
+  it("N4: a manual run is eligible only with the server's API-key marker", async () => {
+    const context = await createTestContext();
+    save(context, hookWorkflow("wf-marker"));
+    context.store.saveReplayCaptureSettings(settings("wf-marker"));
+    const { service } = lifecycleService(context);
+    const base = { workflow: { id: "wf-marker" }, channel: "production", releaseVersion: null, excluded: false };
+    expect(service.decide({ ...base, triggerType: "manual" })).toBeNull();
+    expect(service.decide({ ...base, triggerType: "manual_retry", captureSource: "api_key" })).toBeNull();
+    expect(service.decide({ ...base, triggerType: "manual", captureSource: "api_key" })).toMatchObject({ triggerType: "manual", captureSource: "api_key" });
+  });
+
+  it("N6: a capture whose run or workflow was deleted while it was being masked is discarded", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-gone"));
+    expect((await hook(context, "wf-gone", { user_prompt: `hi ${EMAIL}` })).statusCode).toBe(200);
+    const executionId = context.store.listExecutionHistory({ workflowId: "wf-gone", page: 1, pageSize: 5 }).items[0]!.id;
+    context.store.saveReplayCaptureSettings(settings("wf-gone"));
+    const saved: string[] = [];
+    const { service, outcomes } = lifecycleService(context, {
+      recordings: {
+        createCapture: async (_input: unknown, capture: { beforeSave: (bytes: number) => void }) => {
+          // Masking yields; meanwhile someone deletes the run (for privacy, say).
+          (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec("DELETE FROM execution_history WHERE id = ?", [executionId]);
+          capture.beforeSave(10);
+          saved.push("saved");
+          return { id: "x", bytes: 10 };
+        }
+      } as never
+    });
+    const ticket = service.decide({ workflow: { id: "wf-gone" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })!;
+    service.finish(ticket, { executionId, workflow: { id: "wf-gone", name: "x", projectId: "default" }, plan: {} as never });
+    await service.idle();
+    expect(saved).toEqual([]);
+    expect(outcomes).toEqual(["discarded_source_deleted"]);
+    expect(service.inFlightFor("wf-gone")).toBe(0);
+    expect((await inbox(context, builder.cookie, "wf-gone")).total).toBe(0);
+  });
+
+  it("N9: a capture failure logs the error class and a scrubbed message only", async () => {
+    const context = await createTestContext();
+    save(context, hookWorkflow("wf-log"));
+    expect((await hook(context, "wf-log", {})).statusCode).toBe(200);
+    const executionId = context.store.listExecutionHistory({ workflowId: "wf-log", page: 1, pageSize: 5 }).items[0]!.id;
+    context.store.saveReplayCaptureSettings(settings("wf-log"));
+    class ParserBlewUp extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = "ParserBlewUp";
+      }
+    }
+    const { service, outcomes, warnings } = lifecycleService(context, {
+      recordings: {
+        createCapture: async () => {
+          throw new ParserBlewUp(`Unexpected token near ${EMAIL} card ${CARD} key ${MODEL_KEY} account 123456789012`);
+        }
+      } as never,
+      redact: (text) => text.replaceAll(MODEL_KEY, "[REDACTED]")
+    });
+    const ticket = service.decide({ workflow: { id: "wf-log" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })!;
+    service.finish(ticket, { executionId, workflow: { id: "wf-log", name: "x", projectId: "default" }, plan: {} as never });
+    await service.idle();
+    expect(outcomes).toEqual(["failed"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ outcome: "failed", errorClass: "ParserBlewUp" });
+    const logged = JSON.stringify(warnings[0]);
+    for (const raw of [EMAIL, CARD, CARD.replace(/ /g, ""), MODEL_KEY, "123456789012"]) expect(logged).not.toContain(raw);
+    expect(logged).toContain("Unexpected token");
+  });
+
+  it("N10/N11: the delete intent row is written before anything is deleted (and stays after a crash); a run takes its side rows", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-crash", "{{user_prompt}}"));
+    const ids = [await handSaved(context, builder.cookie, "wf-crash", `one ${EMAIL}`), await handSaved(context, builder.cookie, "wf-crash", `two ${EMAIL}`)];
+    // The server stops in the middle of the delete: the first row goes, the second throws.
+    const store = context.store as unknown as { deleteSubjectRow: (kind: string, id: string) => unknown };
+    const original = store.deleteSubjectRow.bind(context.store);
+    let calls = 0;
+    store.deleteSubjectRow = (kind, id) => {
+      calls += 1;
+      if (calls === 2) throw new Error("disk gone");
+      return original(kind, id);
+    };
+    const crashed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, { value: EMAIL, targets: ids.map((id) => ({ kind: "recording", id })) });
+    expect(crashed.statusCode).toBe(500);
+    store.deleteSubjectRow = original;
+    const audit = context.store.listAuditLogs({ pageSize: 200 }).items.filter((entry) => entry.eventType.startsWith("replay.find_subject.delete"));
+    expect(audit.map((entry) => entry.eventType)).toEqual(["replay.find_subject.delete_started"]);
+    for (const id of ids) expect(JSON.stringify(audit[0])).toContain(`recording:${id}`);
+    expect(JSON.stringify(audit)).not.toContain(EMAIL);
+
+    // N11: a replay execution's tool-call, guard-event and usage rows go with it.
+    const recordingId = ids[1]!;
+    const replayed = await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, builder.cookie, {});
+    expect(replayed.statusCode, replayed.body).toBe(200);
+    const found = (await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value: EMAIL })).json<ReplayFindSubjectResult>();
+    const executions = found.matches.filter((match) => match.kind === "execution").map((match) => match.id);
+    expect(executions.length).toBeGreaterThan(0);
+    const exec = (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec.bind(context.store);
+    const now = new Date().toISOString();
+    for (const executionId of executions) {
+      exec("INSERT INTO mcp_tool_calls (id, execution_id, workflow_id, node_id, adapter_id, tool_name, started_at, ok, error) VALUES (?, ?, 'wf-crash', 'n', 'mock-mcp', 'find', ?, 0, ?)", [`tc-${executionId}`, executionId, now, `failed for ${EMAIL}`]);
+      exec(
+        "INSERT INTO guard_events (id, verdict_id, execution_id, node_id, placement, channel, requested_action, effective_action, verdict_action, profile_id, profile_version, profile_hash, created_at) VALUES (?, 'v', ?, 'n', 'input', 'input', 'mask', 'mask', 'mask', 'p', 1, 'h', ?)",
+        [`ge-${executionId}`, executionId, now]
+      );
+      exec("INSERT INTO usage_events (id, execution_id, workflow_id, status) VALUES (?, ?, 'wf-crash', 'success')", [`ue-${executionId}`, executionId]);
+    }
+    const sideRows = () =>
+      ["mcp_tool_calls", "guard_events", "usage_events"].map((table) => {
+        const row = (context.store as unknown as { queryOne(sql: string, params: unknown[]): { n: number } | null }).queryOne(
+          `SELECT COUNT(*) AS n FROM ${table} WHERE execution_id IN (${executions.map(() => "?").join(", ")})`,
+          executions
+        );
+        return Number(row?.n ?? 0);
+      });
+    expect(sideRows().every((count) => count >= 1)).toBe(true);
+    const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
+      value: EMAIL,
+      targets: found.matches.map((match) => ({ kind: match.kind, id: match.id }))
+    });
+    expect(removed.statusCode, removed.body).toBe(200);
+    expect(sideRows()).toEqual([0, 0, 0]);
+    const trail = context.store.listAuditLogs({ pageSize: 200 }).items.filter((entry) => entry.eventType.startsWith("replay.find_subject.delete"));
+    expect(trail.filter((entry) => entry.eventType === "replay.find_subject.delete_started")).toHaveLength(2);
+    expect(trail.filter((entry) => entry.eventType === "replay.find_subject.deleted")).toHaveLength(1);
+  });
+
+  it("N8: an imported golden-set file's masked flag and provenance labels are never trusted", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-trust"));
+    await enableCapture(context, builder.cookie, "wf-trust", { maxPerDay: 10 });
+    await hook(context, "wf-trust", { user_prompt: `I am ${EMAIL}` });
+    const [capture] = await waitForCaptures(context, builder.cookie, "wf-trust", 1);
+    const promoted = await call(context, "POST", `/api/replay/captures/${capture!.id}/promote`, builder.cookie, {});
+    expect(promoted.statusCode, promoted.body).toBe(200);
+    const datasetId = promoted.json<{ result: { datasetId: string } }>().result.datasetId;
+    const exported = await call(context, "GET", `/api/eval/datasets/${datasetId}/export`, builder.cookie);
+    expect(exported.statusCode, exported.body).toBe(200);
+    const file = exported.json<{ cases: Array<{ recording: { facts: RunFacts; capture?: { masked: boolean; dataClasses: string[] }; input?: unknown } }> }>();
+    // A forged file: raw content, claimed masked, claimed trusted.
+    const forged = file.cases[0]!.recording;
+    forged.input = { user_prompt: `I am ${EMAIL}` };
+    forged.capture = { masked: true, dataClasses: ["email"] };
+    forged.facts.nodes = forged.facts.nodes.map((entry) => ({ ...entry, labels: { provenance: ["trusted"], dataClasses: ["email"], source: "scan" } }));
+    const imported = await call(context, "POST", "/api/eval/datasets/import", builder.cookie, { file, workflowId: "wf-trust", name: "Forged" });
+    expect(imported.statusCode, imported.body).toBe(201);
+    const listed = (await call(context, "GET", "/api/replay/recordings?workflowId=wf-trust", builder.cookie)).json<{ items: ReplayRecordingSummary[] }>().items;
+    const importedRun = listed.find((entry) => entry.capabilities.origin === "imported")!;
+    expect(importedRun.capabilities.capture).toMatchObject({ masked: true, maskingVerified: false });
+    const stored = context.store.getReplayRecording(importedRun.id)!;
+    for (const entry of stored.facts.nodes) {
+      expect(entry.labels?.source).toBe("file");
+      expect(entry.labels?.provenance).not.toContain("trusted");
+    }
+    // Exported again, it no longer claims to be masked.
+    const importedSet = imported.json<{ dataset: { id: string } }>().dataset.id;
+    const again = (await call(context, "GET", `/api/eval/datasets/${importedSet}/export`, builder.cookie)).json<typeof file>();
+    expect(again.cases[0]!.recording.capture).toMatchObject({ masked: false });
+  });
 });

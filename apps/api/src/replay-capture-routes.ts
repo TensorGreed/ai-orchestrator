@@ -300,27 +300,26 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
       return { error: quietIssue(parsed.error) };
     }
     try {
-      const result = await captures.deleteSubject(parsed.data.value, parsed.data.targets);
-      // The erasure trail names every row deleted, cases and results removed with a golden run included
-      // (in chunks of 200 ids per audit row), never the value.
-      const removed = result.removed;
-      const chunks = Math.max(1, Math.ceil(removed.length / AUDIT_IDS_PER_ROW));
-      for (let chunk = 0; chunk < chunks; chunk += 1) {
-        const ids = removed.slice(chunk * AUDIT_IDS_PER_ROW, (chunk + 1) * AUDIT_IDS_PER_ROW);
-        deps.audit(request, user, {
-          eventType: "replay.find_subject.deleted",
-          category: "system",
-          action: "delete",
-          resourceType: "replay_recording",
-          metadata: {
-            chunk: chunk + 1,
-            chunks,
-            deleted: result.deleted,
-            skipped: result.skipped.length,
-            targets: ids.map((target) => `${target.kind}:${target.id}`)
-          }
-        });
-      }
+      // The erasure trail, never the value: an intent row naming every row about to be deleted is written before the
+      // first delete (a crash midway leaves it), then completion rows naming every row deleted, cases and results
+      // removed with a golden run included. Ids go in chunks of 200 per audit row.
+      const writeRows = (eventType: string, rows: Array<{ kind: string; id: string }>, metadata: Record<string, unknown>) => {
+        const chunks = Math.max(1, Math.ceil(rows.length / AUDIT_IDS_PER_ROW));
+        for (let chunk = 0; chunk < chunks; chunk += 1) {
+          const ids = rows.slice(chunk * AUDIT_IDS_PER_ROW, (chunk + 1) * AUDIT_IDS_PER_ROW);
+          deps.audit(request, user, {
+            eventType,
+            category: "system",
+            action: "delete",
+            resourceType: "replay_recording",
+            metadata: { ...metadata, chunk: chunk + 1, chunks, targets: ids.map((target) => `${target.kind}:${target.id}`) }
+          });
+        }
+      };
+      const result = await captures.deleteSubject(parsed.data.value, parsed.data.targets, {
+        beforeDelete: (rows) => writeRows("replay.find_subject.delete_started", rows, { rows: rows.length })
+      });
+      writeRows("replay.find_subject.deleted", result.removed, { deleted: result.deleted, skipped: result.skipped.length });
       return result;
     } catch (error) {
       return lookupError(reply, error);

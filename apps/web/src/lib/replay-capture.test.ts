@@ -65,7 +65,6 @@ describe("capture labels", () => {
     expect(dataClassLabel("customer_id")).toBe("customer id");
     expect(captureTriggerLabel("webhook_api")).toBe("API");
     expect(captureTriggerLabel(null)).toBe("Production");
-    expect(captureTriggerLabel("api_execute")).toBe("Execute API");
     const now = new Date("2026-10-24T12:00:00.000Z");
     expect(capturePeriodFrom("", now)).toBeUndefined();
     expect(capturePeriodFrom("24h", now)).toBe("2026-10-23T12:00:00.000Z");

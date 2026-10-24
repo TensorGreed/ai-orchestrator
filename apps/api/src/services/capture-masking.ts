@@ -3,15 +3,18 @@
  *
  * The recording is split into content parts (trigger input, every node's
  * recorded output and error, the run's output and error, every tool call's
- * arguments, every MCP cassette entry's arguments, result and error, every
- * model-tape entry's request, answer and error, and the memory seed's
+ * arguments, every string of every MCP cassette entry (its server key, its
+ * name, which is the resource URI or prompt name, arguments, result, error,
+ * exchanges and any other field) and the cassette's server keys and labels,
+ * every model-tape entry's request, answer and error, and the memory seed's
  * sessions) and masked at once with `maskRecording` from guard-sdk: a value
- * found anywhere is replaced everywhere by its keyed surrogate. Identifiers
- * and match keys (node ids and types, servers, tools, providers, models,
- * sequence numbers) are not content and stay as they are; the match keys
- * (`argsHash`, `requestHash`) are taken again over the masked content, so a
- * replay of the masked input meets the masked tape and cassette and still
- * finds its answers.
+ * found anywhere is replaced everywhere by its keyed surrogate. Only fields
+ * that cannot hold personal data stay out (node ids and types, providers,
+ * models, a cassette entry's method, sequence numbers and timings); the match
+ * keys (`argsHash`, `requestHash`) are taken again over the masked content,
+ * and a cassette entry's server and name are masked with the same
+ * surrogates as the input, so a replay of the masked input asks for the
+ * masked resource and still finds its answers.
  *
  * Values the workflow definition itself holds as whole literals are kept
  * (see `MaskRecordingOptions.keepLiteralsFrom`).
@@ -45,6 +48,17 @@ import {
 import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orchestrator/mcp-sdk";
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
 import { sha256Hex } from "./audit-bundle-service.js";
+
+/** Cassette entry fields that are not content: a method name, the order, timings, and the match key taken again after masking. */
+const CASSETTE_ENTRY_KEPT = new Set(["seq", "method", "argsHash", "at", "durationMs"]);
+/** Cassette server fields masked like content (the entries' `server` holds the same key). */
+const CASSETTE_SERVER_MASKED = ["key", "label", "registryServerId"] as const;
+
+function cassetteEntryContent(entry: McpCassette["entries"][number]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(entry)) if (!CASSETTE_ENTRY_KEPT.has(field) && value !== undefined) out[field] = value;
+  return out;
+}
 
 export interface CaptureMaskOptions {
   key: Uint8Array;
@@ -92,7 +106,13 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
   }
   add("facts", { output: run.facts.output, error: run.facts.error });
   run.facts.toolCalls.forEach((call, index) => add(`facts.tool:${index}`, call.args, call.nodeId));
-  run.cassette?.entries.forEach((entry, index) => add(`cassette:${index}`, { args: entry.args, result: entry.result, error: entry.error, exchanges: entry.exchanges }));
+  run.cassette?.entries.forEach((entry, index) => add(`cassette:${index}`, cassetteEntryContent(entry)));
+  if (run.cassette) {
+    add(
+      "cassette.servers",
+      run.cassette.servers.map((server) => Object.fromEntries(CASSETTE_SERVER_MASKED.filter((field) => typeof server[field] === "string").map((field) => [field, server[field]])))
+    );
+  }
   run.modelTape?.entries.forEach((entry, index) => add(`tape:${index}`, { request: entry.request, response: entry.response, error: entry.error }, entry.nodeId));
   run.memorySeed?.sessions.forEach((session, index) => add(`memory:${index}`, session));
 
@@ -126,19 +146,20 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
     ? {
         ...run.cassette,
         entries: run.cassette.entries.map((entry) => {
-          const content = next<{ args?: unknown; result?: unknown; error?: string; exchanges?: typeof entry.exchanges }>();
-          const out = { ...entry };
+          const content = next<Record<string, unknown>>();
+          const out = { ...entry, ...content } as McpCassette["entries"][number];
           if (entry.args !== undefined) {
             out.args = cassetteCanonical(content.args);
             out.argsHash = hashCassetteArgs(out.args);
           }
-          if (entry.result !== undefined) out.result = content.result;
-          if (entry.error !== undefined) out.error = content.error;
-          if (entry.exchanges !== undefined) out.exchanges = content.exchanges;
           return out;
         })
       }
     : null;
+  if (cassette && run.cassette) {
+    const servers = next<Array<Record<string, string>>>();
+    cassette.servers = run.cassette.servers.map((server, index) => ({ ...server, ...servers[index] }));
+  }
 
   const modelTape: ModelTape | null = run.modelTape
     ? {
@@ -170,7 +191,7 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
 export type CaptureInputOrigin = "scheduler" | "user" | "external";
 
 /** Production triggers whose input a person typed (chat, forms, app messages) or an authenticated caller sent. */
-const USER_TRIGGERS = new Set(["chat", "form", "webhook_api", "webhook_api_stream", "mcp_server", "slack_webhook", "telegram_webhook", "discord_webhook", "api_execute", "api_execute_stream"]);
+const USER_TRIGGERS = new Set(["chat", "form", "webhook_api", "webhook_api_stream", "mcp_server", "slack_webhook", "telegram_webhook", "discord_webhook"]);
 /** Node categories that bring in content from outside the workflow. */
 const EXTERNAL_CATEGORIES = new Set(["Connector", "RAG", "MCP"]);
 const EXTERNAL_TYPES = new Set(["http_request", "web_browse", "mcp_tool"]);

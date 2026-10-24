@@ -378,6 +378,12 @@ export interface ReplayCaptureInfo {
   rate: number;
   /** Whether the masking pass ran (DLP on capture). */
   masked: boolean;
+  /**
+   * False on a run imported from a golden-set file: the file says it was
+   * masked, but this server did not mask it, so nothing vouches for it
+   * ("imported (masking not verified)"). Absent on runs captured here.
+   */
+  maskingVerified?: boolean;
   /** Data classes masked anywhere in the run, sorted. */
   dataClasses: string[];
   /** Distinct values masked, per class. */

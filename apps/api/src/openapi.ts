@@ -1817,10 +1817,10 @@ export const openApiSpec = {
       post: {
         tags: ["Evals"],
         summary:
-          "Data-subject lookup, preview: every golden run, captured run, golden-set case, replay result, replay execution and replay cassette holding a value, raw or as its surrogate. Whole-value matching; a value not recognised as a data class needs 6 characters. Deletes nothing (admins; the value is never logged or returned)",
+          "Data-subject lookup, preview: every golden run, captured run, golden-set case, replay result, replay execution and replay cassette holding a value, raw or as its surrogate. The value's class comes from the DLP scan of the value; only stored values of that class match, whole values only (a phone only as the same full number or its exact national form, never a shared suffix). A value not recognised as a data class is matched as exact text and needs 6 characters. Deletes nothing (admins; the value is never logged or returned)",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["value"], properties: { value: { type: "string", minLength: 3, maxLength: 1000 } } } } } },
         responses: {
-          "200": { description: "{ classesTried, matches: [{ kind, id, workflowId, projectId, name, status, matchedAs, fields }], counts, searched, covered, notCovered }" },
+          "200": { description: "{ dataClass, classesTried, matches: [{ kind, id, workflowId, projectId, name, status, matchedAs, fields, hits: [{ field, matchedAs, dataClass, excerpt }] }], counts, searched, covered, notCovered }" },
           "400": { description: "Invalid value (too short for a raw search)" },
           "403": { description: "Not an admin" },
           "501": { description: "Postgres store" }
@@ -1831,7 +1831,7 @@ export const openApiSpec = {
       post: {
         tags: ["Evals"],
         summary:
-          "Data-subject lookup, delete: removes the rows named in `targets` (from a preview) after checking each still holds the value; a golden run takes its golden-set cases and their results with it. The audit records every deleted id, never the value (admins)",
+          "Data-subject lookup, delete: removes the rows named in `targets` (from a preview) after checking each still holds the value with the same strict matching; a golden run takes its golden-set cases and their results with it, a run its tool-call, guard-event and usage rows. An intent audit row names every row before the first is deleted, then completion rows name every deleted id; never the value (admins)",
         requestBody: {
           required: true,
           content: {

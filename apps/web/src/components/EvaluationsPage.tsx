@@ -621,6 +621,7 @@ function GoldenSetDetail({ set, workflowName, canEdit, onBack, onChanged, onDele
                           <>
                             {" · "}
                             <span className="golden-origin-badge">imported</span>
+                            {recording.capabilities.capture?.maskingVerified === false ? " (masking not verified)" : null}
                           </>
                         )}
                       </span>

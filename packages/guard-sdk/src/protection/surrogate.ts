@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { luhnCheckDigit, luhnValid } from "../detectors/dlp";
+import { parsePhone } from "../phone";
 import type { GuardDataClass } from "../types";
 import { GuardProtectionError } from "../types";
 import type { KeyResolver, ProtectionProvider } from "./types";
@@ -19,9 +20,9 @@ import type { KeyResolver, ProtectionProvider } from "./types";
  *   - US SSN: same separators, structurally valid, with a randomly chosen area the SSN check
  *     accepts (001–899 except 666). Since 2011 every such area can be issued, so a surrogate
  *     may coincide with an issued number
- *   - phone: keyed on the last nine digits (so a number written with or without its country
- *     code gets the same surrogate digits); the digits before those nine, the separators and a
- *     leading `+` are kept
+ *   - phone: keyed on its national number (without the country code and trunk `0`), so a
+ *     number written with or without its country code gets the same surrogate digits; the
+ *     country code, a trunk `0`, the separators and a leading `+` are kept as written
  *   - UK National Insurance number: same spacing, prefix `ZY`
  *   - credentials, private keys and JSON Web Tokens: fully redacted, no hash
  *   - any other class (a profile dictionary's): `[<class>:<12 hex>]`, which the
@@ -41,9 +42,6 @@ export const SURROGATE_NINO_PREFIX = "ZY";
 /** SSN areas surrogates draw from: every area the SSN check accepts (001–899 except 666). */
 export const SURROGATE_SSN_AREA_MIN = 1;
 export const SURROGATE_SSN_AREA_MAX = 899;
-/** Phones are keyed on their last nine digits: the national number without a country code or trunk prefix in most plans. */
-export const PHONE_KEY_DIGITS = 9;
-
 const REDACTED_CLASSES = new Set<string>(["credential", "private_key", "jwt"]);
 const NINO_SHAPE = /^([A-Z]{2})(\s?)(\d{2})(\s?)(\d{2})(\s?)(\d{2})(\s?)([A-D])$/i;
 
@@ -78,9 +76,9 @@ export function normaliseForSurrogate(value: string, dataClass: GuardDataClass):
   }
 }
 
-/** The digits a phone number is keyed on: its last nine (all of them when it has fewer). */
+/** The digits a phone number is keyed on: its national number (`parsePhone`). */
 export function phoneKey(value: string): string {
-  return value.replace(/\D/g, "").slice(-PHONE_KEY_DIGITS);
+  return parsePhone(value)?.national ?? "";
 }
 
 /** A keyed byte stream for one value: HMAC-SHA-256 blocks under the key, counter-extended. */
@@ -159,8 +157,8 @@ function allSame(digits: string): boolean {
  * output then reads the same whether the run saw the real value or its
  * surrogate, so a replay of a captured run compares equal. Callers ask for it
  * only for classes a guard profile can mask; otherwise the surrogate keeps no
- * real character beyond the structure (an IBAN's country, a phone's leading
- * digits before the last nine).
+ * real character beyond the structure (an IBAN's country, a phone's country
+ * code and trunk 0).
  */
 export const SURROGATE_VISIBLE_TAIL: Partial<Record<string, number>> = { card_number: 4, us_ssn: 4, national_id: 4, phone: 2, iban: 4 };
 
@@ -233,8 +231,9 @@ function ssnSurrogate(value: string, stream: KeyedStream, visibleTail: boolean):
 
 /**
  * The surrogate digits for a phone's keyed digits (`phoneKey`): as many
- * digits as the key has, never all one digit (the phone scan skips those);
- * with `visibleTail`, the last two stay.
+ * digits as the key has, never all one digit (the phone scan skips those),
+ * never a leading 0 (it would read as a trunk prefix); with `visibleTail`,
+ * the last two stay.
  */
 export function phoneSurrogateDigits(keyDigits: string, key: Uint8Array, visibleTail = false): string {
   if (key.length < 16) throw new GuardProtectionError(SURROGATE_PROVIDER_ID, "The surrogate key is shorter than 16 bytes");
@@ -244,15 +243,16 @@ export function phoneSurrogateDigits(keyDigits: string, key: Uint8Array, visible
     let digits = "";
     for (let i = 0; i < keyDigits.length - tail; i += 1) digits += stream.digit();
     digits += keyDigits.slice(keyDigits.length - tail);
-    if (keyDigits.length > 1 && allSame(digits)) continue;
+    // Only the drawn digits can change on a retry: a key no longer than the kept tail is returned as it is.
+    if (keyDigits.length > 1 && keyDigits.length > tail && (allSame(digits) || digits.startsWith("0"))) continue;
     return digits;
   }
 }
 
 function phoneSurrogate(value: string, key: Uint8Array, visibleTail: boolean): string {
   const all = value.replace(/\D/g, "");
-  const keyed = all.slice(-PHONE_KEY_DIGITS);
-  // The digits before the keyed ones (a country code, a trunk prefix) stay as written.
+  const keyed = phoneKey(value);
+  // The digits before the national number (a country code, a trunk 0) stay as written.
   const replaced = all.slice(0, all.length - keyed.length) + phoneSurrogateDigits(keyed, key, visibleTail);
   return reshape(value, replaced, isDigit);
 }

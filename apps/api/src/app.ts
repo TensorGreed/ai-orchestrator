@@ -136,7 +136,7 @@ import { registerGuardRoutes } from "./guard-routes.js";
 import { registerAuditBundleRoutes } from "./audit-bundle-routes.js";
 import { registerReplayRoutes } from "./replay-routes.js";
 import { registerReplayCaptureRoutes } from "./replay-capture-routes.js";
-import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureTicket } from "./services/replay-capture-service.js";
+import { deriveCaptureSurrogateKey, ReplayCaptureService, type CaptureSource, type CaptureTicket } from "./services/replay-capture-service.js";
 import type { CaptureInputOrigin } from "./services/capture-masking.js";
 import { maskableDataClasses } from "@ai-orchestrator/guard-sdk";
 import { registerEvalRoutes } from "./eval-routes.js";
@@ -215,6 +215,8 @@ interface Tier1IntegrationSpec {
 
 /** Phase 15.1 — the trigger type of a golden-run replay. */
 const REPLAY_TRIGGER_TYPE = "replay";
+/** Phase 15.6 — how often stale production-capture tickets are given back. */
+const CAPTURE_SWEEP_INTERVAL_MS = 60_000;
 
 /** Phase 15.1 — the knowledge-base store a run uses: in a replay, writes are refused. */
 function replayKnowledgeBaseStore(sandbox: ReplaySandbox | undefined, store: KnowledgeBaseStore): KnowledgeBaseStore {
@@ -1703,12 +1705,17 @@ export function createApp(
    * delays the run's answer.
    */
   let replayCapture: ReplayCaptureService | null = null;
-  const pendingCaptures = new Map<string, { ticket: CaptureTicket; plan: McpCassetteRunPlan; workflow: Workflow }>();
-  /** A ticket whose run never reached its final history write is given back after the run's timeout plus a minute. */
+  const pendingCaptures = new Map<string, { ticket: CaptureTicket; plan: McpCassetteRunPlan; workflow: Workflow; staleAt: number }>();
+  /**
+   * A ticket whose run never reached its final history write is given back
+   * once the run's own timeout (at most 24 hours) plus a minute has passed
+   * since the hand-off. Runs on a timer and before a run is refused for the
+   * daily limit, so leaked tickets never block a workflow's captures.
+   */
   const sweepStaleCaptures = () => {
-    const cutoff = Date.now() - config.WORKFLOW_EXECUTION_TIMEOUT_MS - 60_000;
+    const now = Date.now();
     for (const [executionId, pending] of pendingCaptures) {
-      if (pending.ticket.issuedAt >= cutoff) continue;
+      if (pending.staleAt > now) continue;
       pendingCaptures.delete(executionId);
       replayCapture?.abandon(pending.ticket, "skipped_stale");
     }
@@ -1877,6 +1884,13 @@ export function createApp(
      * or API key. Never derived from a caller-supplied trigger name.
      */
     captureInputOrigin?: CaptureInputOrigin;
+    /**
+     * Phase 15.6 — set by the execute routes when an API key started the run
+     * on the production channel. The run keeps its `manual` trigger (the
+     * workflow, history and filters see it as before); this server-side
+     * marker alone makes it eligible for capture.
+     */
+    captureSource?: CaptureSource;
   }) => {
     const channel: ReleaseChannel = input.channel ?? "draft";
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
@@ -1894,7 +1908,8 @@ export function createApp(
             triggerType: input.triggerType,
             releaseVersion,
             excluded: Boolean(input.mcpPlan || input.replay || input.resumeState || input.approvalDecision || input.startNodeId || input.runMode === "single_node" || input.providerRegistry),
-            inputOrigin: input.captureInputOrigin
+            inputOrigin: input.captureInputOrigin,
+            captureSource: input.captureSource
           })
         : null;
     let runPlan: McpCassetteRunPlan | undefined = input.mcpPlan;
@@ -2142,7 +2157,7 @@ export function createApp(
           pendingCaptures.delete(oldestId);
           replayCapture?.abandon(oldest.ticket, "skipped_backlog");
         }
-        pendingCaptures.set(input.executionId, { ticket: captureTicket, plan: runPlan, workflow: input.workflow });
+        pendingCaptures.set(input.executionId, { ticket: captureTicket, plan: runPlan, workflow: input.workflow, staleAt: Date.now() + executionTimeoutMs + 60_000 });
         captureHandedOff = true;
       }
 
@@ -2223,7 +2238,7 @@ export function createApp(
     if (triggerType === "eval") {
       return { directInput: { trigger_type: "eval", ...stored } };
     }
-    if (triggerType && ["manual", "manual_stream", "manual_retry", "mcp_replay", "api_execute", "api_execute_stream"].includes(triggerType)) {
+    if (triggerType && ["manual", "manual_stream", "manual_retry", "mcp_replay"].includes(triggerType)) {
       const directInput = asRecord(stored.input);
       const variables = asRecord(stored.variables);
       return {
@@ -7973,8 +7988,9 @@ export function createApp(
     const access = runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
     const executeChannel = executeChannelFor(request, user, access.workflow.id);
-    // Phase 15.6 — an API-key run on the production channel is production traffic (`api_execute`); editor runs stay `manual`.
-    const executeTrigger = "channel" in executeChannel && executeChannel.channel === "production" ? "api_execute" : "manual";
+    // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual` run everywhere else.
+    const executeTrigger = "manual";
+    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
     if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
     const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
@@ -8062,7 +8078,9 @@ export function createApp(
       executionId,
       triggerType: executeTrigger,
       triggeredBy: user.email,
-      hooks: progressHooks
+      hooks: progressHooks,
+      captureSource,
+      captureInputOrigin: captureSource ? "user" : undefined
     });
     const result = finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
 
@@ -8092,8 +8110,9 @@ export function createApp(
     const access = runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
     const executeChannel = executeChannelFor(request, user, access.workflow.id);
-    // Phase 15.6 — an API-key run on the production channel is production traffic (`api_execute_stream`); editor runs stay `manual_stream`.
-    const executeTrigger = "channel" in executeChannel && executeChannel.channel === "production" ? "api_execute_stream" : "manual_stream";
+    // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual_stream` run everywhere else.
+    const executeTrigger = "manual_stream";
+    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
     if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
     const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
@@ -8208,7 +8227,9 @@ export function createApp(
         executionId,
         triggerType: executeTrigger,
         triggeredBy: user.email,
-        hooks: progressHooks
+        hooks: progressHooks,
+        captureSource,
+        captureInputOrigin: captureSource ? "user" : undefined
       });
       const result = finishMcpCassettePlan(mcpPlan, executed, { executionId, workflow, source: "manual", createdBy: user.email });
 
@@ -11660,7 +11681,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       maxBytesPerWorkflow: config.REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW ?? REPLAY_CAPTURE_DEFAULTS.maxBytesPerWorkflow
     },
     log: { warn: (data, message) => app.log.warn(data, message), info: (data, message) => app.log.info(data, message) },
-    metric: (outcome) => metricsService.recordReplayCapture(outcome)
+    metric: (outcome) => metricsService.recordReplayCapture(outcome),
+    redact: (text) => String(secretService.redact(text)),
+    sweepStale: () => sweepStaleCaptures()
   });
   if (captureAvailable) {
     replayCapture = captureService;
@@ -11676,8 +11699,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     pruneCaptures("startup");
     const captureRetentionTimer = setInterval(() => pruneCaptures("interval"), config.EXECUTION_HISTORY_PRUNE_INTERVAL_MS);
     (captureRetentionTimer as { unref?: () => void }).unref?.();
+    // Tickets of runs that never wrote their final history are given back on this timer too (the sweep is cheap).
+    const captureSweepTimer = setInterval(sweepStaleCaptures, CAPTURE_SWEEP_INTERVAL_MS);
+    (captureSweepTimer as { unref?: () => void }).unref?.();
     app.addHook("onClose", async () => {
       clearInterval(captureRetentionTimer);
+      clearInterval(captureSweepTimer);
       replayCapture = null;
       await captureService.idle();
     });

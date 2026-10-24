@@ -1,8 +1,7 @@
 import { DEFAULT_NATIONAL_IDS, scanDlp, type DlpMatch, type NationalIdSpec } from "./detectors/dlp";
 import type { GuardDictionary, GuardProfile } from "./profile";
+import { parsePhone, phoneMaskCandidates, phoneMaskKeys, samePhone, type ParsedPhone, type PhoneKeyStrength } from "./phone";
 import {
-  PHONE_KEY_DIGITS,
-  phoneKey,
   phoneSurrogateDigits,
   SURROGATE_VISIBLE_TAIL,
   surrogateDetectable,
@@ -21,8 +20,9 @@ import {
  *      of each string: URL-encoding (`%40`) and JSON escapes (`@`, `\n`)
  *      are decoded first, so an escaped value is found as well.
  *   2. Each value found is reduced to its canonical form for its class:
- *      digits only for cards and SSNs, the last nine digits for phones (a
- *      number with or without its country code), upper-case letters and
+ *      digits only for cards and SSNs, the national number for phones (a
+ *      number with or without its country code, with or without a trunk 0;
+ *      see phone.ts), upper-case letters and
  *      digits for IBANs and NI numbers, lower case for emails and dictionary
  *      terms. One canonical value is one subject.
  *   3. Every rendering of every canonical value is replaced, in every part,
@@ -317,6 +317,8 @@ export interface SubjectSpan {
   start: number;
   end: number;
   entry: SubjectEntry;
+  /** Phones: the national number whose digits the span holds (the surrogate replaces exactly these). */
+  national?: string;
 }
 
 const EMAIL_TOKEN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,24}\b/g;
@@ -340,7 +342,7 @@ export function canonicalFor(raw: string, dataClass: string): { family: Family; 
   if (surrogateRedacts(dataClass)) return { family: "literal", key: trimmed };
   if (dataClass === "email") return { family: "email", key: trimmed.toLowerCase() };
   if (dataClass === "phone") {
-    const key = phoneKey(trimmed);
+    const key = parsePhone(trimmed)?.national ?? "";
     return key.length > 0 ? { family: "phone", key } : null;
   }
   const letters = /[A-Za-z]/.test(trimmed);
@@ -355,11 +357,23 @@ export function canonicalFor(raw: string, dataClass: string): { family: Family; 
   return { family: "literal", key: trimmed.toLowerCase() };
 }
 
+/** Separators that end one value and start another inside a run of digits (a list, a sentence end, a gap). */
+const STRICT_BREAK = /\/|\.\s|\s{2,}/;
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
 /**
  * Canonical values and a boundary-aware finder for them. Masking collects
  * detected values here and replaces what `find` returns; the data-subject
  * lookup puts a value (and its surrogates) here and asks whether a stored
  * text holds any of them.
+ *
+ * Masking may over-mask, so its finder is generous: a card or SSN is any run
+ * of whole digit groups with its digits, and a phone is found in its
+ * international, national and trunk forms (phone.ts). The lookup's finder
+ * (`strict`) must never over-match, because what it finds is deleted: a
+ * number is a whole run of digits (never a suffix or part of a longer run,
+ * never next to a letter), a phone is the same number only by `samePhone`,
+ * and a literal is a whole token.
  */
 export class SubjectIndex {
   private readonly byFamily: Record<Family, Map<string, SubjectEntry>> = {
@@ -369,14 +383,18 @@ export class SubjectIndex {
     alnum: new Map(),
     literal: new Map()
   };
+  /** Masking: every form a phone is replaced as, with the national number it holds. */
+  private readonly phoneKeys = new Map<string, { entry: SubjectEntry; national: string; strength: PhoneKeyStrength }>();
+  /** Lookup: the phones as written, compared with `samePhone`. */
+  private strictPhones: Array<{ entry: SubjectEntry; phone: ParsedPhone }> = [];
   private literalPatterns: { exact: RegExp | null; folded: RegExp | null } | null = null;
 
   /**
-   * @param options.boundedLiterals literal values match only as whole tokens
-   *   (the lookup's raw search); masking leaves this off, so a secret or a
-   *   dictionary term is replaced wherever it appears.
+   * @param options.strict the data-subject lookup's matching (see the class
+   *   comment); masking leaves it off, so a secret or a dictionary term is
+   *   replaced wherever it appears and a number in any of its forms.
    */
-  constructor(private readonly options: { boundedLiterals?: boolean } = {}) {}
+  constructor(private readonly options: { strict?: boolean } = {}) {}
 
   get size(): number {
     let total = 0;
@@ -394,11 +412,35 @@ export class SubjectIndex {
     if (!canonical) return null;
     const map = this.byFamily[canonical.family];
     const previous = map.get(canonical.key);
-    if (previous && priorityOf(previous.dataClass) <= priorityOf(dataClass)) return previous;
-    const entry: SubjectEntry = { dataClass, family: canonical.family, key: canonical.key };
-    map.set(canonical.key, entry);
-    if (canonical.family === "literal") this.literalPatterns = null;
+    let entry: SubjectEntry;
+    if (previous && priorityOf(previous.dataClass) <= priorityOf(dataClass)) {
+      entry = previous;
+    } else {
+      entry = { dataClass, family: canonical.family, key: canonical.key };
+      if (previous) this.replaceEntry(previous, entry);
+      map.set(canonical.key, entry);
+      if (canonical.family === "literal") this.literalPatterns = null;
+    }
+    if (canonical.family === "phone") this.addPhone(raw, entry);
     return entry;
+  }
+
+  private replaceEntry(previous: SubjectEntry, entry: SubjectEntry): void {
+    for (const value of this.phoneKeys.values()) if (value.entry === previous) value.entry = entry;
+    for (const value of this.strictPhones) if (value.entry === previous) value.entry = entry;
+  }
+
+  private addPhone(raw: string, entry: SubjectEntry): void {
+    const phone = parsePhone(raw);
+    if (!phone) return;
+    if (this.options.strict) {
+      if (!this.strictPhones.some((other) => other.phone.digits === phone.digits && other.phone.explicit === phone.explicit)) this.strictPhones.push({ entry, phone });
+      return;
+    }
+    for (const { key, national, strength } of phoneMaskKeys(phone)) {
+      const previous = this.phoneKeys.get(key);
+      if (!previous || strength > previous.strength) this.phoneKeys.set(key, { entry, national, strength });
+    }
   }
 
   /** Adds a value to be matched exactly as written (case-insensitively): for a finding in a shape the other families do not read. */
@@ -410,12 +452,18 @@ export class SubjectIndex {
   }
 
   has(entry: Pick<SubjectEntry, "family" | "key">): boolean {
+    if (entry.family === "phone" && this.phoneKeys.has(entry.key)) return true;
     return this.byFamily[entry.family].has(entry.key);
   }
 
   delete(entry: Pick<SubjectEntry, "family" | "key">): void {
+    const stored = this.byFamily[entry.family].get(entry.key);
     this.byFamily[entry.family].delete(entry.key);
     if (entry.family === "literal") this.literalPatterns = null;
+    if (entry.family === "phone" && stored) {
+      for (const [key, value] of this.phoneKeys) if (value.entry === stored) this.phoneKeys.delete(key);
+      this.strictPhones = this.strictPhones.filter((value) => value.entry !== stored);
+    }
   }
 
   private literals(): { exact: RegExp | null; folded: RegExp | null } {
@@ -427,46 +475,91 @@ export class SubjectIndex {
     const build = (keys: string[], flags: string) => {
       if (keys.length === 0) return null;
       const body = keys.sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
-      return this.options.boundedLiterals ? new RegExp(`(?<![\\p{L}\\p{N}_])(?:${body})(?![\\p{L}\\p{N}_])`, `${flags}u`) : new RegExp(body, flags);
+      // Strict: a whole token, never glued to a longer number by a dash or a dot.
+      return this.options.strict
+        ? new RegExp(`(?<![\\p{L}\\p{N}_])(?<!\\p{N}[-.])(?:${body})(?![\\p{L}\\p{N}_])(?![-.]\\p{N})`, `${flags}u`)
+        : new RegExp(body, flags);
     };
     this.literalPatterns = { exact: build(exact, "g"), folded: build(folded, "gi") };
     return this.literalPatterns;
   }
 
-  /** Every occurrence of an indexed value in `text` (a decoded view), without overlaps: the longest wins, then the stronger class. */
-  find(text: string): SubjectSpan[] {
-    const found: SubjectSpan[] = [];
-    const { digits, phone, email, alnum, literal } = this.byFamily;
-
-    if (digits.size > 0 || phone.size > 0) {
-      for (const run of text.matchAll(DIGIT_RUN)) {
-        const base = run.index ?? 0;
-        const groups = [...run[0].matchAll(DIGIT_GROUP)].map((group) => ({ start: base + (group.index ?? 0), digits: group[0] }));
-        // Card and SSN values are whole digit groups, joined by any separators.
-        if (digits.size > 0) {
-          for (let i = 0; i < groups.length; i += 1) {
-            let acc = "";
-            for (let j = i; j < groups.length; j += 1) {
-              acc += groups[j]!.digits;
-              if (acc.length > MAX_DIGIT_VALUE) break;
-              const entry = digits.get(acc);
-              if (entry) found.push({ start: groups[i]!.start, end: groups[j]!.start + groups[j]!.digits.length, entry });
-            }
-          }
-        }
-        // A phone is its last nine digits ending a digit group; the digits before them (a country code) stay.
-        if (phone.size > 0) {
-          const positions: number[] = [];
-          for (const group of groups) for (let k = 0; k < group.digits.length; k += 1) positions.push(group.start + k);
-          let all = "";
-          for (const group of groups) {
-            all += group.digits;
-            if (all.length < PHONE_KEY_DIGITS) continue;
-            const entry = phone.get(all.slice(-PHONE_KEY_DIGITS));
-            if (entry) found.push({ start: positions[all.length - PHONE_KEY_DIGITS]!, end: group.start + group.digits.length, entry });
+  /** Masking: card and SSN digits as whole groups, phones in every form (`phoneMaskKeys`). */
+  private findNumbersLoose(text: string, found: SubjectSpan[]): void {
+    const { digits } = this.byFamily;
+    for (const run of text.matchAll(DIGIT_RUN)) {
+      const base = run.index ?? 0;
+      const groups = [...run[0].matchAll(DIGIT_GROUP)].map((group) => ({ start: base + (group.index ?? 0), digits: group[0] }));
+      // Card and SSN values are whole digit groups, joined by any separators.
+      if (digits.size > 0) {
+        for (let i = 0; i < groups.length; i += 1) {
+          let acc = "";
+          for (let j = i; j < groups.length; j += 1) {
+            acc += groups[j]!.digits;
+            if (acc.length > MAX_DIGIT_VALUE) break;
+            const entry = digits.get(acc);
+            if (entry) found.push({ start: groups[i]!.start, end: groups[j]!.start + groups[j]!.digits.length, entry });
           }
         }
       }
+      // A phone is any run of whole groups read as a number with or without its country code; only its national digits are replaced.
+      if (this.phoneKeys.size > 0) {
+        for (let i = 0; i < groups.length; i += 1) {
+          let acc = "";
+          for (let j = i; j < groups.length; j += 1) {
+            acc += groups[j]!.digits;
+            if (acc.length > MAX_PHONE_RUN) break;
+            for (const candidate of phoneMaskCandidates(acc)) {
+              const hit = this.phoneKeys.get(candidate);
+              if (!hit) continue;
+              const end = groups[j]!.start + groups[j]!.digits.length;
+              found.push({ start: digitPosition(groups, i, j, acc.length - hit.national.length), end, entry: hit.entry, national: hit.national });
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /** Lookup: whole runs of digits only (split where one value ends and another starts), never next to a letter. */
+  private findNumbersStrict(text: string, found: SubjectSpan[]): void {
+    const { digits } = this.byFamily;
+    for (const run of text.matchAll(DIGIT_RUN)) {
+      const base = run.index ?? 0;
+      const groups = [...run[0].matchAll(DIGIT_GROUP)].map((group) => ({ start: base + (group.index ?? 0), digits: group[0] }));
+      let first = 0;
+      for (let g = 0; g < groups.length; g += 1) {
+        const last = g === groups.length - 1;
+        const gap = last ? "" : text.slice(groups[g]!.start + groups[g]!.digits.length, groups[g + 1]!.start);
+        if (!last && !STRICT_BREAK.test(gap)) continue;
+        const start = groups[first]!.start;
+        const end = groups[g]!.start + groups[g]!.digits.length;
+        const segmentFirst = first;
+        first = g + 1;
+        if ((start > 0 && WORD_CHAR.test(text[start - 1]!)) || (end < text.length && WORD_CHAR.test(text[end]!))) continue;
+        let value = "";
+        for (let k = segmentFirst; k <= g; k += 1) value += groups[k]!.digits;
+        const entry = digits.get(value);
+        if (entry) found.push({ start, end, entry });
+        if (this.strictPhones.length > 0) {
+          const phone = parsePhone(text.slice(start, end), start > 0 && text[start - 1] === "+");
+          const hit = phone ? this.strictPhones.find((other) => samePhone(other.phone, phone)) : undefined;
+          if (hit) found.push({ start, end, entry: hit.entry, national: phone!.national });
+        }
+      }
+    }
+  }
+
+  /** Every occurrence of an indexed value in `text` (a decoded view), without overlaps: the longest wins, then the stronger class. */
+  find(text: string): SubjectSpan[] {
+    const found: SubjectSpan[] = [];
+    const { digits, email, alnum, literal } = this.byFamily;
+
+    if (this.options.strict) {
+      if (digits.size > 0 || this.strictPhones.length > 0) this.findNumbersStrict(text, found);
+    } else if (digits.size > 0 || this.phoneKeys.size > 0) {
+      this.findNumbersLoose(text, found);
     }
 
     if (email.size > 0) {
@@ -522,6 +615,20 @@ export class SubjectIndex {
   matches(text: string): boolean {
     return this.find(decodeView(text).text).length > 0;
   }
+}
+
+/** Longest run of digits read as one phone number (a 15-digit number with an international prefix and a trunk 0). */
+const MAX_PHONE_RUN = 20;
+
+/** The text position of digit `offset` of the groups `i..j` joined. */
+function digitPosition(groups: ReadonlyArray<{ start: number; digits: string }>, i: number, j: number, offset: number): number {
+  let remaining = offset;
+  for (let k = i; k <= j; k += 1) {
+    const group = groups[k]!;
+    if (remaining < group.digits.length) return group.start + remaining;
+    remaining -= group.digits.length;
+  }
+  return groups[j]!.start + groups[j]!.digits.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -612,23 +719,34 @@ function bump(target: Record<string, number>, key: string, by = 1): void {
 /** Keys that hold identifiers or layout in a workflow definition, never literals the author wrote. */
 const NON_LITERAL_KEYS = new Set(["id", "nodeId", "source", "target", "sourceHandle", "targetHandle", "position", "positionAbsolute", "x", "y", "width", "height", "createdAt", "updatedAt", "secretId", "secretRef"]);
 
+/**
+ * The text of a finding. A phone's `+` is part of it even when the pattern
+ * matched from the digits after it (the scan's phone pattern does for
+ * `+47 2212 3456`): it says the leading digits are a country code.
+ */
+export function findingText(view: string, match: Pick<DlpMatch, "dataClass" | "span">): string {
+  const start = match.span.start > 0 && String(match.dataClass) === "phone" && view[match.span.start - 1] === "+" ? match.span.start - 1 : match.span.start;
+  return view.slice(start, match.span.end);
+}
+
 /** The canonical values a workflow definition holds as whole literal tokens. */
 function workflowLiterals(workflow: unknown, scanOptions: Parameters<typeof scanDlp>[1]): { index: SubjectIndex; digitRuns: Set<string>; phoneRuns: Set<string> } {
   const index = new SubjectIndex();
   const digitRuns = new Set<string>();
+  /** National readings of each whole run of digits (phone.ts): a phone is kept only when a literal is that number. */
   const phoneRuns = new Set<string>();
   const visit = (text: string) => {
     const view = decodeView(text).text;
     for (const match of resolveOverlaps(scanDlp(view, scanOptions))) {
       const dataClass = String(match.dataClass);
       if (surrogateRedacts(dataClass)) continue;
-      index.add(view.slice(match.span.start, match.span.end), dataClass);
+      index.add(findingText(view, match), dataClass);
     }
     // Numbers count as written: a value is kept only when it is a whole run of digits in a literal.
     for (const run of view.matchAll(DIGIT_RUN)) {
       const digits = run[0].replace(/\D/g, "");
       digitRuns.add(digits);
-      if (digits.length >= PHONE_KEY_DIGITS && digits.length <= 15) phoneRuns.add(digits.slice(-PHONE_KEY_DIGITS));
+      if (digits.length <= MAX_PHONE_RUN) for (const reading of phoneMaskCandidates(digits)) phoneRuns.add(reading);
     }
   };
   const walk = (value: unknown, depth: number) => {
@@ -652,8 +770,8 @@ function surrogateEdit(view: string, span: SubjectSpan, key: Uint8Array, tailCla
   const dataClass = span.entry.dataClass;
   const visibleTail = tailClasses.has(dataClass);
   if (span.entry.family === "phone") {
-    // Only the keyed digits change, in place: separators and any digits before them stay.
-    const digits = phoneSurrogateDigits(span.entry.key, key, visibleTail);
+    // Only the national digits change, in place: the span starts after any country code or trunk 0, and separators stay.
+    const digits = phoneSurrogateDigits(span.national ?? span.entry.key, key, visibleTail);
     let index = 0;
     let out = "";
     for (const char of raw) {
@@ -690,7 +808,7 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
         if (matches.length === 0) return;
         withFindings.add(text);
         for (const match of matches) {
-          const raw = view.slice(match.span.start, match.span.end);
+          const raw = findingText(view, match);
           const entry = index.add(raw, String(match.dataClass));
           if (entry && !samples.has(`${entry.family}:${entry.key}`)) samples.set(`${entry.family}:${entry.key}`, raw);
         }
@@ -719,7 +837,7 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
         entry.family === "digits"
           ? literals.digitRuns.has(entry.key)
           : entry.family === "phone"
-            ? literals.phoneRuns.has(entry.key) || literals.digitRuns.has(entry.key)
+            ? literals.phoneRuns.has(entry.key)
             : literals.index.has(entry);
       if (kept) {
         index.delete(entry);
@@ -755,7 +873,7 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
       if (text === original && !withFindings.has(original)) return;
       const view = decodeView(text).text;
       for (const match of scanDlp(view, scanOptions)) {
-        const canonical = canonicalFor(view.slice(match.span.start, match.span.end), String(match.dataClass));
+        const canonical = canonicalFor(findingText(view, match), String(match.dataClass));
         if (canonical && index.has(canonical)) throw new MaskIncompleteError(`A detected value could not be replaced everywhere in ${part.id}.`);
       }
     };
