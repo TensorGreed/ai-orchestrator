@@ -49,8 +49,11 @@ import { hkdfSync } from "node:crypto";
 import {
   DEFAULT_REPLAY_CAPTURE_SETTINGS,
   REPLAY_CAPTURE_DEFAULT_SET_NAME,
+  REPLAY_FIND_SUBJECT_COUNTRIES,
   REPLAY_FIND_SUBJECT_KINDS,
   REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH,
+  type ReplayFindSubjectCertainty,
+  type ReplayFindSubjectQuery,
   type ReplayFindSubjectDeleteResult,
   type ReplayFindSubjectKind,
   type McpCassette,
@@ -65,15 +68,19 @@ import {
   type Workflow
 } from "@ai-orchestrator/shared";
 import {
+  CALLING_CODES,
   decodeView,
   findingText,
+  MaskIdentifierError,
   MaskIncompleteError,
   MaskUnscannableError,
   maskForDataClass,
   parsePhone,
+  phoneInCountry,
   phoneSurrogateDigits,
   resolveOverlaps,
-  scanDlp,
+  scanForCapture,
+  trunkPrefixesFor,
   scrubEvidenceText,
   SubjectIndex,
   surrogateFor,
@@ -131,6 +138,7 @@ function eligibleTrigger(triggerType: string | null | undefined, source: Capture
 function captureFailureOutcome(error: unknown): string {
   if (error instanceof MaskUnscannableError) return "dropped_unscannable";
   if (error instanceof MaskIncompleteError) return "dropped_incomplete_mask";
+  if (error instanceof MaskIdentifierError) return "dropped_identifier_value";
   if (error instanceof ReplayCaptureError && error.code === "conflict") return "discarded_disabled";
   if (error instanceof ReplayCaptureError && error.code === "not_found") return "discarded_source_deleted";
   if (error instanceof ReplayRecordingError && error.code === "too_large") return "skipped_too_large";
@@ -503,6 +511,7 @@ export class ReplayCaptureService {
           rate: ticket.rate,
           publishedVersion: ticket.publishedVersion,
           capturedAt,
+          ...(ticket.captureSource ? { source: ticket.captureSource } : {}),
           inputProvenance: inputProvenance(history.triggerType, ticket.inputOrigin),
           beforeSave: (bytes) => {
             // Read once more right before saving: masking ran in chunks, and capture may have been turned off meanwhile.
@@ -567,7 +576,12 @@ export class ReplayCaptureService {
   // ---------------------------------------------------------------------------
 
   static view(summary: ReplayRecordingSummary): ReplayCaptureView {
-    return { ...summary, dataClasses: summary.capabilities.capture?.dataClasses ?? [], masked: summary.capabilities.capture?.masked ?? false };
+    return {
+      ...summary,
+      dataClasses: summary.capabilities.capture?.dataClasses ?? [],
+      masked: summary.capabilities.capture?.masked ?? false,
+      source: summary.capabilities.capture?.source === "api_key" ? "api_key" : null
+    };
   }
 
   /**
@@ -632,17 +646,19 @@ export class ReplayCaptureService {
   // ---------------------------------------------------------------------------
 
   /**
-   * The looked-up value's data class: the DLP scan of the value itself, one
-   * finding covering all of it (an IBAN or NI number is also tried in upper
-   * case). Null when it is not a recognised class, or is a secret (secrets
-   * are removed outright, so there is no surrogate to find).
+   * The looked-up value's data class: the capture scan of the value itself
+   * (the DLP patterns plus the international phone detector, so a `+` number
+   * with an assigned calling code is a phone), one finding covering all of
+   * it (an IBAN or NI number is also tried in upper case). Null when it is
+   * not a recognised class, or is a secret (secrets are removed outright, so
+   * there is no surrogate to find).
    */
   classify(value: string): string | null {
     const trimmed = value.trim();
     const upper = trimmed.toUpperCase();
     for (const text of upper.length === trimmed.length && upper !== trimmed ? [trimmed, upper] : [trimmed]) {
       // A phone's `+` is part of the value even when the pattern matched from the digits after it.
-      const whole = resolveOverlaps(scanDlp(text)).find((match) => match.span.end === text.length && findingText(text, match).length === text.length);
+      const whole = resolveOverlaps(scanForCapture(text)).find((match) => match.span.end === text.length && findingText(text, match).length === text.length);
       if (!whole) continue;
       const dataClass = String(whole.dataClass);
       return surrogateRedacts(dataClass) ? null : dataClass;
@@ -651,50 +667,95 @@ export class ReplayCaptureService {
   }
 
   /**
-   * The finders for one value, all strict (`SubjectIndex` `strict`: whole
-   * values only; a phone equals another only as the same full number or its
-   * exact national form). A value of a recognised class matches only stored
-   * values of that class: raw, and as its surrogates (with and without the
-   * visible tail, since a capture keeps the tail only when a guard profile
-   * could mask the class). Any other value is matched as exact text, and as
-   * the surrogate of each dictionary class.
+   * What the admin asked for, read: the class (the hint, else the value's
+   * own), and for a phone the text searched (with its country code when the
+   * value has one or a country was chosen). A hint the value does not parse
+   * as, or an unknown country, is refused; never silently searched as text.
+   * Messages never repeat the value.
    */
-  private needlesFor(value: string): { dataClass: string | null; classesTried: string[]; needles: Array<{ label: string; index: SubjectIndex }> } {
-    const trimmed = value.trim();
-    const dataClass = this.classify(trimmed);
-    if (!dataClass && trimmed.length < REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH) {
+  private readQuery(query: ReplayFindSubjectQuery): { text: string; dataClass: string | null; callingCode: string | null } {
+    const trimmed = query.value.trim();
+    let callingCode: string | null = null;
+    if (query.country) {
+      const country = query.country.toUpperCase();
+      callingCode = country.startsWith("+") ? country.slice(1) : (REPLAY_FIND_SUBJECT_COUNTRIES.find((entry) => entry.code === country)?.callingCode ?? null);
+      if (!callingCode || !CALLING_CODES.has(callingCode)) throw new ReplayCaptureError("That country is not one the lookup knows. Pick one from the list or give a calling code such as +44.", "invalid");
+    }
+    const auto = this.classify(trimmed);
+    const dataClass = query.dataClass ?? (auto === null && callingCode ? "phone" : auto);
+    if (query.dataClass && query.dataClass !== auto) {
+      const parses = query.dataClass === "phone" ? phoneShaped(trimmed) : wholeFindingOf(trimmed, query.dataClass);
+      if (!parses) {
+        throw new ReplayCaptureError(
+          query.dataClass === "phone"
+            ? "That does not read as a phone number: it needs 7 to 15 digits, written with digits, spaces, dashes, dots, brackets or a leading +."
+            : `That does not read as ${FIND_SUBJECT_CLASS_NAMES[query.dataClass] ?? query.dataClass}.`,
+          "invalid"
+        );
+      }
+    }
+    if (callingCode && dataClass !== "phone") throw new ReplayCaptureError("A country applies to phone numbers only.", "invalid");
+    if (dataClass !== "phone") return { text: trimmed, dataClass, callingCode: null };
+    if (callingCode) {
+      const phone = phoneInCountry(trimmed, callingCode);
+      if (!phone) throw new ReplayCaptureError("The number's own country code is not the country chosen.", "invalid");
+      return { text: `+${phone.cc}${phone.national}`, dataClass, callingCode };
+    }
+    const phone = parsePhone(trimmed);
+    return { text: trimmed, dataClass, callingCode: phone?.explicit && phone.cc ? phone.cc : null };
+  }
+
+  /**
+   * The finders for one value, all strict (`SubjectIndex` `strict`: whole
+   * values only; a phone is `exact` only as the same number with its country
+   * code on both sides, `national_only` when one side has none). A value of
+   * a recognised class matches only stored values of that class: raw, and
+   * as its surrogates (with and without the visible tail, since a capture
+   * keeps the tail only when a guard profile could mask the class). Any
+   * other value is matched as exact text, and as the surrogate of each
+   * dictionary class.
+   */
+  private needlesFor(query: ReplayFindSubjectQuery): {
+    dataClass: string | null;
+    callingCode: string | null;
+    classesTried: string[];
+    needles: Array<{ label: string; index: SubjectIndex }>;
+  } {
+    const { text, dataClass, callingCode } = this.readQuery(query);
+    if (!dataClass && text.length < REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH) {
       throw new ReplayCaptureError(
         `A value that is not an email address, card, IBAN, SSN, phone or NI number needs at least ${REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH} characters.`,
         "invalid"
       );
     }
     const raw = new SubjectIndex({ strict: true });
-    if (dataClass) raw.add(trimmed, dataClass);
-    else raw.addLiteral(trimmed, "raw");
+    if (dataClass) raw.add(text, dataClass);
+    else raw.addLiteral(text, "raw");
     const needles: Array<{ label: string; index: SubjectIndex }> = [{ label: "raw", index: raw }];
     const classes = dataClass ? [dataClass] : [...new Set(this.options.dictionaryClasses())].sort();
     const key = this.options.surrogateKey;
     for (const surrogateClass of classes) {
       const index = new SubjectIndex({ strict: true });
       for (const visibleTail of [false, true]) {
-        const surrogate = surrogateFor(trimmed, surrogateClass, key, { visibleTail });
+        const surrogate = surrogateFor(text, surrogateClass, key, { visibleTail });
         if (surrogate.startsWith("[")) index.addLiteral(surrogate, surrogateClass);
         else index.add(surrogate, surrogateClass);
         if (surrogateClass === "phone") {
-          // A capture masks a copy written without its `+` as a whole number (it cannot know the country code): its surrogate, too.
-          const phone = parsePhone(trimmed);
-          if (phone?.cc) for (const full of [phone.cc + phone.national, `${phone.cc}0${phone.national}`]) index.add(phoneSurrogateDigits(full, key, visibleTail), "phone");
+          // A capture keys a copy written without its `+` on that copy's own digits (it cannot know the country code):
+          // the full number, and the national number behind a trunk prefix. Those surrogates are written without a country code.
+          for (const plainKey of plainMaskKeys(text)) index.add(phoneSurrogateDigits(plainKey, key, visibleTail), "phone");
         }
       }
       needles.push({ label: surrogateClass, index });
     }
-    return { dataClass, classesTried: classes, needles };
+    return { dataClass, callingCode, classesTried: classes, needles };
   }
 
   private matchRow(row: SubjectTextRow, needles: Array<{ label: string; index: SubjectIndex }>): ReplayFindSubjectMatch | null {
     const matchedAs = new Set<string>();
     const fields = new Set<string>();
     const hits: ReplayFindSubjectHit[] = [];
+    let exact = false;
     for (const [field, text] of Object.entries(row.texts)) {
       if (!text) continue;
       // Stored text is JSON: decode its escapes (and URL-encoding) once, then match each finder.
@@ -704,7 +765,10 @@ export class ReplayCaptureService {
         if (spans.length === 0) continue;
         matchedAs.add(needle.label);
         fields.add(field);
-        for (const span of spans) {
+        if (spans.some((span) => (span.certainty ?? "exact") === "exact")) exact = true;
+        // Exact hits first, so the preview shows why a row is certain.
+        const ordered = [...spans].sort((a, b) => Number((a.certainty ?? "exact") !== "exact") - Number((b.certainty ?? "exact") !== "exact"));
+        for (const span of ordered) {
           if (hits.length >= FIND_SUBJECT_HITS_PER_ROW) break;
           hits.push(subjectHit(view, span, field, needle.label));
         }
@@ -720,7 +784,8 @@ export class ReplayCaptureService {
       status: row.status,
       matchedAs: [...matchedAs].sort(),
       fields: [...fields].sort(),
-      hits
+      hits,
+      certainty: exact ? "exact" : "national_only"
     };
   }
 
@@ -730,8 +795,8 @@ export class ReplayCaptureService {
    * replay of one). The value is never stored or logged. Pages are small and
    * the event loop gets a turn between them. Nothing is deleted here.
    */
-  async findSubject(value: string): Promise<ReplayFindSubjectResult> {
-    const { dataClass, classesTried, needles } = this.needlesFor(value);
+  async findSubject(query: ReplayFindSubjectQuery): Promise<ReplayFindSubjectResult> {
+    const { dataClass, callingCode, classesTried, needles } = this.needlesFor(query);
     const store = this.options.store;
     const matches: ReplayFindSubjectMatch[] = [];
     const counts = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
@@ -753,39 +818,46 @@ export class ReplayCaptureService {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
     }
-    return { dataClass, classesTried, matches, counts, searched, covered: FIND_SUBJECT_COVERED, notCovered: FIND_SUBJECT_NOT_COVERED };
+    // Certain matches first; possible matches (no country code in the stored copy) after them.
+    matches.sort((a, b) => Number(a.certainty !== "exact") - Number(b.certainty !== "exact"));
+    return { dataClass, callingCode, classesTried, matches, counts, searched, covered: FIND_SUBJECT_COVERED, notCovered: FIND_SUBJECT_NOT_COVERED };
   }
 
   /**
    * Delete: the rows a search returned. Each is checked again against the
    * value first, with the same strict matching; one that is gone or no
-   * longer holds it is skipped, never deleted. `beforeDelete` gets every row
+   * longer holds it is skipped, never deleted. A row that is only a
+   * possible match (`national_only`: a phone with no country code on one
+   * side) is skipped unless its target says `confirmPossible`. `beforeDelete` gets every row
    * about to be deleted before the first one is (the caller writes the
    * intent audit row; if it throws, nothing is deleted). A golden run takes
    * its golden-set cases and their results; a run takes its tool-call,
    * guard-event and usage rows.
    */
   async deleteSubject(
-    value: string,
-    targets: Array<{ kind: ReplayFindSubjectKind; id: string }>,
-    hooks: { beforeDelete?: (rows: Array<{ kind: ReplayFindSubjectKind; id: string }>) => void } = {}
+    query: ReplayFindSubjectQuery,
+    targets: Array<{ kind: ReplayFindSubjectKind; id: string; confirmPossible?: true }>,
+    hooks: { beforeDelete?: (rows: Array<{ kind: ReplayFindSubjectKind; id: string; certainty: ReplayFindSubjectCertainty }>) => void } = {}
   ): Promise<ReplayFindSubjectDeleteResult> {
-    const { needles } = this.needlesFor(value);
+    const { needles } = this.needlesFor(query);
     const store = this.options.store;
     const deleted = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
     const skipped: ReplayFindSubjectDeleteResult["skipped"] = [];
     const removed: ReplayFindSubjectDeleteResult["removed"] = [];
     const seen = new Set<string>();
-    const confirmed: Array<{ kind: ReplayFindSubjectKind; id: string }> = [];
+    const confirmed: Array<{ kind: ReplayFindSubjectKind; id: string; certainty: ReplayFindSubjectCertainty }> = [];
     let checked = 0;
     for (const target of targets) {
       const key = `${target.kind}:${target.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
       const row = store.subjectTextRow(target.kind, target.id);
-      if (!row) skipped.push({ ...target, reason: "not_found" });
-      else if (!this.matchRow(row, needles)) skipped.push({ ...target, reason: "no_match" });
-      else confirmed.push({ kind: target.kind, id: target.id });
+      const match = row ? this.matchRow(row, needles) : null;
+      if (!row) skipped.push({ kind: target.kind, id: target.id, reason: "not_found" });
+      else if (!match) skipped.push({ kind: target.kind, id: target.id, reason: "no_match" });
+      // A possible match may be another person's number: never deleted unless the admin confirmed this row.
+      else if (match.certainty !== "exact" && target.confirmPossible !== true) skipped.push({ kind: target.kind, id: target.id, reason: "possible_match_unconfirmed" });
+      else confirmed.push({ kind: target.kind, id: target.id, certainty: match.certainty });
       checked += 1;
       if (checked % FIND_SUBJECT_PAGE === 0) await new Promise<void>((resolve) => setImmediate(resolve));
     }
@@ -802,7 +874,7 @@ export class ReplayCaptureService {
         deleted[target.kind] += 1;
         removed.push({ kind: target.kind, id: target.id });
       } else {
-        skipped.push({ ...target, reason: "not_found" });
+        skipped.push({ kind: target.kind, id: target.id, reason: "not_found" });
       }
       for (const cascaded of outcome.cascaded) {
         const cascadedKey = `${cascaded.kind}:${cascaded.id}`;
@@ -831,11 +903,79 @@ const FIND_SUBJECT_EXCERPT_CONTEXT = 24;
  */
 function subjectHit(view: string, span: SubjectSpan, field: string, matchedAs: string): ReplayFindSubjectHit {
   const dataClass = span.entry.dataClass === "raw" ? null : span.entry.dataClass;
+  const certainty: ReplayFindSubjectCertainty = span.certainty ?? "exact";
+  // A possible match shows the stored copy's country code when it has one (not personal data): "+33" tells the admin it is someone else's.
+  const storedPhone = certainty === "national_only" ? parsePhone(view.slice(span.start, span.end), span.start > 0 && view[span.start - 1] === "+") : null;
+  const storedCallingCode = storedPhone?.explicit ? storedPhone.cc : null;
   const context = (text: string) => scrubEvidenceText(text).replace(/\d/g, "#").replace(/\s+/g, " ");
   const from = Math.max(0, span.start - FIND_SUBJECT_EXCERPT_CONTEXT);
   const to = Math.min(view.length, span.end + FIND_SUBJECT_EXCERPT_CONTEXT);
-  const excerpt = `${from > 0 ? "…" : ""}${context(view.slice(from, span.start))}[${maskForDataClass(view.slice(span.start, span.end), dataClass ?? undefined)}]${context(view.slice(span.end, to))}${to < view.length ? "…" : ""}`;
-  return { field, matchedAs, dataClass, excerpt };
+  const value = view.slice(span.start, span.end);
+  // A phone keeps its brackets in the excerpt, as written: `[(•••) •••-••58]`.
+  const shown = dataClass === "phone" ? maskPhoneKeepingBrackets(value) : maskForDataClass(value, dataClass ?? undefined);
+  const excerpt = `${from > 0 ? "…" : ""}${context(view.slice(from, span.start))}[${shown}]${context(view.slice(span.end, to))}${to < view.length ? "…" : ""}`;
+  return { field, matchedAs, dataClass, excerpt, certainty, ...(certainty === "national_only" ? { storedCallingCode } : {}) };
+}
+
+/** A phone as the guard mask shows it (the last two digits), with its brackets, `+` and separators kept as written. */
+function maskPhoneKeepingBrackets(value: string): string {
+  const total = value.replace(/\D/g, "").length;
+  let seen = 0;
+  let out = "";
+  for (const char of value) {
+    if (/\d/.test(char)) {
+      seen += 1;
+      out += seen > total - 2 ? char : "•";
+    } else {
+      out += char;
+    }
+  }
+  return out;
+}
+
+/** Plain names of the classes a lookup hint can ask for, for messages. */
+const FIND_SUBJECT_CLASS_NAMES: Record<string, string> = {
+  email: "an email address",
+  phone: "a phone number",
+  card_number: "a card number",
+  us_ssn: "a US Social Security number",
+  iban: "an IBAN",
+  national_id: "a national ID number"
+};
+
+/** A value typed as a phone: 7 to 15 digits, written only with digits, separators and a leading `+`. */
+function phoneShaped(value: string): boolean {
+  if (!/^\+?[\d\s().-]+$/.test(value)) return false;
+  const digits = value.replace(/\D/g, "").length;
+  return digits >= 7 && digits <= 15;
+}
+
+/** Whether the capture scan reads all of `value` as `dataClass` (an IBAN or NI number also in upper case). */
+function wholeFindingOf(value: string, dataClass: string): boolean {
+  const upper = value.toUpperCase();
+  for (const text of upper !== value ? [value, upper] : [value]) {
+    if (scanForCapture(text).some((match) => String(match.dataClass) === dataClass && match.span.start === 0 && match.span.end === text.length)) return true;
+  }
+  return false;
+}
+
+/**
+ * The digits a capture keys a copy of this number on when the copy is
+ * written without its `+` (masking keys such a copy on its own digits): the
+ * full number, and the number behind each of the country's trunk prefixes.
+ * Only for a number with a country code; the main surrogate covers the rest.
+ */
+function plainMaskKeys(text: string): string[] {
+  const phone = parsePhone(text);
+  if (!phone?.cc) return [];
+  const keys = new Set<string>();
+  const written = [phone.cc + phone.national, phone.national, ...trunkPrefixesFor(phone.cc).map((trunk) => trunk + phone.national)];
+  if (trunkPrefixesFor(phone.cc).length > 0) written.push(`${phone.cc}0${phone.national}`);
+  for (const digits of written) {
+    const key = parsePhone(digits)?.national;
+    if (key && key !== phone.national) keys.add(key);
+  }
+  return [...keys];
 }
 
 /** Rows read per page by the data-subject lookup (each golden run can be several megabytes). */

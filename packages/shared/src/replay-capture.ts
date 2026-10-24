@@ -88,7 +88,12 @@ export interface ReplayCaptureView extends ReplayRecordingSummary {
   /** Data classes masked in the run (chips: "contains email, card"). */
   dataClasses: string[];
   masked: boolean;
+  /** `api_key`: an API key started the run on the execute routes (its trigger stays `manual`). Set by the server only. */
+  source: "api_key" | null;
 }
+
+/** The inbox trigger filter's value for runs an API key started (filters on the capture source, not the trigger). */
+export const REPLAY_CAPTURE_API_KEY_FILTER = "api_key";
 
 export const replayCaptureListQuerySchema = z.object({
   /** The source run's outcome. */
@@ -143,13 +148,93 @@ export interface ReplayCapturePromoteOutcome {
 /** Shortest value searched raw when it is not recognised as a data class (an email, card, phone, ...). */
 export const REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH = 6;
 
+/** Data classes the lookup can be told to read a value as. */
+export const REPLAY_FIND_SUBJECT_CLASSES = ["email", "phone", "card_number", "us_ssn", "iban", "national_id"] as const;
+export type ReplayFindSubjectClass = (typeof REPLAY_FIND_SUBJECT_CLASSES)[number];
+
+/** Countries the lookup offers for a phone number typed without its country code (ISO 3166 code → calling code). */
+export const REPLAY_FIND_SUBJECT_COUNTRIES: ReadonlyArray<{ code: string; name: string; callingCode: string }> = [
+  { code: "US", name: "United States", callingCode: "1" },
+  { code: "CA", name: "Canada", callingCode: "1" },
+  { code: "GB", name: "United Kingdom", callingCode: "44" },
+  { code: "IE", name: "Ireland", callingCode: "353" },
+  { code: "FR", name: "France", callingCode: "33" },
+  { code: "DE", name: "Germany", callingCode: "49" },
+  { code: "IT", name: "Italy", callingCode: "39" },
+  { code: "ES", name: "Spain", callingCode: "34" },
+  { code: "PT", name: "Portugal", callingCode: "351" },
+  { code: "NL", name: "Netherlands", callingCode: "31" },
+  { code: "BE", name: "Belgium", callingCode: "32" },
+  { code: "CH", name: "Switzerland", callingCode: "41" },
+  { code: "AT", name: "Austria", callingCode: "43" },
+  { code: "SE", name: "Sweden", callingCode: "46" },
+  { code: "NO", name: "Norway", callingCode: "47" },
+  { code: "DK", name: "Denmark", callingCode: "45" },
+  { code: "FI", name: "Finland", callingCode: "358" },
+  { code: "PL", name: "Poland", callingCode: "48" },
+  { code: "CZ", name: "Czechia", callingCode: "420" },
+  { code: "HU", name: "Hungary", callingCode: "36" },
+  { code: "RO", name: "Romania", callingCode: "40" },
+  { code: "GR", name: "Greece", callingCode: "30" },
+  { code: "UA", name: "Ukraine", callingCode: "380" },
+  { code: "BY", name: "Belarus", callingCode: "375" },
+  { code: "RU", name: "Russia", callingCode: "7" },
+  { code: "KZ", name: "Kazakhstan", callingCode: "7" },
+  { code: "TR", name: "Türkiye", callingCode: "90" },
+  { code: "IL", name: "Israel", callingCode: "972" },
+  { code: "AE", name: "United Arab Emirates", callingCode: "971" },
+  { code: "SA", name: "Saudi Arabia", callingCode: "966" },
+  { code: "EG", name: "Egypt", callingCode: "20" },
+  { code: "ZA", name: "South Africa", callingCode: "27" },
+  { code: "NG", name: "Nigeria", callingCode: "234" },
+  { code: "KE", name: "Kenya", callingCode: "254" },
+  { code: "IN", name: "India", callingCode: "91" },
+  { code: "PK", name: "Pakistan", callingCode: "92" },
+  { code: "CN", name: "China", callingCode: "86" },
+  { code: "HK", name: "Hong Kong", callingCode: "852" },
+  { code: "TW", name: "Taiwan", callingCode: "886" },
+  { code: "JP", name: "Japan", callingCode: "81" },
+  { code: "KR", name: "South Korea", callingCode: "82" },
+  { code: "SG", name: "Singapore", callingCode: "65" },
+  { code: "MY", name: "Malaysia", callingCode: "60" },
+  { code: "TH", name: "Thailand", callingCode: "66" },
+  { code: "VN", name: "Vietnam", callingCode: "84" },
+  { code: "ID", name: "Indonesia", callingCode: "62" },
+  { code: "PH", name: "Philippines", callingCode: "63" },
+  { code: "AU", name: "Australia", callingCode: "61" },
+  { code: "NZ", name: "New Zealand", callingCode: "64" },
+  { code: "BR", name: "Brazil", callingCode: "55" },
+  { code: "MX", name: "Mexico", callingCode: "52" },
+  { code: "AR", name: "Argentina", callingCode: "54" },
+  { code: "CL", name: "Chile", callingCode: "56" },
+  { code: "CO", name: "Colombia", callingCode: "57" }
+];
+
+const findSubjectQuery = {
+  /** The value to look for (an email address, card number, phone number, ...). Never stored or logged. */
+  value: z.string().min(3).max(1_000),
+  /**
+   * Read the value as this class (a value it does not parse as is refused).
+   * Without it the class comes from the value itself; a `+` number with an
+   * assigned calling code is a phone.
+   */
+  dataClass: z.enum(REPLAY_FIND_SUBJECT_CLASSES).optional(),
+  /**
+   * Phones: the country of a number typed without its country code, as an
+   * ISO code from REPLAY_FIND_SUBJECT_COUNTRIES or a calling code (`+44`).
+   * With it the number is searched as an international number; without it
+   * a number typed without a country code finds possible matches only.
+   */
+  country: z
+    .string()
+    .trim()
+    .regex(/^(?:[A-Za-z]{2}|\+\d{1,3})$/, "country is a two-letter country code or a calling code such as +44")
+    .optional()
+};
+
 /** Search: where a value is stored, raw or as its surrogate. Nothing is deleted. */
-export const replayFindSubjectSchema = z
-  .object({
-    /** The value to look for (an email address, card number, phone number, ...). Never stored or logged. */
-    value: z.string().min(3).max(1_000)
-  })
-  .strict();
+export const replayFindSubjectSchema = z.object(findSubjectQuery).strict();
+export type ReplayFindSubjectQuery = z.infer<typeof replayFindSubjectSchema>;
 
 /** Stores the lookup searches. */
 export const REPLAY_FIND_SUBJECT_KINDS = ["recording", "fixture", "eval_result", "execution", "cassette"] as const;
@@ -161,13 +246,34 @@ export const REPLAY_FIND_SUBJECT_DELETE_MAX = 2_000;
 /** Delete: the rows a search returned, by kind and id. Each is checked again against the value before it is deleted. */
 export const replayFindSubjectDeleteSchema = z
   .object({
-    value: z.string().min(3).max(1_000),
+    ...findSubjectQuery,
     targets: z
-      .array(z.object({ kind: z.enum(REPLAY_FIND_SUBJECT_KINDS), id: z.string().trim().min(1).max(200) }).strict())
+      .array(
+        z
+          .object({
+            kind: z.enum(REPLAY_FIND_SUBJECT_KINDS),
+            id: z.string().trim().min(1).max(200),
+            /**
+             * Required to delete a possible match (certainty `national_only`):
+             * the admin checked this row and confirms it holds this person's
+             * number. Without it such a row is skipped, never deleted.
+             */
+            confirmPossible: z.literal(true).optional()
+          })
+          .strict()
+      )
       .min(1)
       .max(REPLAY_FIND_SUBJECT_DELETE_MAX)
   })
   .strict();
+
+/**
+ * How sure a match is. `exact`: the same value (a phone with the same
+ * country code on both sides). `national_only`: a phone whose national
+ * digits agree but one side has no country code, so it may be someone
+ * else's number; listed as a possible match and deleted only when confirmed.
+ */
+export type ReplayFindSubjectCertainty = "exact" | "national_only";
 
 export interface ReplayFindSubjectMatch {
   kind: ReplayFindSubjectKind;
@@ -183,6 +289,8 @@ export interface ReplayFindSubjectMatch {
   fields: string[];
   /** Why it matched, so an admin can check before deleting: up to a few hits, each with a masked excerpt. */
   hits: ReplayFindSubjectHit[];
+  /** `exact` when any hit is exact; `national_only` rows are possible matches (a delete needs `confirmPossible`). */
+  certainty: ReplayFindSubjectCertainty;
 }
 
 /** One place a stored row holds the value. The excerpt is masked: the match as the guard mask shows it, digits around it hidden. */
@@ -193,6 +301,9 @@ export interface ReplayFindSubjectHit {
   /** The value's data class (null for a value searched as plain text). */
   dataClass: string | null;
   excerpt: string;
+  certainty: ReplayFindSubjectCertainty;
+  /** A possible match's stored country code, when the stored copy has one (a country code is not personal data). */
+  storedCallingCode?: string | null;
 }
 
 export interface ReplayFindSubjectResult {
@@ -204,6 +315,8 @@ export interface ReplayFindSubjectResult {
   dataClass: string | null;
   /** The data classes the value was surrogated as for the search. */
   classesTried: string[];
+  /** A phone searched with its country code (from the value or the country chosen): `1` for "Searched as phone (+1)". */
+  callingCode: string | null;
   matches: ReplayFindSubjectMatch[];
   /** Matches per store. */
   counts: Record<ReplayFindSubjectKind, number>;
@@ -220,5 +333,5 @@ export interface ReplayFindSubjectDeleteResult {
   /** Every row deleted, by kind and id (the targets, and the cases and results removed with a golden run). */
   removed: Array<{ kind: ReplayFindSubjectKind; id: string }>;
   /** Targets not deleted: gone already, or no longer holding the value. */
-  skipped: Array<{ kind: ReplayFindSubjectKind; id: string; reason: "not_found" | "no_match" }>;
+  skipped: Array<{ kind: ReplayFindSubjectKind; id: string; reason: "not_found" | "no_match" | "possible_match_unconfirmed" }>;
 }

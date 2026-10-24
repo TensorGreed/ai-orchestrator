@@ -1771,13 +1771,23 @@ export const openApiSpec = {
         parameters: [
           { name: "id", in: "path", required: true, schema: { type: "string" } },
           { name: "runStatus", in: "query", required: false, schema: { type: "string", enum: ["success", "error", "canceled"] } },
-          { name: "trigger", in: "query", required: false, schema: { type: "string" } },
+          {
+            name: "trigger",
+            in: "query",
+            required: false,
+            description: "A production trigger (webhook, cron, chat, ...), or api_key for runs an API key started on the execute routes (their trigger stays manual)",
+            schema: { type: "string" }
+          },
           { name: "from", in: "query", required: false, schema: { type: "string", format: "date-time" } },
           { name: "to", in: "query", required: false, schema: { type: "string", format: "date-time" } },
           { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 200 } },
           { name: "offset", in: "query", required: false, schema: { type: "integer", minimum: 0 } }
         ],
-        responses: { "200": { description: "{ items, total }" }, "404": { description: "Not found or not readable" }, "501": { description: "Postgres store" } }
+        responses: {
+          "200": { description: "{ items: [summary + { dataClasses, masked, source: api_key | null }], total }" },
+          "404": { description: "Not found or not readable" },
+          "501": { description: "Postgres store" }
+        }
       }
     },
     "/api/replay/captures/{id}/promote": {
@@ -1817,11 +1827,29 @@ export const openApiSpec = {
       post: {
         tags: ["Evals"],
         summary:
-          "Data-subject lookup, preview: every golden run, captured run, golden-set case, replay result, replay execution and replay cassette holding a value, raw or as its surrogate. The value's class comes from the DLP scan of the value; only stored values of that class match, whole values only (a phone only as the same full number or its exact national form, never a shared suffix). A value not recognised as a data class is matched as exact text and needs 6 characters. Deletes nothing (admins; the value is never logged or returned)",
-        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["value"], properties: { value: { type: "string", minLength: 3, maxLength: 1000 } } } } } },
+          "Data-subject lookup, preview: every golden run, captured run, golden-set case, replay result, replay execution and replay cassette holding a value, raw or as its surrogate. The value's class comes from `dataClass` when given (a value that does not parse as it is refused) or from the capture scan of the value (a `+` number with an assigned calling code is a phone); only stored values of that class match, whole values only. Each match has a certainty: `exact`, or `national_only` for a phone whose national digits agree but one side has no country code (a possible match, possibly someone else's number). `country` (ISO code or `+44`) makes a phone typed without its country code explicit; without it such a number yields possible matches only. A value not recognised as a data class is matched as exact text and needs 6 characters. Deletes nothing (admins; the value is never logged or returned)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["value"],
+                properties: {
+                  value: { type: "string", minLength: 3, maxLength: 1000 },
+                  dataClass: { type: "string", enum: ["email", "phone", "card_number", "us_ssn", "iban", "national_id"] },
+                  country: { type: "string", pattern: "^(?:[A-Za-z]{2}|\\+\\d{1,3})$" }
+                }
+              }
+            }
+          }
+        },
         responses: {
-          "200": { description: "{ dataClass, classesTried, matches: [{ kind, id, workflowId, projectId, name, status, matchedAs, fields, hits: [{ field, matchedAs, dataClass, excerpt }] }], counts, searched, covered, notCovered }" },
-          "400": { description: "Invalid value (too short for a raw search)" },
+          "200": {
+            description:
+              "{ dataClass, callingCode, classesTried, matches: [{ kind, id, workflowId, projectId, name, status, matchedAs, fields, certainty, hits: [{ field, matchedAs, dataClass, excerpt, certainty, storedCallingCode? }] }], counts, searched, covered, notCovered }; exact matches first"
+          },
+          "400": { description: "Invalid value (too short for a raw search), a value that does not parse as the requested class, or an unknown country" },
           "403": { description: "Not an admin" },
           "501": { description: "Postgres store" }
         }
@@ -1831,7 +1859,7 @@ export const openApiSpec = {
       post: {
         tags: ["Evals"],
         summary:
-          "Data-subject lookup, delete: removes the rows named in `targets` (from a preview) after checking each still holds the value with the same strict matching; a golden run takes its golden-set cases and their results with it, a run its tool-call, guard-event and usage rows. An intent audit row names every row before the first is deleted, then completion rows name every deleted id; never the value (admins)",
+          "Data-subject lookup, delete: removes the rows named in `targets` (from a preview) after checking each still holds the value with the same strict matching (same `value`, `dataClass` and `country` as the search). A row that is only a possible match (`national_only`) is skipped unless its target says `confirmPossible: true`; a golden run takes its golden-set cases and their results with it, a run its tool-call, guard-event and usage rows. An intent audit row names every row before the first is deleted, then completion rows name every deleted id; never the value (admins)",
         requestBody: {
           required: true,
           content: {
@@ -1841,11 +1869,21 @@ export const openApiSpec = {
                 required: ["value", "targets"],
                 properties: {
                   value: { type: "string", minLength: 3, maxLength: 1000 },
+                  dataClass: { type: "string", enum: ["email", "phone", "card_number", "us_ssn", "iban", "national_id"] },
+                  country: { type: "string", pattern: "^(?:[A-Za-z]{2}|\\+\\d{1,3})$" },
                   targets: {
                     type: "array",
                     minItems: 1,
                     maxItems: 2000,
-                    items: { type: "object", required: ["kind", "id"], properties: { kind: { type: "string", enum: ["recording", "fixture", "eval_result", "execution", "cassette"] }, id: { type: "string" } } }
+                    items: {
+                      type: "object",
+                      required: ["kind", "id"],
+                      properties: {
+                        kind: { type: "string", enum: ["recording", "fixture", "eval_result", "execution", "cassette"] },
+                        id: { type: "string" },
+                        confirmPossible: { type: "boolean", enum: [true], description: "Required to delete a possible match (national_only)" }
+                      }
+                    }
                   }
                 }
               }
@@ -1853,7 +1891,7 @@ export const openApiSpec = {
           }
         },
         responses: {
-          "200": { description: "{ deleted (per kind), removed: [{ kind, id }], skipped: [{ kind, id, reason: not_found | no_match }] }" },
+          "200": { description: "{ deleted (per kind), removed: [{ kind, id }], skipped: [{ kind, id, reason: not_found | no_match | possible_match_unconfirmed }] }" },
           "400": { description: "Invalid request" },
           "403": { description: "Not an admin" },
           "501": { description: "Postgres store" }

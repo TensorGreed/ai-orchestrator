@@ -3,18 +3,21 @@
  *
  * The recording is split into content parts (trigger input, every node's
  * recorded output and error, the run's output and error, every tool call's
- * arguments, every string of every MCP cassette entry (its server key, its
- * name, which is the resource URI or prompt name, arguments, result, error,
- * exchanges and any other field) and the cassette's server keys and labels,
+ * arguments, every string of every MCP cassette entry (a resource URI or
+ * prompt name, arguments, result, error, exchanges and any other field) and
+ * the cassette's server labels,
  * every model-tape entry's request, answer and error, and the memory seed's
  * sessions) and masked at once with `maskRecording` from guard-sdk: a value
  * found anywhere is replaced everywhere by its keyed surrogate. Only fields
  * that cannot hold personal data stay out (node ids and types, providers,
  * models, a cassette entry's method, sequence numbers and timings); the match
  * keys (`argsHash`, `requestHash`) are taken again over the masked content,
- * and a cassette entry's server and name are masked with the same
- * surrogates as the input, so a replay of the masked input asks for the
- * masked resource and still finds its answers.
+ * and a resource URI or prompt name is masked with the same surrogates as
+ * the input, so a replay of the masked input asks for the masked resource
+ * and still finds its answers. Routing identifiers (a server's key,
+ * registry id and adapter, an entry's server, a `tools/call` tool name) stay
+ * as written, because replay looks them up as configured; if one holds a
+ * collected value the capture is dropped (`dropped_identifier_value`).
  *
  * Values the workflow definition itself holds as whole literals are kept
  * (see `MaskRecordingOptions.keepLiteralsFrom`).
@@ -49,14 +52,47 @@ import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orches
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
 import { sha256Hex } from "./audit-bundle-service.js";
 
-/** Cassette entry fields that are not content: a method name, the order, timings, and the match key taken again after masking. */
-const CASSETTE_ENTRY_KEPT = new Set(["seq", "method", "argsHash", "at", "durationMs"]);
-/** Cassette server fields masked like content (the entries' `server` holds the same key). */
-const CASSETTE_SERVER_MASKED = ["key", "label", "registryServerId"] as const;
+/** Cassette entry fields that are not content: a method name, the order, timings, the match key taken again after masking, and the server key replay looks the entry up by. */
+const CASSETTE_ENTRY_KEPT = new Set(["seq", "method", "argsHash", "at", "durationMs", "server"]);
+/** Cassette server fields masked like content. Its `key`, `registryServerId` and `adapterId` are routing identifiers, kept as written. */
+const CASSETTE_SERVER_MASKED = ["label"] as const;
+/** Cassette server fields replay rebuilds from the live configuration: kept as written, and checked for collected values. */
+const CASSETTE_SERVER_IDENTIFIERS = ["key", "registryServerId", "adapterId"] as const;
+
+/** A `tools/call` entry's `name` is the tool name from the workflow (replay asks for it as configured); a resource URI or prompt name is content. */
+function nameIsIdentifier(entry: McpCassette["entries"][number]): boolean {
+  return entry.method === "tools/call";
+}
 
 function cassetteEntryContent(entry: McpCassette["entries"][number]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [field, value] of Object.entries(entry)) if (!CASSETTE_ENTRY_KEPT.has(field) && value !== undefined) out[field] = value;
+  for (const [field, value] of Object.entries(entry)) {
+    if (CASSETTE_ENTRY_KEPT.has(field) || value === undefined) continue;
+    if (field === "name" && nameIsIdentifier(entry)) continue;
+    out[field] = value;
+  }
+  return out;
+}
+
+/**
+ * The cassette's routing identifiers, kept as written: replay rebuilds the
+ * server key from the live configuration and asks for a tool by the name
+ * the workflow gives it, so a masked identifier would never be found. They
+ * are operator configuration (stored in plain text in the registry and the
+ * workflow); masking drops the capture if one holds a collected value.
+ */
+function cassetteIdentifiers(cassette: McpCassette): Array<{ id: string; text: string }> {
+  const out: Array<{ id: string; text: string }> = [];
+  cassette.servers.forEach((server, index) => {
+    for (const field of CASSETTE_SERVER_IDENTIFIERS) {
+      const value = server[field];
+      if (typeof value === "string" && value) out.push({ id: `cassette server ${index + 1} ${field}`, text: value });
+    }
+  });
+  cassette.entries.forEach((entry, index) => {
+    if (entry.server) out.push({ id: `cassette entry ${index + 1} server`, text: entry.server });
+    if (nameIsIdentifier(entry) && entry.name) out.push({ id: `cassette entry ${index + 1} tool name`, text: entry.name });
+  });
   return out;
 }
 
@@ -120,7 +156,8 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
     key: options.key,
     dictionaries: options.dictionaries,
     keepLiteralsFrom: options.keepLiteralsFrom,
-    visibleTailClasses: options.visibleTailClasses
+    visibleTailClasses: options.visibleTailClasses,
+    identifiers: run.cassette ? cassetteIdentifiers(run.cassette) : []
   });
   let cursor = 0;
   const next = <T>() => masked[cursor++]!.value as T;

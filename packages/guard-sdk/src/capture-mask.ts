@@ -81,8 +81,9 @@ export interface MaskRecordingOptions {
   maxDepth?: number;
   /**
    * Identifiers kept as written (replay looks them up as they are: MCP server
-   * keys, tool names). They are not masked; when one holds a collected value
-   * masking throws `MaskIdentifierError` and the caller drops the capture.
+   * keys, tool names). They are not masked; when one holds a detected or a
+   * collected value masking throws `MaskIdentifierError` and the caller drops
+   * the capture.
    */
   identifiers?: ReadonlyArray<{ id: string; text: string }>;
 }
@@ -825,13 +826,17 @@ function surrogateEdit(view: string, span: SubjectSpan, key: Uint8Array, tailCla
 }
 
 /**
- * Whether an identifier kept as written holds a collected value anywhere,
- * even glued to other characters (`lookup_jane@example.com`): stricter than
+ * Whether an identifier kept as written holds a detected value, or a
+ * collected value anywhere, even glued to other characters
+ * (`lookup_jane@example.com`): stricter than
  * the masking finder, because an identifier is never masked. A false alarm
  * only drops the capture.
  */
-function identifierHolds(index: SubjectIndex, text: string): boolean {
+function identifierHolds(index: SubjectIndex, text: string, scanOptions: Parameters<typeof scanDlp>[1]): boolean {
   const view = decodeView(text).text;
+  // A value found only in an identifier was never collected: the scan of the identifier itself counts too.
+  if (scanForCapture(view, scanOptions).some((match) => view.slice(match.span.start, match.span.end).trim())) return true;
+  if (index.size === 0) return false;
   if (index.find(view).length > 0) return true;
   const lower = view.toLowerCase();
   const digitsOnly = view.replace(/\D/g, "");
@@ -955,7 +960,7 @@ export function* maskRecordingSteps(parts: readonly MaskPart[], options: MaskRec
   }
   // Identifiers stay as written: none may hold a collected value.
   for (const identifier of options.identifiers ?? []) {
-    if (index.size > 0 && identifier.text && identifierHolds(index, identifier.text)) {
+    if (identifier.text && identifierHolds(index, identifier.text, scanOptions)) {
       throw new MaskIdentifierError(`A detected value appears in ${identifier.id}, which is kept as written for replay.`);
     }
   }

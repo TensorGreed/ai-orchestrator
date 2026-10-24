@@ -276,13 +276,19 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
       return { error: quietIssue(parsed.error) };
     }
     try {
-      const result = await captures.findSubject(parsed.data.value);
+      const result = await captures.findSubject(parsed.data);
       deps.audit(request, user, {
         eventType: "replay.find_subject.searched",
         category: "system",
         action: "read",
         resourceType: "replay_recording",
-        metadata: { classesTried: result.classesTried, matches: result.matches.length, counts: result.counts }
+        metadata: {
+          classesTried: result.classesTried,
+          callingCode: result.callingCode,
+          matches: result.matches.length,
+          possibleMatches: result.matches.filter((match) => match.certainty !== "exact").length,
+          counts: result.counts
+        }
       });
       return result;
     } catch (error) {
@@ -316,8 +322,11 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
           });
         }
       };
-      const result = await captures.deleteSubject(parsed.data.value, parsed.data.targets, {
-        beforeDelete: (rows) => writeRows("replay.find_subject.delete_started", rows, { rows: rows.length })
+      const { targets, ...query } = parsed.data;
+      const result = await captures.deleteSubject(query, targets, {
+        // Possible matches deleted only because the admin confirmed each one are counted apart in the trail.
+        beforeDelete: (rows) =>
+          writeRows("replay.find_subject.delete_started", rows, { rows: rows.length, confirmedPossible: rows.filter((row) => row.certainty !== "exact").length })
       });
       writeRows("replay.find_subject.deleted", result.removed, { deleted: result.deleted, skipped: result.skipped.length });
       return result;

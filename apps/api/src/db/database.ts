@@ -47,7 +47,7 @@ import type {
   ReplayCaptureStatus,
   ReplayGoldenBadge
 } from "@ai-orchestrator/shared";
-import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
+import { DEFAULT_MCP_SAMPLING_SETTINGS, DEFAULT_PROJECT_ID, MCP_POLICY_KINDS, MCP_POLICY_ROLES, MCP_TOOL_HINT_CONDITIONS, REPLAY_CAPTURE_API_KEY_FILTER, REPLAY_CAPTURE_STATUSES } from "@ai-orchestrator/shared";
 import {
   normalizeMcpRuntimeLimits,
   normalizeMcpSandboxSettings,
@@ -1451,7 +1451,8 @@ function mapReplayCaptureInfo(raw: Partial<ReplayCaptureInfo>): ReplayCaptureInf
     values: counts,
     notDetectableAfterMasking: strings(raw.notDetectableAfterMasking),
     keptFromWorkflow: typeof raw.keptFromWorkflow === "number" ? raw.keptFromWorkflow : 0,
-    publishedVersion: typeof raw.publishedVersion === "number" ? raw.publishedVersion : null
+    publishedVersion: typeof raw.publishedVersion === "number" ? raw.publishedVersion : null,
+    ...(raw.source === "api_key" ? { source: "api_key" as const } : {})
   };
 }
 
@@ -11279,7 +11280,10 @@ export class SqliteStore {
       where.push("source_status = ?");
       params.push(options.runStatus);
     }
-    if (options.trigger) {
+    if (options.trigger === REPLAY_CAPTURE_API_KEY_FILTER) {
+      // Runs an API key started keep the trigger `manual`; the capture info records the source.
+      where.push("json_extract(capabilities_json, '$.capture.source') = 'api_key'");
+    } else if (options.trigger) {
       where.push("source_trigger_type = ?");
       params.push(options.trigger);
     }

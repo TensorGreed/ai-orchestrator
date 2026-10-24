@@ -110,6 +110,8 @@ export interface CaptureOptions {
   rate: number;
   publishedVersion: number | null;
   capturedAt: string;
+  /** `api_key`: an API key started the run (server-set where the run started; stored on the capture info). */
+  source?: "api_key";
   /** Where the run's input came from (labels); decided by the server where the run started. */
   inputProvenance: ProvenanceLabel;
   /** Called once the candidate is built and checked, right before it is saved (eviction makes room here). Throw to drop it. */
@@ -390,7 +392,8 @@ export class ReplayRecordingService {
         values: masked ? { ...masked.report.values } : {},
         notDetectableAfterMasking: masked ? masked.report.notDetectableAfterMasking : [],
         keptFromWorkflow: masked ? masked.report.keptFromWorkflow : 0,
-        publishedVersion: capture.publishedVersion
+        publishedVersion: capture.publishedVersion,
+        ...(capture.source === "api_key" ? { source: "api_key" as const } : {})
       };
     }
 

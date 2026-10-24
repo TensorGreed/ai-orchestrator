@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { canonicalJson, type McpCassette, type ModelMemorySeed, type ModelTape, type RunFacts } from "@ai-orchestrator/shared";
-import { surrogateFor } from "@ai-orchestrator/guard-sdk";
+import { MaskIdentifierError, surrogateFor } from "@ai-orchestrator/guard-sdk";
 import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orchestrator/mcp-sdk";
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
 import { sha256Hex } from "./audit-bundle-service.js";
@@ -109,16 +109,16 @@ describe("maskCapturedRun", () => {
   });
 
   // Re-review N1: a resource URI (the cassette entry's `name`) held the raw email.
-  it("masks a cassette entry's name (resource URI), server key and every other string, and a replay of the masked input asks for the masked URI", () => {
+  it("masks a resource URI and a server label; a replay of the masked input asks for the masked URI on the unmasked server", () => {
     const base: CapturedRunParts = run();
     const uri = `crm://customers/${EMAIL}/profile`;
     base.cassette = {
       ...base.cassette!,
-      servers: [{ key: `inline:http-mcp:${EMAIL}`, adapterId: "http-mcp", label: `CRM for ${EMAIL}` }],
+      servers: [{ key: "registry:crm", registryServerId: "crm", adapterId: "http-mcp", label: `CRM for ${EMAIL}` }],
       entries: [
         {
           seq: 1,
-          server: `inline:http-mcp:${EMAIL}`,
+          server: "registry:crm",
           method: "resources/read",
           name: uri,
           argsHash: "stale",
@@ -134,9 +134,34 @@ describe("maskCapturedRun", () => {
     const entry = masked.cassette!.entries[0]!;
     // The workflow resolves the URI from the (masked) input, so a replay asks for exactly this name.
     expect(entry.name).toBe(`crm://customers/${surrogate}/profile`);
-    expect(entry.server).toBe(masked.cassette!.servers[0]!.key);
-    expect(masked.cassette!.servers[0]).toMatchObject({ adapterId: "http-mcp", label: `CRM for ${surrogate}` });
+    // Routing identifiers stay as written: replay rebuilds the server key from the live configuration.
+    expect(entry.server).toBe("registry:crm");
+    expect(masked.cassette!.servers[0]).toMatchObject({ key: "registry:crm", registryServerId: "crm", adapterId: "http-mcp", label: `CRM for ${surrogate}` });
     expect(entry).toMatchObject({ seq: 1, method: "resources/read", at: 0, durationMs: 1 });
+  });
+
+  it("round 3 A3: keeps server keys and tool names as written, and drops the capture when one holds a collected value", () => {
+    const dictionaries = [{ dataClass: "codename", terms: ["atlas"], patterns: [], score: 0.9 }];
+    const clean: CapturedRunParts = run();
+    clean.cassette = {
+      ...clean.cassette!,
+      servers: [{ key: "registry:crm-main", registryServerId: "crm-main", adapterId: "http-mcp", label: "CRM" }],
+      entries: [{ seq: 1, server: "registry:crm-main", method: "tools/call", name: "crm_search", args: { email: EMAIL }, argsHash: "stale", at: 0, durationMs: 1 }]
+    } as McpCassette;
+    const masked = maskCapturedRun(clean, { key, dictionaries });
+    expect(masked.cassette!.entries[0]).toMatchObject({ server: "registry:crm-main", name: "crm_search" });
+    expect(masked.cassette!.servers[0]).toMatchObject({ key: "registry:crm-main", registryServerId: "crm-main" });
+    expect(JSON.stringify(masked)).not.toContain(EMAIL);
+
+    // A dictionary term the input holds also names the server and the tool: kept identifiers would show it, so the capture is dropped.
+    const leaky: CapturedRunParts = run();
+    leaky.input = { user_prompt: "ask atlas about it" };
+    leaky.cassette = {
+      ...leaky.cassette!,
+      servers: [{ key: "registry:atlas", registryServerId: "atlas", adapterId: "http-mcp" }],
+      entries: [{ seq: 1, server: "registry:atlas", method: "tools/call", name: "atlas_search", args: { q: "x" }, argsHash: "stale", at: 0, durationMs: 1 }]
+    } as McpCassette;
+    expect(() => maskCapturedRun(leaky, { key, dictionaries })).toThrow(MaskIdentifierError);
   });
 
   it("finds the value only in a resource URI and masks it there and everywhere else", () => {
@@ -170,6 +195,11 @@ describe("maskCapturedRun", () => {
               : `x ${value} y`;
         base.input = { user_prompt: "nothing here" };
         base.cassette = { ...base.cassette!, servers: [{ key: "crm", adapterId: "mock-mcp", label: field === "server" ? `crm ${value}` : "crm" }], entries: [entry] } as unknown as McpCassette;
+        // The entry's server and a tool name are kept as written: a value in one drops the capture instead.
+        if (field === "server" || field === "name") {
+          expect(() => maskCapturedRun(base, { key, dictionaries: [] }), `${field}: ${value}`).toThrow(MaskIdentifierError);
+          continue;
+        }
         const masked = maskCapturedRun(base, { key, dictionaries: [] });
         const stored = JSON.stringify(masked.cassette);
         expect(stored, `${field}: ${value}`).not.toContain(value);

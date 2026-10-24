@@ -433,6 +433,27 @@ describe("sampling and limits", () => {
     }
     expect(manual.items.map((item) => item.id)).toEqual(expect.arrayContaining(captured.filter((id) => context.store.getExecutionHistory(id!)!.triggerType === "manual")));
     expect((await call(context, "GET", "/api/executions?triggerType=api_execute", builder.cookie)).json<{ items: unknown[] }>().items).toEqual([]);
+
+    // Ruling (b): the recording says an API key started it; the inbox filters on that, not on the trigger.
+    expect(items.every((item) => item.source === "api_key" && item.capabilities.capture?.source === "api_key")).toBe(true);
+    expect((await inbox(context, builder.cookie, "wf-api", "?trigger=api_key")).total).toBe(2);
+    expect((await inbox(context, builder.cookie, "wf-api", "?trigger=webhook")).total).toBe(0);
+    save(context, hookWorkflow("wf-api-hook"));
+    await enableCapture(context, builder.cookie, "wf-api-hook");
+    await hook(context, "wf-api-hook", { user_prompt: "from a webhook" });
+    const [webhookCapture] = await waitForCaptures(context, builder.cookie, "wf-api-hook", 1);
+    expect(webhookCapture!.source).toBeNull();
+    expect((await inbox(context, builder.cookie, "wf-api-hook", "?trigger=api_key")).total).toBe(0);
+    // A golden-set file never carries the source back in: an import drops it.
+    const promoted = await call(context, "POST", `/api/replay/captures/${items[0]!.id}/promote`, builder.cookie, {});
+    expect(promoted.statusCode, promoted.body).toBe(200);
+    const datasetId = promoted.json<{ result: { datasetId: string } }>().result.datasetId;
+    const file = (await call(context, "GET", `/api/eval/datasets/${datasetId}/export`, builder.cookie)).json<{ cases: Array<{ recording: { capture?: Record<string, unknown> } }> }>();
+    file.cases[0]!.recording.capture = { ...file.cases[0]!.recording.capture, source: "api_key" };
+    const imported = await call(context, "POST", "/api/eval/datasets/import", builder.cookie, { file, workflowId: "wf-api", name: "Imported API-key run" });
+    expect(imported.statusCode, imported.body).toBe(201);
+    const importedId = context.store.listEvalFixtures(imported.json<{ dataset: { id: string } }>().dataset.id)[0]!.recordingId!;
+    expect(context.store.getReplayRecording(importedId)!.capabilities.capture?.source).toBeUndefined();
   });
 
   it("a run that pauses for approval keeps nothing and frees its slot; its resume is never captured", async () => {
@@ -1015,16 +1036,27 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
       expect(match.hits[0]!.excerpt).toMatch(/34\]/);
     }
 
-    // Delete: bystanders named as targets are re-checked with the same strict test and skipped.
+    // Round 3: only the copy written with its country code is certain; the national forms are possible matches, listed after it.
+    expect(found.matches.map((match) => match.certainty)).toEqual(["exact", "national_only", "national_only"]);
+    expect(found.matches[0]!.id).toBe(own[0]);
+
+    // Delete: bystanders named as targets are re-checked with the same strict test and skipped; possible matches need a confirmation each.
     const removed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
       value: "+1 415-555-1234",
       targets: [...own, ...bystanders].map((id) => ({ kind: "recording", id }))
     });
     expect(removed.statusCode, removed.body).toBe(200);
     const outcome = removed.json<ReplayFindSubjectDeleteResult>();
-    expect(outcome.deleted.recording).toBe(3);
-    expect(outcome.skipped.map((entry) => entry.id).sort()).toEqual([...bystanders].sort());
-    expect(outcome.skipped.every((entry) => entry.reason === "no_match")).toBe(true);
+    expect(outcome.deleted.recording).toBe(1);
+    expect(outcome.removed).toEqual([{ kind: "recording", id: own[0] }]);
+    expect(outcome.skipped.filter((entry) => entry.reason === "no_match").map((entry) => entry.id).sort()).toEqual([...bystanders].sort());
+    expect(outcome.skipped.filter((entry) => entry.reason === "possible_match_unconfirmed").map((entry) => entry.id).sort()).toEqual([own[1], own[2]].sort());
+    for (const id of [...bystanders, own[1]!, own[2]!]) expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
+    const confirmed = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, {
+      value: "+1 415-555-1234",
+      targets: [own[1], own[2]].map((id) => ({ kind: "recording", id, confirmPossible: true }))
+    });
+    expect(confirmed.json<ReplayFindSubjectDeleteResult>().deleted.recording).toBe(2);
     for (const id of bystanders) expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
   });
 
@@ -1274,4 +1306,232 @@ describe("re-review round 2: lookup precision, lifecycle, audit and import trust
     const again = (await call(context, "GET", `/api/eval/datasets/${importedSet}/export`, builder.cookie)).json<typeof file>();
     expect(again.cases[0]!.recording.capture).toMatchObject({ masked: false });
   });
+});
+
+describe("re-review round 3: lookup certainty, hints, international phones, kept identifiers", () => {
+  async function handSaved(context: TestContext, cookie: string, workflowId: string, prompt: string): Promise<string> {
+    const run = await call(context, "POST", `/api/workflows/${workflowId}/execute`, cookie, { input: { user_prompt: prompt } });
+    const saved = await call(context, "POST", "/api/replay/recordings", cookie, { executionId: run.json<{ executionId: string }>().executionId, name: prompt.slice(0, 40) });
+    expect(saved.statusCode, saved.body).toBe(201);
+    return saved.json<{ recording: ReplayRecordingSummary }>().recording.id;
+  }
+  const find = async (context: TestContext, cookie: string, body: Record<string, unknown>) => {
+    const response = await call(context, "POST", "/api/replay/recordings/find-subject", cookie, body);
+    expect(response.statusCode, response.body).toBe(200);
+    return response.json<ReplayFindSubjectResult>();
+  };
+  const erase = async (context: TestContext, cookie: string, body: Record<string, unknown>) => {
+    const response = await call(context, "POST", "/api/replay/recordings/find-subject/delete", cookie, body);
+    expect(response.statusCode, response.body).toBe(200);
+    return response.json<ReplayFindSubjectDeleteResult>();
+  };
+
+  it("A1: every re-review 2 over-match is a possible match or no match, never exact, and never deleted without a confirmation", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-a1"));
+    const rows: Array<[string, string, "national_only" | null]> = [
+      ["+44 20 7946 0958", "call (207) 946-0958", "national_only"],
+      ["+1 (207) 946-0958", "ring 020 7946 0958", "national_only"],
+      ["(415) 555-1234", "fr +33 415 555 1234", "national_only"],
+      ["(415) 555-1234", "de +49 415 555 1234", "national_only"],
+      ["(207) 946-0958", "uk 44 207 946 0958", null],
+      ["020 7946 0958", "us (207) 946-0958", "national_only"],
+      ["020 7946 0958", "us +1 207 946 0958", "national_only"],
+      ["415-555-1234", "ids 7 415 555 1234", null],
+      ["415-555-1234", "ids 86 415 555 1234", null]
+    ];
+    for (const [query, stored, expected] of rows) {
+      const id = await handSaved(context, builder.cookie, "wf-a1", stored);
+      const result = await find(context, admin.cookie, { value: query });
+      const match = result.matches.find((entry) => entry.id === id);
+      expect(result.matches.some((entry) => entry.certainty === "exact"), `${query} vs ${stored}`).toBe(false);
+      expect(match?.certainty ?? null, `${query} vs ${stored}`).toBe(expected);
+      if (match) {
+        expect(match.hits.every((hit) => hit.certainty === "national_only")).toBe(true);
+        // The stored copy's own country code is shown, so the admin can see it is someone else's.
+        if (stored.includes("+33")) expect(match.hits[0]!.storedCallingCode).toBe("33");
+        // Delete without a confirmation keeps it.
+        const outcome = await erase(context, admin.cookie, { value: query, targets: [{ kind: "recording", id }] });
+        expect(outcome.deleted.recording).toBe(0);
+        expect(outcome.skipped).toEqual([{ kind: "recording", id, reason: "possible_match_unconfirmed" }]);
+        expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
+      }
+      context.store.deleteReplayRecording(id);
+    }
+    // The intent audit row counts confirmed possible matches apart.
+    const id = await handSaved(context, builder.cookie, "wf-a1", "call (207) 946-0958");
+    expect((await erase(context, admin.cookie, { value: "+44 20 7946 0958", targets: [{ kind: "recording", id, confirmPossible: true }] })).deleted.recording).toBe(1);
+    const started = context.store.listAuditLogs({ pageSize: 200 }).items.find((entry) => entry.eventType === "replay.find_subject.delete_started")!;
+    expect(started.metadata).toMatchObject({ rows: 1, confirmedPossible: 1 });
+  }, 60_000);
+
+  it("ruling (a): a class hint and a country; refusals are plain and never repeat the value", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-hint"));
+    const intl = await handSaved(context, builder.cookie, "wf-hint", "call +1 415 555 1234");
+    const national = await handSaved(context, builder.cookie, "wf-hint", "call (415) 555-1234");
+    const other = await handSaved(context, builder.cookie, "wf-hint", "call +33 415 555 1234");
+    const raw = await handSaved(context, builder.cookie, "wf-hint", "ref 4155551234 on file");
+
+    // No hint: bare digits are text, matched exactly as typed.
+    const text = await find(context, admin.cookie, { value: "4155551234" });
+    expect(text).toMatchObject({ dataClass: null, callingCode: null });
+    expect(text.matches.map((match) => match.id)).toEqual([raw]);
+    // A `+` number with an assigned calling code is a phone without a hint (E.164, no separators).
+    const e164 = await find(context, admin.cookie, { value: "+14155551234" });
+    expect(e164).toMatchObject({ dataClass: "phone", callingCode: "1" });
+    expect(e164.matches.find((match) => match.id === intl)?.certainty).toBe("exact");
+    // Read as a phone, no country: possible matches only.
+    const plain = await find(context, admin.cookie, { value: "4155551234", dataClass: "phone" });
+    expect(plain).toMatchObject({ dataClass: "phone", callingCode: null });
+    expect(plain.matches.map((match) => match.id).sort()).toEqual([intl, national, other, raw].sort());
+    expect(plain.matches.every((match) => match.certainty === "national_only")).toBe(true);
+    // With a country: the +1 copy is exact, +33 is someone else, the national copies stay possible.
+    const us = await find(context, admin.cookie, { value: "4155551234", dataClass: "phone", country: "US" });
+    expect(us).toMatchObject({ dataClass: "phone", callingCode: "1" });
+    const certainty = Object.fromEntries(us.matches.map((match) => [match.id, match.certainty]));
+    expect(certainty).toEqual({ [intl]: "exact", [national]: "national_only", [raw]: "national_only" });
+    expect((await find(context, admin.cookie, { value: "(415) 555-1234", country: "+1" })).callingCode).toBe("1");
+    // A country alone makes bare digits a phone.
+    expect((await find(context, admin.cookie, { value: "4155551234", country: "US" })).dataClass).toBe("phone");
+
+    const refused = async (body: Record<string, unknown>, message: RegExp) => {
+      for (const route of ["/api/replay/recordings/find-subject", "/api/replay/recordings/find-subject/delete"]) {
+        const response = await call(context, "POST", route, admin.cookie, route.endsWith("delete") ? { ...body, targets: [{ kind: "recording", id: intl }] } : body);
+        expect(response.statusCode, `${route} ${JSON.stringify(body)}`).toBe(400);
+        expect(response.json<{ error: string }>().error).toMatch(message);
+        expect(response.body).not.toContain(String(body.value));
+      }
+    };
+    await refused({ value: "call me 41", dataClass: "phone" }, /does not read as a phone number/);
+    await refused({ value: "4155551234", dataClass: "email" }, /does not read as an email address/);
+    await refused({ value: "123-45-678", dataClass: "us_ssn" }, /does not read as a US Social Security number/);
+    await refused({ value: "4155551234", dataClass: "phone", country: "ZZ" }, /country is not one the lookup knows/);
+    await refused({ value: "jane.doe@example.com", country: "US" }, /phone numbers only/);
+    await refused({ value: "+44 20 7946 0958", country: "US" }, /own country code is not the country chosen/);
+    expect((await call(context, "POST", "/api/replay/recordings/find-subject", admin.cookie, { value: "4155551234", country: "United States" })).statusCode).toBe(400);
+    expect(context.store.getReplayRecordingSummary(intl)).not.toBeNull();
+  }, 60_000);
+
+  it("A2: an E.164 or international number the DLP pattern does not read is masked in a capture and found by the lookup", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-intl"));
+    await enableCapture(context, builder.cookie, "wf-intl", { maxPerDay: 20 });
+    const numbers: Array<[string, string]> = [
+      ["+14155551234", "4155551234"],
+      ["+447700900123", "7700900123"],
+      ["+33 1 23 45 67 89", "123456789"],
+      ["+44 (0) 20 7946 0958", "2079460958"],
+      ["+61 2 9876 5432", "298765432"],
+      ["+91 98765 43210", "9876543210"],
+      ["+81 3-1234-5678", "312345678"],
+      ["+353 1 234 5678", "12345678"],
+      ["+36 1 234 5678", "12345678"],
+      ["+7 495 123-45-67", "4951234567"]
+    ];
+    for (const [written] of numbers) await hook(context, "wf-intl", { crm: { phone: written } });
+    const items = await waitForCaptures(context, builder.cookie, "wf-intl", numbers.length);
+    for (const item of items) {
+      expect(item.dataClasses).toContain("phone");
+      const stored = rawRecordingText(context, item.id).replace(/\D/g, "");
+      for (const [, national] of numbers) expect(stored).not.toContain(national);
+    }
+    for (const [written] of numbers) {
+      const result = await find(context, admin.cookie, { value: written });
+      expect(result.dataClass, written).toBe("phone");
+      const exact = result.matches.filter((match) => match.certainty === "exact");
+      expect(exact.map((match) => match.matchedAs), written).toEqual([["phone"]]);
+    }
+  }, 60_000);
+
+  it("A3: a captured run whose tool argument and resource URI hold an email replays with strict MCP matching", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const created = await call(context, "POST", "/api/mcp/servers", admin.cookie, {
+      name: "Mock CRM",
+      adapterId: "mock-mcp",
+      probeEnabled: false,
+      connection: { kbOverrides: { [EMAIL]: "Profile on file." } }
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const serverId = created.json<{ server: { id: string } }>().server.id;
+    expect((await call(context, "POST", `/api/mcp/servers/${serverId}/probe`, admin.cookie)).statusCode).toBe(200);
+    save(context, {
+      id: "wf-mcp",
+      name: "CRM lookup",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        node("hook", "webhook_input", { path: "hook-wf-mcp", method: "POST" }),
+        node("tool", "mcp_tool", { registryServerId: serverId, toolName: "lookup_kb", argsTemplate: JSON.stringify({ topic: "{{user_prompt}}" }), retry: { enabled: false } }, 150),
+        node("profile", "mcp_tool", { registryServerId: serverId, operation: "read_resource", resourceUri: "mock://kb/{{user_prompt}}", retry: { enabled: false } }, 300),
+        node("out", "output", { responseTemplate: "done" }, 450)
+      ],
+      edges: [
+        { id: "e1", source: "hook", target: "tool" },
+        { id: "e2", source: "tool", target: "profile" },
+        { id: "e3", source: "profile", target: "out" }
+      ]
+    } as Workflow);
+    await enableCapture(context, builder.cookie, "wf-mcp");
+    const response = await hook(context, "wf-mcp", { user_prompt: EMAIL });
+    expect(response.statusCode, response.body).toBe(200);
+    const [captured] = await waitForCaptures(context, builder.cookie, "wf-mcp", 1);
+    expect(captured!.capabilities).toMatchObject({ mcp: "cassette" });
+    const text = rawRecordingText(context, captured!.id);
+    expect(text).not.toContain(EMAIL);
+    const recording = context.store.getReplayRecording(captured!.id)!;
+    const cassette = recording.mcpCassette!;
+    const surrogate = surrogateFor(EMAIL, "email", SURROGATE_KEY);
+    // Routing identifiers as written; the resource URI and the arguments masked.
+    expect(cassette.servers[0]!.key).toBe(`registry:${serverId}`);
+    const call1 = cassette.entries.find((entry) => entry.method === "tools/call")!;
+    expect(call1).toMatchObject({ server: `registry:${serverId}`, name: "lookup_kb" });
+    expect(JSON.stringify(call1.args)).toContain(surrogate);
+    expect(cassette.entries.find((entry) => entry.method === "resources/read")!.name).toBe(`mock://kb/${surrogate}`);
+
+    const promoted = await call(context, "POST", `/api/replay/captures/${captured!.id}/promote`, builder.cookie, {});
+    expect(promoted.statusCode, promoted.body).toBe(200);
+    const datasetId = promoted.json<{ result: { datasetId: string } }>().result.datasetId;
+    const job = await runJob(context, builder.cookie, { datasetIds: [datasetId], mcpMode: "strict" });
+    expect(job.status, job.error ?? "").toBe("completed");
+    expect(job.results.map((result) => [result.status, result.error ?? null])).toEqual([["pass", null]]);
+  }, 60_000);
+
+  it("A4 and A5: Hungarian and Russian national forms are possible matches; an excerpt starts at the bracket", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-trunk"));
+    const hu = await handSaved(context, builder.cookie, "wf-trunk", "call 06 1 234 5678");
+    const ru = await handSaved(context, builder.cookie, "wf-trunk", "call 8 (495) 123-45-67");
+    const us = await handSaved(context, builder.cookie, "wf-trunk", "call (207) 946-0958");
+    const huFound = await find(context, admin.cookie, { value: "+36 1 234 5678" });
+    expect(huFound.matches.map((match) => [match.id, match.certainty])).toEqual([[hu, "national_only"]]);
+    const ruFound = await find(context, admin.cookie, { value: "+7 495 123 4567" });
+    expect(ruFound.matches.map((match) => [match.id, match.certainty])).toEqual([[ru, "national_only"]]);
+    const usFound = await find(context, admin.cookie, { value: "+1 207 946 0958" });
+    const hit = usFound.matches.find((match) => match.id === us)!.hits[0]!;
+    expect(hit.excerpt).toContain("[(");
+    expect(hit.excerpt).not.toContain("946");
+
+    // Masked captures: the national form written with a two-digit trunk gets the same surrogate, so the lookup finds both copies.
+    save(context, hookWorkflow("wf-trunk-cap"));
+    await enableCapture(context, builder.cookie, "wf-trunk-cap");
+    await hook(context, "wf-trunk-cap", { user_prompt: "call +36 30 123 4567", note: "or 06 30 123 4567" });
+    const [captured] = await waitForCaptures(context, builder.cookie, "wf-trunk-cap", 1);
+    expect(rawRecordingText(context, captured!.id).replace(/\D/g, "")).not.toContain("301234567");
+    const capFound = await find(context, admin.cookie, { value: "+36 30 123 4567" });
+    const match = capFound.matches.find((entry) => entry.id === captured!.id)!;
+    expect(match.certainty).toBe("exact");
+    expect(match.hits.some((entry) => entry.certainty === "national_only")).toBe(true);
+  }, 60_000);
 });

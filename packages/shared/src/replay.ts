@@ -394,6 +394,12 @@ export interface ReplayCaptureInfo {
   keptFromWorkflow: number;
   /** The published version the run ran, when the workflow has one. */
   publishedVersion: number | null;
+  /**
+   * `api_key`: an API key started the run on the execute routes (its trigger
+   * stays `manual`). Set by the server where the run started; a golden-set
+   * import drops it.
+   */
+  source?: "api_key";
 }
 
 export interface ReplayScrubbedValues {
