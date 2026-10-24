@@ -56,9 +56,10 @@ export function changeLabel(change: GuardSimulationChange): string {
   return CHANGE_LABELS[change];
 }
 
-/** "guard · prompt" (and "#2" when the place checked more than once). */
-export function checkpointPlace(checkpoint: Pick<GuardSimulationCheckpoint, "nodeId" | "channel" | "occurrence">): string {
-  const base = `${checkpoint.nodeId ?? "run"} · ${checkpoint.channel.replace(/_/g, " ")}`;
+/** "Prompt guard · prompt" (the node's name when known; "#2" when the place checked more than once; the agent's tool when it has one). */
+export function checkpointPlace(checkpoint: Pick<GuardSimulationCheckpoint, "nodeId" | "nodeName" | "channel" | "occurrence" | "toolName">): string {
+  const node = checkpoint.nodeName || checkpoint.nodeId || "run";
+  const base = `${node} · ${checkpoint.channel.replace(/_/g, " ")}${checkpoint.toolName ? ` (${checkpoint.toolName})` : ""}`;
   return checkpoint.occurrence > 1 ? `${base} #${checkpoint.occurrence}` : base;
 }
 
@@ -84,4 +85,25 @@ export function topTallies(tallies: Record<string, GuardSimulationTally>, limit 
 
 export function simulationFinished(view: Pick<GuardSimulationView, "status"> | null | undefined): boolean {
   return Boolean(view && view.status !== "running");
+}
+
+/** Delay before the n-th retry (1-based) of a failed poll: 2 s, 4 s, 8 s, … capped at 30 s. */
+export function pollRetryDelay(attempt: number, baseMs = 2000): number {
+  return Math.min(30_000, baseMs * 2 ** Math.max(0, attempt - 1));
+}
+
+/** Failed polls in a row before the card stops and offers a retry. */
+export const POLL_MAX_RETRIES = 5;
+
+/**
+ * Why this user may not simulate the profile (a plain tooltip), or null when
+ * they may. The same rule as saving: admins, and builders on profiles that
+ * are neither built-in nor enforced on a project.
+ */
+export function simulateDenial(role: string, profile: { builtIn: boolean; enforced?: boolean }): string | null {
+  if (role === "admin") return null;
+  if (role !== "builder") return "Only admins and builders can simulate guard profile changes.";
+  if (profile.builtIn) return "The built-in profile is read-only: only an admin can simulate changes to it. Duplicate it to simulate your own.";
+  if (profile.enforced) return "A project enforces this profile: only an admin can change or simulate it.";
+  return null;
 }

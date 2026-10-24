@@ -2,11 +2,13 @@
  * Phase 15.6 — "Simulate on recent traffic" in the guard profile editor.
  *
  * One button next to Save replays the most recent recorded runs of the
- * workflows that use this profile under the editor's current (unsaved)
- * document, with model calls from each run's tape, and shows one plain
- * sentence first ("Across 50 recent runs in 4 workflows: 3 newly blocked,
- * 7 now masked, 0 no longer blocked"), the detail behind a disclosure.
- * Advanced: simulate a saved version instead. Only profile editors see it.
+ * workflows that use this profile twice, model calls from each run's tape:
+ * under the current profile and under the editor's current (unsaved)
+ * document, and shows one plain sentence first ("Across 50 recent runs in
+ * 4 workflows: 3 newly blocked, 7 now masked, 0 no longer blocked"), the
+ * detail behind a disclosure. Advanced: simulate a saved version instead.
+ * Only profile editors can use it; others see it disabled with the reason.
+ * A failed poll is retried with backoff, then the card offers Retry.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -18,6 +20,8 @@ import {
   checkpointPlace,
   divergenceText,
   notableCases,
+  POLL_MAX_RETRIES,
+  pollRetryDelay,
   simulationFinished,
   simulationWorkflowRows,
   topTallies
@@ -37,11 +41,15 @@ function issuesOf(err: unknown): GuardFieldIssue[] {
 }
 
 /** The button that sits next to Save, and the card under the save row. */
-export function useGuardSimulation(profileId: string) {
+export function useGuardSimulation(profileId: string, options: { pollMs?: number; retryBaseMs?: number } = {}) {
+  const pollMs = options.pollMs ?? POLL_MS;
+  const retryBaseMs = options.retryBaseMs;
   const [simulation, setSimulation] = useState<GuardSimulationView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<GuardFieldIssue[]>([]);
+  /** Set when polling gave up after retries: the simulation may still be running on the server. */
+  const [lost, setLost] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(
@@ -51,25 +59,44 @@ export function useGuardSimulation(profileId: string) {
     []
   );
 
-  const poll = useCallback((id: string) => {
-    timer.current = setTimeout(async () => {
-      try {
-        const response = await fetchGuardSimulation(id);
-        setSimulation(response.simulation);
-        if (simulationFinished(response.simulation)) setBusy(false);
-        else poll(id);
-      } catch (err) {
-        setError(errorText(err));
-        setBusy(false);
-      }
-    }, POLL_MS);
-  }, []);
+  const poll = useCallback(
+    (id: string, failures = 0) => {
+      const delay = failures === 0 ? pollMs : pollRetryDelay(failures, retryBaseMs);
+      timer.current = setTimeout(async () => {
+        try {
+          const response = await fetchGuardSimulation(id);
+          setLost(null);
+          setSimulation(response.simulation);
+          if (simulationFinished(response.simulation)) setBusy(false);
+          else poll(id);
+        } catch (err) {
+          // A network blip or a deploy: try again a few times, then offer Retry (the simulation keeps running on the server).
+          if (failures < POLL_MAX_RETRIES) {
+            poll(id, failures + 1);
+            return;
+          }
+          setLost(`Lost touch with the simulation (${errorText(err)}). It may still be running.`);
+          setBusy(false);
+        }
+      }, delay);
+    },
+    [pollMs, retryBaseMs]
+  );
+
+  const retry = useCallback(() => {
+    if (!simulation) return;
+    if (timer.current) clearTimeout(timer.current);
+    setLost(null);
+    setBusy(true);
+    poll(simulation.id);
+  }, [poll, simulation]);
 
   const start = useCallback(
     async (payload: { document: Record<string, unknown> } | { version: number }) => {
       if (timer.current) clearTimeout(timer.current);
       setBusy(true);
       setError(null);
+      setLost(null);
       setIssues([]);
       try {
         const response = await simulateGuardProfile(profileId, payload);
@@ -85,7 +112,7 @@ export function useGuardSimulation(profileId: string) {
     [poll, profileId]
   );
 
-  return { simulation, busy, error, issues, start };
+  return { simulation, busy, error, issues, lost, start, retry };
 }
 
 export function GuardSimulationCard({
@@ -93,22 +120,26 @@ export function GuardSimulationCard({
   busy,
   error,
   issues,
+  lost,
   versions,
-  onSimulateVersion
+  onSimulateVersion,
+  onRetry
 }: {
   simulation: GuardSimulationView | null;
   busy: boolean;
   error: string | null;
   issues: GuardFieldIssue[];
+  lost?: string | null;
   versions: GuardProfileVersionView[];
   onSimulateVersion: (version: number) => void;
+  onRetry?: () => void;
 }) {
   const [version, setVersion] = useState<number | null>(versions[0]?.version ?? null);
   useEffect(() => {
     setVersion((current) => current ?? versions[0]?.version ?? null);
   }, [versions]);
 
-  if (!simulation && !busy && !error) return null;
+  if (!simulation && !busy && !error && !lost) return null;
   return (
     <section className="guard-sim" aria-label="Simulation on recent traffic" aria-busy={busy}>
       {error && (
@@ -122,6 +153,16 @@ export function GuardSimulationCard({
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+      {lost && (
+        <div className="settings-error guard-sim-lost" role="alert">
+          {lost}{" "}
+          {onRetry && (
+            <button type="button" className="pg-btn small" onClick={onRetry}>
+              Retry
+            </button>
           )}
         </div>
       )}
@@ -151,7 +192,7 @@ export function GuardSimulationCard({
               Simulate version
             </button>
           </div>
-          <p className="kb-subtle">The recorded runs are compared with the version you pick, so you can see what moving to (or back to) it would change.</p>
+          <p className="kb-subtle">The version you pick is compared with the current profile on the same recorded runs, so you can see what moving to (or back to) it would change.</p>
         </details>
       )}
     </section>
@@ -168,6 +209,14 @@ function SimulationResult({ simulation }: { simulation: GuardSimulationView }) {
       </div>
     );
   }
+  if (simulation.status === "interrupted") {
+    return (
+      <div className="guard-sim-card">
+        <p className="guard-sim-sentence">The simulation was interrupted before every run was replayed, so it has no result. Start it again.</p>
+        {simulation.error && <p className="kb-subtle">{simulation.error}</p>}
+      </div>
+    );
+  }
   if (!summary || summary.runs === 0) {
     return (
       <div className="guard-sim-card guard-sim-empty">
@@ -176,7 +225,8 @@ function SimulationResult({ simulation }: { simulation: GuardSimulationView }) {
       </div>
     );
   }
-  const label = simulation.source.kind === "inline" ? "your unsaved changes" : `version ${simulation.source.version}`;
+  const label = simulation.source.kind === "inline" ? "Your unsaved changes" : `Version ${simulation.source.version}`;
+  const current = simulation.baseVersion !== null ? `the current profile (version ${simulation.baseVersion})` : "the current profile";
   const rows = simulationWorkflowRows(simulation.workflows ?? []);
   const detectors = topTallies(summary.byDetector);
   const dataClasses = topTallies(summary.byDataClass);
@@ -186,8 +236,7 @@ function SimulationResult({ simulation }: { simulation: GuardSimulationView }) {
         {summary.sentence}
       </p>
       <p className="kb-subtle">
-        Simulated {label} against what these runs recorded. Model calls were answered from each run's recording, so nothing called a model.
-        {simulation.hiddenWorkflows ? ` ${simulation.hiddenWorkflows} workflow${simulation.hiddenWorkflows === 1 ? " is" : "s are"} in projects you cannot read and left out.` : ""}
+        {label} compared with {current} on these runs. Each run was replayed twice from its recording, so nothing called a model.
       </p>
       <div className="guard-sim-chips">
         <span className={summary.runsNewlyBlocked > 0 ? "guard-chip guard-chip-lock" : "guard-chip"}>{summary.runsNewlyBlocked} newly blocked</span>

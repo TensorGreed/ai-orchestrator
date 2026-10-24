@@ -315,7 +315,8 @@ describe("Profile editor and bindings", () => {
     expect(await screen.findByText("built-in · read-only")).toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toBeDisabled();
     expect(screen.queryByRole("button", { name: /Save/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Simulate on recent traffic" })).toBeNull();
+    // An admin may still simulate the built-in profile (a saved version, from Advanced).
+    expect(screen.getByRole("button", { name: "Simulate on recent traffic" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Duplicate" })).toBeInTheDocument();
   });
 });
@@ -345,7 +346,7 @@ describe("Simulate on recent traffic", () => {
         workflowId: "wf-1", workflowName: "Support agent", projectId: "default", jobId: "run_1",
         cases: [
           { recordingId: "r1", recordingName: "Refund question", recordedAt: now, executionId: "e1", outcome: "compared", counts: { ...counts, newlyBlocked: 1 },
-            checkpoints: [{ nodeId: "agent", placement: "pre_model", channel: "prompt", occurrence: 1, before: "allow", after: "block", change: "newly_blocked", detectors: [] }] },
+            checkpoints: [{ nodeId: "agent", nodeName: "Support agent", placement: "pre_model", channel: "prompt", occurrence: 1, before: "allow", after: "block", change: "newly_blocked", detectors: [] }] },
           { recordingId: "r2", recordingName: "Order email", recordedAt: now, executionId: "e2", outcome: "diverged", divergedAt: { step: 1, kind: "model", nodeId: "agent", message: "" },
             counts: { ...counts, actionChanged: 1, nowMasked: 1 }, checkpoints: [] }
         ]
@@ -366,9 +367,11 @@ describe("Simulate on recent traffic", () => {
     expect(api.updateGuardProfile).not.toHaveBeenCalled();
     expect(await screen.findByText(/0 of 2 runs replayed/)).toBeInTheDocument();
     expect(await screen.findByTestId("guard-sim-sentence", {}, { timeout: 3000 })).toHaveTextContent("Across 2 recent runs in 1 workflow: 1 newly blocked, 1 now masked, 0 no longer blocked.");
+    expect(screen.getByText(/compared with the current profile \(version 2\)/)).toBeInTheDocument();
     expect(screen.getByText(/nothing called a model/)).toBeInTheDocument();
     await userEvent.click(screen.getByText("Details"));
     expect(screen.getByText("Refund question")).toBeInTheDocument();
+    expect(screen.getByText("Support agent · prompt")).toBeInTheDocument();
     expect(screen.getByText(/Diverged at step 1/)).toBeInTheDocument();
     expect(screen.getAllByText("email").length).toBeGreaterThan(0);
   });
@@ -396,10 +399,65 @@ describe("Simulate on recent traffic", () => {
     expect(await screen.findByText("channels.prompt.defaultAction.action")).toBeInTheDocument();
   });
 
-  it("is not offered to viewers or on the built-in profile", async () => {
+  it("is not offered to viewers", async () => {
     render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="viewer" />);
     await screen.findByLabelText("Name");
     expect(screen.queryByRole("button", { name: "Simulate on recent traffic" })).toBeNull();
+  });
+
+  it("is disabled with a plain reason for builders on the built-in profile or a profile a project enforces", async () => {
+    vi.mocked(api.fetchGuardProfile).mockResolvedValue({ profile: profiles[0]!, latest: { ...versions[1]!, profileId: "default", version: 1 }, bindings: [] });
+    const { unmount } = render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    const builtIn = await screen.findByRole("button", { name: "Simulate on recent traffic" });
+    expect(builtIn).toBeDisabled();
+    expect(builtIn).toHaveAttribute("title", expect.stringMatching(/only an admin can simulate/));
+    unmount();
+
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    vi.mocked(api.fetchGuardProfile).mockResolvedValue({ profile: { ...profiles[1]!, enforced: true }, latest: versions[0]!, bindings: [] });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    const enforced = await screen.findByRole("button", { name: "Simulate on recent traffic" });
+    expect(enforced).toBeDisabled();
+    expect(enforced).toHaveAttribute("title", expect.stringMatching(/A project enforces this profile/));
+    expect(screen.getByText(/A project enforces this profile/)).toBeInTheDocument();
+    await userEvent.click(enforced);
+    expect(api.simulateGuardProfile).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed poll with backoff, then offers Retry instead of stopping silently", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+      vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: { ...done, status: "running", summary: null, workflows: undefined, progress: { done: 0, total: 2 } } });
+      vi.mocked(api.fetchGuardSimulation).mockRejectedValue(new Error("Failed to fetch"));
+      render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(api.fetchGuardSimulation).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(/Lost touch/)).toBeNull();
+      // 2 s, 4 s, 8 s, 16 s, 30 s between retries.
+      await vi.advanceTimersByTimeAsync(2000 + 4000 + 8000 + 16000 + 30000);
+      expect(api.fetchGuardSimulation).toHaveBeenCalledTimes(6);
+      expect(await screen.findByText(/Lost touch with the simulation/)).toBeInTheDocument();
+
+      vi.mocked(api.fetchGuardSimulation).mockResolvedValue({ simulation: done });
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await screen.findByTestId("guard-sim-sentence")).toHaveTextContent("Across 2 recent runs in 1 workflow");
+      expect(screen.queryByText(/Lost touch/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows an interrupted simulation without a result", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: { ...done, status: "interrupted", summary: null, error: "The simulation was interrupted before every run was replayed" } });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+    expect(await screen.findByText(/so it has no result. Start it again./)).toBeInTheDocument();
+    expect(screen.queryByTestId("guard-sim-sentence")).toBeNull();
   });
 });
 
