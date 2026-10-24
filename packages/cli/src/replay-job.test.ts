@@ -205,6 +205,34 @@ describe("an enforced release gate in the job output", () => {
     expect(fake.out()).toContain('required case "Refund" was inconclusive: it blocks a publish whatever the pass rate');
   });
 
+  it("for a job over the gate's sets and another set, a failing or inconclusive case outside the gate still fails or is inconclusive", async () => {
+    const outsideFail: Partial<EvalCaseResult> = { id: "r9", fixtureId: "x1", fixtureName: "Other set", status: "fail" };
+    const outsideError: Partial<EvalCaseResult> = { id: "r10", fixtureId: "x2", fixtureName: "Other set too", status: "error", error: "tape miss" };
+    const gate = { enforced: true, admittedFixtureIds: ["f2"], pendingFixtureIds: [], requiredFixtureIds: [], errorsCountAsFailures: true, verdict: "passed", reasons: [] };
+    const run = (extra: Partial<EvalCaseResult>[], counts: { pass?: number; fail?: number; error?: number }) => ({
+      ...job("completed", counts, [results[1]!, ...extra]),
+      datasetIds: ["ds_1", "ds_2"],
+      releaseGate: gate
+    });
+    const failing = io([{ status: 200, body: { run: run([outsideFail], { pass: 1, fail: 1 }) } }]);
+    expect(await main(["replay", "status", "run_1"], failing.cli)).toBe(EXIT_FAILED);
+    const inconclusive = io([{ status: 200, body: { run: run([outsideError], { pass: 1, error: 1 }) } }]);
+    expect(await main(["replay", "status", "run_1"], inconclusive.cli)).toBe(EXIT_INCOMPLETE);
+    const clean = io([{ status: 200, body: { run: run([{ id: "r11", fixtureId: "x3", fixtureName: "Other ok", status: "pass" }], { pass: 2 }) } }]);
+    expect(await main(["replay", "status", "run_1"], clean.cli)).toBe(EXIT_OK);
+    // A blocking gate fails the step whatever the other sets did.
+    const blocked = io([{ status: 200, body: { run: { ...run([outsideError], { pass: 1, error: 1 }), releaseGate: { ...gate, verdict: "blocked", reasons: ["Pass rate 0% is below the required 90%."] } } } }]);
+    expect(await main(["replay", "status", "run_1"], blocked.cli)).toBe(EXIT_FAILED);
+  });
+
+  it("says publishing may still refuse the job when the gate's sets changed after it was queued", async () => {
+    const passing = { ...gated(), releaseGate: { ...gated().releaseGate, requiredFixtureIds: [], verdict: "passed", reasons: [], setsChanged: true } };
+    const fake = io([{ status: 200, body: { run: passing } }]);
+    expect(await main(["replay", "status", "run_1"], fake.cli)).toBe(EXIT_OK);
+    expect(fake.out()).toContain("the release gate accepts these results");
+    expect(fake.out()).toContain("publishing may still refuse it (`l2m release publish` decides)");
+  });
+
   it("says nothing about a gate when the job ran over no enforced gate's sets", async () => {
     const fake = io([{ status: 200, body: { run: job("completed", { pass: 1, fail: 1 }, results.slice(0, 2)) } }]);
     await main(["replay", "status", "run_1"], fake.cli);

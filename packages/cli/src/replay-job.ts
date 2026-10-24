@@ -254,7 +254,14 @@ const caseStatus = (status: unknown): ReleaseCaseStatus => (status === "pass" ||
  */
 export function gateAdmissionOf(
   run: JobView
-): (ReleaseGateAdmissionStats & { pendingIds: Set<string>; requiredIds: Set<string>; verdict: ReleaseGateVerdict | null; reasons: string[] }) | null {
+): (ReleaseGateAdmissionStats & {
+  pendingIds: Set<string>;
+  requiredIds: Set<string>;
+  inGateIds: Set<string>;
+  verdict: ReleaseGateVerdict | null;
+  reasons: string[];
+  setsChanged: boolean;
+}) | null {
   const gate = run.releaseGate;
   if (!isObject(gate) || !Array.isArray(gate.admittedFixtureIds) || !Array.isArray(gate.requiredFixtureIds)) return null;
   const admitted = gate.admittedFixtureIds.map(String);
@@ -274,20 +281,40 @@ export function gateAdmissionOf(
   const stats = summarizeReleaseGateAdmission(cases, { admittedIds: admitted, requiredIds: gate.requiredFixtureIds.map(String), caseNames: names });
   const verdict = gate.verdict === "passed" || gate.verdict === "blocked" || gate.verdict === "needs_approval" ? gate.verdict : null;
   const reasons = Array.isArray(gate.reasons) ? gate.reasons.map(String) : [];
-  return { ...stats, pendingIds: new Set(pending), requiredIds: new Set(gate.requiredFixtureIds.map(String)), verdict, reasons };
+  return {
+    ...stats,
+    pendingIds: new Set(pending),
+    requiredIds: new Set(gate.requiredFixtureIds.map(String)),
+    inGateIds: inGate,
+    verdict,
+    reasons,
+    setsChanged: gate.setsChanged === true
+  };
 }
 
 /**
  * The exit code: the job's own verdict, or, for a completed job over an
- * enforced release gate's sets, the gate's verdict on its case results
- * (1 when it blocks, else 0).
+ * enforced release gate's sets, 1 when the gate blocks its case results, and
+ * otherwise the job's own verdict over the cases outside the gate's sets
+ * (1 for a failure, 4 for an inconclusive case; 0 when there are none).
  */
 export function jobExitCode(run: JobView): number {
   const own = replayJobExitCode(run);
   if (run.status !== "completed") return own;
   const gate = gateAdmissionOf(run);
   if (!gate?.verdict) return own;
-  return gate.verdict === "blocked" ? EXIT_FAILED : EXIT_OK;
+  if (gate.verdict === "blocked") return EXIT_FAILED;
+  const aggregate = (run.options && typeof run.options.aggregate === "string" ? run.options.aggregate : "all") as "all" | "majority" | "any";
+  const outside = new Map<string, ReleaseCaseStatus[]>();
+  for (const result of (run.results ?? []) as Array<EvalCaseResult & Record<string, unknown>>) {
+    if (result.role === "baseline" || result.baseline === true || gate.inGateIds.has(result.fixtureId)) continue;
+    const key = result.fixtureId || String(result.id);
+    outside.set(key, [...(outside.get(key) ?? []), caseStatus(result.status)]);
+  }
+  if (outside.size === 0) return EXIT_OK;
+  const summary = { total: outside.size, pass: 0, fail: 0, error: 0, skipped: 0 };
+  for (const statuses of outside.values()) summary[aggregateReleaseRepeats(statuses, aggregate)] += 1;
+  return replayJobExitCode({ status: "completed", summary: summary as unknown as NonNullable<JobView["summary"]> });
 }
 
 export function formatJob(run: JobView, code: number): string {
@@ -316,7 +343,12 @@ export function formatJob(run: JobView, code: number): string {
     if (gate.verdict === "blocked") {
       lines.push("  the release gate blocks these results:");
       for (const reason of gate.reasons) lines.push(`    - ${cleanServerText(reason)}`);
-    } else if (gate.verdict) lines.push("  the release gate accepts these results");
+    } else if (gate.verdict) {
+      lines.push("  the release gate accepts these results");
+      if (gate.setsChanged) {
+        lines.push("    but the gate's golden sets changed after this job was queued, so publishing may still refuse it (`l2m release publish` decides)");
+      }
+    }
   }
   for (const result of run.results ?? []) {
     if (result.status === "pass") continue;

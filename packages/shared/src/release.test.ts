@@ -10,6 +10,7 @@ import {
   releaseGateSettingsSchema,
   releasePublishInputSchema,
   releaseAdmissionLoosening,
+  releaseGateChecksWorsened,
   summarizeReleaseGateAdmission,
   type ReleaseGateCase,
   type ReleaseGateEvidence
@@ -345,5 +346,41 @@ describe("gate admission and required cases (enforced gates)", () => {
     const gate = releaseGateSettingsSchema.parse({ enabled: true, datasetIds: ["set_a"] });
     expect(releaseGateLoosening(gate, gate)).toEqual([]);
     expect(releaseGateLoosening(gate, gate, { before, after: { admittedIds: ["b"], requiredIds: [] } })).toEqual(['removes admitted case "a"', 'stops requiring case "a"']);
+  });
+});
+
+describe("gate reason checks", () => {
+  const failing = (id: string): ReleaseGateCase => passing(id, { status: "fail", scorers: [{ type: "status", pass: false }] });
+
+  it("give every reason a stable code, in the same order, whose wording may change", () => {
+    const cases = [passing("c1"), passing("c2"), failing("c3"), passing("p1")];
+    const gatePolicy = policy({ minCases: 10, minPassRate: 0.9, maxRegressions: 5 });
+    const judged = judgeReleaseGate(evidence(cases, { staleSets: ["set_a"] }), gatePolicy, { expected, now: NOW, admission: { admittedIds: ["c1", "c2", "c3"] } });
+    expect(judged.checks.map((check) => check.code)).toEqual(["stale_sets", "min_cases", "pass_rate"]);
+    expect(judged.checks).toHaveLength(judged.reasons.length);
+    expect(judged.reasons[1]).toMatch(/1 more is waiting for admission/);
+    // Without the pending case the wording changes, the codes and measures do not.
+    const plain = judgeReleaseGate(evidence(cases.slice(0, 3), { staleSets: ["set_a"] }), gatePolicy, { expected, now: NOW, admission: { admittedIds: ["c1", "c2", "c3"] } });
+    expect(plain.reasons[1]).not.toEqual(judged.reasons[1]);
+    expect(releaseGateChecksWorsened(judged.checks, plain.checks)).toEqual([]);
+    expect(judgeReleaseGate(null, gatePolicy, { expected }).checks).toEqual([{ code: "no_job", measure: null }]);
+    expect(judgeReleaseGate(evidence([passing("c1")]), policy({ minCases: 1 }), { expected, now: NOW, requireApproval: true }).checks).toEqual([
+      { code: "approval_required", measure: null }
+    ]);
+  });
+
+  it("are worse only for a new code or a higher measure; better numbers and vanished reasons are not", () => {
+    const gatePolicy = policy({ minPassRate: 0.9, maxRegressions: 5 });
+    const at = (pass: number, fail: number) =>
+      judgeReleaseGate(evidence([...Array.from({ length: pass }, (_, i) => passing(`p${i}`)), ...Array.from({ length: fail }, (_, i) => failing(`f${i}`))]), gatePolicy, { expected, now: NOW }).checks;
+    const before = at(8, 2);
+    expect(before.map((check) => check.code)).toEqual(["pass_rate"]);
+    expect(releaseGateChecksWorsened(before, at(9, 2))).toEqual([]);
+    expect(releaseGateChecksWorsened(before, at(7, 3)).map((check) => check.code)).toEqual(["pass_rate"]);
+    // A tighter minimum on the same numbers is worse too.
+    const tighter = judgeReleaseGate(evidence([...Array.from({ length: 8 }, (_, i) => passing(`p${i}`)), failing("f0"), failing("f1")]), policy({ minPassRate: 0.95, maxRegressions: 5 }), { expected, now: NOW }).checks;
+    expect(releaseGateChecksWorsened(before, tighter)).toHaveLength(1);
+    expect(releaseGateChecksWorsened(before, [...before, { code: "required_case:f0", measure: null }]).map((check) => check.code)).toEqual(["required_case:f0"]);
+    expect(releaseGateChecksWorsened(before, [])).toEqual([]);
   });
 });
