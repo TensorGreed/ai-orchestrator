@@ -374,6 +374,51 @@ describe("gate admission on an enforced gate", () => {
     expect(screen.queryByText(/waiting for admin admission/)).toBeNull();
   });
 
+  it("an admin adding a golden set to an enforced gate is asked whether to admit its cases; nothing is admitted unless they confirm", async () => {
+    const user = userEvent.setup();
+    const enforcedGate = { ...defaultReleaseGate("wf-1"), enabled: true, enforced: true, datasetIds: ["set-1"] };
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: enforcedGate });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({
+      datasets: [
+        { id: "set-1", name: "Refund cases", workflowId: "wf-1", fixtureCount: 4, goldenRunCount: 4 },
+        { id: "set-2", name: "Builder cases", workflowId: "wf-1", fixtureCount: 5, goldenRunCount: 5 }
+      ] as never
+    });
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [], publishedVersion: null });
+    vi.mocked(api.saveReleaseGate).mockImplementation(async (_id, settings) => ({ gate: { ...enforcedGate, ...(settings as Partial<ReleaseGateView>), updatedAt: "now" } }));
+    render(<ReleaseGatePanel workflows={[{ id: "wf-1", name: "Refunds" } as never]} canEdit isAdmin />);
+
+    await user.click(await screen.findByLabelText(/Builder cases/));
+    const admit = screen.getByLabelText("Admit 5 cases from the added set?");
+    expect(admit).not.toBeChecked();
+    expect(screen.getByText(/Unless admitted, they wait for admission/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save gate" }));
+    await waitFor(() => expect(api.saveReleaseGate).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveReleaseGate).mock.calls[0]![1]).not.toHaveProperty("admitAddedSetCases");
+  });
+
+  it("the admin's confirmation is sent with the save", async () => {
+    const user = userEvent.setup();
+    const enforcedGate = { ...defaultReleaseGate("wf-1"), enabled: true, enforced: true, datasetIds: ["set-1"] };
+    vi.mocked(api.fetchReleaseGate).mockResolvedValue({ gate: enforcedGate });
+    vi.mocked(api.fetchEvalDatasets).mockResolvedValue({
+      datasets: [
+        { id: "set-1", name: "Refund cases", workflowId: "wf-1", fixtureCount: 4, goldenRunCount: 4 },
+        { id: "set-2", name: "Builder cases", workflowId: "wf-1", fixtureCount: 1, goldenRunCount: 1 }
+      ] as never
+    });
+    vi.mocked(api.fetchReleases).mockResolvedValue({ releases: [], publishedVersion: null });
+    vi.mocked(api.saveReleaseGate).mockImplementation(async (_id, settings) => ({ gate: { ...enforcedGate, ...(settings as Partial<ReleaseGateView>), updatedAt: "now" } }));
+    render(<ReleaseGatePanel workflows={[{ id: "wf-1", name: "Refunds" } as never]} canEdit isAdmin />);
+
+    await user.click(await screen.findByLabelText(/Builder cases/));
+    await user.click(screen.getByLabelText("Admit 1 case from the added set?"));
+    expect(screen.getByText(/Saving admits them/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save gate" }));
+    await waitFor(() => expect(api.saveReleaseGate).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.saveReleaseGate).mock.calls[0]![1]).toMatchObject({ datasetIds: ["set-1", "set-2"], admitAddedSetCases: true });
+  });
+
   it("nothing new appears on an unenforced gate", async () => {
     mountGate(false, true);
     expect(await screen.findByText("Release gate")).toBeInTheDocument();

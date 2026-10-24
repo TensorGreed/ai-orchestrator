@@ -29,7 +29,8 @@ vi.mock("../lib/api", async () => {
     fetchReplayJob: vi.fn(),
     fetchReplayJobCase: vi.fn(),
     cancelReplayJob: vi.fn(),
-    subscribeEvalRun: vi.fn()
+    subscribeEvalRun: vi.fn(),
+    fetchReleaseGateCases: vi.fn()
   };
 });
 
@@ -171,6 +172,7 @@ beforeEach(() => {
   vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [{ id: "strict", name: "Strict support", builtIn: false, latestVersion: 2, hash: "h", createdAt: "", updatedAt: "" }], autoApply: false, builtInId: "default" });
   vi.mocked(api.fetchMcpServers).mockResolvedValue({ servers: [{ id: "srv_docs", name: "Docs" }], adapters: [], defaultProbeIntervalMs: 0 } as never);
   vi.mocked(api.estimateReplayJob).mockResolvedValue({ cases: 1, runsPerCase: 1, modelCallsEstimate: 1, estimatedCostUsd: 0.002, costUnknown: false, warnings: [] });
+  vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({ cases: { workflowId: "wf-1", enforced: false, cases: [], counts: { admitted: 0, pending: 0, required: 0 }, canAdmit: false, canRequest: false } });
 });
 
 /** wf-1 with an agent (chat model attached), a read node and a write node. */
@@ -225,6 +227,33 @@ describe("EvaluationsPage — golden sets", () => {
     expect(await screen.findByRole("button", { name: "Refund baseline is in the set" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Add Exchange baseline" }));
     await waitFor(() => expect(api.addGoldenRunToSet).toHaveBeenCalledWith("set_1", { recordingId: "rec_bbb", name: "Exchange baseline" }));
+  });
+
+  it("shows the required chip only for a case an enforced gate requires, never on an unenforced gate", async () => {
+    vi.mocked(api.fetchEvalFixtures).mockResolvedValue({ fixtures: [{ ...fixture, required: true }] });
+    const user = renderPage();
+    await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
+    const cases = await screen.findByRole("region", { name: "Cases" });
+    expect(await within(cases).findByText("rec_aaa")).toBeInTheDocument();
+    await waitFor(() => expect(api.fetchReleaseGateCases).toHaveBeenCalledWith("wf-1"));
+    expect(within(cases).queryByText("required")).toBeNull();
+  });
+
+  it("shows the required chip when the enforced gate requires the case", async () => {
+    vi.mocked(api.fetchReleaseGateCases).mockResolvedValue({
+      cases: {
+        workflowId: "wf-1",
+        enforced: true,
+        cases: [{ fixtureId: "fix_1", datasetId: "set_1", datasetName: "Refund regressions", name: "Refund baseline", recordingId: "rec_aaa", admission: "admitted", required: true, requestId: null, requestKind: null, createdAt: "" }],
+        counts: { admitted: 1, pending: 0, required: 1 },
+        canAdmit: false,
+        canRequest: true
+      }
+    });
+    const user = renderPage();
+    await user.click(await screen.findByRole("button", { name: /Refund regressions/ }));
+    const cases = await screen.findByRole("region", { name: "Cases" });
+    expect(await within(cases).findByText("required")).toBeInTheDocument();
   });
 
   it("marks golden runs imported from a golden-set file", async () => {

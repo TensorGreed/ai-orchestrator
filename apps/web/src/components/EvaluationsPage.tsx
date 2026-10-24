@@ -11,6 +11,7 @@ import {
   fetchDefinitions,
   fetchEvalDatasets,
   fetchEvalFixtures,
+  fetchReleaseGateCases,
   fetchReplayJob,
   fetchReplayJobCase,
   fetchReplayJobs,
@@ -450,15 +451,20 @@ function GoldenSetDetail({ set, workflowName, canEdit, onBack, onChanged, onDele
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [replayOpen, setReplayOpen] = useState(false);
+  // Cases an enforced release gate requires (admitted ones only); empty when the gate is not enforced.
+  const [gateRequired, setGateRequired] = useState<ReadonlySet<string>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
-      const [fixtureResponse, recordingResponse] = await Promise.all([
+      const [fixtureResponse, recordingResponse, gateCases] = await Promise.all([
         fetchEvalFixtures(set.id),
-        set.workflowId ? fetchReplayRecordings({ workflowId: set.workflowId, limit: 200 }) : Promise.resolve({ items: [], total: 0 })
+        set.workflowId ? fetchReplayRecordings({ workflowId: set.workflowId, limit: 200 }) : Promise.resolve({ items: [], total: 0 }),
+        // No gate, an unreadable gate or a store without release gates: nothing is required.
+        set.workflowId ? fetchReleaseGateCases(set.workflowId).catch(() => null) : Promise.resolve(null)
       ]);
       setFixtures(fixtureResponse.fixtures);
       setRecordings(recordingResponse.items);
+      setGateRequired(new Set(gateCases?.cases.enforced ? gateCases.cases.cases.filter((entry) => entry.required).map((entry) => entry.fixtureId) : []));
       setError(null);
     } catch (err) {
       setError(errorText(err, "Could not load the golden set"));
@@ -560,7 +566,7 @@ function GoldenSetDetail({ set, workflowName, canEdit, onBack, onChanged, onDele
                       </span>
                     )}
                     {fixture.name}
-                    {fixture.required && (
+                    {gateRequired.has(fixture.id) && (
                       <span className="release-tag is-ok gate-required-chip" title="An enforced release gate needs this case to pass on every publish">
                         required
                       </span>

@@ -474,5 +474,22 @@ test.describe("golden journeys", () => {
     await cases.getByLabel("Counted case is required").click();
     await expect(cases.getByLabel("Counted case is required")).toBeChecked();
     await expect(cases.getByText("required", { exact: true })).toBeVisible();
+
+    // Adding a golden set to the enforced gate admits nothing unless the admin confirms it.
+    const extra = await page.request.post("/api/eval/datasets", { data: { name: `Extra suite ${stamp}`, workflowId } });
+    const extraId = (await extra.json()).dataset.id as string;
+    expect((await page.request.post(`/api/eval/datasets/${extraId}/recordings`, { data: { recordingId: await goldenRun("Extra case") } })).ok()).toBeTruthy();
+    await page.reload();
+    await sidebarItem(page, "Evaluations").click();
+    await page.getByRole("tab", { name: "Release gates" }).click();
+    await page.getByRole("tabpanel", { name: "Release gates" }).getByLabel("Workflow", { exact: true }).selectOption(workflowId);
+    await page.getByLabel(new RegExp(`Extra suite ${stamp}`)).check();
+    const admitAdded = page.getByLabel("Admit 1 case from the added set?");
+    await expect(admitAdded).not.toBeChecked();
+    await admitAdded.check();
+    await page.getByRole("button", { name: "Save gate" }).click();
+    await expect(page.getByText("Gate saved.")).toBeVisible();
+    await expect(cases.getByText("3 admitted · 1 required")).toBeVisible();
+    await expect(cases.getByText(/waiting for admin admission/)).toHaveCount(0);
   });
 });
