@@ -13,8 +13,11 @@
  * replay of the masked input meets the masked tape and cassette and still
  * finds its answers.
  *
- * Values the workflow definition itself holds are kept (see
- * `MaskRecordingOptions.keepValuesIn`).
+ * Values the workflow definition itself holds as whole literals are kept
+ * (see `MaskRecordingOptions.keepLiteralsFrom`).
+ *
+ * Masking runs in chunks (`maskCapturedRunAsync`), so a large capture never
+ * holds the event loop for long.
  */
 
 import {
@@ -30,7 +33,15 @@ import {
   type ReplayRecordedNode,
   type RunFacts
 } from "@ai-orchestrator/shared";
-import { maskRecording, maskedClassesForNode, type GuardDictionary, type MaskPart, type MaskReport } from "@ai-orchestrator/guard-sdk";
+import {
+  maskRecordingSteps,
+  maskedClassesForNode,
+  runSteps,
+  runStepsAsync,
+  type GuardDictionary,
+  type MaskPart,
+  type MaskReport
+} from "@ai-orchestrator/guard-sdk";
 import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orchestrator/mcp-sdk";
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
 import { sha256Hex } from "./audit-bundle-service.js";
@@ -39,6 +50,8 @@ export interface CaptureMaskOptions {
   key: Uint8Array;
   /** The bound guard profile's dictionaries. */
   dictionaries: GuardDictionary[];
+  /** Classes a bound guard profile can mask: their surrogates keep what the mask shows. */
+  visibleTailClasses?: readonly string[];
 }
 
 export interface CapturedRunParts {
@@ -54,8 +67,20 @@ export interface MaskedCapturedRun extends CapturedRunParts {
   report: MaskReport;
 }
 
-/** Masks a scrubbed capture across all of its parts. See the module comment. */
-export function maskCapturedRun(run: CapturedRunParts, options: CaptureMaskOptions & { keepValuesIn?: string }): MaskedCapturedRun {
+type MaskRunOptions = CaptureMaskOptions & { keepLiteralsFrom?: unknown };
+
+/** Masks a scrubbed capture across all of its parts, in one go. See the module comment. */
+export function maskCapturedRun(run: CapturedRunParts, options: MaskRunOptions): MaskedCapturedRun {
+  return runSteps(maskCapturedRunSteps(run, options));
+}
+
+/** Masks a scrubbed capture across all of its parts, giving the event loop a turn between chunks. */
+export function maskCapturedRunAsync(run: CapturedRunParts, options: MaskRunOptions): Promise<MaskedCapturedRun> {
+  return runStepsAsync(maskCapturedRunSteps(run, options));
+}
+
+/** The stepping form of `maskCapturedRun` (yields between chunks of work). */
+export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOptions): Generator<void, MaskedCapturedRun, void> {
   const parts: MaskPart[] = [];
   const add = (id: string, value: unknown, nodeId?: string | null) => parts.push({ id, value, nodeId: nodeId ?? null });
 
@@ -71,7 +96,12 @@ export function maskCapturedRun(run: CapturedRunParts, options: CaptureMaskOptio
   run.modelTape?.entries.forEach((entry, index) => add(`tape:${index}`, { request: entry.request, response: entry.response, error: entry.error }, entry.nodeId));
   run.memorySeed?.sessions.forEach((session, index) => add(`memory:${index}`, session));
 
-  const { parts: masked, report } = maskRecording(parts, { key: options.key, dictionaries: options.dictionaries, keepValuesIn: options.keepValuesIn });
+  const { parts: masked, report } = yield* maskRecordingSteps(parts, {
+    key: options.key,
+    dictionaries: options.dictionaries,
+    keepLiteralsFrom: options.keepLiteralsFrom,
+    visibleTailClasses: options.visibleTailClasses
+  });
   let cursor = 0;
   const next = <T>() => masked[cursor++]!.value as T;
 
@@ -131,41 +161,55 @@ export function maskCapturedRun(run: CapturedRunParts, options: CaptureMaskOptio
   return { input, nodes, facts, cassette, modelTape, memorySeed, report };
 }
 
-/** Production triggers whose input a scheduler, not a person or an outside system, produced. */
-const TRUSTED_TRIGGERS = new Set(["cron", "schedule"]);
-/** Production triggers whose input a signed-in user or an end user typed. */
-const USER_TRIGGERS = new Set(["chat", "form", "webhook_api", "webhook_api_stream", "mcp_server", "slack_webhook", "telegram_webhook", "discord_webhook"]);
+/**
+ * Who produced a run's input, decided by the server where the run started
+ * (never by a caller-supplied trigger name): `scheduler` for the server's own
+ * scheduled runs, `user` for runs a signed-in user or an API key started
+ * (the queue, the execute API), `external` for everything else.
+ */
+export type CaptureInputOrigin = "scheduler" | "user" | "external";
+
+/** Production triggers whose input a person typed (chat, forms, app messages) or an authenticated caller sent. */
+const USER_TRIGGERS = new Set(["chat", "form", "webhook_api", "webhook_api_stream", "mcp_server", "slack_webhook", "telegram_webhook", "discord_webhook", "api_execute", "api_execute_stream"]);
 /** Node categories that bring in content from outside the workflow. */
 const EXTERNAL_CATEGORIES = new Set(["Connector", "RAG", "MCP"]);
 const EXTERNAL_TYPES = new Set(["http_request", "web_browse", "mcp_tool"]);
 
-/** Where a node's content came from, by the run's trigger and the node's type. */
-export function provenanceFor(nodeType: string, triggerType: string | null): ProvenanceLabel[] {
+/**
+ * The provenance of a run's input. `trusted` only for the server's own
+ * scheduler: a trigger name a caller chose (`cron` on the queue route) earns
+ * nothing.
+ */
+export function inputProvenance(triggerType: string | null, origin: CaptureInputOrigin | undefined): ProvenanceLabel {
+  if (origin === "scheduler") return "trusted";
+  if (origin === "user") return "user";
+  if (triggerType && USER_TRIGGERS.has(triggerType)) return "user";
+  return "untrusted_external";
+}
+
+/** Where a node's content came from: input nodes carry the run's input provenance, nodes that fetch from outside are external. */
+export function provenanceFor(nodeType: string, input: ProvenanceLabel): ProvenanceLabel[] {
   const category = getNodeDefinition(nodeType)?.category;
-  if (category === "Input") {
-    if (triggerType && TRUSTED_TRIGGERS.has(triggerType)) return ["trusted"];
-    if (triggerType && USER_TRIGGERS.has(triggerType)) return ["user"];
-    return ["untrusted_external"];
-  }
+  if (category === "Input") return [input];
   if ((category && EXTERNAL_CATEGORIES.has(category)) || EXTERNAL_TYPES.has(nodeType)) return ["untrusted_external"];
   return [];
 }
 
 /**
  * Every node of the run facts gets `labels` (source `scan`): the data
- * classes the masking pass found in its content, and where its content came
- * from; `sensitive` is added when it held any data class. Without a masking
- * report (masking off) nothing was scanned and the facts are unchanged.
+ * classes the masking pass found in its content (`dataClasses`), and where
+ * its content came from (`provenance`, from the trigger and the node type
+ * only, never from the scan). Without a masking report (masking off)
+ * nothing was scanned and the facts are unchanged.
  */
-export function withNodeLabels(facts: RunFacts, report: MaskReport | null, triggerType: string | null): RunFacts {
+export function withNodeLabels(facts: RunFacts, report: MaskReport | null, input: ProvenanceLabel): RunFacts {
   if (!report) return facts;
   const scan: (typeof DATA_LABEL_SOURCES)[number] = "scan";
   return {
     ...facts,
     nodes: facts.nodes.map((node) => {
       const dataClasses = maskedClassesForNode(report, node.nodeId);
-      const provenance = new Set<ProvenanceLabel>(provenanceFor(node.nodeType, triggerType));
-      if (dataClasses.length > 0) provenance.add("sensitive");
+      const provenance = new Set<ProvenanceLabel>(provenanceFor(node.nodeType, input));
       const labels: DataLabels = { provenance: PROVENANCE_LABELS.filter((label) => provenance.has(label)), dataClasses, source: scan };
       return { ...node, labels };
     })

@@ -140,24 +140,46 @@ export interface ReplayCapturePromoteOutcome {
 // Data-subject lookup (admins)
 // ---------------------------------------------------------------------------
 
+/** Shortest value searched raw when it is not recognised as a data class (an email, card, phone, ...). */
+export const REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH = 6;
+
+/** Search: where a value is stored, raw or as its surrogate. Nothing is deleted. */
 export const replayFindSubjectSchema = z
   .object({
     /** The value to look for (an email address, card number, phone number, ...). Never stored or logged. */
+    value: z.string().min(3).max(1_000)
+  })
+  .strict();
+
+/** Stores the lookup searches. */
+export const REPLAY_FIND_SUBJECT_KINDS = ["recording", "fixture", "eval_result", "execution", "cassette"] as const;
+export type ReplayFindSubjectKind = (typeof REPLAY_FIND_SUBJECT_KINDS)[number];
+
+/** Most rows one delete may name. */
+export const REPLAY_FIND_SUBJECT_DELETE_MAX = 2_000;
+
+/** Delete: the rows a search returned, by kind and id. Each is checked again against the value before it is deleted. */
+export const replayFindSubjectDeleteSchema = z
+  .object({
     value: z.string().min(3).max(1_000),
-    /** Delete every recording that holds it (and the golden-set cases made from them). */
-    delete: z.boolean().optional()
+    targets: z
+      .array(z.object({ kind: z.enum(REPLAY_FIND_SUBJECT_KINDS), id: z.string().trim().min(1).max(200) }).strict())
+      .min(1)
+      .max(REPLAY_FIND_SUBJECT_DELETE_MAX)
   })
   .strict();
 
 export interface ReplayFindSubjectMatch {
-  recordingId: string;
-  workflowId: string;
+  kind: ReplayFindSubjectKind;
+  id: string;
+  workflowId: string | null;
   projectId: string | null;
   name: string;
-  status: ReplayRecordingSummary["status"];
-  /** How it matched: `raw` (an unmasked run saved by hand) or the data class whose surrogate matched. */
+  /** A golden run's status (`candidate` | `golden`), or a result's or run's outcome. */
+  status: string | null;
+  /** How it matched: `raw` (stored unmasked) or the data class whose surrogate matched. */
   matchedAs: string[];
-  /** Which stored parts hold it: input, nodes, facts, cassette, modelTape, memorySeed, workflow, notes. */
+  /** Which stored parts hold it (a golden run: input, nodes, facts, cassette, modelTape, memorySeed, workflow, notes). */
   fields: string[];
 }
 
@@ -165,10 +187,20 @@ export interface ReplayFindSubjectResult {
   /** The data classes the value was surrogated as for the search. */
   classesTried: string[];
   matches: ReplayFindSubjectMatch[];
-  /** Recordings deleted (with `delete: true`). */
-  deleted: number;
-  /** Golden-set cases removed with them. */
-  casesDeleted: number;
-  /** Recordings searched. */
-  searched: number;
+  /** Matches per store. */
+  counts: Record<ReplayFindSubjectKind, number>;
+  /** Rows searched per store. */
+  searched: Record<ReplayFindSubjectKind, number>;
+  /** What the search covers, and what it does not (those follow their own retention). */
+  covered: string[];
+  notCovered: string[];
+}
+
+export interface ReplayFindSubjectDeleteResult {
+  /** Rows deleted per store. Golden-set cases and results removed with a golden run are counted under fixture and eval_result. */
+  deleted: Record<ReplayFindSubjectKind, number>;
+  /** Every row deleted, by kind and id (the targets, and the cases and results removed with a golden run). */
+  removed: Array<{ kind: ReplayFindSubjectKind; id: string }>;
+  /** Targets not deleted: gone already, or no longer holding the value. */
+  skipped: Array<{ kind: ReplayFindSubjectKind; id: string; reason: "not_found" | "no_match" }>;
 }

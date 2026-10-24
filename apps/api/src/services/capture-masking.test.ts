@@ -4,7 +4,7 @@ import { surrogateFor } from "@ai-orchestrator/guard-sdk";
 import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orchestrator/mcp-sdk";
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
 import { sha256Hex } from "./audit-bundle-service.js";
-import { maskCapturedRun, provenanceFor, withNodeLabels } from "./capture-masking.js";
+import { inputProvenance, maskCapturedRun, maskCapturedRunAsync, provenanceFor, withNodeLabels } from "./capture-masking.js";
 
 const key = Buffer.from("0123456789abcdef0123456789abcdef");
 const EMAIL = "jane.doe@example.com";
@@ -55,7 +55,7 @@ function run() {
 
 describe("maskCapturedRun", () => {
   it("replaces the value with one surrogate in every part and takes the match keys again over the masked content", () => {
-    const masked = maskCapturedRun(run(), { key, dictionaries: [], keepValuesIn: JSON.stringify({ note: "support@acme.test" }) });
+    const masked = maskCapturedRun(run(), { key, dictionaries: [], keepLiteralsFrom: { nodes: [{ config: { note: "Mail support@acme.test" } }] } });
     const surrogate = surrogateFor(EMAIL, "email", key);
     const text = JSON.stringify(masked);
     expect(text).not.toContain(EMAIL);
@@ -78,20 +78,32 @@ describe("maskCapturedRun", () => {
 
   it("labels each node with the classes found in it and where its content came from", () => {
     const masked = maskCapturedRun(run(), { key, dictionaries: [] });
-    const facts = withNodeLabels(masked.facts, masked.report, "webhook");
+    const facts = withNodeLabels(masked.facts, masked.report, "untrusted_external");
     const byId = Object.fromEntries(facts.nodes.map((node) => [node.nodeId, node.labels]));
-    expect(byId.hook).toEqual({ provenance: ["untrusted_external", "sensitive"], dataClasses: ["email"], source: "scan" });
-    expect(byId.lookup).toMatchObject({ provenance: ["untrusted_external", "sensitive"], dataClasses: ["email"] });
+    // Provenance is origin only: finding a data class adds nothing to it.
+    expect(byId.hook).toEqual({ provenance: ["untrusted_external"], dataClasses: ["email"], source: "scan" });
+    expect(byId.lookup).toMatchObject({ provenance: ["untrusted_external"], dataClasses: ["email"] });
     expect(byId.out).toEqual({ provenance: [], dataClasses: [], source: "scan" });
     // Unscanned (masking off): unchanged.
-    expect(withNodeLabels(masked.facts, null, "webhook")).toBe(masked.facts);
+    expect(withNodeLabels(masked.facts, null, "untrusted_external")).toBe(masked.facts);
   });
 
-  it("derives provenance from the trigger for input nodes", () => {
-    expect(provenanceFor("webhook_input", "cron")).toEqual(["trusted"]);
-    expect(provenanceFor("webhook_input", "chat")).toEqual(["user"]);
-    expect(provenanceFor("webhook_input", "webhook")).toEqual(["untrusted_external"]);
-    expect(provenanceFor("http_request", "chat")).toEqual(["untrusted_external"]);
-    expect(provenanceFor("output", "webhook")).toEqual([]);
+  it("derives provenance from where the run started, never from a caller-chosen trigger name", () => {
+    expect(inputProvenance("cron", "scheduler")).toBe("trusted");
+    // A caller naming its queued run "cron" is a user, not the scheduler.
+    expect(inputProvenance("cron", "user")).toBe("user");
+    expect(inputProvenance("cron", undefined)).toBe("untrusted_external");
+    expect(inputProvenance("schedule", undefined)).toBe("untrusted_external");
+    expect(inputProvenance("chat", undefined)).toBe("user");
+    expect(inputProvenance("api_execute", undefined)).toBe("user");
+    expect(inputProvenance("webhook", undefined)).toBe("untrusted_external");
+    expect(provenanceFor("webhook_input", "trusted")).toEqual(["trusted"]);
+    expect(provenanceFor("http_request", "user")).toEqual(["untrusted_external"]);
+    expect(provenanceFor("output", "untrusted_external")).toEqual([]);
+  });
+
+  it("masks the same way in chunks as in one go", async () => {
+    const options = { key, dictionaries: [] };
+    expect(JSON.stringify(await maskCapturedRunAsync(run(), options))).toBe(JSON.stringify(maskCapturedRun(run(), options)));
   });
 });

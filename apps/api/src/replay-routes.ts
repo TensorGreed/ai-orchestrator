@@ -14,6 +14,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { candidateRefusal } from "./services/candidate-policy.js";
 import { replayRecordingCreateSchema, replayRunRequestSchema } from "@ai-orchestrator/shared";
 import type { SqliteStore } from "./db/database.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
@@ -158,9 +159,10 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     }
     const access = runAccess.run(user, record, "workflow:execute", "Golden run");
     if (!access.ok) return deny(reply, access);
-    if (record.status === "candidate") {
+    const refusal = candidateRefusal(record);
+    if (refusal) {
       reply.code(409);
-      return { error: "This is a captured run waiting in the inbox; promote it before replaying it.", code: "candidate" };
+      return { error: refusal, code: "candidate" };
     }
     try {
       const result = await replays.replay(record, parsed.data, user);

@@ -18,25 +18,41 @@
  *      workflow's captures today (UTC, counting runs in flight) are under
  *      `maxPerDay`. Only then does the run get a recorder, so a run that is
  *      not sampled costs nothing.
- *   2. `finish`, after the run's final history is stored: queued, so it
- *      never delays the run's answer. A run whose status is not in
- *      `onlyStatuses` is dropped (a miss: it does not count against the
- *      day), as is a run that paused for approval.
- *   3. The candidate is built by `ReplayRecordingService.create` (secret
- *      scrub, then surrogate masking when `dlp` is on), the oldest candidate
- *      is evicted when the workflow is at REPLAY_CAPTURES_MAX_PER_WORKFLOW,
- *      and it is stored with `status = 'candidate'`, no author.
+ *   2. A run that pauses for approval gives its ticket back at once
+ *      (`abandon`): nothing is kept of it, its recorder is dropped and its
+ *      slot in the day is freed. Its resume is never captured.
+ *   3. `finish`, after the run's final history is stored: queued, so it
+ *      never delays the run's answer. The settings and the kill switch are
+ *      read again: a capture turned off since the run started is dropped,
+ *      and masking applies when either the run-start or the current
+ *      settings ask for it. A run whose status is not in `onlyStatuses` is
+ *      dropped (a miss: it does not count against the day).
+ *   4. The candidate is built by `ReplayRecordingService.createCapture`
+ *      (secret scrub, then surrogate masking in chunks when `dlp` is on).
+ *      Content that cannot be scanned completely drops the capture
+ *      (`dropped_unscannable`). The oldest candidates are evicted while the
+ *      workflow is at REPLAY_CAPTURES_MAX_PER_WORKFLOW or over
+ *      REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW, and it is stored with
+ *      `status = 'candidate'`, no author.
  *
  * Any failure while capturing is logged and counted (metric
  * `replay_captures_total{outcome="failed"}`), never thrown into the run.
  *
  * Candidates nobody promotes are deleted after REPLAY_CAPTURE_RETENTION_DAYS.
+ *
+ * The daily limit counts the captures stored today (plus runs in flight):
+ * a candidate discarded, evicted or deleted by the data-subject lookup frees
+ * its slot again.
  */
 
 import { hkdfSync } from "node:crypto";
 import {
   DEFAULT_REPLAY_CAPTURE_SETTINGS,
   REPLAY_CAPTURE_DEFAULT_SET_NAME,
+  REPLAY_FIND_SUBJECT_KINDS,
+  REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH,
+  type ReplayFindSubjectDeleteResult,
+  type ReplayFindSubjectKind,
   type McpCassette,
   type ReplayCapturePromoteOutcome,
   type ReplayCaptureSettingsUpdate,
@@ -47,19 +63,35 @@ import {
   type ReplayRecordingSummary,
   type Workflow
 } from "@ai-orchestrator/shared";
-import { scanDlp, surrogateFor, type GuardDictionary } from "@ai-orchestrator/guard-sdk";
-import type { ReplayCaptureSettingsRecord, ReplayRecordingTextRow, SqliteStore } from "../db/database.js";
+import {
+  decodeView,
+  MaskIncompleteError,
+  MaskUnscannableError,
+  scanDlp,
+  SubjectIndex,
+  surrogateFor,
+  surrogateRedacts,
+  type GuardDictionary
+} from "@ai-orchestrator/guard-sdk";
+import { SUBJECT_CASSETTE_SOURCES, SUBJECT_EXECUTION_TRIGGERS, type ReplayCaptureSettingsRecord, type SqliteStore, type SubjectTextRow } from "../db/database.js";
+import { inputProvenance, type CaptureInputOrigin } from "./capture-masking.js";
 import type { McpCassetteRunPlan } from "./mcp-cassette-service.js";
 import { ReplayRecordingError, type ReplayRecordingService } from "./replay-recording-service.js";
 
 /** HKDF info for the surrogate key: one deployment-stable key derived from the master key. */
 export const CAPTURE_SURROGATE_HKDF_INFO = "l2m/capture-surrogate/v1";
 
+/** The surrogate key: HKDF-SHA-256 of the 32-byte master key. Refuses any other key length (an empty key would give a key anyone can compute). */
 export function deriveCaptureSurrogateKey(masterKey: Uint8Array): Uint8Array {
+  if (masterKey.length !== 32) throw new Error("The capture surrogate key needs the 32-byte master key (SECRET_MASTER_KEY_BASE64).");
   return new Uint8Array(hkdfSync("sha256", masterKey, new Uint8Array(0), CAPTURE_SURROGATE_HKDF_INFO, 32));
 }
 
-/** Triggers that are never captured, whatever channel they report. */
+/**
+ * Triggers that are never captured, whatever channel they report. Editor
+ * runs are `manual` / `manual_stream`; the execute API with an API key runs
+ * as `api_execute` / `api_execute_stream` and is captured.
+ */
 const EXCLUDED_TRIGGERS = new Set([
   "manual",
   "manual_stream",
@@ -88,6 +120,8 @@ export interface CaptureDeployment {
   maxRate: number;
   retentionDays: number;
   maxPerWorkflow: number;
+  /** REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW: candidates' bytes per workflow; the oldest go first. */
+  maxBytesPerWorkflow: number;
 }
 
 export interface ReplayCaptureServiceOptions {
@@ -104,6 +138,10 @@ export interface ReplayCaptureServiceOptions {
   surrogateKey: Uint8Array;
   /** The dictionaries of the guard profiles bound to the workflow (custom data classes). */
   dictionariesFor: (workflow: { id: string; projectId?: string | null }) => GuardDictionary[];
+  /** Data classes a guard profile bound to the workflow can mask: their surrogates keep what the mask shows. */
+  maskableClassesFor?: (workflow: { id: string; projectId?: string | null }) => string[];
+  /** The workflow's current project (a promoted run's "Captured" set is made there). */
+  workflowProject?: (workflowId: string) => string | null;
   /** Every dictionary data class the deployment's guard profiles define (the data-subject lookup tries them all). */
   dictionaryClasses: () => string[];
   /** The workflow's published version, or null when it has none. */
@@ -122,6 +160,12 @@ export interface CaptureTicket {
   rate: number;
   publishedVersion: number | null;
   settings: ReplayCaptureSettingsRecord;
+  triggerType: string;
+  /** Who produced the run's input, decided where the run started (labels). */
+  inputOrigin: CaptureInputOrigin;
+  /** When the ticket was given out (ms), for the stale-ticket sweep. */
+  issuedAt: number;
+  released?: boolean;
 }
 
 /** A small deterministic generator (mulberry32) for seeded sampling. */
@@ -253,6 +297,8 @@ export class ReplayCaptureService {
     releaseVersion: number | null;
     /** The run already records or replays (an eval run, a replay, a resume, a single-node run). */
     excluded: boolean;
+    /** Who produced the run's input (server-side): only the scheduler earns `trusted`. Default `external`. */
+    inputOrigin?: CaptureInputOrigin;
   }): CaptureTicket | null {
     try {
       const deployment = this.options.deployment;
@@ -277,7 +323,15 @@ export class ReplayCaptureService {
         return null;
       }
       this.inFlight.set(input.workflow.id, (this.inFlight.get(input.workflow.id) ?? 0) + 1);
-      return { workflowId: input.workflow.id, rate, publishedVersion: published, settings };
+      return {
+        workflowId: input.workflow.id,
+        rate,
+        publishedVersion: published,
+        settings,
+        triggerType: input.triggerType,
+        inputOrigin: input.inputOrigin ?? "external",
+        issuedAt: this.now().getTime()
+      };
     } catch (error) {
       this.metric("failed");
       this.options.log.warn({ workflowId: input.workflow.id, error: error instanceof Error ? error.message : String(error) }, "Capture sampling failed; the run is not captured");
@@ -286,15 +340,24 @@ export class ReplayCaptureService {
   }
 
   private release(ticket: CaptureTicket): void {
+    // A ticket is given back once, whichever path gets there first.
+    if (ticket.released) return;
+    ticket.released = true;
     const count = (this.inFlight.get(ticket.workflowId) ?? 1) - 1;
     if (count <= 0) this.inFlight.delete(ticket.workflowId);
     else this.inFlight.set(ticket.workflowId, count);
   }
 
-  /** A sampled run that will not be captured after all (it threw, or paused). */
+  /** A sampled run that will not be captured after all (it threw, paused, or its history was not stored). */
   abandon(ticket: CaptureTicket, outcome = "abandoned"): void {
+    if (ticket.released) return;
     this.release(ticket);
     this.metric(outcome);
+  }
+
+  /** Runs in flight for a workflow (tests and the settings view). */
+  inFlightFor(workflowId: string): number {
+    return this.inFlight.get(workflowId) ?? 0;
   }
 
   /** The recording the run's recorder holds: MCP cassette with model tape and memory seed. */
@@ -330,34 +393,72 @@ export class ReplayCaptureService {
     while (this.pending > 0) await this.queue;
   }
 
-  private capture(ticket: CaptureTicket, input: { executionId: string; workflow: Pick<Workflow, "id" | "name" | "projectId">; plan: McpCassetteRunPlan }): void {
+  private async capture(ticket: CaptureTicket, input: { executionId: string; workflow: Pick<Workflow, "id" | "name" | "projectId">; plan: McpCassetteRunPlan }): Promise<void> {
     try {
       const store = this.options.store;
+      // Settings as they are now: capture turned off (or the kill switch) since the run started drops it.
+      const current = this.settings(ticket.workflowId);
+      if (!this.options.deployment.enabled || !current?.enabled) {
+        this.metric("discarded_disabled");
+        return;
+      }
       const history = store.getExecutionHistory(input.executionId);
       if (!history || !history.completedAt || ["running", "pending", "queued", "waiting_approval"].includes(history.status)) {
         this.metric("skipped_unfinished");
         return;
       }
-      const statuses = ticket.settings.onlyStatuses as readonly string[];
+      // Never a run a production trigger did not start (a resume under the same execution id).
+      if (!history.triggerType || EXCLUDED_TRIGGERS.has(history.triggerType) || history.triggerType !== ticket.triggerType) {
+        this.metric("skipped_excluded_trigger");
+        return;
+      }
+      const statuses = current.onlyStatuses as readonly string[];
       if (!statuses.includes(history.status)) {
         this.metric("discarded_status");
         return;
       }
       const capturedAt = this.now().toISOString();
-      const mask = ticket.settings.dlp ? { key: this.options.surrogateKey, dictionaries: this.options.dictionariesFor(input.workflow) } : null;
+      // Masking applies when either the settings the run started with or the current ones ask for it.
+      const masked = ticket.settings.dlp || current.dlp;
+      const mask = masked
+        ? {
+            key: this.options.surrogateKey,
+            dictionaries: this.options.dictionariesFor(input.workflow),
+            visibleTailClasses: this.options.maskableClassesFor?.(input.workflow) ?? []
+          }
+        : null;
       const name = `Captured ${history.triggerType ?? "run"} ${capturedAt.slice(0, 16).replace("T", " ")}`;
-      const summary = this.options.recordings.create({ executionId: input.executionId, name }, null, {
-        cassette: ReplayCaptureService.cassetteOf(input.plan),
-        mask,
-        rate: ticket.rate,
-        publishedVersion: ticket.publishedVersion,
-        capturedAt,
-        beforeSave: () => this.evictFor(ticket.workflowId)
-      });
+      const summary = await this.options.recordings.createCapture(
+        { executionId: input.executionId, name },
+        {
+          cassette: ReplayCaptureService.cassetteOf(input.plan),
+          mask,
+          rate: ticket.rate,
+          publishedVersion: ticket.publishedVersion,
+          capturedAt,
+          inputProvenance: inputProvenance(history.triggerType, ticket.inputOrigin),
+          beforeSave: (bytes) => {
+            // Read once more right before saving: masking ran in chunks, and capture may have been turned off meanwhile.
+            const latest = this.settings(ticket.workflowId);
+            if (!this.options.deployment.enabled || !latest?.enabled) throw new ReplayCaptureError("Capture was turned off while the run was being masked.", "conflict");
+            if (!masked && latest.dlp) throw new ReplayCaptureError("Masking was turned on while the run was being captured.", "conflict");
+            this.evictFor(ticket.workflowId, bytes);
+          }
+        }
+      );
       this.metric("captured");
       this.options.log.info({ workflowId: ticket.workflowId, recordingId: summary.id, bytes: summary.bytes, masked: Boolean(mask) }, "Captured a production run");
     } catch (error) {
-      const outcome = error instanceof ReplayRecordingError && error.code === "too_large" ? "skipped_too_large" : "failed";
+      const outcome =
+        error instanceof MaskUnscannableError
+          ? "dropped_unscannable"
+          : error instanceof MaskIncompleteError
+            ? "dropped_incomplete_mask"
+            : error instanceof ReplayCaptureError && error.code === "conflict"
+              ? "discarded_disabled"
+              : error instanceof ReplayRecordingError && error.code === "too_large"
+                ? "skipped_too_large"
+                : "failed";
       this.metric(outcome);
       this.options.log.warn(
         { workflowId: ticket.workflowId, executionId: input.executionId, outcome, error: error instanceof Error ? error.message : String(error) },
@@ -368,14 +469,28 @@ export class ReplayCaptureService {
     }
   }
 
-  /** Makes room for one more candidate: the oldest go first. */
-  private evictFor(workflowId: string): void {
+  /**
+   * Makes room for one more candidate of `bytes`: the oldest go first, while
+   * the workflow is at its candidate count or over its byte budget. A
+   * candidate larger than the whole budget is refused.
+   */
+  private evictFor(workflowId: string, bytes: number): void {
     const store = this.options.store;
-    const over = store.countReplayRecordingsForWorkflow(workflowId, "candidate") - this.options.deployment.maxPerWorkflow + 1;
-    if (over <= 0) return;
-    for (const id of store.oldestReplayCaptureIds(workflowId, over)) {
-      store.deleteReplayRecording(id);
-      this.metric("evicted");
+    const { maxPerWorkflow, maxBytesPerWorkflow } = this.options.deployment;
+    if (bytes > maxBytesPerWorkflow) {
+      throw new ReplayRecordingError(`The captured run is ${bytes} bytes, more than REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW (${maxBytesPerWorkflow}).`, "too_large");
+    }
+    let count = store.countReplayRecordingsForWorkflow(workflowId, "candidate");
+    let used = store.sumReplayCaptureBytesForWorkflow(workflowId);
+    while (count > 0 && (count + 1 > maxPerWorkflow || used + bytes > maxBytesPerWorkflow)) {
+      const oldest = store.oldestReplayCaptures(workflowId, 20);
+      if (oldest.length === 0) break;
+      for (const candidate of oldest) {
+        if (!(count + 1 > maxPerWorkflow || used + bytes > maxBytesPerWorkflow)) break;
+        if (store.deleteReplayRecording(candidate.id)) this.metric("evicted");
+        count -= 1;
+        used -= candidate.bytes;
+      }
     }
   }
 
@@ -404,15 +519,19 @@ export class ReplayCaptureService {
     const record = store.getReplayRecording(id);
     if (!record || record.status !== "candidate") return { id, ok: false, error: "Captured run not found" };
     try {
-      const datasetId = this.targetSet(record.workflowId, record.projectId, input.datasetId, actor.email);
+      // Checks first; the "Captured" set is made inside the transaction, so a refused promote leaves nothing behind.
       const prepared = this.options.recordings.preparePromotion(record);
+      const projectId = this.options.workflowProject?.(record.workflowId) ?? record.projectId;
       let fixtureId: string | undefined;
+      let datasetId = "";
       store.transaction(() => {
+        datasetId = this.targetSet(record.workflowId, projectId, input.datasetId, actor.email);
         if (!store.promoteReplayCapture(id, { ...prepared, name: input.name ?? prepared.name, createdBy: actor.email })) {
           throw new ReplayCaptureError("The run is no longer waiting in the inbox.", "conflict");
         }
         const promoted = store.getReplayRecording(id)!;
         fixtureId = this.options.datasets.addGoldenRun({ datasetId, recording: promoted })?.id;
+        if (!fixtureId) throw new ReplayCaptureError("The run could not be added to the golden set.", "conflict");
       });
       return { id, ok: true, datasetId, workflowId: record.workflowId, ...(fixtureId ? { fixtureId } : {}) };
     } catch (error) {
@@ -450,102 +569,186 @@ export class ReplayCaptureService {
   // Data-subject lookup
   // ---------------------------------------------------------------------------
 
-  /** The classes a looked-up value could have been masked as. */
-  plausibleClasses(value: string): string[] {
+  /** The built-in classes a looked-up value could have been masked as. */
+  private builtInClasses(value: string): string[] {
     const trimmed = value.trim();
     const classes = new Set<string>(scanDlp(trimmed).map((match) => String(match.dataClass)));
     const digits = trimmed.replace(/\D/g, "").length;
-    if (/@/.test(trimmed)) classes.add("email");
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) classes.add("email");
     if (digits >= 13 && digits <= 19 && /^[\d\s-]+$/.test(trimmed)) classes.add("card_number");
     if (digits >= 9 && digits <= 15 && /^[+\d\s().-]+$/.test(trimmed)) classes.add("phone");
     if (/^\d{3}[- ]?\d{2}[- ]?\d{4}$/.test(trimmed)) classes.add("us_ssn");
     if (/^[A-Z]{2}\d{2}[A-Z0-9\s-]{8,}$/i.test(trimmed)) classes.add("iban");
     if (/^[A-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]$/i.test(trimmed)) classes.add("national_id");
-    for (const name of this.options.dictionaryClasses()) classes.add(name);
     // Secrets are removed outright, so there is nothing keyed to find.
-    for (const redacted of ["credential", "private_key", "jwt"]) classes.delete(redacted);
+    for (const redacted of [...classes]) if (surrogateRedacts(redacted)) classes.delete(redacted);
+    return [...classes].sort();
+  }
+
+  /** The classes a looked-up value could have been masked as: the built-in ones it fits, and every dictionary class. */
+  plausibleClasses(value: string): string[] {
+    const classes = new Set(this.builtInClasses(value));
+    for (const name of this.options.dictionaryClasses()) classes.add(name);
     return [...classes].sort();
   }
 
   /**
-   * Every recording that holds `value`, as its surrogate (a masked capture)
-   * or raw (a run saved by hand, or captured with masking off). The value is
-   * never stored or logged. With `remove`, those recordings and the
-   * golden-set cases made from them are deleted.
+   * The finders for one value: raw (boundary-aware, in canonical form per
+   * class: `ann@x.co` never matches `joann@x.com`) and, per plausible class,
+   * its surrogates (with and without the visible tail, since a capture keeps
+   * the tail only when a guard profile could mask the class). A phone is
+   * matched on its last nine digits, so it is found written with or without
+   * its country code.
    */
-  findSubject(value: string, remove: boolean): ReplayFindSubjectResult {
+  private needlesFor(value: string): { classesTried: string[]; needles: Array<{ label: string; index: SubjectIndex }> } {
     const trimmed = value.trim();
+    const builtIn = this.builtInClasses(trimmed);
+    if (builtIn.length === 0 && trimmed.length < REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH) {
+      throw new ReplayCaptureError(
+        `A value that is not an email address, card, IBAN, SSN, phone or NI number needs at least ${REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH} characters.`,
+        "invalid"
+      );
+    }
     const classes = this.plausibleClasses(trimmed);
-    const needles: Array<{ label: string; test: (text: string) => boolean }> = [];
-    const separators = "[\\s.()\\-]*";
-    const flexible = (core: string, flags = "") => {
-      const pattern = new RegExp(`(?<![0-9A-Za-z])${Array.from(core).map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(separators)}(?![0-9A-Za-z])`, flags);
-      return (text: string) => pattern.test(text);
-    };
-    const escaped = (text: string) => JSON.stringify(text).slice(1, -1);
-    const literal = (needle: string, caseInsensitive = false) => {
-      const forms = [...new Set([needle, escaped(needle)])];
-      return caseInsensitive
-        ? (text: string) => {
-            const lower = text.toLowerCase();
-            return forms.some((form) => lower.includes(form.toLowerCase()));
-          }
-        : (text: string) => forms.some((form) => text.includes(form));
-    };
-
+    const raw = new SubjectIndex({ boundedLiterals: true });
+    for (const dataClass of builtIn) raw.add(trimmed, dataClass);
+    if (builtIn.length === 0) raw.addLiteral(trimmed, "raw");
+    const needles: Array<{ label: string; index: SubjectIndex }> = [{ label: "raw", index: raw }];
     for (const dataClass of classes) {
-      const surrogate = surrogateFor(trimmed, dataClass, this.options.surrogateKey);
-      if (["card_number", "phone", "us_ssn"].includes(dataClass)) needles.push({ label: dataClass, test: flexible(surrogate.replace(/\D/g, "")) });
-      else if (["iban", "national_id"].includes(dataClass) && !surrogate.startsWith("[")) needles.push({ label: dataClass, test: flexible(surrogate.replace(/[^A-Za-z0-9]/g, ""), "i") });
-      else needles.push({ label: dataClass, test: literal(surrogate) });
-    }
-    const rawTests = [literal(trimmed, /@/.test(trimmed))];
-    const digitsOnly = trimmed.replace(/\D/g, "");
-    if (digitsOnly.length >= 9 && /^[+\d\s().-]+$/.test(trimmed)) rawTests.push(flexible(digitsOnly));
-    if (/^[A-Z]{2}\d{2}/i.test(trimmed.replace(/[\s-]/g, ""))) rawTests.push(flexible(trimmed.replace(/[^A-Za-z0-9]/g, ""), "i"));
-    needles.push({ label: "raw", test: (text) => rawTests.some((test) => test(text)) });
-
-    const store = this.options.store;
-    const matches: ReplayFindSubjectMatch[] = [];
-    let searched = 0;
-    let after = 0;
-    for (;;) {
-      const page = store.replayRecordingTextPage(after, 200);
-      for (const row of page.rows) {
-        searched += 1;
-        const match = this.matchRow(row, needles);
-        if (match) matches.push(match);
+      const index = new SubjectIndex({ boundedLiterals: true });
+      for (const visibleTail of [false, true]) {
+        const surrogate = surrogateFor(trimmed, dataClass, this.options.surrogateKey, { visibleTail });
+        if (surrogate.startsWith("[")) index.addLiteral(surrogate, dataClass);
+        else index.add(surrogate, dataClass);
       }
-      if (page.lastRowid === null || page.rows.length < 200) break;
-      after = page.lastRowid;
+      needles.push({ label: dataClass, index });
     }
-
-    let deleted = 0;
-    let casesDeleted = 0;
-    if (remove && matches.length > 0) {
-      store.transaction(() => {
-        for (const match of matches) {
-          casesDeleted += store.deleteEvalFixturesForRecording(match.recordingId);
-          if (store.deleteReplayRecording(match.recordingId)) deleted += 1;
-        }
-      });
-    }
-    return { classesTried: classes, matches, deleted, casesDeleted, searched };
+    return { classesTried: classes, needles };
   }
 
-  private matchRow(row: ReplayRecordingTextRow, needles: Array<{ label: string; test: (text: string) => boolean }>): ReplayFindSubjectMatch | null {
+  private matchRow(row: SubjectTextRow, needles: Array<{ label: string; index: SubjectIndex }>): ReplayFindSubjectMatch | null {
     const matchedAs = new Set<string>();
     const fields = new Set<string>();
     for (const [field, text] of Object.entries(row.texts)) {
       if (!text) continue;
+      // Stored text is JSON: decode its escapes (and URL-encoding) once, then match each finder.
+      const view = decodeView(decodeView(text).text).text;
       for (const needle of needles) {
-        if (needle.test(text)) {
+        if (needle.index.find(view).length > 0) {
           matchedAs.add(needle.label);
           fields.add(field);
         }
       }
     }
     if (matchedAs.size === 0) return null;
-    return { recordingId: row.id, workflowId: row.workflowId, projectId: row.projectId, name: row.name, status: row.status, matchedAs: [...matchedAs].sort(), fields: [...fields].sort() };
+    return {
+      kind: row.kind,
+      id: row.id,
+      workflowId: row.workflowId,
+      projectId: row.projectId,
+      name: row.name,
+      status: row.status,
+      matchedAs: [...matchedAs].sort(),
+      fields: [...fields].sort()
+    };
+  }
+
+  /**
+   * Search: every stored copy of `value`, as its surrogate (a masked
+   * capture) or raw (a run saved by hand, captured with masking off, or a
+   * replay of one). The value is never stored or logged. Pages are small and
+   * the event loop gets a turn between them. Nothing is deleted here.
+   */
+  async findSubject(value: string): Promise<ReplayFindSubjectResult> {
+    const { classesTried, needles } = this.needlesFor(value);
+    const store = this.options.store;
+    const matches: ReplayFindSubjectMatch[] = [];
+    const counts = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
+    const searched = { ...counts };
+    for (const kind of REPLAY_FIND_SUBJECT_KINDS) {
+      let after = 0;
+      for (;;) {
+        const page = store.subjectTextPage(kind, after, FIND_SUBJECT_PAGE);
+        for (const row of page.rows) {
+          searched[kind] += 1;
+          const match = this.matchRow(row, needles);
+          if (match) {
+            matches.push(match);
+            counts[kind] += 1;
+          }
+        }
+        if (page.lastRowid === null || page.rows.length < FIND_SUBJECT_PAGE) break;
+        after = page.lastRowid;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
+    return { classesTried, matches, counts, searched, covered: FIND_SUBJECT_COVERED, notCovered: FIND_SUBJECT_NOT_COVERED };
+  }
+
+  /**
+   * Delete: the rows a search returned. Each is checked again against the
+   * value first; one that is gone or no longer holds it is skipped, never
+   * deleted. A golden run takes its golden-set cases and their results.
+   */
+  async deleteSubject(value: string, targets: Array<{ kind: ReplayFindSubjectKind; id: string }>): Promise<ReplayFindSubjectDeleteResult> {
+    const { needles } = this.needlesFor(value);
+    const store = this.options.store;
+    const deleted = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
+    const skipped: ReplayFindSubjectDeleteResult["skipped"] = [];
+    const removed: ReplayFindSubjectDeleteResult["removed"] = [];
+    const seen = new Set<string>();
+    let checked = 0;
+    for (const target of targets) {
+      const key = `${target.kind}:${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const row = store.subjectTextRow(target.kind, target.id);
+      if (!row) {
+        skipped.push({ ...target, reason: "not_found" });
+        continue;
+      }
+      if (!this.matchRow(row, needles)) {
+        skipped.push({ ...target, reason: "no_match" });
+        continue;
+      }
+      const outcome = store.transaction(() => store.deleteSubjectRow(target.kind, target.id));
+      if (outcome.deleted) {
+        deleted[target.kind] += 1;
+        removed.push({ kind: target.kind, id: target.id });
+      }
+      for (const cascaded of outcome.cascaded) {
+        const cascadedKey = `${cascaded.kind}:${cascaded.id}`;
+        if (seen.has(cascadedKey)) continue;
+        seen.add(cascadedKey);
+        deleted[cascaded.kind] += 1;
+        removed.push(cascaded);
+      }
+      checked += 1;
+      if (checked % FIND_SUBJECT_PAGE === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return { deleted, removed, skipped };
   }
 }
+
+/** Rows read per page by the data-subject lookup (each golden run can be several megabytes). */
+const FIND_SUBJECT_PAGE = 20;
+
+/** What the data-subject lookup searches (and can delete from). */
+export const FIND_SUBJECT_COVERED = [
+  "Golden runs and captured runs (replay_recordings): input, node outputs, run facts, MCP cassette, model tape, memory seed, workflow snapshot, notes",
+  "Golden-set cases (eval_fixtures): input and expected output, including hand-written cases and copied inputs",
+  "Replay, replay-job, gate and eval results (eval_results): output, error and diff",
+  `Runs made from golden runs and cases (execution_history with trigger ${SUBJECT_EXECUTION_TRIGGERS.join(", ")}): input, output, node results, custom data, error`,
+  `MCP cassettes recorded by those runs (mcp_cassettes with source ${SUBJECT_CASSETTE_SOURCES.join(", ")})`
+];
+
+/** What it does not search: these follow their own retention settings. */
+export const FIND_SUBJECT_NOT_COVERED = [
+  "Production execution history, tool-call telemetry and paused runs (EXECUTION_HISTORY_RETENTION_DAYS)",
+  "MCP cassettes from Record calls on ordinary runs, and imported cassettes (they follow EXECUTION_HISTORY_RETENTION_DAYS)",
+  "Session memory, tool data and session artifacts (their own retention)",
+  "Logs, metrics and log-streaming destinations (outside the database)",
+  "Audit log (AUDIT_LOG_RETENTION_DAYS; it holds ids and counts, not values)",
+  "Guard events (masked evidence only) and the guard token vault",
+  "Usage events and eval run summaries (counts and costs)"
+];

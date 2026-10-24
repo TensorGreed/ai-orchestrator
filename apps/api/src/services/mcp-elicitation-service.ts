@@ -34,7 +34,7 @@ import type { McpElicitationRecord, SqliteStore } from "../db/database.js";
 import type { AuditEventInput } from "./audit-service.js";
 
 /** Trigger types where a person is in front of the run and can answer. */
-export const ATTENDED_TRIGGER_TYPES = new Set(["manual", "manual_stream", "manual_retry", "approval_resume"]);
+export const ATTENDED_TRIGGER_TYPES = new Set(["manual", "manual_stream", "manual_retry", "approval_resume", "api_execute", "api_execute_stream"]);
 
 export function isAttendedTrigger(triggerType: string | undefined): boolean {
   return triggerType !== undefined && ATTENDED_TRIGGER_TYPES.has(triggerType);

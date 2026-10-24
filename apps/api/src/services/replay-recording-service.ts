@@ -46,7 +46,9 @@ import {
 import { canonicalJson as cassetteCanonical, hashCassetteArgs, parseCassette, scrubForCassette } from "@ai-orchestrator/mcp-sdk";
 import type { ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import { SecretScrubber } from "./audit-scrub.js";
-import { maskCapturedRun, withNodeLabels, type CaptureMaskOptions } from "./capture-masking.js";
+import { runSteps, runStepsAsync } from "@ai-orchestrator/guard-sdk";
+import type { ProvenanceLabel } from "@ai-orchestrator/shared";
+import { maskCapturedRunSteps, withNodeLabels, type CaptureMaskOptions } from "./capture-masking.js";
 import { sanitizeConfig, sha256Hex, workflowForHash } from "./audit-bundle-service.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import type { SecretService } from "./secret-service.js";
@@ -108,8 +110,10 @@ export interface CaptureOptions {
   rate: number;
   publishedVersion: number | null;
   capturedAt: string;
-  /** Called once the candidate is built and checked, right before it is saved (eviction makes room here). */
-  beforeSave?: () => void;
+  /** Where the run's input came from (labels); decided by the server where the run started. */
+  inputProvenance: ProvenanceLabel;
+  /** Called once the candidate is built and checked, right before it is saved (eviction makes room here). Throw to drop it. */
+  beforeSave?: (bytes: number) => void;
 }
 
 /** A golden run from a file, checked and scrubbed, ready to be saved (`ReplayRecordingService.saveImport`). */
@@ -234,7 +238,20 @@ export class ReplayRecordingService {
    * secret scrub; tape and cassette match keys are then taken again over the
    * masked content, so a `models: "replay"` replay still finds its answers.
    */
-  create(input: { executionId: string; name: string; notes?: string | null }, createdBy: string | null, capture?: CaptureOptions): ReplayRecordingSummary {
+  create(input: { executionId: string; name: string; notes?: string | null }, createdBy: string | null): ReplayRecordingSummary {
+    return runSteps(this.build(input, createdBy));
+  }
+
+  /**
+   * Phase 15.6 — saves a finished production run as a capture candidate (see
+   * `create`). Masking runs in chunks, giving the event loop a turn between
+   * them, so a large capture never stalls production requests.
+   */
+  createCapture(input: { executionId: string; name: string }, capture: CaptureOptions): Promise<ReplayRecordingSummary> {
+    return runStepsAsync(this.build(input, null, capture));
+  }
+
+  private *build(input: { executionId: string; name: string; notes?: string | null }, createdBy: string | null, capture?: CaptureOptions): Generator<void, ReplayRecordingSummary, void> {
     const store = this.options.store;
     const history = store.getExecutionHistory(input.executionId);
     if (!history) throw new ReplayRecordingError("Execution not found", "not_found");
@@ -352,7 +369,10 @@ export class ReplayRecordingService {
     let captureInfo: ReplayCaptureInfo | undefined;
     if (capture) {
       const masked = capture.mask
-        ? maskCapturedRun({ input: scrubbedInput, nodes: scrubbedNodes, facts: scrubbedFacts, cassette, modelTape, memorySeed }, { ...capture.mask, keepValuesIn: workflowJson })
+        ? yield* maskCapturedRunSteps(
+            { input: scrubbedInput, nodes: scrubbedNodes, facts: scrubbedFacts, cassette, modelTape, memorySeed },
+            { ...capture.mask, keepLiteralsFrom: JSON.parse(workflowJson) as unknown }
+          )
         : null;
       if (masked) {
         scrubbedInput = (masked.input ?? null) as typeof scrubbedInput;
@@ -362,7 +382,7 @@ export class ReplayRecordingService {
         modelTape = masked.modelTape;
         memorySeed = masked.memorySeed;
       }
-      scrubbedFacts = withNodeLabels(scrubbedFacts, masked?.report ?? null, history.triggerType);
+      scrubbedFacts = withNodeLabels(scrubbedFacts, masked?.report ?? null, capture.inputProvenance);
       captureInfo = {
         rate: capture.rate,
         masked: Boolean(masked),
@@ -427,7 +447,7 @@ export class ReplayRecordingService {
       (modelTapeJson ? byteLength(modelTapeJson) : 0) +
       (memorySeedJson ? byteLength(memorySeedJson) : 0);
     if (!capture) this.checkBudgets(history.workflowId, bytes);
-    capture?.beforeSave?.();
+    capture?.beforeSave?.(bytes);
 
     return store.saveReplayRecording({
       id: `rec_${randomUUID()}`,
@@ -723,7 +743,9 @@ export class ReplayRecordingService {
       ...(record.modelTape ? { modelTape: ReplayRecordingService.keepTapeHashes(record.modelTape, this.scrubForFile(record.modelTape, scrubber)) } : {}),
       ...(record.memorySeed ? { memorySeed: this.scrubForFile(record.memorySeed, scrubber) } : {}),
       truncated: record.truncated,
-      ...(record.capabilities.scrubbed ? { scrubbed: record.capabilities.scrubbed } : {})
+      ...(record.capabilities.scrubbed ? { scrubbed: record.capabilities.scrubbed } : {}),
+      // A captured run keeps its masked flag and classes, so an importer knows the values are surrogates.
+      ...(record.capabilities.capture ? { capture: { masked: record.capabilities.capture.masked, dataClasses: [...record.capabilities.capture.dataClasses] } } : {})
     };
   }
 
@@ -859,7 +881,20 @@ export class ReplayRecordingService {
           origin: "imported",
           recordedAt,
           importedAt: now.toISOString(),
-          sourceWorkflowId: input.sourceWorkflowId
+          sourceWorkflowId: input.sourceWorkflowId,
+          ...(file.capture
+            ? {
+                capture: {
+                  rate: 0,
+                  masked: file.capture.masked,
+                  dataClasses: [...new Set(file.capture.dataClasses)].sort(),
+                  values: {},
+                  notDetectableAfterMasking: [],
+                  keptFromWorkflow: 0,
+                  publishedVersion: null
+                }
+              }
+            : {})
         },
         bytes,
         truncated: Boolean(file.truncated),

@@ -57,6 +57,7 @@
  */
 
 import { CASSETTE_REDACTED } from "@ai-orchestrator/mcp-sdk";
+import { candidateRefusal, type CandidatePolicy } from "./candidate-policy.js";
 import { randomUUID } from "node:crypto";
 import {
   aggregateReplayAttempts,
@@ -351,6 +352,8 @@ interface ReplayJobContext {
   candidate: EvalReplayCandidate;
   options: ReplayJobOptions;
   scorers: EvalScorerSpec[] | null;
+  /** Phase 15.6 — server-internal jobs only (a policy simulation over recent traffic): captured candidates may be replayed. */
+  allowCandidates?: boolean;
 }
 
 /** Phase 15.3 — a validated replay job request, before it is stored and launched. */
@@ -644,7 +647,7 @@ export class EvalService {
    * models, plus the most the judges can cost), with warnings. Validates the
    * request exactly as `enqueueReplayJob` does; nothing is stored or run.
    */
-  estimateReplayJob(request: ReplayJobRequest, context: { workflowId: string; actor?: SafeUser | null }): ReplayJobEstimate {
+  estimateReplayJob(request: ReplayJobRequest, context: { workflowId: string; actor?: SafeUser | null } & CandidatePolicy): ReplayJobEstimate {
     const replay = this.options.replay!;
     const { candidate, options, fixtures, executions } = this.prepareReplayJob(request, context.workflowId, context.actor ?? null);
     const repeats = options.repeats ?? 1;
@@ -664,7 +667,7 @@ export class EvalService {
     for (const fixture of fixtures) {
       if (!fixture.recordingId) continue;
       const recording = replay.getRecording(fixture.recordingId);
-      if (!recording || recording.workflowId !== context.workflowId || recording.status === "candidate") {
+      if (!recording || recording.workflowId !== context.workflowId || candidateRefusal(recording, context)) {
         missing += 1;
         continue;
       }
@@ -1398,7 +1401,8 @@ export class EvalService {
     if (!recording) return { status: "error", recordingId, error: "The golden run for this case was deleted." };
     if (recording.workflowId !== workflowId) return { status: "error", recordingId, error: "The golden run for this case belongs to another workflow." };
     // Phase 15.6 — a captured run is not a golden run until a builder promotes it.
-    if (recording.status === "candidate") return { status: "error", recordingId, error: "This case's run is a captured candidate; promote it from the Captured runs inbox first." };
+    const refusal = candidateRefusal(recording, { allowCandidates: job.allowCandidates });
+    if (refusal) return { status: "error", recordingId, error: refusal };
     const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute");
     if (!actor) {
       return {

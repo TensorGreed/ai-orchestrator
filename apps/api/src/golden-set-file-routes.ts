@@ -38,6 +38,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { candidateRefusal } from "./services/candidate-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   DEFAULT_PROJECT_ID,
@@ -166,7 +167,7 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
     for (const fixture of store.listEvalFixtures(dataset.id)) {
       const recording = fixture.recordingId ? store.getReplayRecording(fixture.recordingId) : null;
       // A hand-written case, or one whose golden run was deleted, has no recording to carry; a captured candidate is not a golden run yet.
-      if (!recording || recording.status === "candidate") {
+      if (!recording || candidateRefusal(recording)) {
         skipped += 1;
         continue;
       }

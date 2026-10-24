@@ -1651,7 +1651,7 @@ export const MIGRATIONS: Migration[] = [
     version: 34,
     description: "Phase 15.6 — Production capture (capture settings, candidate recordings)",
     up: `
-      ALTER TABLE replay_recordings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'golden';
+      ALTER TABLE replay_recordings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'golden' CHECK (status IN ('candidate', 'golden'));
       ALTER TABLE replay_recordings ADD COLUMN IF NOT EXISTS captured_at TIMESTAMPTZ;
       CREATE INDEX IF NOT EXISTS idx_replay_recordings_status ON replay_recordings(workflow_id, status, captured_at DESC);
       CREATE TABLE IF NOT EXISTS replay_capture_settings (

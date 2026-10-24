@@ -8,7 +8,8 @@
  *   POST   /api/replay/captures/promote            the same for up to 100 candidates (builder)
  *   DELETE /api/replay/captures/:id                discard a candidate: hard delete (builder)
  *   POST   /api/replay/captures/discard            the same for up to 100 candidates (builder)
- *   POST   /api/replay/recordings/find-subject     admins: every recording that holds a value, as its surrogate or raw; optional delete
+ *   POST   /api/replay/recordings/find-subject     admins: every stored copy of a value, as its surrogate or raw (search only)
+ *   POST   /api/replay/recordings/find-subject/delete  admins: delete rows a search returned, each checked again first
  *
  * Access follows the workflow (run-access.ts): reading needs `workflow:read`
  * (404 otherwise), changing needs `workflow:write` (403 when readable but not
@@ -24,6 +25,7 @@ import {
   replayCaptureListQuerySchema,
   replayCapturePromoteSchema,
   replayCaptureSettingsUpdateSchema,
+  replayFindSubjectDeleteSchema,
   replayFindSubjectSchema,
   type ReplayCapturePromoteOutcome
 } from "@ai-orchestrator/shared";
@@ -254,6 +256,16 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
     return { results, discarded: results.filter((result) => result.ok).length };
   });
 
+  /** Never echo the value back, not even in a validation message. */
+  const quietIssue = (error: z.ZodError) => firstIssue(error).replace(/"[^"]*"/g, '"…"');
+  const lookupError = (reply: FastifyReply, error: unknown) => {
+    if (error instanceof ReplayCaptureError) {
+      reply.code(CAPTURE_ERROR_STATUS[error.code]);
+      return { error: error.message, code: error.code };
+    }
+    throw error;
+  };
+
   app.post<{ Body: unknown }>("/api/replay/recordings/find-subject", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return reply;
@@ -261,23 +273,60 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
     const parsed = replayFindSubjectSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
-      // Never echo the value back, not even in a validation message.
-      return { error: firstIssue(parsed.error).replace(/"[^"]*"/g, '"…"') };
+      return { error: quietIssue(parsed.error) };
     }
-    const result = captures.findSubject(parsed.data.value, parsed.data.delete === true);
-    deps.audit(request, user, {
-      eventType: parsed.data.delete ? "replay.find_subject.deleted" : "replay.find_subject.searched",
-      category: "system",
-      action: parsed.data.delete ? "delete" : "read",
-      resourceType: "replay_recording",
-      metadata: {
-        classesTried: result.classesTried,
-        matches: result.matches.length,
-        recordingIds: result.matches.map((match) => match.recordingId).slice(0, 200),
-        deleted: result.deleted,
-        casesDeleted: result.casesDeleted
+    try {
+      const result = await captures.findSubject(parsed.data.value);
+      deps.audit(request, user, {
+        eventType: "replay.find_subject.searched",
+        category: "system",
+        action: "read",
+        resourceType: "replay_recording",
+        metadata: { classesTried: result.classesTried, matches: result.matches.length, counts: result.counts }
+      });
+      return result;
+    } catch (error) {
+      return lookupError(reply, error);
+    }
+  });
+
+  app.post<{ Body: unknown }>("/api/replay/recordings/find-subject/delete", async (request, reply) => {
+    const user = await requireRole(request, reply, ["admin"]);
+    if (!user) return reply;
+    if (!deps.available) return unavailable(reply);
+    const parsed = replayFindSubjectDeleteSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: quietIssue(parsed.error) };
+    }
+    try {
+      const result = await captures.deleteSubject(parsed.data.value, parsed.data.targets);
+      // The erasure trail names every row deleted, cases and results removed with a golden run included
+      // (in chunks of 200 ids per audit row), never the value.
+      const removed = result.removed;
+      const chunks = Math.max(1, Math.ceil(removed.length / AUDIT_IDS_PER_ROW));
+      for (let chunk = 0; chunk < chunks; chunk += 1) {
+        const ids = removed.slice(chunk * AUDIT_IDS_PER_ROW, (chunk + 1) * AUDIT_IDS_PER_ROW);
+        deps.audit(request, user, {
+          eventType: "replay.find_subject.deleted",
+          category: "system",
+          action: "delete",
+          resourceType: "replay_recording",
+          metadata: {
+            chunk: chunk + 1,
+            chunks,
+            deleted: result.deleted,
+            skipped: result.skipped.length,
+            targets: ids.map((target) => `${target.kind}:${target.id}`)
+          }
+        });
       }
-    });
-    return result;
+      return result;
+    } catch (error) {
+      return lookupError(reply, error);
+    }
   });
 }
+
+/** Ids per audit row in a data-subject delete's trail. */
+const AUDIT_IDS_PER_ROW = 200;
