@@ -131,3 +131,51 @@ describe("l2m replay run --set", () => {
     expect(JSON.parse(fake.out())).toMatchObject({ id: "run_1", status: "completed", exitCode: 0 });
   });
 });
+
+describe("an enforced release gate in the job output", () => {
+  const results: Partial<EvalCaseResult>[] = [
+    { id: "r1", fixtureId: "f1", fixtureName: "Refund", status: "fail", score: { pass: false, details: [{ type: "status", pass: false, reason: "different" }] } },
+    { id: "r2", fixtureId: "f2", fixtureName: "Lookup", status: "pass" },
+    { id: "r3", fixtureId: "f3", fixtureName: "Easy", status: "error", error: "cassette miss" }
+  ];
+  const gated = () => ({
+    ...job("completed", { pass: 1, fail: 1, error: 1 }, results),
+    releaseGate: { enforced: true, admittedFixtureIds: ["f1", "f2"], pendingFixtureIds: ["f3"], requiredFixtureIds: ["f1"], errorsCountAsFailures: true }
+  });
+
+  it("prints admitted, pending and required counts and the failing required case; the exit code stays the job's", async () => {
+    const fake = io([{ status: 200, body: { run: gated() } }]);
+    const code = await main(["replay", "status", "run_1"], fake.cli);
+    expect(code).toBe(EXIT_FAILED);
+    expect(fake.out()).toContain("enforced release gate: 2 admitted, 1 pending admission (they run but do not count yet), 1 required");
+    expect(fake.out()).toContain('required case "Refund" failed: it blocks a publish whatever the pass rate');
+    expect(fake.out()).toContain("fail Refund (required)");
+    expect(fake.out()).toContain("error Easy (pending admission, not counted): cassette miss");
+  });
+
+  it("says nothing about a gate when the job ran over no enforced gate's sets", async () => {
+    const fake = io([{ status: 200, body: { run: job("completed", { pass: 1, fail: 1 }, results.slice(0, 2)) } }]);
+    await main(["replay", "status", "run_1"], fake.cli);
+    expect(fake.out()).not.toContain("release gate");
+    expect(fake.out()).not.toContain("required");
+  });
+
+  it("marks the failing required case in JUnit and carries the counts", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l2m-junit-"));
+    try {
+      const file = path.join(dir, "out.xml");
+      const fake = io([{ status: 200, body: { run: gated() } }]);
+      await main(["replay", "status", "run_1", "--junit", file], fake.cli);
+      const xml = fs.readFileSync(file, "utf8");
+      expect(xml).toContain('<failure message="required case: blocks a publish whatever the pass rate: status: different" type="required_case">');
+      expect(xml).toContain('message="pending admission, not counted by the release gate: cassette miss"');
+      expect(xml).toContain('<property name="gateAdmittedCases" value="2"/>');
+      expect(xml).toContain('<property name="gateRequiredFailing" value="1"/>');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
