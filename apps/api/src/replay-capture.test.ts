@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { MaskUnscannableError, surrogateFor } from "@ai-orchestrator/guard-sdk";
+import { MaskIdentifierError, MaskUnscannableError, surrogateFor } from "@ai-orchestrator/guard-sdk";
 import type {
   EvalRunView,
   ReplayCaptureSettingsView,
@@ -240,6 +240,7 @@ describe("migration 34", () => {
     expect(migration.up).toContain("ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'golden'");
     expect(migration.up).toContain("ADD COLUMN IF NOT EXISTS captured_at");
     expect(migration.up).toContain("CREATE TABLE IF NOT EXISTS replay_capture_settings");
+    expect(migration.up).toContain("last_drop_outcome TEXT");
     expect(migration.down).toContain("DROP TABLE IF EXISTS replay_capture_settings");
     expect(migration.down).toContain("DROP COLUMN IF EXISTS status");
     const context = await createTestContext();
@@ -247,7 +248,7 @@ describe("migration 34", () => {
     const columns = (table: string) => db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
     expect(columns("replay_recordings")).toEqual(expect.arrayContaining(["status", "captured_at"]));
     expect(columns("replay_capture_settings")).toEqual(
-      expect.arrayContaining(["workflow_id", "enabled", "rate", "max_per_day", "only_statuses_json", "dlp", "dlp_off_reason", "target_dataset_id"])
+      expect.arrayContaining(["workflow_id", "enabled", "rate", "max_per_day", "only_statuses_json", "dlp", "dlp_off_reason", "target_dataset_id", "last_drop_outcome", "last_drop_at"])
     );
   });
 });
@@ -1504,6 +1505,105 @@ describe("re-review round 3: lookup certainty, hints, international phones, kept
     const job = await runJob(context, builder.cookie, { datasetIds: [datasetId], mcpMode: "strict" });
     expect(job.status, job.error ?? "").toBe("completed");
     expect(job.results.map((result) => [result.status, result.error ?? null])).toEqual([["pass", null]]);
+  }, 60_000);
+
+  it("round 4 B1: bare digits searched as text are a possible match inside another country's number, and never deleted without a confirmation", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-b1"));
+    const french = [
+      await handSaved(context, builder.cookie, "wf-b1", "fr +33 4155551234"),
+      await handSaved(context, builder.cookie, "wf-b1", "fr 0033 4155551234"),
+      await handSaved(context, builder.cookie, "wf-b1", "fr +33(0)4155551234")
+    ];
+    const plain = await handSaved(context, builder.cookie, "wf-b1", "ref 4155551234 on file");
+    const query = { value: "4155551234" };
+    const result = await find(context, admin.cookie, query);
+    expect(result.dataClass).toBeNull();
+    const certainty = new Map(result.matches.map((match) => [match.id, match]));
+    for (const id of french) {
+      expect(certainty.get(id)?.certainty, id).toBe("national_only");
+      expect(certainty.get(id)!.hits.every((hit) => hit.certainty === "national_only")).toBe(true);
+      // The stored copy's country code is shown, so the admin can see it is someone else's.
+      expect(certainty.get(id)!.hits[0]!.storedCallingCode).toBe("33");
+    }
+    expect(certainty.get(plain)?.certainty).toBe("exact");
+    // Certain matches first.
+    expect(result.matches[0]!.id).toBe(plain);
+
+    const outcome = await erase(context, admin.cookie, { ...query, targets: [...french, plain].map((id) => ({ kind: "recording", id })) });
+    expect(outcome.removed).toEqual([{ kind: "recording", id: plain }]);
+    expect(outcome.skipped).toEqual(french.map((id) => ({ kind: "recording", id, reason: "possible_match_unconfirmed" })));
+    for (const id of french) expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
+    expect(context.store.getReplayRecordingSummary(plain)).toBeNull();
+    // Confirmed row by row, a possible match is deleted.
+    const confirmed = await erase(context, admin.cookie, { ...query, targets: [{ kind: "recording", id: french[0]!, confirmPossible: true }] });
+    expect(confirmed.removed).toEqual([{ kind: "recording", id: french[0]! }]);
+  }, 60_000);
+
+  it("round 4 B3: a row named both with and without a confirmation is refused in either order, and nothing is deleted", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-b3"));
+    const id = await handSaved(context, builder.cookie, "wf-b3", "call (207) 946-0958");
+    const other = await handSaved(context, builder.cookie, "wf-b3", "uk +44 20 7946 0958");
+    const query = { value: "+44 20 7946 0958" };
+    for (const targets of [
+      [{ kind: "recording", id: other }, { kind: "recording", id }, { kind: "recording", id, confirmPossible: true }],
+      [{ kind: "recording", id, confirmPossible: true }, { kind: "recording", id: other }, { kind: "recording", id }]
+    ]) {
+      const response = await call(context, "POST", "/api/replay/recordings/find-subject/delete", admin.cookie, { ...query, targets });
+      expect(response.statusCode, response.body).toBe(400);
+      expect(response.json<{ error: string }>().error).toBe("A row is listed twice, once confirmed as a possible match and once not. List each row once.");
+      expect(response.body).not.toContain("7946");
+      expect(context.store.getReplayRecordingSummary(id)).not.toBeNull();
+      expect(context.store.getReplayRecordingSummary(other)).not.toBeNull();
+    }
+    expect(context.store.listAuditLogs({ pageSize: 200 }).items.some((entry) => entry.eventType === "replay.find_subject.delete_started")).toBe(false);
+    // The same row twice with the same confirmation is still one target.
+    const twice = await erase(context, admin.cookie, { ...query, targets: [{ kind: "recording", id, confirmPossible: true }, { kind: "recording", id, confirmPossible: true }] });
+    expect(twice.removed).toEqual([{ kind: "recording", id }]);
+  }, 60_000);
+
+  it("round 4 B2: a dropped capture is noted on the workflow's settings, with when and why", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    save(context, hookWorkflow("wf-drop"));
+    expect((await hook(context, "wf-drop", {})).statusCode).toBe(200);
+    const executionId = context.store.listExecutionHistory({ workflowId: "wf-drop", page: 1, pageSize: 5 }).items[0]!.id;
+    await enableCapture(context, builder.cookie, "wf-drop");
+    const before = await call(context, "GET", "/api/workflows/wf-drop/replay-capture", builder.cookie);
+    expect(before.json<{ settings: ReplayCaptureSettingsView }>().settings.lastDrop).toBeNull();
+    const outcomes: string[] = [];
+    const service = new ReplayCaptureService({
+      store: context.store,
+      recordings: {
+        createCapture: async () => {
+          throw new MaskIdentifierError("A detected value appears in cassette entry 1 tool name, which is kept as written for replay.");
+        }
+      } as never,
+      datasets: {} as never,
+      surrogateKey: SURROGATE_KEY,
+      dictionariesFor: () => [],
+      dictionaryClasses: () => [],
+      publishedVersion: () => null,
+      deployment: { enabled: true, maxRate: 1, retentionDays: 14, maxPerWorkflow: 200, maxBytesPerWorkflow: 209_715_200 },
+      log: { warn: () => undefined, info: () => undefined },
+      metric: (outcome) => outcomes.push(outcome),
+      now: () => new Date("2026-10-24T10:00:00.000Z")
+    });
+    const ticket = service.decide({ workflow: { id: "wf-drop" }, channel: "production", triggerType: "webhook", releaseVersion: null, excluded: false })!;
+    expect(ticket).toBeTruthy();
+    service.finish(ticket, { executionId, workflow: { id: "wf-drop", name: "x", projectId: "default" }, plan: {} as never });
+    await service.idle();
+    expect(outcomes).toEqual(["dropped_identifier_value"]);
+    const after = await call(context, "GET", "/api/workflows/wf-drop/replay-capture", builder.cookie);
+    expect(after.json<{ settings: ReplayCaptureSettingsView }>().settings.lastDrop).toEqual({ outcome: "dropped_identifier_value", at: "2026-10-24T10:00:00.000Z" });
+    // Saving the settings again keeps the note.
+    expect((await call(context, "PUT", "/api/workflows/wf-drop/replay-capture", builder.cookie, { rate: 0.5 })).statusCode).toBe(200);
+    expect(service.view("wf-drop").lastDrop?.outcome).toBe("dropped_identifier_value");
   }, 60_000);
 
   it("A4 and A5: Hungarian and Russian national forms are possible matches; an excerpt starts at the bracket", async () => {

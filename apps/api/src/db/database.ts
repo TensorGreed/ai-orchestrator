@@ -1468,6 +1468,9 @@ export interface ReplayCaptureSettingsRecord {
   targetDatasetId: string | null;
   updatedAt: string;
   updatedBy: string | null;
+  /** The last sampled run capture dropped (`REPLAY_CAPTURE_DROP_OUTCOMES`), and when; never written by `saveReplayCaptureSettings`. */
+  lastDropOutcome?: string | null;
+  lastDropAt?: string | null;
 }
 
 function mapReplayCaptureSettings(row: Record<string, unknown>): ReplayCaptureSettingsRecord {
@@ -1484,7 +1487,9 @@ function mapReplayCaptureSettings(row: Record<string, unknown>): ReplayCaptureSe
     dlpOffReason: typeof row.dlp_off_reason === "string" ? row.dlp_off_reason : null,
     targetDatasetId: typeof row.target_dataset_id === "string" && row.target_dataset_id ? row.target_dataset_id : null,
     updatedAt: toString(row.updated_at),
-    updatedBy: typeof row.updated_by === "string" ? row.updated_by : null
+    updatedBy: typeof row.updated_by === "string" ? row.updated_by : null,
+    lastDropOutcome: typeof row.last_drop_outcome === "string" && row.last_drop_outcome ? row.last_drop_outcome : null,
+    lastDropAt: typeof row.last_drop_at === "string" && row.last_drop_at ? row.last_drop_at : null
   };
 }
 
@@ -3427,6 +3432,8 @@ export class SqliteStore {
         updated_by TEXT
       );
     `);
+    this.ensureColumn("replay_capture_settings", "last_drop_outcome", "TEXT");
+    this.ensureColumn("replay_capture_settings", "last_drop_at", "TEXT");
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -11388,6 +11395,11 @@ export class SqliteStore {
       ]
     );
     return this.getReplayCaptureSettings(input.workflowId)!;
+  }
+
+  /** Notes the last sampled run capture dropped for a workflow (the settings row only; nothing when there is none). */
+  recordReplayCaptureDrop(workflowId: string, outcome: string, at: string): void {
+    this.exec(`UPDATE replay_capture_settings SET last_drop_outcome = ?, last_drop_at = ? WHERE workflow_id = ?`, [outcome, at, workflowId]);
   }
 
   /** A page of one store's searchable text, in rowid order after `afterRowid`, for the data-subject lookup. */

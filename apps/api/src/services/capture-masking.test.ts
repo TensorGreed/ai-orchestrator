@@ -4,7 +4,7 @@ import { MaskIdentifierError, surrogateFor } from "@ai-orchestrator/guard-sdk";
 import { canonicalJson as cassetteCanonical, hashCassetteArgs } from "@ai-orchestrator/mcp-sdk";
 import { canonicalTapeJson, hashModelRequest } from "@ai-orchestrator/provider-sdk";
 import { sha256Hex } from "./audit-bundle-service.js";
-import { inputProvenance, maskCapturedRun, maskCapturedRunAsync, provenanceFor, withNodeLabels, type CapturedRunParts } from "./capture-masking.js";
+import { cassetteIdentifiers, inputProvenance, maskCapturedRun, maskCapturedRunAsync, provenanceFor, withNodeLabels, type CapturedRunParts } from "./capture-masking.js";
 
 const key = Buffer.from("0123456789abcdef0123456789abcdef");
 const EMAIL = "jane.doe@example.com";
@@ -162,6 +162,50 @@ describe("maskCapturedRun", () => {
       entries: [{ seq: 1, server: "registry:atlas", method: "tools/call", name: "atlas_search", args: { q: "x" }, argsHash: "stale", at: 0, durationMs: 1 }]
     } as McpCassette;
     expect(() => maskCapturedRun(leaky, { key, dictionaries })).toThrow(MaskIdentifierError);
+  });
+
+  it("round 4 B2: a registry id with a card-shaped digit run and a catalog tool name holding a dictionary term never drop the capture", () => {
+    const dictionaries = [{ dataClass: "codename", terms: ["atlas"], patterns: [], score: 0.9 }];
+    // The capture scan reads `77585956-5432-4` in this id as a Luhn-valid card number.
+    const registryId = "mcp_77585956-5432-4c3f-b145-534cb79b36c8";
+    const base: CapturedRunParts = run();
+    base.input = { user_prompt: `ask atlas about ${EMAIL}, card 4111 1111 1111 1111` };
+    base.cassette = {
+      ...base.cassette!,
+      servers: [{ key: `registry:${registryId}`, registryServerId: registryId, adapterId: "http-mcp", label: "Atlas" }],
+      entries: [
+        { seq: 1, server: `registry:${registryId}`, method: "tools/list", argsHash: "x", result: [{ name: "atlas_search" }], at: 0, durationMs: 1 },
+        { seq: 2, server: `registry:${registryId}`, method: "tools/call", name: "atlas_search", args: { q: "atlas" }, argsHash: "stale", at: 1, durationMs: 1 },
+        { seq: 3, server: `registry:${registryId}`, method: "tools/call", name: "atlas_lookup", args: { q: "atlas" }, argsHash: "stale", at: 2, durationMs: 1 }
+      ]
+    } as McpCassette;
+    const kinds = (catalog?: (id: string) => readonly string[]) => cassetteIdentifiers(base.cassette!, catalog).map((entry) => [entry.text, entry.kind]);
+    expect(kinds()).toEqual([
+      [`registry:${registryId}`, "generated"],
+      [registryId, "generated"],
+      ["http-mcp", "generated"],
+      [`registry:${registryId}`, "generated"],
+      [`registry:${registryId}`, "generated"],
+      ["atlas_search", "catalog"],
+      [`registry:${registryId}`, "generated"],
+      ["atlas_lookup", "free"]
+    ]);
+    // The registry's current tool snapshot lists the second tool.
+    expect(kinds((id) => (id === registryId ? ["atlas_lookup"] : [])).at(-1)).toEqual(["atlas_lookup", "catalog"]);
+    const masked = maskCapturedRun(base, { key, dictionaries });
+    expect(masked.cassette!.servers[0]!.key).toBe(`registry:${registryId}`);
+    expect(masked.cassette!.entries.map((entry) => entry.name)).toEqual([undefined, "atlas_search", "atlas_lookup"]);
+    expect(JSON.stringify(masked)).not.toContain(EMAIL);
+
+    // A raw email in a tool name the catalog does not list still drops the capture, even when the content never holds it.
+    const leaky: CapturedRunParts = run();
+    leaky.input = { user_prompt: "hello" };
+    leaky.cassette = {
+      ...leaky.cassette!,
+      servers: [{ key: `registry:${registryId}`, registryServerId: registryId, adapterId: "http-mcp" }],
+      entries: [{ seq: 1, server: `registry:${registryId}`, method: "tools/call", name: "lookup_john.roe@example.org", args: { q: "x" }, argsHash: "stale", at: 0, durationMs: 1 }]
+    } as McpCassette;
+    expect(() => maskCapturedRun(leaky, { key, dictionaries: [] })).toThrow(MaskIdentifierError);
   });
 
   it("finds the value only in a resource URI and masks it there and everywhere else", () => {

@@ -45,6 +45,7 @@ import {
   runSteps,
   runStepsAsync,
   type GuardDictionary,
+  type MaskIdentifier,
   type MaskPart,
   type MaskReport
 } from "@ai-orchestrator/guard-sdk";
@@ -80,18 +81,52 @@ function cassetteEntryContent(entry: McpCassette["entries"][number]): Record<str
  * the workflow gives it, so a masked identifier would never be found. They
  * are operator configuration (stored in plain text in the registry and the
  * workflow); masking drops the capture if one holds a collected value.
+ *
+ * Server keys, registry ids and adapter ids are made by the server
+ * (`generated`), and a tool name the server's own catalog lists (its
+ * recorded `tools/list` answer, or the registry's current tool snapshot) is
+ * `catalog`: neither is scanned on its own, so a digit run in a
+ * `mcp_<uuid>` id or a dictionary word in `atlas_search` never drops every
+ * capture of a workflow. Any other tool name is scanned on its own too.
  */
-function cassetteIdentifiers(cassette: McpCassette): Array<{ id: string; text: string }> {
-  const out: Array<{ id: string; text: string }> = [];
+export function cassetteIdentifiers(cassette: McpCassette, catalogToolNames?: (registryServerId: string) => readonly string[]): MaskIdentifier[] {
+  const out: MaskIdentifier[] = [];
+  const catalog = new Map<string, Set<string>>();
+  const catalogOf = (serverKey: string): Set<string> => {
+    let names = catalog.get(serverKey);
+    if (names) return names;
+    names = new Set<string>();
+    for (const entry of cassette.entries) {
+      if (entry.server !== serverKey || entry.method !== "tools/list" || !Array.isArray(entry.result)) continue;
+      for (const tool of entry.result as unknown[]) {
+        const name = tool && typeof tool === "object" ? (tool as { name?: unknown }).name : undefined;
+        if (typeof name === "string") names.add(name);
+      }
+    }
+    const registryServerId = cassette.servers.find((server) => server.key === serverKey)?.registryServerId;
+    if (registryServerId && catalogToolNames) {
+      try {
+        for (const name of catalogToolNames(registryServerId)) names.add(name);
+      } catch {
+        // No registry catalog: the name is scanned on its own (fails closed).
+      }
+    }
+    catalog.set(serverKey, names);
+    return names;
+  };
+  const serverKeys = new Set(cassette.servers.map((server) => server.key));
   cassette.servers.forEach((server, index) => {
     for (const field of CASSETTE_SERVER_IDENTIFIERS) {
       const value = server[field];
-      if (typeof value === "string" && value) out.push({ id: `cassette server ${index + 1} ${field}`, text: value });
+      if (typeof value === "string" && value) out.push({ id: `cassette server ${index + 1} ${field}`, text: value, kind: "generated" });
     }
   });
   cassette.entries.forEach((entry, index) => {
-    if (entry.server) out.push({ id: `cassette entry ${index + 1} server`, text: entry.server });
-    if (nameIsIdentifier(entry) && entry.name) out.push({ id: `cassette entry ${index + 1} tool name`, text: entry.name });
+    // An entry's server is one of the cassette's server keys; anything else is scanned on its own.
+    if (entry.server) out.push({ id: `cassette entry ${index + 1} server`, text: entry.server, kind: serverKeys.has(entry.server) ? "generated" : "free" });
+    if (nameIsIdentifier(entry) && entry.name) {
+      out.push({ id: `cassette entry ${index + 1} tool name`, text: entry.name, kind: catalogOf(entry.server).has(entry.name) ? "catalog" : "free" });
+    }
   });
   return out;
 }
@@ -102,6 +137,8 @@ export interface CaptureMaskOptions {
   dictionaries: GuardDictionary[];
   /** Classes a bound guard profile can mask: their surrogates keep what the mask shows. */
   visibleTailClasses?: readonly string[];
+  /** The tool names a registry server's current tool snapshot lists (`cassetteIdentifiers`). */
+  catalogToolNames?: (registryServerId: string) => readonly string[];
 }
 
 export interface CapturedRunParts {
@@ -157,7 +194,7 @@ export function* maskCapturedRunSteps(run: CapturedRunParts, options: MaskRunOpt
     dictionaries: options.dictionaries,
     keepLiteralsFrom: options.keepLiteralsFrom,
     visibleTailClasses: options.visibleTailClasses,
-    identifiers: run.cassette ? cassetteIdentifiers(run.cassette) : []
+    identifiers: run.cassette ? cassetteIdentifiers(run.cassette, options.catalogToolNames) : []
   });
   let cursor = 0;
   const next = <T>() => masked[cursor++]!.value as T;

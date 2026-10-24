@@ -1664,7 +1664,9 @@ export const MIGRATIONS: Migration[] = [
         dlp_off_reason TEXT,
         target_dataset_id TEXT,
         updated_at TIMESTAMPTZ NOT NULL,
-        updated_by TEXT
+        updated_by TEXT,
+        last_drop_outcome TEXT,
+        last_drop_at TIMESTAMPTZ
       );
     `,
     down: `

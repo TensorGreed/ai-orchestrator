@@ -49,6 +49,7 @@ import { hkdfSync } from "node:crypto";
 import {
   DEFAULT_REPLAY_CAPTURE_SETTINGS,
   REPLAY_CAPTURE_DEFAULT_SET_NAME,
+  REPLAY_CAPTURE_DROP_OUTCOMES,
   REPLAY_FIND_SUBJECT_COUNTRIES,
   REPLAY_FIND_SUBJECT_KINDS,
   REPLAY_FIND_SUBJECT_MIN_RAW_LENGTH,
@@ -57,6 +58,7 @@ import {
   type ReplayFindSubjectDeleteResult,
   type ReplayFindSubjectKind,
   type McpCassette,
+  type ReplayCaptureDropOutcome,
   type ReplayCapturePromoteOutcome,
   type ReplayCaptureSettingsUpdate,
   type ReplayCaptureSettingsView,
@@ -196,6 +198,8 @@ export interface ReplayCaptureServiceOptions {
   dictionariesFor: (workflow: { id: string; projectId?: string | null }) => GuardDictionary[];
   /** Data classes a guard profile bound to the workflow can mask: their surrogates keep what the mask shows. */
   maskableClassesFor?: (workflow: { id: string; projectId?: string | null }) => string[];
+  /** Tool names a registry server's current tool snapshot lists: such a tool name is not scanned on its own (capture-masking `cassetteIdentifiers`). */
+  catalogToolNames?: (registryServerId: string) => readonly string[];
   /** The workflow's current project (a promoted run's "Captured" set is made there). */
   workflowProject?: (workflowId: string) => string | null;
   /** Every dictionary data class the deployment's guard profiles define (the data-subject lookup tries them all). */
@@ -301,7 +305,11 @@ export class ReplayCaptureService {
       deployment: { enabled: deployment.enabled, maxRate: deployment.maxRate, retentionDays: deployment.retentionDays, maxCandidates: deployment.maxPerWorkflow },
       effectiveRate: active ? Math.min(base.rate, deployment.maxRate) : 0,
       candidates: this.options.store.countReplayRecordingsForWorkflow(workflowId, "candidate"),
-      capturedToday: this.options.store.countReplayCapturesSince(workflowId, startOfUtcDay(this.now())) + (this.inFlight.get(workflowId) ?? 0)
+      capturedToday: this.options.store.countReplayCapturesSince(workflowId, startOfUtcDay(this.now())) + (this.inFlight.get(workflowId) ?? 0),
+      lastDrop:
+        stored?.lastDropOutcome && stored.lastDropAt && (REPLAY_CAPTURE_DROP_OUTCOMES as readonly string[]).includes(stored.lastDropOutcome)
+          ? { outcome: stored.lastDropOutcome as ReplayCaptureDropOutcome, at: stored.lastDropAt }
+          : null
     };
   }
 
@@ -499,7 +507,8 @@ export class ReplayCaptureService {
         ? {
             key: this.options.surrogateKey,
             dictionaries: this.options.dictionariesFor(input.workflow),
-            visibleTailClasses: this.options.maskableClassesFor?.(input.workflow) ?? []
+            visibleTailClasses: this.options.maskableClassesFor?.(input.workflow) ?? [],
+            ...(this.options.catalogToolNames ? { catalogToolNames: this.options.catalogToolNames } : {})
           }
         : null;
       const name = `Captured ${ticket.captureSource === "api_key" ? "API-key run" : history.triggerType} ${capturedAt.slice(0, 16).replace("T", " ")}`;
@@ -531,6 +540,13 @@ export class ReplayCaptureService {
     } catch (error) {
       const outcome = captureFailureOutcome(error);
       this.metric(outcome);
+      if ((REPLAY_CAPTURE_DROP_OUTCOMES as readonly string[]).includes(outcome)) {
+        try {
+          this.options.store.recordReplayCaptureDrop(ticket.workflowId, outcome, this.now().toISOString());
+        } catch {
+          // The note is for the settings panel; the metric and the log line above still carry the drop.
+        }
+      }
       this.options.log.warn(
         { workflowId: ticket.workflowId, executionId: input.executionId, outcome, ...captureErrorLog(error, this.options.redact) },
         "A production run could not be captured; the run itself is unaffected"
@@ -839,6 +855,16 @@ export class ReplayCaptureService {
     targets: Array<{ kind: ReplayFindSubjectKind; id: string; confirmPossible?: true }>,
     hooks: { beforeDelete?: (rows: Array<{ kind: ReplayFindSubjectKind; id: string; certainty: ReplayFindSubjectCertainty }>) => void } = {}
   ): Promise<ReplayFindSubjectDeleteResult> {
+    // A row named both with and without a confirmation is a mistake in the request, whichever comes first: refused, nothing deleted.
+    const confirmations = new Map<string, boolean>();
+    for (const target of targets) {
+      const key = `${target.kind}:${target.id.trim()}`;
+      const confirmedHere = target.confirmPossible === true;
+      if (confirmations.has(key) && confirmations.get(key) !== confirmedHere) {
+        throw new ReplayCaptureError("A row is listed twice, once confirmed as a possible match and once not. List each row once.", "invalid");
+      }
+      confirmations.set(key, confirmedHere);
+    }
     const { needles } = this.needlesFor(query);
     const store = this.options.store;
     const deleted = Object.fromEntries(REPLAY_FIND_SUBJECT_KINDS.map((kind) => [kind, 0])) as Record<ReplayFindSubjectKind, number>;
@@ -905,7 +931,13 @@ function subjectHit(view: string, span: SubjectSpan, field: string, matchedAs: s
   const dataClass = span.entry.dataClass === "raw" ? null : span.entry.dataClass;
   const certainty: ReplayFindSubjectCertainty = span.certainty ?? "exact";
   // A possible match shows the stored copy's country code when it has one (not personal data): "+33" tells the admin it is someone else's.
-  const storedPhone = certainty === "national_only" ? parsePhone(view.slice(span.start, span.end), span.start > 0 && view[span.start - 1] === "+") : null;
+  // A text hit inside a longer number reads the country code from that number (`+33 4155551234`).
+  const storedPhone =
+    certainty !== "national_only"
+      ? null
+      : span.around
+        ? parsePhone(view.slice(span.around.start, span.around.end))
+        : parsePhone(view.slice(span.start, span.end), span.start > 0 && view[span.start - 1] === "+");
   const storedCallingCode = storedPhone?.explicit ? storedPhone.cc : null;
   const context = (text: string) => scrubEvidenceText(text).replace(/\d/g, "#").replace(/\s+/g, " ");
   const from = Math.max(0, span.start - FIND_SUBJECT_EXCERPT_CONTEXT);

@@ -66,6 +66,16 @@ export interface ReplayCaptureSettings {
   targetDatasetId: string | null;
 }
 
+/** Capture outcomes that lost a run the settings asked for (masking could not finish, too large, an error): shown as the last drop. */
+export const REPLAY_CAPTURE_DROP_OUTCOMES = ["dropped_identifier_value", "dropped_unscannable", "dropped_incomplete_mask", "skipped_too_large", "failed"] as const;
+export type ReplayCaptureDropOutcome = (typeof REPLAY_CAPTURE_DROP_OUTCOMES)[number];
+
+/** The last run the workflow's capture dropped, and when. */
+export interface ReplayCaptureLastDrop {
+  outcome: ReplayCaptureDropOutcome;
+  at: string;
+}
+
 export interface ReplayCaptureSettingsView extends ReplayCaptureSettings {
   workflowId: string;
   /** False until the workflow's settings were first saved. */
@@ -81,6 +91,8 @@ export interface ReplayCaptureSettingsView extends ReplayCaptureSettings {
   /** Candidates waiting in the inbox, and captures counted against today's (UTC) limit. */
   candidates: number;
   capturedToday: number;
+  /** The last sampled run that could not be captured (null when none was): a workflow that never captures shows why. */
+  lastDrop: ReplayCaptureLastDrop | null;
 }
 
 /** One row of the "Captured runs" inbox. */

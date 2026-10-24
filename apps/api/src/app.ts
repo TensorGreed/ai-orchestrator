@@ -11665,6 +11665,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     maskableClassesFor: (workflow) =>
       maskableDataClasses(guardService.resolveRun({ workflowId: workflow.id, projectId: workflow.projectId ?? DEFAULT_PROJECT_ID }).stack.map((entry) => entry.profile)),
     workflowProject: (workflowId) => store.getWorkflow(workflowId)?.projectId ?? null,
+    catalogToolNames: (registryServerId) => {
+      const snapshotId = store.getMcpServer(registryServerId)?.currentSnapshotId;
+      return snapshotId ? (store.getMcpToolSnapshot(snapshotId)?.tools.map((tool) => tool.name) ?? []) : [];
+    },
     dictionaryClasses: () => {
       const names = new Set<string>();
       for (const profile of guardService.listProfiles()) {

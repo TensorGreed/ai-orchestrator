@@ -1727,7 +1727,7 @@ export const openApiSpec = {
     "/api/workflows/{id}/replay-capture": {
       get: {
         tags: ["Evals"],
-        summary: "Production capture settings of a workflow, the deployment's limits, candidates waiting and today's count (viewers; SQLite only)",
+        summary: "Production capture settings of a workflow, the deployment's limits, candidates waiting, today's count and the last run capture dropped (`lastDrop`: outcome and time) (viewers; SQLite only)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ settings }" }, "404": { description: "Not found or not readable" }, "501": { description: "Postgres store" } }
       },
@@ -1892,7 +1892,7 @@ export const openApiSpec = {
         },
         responses: {
           "200": { description: "{ deleted (per kind), removed: [{ kind, id }], skipped: [{ kind, id, reason: not_found | no_match | possible_match_unconfirmed }] }" },
-          "400": { description: "Invalid request" },
+          "400": { description: "Invalid request, or a row listed both with and without confirmPossible (nothing is deleted)" },
           "403": { description: "Not an admin" },
           "501": { description: "Postgres store" }
         }
