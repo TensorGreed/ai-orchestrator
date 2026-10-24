@@ -1916,6 +1916,13 @@ export interface ReleaseApprovalRequestRecord {
    * requests made before.
    */
   gateChecks?: Array<{ code: string; measure: number | null }> | null;
+  /**
+   * Migration 36 — who decides on the gate when asked (approvers,
+   * self-approval, enforcement; see gate-authority.ts). The request goes
+   * stale only when it changes. Null on requests made before: they keep the
+   * `gateUpdatedAt` rule.
+   */
+  gateAuthority?: string | null;
   publishedVersionAtRequest: number | null;
   spec: Record<string, unknown>;
   status: string;
@@ -2031,6 +2038,7 @@ function mapReleaseApprovalRequestRow(row: Record<string, unknown>): ReleaseAppr
     gateReasons: parseJsonArray(row.gate_reasons_json),
     gateUpdatedAt: nullableText(row.gate_updated_at),
     gateChecks: parseGateChecks(row.gate_checks_json),
+    gateAuthority: nullableText(row.gate_authority),
     publishedVersionAtRequest: nullableNumber(row.published_version_at_request),
     spec: parseJsonObject(row.spec_json),
     status: String(row.status),
@@ -3607,6 +3615,7 @@ export class SqliteStore {
     `);
     this.ensureColumn("gate_case_requests", "gate_authority", "TEXT");
     this.ensureColumn("release_approval_requests", "gate_checks_json", "TEXT");
+    this.ensureColumn("release_approval_requests", "gate_authority", "TEXT");
     // Gates enforced before admission existed admit every case their sets hold now, so they judge as before. Once only:
     // afterwards an enforced gate without a stored admission fails closed (counts nothing until an admin admits its cases).
     this.transaction(() => {
@@ -7967,10 +7976,10 @@ export class SqliteStore {
   insertReleaseApprovalRequest(record: ReleaseApprovalRequestRecord): ReleaseApprovalRequestRecord {
     this.exec(
       `INSERT INTO release_approval_requests (
-         id, workflow_id, workflow_name, project_id, version, workflow_hash, replay_run_id, origin, gate_reasons_json, gate_updated_at, gate_checks_json,
+         id, workflow_id, workflow_name, project_id, version, workflow_hash, replay_run_id, origin, gate_reasons_json, gate_updated_at, gate_checks_json, gate_authority,
          published_version_at_request, spec_json, status, request_reason, requested_by_user_id, requested_by, expires_at,
          decided_by_user_id, decided_by, decided_at, decision_reason, release_id, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.id,
         record.workflowId,
@@ -7983,6 +7992,7 @@ export class SqliteStore {
         JSON.stringify(record.gateReasons),
         record.gateUpdatedAt,
         record.gateChecks ? JSON.stringify(record.gateChecks) : null,
+        record.gateAuthority ?? null,
         record.publishedVersionAtRequest,
         JSON.stringify(record.spec),
         record.status,

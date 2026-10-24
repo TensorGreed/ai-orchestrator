@@ -283,6 +283,8 @@ export interface ReleaseGateExpectation {
   datasetIds: string[];
   /** The gate's MCP mode (default strict): a strict gate refuses a lenient job. */
   mcpMode?: string;
+  /** A hash of the scorers the gate names, so a gate that changed scorers is a new kind of mismatch. */
+  scorersKey?: string;
 }
 
 export interface ReleaseGateStats {
@@ -309,11 +311,14 @@ export interface ReleaseGateStats {
 export type ReleaseGateVerdict = "passed" | "blocked" | "needs_approval";
 
 /**
- * A stable, machine-readable form of one gate reason, aligned with
- * `ReleaseGateJudgement.reasons`. `code` names the kind of reason and stays
+ * A stable, machine-readable form of a gate reason (see
+ * `ReleaseGateJudgement.checks`). `code` names the kind of reason and stays
  * the same when its numbers or wording change (per case or scorer it carries
- * the id: `required_case:<fixtureId>`, `required_scorer:<type>`). `measure`,
- * when present, says how bad it is: higher is worse.
+ * the id: `required_case:<fixtureId>`, `required_scorer:<type>`,
+ * `sets_not_covered:<setId>`, `stale_sets:<setId>`, `overrides:<name>`,
+ * `ineligible:<reason>`, `scorer_mismatch:<gate scorers hash>`), so more of
+ * the same thing is a new code. `measure`, when present, says how bad it is:
+ * higher is worse.
  */
 export interface ReleaseGateReasonCheck {
   code: string;
@@ -323,7 +328,7 @@ export interface ReleaseGateReasonCheck {
 export interface ReleaseGateJudgement {
   verdict: ReleaseGateVerdict;
   reasons: string[];
-  /** One per reason, in the same order. */
+  /** The codes of the reasons, in order: one per reason, and one per set, override or ineligible reason a reason names. */
   checks: ReleaseGateReasonCheck[];
   stats: ReleaseGateStats;
 }
@@ -445,10 +450,12 @@ export function judgeReleaseGate(
   }
   const reasons: string[] = [];
   const checks: ReleaseGateReasonCheck[] = [];
-  const add = (code: string, text: string, measure: number | null = null) => {
+  const add = (code: string | readonly string[], text: string, measure: number | null = null) => {
     reasons.push(text);
     // JSON has no Infinity: a rise "from zero" is stored as the largest number.
-    checks.push({ code, measure: measure === null ? null : Number.isFinite(measure) ? measure : Number.MAX_VALUE });
+    for (const one of typeof code === "string" ? [code] : code) {
+      checks.push({ code: one, measure: measure === null ? null : Number.isFinite(measure) ? measure : Number.MAX_VALUE });
+    }
   };
   const { job } = evidence;
   if (job.status !== "completed") add("job_not_completed", `Replay job ${job.id} is ${job.status}, not completed.`);
@@ -457,17 +464,17 @@ export function judgeReleaseGate(
   }
   const covered = new Set(job.datasetIds);
   const missing = options.expected.datasetIds.filter((id) => !covered.has(id));
-  if (missing.length > 0) add("sets_not_covered", `Replay job ${job.id} did not cover the gate's golden set${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`);
+  if (missing.length > 0) add(missing.map((id) => `sets_not_covered:${id}`), `Replay job ${job.id} did not cover the gate's golden set${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`);
   if ((options.expected.mcpMode ?? "strict") === "strict" && job.mcpMode && job.mcpMode !== "strict") {
     add("mcp_mode", `The gate replays MCP calls strictly; job ${job.id} used ${job.mcpMode}.`);
   }
   if (job.liveWrites) add("live_writes", `Replay job ${job.id} allowed live write calls, which a gate run never may.`);
   if (job.overrides && job.overrides.length > 0) {
-    add("overrides", `Replay job ${job.id} ran with settings the gate does not specify (${job.overrides.join(", ")}), so it does not test the version as it ships.`);
+    add(job.overrides.map((name) => `overrides:${name}`), `Replay job ${job.id} ran with settings the gate does not specify (${job.overrides.join(", ")}), so it does not test the version as it ships.`);
   }
   if (job.releaseEligible !== undefined && job.releaseEligible !== null && job.releaseEligible !== true) {
     const why = job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? ` (${job.releaseIneligibleReasons.join("; ")})` : "";
-    add("ineligible", `Replay job ${job.id} is not eligible to prove a release${why}.`);
+    add(job.releaseIneligibleReasons && job.releaseIneligibleReasons.length > 0 ? job.releaseIneligibleReasons.map((entry) => `ineligible:${entry}`) : "ineligible", `Replay job ${job.id} is not eligible to prove a release${why}.`);
   }
   if (job.repeatsUnchecked && (policy.maxP95LatencyIncreasePct !== undefined || policy.noNewGuardBlocks)) {
     add(
@@ -475,12 +482,12 @@ export function judgeReleaseGate(
       `This gate checks latency and guard limits per run, but replay job ${job.id} repeated its cases and recorded them for only one repeat: run the gate's suite with repeats 1, or remove those limits.`
     );
   }
-  if (job.scorerMismatch) add("scorer_mismatch", `Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);
+  if (job.scorerMismatch) add(options.expected.scorersKey ? `scorer_mismatch:${options.expected.scorersKey}` : "scorer_mismatch", `Replay job ${job.id} ${job.scorerMismatch}: the gate judges with its own scorers.`);
   if (job.noSetSnapshot) {
     add("no_set_snapshot", `Replay job ${job.id} was queued before release gates existed, so it holds no record of the golden sets it ran on: run the gate again.`);
   } else if (job.staleSets && job.staleSets.length > 0) {
     add(
-      "stale_sets",
+      job.staleSets.map((id) => `stale_sets:${id}`),
       `The golden set${job.staleSets.length === 1 ? "" : "s"} ${job.staleSets.join(", ")} changed after replay job ${job.id} was queued (cases, golden runs or case scorers): run the gate again.`
     );
   }
@@ -492,13 +499,11 @@ export function judgeReleaseGate(
     : evidence;
 
   const admission = options.admission ?? null;
-  const { counted, pending } = splitAdmittedCases(judged.cases, admission);
+  const { counted } = splitAdmittedCases(judged.cases, admission);
   const stats: ReleaseGateStats = statsOf({ ...judged, cases: counted }, policy, now);
   if (admission) stats.admission = summarizeReleaseGateAdmission(judged.cases, admission);
-  const waiting = pending.filter((entry) => entry.status !== "skipped").length;
   if (stats.cases < policy.minCases) {
-    const more = waiting > 0 ? ` (${waiting} more ${waiting === 1 ? "is" : "are"} waiting for admission and do not count yet)` : "";
-    add("min_cases", `Only ${stats.cases} case${stats.cases === 1 ? "" : "s"} judged${more}; the gate needs at least ${policy.minCases}.`, policy.minCases - stats.cases);
+    add("min_cases", `Only ${stats.cases} case${stats.cases === 1 ? "" : "s"} judged; the gate needs at least ${policy.minCases}.`, policy.minCases - stats.cases);
   }
   if (stats.passRate < policy.minPassRate) {
     add("pass_rate", `Pass rate ${Math.round(stats.passRate * 1000) / 10}% is below the required ${Math.round(policy.minPassRate * 1000) / 10}%.`, policy.minPassRate - stats.passRate);
@@ -524,10 +529,10 @@ export function judgeReleaseGate(
   }
   const compare = job.compare ?? "recording";
   if (stats.oldestRecordingDays !== null && stats.oldestRecordingDays > policy.maxRecordingAgeDays && compare !== "baseline_rerun") {
+    // No measure: the age only grows with the clock, so time passing is never "worse".
     add(
       "recording_age",
-      `A golden run is ${stats.oldestRecordingDays} days old (the gate allows ${policy.maxRecordingAgeDays}): run the gate with compare "baseline_rerun" or re-record it.`,
-      stats.oldestRecordingDays - policy.maxRecordingAgeDays
+      `A golden run is ${stats.oldestRecordingDays} days old (the gate allows ${policy.maxRecordingAgeDays}): run the gate with compare "baseline_rerun" or re-record it.`
     );
   }
   if (reasons.length > 0) return { verdict: "blocked", reasons, checks, stats };

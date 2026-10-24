@@ -59,7 +59,8 @@ export function goldenSetSnapshots(datasetIds: readonly string[], listFixtures: 
  * job from before admission) a set is stale when its hash changed. With
  * them a set is stale only when one of its admitted cases is missing from the
  * job or its fingerprint changed: pending cases added or deleted later do not
- * count, and admitting a case the job never ran does.
+ * count, and admitting a case the job never ran does. A set with no
+ * admitted case at all counts as fresh even for a job that never ran it.
  */
 export function staleGoldenSets(
   datasetIds: readonly string[],
@@ -70,7 +71,10 @@ export function staleGoldenSets(
   return datasetIds.filter((datasetId) => {
     const ran = job[datasetId];
     const now = current[datasetId];
-    if (!ran || !now) return true;
+    if (!now) return true;
+    // A set with no admitted case counts for nothing on an enforced gate, so a job that never ran it is not behind.
+    if (!ran && admittedIds && now.cases && !Object.keys(now.cases).some((fixtureId) => admittedIds.has(fixtureId))) return false;
+    if (!ran) return true;
     if (!admittedIds || !ran.cases || !now.cases) return ran.hash !== now.hash;
     for (const [fixtureId, fingerprint] of Object.entries(now.cases)) {
       if (!admittedIds.has(fixtureId)) continue;

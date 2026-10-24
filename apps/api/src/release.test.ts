@@ -546,10 +546,10 @@ describe("release requests in the approvals inbox", () => {
     expect((await call(context, "POST", `/api/approvals/${id}/approve`, reader.cookie, {})).statusCode).toBe(403);
 
     // The gate changes after the request: approving would publish under settings nobody asked about.
-    await enableGate(context, requester.cookie, "wf-team", { requireApproval: true, approvers: { approverRoles: ["builder"] }, policy: { minCases: 2 } });
+    await enableGate(context, requester.cookie, "wf-team", { requireApproval: true, approvers: { approverRoles: ["builder", "admin"] } });
     const stale = await call(context, "POST", `/api/approvals/${id}/approve`, lead.cookie, {});
     expect(stale.statusCode).toBe(409);
-    expect(stale.json<{ error: string }>().error).toMatch(/stale.*settings changed/);
+    expect(stale.json<{ error: string }>().error).toMatch(/stale.*approve this release.*changed/);
     expect(context.store.getReleaseApprovalRequest(id)!.status).toBe("canceled");
     expect(context.store.getPublishedVersion("wf-team")).toBe(1);
 
@@ -1285,7 +1285,7 @@ describe("release requests: expiry and duplicates (L1, L2)", () => {
     expect(auditTypes(context)).toContain("release.approval.timed_out");
 
     // The gate changes: asking again closes the stale request and makes a new one.
-    await enableGate(context, first.cookie, "wf-req", { approvers: { approverRoles: ["admin"] }, policy: { minCases: 4 } });
+    await enableGate(context, first.cookie, "wf-req", { approvers: { approverRoles: ["admin", "builder"] } });
     const c = await ask(second, "after the change");
     expect(c).not.toBe(b);
     expect(context.store.getReleaseApprovalRequest(b)!.status).toBe("canceled");

@@ -1003,7 +1003,7 @@ describe("release requests are re-judged by reason codes, not wording", () => {
     const request = context.store.getReleaseApprovalRequest(setup.requestId)!;
     expect(request.origin).toBe("blocked");
     expect(request.gateChecks?.map((check) => check.code)).toEqual(["min_cases", "pass_rate"]);
-    expect(request.gateReasons.join(" ")).toMatch(/1 more is waiting for admission/);
+    expect(request.gateReasons.join(" ")).not.toMatch(/waiting for admission/);
 
     // A builder adds a case (pending); an admin admits the passing case the job ran: 9 of 11, still blocked, but better.
     addCases(context, setup.setId, "codes_late", 1);
@@ -1027,5 +1027,102 @@ describe("release requests are re-judged by reason codes, not wording", () => {
     const approved = await call(context, "POST", `/api/approvals/${setup.requestId}/approve`, setup.approver.cookie, {});
     expect(approved.statusCode).toBe(409);
     expect(approved.json<{ details?: { reasons?: string[] } }>().details?.reasons?.join(" ")).toMatch(/Pass rate 72.7%/);
+  });
+});
+
+describe("release requests go stale by who decides, and are judged again for the rest", () => {
+  const approve = (context: TestContext, requestId: string, cookie: string) => call(context, "POST", `/api/approvals/${requestId}/approve`, cookie, {});
+
+  it("a builder's tightening that the job still meets leaves a policy-filed request publishable", async () => {
+    const context = await createTestContext();
+    const setup = await waitingRequestSetup(context, "wf-tighten-ok", { policy: { minPassRate: 0.5 }, statuses: (ids) => statusesOf(ids, "pass") });
+    const tightened = await putGate(context, setup.builder.cookie, "wf-tighten-ok", { ...setup.settings, policy: { minPassRate: 0.9 } });
+    expect(tightened.policy.minPassRate).toBe(0.9);
+    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.gateAuthority).toBeTruthy();
+    const approved = await approve(context, setup.requestId, setup.approver.cookie);
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect(context.store.getPublishedVersion("wf-tighten-ok")).toBe(setup.version);
+  });
+
+  it("a builder's tightening that the job fails cancels the request with the reasons", async () => {
+    const context = await createTestContext();
+    const setup = await waitingRequestSetup(context, "wf-tighten-bad", {
+      policy: { minPassRate: 0.5, maxRegressions: 5 },
+      statuses: (ids) => ({ ...statusesOf(ids.slice(0, 8), "pass"), ...statusesOf(ids.slice(8), "fail") })
+    });
+    await putGate(context, setup.builder.cookie, "wf-tighten-bad", { ...setup.settings, policy: { minPassRate: 0.95, maxRegressions: 5 } });
+    const refused = await approve(context, setup.requestId, setup.approver.cookie);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json<{ details?: { reasons?: string[] } }>().details?.reasons?.join(" ")).toMatch(/Pass rate 80%/);
+    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.status).toBe("canceled");
+  });
+
+  it("a builder adding a set of pending cases leaves the request publishable; once an admin admits one of its cases it is refused", async () => {
+    const context = await createTestContext();
+    const setup = await waitingRequestSetup(context, "wf-add-set", { policy: { minPassRate: 0.9 }, statuses: (ids) => statusesOf(ids, "pass") });
+    context.store.createEvalDataset({ id: "set-added", name: "Added", workflowId: "wf-add-set" });
+    const added = addCases(context, "set-added", "added", 2);
+    await putGate(context, setup.builder.cookie, "wf-add-set", { ...setup.settings, datasetIds: [setup.setId, "set-added"] });
+    const before = await preview(context, setup.builder.cookie, "wf-add-set", setup.version, setup.job);
+    expect(before.reasons.join(" ")).not.toMatch(/did not cover|changed after replay job/);
+
+    expect((await call(context, "POST", "/api/workflows/wf-add-set/release-gate/cases/admit", setup.admin.cookie, { fixtureIds: [added[0]] })).statusCode).toBe(200);
+    const after = await preview(context, setup.builder.cookie, "wf-add-set", setup.version, setup.job);
+    expect(after.verdict).toBe("blocked");
+    expect(after.reasons.join(" ")).toMatch(/did not cover/);
+    const refused = await approve(context, setup.requestId, setup.approver.cookie);
+    expect(refused.statusCode).toBe(409);
+    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.status).toBe("canceled");
+  });
+
+  it("an admin's approver change makes the request stale", async () => {
+    const context = await createTestContext();
+    const setup = await waitingRequestSetup(context, "wf-approver-change", { policy: { minPassRate: 0.9 }, statuses: (ids) => statusesOf(ids, "pass") });
+    await putGate(context, setup.admin.cookie, "wf-approver-change", { ...setup.settings, approvers: { approverUsers: [setup.approver.email, setup.admin.email] } });
+    const stale = await approve(context, setup.requestId, setup.approver.cookie);
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json<{ error: string }>().error).toMatch(/Who may approve this release/);
+    expect(context.store.getReleaseApprovalRequest(setup.requestId)?.status).toBe("canceled");
+  });
+
+  it("a request made before the fingerprint existed keeps the timestamp rule", async () => {
+    const context = await createTestContext();
+    const setup = await waitingRequestSetup(context, "wf-legacy-authority", { policy: { minPassRate: 0.5 }, statuses: (ids) => statusesOf(ids, "pass") });
+    (context.store as unknown as { exec(sql: string, params: unknown[]): void }).exec(`UPDATE release_approval_requests SET gate_authority = NULL WHERE id = ?`, [setup.requestId]);
+    await putGate(context, setup.builder.cookie, "wf-legacy-authority", { ...setup.settings, policy: { minPassRate: 0.6 } });
+    const stale = await approve(context, setup.requestId, setup.approver.cookie);
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json<{ error: string }>().error).toMatch(/settings changed/);
+  });
+
+  it("a request filed on one stale set is canceled when an admin's admission makes another set stale too", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const approver = await login(context, "builder", "approver");
+    save(context, labelWorkflow("wf-two-sets", "v1"));
+    context.store.createEvalDataset({ id: "set-two-a", name: "A", workflowId: "wf-two-sets" });
+    context.store.createEvalDataset({ id: "set-two-b", name: "B", workflowId: "wf-two-sets" });
+    const a = addCases(context, "set-two-a", "two_a", 3);
+    const b = addCases(context, "set-two-b", "two_b", 3);
+    await putGate(context, admin.cookie, "wf-two-sets", { datasetIds: ["set-two-a", "set-two-b"], enforced: true, policy: { minPassRate: 0.5 }, approvers: { approverUsers: [approver.email] } });
+    const version = save(context, labelWorkflow("wf-two-sets", "v2"));
+    const hash = (await preview(context, builder.cookie, "wf-two-sets", version)).workflowHash;
+    const job = seedJob(context, { workflowId: "wf-two-sets", datasetIds: ["set-two-a", "set-two-b"], version, hash, statuses: statusesOf([...a, ...b], "pass") });
+    // Set A's admitted case now replays another golden run: the job is stale for A.
+    const target = context.store.getEvalFixture(a[0]!)!;
+    context.store.deleteEvalFixture(target.id);
+    context.store.createEvalFixture({ id: target.id, datasetId: "set-two-a", name: target.name, input: {}, recordingId: "rec_rerecorded" });
+    const published = await call(context, "POST", "/api/workflows/wf-two-sets/publish", builder.cookie, { version, replayRunId: job, requestApproval: { reason: "Known" } });
+    expect(published.statusCode, published.body).toBe(202);
+    const requestId = published.json<{ approvalRequestId: string }>().approvalRequestId;
+    expect(context.store.getReleaseApprovalRequest(requestId)?.gateChecks?.map((check) => check.code)).toEqual(["stale_sets:set-two-a"]);
+
+    // An admin admits a case in set B that the job never ran: B is stale as well, a new reason.
+    const [late] = addCases(context, "set-two-b", "two_b_late", 1);
+    expect((await call(context, "POST", "/api/workflows/wf-two-sets/release-gate/cases/admit", admin.cookie, { fixtureIds: [late] })).statusCode).toBe(200);
+    const refused = await approve(context, requestId, approver.cookie);
+    expect(refused.statusCode).toBe(409);
+    expect(context.store.getReleaseApprovalRequest(requestId)?.status).toBe("canceled");
   });
 });

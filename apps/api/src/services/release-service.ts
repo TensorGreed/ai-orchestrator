@@ -65,8 +65,9 @@
  * Postgres the routes answer 501 and every channel runs the draft.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { goldenSetSnapshots, staleGoldenSets, type GoldenSetSnapshot } from "./release-snapshot.js";
+import { gateAuthority } from "./gate-authority.js";
 import { admissionState, gateAdmissionSnapshot, judgeAdmission, nextAdmittedIds } from "./gate-admission-state.js";
 import {
   RELEASE_APPROVAL_REQUEST_PREFIX,
@@ -1128,8 +1129,17 @@ export class ReleaseService {
    * Every completed job for the hash is considered.
    */
   judge(gate: ReleaseGateView, workflowId: string, workflowHash: string, replayRunId?: string): { judgement: ReleaseGateJudgement; replayRunId?: string } {
-    const expected = { workflowHash, datasetIds: gate.datasetIds, mcpMode: gate.candidateOptions.mcpMode ?? "strict" };
     const sets = this.gateSets(gate);
+    // On an enforced gate a set with no admitted case yet counts for nothing, so a job that did not run it still covers the gate.
+    const datasetIds = sets.admittedIds
+      ? gate.datasetIds.filter((id) => Object.keys(sets.snapshots[id]?.cases ?? {}).some((fixtureId) => sets.admittedIds!.has(fixtureId)))
+      : gate.datasetIds;
+    const expected = {
+      workflowHash,
+      datasetIds,
+      mcpMode: gate.candidateOptions.mcpMode ?? "strict",
+      scorersKey: createHash("sha256").update(releaseCanonicalJson(gate.candidateOptions.scorers ?? null)).digest("hex").slice(0, 16)
+    };
     // Enforced gates count only admitted cases, and required cases must pass (null: every case counts, as before).
     const admission = gate.enforced ? judgeAdmission(gateAdmissionSnapshot(this.store, this.store.getReleaseGate(workflowId))) : null;
     const judgeJob = (job: JobView) =>
@@ -1429,6 +1439,7 @@ export class ReleaseService {
       gateReasons: input.reasons,
       gateUpdatedAt: input.gate.updatedAt,
       gateChecks: input.checks,
+      gateAuthority: gateAuthority(input.gate),
       publishedVersionAtRequest: input.publishedVersion,
       spec: { approverRoles: approvers.approverRoles, approverUsers: approvers.approverUsers, allowSelfApproval: approvers.allowSelfApproval },
       status: "pending",
@@ -1517,7 +1528,13 @@ export class ReleaseService {
     }
     if (hash !== record.workflowHash) return `Version ${record.version} no longer has the hash that was asked for (the workflow moved project).`;
     const gate = this.store.getReleaseGate(record.workflowId);
-    if ((gate?.updatedAt ?? null) !== record.gateUpdatedAt) return "The release gate's settings changed after the request was made.";
+    // Who decides is what a settings change must not move under a request; a builder's tightening is judged again by the reasons instead.
+    // Requests made before the fingerprint existed keep the timestamp rule.
+    if (record.gateAuthority) {
+      if (!gate || gateAuthority(gate) !== record.gateAuthority) return "Who may approve this release (the gate's approvers, self-approval or enforcement) changed after the request was made.";
+    } else if ((gate?.updatedAt ?? null) !== record.gateUpdatedAt) {
+      return "The release gate's settings changed after the request was made.";
+    }
     if (this.store.getPublishedVersion(record.workflowId) !== record.publishedVersionAtRequest) return "Another version was published after the request was made.";
     return null;
   }
