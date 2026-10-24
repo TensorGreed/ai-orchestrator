@@ -18,12 +18,13 @@ export function gateApprovers(gate: Pick<ReleaseGateRecord, "approvers">): Relea
 
 export function gateAuthority(gate: Pick<ReleaseGateRecord, "approvers" | "enforced">): string {
   const approvers = gateApprovers(gate);
-  const sorted = (values: readonly string[]) => [...new Set(values.map((value) => value.trim()))].sort();
+  // Lower-cased, like the shared canonicalApprovers: re-casing an approver's email changes nothing about who may approve.
+  const sorted = (values: readonly string[], lower = false) => [...new Set(values.map((value) => (lower ? value.trim().toLowerCase() : value.trim())))].sort();
   return createHash("sha256")
     .update(
       releaseCanonicalJson({
         approverRoles: sorted(approvers.approverRoles),
-        approverUsers: sorted(approvers.approverUsers),
+        approverUsers: sorted(approvers.approverUsers, true),
         allowSelfApproval: approvers.allowSelfApproval,
         enforced: gate.enforced
       })

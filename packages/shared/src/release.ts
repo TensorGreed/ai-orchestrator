@@ -265,6 +265,8 @@ export interface ReleaseGateJob {
   scorerMismatch?: string | null;
   /** Gate golden sets whose contents (cases, golden runs, case scorers) changed since the job was queued, or that the job holds no snapshot of. */
   staleSets?: string[];
+  /** Per stale set, how many of its admitted cases are missing from the job or changed (a larger number is worse). */
+  staleSetCounts?: Record<string, number>;
   /** The job holds no snapshot of its sets: it was queued before release gates existed. */
   noSetSnapshot?: boolean;
   /** The job repeated its cases and the replay recorded latency or guard verdicts for only one repeat of some case. */
@@ -285,6 +287,8 @@ export interface ReleaseGateExpectation {
   mcpMode?: string;
   /** A hash of the scorers the gate names, so a gate that changed scorers is a new kind of mismatch. */
   scorersKey?: string;
+  /** Per set, how many cases the gate counts in it (its admitted cases on an enforced gate): the measure of an uncovered set. */
+  setCaseCounts?: Record<string, number>;
 }
 
 export interface ReleaseGateStats {
@@ -450,11 +454,12 @@ export function judgeReleaseGate(
   }
   const reasons: string[] = [];
   const checks: ReleaseGateReasonCheck[] = [];
-  const add = (code: string | readonly string[], text: string, measure: number | null = null) => {
+  const add = (code: string | readonly string[], text: string, measure: number | null | ((entity: string, code: string) => number | null) = null) => {
     reasons.push(text);
-    // JSON has no Infinity: a rise "from zero" is stored as the largest number.
     for (const one of typeof code === "string" ? [code] : code) {
-      checks.push({ code: one, measure: measure === null ? null : Number.isFinite(measure) ? measure : Number.MAX_VALUE });
+      const value = typeof measure === "function" ? measure(one.slice(one.indexOf(":") + 1), one) : measure;
+      // JSON has no Infinity: a rise "from zero" is stored as the largest number.
+      checks.push({ code: one, measure: value === null ? null : Number.isFinite(value) ? value : Number.MAX_VALUE });
     }
   };
   const { job } = evidence;
@@ -464,7 +469,7 @@ export function judgeReleaseGate(
   }
   const covered = new Set(job.datasetIds);
   const missing = options.expected.datasetIds.filter((id) => !covered.has(id));
-  if (missing.length > 0) add(missing.map((id) => `sets_not_covered:${id}`), `Replay job ${job.id} did not cover the gate's golden set${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`);
+  if (missing.length > 0) add(missing.map((id) => `sets_not_covered:${id}`), `Replay job ${job.id} did not cover the gate's golden set${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`, (id) => options.expected.setCaseCounts?.[id] ?? null);
   if ((options.expected.mcpMode ?? "strict") === "strict" && job.mcpMode && job.mcpMode !== "strict") {
     add("mcp_mode", `The gate replays MCP calls strictly; job ${job.id} used ${job.mcpMode}.`);
   }
@@ -488,7 +493,8 @@ export function judgeReleaseGate(
   } else if (job.staleSets && job.staleSets.length > 0) {
     add(
       job.staleSets.map((id) => `stale_sets:${id}`),
-      `The golden set${job.staleSets.length === 1 ? "" : "s"} ${job.staleSets.join(", ")} changed after replay job ${job.id} was queued (cases, golden runs or case scorers): run the gate again.`
+      `The golden set${job.staleSets.length === 1 ? "" : "s"} ${job.staleSets.join(", ")} changed after replay job ${job.id} was queued (cases, golden runs or case scorers): run the gate again.`,
+      (id) => job.staleSetCounts?.[id] ?? null
     );
   }
 
@@ -858,8 +864,8 @@ export function releaseScorersMatch(gateScorers: readonly unknown[] | null | und
 function canonicalApprovers(approvers: ReleaseApprovers | null): string {
   if (!approvers) return "null";
   return releaseCanonicalJson({
-    approverRoles: [...approvers.approverRoles].sort(),
-    approverUsers: approvers.approverUsers.map((entry) => entry.toLowerCase()).sort(),
+    approverRoles: [...new Set(approvers.approverRoles)].sort(),
+    approverUsers: [...new Set(approvers.approverUsers.map((entry) => entry.trim().toLowerCase()))].sort(),
     allowSelfApproval: approvers.allowSelfApproval,
     timeoutMinutes: approvers.timeoutMinutes
   });

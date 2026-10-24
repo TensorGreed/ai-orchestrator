@@ -68,18 +68,19 @@ export function staleGoldenSets(
   current: Record<string, GoldenSetSnapshot>,
   admittedIds: ReadonlySet<string> | null
 ): string[] {
-  return datasetIds.filter((datasetId) => {
-    const ran = job[datasetId];
-    const now = current[datasetId];
-    if (!now) return true;
-    // A set with no admitted case counts for nothing on an enforced gate, so a job that never ran it is not behind.
-    if (!ran && admittedIds && now.cases && !Object.keys(now.cases).some((fixtureId) => admittedIds.has(fixtureId))) return false;
-    if (!ran) return true;
-    if (!admittedIds || !ran.cases || !now.cases) return ran.hash !== now.hash;
-    for (const [fixtureId, fingerprint] of Object.entries(now.cases)) {
-      if (!admittedIds.has(fixtureId)) continue;
-      if (ran.cases[fixtureId] !== fingerprint) return true;
-    }
-    return false;
-  });
+  return datasetIds.filter((datasetId) => staleGoldenSetCount(job[datasetId], current[datasetId], admittedIds) > 0);
+}
+
+/**
+ * How much of one set is behind its job: with admission, the admitted cases
+ * missing from the job or whose fingerprint changed; otherwise 1 when the
+ * hash changed. 0 is fresh. A later admission of an unrun case raises it.
+ */
+export function staleGoldenSetCount(ran: GoldenSetSnapshot | undefined, now: GoldenSetSnapshot | undefined, admittedIds: ReadonlySet<string> | null): number {
+  if (!now) return 1;
+  // A set with no admitted case counts for nothing on an enforced gate, so a job that never ran it is not behind.
+  const admitted = admittedIds && now.cases ? Object.keys(now.cases).filter((fixtureId) => admittedIds.has(fixtureId)) : null;
+  if (!ran) return admitted ? admitted.length : 1;
+  if (!admittedIds || !ran.cases || !now.cases || !admitted) return ran.hash !== now.hash ? 1 : 0;
+  return admitted.filter((fixtureId) => ran.cases![fixtureId] !== now.cases![fixtureId]).length;
 }

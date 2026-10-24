@@ -394,6 +394,17 @@ describe("gate reason checks", () => {
     expect(releaseGateChecksWorsened(day1.checks, day2.checks)).toEqual([]);
   });
 
+  it("measure a stale or uncovered set by its admitted-case count, so more unrun cases count as worse", () => {
+    const stale = (count: number) =>
+      judgeReleaseGate(evidence([passing("c1")], { datasetIds: [], staleSets: ["s"], staleSetCounts: { s: count } }), policy({ minCases: 1 }), { expected: { ...expected, datasetIds: [] }, now: NOW }).checks;
+    expect(stale(1)).toEqual([{ code: "stale_sets:s", measure: 1 }]);
+    expect(releaseGateChecksWorsened(stale(1), stale(4)).map((check) => check.code)).toEqual(["stale_sets:s"]);
+    expect(releaseGateChecksWorsened(stale(4), stale(4))).toEqual([]);
+    const uncovered = (count: number) =>
+      judgeReleaseGate(evidence([passing("c1")], { datasetIds: [] }), policy({ minCases: 1 }), { expected: { ...expected, datasetIds: ["s"], setCaseCounts: { s: count } }, now: NOW }).checks;
+    expect(releaseGateChecksWorsened(uncovered(2), uncovered(5)).map((check) => check.code)).toEqual(["sets_not_covered:s"]);
+  });
+
   it("carry one code per uncovered set, stale set, override and ineligible reason, and the gate's scorers", () => {
     const judge = (job: Partial<ReleaseGateEvidence["job"]>, sets: string[] = ["set_a"], scorersKey?: string) =>
       judgeReleaseGate(evidence([passing("c1")], { datasetIds: [], ...job }), policy({ minCases: 1 }), { expected: { ...expected, datasetIds: sets, scorersKey }, now: NOW }).checks;

@@ -66,7 +66,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { goldenSetSnapshots, staleGoldenSets, type GoldenSetSnapshot } from "./release-snapshot.js";
+import { goldenSetSnapshots, staleGoldenSetCount, staleGoldenSets, type GoldenSetSnapshot } from "./release-snapshot.js";
 import { gateAuthority } from "./gate-authority.js";
 import { admissionState, gateAdmissionSnapshot, judgeAdmission, nextAdmittedIds } from "./gate-admission-state.js";
 import {
@@ -1102,6 +1102,7 @@ export class ReleaseService {
     }
     const jobSnapshot = this.store.getEvalRunSetSnapshot(job.id);
     const staleSets = jobSnapshot ? staleGoldenSets(gate.datasetIds, jobSnapshot, current.snapshots, current.admittedIds) : [...gate.datasetIds];
+    const staleSetCounts = Object.fromEntries(staleSets.map((id) => [id, jobSnapshot ? staleGoldenSetCount(jobSnapshot[id], current.snapshots[id], current.admittedIds) : 1]));
     return {
       job: {
         id: job.id,
@@ -1116,6 +1117,7 @@ export class ReleaseService {
         ...(Array.isArray(ineligible) ? { releaseIneligibleReasons: ineligible.map((entry) => String(entry)) } : {}),
         scorerMismatch,
         staleSets: jobSnapshot ? staleSets : [],
+        ...(jobSnapshot ? { staleSetCounts } : {}),
         ...(jobSnapshot ? {} : { noSetSnapshot: true }),
         ...(repeatsUnchecked ? { repeatsUnchecked: true } : {})
       },
@@ -1138,6 +1140,12 @@ export class ReleaseService {
       workflowHash,
       datasetIds,
       mcpMode: gate.candidateOptions.mcpMode ?? "strict",
+      setCaseCounts: Object.fromEntries(
+        gate.datasetIds.map((id) => {
+          const cases = Object.keys(sets.snapshots[id]?.cases ?? {});
+          return [id, sets.admittedIds ? cases.filter((fixtureId) => sets.admittedIds!.has(fixtureId)).length : cases.length];
+        })
+      ),
       scorersKey: createHash("sha256").update(releaseCanonicalJson(gate.candidateOptions.scorers ?? null)).digest("hex").slice(0, 16)
     };
     // Enforced gates count only admitted cases, and required cases must pass (null: every case counts, as before).
@@ -1422,7 +1430,14 @@ export class ReleaseService {
         this.closeRequest(existing, "canceled", `Stale: ${stale}`, null);
         continue;
       }
-      if (sameIdentity({ id: existing.requestedByUserId, email: existing.requestedBy }, input.user)) return existing;
+      if (!sameIdentity({ id: existing.requestedByUserId, email: existing.requestedBy }, input.user)) continue;
+      // Asking again after the gate got worse must not hand back a request that approval would cancel.
+      const worse = this.newGateReasons(existing);
+      if (worse) {
+        this.closeRequest(existing, "canceled", `Stale: The release gate now judges version ${existing.version} differently than when the request was made: ${worse.join(" ")}`, null);
+        continue;
+      }
+      return existing;
     }
     const approvers: ReleaseApprovers = input.gate.approvers ?? releaseApproversSchema.parse({});
     const createdAt = this.now();

@@ -1125,4 +1125,57 @@ describe("release requests go stale by who decides, and are judged again for the
     expect(refused.statusCode).toBe(409);
     expect(context.store.getReleaseApprovalRequest(requestId)?.status).toBe("canceled");
   });
+  it("a builder re-casing an approver's email leaves a pending release request approvable", async () => {
+    const context = await createTestContext();
+    const setup = await waitingRequestSetup(context, "wf-recase", { policy: { minPassRate: 0.5 }, statuses: (ids) => statusesOf(ids, "pass") });
+    await putGate(context, setup.builder.cookie, "wf-recase", { ...setup.settings, approvers: { approverUsers: [setup.approver.email.toUpperCase()] } });
+    const approved = await approve(context, setup.requestId, setup.approver.cookie);
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect(context.store.getPublishedVersion("wf-recase")).toBe(setup.version);
+  });
+
+  async function staleSetRequest(workflowId: string) {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const approver = await login(context, "builder", "approver");
+    save(context, labelWorkflow(workflowId, "v1"));
+    context.store.createEvalDataset({ id: `set-${workflowId}`, name: "S", workflowId });
+    const cases = addCases(context, `set-${workflowId}`, `${workflowId}_c`, 4);
+    await putGate(context, admin.cookie, workflowId, { datasetIds: [`set-${workflowId}`], enforced: true, policy: { minPassRate: 0.5 }, approvers: { approverUsers: [approver.email] } });
+    const version = save(context, labelWorkflow(workflowId, "v2"));
+    const hash = (await preview(context, builder.cookie, workflowId, version)).workflowHash;
+    const job = seedJob(context, { workflowId, datasetIds: [`set-${workflowId}`], version, hash, statuses: statusesOf(cases, "pass") });
+    // One admitted case now replays another golden run: the set is stale, and the request is filed on that.
+    const target = context.store.getEvalFixture(cases[0]!)!;
+    context.store.deleteEvalFixture(target.id);
+    context.store.createEvalFixture({ id: target.id, datasetId: `set-${workflowId}`, name: target.name, input: {}, recordingId: "rec_rerecorded" });
+    const ask = () => call(context, "POST", `/api/workflows/${workflowId}/publish`, builder.cookie, { version, replayRunId: job, requestApproval: { reason: "Known" } });
+    const published = await ask();
+    expect(published.statusCode, published.body).toBe(202);
+    const requestId = published.json<{ approvalRequestId: string }>().approvalRequestId;
+    expect(context.store.getReleaseApprovalRequest(requestId)?.gateChecks).toEqual([{ code: `stale_sets:set-${workflowId}`, measure: 1 }]);
+    return { context, admin, approver, requestId, ask, setId: `set-${workflowId}`, workflowId };
+  }
+
+  it("admitting never-run cases into a set the request was filed as stale on refuses the approval", async () => {
+    const { context, admin, approver, requestId, setId, workflowId } = await staleSetRequest("wf-stale-in-set");
+    const late = addCases(context, setId, "stale_late", 3);
+    expect((await call(context, "POST", `/api/workflows/${workflowId}/release-gate/cases/admit`, admin.cookie, { fixtureIds: late })).statusCode).toBe(200);
+    const refused = await call(context, "POST", `/api/approvals/${requestId}/approve`, approver.cookie, {});
+    expect(refused.statusCode).toBe(409);
+    expect(context.store.getReleaseApprovalRequest(requestId)?.status).toBe("canceled");
+  });
+
+  it("asking again after the gate got worse files a new request instead of returning the old one", async () => {
+    const { context, admin, requestId, ask, setId, workflowId } = await staleSetRequest("wf-ask-worse");
+    const late = addCases(context, setId, "worse_late", 3);
+    expect((await call(context, "POST", `/api/workflows/${workflowId}/release-gate/cases/admit`, admin.cookie, { fixtureIds: late })).statusCode).toBe(200);
+    const again = await ask();
+    expect(again.statusCode, again.body).toBe(202);
+    const next = again.json<{ approvalRequestId: string }>().approvalRequestId;
+    expect(next).not.toBe(requestId);
+    expect(context.store.getReleaseApprovalRequest(requestId)?.status).toBe("canceled");
+    expect(context.store.getReleaseApprovalRequest(next)?.status).toBe("pending");
+  });
 });
