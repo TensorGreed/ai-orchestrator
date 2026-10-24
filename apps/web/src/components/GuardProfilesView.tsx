@@ -7,6 +7,8 @@
  * Bindings: the project's binding (an admin can enforce a profile, which
  * builders then cannot change) and a workflow's override, with the profiles
  * that apply to agent traffic in evaluation order.
+ * Phase 15.6: profile editors can simulate the editor's changes (or a saved
+ * version) on recent recorded runs before saving.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -52,6 +54,7 @@ import {
   type GuardDocument
 } from "../lib/guard-profile-edit";
 import { actionLabel, channelLabel } from "../lib/guard-trace";
+import { GuardSimulationCard, useGuardSimulation } from "./GuardSimulationPanel";
 
 type Role = "admin" | "builder" | "operator" | "viewer";
 
@@ -219,6 +222,7 @@ function GuardProfileEditor({
   const [jsonMode, setJsonMode] = useState(false);
   const [jsonText, setJsonText] = useState("");
   const [busy, setBusy] = useState(false);
+  const simulation = useGuardSimulation(profileId);
 
   const load = useCallback(async () => {
     try {
@@ -283,6 +287,20 @@ function GuardProfileEditor({
     } finally {
       setBusy(false);
     }
+  };
+
+  const simulate = () => {
+    let next = document;
+    if (jsonMode) {
+      try {
+        next = JSON.parse(jsonText) as GuardDocument;
+      } catch {
+        setIssues([{ path: "(json)", message: "Not valid JSON" }]);
+        setError("Invalid guard profile");
+        return;
+      }
+    }
+    void simulation.start({ document: next as Record<string, unknown> });
   };
 
   const duplicate = async () => {
@@ -486,10 +504,29 @@ function GuardProfileEditor({
         {!readOnly && (
           <div className="guard-save-row">
             <input aria-label="Version note" placeholder="Version note (optional)" value={note} onChange={(event) => setNote(event.target.value)} />
+            <button
+              type="button"
+              className="pg-btn"
+              disabled={simulation.busy}
+              title="Replay recent recorded runs of the workflows that use this profile with these settings; nothing is saved and no model is called"
+              onClick={simulate}
+            >
+              {simulation.busy ? "Simulating…" : "Simulate on recent traffic"}
+            </button>
             <button type="button" className="pg-btn primary" disabled={busy || (!dirty && !jsonMode)} onClick={() => void save()}>
               {dirty || jsonMode ? "Save new version" : "Saved"}
             </button>
           </div>
+        )}
+        {!readOnly && (
+          <GuardSimulationCard
+            simulation={simulation.simulation}
+            busy={simulation.busy}
+            error={simulation.error}
+            issues={simulation.issues}
+            versions={versions}
+            onSimulateVersion={(version) => void simulation.start({ version })}
+          />
         )}
       </section>
 

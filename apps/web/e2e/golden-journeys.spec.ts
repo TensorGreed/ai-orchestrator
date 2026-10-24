@@ -373,4 +373,56 @@ test.describe("golden journeys", () => {
     await expect(matches.getByRole("listitem").filter({ hasText: "stored masked" }).first()).toBeVisible();
     await expect(lookup.getByRole("button", { name: /Delete selected \([1-9]/ })).toBeEnabled();
   });
+
+  test("simulates a guard profile change on recent recorded runs before saving it", async ({ page }) => {
+    await openStudio(page);
+    const stamp = Date.now();
+    const profileId = `e2e-sim-${stamp}`;
+    const workflowId = `wf-e2e-sim-${stamp}`;
+    const profile = {
+      id: profileId,
+      name: `E2E simulation ${stamp}`,
+      version: "1",
+      channels: { prompt: { detectors: [{ id: "dlp.patterns", threshold: 0.5 }], actions: { email: { action: "allow" } }, defaultAction: { action: "allow" } } }
+    };
+    expect((await page.request.post("/api/guard/profiles", { data: { document: profile } })).ok()).toBeTruthy();
+    const created = await page.request.post("/api/workflows", {
+      data: {
+        id: workflowId,
+        name: `E2E Guarded ${stamp}`,
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        nodes: [
+          { id: "hook", type: "webhook_input", name: "Hook", position: { x: 0, y: 0 }, config: { path: `e2e-sim-${stamp}`, method: "POST" } },
+          { id: "guard", type: "guard", name: "Prompt guard", position: { x: 200, y: 0 }, config: {} },
+          { id: "pass", type: "output", name: "Pass", position: { x: 400, y: 0 }, config: { responseTemplate: "passed" } },
+          { id: "blocked", type: "output", name: "Blocked", position: { x: 400, y: 200 }, config: { responseTemplate: "blocked" } }
+        ],
+        edges: [
+          { id: "e1", source: "hook", target: "guard" },
+          { id: "e2", source: "guard", sourceHandle: "pass", target: "pass" },
+          { id: "e3", source: "guard", sourceHandle: "blocked", target: "blocked" }
+        ]
+      }
+    });
+    expect(created.ok()).toBeTruthy();
+    expect((await page.request.put(`/api/guard/bindings/workflows/${workflowId}`, { data: { mode: "override", profileId } })).ok()).toBeTruthy();
+    const run = await page.request.post(`/api/workflows/${workflowId}/execute`, { data: { record: true, user_prompt: "Write to someone@example.com please" } });
+    expect(run.ok()).toBeTruthy();
+    const { executionId } = (await run.json()) as { executionId: string };
+    expect((await page.request.post("/api/replay/recordings", { data: { executionId, name: "E2E guarded run" } })).ok()).toBeTruthy();
+
+    // Security → Profiles: change email to block, simulate before saving.
+    await sidebarItem(page, "Security").click();
+    await page.getByRole("tab", { name: "Profiles & bindings" }).click();
+    await page.getByRole("complementary", { name: "Guard profiles" }).getByRole("button", { name: new RegExp(profile.name) }).click();
+    await page.getByLabel("Action for email").selectOption("block");
+    await page.getByRole("button", { name: "Simulate on recent traffic" }).click();
+    await expect(page.getByTestId("guard-sim-sentence")).toHaveText("Across 1 recent run in 1 workflow: 1 newly blocked, 0 now masked, 0 no longer blocked.", { timeout: 60_000 });
+    await page.getByText("Details", { exact: true }).click();
+    await expect(page.getByText("E2E guarded run")).toBeVisible();
+    // Nothing was saved: the editor still offers to save the change.
+    await expect(page.getByRole("button", { name: "Save new version" })).toBeEnabled();
+  });
 });
+

@@ -8,6 +8,7 @@ import type {
   ReplayFindSubjectQuery,
   ReplayFindSubjectResult,
   ApprovalRequestView,
+  GuardSimulationView,
   ReleaseApprovalRequestView,
   ReleaseGateSettingsInput,
   ReleaseGateView,
@@ -3649,6 +3650,22 @@ export async function importGuardProfile(payload: { text: string; note?: string 
     method: "POST",
     body: JSON.stringify(payload)
   });
+}
+
+/** Phase 15.6 — replay recent recorded runs under an unsaved profile document or a saved version. */
+export async function simulateGuardProfile(id: string, payload: { document: Record<string, unknown> } | { version: number }) {
+  return apiRequest<{ simulation: GuardSimulationView }>(`/api/guard/profiles/${encodeURIComponent(id)}/simulate`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function fetchGuardSimulation(simulationId: string) {
+  return apiRequest<{ simulation: GuardSimulationView }>(`/api/guard/simulations/${encodeURIComponent(simulationId)}`);
+}
+
+export async function fetchGuardSimulations(profileId: string) {
+  return apiRequest<{ simulations: GuardSimulationView[] }>(`/api/guard/profiles/${encodeURIComponent(profileId)}/simulations`);
 }
 
 export async function fetchGuardDetectors() {
