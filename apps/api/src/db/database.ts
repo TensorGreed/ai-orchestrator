@@ -87,6 +87,8 @@ export interface EvalFixtureRecord {
   scorers: Array<Record<string, unknown>> | null;
   /** Phase 15.2 — the golden run this case replays. */
   recordingId: string | null;
+  /** Migration 36 — on an enforced release gate this case must pass whatever the pass rate (admins set it). */
+  required: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -114,7 +116,7 @@ export interface EvalRunRecord {
 
 interface EvalFixtureRow {
   id: string; dataset_id: string; name: string;
-  input_json: string; expected_json: string | null; scorers_json: string | null; recording_id: string | null;
+  input_json: string; expected_json: string | null; scorers_json: string | null; recording_id: string | null; required?: number | null;
   created_at: string; updated_at: string;
 }
 
@@ -1830,6 +1832,36 @@ export interface ReleaseGateRecord {
   approvers: Record<string, unknown> | null;
   updatedAt: string;
   updatedBy: string | null;
+  /**
+   * Migration 36 — the cases an enforced gate counts; null when the gate is
+   * not enforced. Saved by `setReleaseGateAdmission`, never by `upsertReleaseGate`.
+   */
+  admittedFixtureIds?: string[] | null;
+  admissionUpdatedAt?: string | null;
+  admissionUpdatedBy?: string | null;
+}
+
+/** Migration 36 — a request to admit cases to an enforced gate, or to remove admitted ones, decided in the approvals inbox. */
+export interface GateCaseRequestRecord {
+  id: string;
+  workflowId: string;
+  workflowName: string | null;
+  projectId: string;
+  action: "admit" | "remove";
+  /** The cases asked about, with their names and sets when asked. */
+  fixtures: Array<{ fixtureId: string; name: string; datasetId: string | null }>;
+  spec: Record<string, unknown>;
+  status: string;
+  requestReason: string | null;
+  requestedByUserId: string | null;
+  requestedBy: string | null;
+  expiresAt: string | null;
+  decidedByUserId: string | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  decisionReason: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** Phase 15.4 — one release: the published version moved to `version`. */
@@ -1897,7 +1929,43 @@ function mapReleaseGateRow(row: Record<string, unknown>): ReleaseGateRecord {
     requireApproval: Number(row.require_approval) === 1,
     approvers,
     updatedAt: String(row.updated_at),
-    updatedBy: nullableText(row.updated_by)
+    updatedBy: nullableText(row.updated_by),
+    admittedFixtureIds: row.admitted_fixture_ids_json === null || row.admitted_fixture_ids_json === undefined ? null : parseJsonArray(row.admitted_fixture_ids_json),
+    admissionUpdatedAt: nullableText(row.admission_updated_at),
+    admissionUpdatedBy: nullableText(row.admission_updated_by)
+  };
+}
+
+function mapGateCaseRequestRow(row: Record<string, unknown>): GateCaseRequestRecord {
+  const fixtures = parseJsonSafe(row.fixtures_json);
+  return {
+    id: String(row.id),
+    workflowId: String(row.workflow_id),
+    workflowName: nullableText(row.workflow_name),
+    projectId: String(row.project_id),
+    action: row.action === "remove" ? "remove" : "admit",
+    fixtures: Array.isArray(fixtures)
+      ? fixtures
+          .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+          .map((entry) => ({
+            fixtureId: String(entry.fixtureId ?? ""),
+            name: String(entry.name ?? entry.fixtureId ?? ""),
+            datasetId: typeof entry.datasetId === "string" ? entry.datasetId : null
+          }))
+          .filter((entry) => entry.fixtureId)
+      : [],
+    spec: parseJsonObject(row.spec_json),
+    status: String(row.status),
+    requestReason: nullableText(row.request_reason),
+    requestedByUserId: nullableText(row.requested_by_user_id),
+    requestedBy: nullableText(row.requested_by),
+    expiresAt: nullableText(row.expires_at),
+    decidedByUserId: nullableText(row.decided_by_user_id),
+    decidedBy: nullableText(row.decided_by),
+    decidedAt: nullableText(row.decided_at),
+    decisionReason: nullableText(row.decision_reason),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
   };
 }
 
@@ -3474,6 +3542,51 @@ export class SqliteStore {
       );
       CREATE INDEX IF NOT EXISTS idx_guard_simulations_profile ON guard_simulations(profile_id, created_at DESC);
     `);
+
+    // Migration 36 — release gate admission: required cases, the admitted cases of enforced gates, gate case requests.
+    this.ensureColumn("eval_fixtures", "required", "INTEGER NOT NULL", "0");
+    this.ensureColumn("release_gates", "admitted_fixture_ids_json", "TEXT");
+    this.ensureColumn("release_gates", "admission_updated_at", "TEXT");
+    this.ensureColumn("release_gates", "admission_updated_by", "TEXT");
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS gate_case_requests (
+        id TEXT PRIMARY KEY,
+        workflow_id TEXT NOT NULL,
+        workflow_name TEXT,
+        project_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        fixtures_json TEXT NOT NULL,
+        spec_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        request_reason TEXT,
+        requested_by_user_id TEXT,
+        requested_by TEXT,
+        expires_at TEXT,
+        decided_by_user_id TEXT,
+        decided_by TEXT,
+        decided_at TEXT,
+        decision_reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gate_case_requests_workflow ON gate_case_requests(workflow_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_gate_case_requests_status ON gate_case_requests(status, created_at DESC);
+    `);
+    // Gates enforced before admission existed admit every case their sets hold now, so they judge as before.
+    for (const row of this.queryAll<{ workflow_id: string; dataset_ids_json: string }>(
+      `SELECT workflow_id, dataset_ids_json FROM release_gates WHERE enforced = 1 AND admitted_fixture_ids_json IS NULL`
+    )) {
+      const datasetIds = parseJsonArray(row.dataset_ids_json);
+      const ids = datasetIds.flatMap((datasetId) =>
+        this.queryAll<{ id: string }>(`SELECT id FROM eval_fixtures WHERE dataset_id = ?`, [datasetId]).map((fixture) => toString(fixture.id))
+      );
+      this.exec(`UPDATE release_gates SET admitted_fixture_ids_json = ?, admission_updated_at = ?, admission_updated_by = ? WHERE workflow_id = ?`, [
+        JSON.stringify([...new Set(ids)].sort()),
+        new Date().toISOString(),
+        "migration 36",
+        toString(row.workflow_id)
+      ]);
+    }
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -7879,6 +7992,124 @@ export class SqliteStore {
     return result.changes > 0;
   }
 
+  /** Migration 36 — the cases an enforced gate counts (null: not enforced). Leaves the gate's `updated_at` alone. */
+  setReleaseGateAdmission(workflowId: string, admittedFixtureIds: string[] | null, updatedAt: string, updatedBy: string | null): void {
+    this.exec(`UPDATE release_gates SET admitted_fixture_ids_json = ?, admission_updated_at = ?, admission_updated_by = ? WHERE workflow_id = ?`, [
+      admittedFixtureIds === null ? null : JSON.stringify([...new Set(admittedFixtureIds)].sort()),
+      updatedAt,
+      updatedBy,
+      workflowId
+    ]);
+    this.persist();
+  }
+
+  insertGateCaseRequest(record: GateCaseRequestRecord): GateCaseRequestRecord {
+    this.exec(
+      `INSERT INTO gate_case_requests (
+         id, workflow_id, workflow_name, project_id, action, fixtures_json, spec_json, status, request_reason, requested_by_user_id,
+         requested_by, expires_at, decided_by_user_id, decided_by, decided_at, decision_reason, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        record.id,
+        record.workflowId,
+        record.workflowName,
+        record.projectId,
+        record.action,
+        JSON.stringify(record.fixtures),
+        JSON.stringify(record.spec),
+        record.status,
+        record.requestReason,
+        record.requestedByUserId,
+        record.requestedBy,
+        record.expiresAt,
+        record.decidedByUserId,
+        record.decidedBy,
+        record.decidedAt,
+        record.decisionReason,
+        record.createdAt,
+        record.updatedAt
+      ]
+    );
+    return this.getGateCaseRequest(record.id)!;
+  }
+
+  getGateCaseRequest(id: string): GateCaseRequestRecord | null {
+    const row = this.queryOne<Record<string, unknown>>(`SELECT * FROM gate_case_requests WHERE id = ?`, [id]);
+    return row ? mapGateCaseRequestRow(row) : null;
+  }
+
+  /** Pending gate case requests of one workflow, newest first. */
+  listPendingGateCaseRequests(workflowId: string): GateCaseRequestRecord[] {
+    return this.queryAll<Record<string, unknown>>(`SELECT * FROM gate_case_requests WHERE workflow_id = ? AND status = 'pending' ORDER BY created_at DESC, id DESC`, [workflowId]).map(
+      mapGateCaseRequestRow
+    );
+  }
+
+  listGateCaseRequests(filter: { status: "pending" | "decided" | "all"; workflowId?: string; limit?: number; scope?: ApprovalReadScope; now?: string }): GateCaseRequestRecord[] {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    const now = filter.now ?? new Date().toISOString();
+    if (filter.status === "pending") {
+      clauses.push(`status = 'pending' AND (expires_at IS NULL OR expires_at > ?)`);
+      params.push(now);
+    }
+    if (filter.status === "decided") {
+      clauses.push(`(status <> 'pending' OR (expires_at IS NOT NULL AND expires_at <= ?))`);
+      params.push(now);
+    }
+    if (filter.workflowId) {
+      clauses.push(`workflow_id = ?`);
+      params.push(filter.workflowId);
+    }
+    if (filter.scope && !filter.scope.all) {
+      const ids = filter.scope.workflowIds;
+      if (ids.length === 0) return [];
+      clauses.push(`workflow_id IN (${ids.map(() => "?").join(", ")})`);
+      params.push(...ids);
+    }
+    const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
+    const order = filter.status === "decided" ? "COALESCE(decided_at, updated_at) DESC" : "created_at DESC";
+    return this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM gate_case_requests ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""} ORDER BY ${order}, id DESC LIMIT ${limit}`,
+      params
+    ).map(mapGateCaseRequestRow);
+  }
+
+  /** Closes every pending gate case request whose time ran out; returns those it closed. */
+  timeOutExpiredGateCaseRequests(nowIso: string): GateCaseRequestRecord[] {
+    const expired = this.queryAll<Record<string, unknown>>(
+      `SELECT * FROM gate_case_requests WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+      [nowIso]
+    ).map(mapGateCaseRequestRow);
+    if (expired.length === 0) return [];
+    this.exec(
+      `UPDATE gate_case_requests SET status = 'timed_out', decided_by = 'system', decided_at = ?, decision_reason = 'Nobody decided before the request expired', updated_at = ?
+       WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+      [nowIso, nowIso, nowIso]
+    );
+    return expired;
+  }
+
+  /** Records a decision on a pending gate case request; false when it was no longer pending. */
+  decideGateCaseRequest(input: {
+    id: string;
+    status: "approved" | "rejected" | "canceled" | "timed_out";
+    decidedByUserId?: string | null;
+    decidedBy?: string | null;
+    decisionReason?: string | null;
+  }): boolean {
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE gate_case_requests
+         SET status = ?, decided_by_user_id = ?, decided_by = ?, decided_at = ?, decision_reason = ?, updated_at = ?
+         WHERE id = ? AND status = 'pending'`
+      )
+      .run(input.status, input.decidedByUserId ?? null, input.decidedBy ?? null, now, input.decisionReason ?? null, now, input.id);
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
+  }
+
   // Git config (singleton row keyed by literal 'default')
 
   getGitConfig(): {
@@ -8363,6 +8594,7 @@ export class SqliteStore {
       expected: r.expected_json ? JSON.parse(toString(r.expected_json)) : null,
       scorers: r.scorers_json ? (JSON.parse(toString(r.scorers_json)) as Array<Record<string, unknown>>) : null,
       recordingId: r.recording_id ? toString(r.recording_id) : null,
+      required: Number(r.required ?? 0) === 1,
       createdAt: toString(r.created_at),
       updatedAt: toString(r.updated_at)
     };
@@ -8370,7 +8602,7 @@ export class SqliteStore {
 
   listEvalFixtures(datasetId: string): EvalFixtureRecord[] {
     const rows = this.queryAll<EvalFixtureRow>(
-      `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, created_at, updated_at
+      `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, required, created_at, updated_at
        FROM eval_fixtures WHERE dataset_id = ? ORDER BY created_at, rowid`,
       [datasetId]
     );
@@ -8379,7 +8611,7 @@ export class SqliteStore {
 
   getEvalFixture(id: string): EvalFixtureRecord | null {
     const row = this.queryOne<EvalFixtureRow>(
-      `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, created_at, updated_at
+      `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, required, created_at, updated_at
        FROM eval_fixtures WHERE id = ?`,
       [id]
     );
@@ -8389,7 +8621,7 @@ export class SqliteStore {
   /** Phase 15.2 — whether a golden set already holds this golden run. */
   findEvalFixtureByRecording(datasetId: string, recordingId: string): EvalFixtureRecord | null {
     const row = this.queryOne<EvalFixtureRow>(
-      `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, created_at, updated_at
+      `SELECT id, dataset_id, name, input_json, expected_json, scorers_json, recording_id, required, created_at, updated_at
        FROM eval_fixtures WHERE dataset_id = ? AND recording_id = ? LIMIT 1`,
       [datasetId, recordingId]
     );
@@ -8407,6 +8639,13 @@ export class SqliteStore {
     const changed = (row ? toNumber(row.count) : 0) > 0;
     if (changed) this.persist();
     return changed;
+  }
+
+  /** Migration 36 — marks a case required (or not); false when it does not exist. */
+  setEvalFixtureRequired(id: string, required: boolean): boolean {
+    const result = this.db.prepare(`UPDATE eval_fixtures SET required = ?, updated_at = ? WHERE id = ?`).run(required ? 1 : 0, new Date().toISOString(), id);
+    if (result.changes > 0) this.persist();
+    return result.changes > 0;
   }
 
   createEvalRun(input: {
