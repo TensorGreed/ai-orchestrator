@@ -363,6 +363,52 @@ describe("guard policy simulation", () => {
     }
   }, 60_000);
 
+  it("replays a masked captured run still in the inbox, while every public replay of that capture is refused", async () => {
+    const { context, builder } = await guardedSetup();
+    const enabled = await call(context, "PUT", "/api/workflows/wf-guarded/replay-capture", builder.cookie, { enabled: true, rate: 1 });
+    expect(enabled.statusCode, enabled.body).toBe(200);
+    const hooked = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-guarded", payload: { user_prompt: "Write to someone@example.com please" } });
+    expect(hooked.statusCode, hooked.body).toBe(200);
+    let captures: Array<{ id: string; status: string; masked: boolean }> = [];
+    for (const until = Date.now() + 20_000; captures.length === 0; ) {
+      captures = (await call(context, "GET", "/api/workflows/wf-guarded/replay-captures", builder.cookie)).json<{ items: Array<{ id: string; status: string; masked: boolean }> }>().items;
+      if (captures.length === 0) {
+        if (Date.now() > until) throw new Error("The capture never arrived");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    const capture = captures[0]!;
+    expect(capture).toMatchObject({ status: "candidate", masked: true });
+    const db = (context.store as unknown as { db: { prepare: (sql: string) => { get: (...args: unknown[]) => Record<string, unknown> } } }).db;
+    const raw = () => JSON.stringify(db.prepare("SELECT * FROM replay_recordings WHERE id = ?").get(capture.id));
+    expect(raw()).not.toContain("someone@example.com");
+    const before = raw();
+    const count = (table: string) => Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count);
+    const events = count("guard_events");
+    const vault = count("guard_token_vault");
+
+    // The simulation's server-internal source takes the candidate (its surrogate email is still an email).
+    const simulation = await simulate(context, builder.cookie, "sim-guard", { document: emailProfile("block") });
+    expect(simulation.status).toBe("completed");
+    expect(simulation.summary).toMatchObject({ runs: 1, compared: 1, runsNewlyBlocked: 1 });
+    expect(simulation.workflows![0]!.cases[0]).toMatchObject({ recordingId: capture.id });
+    // Nothing reached live guard data, and the capture is untouched and still in the inbox.
+    expect(count("guard_events")).toBe(events);
+    expect(count("guard_token_vault")).toBe(vault);
+    expect(raw()).toBe(before);
+    expect(context.store.getReplayRecordingSummary(capture.id)).toMatchObject({ status: "candidate" });
+
+    // Public paths still refuse the same candidate.
+    const replayed = await call(context, "POST", `/api/replay/recordings/${capture.id}/replay`, builder.cookie, {});
+    expect(replayed.statusCode, replayed.body).toBe(409);
+    expect(replayed.json<{ code: string }>().code).toBe("candidate");
+    const dataset = await call(context, "POST", "/api/eval/datasets", builder.cookie, { name: "Set", workflowId: "wf-guarded" });
+    expect(dataset.statusCode, dataset.body).toBe(200);
+    const datasetId = dataset.json<{ dataset: { id: string } }>().dataset.id;
+    const added = await call(context, "POST", `/api/eval/datasets/${datasetId}/recordings`, builder.cookie, { recordingId: capture.id });
+    expect(added.statusCode, added.body).toBe(409);
+  }, 90_000);
+
   it("refuses invalid requests and documents with field issues", async () => {
     const { context, builder } = await guardedSetup();
     const bad = await call(context, "POST", "/api/guard/profiles/sim-guard/simulate", builder.cookie, { document: { ...emailProfile("explode") } });

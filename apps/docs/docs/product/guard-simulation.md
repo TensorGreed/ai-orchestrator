@@ -1,8 +1,10 @@
 # Guard policy simulation
 
-Before you save a change to a guard profile, you can see what it would do to real traffic. **Simulate on recent traffic** replays the most recent [golden runs](./golden-runs.md) of the workflows that use the profile twice: once under the profiles in force now, and once with your changed settings. It then compares the guard's outcome at every checkpoint of the two replays. The result is your change **compared with the current profile**, whatever the profiles were when each run was recorded.
+Before you save a change to a guard profile, you can see what it would do to real traffic. **Simulate on recent traffic** replays the most recent [golden runs](./golden-runs.md) and [captured runs](./production-capture.md) still waiting in the inbox of the workflows that use the profile twice: once under the profiles in force now, and once with your changed settings. It then compares the guard's outcome at every checkpoint of the two replays. The result is your change **compared with the current profile**, whatever the profiles were when each run was recorded.
 
 Nothing is saved and no model is called. Model calls are answered from each run's model tape and MCP calls from its cassette, the same way a [replay job](./golden-sets.md#replay-jobs) works.
+
+Captured runs are replayed as they were stored: masked, with surrogates that the guard still detects as the same kind of data (an email surrogate is still an email). The simulation never promotes, changes or deletes a captured run, and captured runs still cannot be replayed on their own or added to a golden set until you promote them.
 
 ## Using it
 
@@ -20,7 +22,7 @@ The result is one sentence first:
 - One row per workflow.
 - The runs that changed, with each checkpoint (node name and channel) and its action under the current profile and under your change.
 
-When no workflow you can read uses the profile, or none of them has a recorded run, the card says so. Record a few runs with **Save as golden run** (or `record: true` on the execute API) and simulate again.
+When no workflow you can read uses the profile, or none of them has a recorded run, the card says so. Record a few runs with **Save as golden run** (or `record: true` on the execute API), or turn on [production capture](./production-capture.md), and simulate again.
 
 **Advanced** lets you simulate a saved version instead of the editor's contents. That version is compared with the current profile (its latest version) on the same runs, so you can see what moving to it, or back to it, would change.
 

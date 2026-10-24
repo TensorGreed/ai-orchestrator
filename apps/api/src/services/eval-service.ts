@@ -759,6 +759,8 @@ export class EvalService {
       actorUserId: actor.id,
       actorEmail: actor.email,
       needsWrite: false,
+      // Recent traffic includes captured runs still in the inbox: server-internal, never from a request body.
+      allowCandidates: true,
       simulation: { id: request.simulationId, substitute, baseSubstitute: request.baseSubstitute, vault: request.vault, canRun: request.canRun, profileChanged: request.profileChanged },
       candidate,
       options,
@@ -1551,6 +1553,9 @@ export class EvalService {
     const skip = (reason: string) => finish(simulateCase({ recordingId, recording: meta, baseline: null, candidate: null, skipped: reason, scrub: (text) => this.scrubText(text) }), 0);
     if (!recording) return skip("The recording was deleted before it could be replayed.");
     if (recording.workflowId !== workflowId) return skip("The recording belongs to another workflow.");
+    // Phase 15.6 — the same candidate policy as every golden-run path; a simulation job allows captured runs.
+    const refusal = candidateRefusal(recording, { allowCandidates: job.allowCandidates });
+    if (refusal) return skip(refusal);
     const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, "workflow:read");
     if (!actor) return skip(`The user who started this simulation (${job.actorEmail}) can no longer read this workflow.`);
     const denied = simulation.canRun(actor);
