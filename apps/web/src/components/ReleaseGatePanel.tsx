@@ -18,6 +18,7 @@ import {
   type WorkflowReleasesView
 } from "../lib/api";
 import { gateFormFrom, gateLocks, gateSettingsFromForm, releaseVerdictLabel, releaseVerdictTone, type GateForm } from "../lib/release";
+import { GateCasesCard } from "./GateCasesCard";
 
 /** Only roles that can hold workflow:publish can approve a release. */
 const APPROVER_ROLES = RELEASE_APPROVER_ROLE_CHOICES;
@@ -257,7 +258,7 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
           {isAdmin && (
             <label className="guard-check">
               <input type="checkbox" checked={form.enforced} onChange={(event) => update({ enforced: event.target.checked })} />
-              <span>Enforce: only admins can turn this gate off or loosen it</span>
+              <span>Enforce: only admins can turn this gate off or loosen it, and cases added later count only once admitted</span>
             </label>
           )}
         </fieldset>
@@ -281,6 +282,8 @@ function WorkflowReleaseView({ workflowId, activeProjectId, canEdit, isAdmin }: 
           </div>
         )}
       </section>
+
+      {gate.enforced && <GateCasesCard workflowId={workflowId} gateVersion={gate.updatedAt} />}
 
       <ReleaseHistory workflowId={workflowId} history={history} canRollback={canEdit && !locks.adminOnly} onChanged={() => void load()} />
     </div>

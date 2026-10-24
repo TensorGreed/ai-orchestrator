@@ -560,6 +560,11 @@ function GoldenSetDetail({ set, workflowName, canEdit, onBack, onChanged, onDele
                       </span>
                     )}
                     {fixture.name}
+                    {fixture.required && (
+                      <span className="release-tag is-ok gate-required-chip" title="An enforced release gate needs this case to pass on every publish">
+                        required
+                      </span>
+                    )}
                   </span>
                   <span className="evals-row-sub">
                     {fixture.recordingId ? (

@@ -61,7 +61,21 @@ export function gateStatsLines(stats: ReleaseGateStats | null): string[] {
   if (stats.costIncreasePct !== null) lines.push(`cost ${stats.costIncreasePct >= 0 ? "+" : ""}${Math.round(stats.costIncreasePct)}%`);
   if (stats.p95LatencyIncreasePct !== null) lines.push(`p95 latency ${stats.p95LatencyIncreasePct >= 0 ? "+" : ""}${Math.round(stats.p95LatencyIncreasePct)}%`);
   if (stats.newGuardBlocks > 0) lines.push(`${stats.newGuardBlocks} new guard block${stats.newGuardBlocks === 1 ? "" : "s"}`);
+  const admission = stats.admission;
+  if (admission && admission.pending > 0) lines.push(`${admission.pending} case${admission.pending === 1 ? "" : "s"} pending admission (run, not counted)`);
+  if (admission && admission.required > 0) lines.push(`${admission.required} required case${admission.required === 1 ? "" : "s"}${admission.requiredFailures.length > 0 ? `, ${admission.requiredFailures.length} not passing` : ""}`);
   return lines;
+}
+
+/**
+ * The plain banner on an enforced gate with cases waiting for admission;
+ * null when nothing waits.
+ */
+export function gateAdmissionBanner(pending: number): string | null {
+  if (pending <= 0) return null;
+  return pending === 1
+    ? "1 new case waiting for admin admission. It runs but doesn't count yet."
+    : `${pending} new cases waiting for admin admission. They run but don't count yet.`;
 }
 
 /** The editable form of a gate's settings. */

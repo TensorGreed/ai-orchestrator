@@ -1,4 +1,4 @@
-import { validateApprovalEdits, type ApprovalEditableField, type ApprovalRequestView, type ReleaseApprovalRequestView } from "@ai-orchestrator/shared";
+import { validateApprovalEdits, type ApprovalEditableField, type ApprovalRequestView, type GateCaseRequestView, type ReleaseApprovalRequestView } from "@ai-orchestrator/shared";
 import { ApiError, type ApprovalDecisionResponse, type ApprovalInboxItem } from "./api";
 
 /** Phase 11.2 — helpers behind the approvals inbox. */
@@ -8,6 +8,8 @@ export type FieldDrafts = Record<string, FieldDraft>;
 
 const KIND_LABELS: Record<ApprovalInboxItem["kind"], string> = {
   release: "Release",
+  admit_cases: "Gate cases",
+  remove_cases: "Gate cases",
   approval_gate: "Approval gate",
   human_approval: "Human approval",
   guard: "Guard",
@@ -133,10 +135,23 @@ export function isReleaseInboxItem(item: ApprovalInboxItem): item is ReleaseAppr
   return item.kind === "release";
 }
 
+/** Release gate admission — a request to admit cases to an enforced gate, or to remove admitted ones. */
+export function isGateCaseInboxItem(item: ApprovalInboxItem): item is GateCaseRequestView {
+  return item.kind === "admit_cases" || item.kind === "remove_cases";
+}
+
 /** Whether an inbox item is the one a deep link names (a request id, or a paused run's execution id). */
 export function matchesFocus(item: ApprovalInboxItem, focusId: string | null): boolean {
   if (!focusId) return false;
-  return item.requestId === focusId || (!isReleaseInboxItem(item) && item.executionId === focusId);
+  return item.requestId === focusId || (!isReleaseInboxItem(item) && !isGateCaseInboxItem(item) && item.executionId === focusId);
+}
+
+/** One line describing a decided gate case request. */
+export function gateCaseDecisionOutcome(decision: "approve" | "reject", view: Pick<GateCaseRequestView, "kind" | "cases">): string {
+  const count = view.cases.length;
+  const cases = `${count} case${count === 1 ? "" : "s"}`;
+  if (decision === "reject") return `Rejected. The gate counts the same cases as before.`;
+  return view.kind === "remove_cases" ? `Approved. ${cases} left the gate's golden sets.` : `Approved. ${cases} now count toward publishing.`;
 }
 
 /** One line describing a decided release request. */
@@ -149,6 +164,13 @@ export function releaseDecisionOutcome(decision: "approve" | "reject", version: 
 export function matchesApprovalFilter(view: ApprovalInboxItem, filter: string): boolean {
   const needle = filter.trim().toLowerCase();
   if (!needle) return true;
+  if (isGateCaseInboxItem(view)) {
+    return [view.message, view.workflowName, view.workflowId, "gate cases admission", ...view.cases.map((entry) => entry.name), view.requestedBy, view.decidedBy, view.requestReason]
+      .filter((part): part is string => typeof part === "string")
+      .join(" ")
+      .toLowerCase()
+      .includes(needle);
+  }
   if (isReleaseInboxItem(view)) {
     return [view.message, view.workflowName, view.workflowId, "release", `v${view.version}`, view.requestedBy, view.decidedBy, view.requestReason]
       .filter((part): part is string => typeof part === "string")
