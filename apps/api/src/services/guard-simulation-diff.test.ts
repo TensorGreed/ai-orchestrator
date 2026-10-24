@@ -223,7 +223,7 @@ describe("divergenceOf and simulateCase", () => {
   it("calls a recording the baseline cannot follow stale, never an impact", () => {
     const entry = simulateCase({ recordingId: "rec_1", recording, baseline: { replay: tapeMiss, checks: allow }, candidate: { replay: ok(), checks: masked }, profileChanged: true });
     expect(entry.outcome).toBe("not_simulated");
-    expect(entry.reason).toMatch(/recording is stale for the current workflow/);
+    expect(entry.reason).toMatch(/recording is stale/);
     expect(entry.counts.actionChanged).toBe(0);
   });
 

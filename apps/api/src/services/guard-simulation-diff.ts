@@ -191,7 +191,7 @@ function blockingProblem(replay: SimulatedReplay): string | null {
   return null;
 }
 
-export const GUARD_SIMULATION_STALE_REASON = "Not simulated: the recording is stale for the current workflow (replayed under the current profiles, it no longer follows its recorded answers)";
+export const GUARD_SIMULATION_STALE_REASON = "Not simulated: the recording is stale (replayed under the current profiles, it no longer follows its recorded answers: the workflow changed, the profiles in force now rewrite its content, or a protect token is not deterministic)";
 
 /**
  * One case of a simulation, from its two replays.

@@ -47,7 +47,7 @@ A diverged run still counts its guard changes up to that point; the divergence i
 
 A run is **not simulated** when the simulation cannot say anything about the guard:
 
-- **The recording is stale for the current workflow.** The replay under the current profiles could not follow its recorded answers (the workflow changed since the run was recorded, for example). The difference would not be the guard's, so it is never counted as an impact. Record a fresh run.
+- **The recording is stale.** The replay under the current profiles could not follow its recorded answers: the workflow changed since the run was recorded, the profiles in force now rewrite its content (for example the current profile masks something the recorded run sent through), or a `protect` token is random, so it differs on every replay. The difference would not be the guard's, so it is never counted as an impact. Record a fresh run.
 - The replay with your change missed the tape although your change is identical to the current profile.
 - The recording was deleted, or you can no longer read the workflow or simulate the profile.
 
@@ -68,7 +68,11 @@ Simulation is for people who can edit the profile: admins, and builders for prof
 
 ## Running one at a time
 
-One simulation runs at a time per deployment. Starting another while one runs answers 409 with the running simulation's id. Simulation replays also yield to release-gate and ordinary replay jobs: their runs always start first, and simulations never take every replay slot.
+The current-profile side is pinned to the profile version the simulation started against (the card names it), so saving the profile while a simulation runs never mixes two baselines.
+
+One simulation runs at a time per deployment. Starting another while one runs answers 409 with the running simulation's id. While another start is still being set up the 409 says so, without an id. Simulation replays also yield to release-gate and ordinary replay jobs: their runs always start first, and simulations never take every replay slot, so a simulation can wait behind a long queue of ordinary jobs.
+
+An admin, or whoever started a simulation, can **Cancel** it from its card (or `POST /api/guard/simulations/:id/cancel`). Its replay jobs are canceled, it shows as canceled with no result, and the next simulation can start.
 
 If the server restarts while a simulation runs, the simulation is marked **interrupted** and shows no result. Start it again.
 
@@ -92,7 +96,7 @@ Two replays per run, both answered from the tape: no model is called and nothing
 | `GET /api/guard/simulations/:id` | The simulation: summary, sentence, per-workflow runs and checkpoints |
 | `GET /api/guard/profiles/:id/simulations` | Recent simulations of the profile you may see (summaries only) |
 
-Errors: 400 for an invalid document or both or neither of `document` and `version`; 403 for non-editors; 404 for an unknown profile, version or simulation (or one with none of your workflows); 409 while another simulation runs.
+Errors: 400 for an invalid document or both or neither of `document` and `version`; 403 for non-editors; 404 for an unknown profile, version or simulation (or one with none of your workflows); 409 while another simulation runs. Cancel: 403 unless you are an admin or started it.
 
 A simulation's `status` is `running`, `completed`, `failed` (nothing could start) or `interrupted` (a replay job stopped early; no summary).
 

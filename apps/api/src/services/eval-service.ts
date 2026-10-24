@@ -246,6 +246,8 @@ export interface SimulationJobRequest {
   /** The recordings to replay, newest first; all of `workflowId`. */
   recordingIds: string[];
   substitute: GuardProfileSubstitute;
+  /** The profile's version the simulation started against, swapped in for the baseline side; null when the profile had none (the baseline runs the profiles in force). */
+  baseSubstitute: GuardProfileSubstitute | null;
   /** The saved version to replay (the published one, when the workflow has one); the draft when absent. */
   version?: number;
   /** The simulation's vault: `protect` tokens stay in memory. */
@@ -385,7 +387,7 @@ interface ReplayJobContext {
   /** Phase 15.3 — an inline or overridden candidate: every case re-checks workflow:write. */
   needsWrite: boolean;
   /** Phase 15.6 — a guard policy simulation's job (see `runSimulationCase`). */
-  simulation?: { id: string; substitute: GuardProfileSubstitute; vault: GuardSimulationRun["vault"]; canRun: SimulationJobRequest["canRun"]; profileChanged: boolean };
+  simulation?: { id: string; substitute: GuardProfileSubstitute; baseSubstitute: GuardProfileSubstitute | null; vault: GuardSimulationRun["vault"]; canRun: SimulationJobRequest["canRun"]; profileChanged: boolean };
   candidate: EvalReplayCandidate;
   options: ReplayJobOptions;
   scorers: EvalScorerSpec[] | null;
@@ -757,7 +759,7 @@ export class EvalService {
       actorUserId: actor.id,
       actorEmail: actor.email,
       needsWrite: false,
-      simulation: { id: request.simulationId, substitute, vault: request.vault, canRun: request.canRun, profileChanged: request.profileChanged },
+      simulation: { id: request.simulationId, substitute, baseSubstitute: request.baseSubstitute, vault: request.vault, canRun: request.canRun, profileChanged: request.profileChanged },
       candidate,
       options,
       scorers: null
@@ -1556,11 +1558,11 @@ export class EvalService {
 
     const candidate = { workflow: job.candidate.workflow, kind: job.candidate.kind, version: job.candidate.version };
     const request = { mcpMode: "strict" as const };
-    const side = async (substitute: GuardProfileSubstitute | null, id: string) => {
+    const side = async (substitute: GuardProfileSubstitute | null, id: string, role: "baseline" | "candidate") => {
       const run: GuardSimulationRun = { id: simulation.id, substitute, sink: new GuardSimulationSink(), vault: simulation.vault };
       let replayed: SimulatedReplay;
       try {
-        const response = await replay.replayCase({ recording, candidate, request, actor, executionId: id, models: "replay", overrides: null, role: substitute ? "candidate" : "baseline", simulation: run });
+        const response = await replay.replayCase({ recording, candidate, request, actor, executionId: id, models: "replay", overrides: null, role, simulation: run });
         const { facts: _facts, ...rest } = response;
         replayed = { status: response.status, error: response.verdict === "error" ? response.reasons.join(" ") || null : null, executionId: response.executionId, response: rest };
       } catch (error) {
@@ -1569,11 +1571,11 @@ export class EvalService {
       return { replay: replayed, checks: run.sink.checks };
     };
     const nodeNames = new Map(job.candidate.workflow.nodes.map((node) => [node.id, node.name] as const));
-    const baseline = await side(null, executionId);
+    const baseline = await side(simulation.baseSubstitute, executionId, "baseline");
     if (context?.canceled()) {
       return finish(simulateCase({ recordingId, recording: meta, baseline, candidate: null, nodeNames, scrub: (text) => this.scrubText(text) }), 1);
     }
-    const simulated = await side(simulation.substitute, context?.nextExecutionId() ?? randomUUID());
+    const simulated = await side(simulation.substitute, context?.nextExecutionId() ?? randomUUID(), "candidate");
     return finish(simulateCase({ recordingId, recording: meta, baseline, candidate: simulated, nodeNames, profileChanged: simulation.profileChanged, scrub: (text) => this.scrubText(text) }), 2);
   }
 

@@ -21,7 +21,8 @@
  * When a guard change makes the replay ask for a model or tool answer the
  * recording does not have, the case "diverged at step k": an impact of the
  * change, reported as such, never a live call. A recording the baseline
- * itself cannot follow is stale for the current workflow: not simulated.
+ * itself cannot follow is stale: the workflow or the profiles in force
+ * changed what it sends since it was recorded: not simulated.
  */
 
 import { z } from "zod";
@@ -167,8 +168,8 @@ export interface GuardSimulationSummary {
   sentence: string;
 }
 
-/** `interrupted`: a replay job stopped before it finished (a restart, a cancel); no partial result is shown. */
-export type GuardSimulationStatus = "running" | "completed" | "failed" | "interrupted";
+/** `interrupted`: a replay job stopped before it finished (a restart); `canceled`: someone canceled it. Neither shows a partial result. */
+export type GuardSimulationStatus = "running" | "completed" | "failed" | "interrupted" | "canceled";
 
 export interface GuardSimulationView {
   id: string;
@@ -178,6 +179,8 @@ export interface GuardSimulationView {
   /** The profile's latest version when the simulation started. */
   baseVersion: number | null;
   status: GuardSimulationStatus;
+  /** The viewer may cancel it now: it is running and they are an admin or started it. */
+  canCancel: boolean;
   createdAt: string;
   createdBy: string | null;
   finishedAt: string | null;

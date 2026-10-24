@@ -8,12 +8,13 @@
  * 4 workflows: 3 newly blocked, 7 now masked, 0 no longer blocked"), the
  * detail behind a disclosure. Advanced: simulate a saved version instead.
  * Only profile editors can use it; others see it disabled with the reason.
- * A failed poll is retried with backoff, then the card offers Retry.
+ * A failed poll is retried with backoff, then the card offers Retry. A
+ * running simulation can be canceled by an admin or whoever started it.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { GuardProfileVersionView, GuardSimulationView } from "@ai-orchestrator/shared";
-import { ApiError, fetchGuardSimulation, simulateGuardProfile, type GuardFieldIssue } from "../lib/api";
+import { ApiError, cancelGuardSimulation, fetchGuardSimulation, simulateGuardProfile, type GuardFieldIssue } from "../lib/api";
 import {
   actionTransition,
   changeLabel,
@@ -112,7 +113,19 @@ export function useGuardSimulation(profileId: string, options: { pollMs?: number
     [poll, profileId]
   );
 
-  return { simulation, busy, error, issues, lost, start, retry };
+  const cancel = useCallback(async () => {
+    if (!simulation) return;
+    try {
+      const response = await cancelGuardSimulation(simulation.id);
+      if (timer.current) clearTimeout(timer.current);
+      setSimulation(response.simulation);
+      if (simulationFinished(response.simulation)) setBusy(false);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }, [simulation]);
+
+  return { simulation, busy, error, issues, lost, start, retry, cancel };
 }
 
 export function GuardSimulationCard({
@@ -123,7 +136,8 @@ export function GuardSimulationCard({
   lost,
   versions,
   onSimulateVersion,
-  onRetry
+  onRetry,
+  onCancel
 }: {
   simulation: GuardSimulationView | null;
   busy: boolean;
@@ -133,6 +147,7 @@ export function GuardSimulationCard({
   versions: GuardProfileVersionView[];
   onSimulateVersion: (version: number) => void;
   onRetry?: () => void;
+  onCancel?: () => void;
 }) {
   const [version, setVersion] = useState<number | null>(versions[0]?.version ?? null);
   useEffect(() => {
@@ -170,6 +185,14 @@ export function GuardSimulationCard({
         <p className="guard-sim-running" role="status">
           Simulating on recent traffic…
           {simulation?.progress && simulation.progress.total > 0 ? ` ${simulation.progress.done} of ${simulation.progress.total} runs replayed` : ""}
+          {simulation?.canCancel && onCancel && (
+            <>
+              {" "}
+              <button type="button" className="pg-btn small" onClick={onCancel}>
+                Cancel
+              </button>
+            </>
+          )}
         </p>
       )}
       {simulation && simulationFinished(simulation) && <SimulationResult simulation={simulation} />}
@@ -206,6 +229,14 @@ function SimulationResult({ simulation }: { simulation: GuardSimulationView }) {
       <div className="guard-sim-card">
         <p className="guard-sim-sentence">The simulation could not run.</p>
         {simulation.error && <p className="kb-subtle">{simulation.error}</p>}
+      </div>
+    );
+  }
+  if (simulation.status === "canceled") {
+    return (
+      <div className="guard-sim-card">
+        <p className="guard-sim-sentence">The simulation was canceled, so it has no result.</p>
+        <p className="kb-subtle">Replays for ordinary runs and gates go first, so a simulation can wait behind them. Start it again when you are ready.</p>
       </div>
     );
   }

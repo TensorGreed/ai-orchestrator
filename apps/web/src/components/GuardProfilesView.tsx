@@ -541,6 +541,7 @@ function GuardProfileEditor({
             versions={versions}
             onSimulateVersion={(version) => void simulation.start({ version })}
             onRetry={simulation.retry}
+            onCancel={() => void simulation.cancel()}
           />
         )}
       </section>

@@ -11614,9 +11614,9 @@ export class SqliteStore {
     return row ? mapGuardSimulationRow(row) : null;
   }
 
-  listGuardSimulations(options: { profileId: string; limit?: number }): GuardSimulationRecord[] {
+  listGuardSimulations(options: { profileId: string; limit?: number; offset?: number }): GuardSimulationRecord[] {
     const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 20)));
-    return this.queryAll<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE profile_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`, [options.profileId, limit]).map(mapGuardSimulationRow);
+    return this.queryAll<Record<string, unknown>>(`SELECT * FROM guard_simulations WHERE profile_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`, [options.profileId, limit, Math.max(0, Math.floor(options.offset ?? 0))]).map(mapGuardSimulationRow);
   }
 
   /** Simulations still running (a stopped server left them so). */

@@ -397,7 +397,7 @@ export class ReplayService {
           ? {
               simulation: {
                 id: options.simulation.id,
-                side: options.simulation.substitute ? "simulated" : "current",
+                side: role === "baseline" ? "current" : "simulated",
                 ...(options.simulation.substitute
                   ? { profileId: options.simulation.substitute.profileId, version: options.simulation.substitute.version, hash: options.simulation.substitute.hash }
                   : {})

@@ -544,7 +544,7 @@ describe("Phase 15.6: guard policy simulation jobs", () => {
     const substitute = { profileId: "p", version: 0, hash: "sim-hash", name: "P", profile: {} as never, inline: true };
     const actor = { id: "u1", email: "b@example.com", role: "builder" as const };
     let denial: string | null = null;
-    const base = { simulationId: "gsim_1", workflowId: "wf", recordingIds: ["rec_a"], substitute, vault: new GuardSimulationVault(), canRun: () => denial, profileChanged: true };
+    const base = { simulationId: "gsim_1", workflowId: "wf", recordingIds: ["rec_a"], substitute, baseSubstitute: null, vault: new GuardSimulationVault(), canRun: () => denial, profileChanged: true };
 
     const job = svc.enqueueSimulationJob(base, actor);
     expect(job.candidate).toMatchObject({ releaseEligible: false, simulation: { id: "gsim_1", inline: true } });

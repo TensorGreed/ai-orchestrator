@@ -3664,6 +3664,10 @@ export async function fetchGuardSimulation(simulationId: string) {
   return apiRequest<{ simulation: GuardSimulationView }>(`/api/guard/simulations/${encodeURIComponent(simulationId)}`);
 }
 
+export async function cancelGuardSimulation(simulationId: string) {
+  return apiRequest<{ simulation: GuardSimulationView }>(`/api/guard/simulations/${encodeURIComponent(simulationId)}/cancel`, { method: "POST" });
+}
+
 export async function fetchGuardSimulations(profileId: string) {
   return apiRequest<{ simulations: GuardSimulationView[] }>(`/api/guard/profiles/${encodeURIComponent(profileId)}/simulations`);
 }

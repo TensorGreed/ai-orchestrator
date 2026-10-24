@@ -28,7 +28,7 @@ import { MIGRATIONS } from "./db/migrations.js";
 import { registerGuardSimulationRoutes } from "./guard-simulation-routes.js";
 import { AuthService } from "./services/auth-service.js";
 import { GuardService } from "./services/guard-service.js";
-import { GuardSimulationService } from "./services/guard-simulation-service.js";
+import { GuardSimulationBusyError, GuardSimulationService } from "./services/guard-simulation-service.js";
 import { SecretService } from "./services/secret-service.js";
 
 interface TestContext {
@@ -533,6 +533,72 @@ describe("guard policy simulation", () => {
     runningSimulation("gsim_b", "run_b");
     expect(service.recover()).toBe(0);
     expect(context.store.getGuardSimulation("gsim_b")!.status).toBe("running");
+  }, 60_000);
+
+  it("settles a running row whose jobs are gone before answering 409, and says when another start is in progress", async () => {
+    const { context, builder } = await guardedSetup();
+    const now = new Date().toISOString();
+    context.store.createEvalRun({ id: "run_gone", kind: "replay", status: "interrupted", datasetId: "guard-simulation:gsim_stale", datasetIds: [], workflowId: "wf-guarded", candidate: { kind: "draft", version: null, workflowHash: "h" }, workflowHash: "h", options: { mcpMode: "strict" } });
+    context.store.insertGuardSimulation({ id: "gsim_stale", profileId: "sim-guard", sourceKind: "inline", sourceVersion: null, simulatedHash: "x", baseVersion: 1, jobIds: ["run_gone"], detail: { workflows: [{ workflowId: "wf-guarded", workflowName: "Guarded", projectId: "default", jobId: "run_gone", cases: [], recordingIds: ["rec_gone"] }] }, status: "running", createdAt: now, createdBy: "other@example.com", createdByUserId: "u-other" });
+    const started = await call(context, "POST", "/api/guard/profiles/sim-guard/simulate", builder.cookie, { document: emailProfile("block") });
+    expect(started.statusCode, started.body).toBeLessThan(300);
+    expect(context.store.getGuardSimulation("gsim_stale")!.status).toBe("interrupted");
+
+    expect(new GuardSimulationBusyError("starting").message).toMatch(/Another simulation is starting/);
+    expect(new GuardSimulationBusyError("gsim_x").message).toMatch(/already running \(gsim_x\)/);
+  }, 60_000);
+
+  it("pins the current-profile side to the version the simulation started against, so a save mid-simulation never mixes baselines", async () => {
+    const { context, builder } = await guardedSetup();
+    // Recorded and simulated against v1 (email: allow); a simulation of the same document changes nothing.
+    await recordRuns(context, builder.cookie, "wf-guarded", 3, { user_prompt: "Write to someone@example.com please" });
+    const started = await call(context, "POST", "/api/guard/profiles/sim-guard/simulate", builder.cookie, { document: { ...emailProfile("allow"), name: "Renamed guard" } });
+    expect(started.statusCode, started.body).toBe(202);
+    const id = started.json<{ simulation: GuardSimulationView }>().simulation.id;
+    // v2 blocks email, saved while the cases are still being replayed.
+    expect((await call(context, "PUT", "/api/guard/profiles/sim-guard", builder.cookie, { document: emailProfile("block") })).statusCode).toBe(200);
+    let finished: GuardSimulationView | null = null;
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      finished = (await call(context, "GET", `/api/guard/simulations/${id}`, builder.cookie)).json<{ simulation: GuardSimulationView }>().simulation;
+      if (finished.status !== "running") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(finished).toMatchObject({ status: "completed", baseVersion: 1 });
+    expect(finished!.summary).toMatchObject({ runs: 3, runsNewlyBlocked: 0, runsNoLongerBlocked: 0, runsUnchanged: 3 });
+  }, 90_000);
+
+  it("lists the visible simulations before applying the limit, past the newest hundred", async () => {
+    const { context, builder } = await guardedSetup();
+    const base = Date.now() - 3_600_000;
+    const insert = (id: string, offset: number, createdByUserId: string, workflows: unknown[]) =>
+      context.store.insertGuardSimulation({ id, profileId: "sim-guard", sourceKind: "inline", sourceVersion: null, simulatedHash: "x", baseVersion: 1, jobIds: [], detail: { workflows }, status: "completed", createdAt: new Date(base + offset).toISOString(), createdBy: "x@example.com", createdByUserId, finishedAt: new Date(base + offset).toISOString() });
+    insert("gsim_mine", 0, builder.id, []);
+    for (let index = 0; index < 105; index += 1) insert(`gsim_other_${index}`, 1000 + index, "u-other", [{ workflowId: "wf-hidden", workflowName: "Hidden", projectId: "other", jobId: null, cases: [] }]);
+    const listed = (await call(context, "GET", "/api/guard/profiles/sim-guard/simulations?limit=5", builder.cookie)).json<{ simulations: GuardSimulationView[] }>().simulations;
+    expect(listed.map((entry) => entry.id)).toEqual(["gsim_mine"]);
+  }, 60_000);
+
+  it("cancels a running simulation: admins and the starter only, its jobs canceled, and the next one may start", async () => {
+    const { context, admin, builder } = await guardedSetup();
+    const other = await login(context, "builder", "builder2");
+    const now = new Date().toISOString();
+    context.store.createEvalRun({ id: "run_slow", kind: "replay", status: "running", datasetId: "guard-simulation:gsim_slow", datasetIds: [], workflowId: "wf-guarded", candidate: { kind: "draft", version: null, workflowHash: "h" }, workflowHash: "h", options: { mcpMode: "strict" } });
+    context.store.insertGuardSimulation({ id: "gsim_slow", profileId: "sim-guard", sourceKind: "inline", sourceVersion: null, simulatedHash: "x", baseVersion: 1, jobIds: ["run_slow"], detail: { workflows: [{ workflowId: "wf-guarded", workflowName: "Guarded", projectId: "default", jobId: "run_slow", cases: [], recordingIds: ["rec_a"] }] }, status: "running", createdAt: now, createdBy: builder.email, createdByUserId: builder.id });
+
+    const running = (await call(context, "GET", "/api/guard/simulations/gsim_slow", builder.cookie)).json<{ simulation: GuardSimulationView }>().simulation;
+    expect(running).toMatchObject({ status: "running", canCancel: true });
+    expect((await call(context, "GET", "/api/guard/simulations/gsim_slow", other.cookie)).json<{ simulation: GuardSimulationView }>().simulation.canCancel).toBe(false);
+    expect((await call(context, "POST", "/api/guard/simulations/gsim_missing/cancel", builder.cookie)).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/guard/simulations/gsim_slow/cancel", other.cookie)).statusCode).toBe(403);
+    expect(context.store.getGuardSimulation("gsim_slow")!.status).toBe("running");
+
+    const canceled = await call(context, "POST", "/api/guard/simulations/gsim_slow/cancel", admin.cookie);
+    expect(canceled.statusCode, canceled.body).toBe(200);
+    expect(canceled.json<{ simulation: GuardSimulationView }>().simulation).toMatchObject({ status: "canceled", canCancel: false, summary: null });
+    expect(context.store.getEvalRun("run_slow")!.status).toBe("canceled");
+    // Canceling again changes nothing; a new simulation can start.
+    expect((await call(context, "POST", "/api/guard/simulations/gsim_slow/cancel", builder.cookie)).json<{ simulation: GuardSimulationView }>().simulation.status).toBe("canceled");
+    expect((await call(context, "POST", "/api/guard/profiles/sim-guard/simulate", builder.cookie, { document: emailProfile("block") })).statusCode).toBeLessThan(300);
   }, 60_000);
 
   it("replays a recording without a model tape on an empty tape only for a simulation; an ordinary replay job still calls it inconclusive", async () => {

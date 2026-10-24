@@ -57,7 +57,11 @@ import { GuardSimulationVault } from "./guard-simulation-sink.js";
 /** Another simulation is running (one at a time per deployment). */
 export class GuardSimulationBusyError extends Error {
   constructor(readonly simulationId: string) {
-    super(`A guard policy simulation is already running (${simulationId}). Wait for it to finish, then start yours.`);
+    super(
+      simulationId === "starting"
+        ? "Another simulation is starting. Wait a moment, then start yours."
+        : `A guard policy simulation is already running (${simulationId}). Wait for it to finish, then start yours.`
+    );
     this.name = "GuardSimulationBusyError";
   }
 }
@@ -166,13 +170,15 @@ export class GuardSimulationService {
       // One vault for the whole simulation: tokens it creates stay in memory and go away with it.
       const vault = new GuardSimulationVault(guard.vault);
       const canRun = (current: SafeUser) => this.editorDenial(current, profileId)?.error ?? null;
-      const profileChanged = substitute.hash !== guard.loadProfile(profileId)?.hash;
+      // The current-profile side is pinned to the version the simulation started against, so a save mid-simulation never mixes baselines.
+      const baseSubstitute = baseVersion !== null ? guard.simulationProfile(profileId, { version: baseVersion }) : null;
+      const profileChanged = substitute.hash !== (baseSubstitute ? baseSubstitute.hash : guard.loadProfile(profileId)?.hash);
       const jobIds: string[] = [];
       for (const workflow of workflows) {
         try {
           const published = store.getPublishedVersion(workflow.workflowId);
           const job = this.options.evals.enqueueSimulationJob(
-            { simulationId: id, workflowId: workflow.workflowId, recordingIds: workflow.recordingIds!, substitute, vault, canRun, profileChanged, ...(published !== null ? { version: published } : {}) },
+            { simulationId: id, workflowId: workflow.workflowId, recordingIds: workflow.recordingIds!, substitute, baseSubstitute, vault, canRun, profileChanged, ...(published !== null ? { version: published } : {}) },
             actor
           );
           workflow.jobId = job.id;
@@ -197,8 +203,11 @@ export class GuardSimulationService {
 
   /** Throws GuardSimulationBusyError when a simulation is starting in this process or running anywhere. */
   private assertIdle(ignoreStarting = false): void {
-    const running = this.options.store.listRunningGuardSimulations()[0];
-    if (running) throw new GuardSimulationBusyError(running.id);
+    // A row whose jobs are gone (no recovery ran) is finished first, so it never blocks every start.
+    for (const record of this.options.store.listRunningGuardSimulations()) {
+      const settled = this.settle(record);
+      if (settled?.status === "running") throw new GuardSimulationBusyError(settled.id);
+    }
     if (this.starting && !ignoreStarting) throw new GuardSimulationBusyError("starting");
   }
 
@@ -216,10 +225,15 @@ export class GuardSimulationService {
     const wanted = Math.max(1, Math.min(100, Math.floor(limit)));
     const readable = this.readable(viewer);
     const out: GuardSimulationView[] = [];
-    for (const record of this.options.store.listGuardSimulations({ profileId, limit: 100 })) {
-      if (!this.visibleTo(record, viewer, readable)) continue;
-      out.push(this.view(this.settle(record)!, viewer, false));
-      if (out.length >= wanted) break;
+    // Visibility is decided before the limit: page through the profile's simulations until `wanted` are visible or they run out.
+    for (let offset = 0; out.length < wanted; offset += 100) {
+      const page = this.options.store.listGuardSimulations({ profileId, limit: 100, offset });
+      for (const record of page) {
+        if (!this.visibleTo(record, viewer, readable)) continue;
+        out.push(this.view(this.settle(record)!, viewer, false));
+        if (out.length >= wanted) break;
+      }
+      if (page.length < 100) break;
     }
     return out;
   }
@@ -229,6 +243,29 @@ export class GuardSimulationService {
     if (readable === null || record.createdByUserId === viewer.id) return true;
     const detail = (record.detail ?? { workflows: [] }) as unknown as StoredDetail;
     return detail.workflows.some((workflow) => readable.has(workflow.workflowId));
+  }
+
+  /** Whether `viewer` may cancel this simulation: admins, and whoever started it. */
+  mayCancel(record: GuardSimulationRecord, viewer: SafeUser): boolean {
+    return viewer.role === "admin" || record.createdByUserId === viewer.id;
+  }
+
+  /**
+   * Cancels a running simulation: its replay jobs are canceled (running
+   * replays aborted) and it is marked `canceled`, with no result. A finished
+   * one is returned unchanged. Ordinary replay and gate jobs take priority
+   * over a simulation's cases, so a simulation behind them may wait; canceling
+   * frees the deployment for the next one.
+   */
+  cancel(id: string, viewer: SafeUser): GuardSimulationView | null {
+    const { store, evals } = this.options;
+    const record = this.settle(store.getGuardSimulation(id));
+    if (!record) return null;
+    if (record.status === "running") {
+      for (const jobId of record.jobIds) evals.cancel(jobId);
+      store.updateGuardSimulation({ id, status: "canceled", error: null, finishedAt: this.now(), onlyFrom: ["running"] });
+    }
+    return this.view(store.getGuardSimulation(id)!, viewer, true);
   }
 
   /** Waits until a simulation this process started has finished (tests, `?wait`). */
@@ -433,7 +470,7 @@ export class GuardSimulationService {
       return workflow ? canRead(workflow.workflowId) : readable === null;
     });
     const status: GuardSimulationView["status"] =
-      record.status === "completed" || record.status === "failed" || record.status === "interrupted" ? record.status : "running";
+      record.status === "completed" || record.status === "failed" || record.status === "interrupted" || record.status === "canceled" ? record.status : "running";
     let progress: GuardSimulationView["progress"] = null;
     if (status === "running") {
       let done = 0;
@@ -452,6 +489,7 @@ export class GuardSimulationService {
       source: { kind: record.sourceKind, version: record.sourceVersion, hash: record.simulatedHash },
       baseVersion: record.baseVersion,
       status,
+      canCancel: status === "running" && this.mayCancel(record, viewer),
       createdAt: record.createdAt,
       createdBy: record.createdBy,
       finishedAt: record.finishedAt,

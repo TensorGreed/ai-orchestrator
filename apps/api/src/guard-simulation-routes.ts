@@ -4,6 +4,7 @@
  *   POST /api/guard/profiles/:id/simulate        start one: { document } (unsaved, never stored) or { version }; 202
  *   GET  /api/guard/profiles/:id/simulations     recent simulations of the profile (summaries)
  *   GET  /api/guard/simulations/:id              one simulation with its per-workflow detail
+ *   POST /api/guard/simulations/:id/cancel       cancel a running one (admins, or whoever started it)
  *
  * Only guard-profile editors: admins, and builders for a profile they may
  * edit (not the built-in one, not one a project enforces; the same rule as
@@ -14,7 +15,8 @@
  * said about the others. A simulation that includes none of the viewer's
  * readable workflows (and is not theirs) is not listed and reads as 404.
  * One simulation runs at a time per deployment: a second start gets 409
- * with the running simulation's id.
+ * with the running simulation's id (without one while another start is
+ * still being set up).
  *
  * SQLite only in this release: on Postgres every route answers 501.
  */
@@ -133,6 +135,35 @@ export function registerGuardSimulationRoutes(deps: GuardSimulationRoutesDeps): 
       reply.code(404);
       return { error: "Simulation not found" };
     }
+    return { simulation };
+  });
+
+  app.post<{ Params: { id: string } }>("/api/guard/simulations/:id/cancel", async (request, reply) => {
+    const user = await requireRole(request, reply, ["builder"]);
+    if (!user) return reply;
+    if (!simulations) return unavailable(reply);
+    const record = store.getGuardSimulation(request.params.id);
+    if (!record || !simulations.visibleTo(record, user)) {
+      reply.code(404);
+      return { error: "Simulation not found" };
+    }
+    if (!simulations.mayCancel(record, user)) {
+      reply.code(403);
+      return { error: "Only an admin or the person who started a simulation can cancel it" };
+    }
+    const simulation = simulations.cancel(record.id, user);
+    if (!simulation) {
+      reply.code(404);
+      return { error: "Simulation not found" };
+    }
+    deps.audit(request, user, {
+      eventType: "guard.simulation.canceled",
+      category: "system",
+      action: "execute",
+      resourceType: "guard_profile",
+      resourceId: record.profileId,
+      metadata: { simulationId: record.id }
+    });
     return { simulation };
   });
 }

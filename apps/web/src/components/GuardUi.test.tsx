@@ -24,7 +24,8 @@ vi.mock("../lib/api", async () => {
     fetchGuardWorkflowBinding: vi.fn(),
     updateGuardProfile: vi.fn(),
     simulateGuardProfile: vi.fn(),
-    fetchGuardSimulation: vi.fn()
+    fetchGuardSimulation: vi.fn(),
+    cancelGuardSimulation: vi.fn()
   };
 });
 
@@ -329,6 +330,7 @@ describe("Simulate on recent traffic", () => {
     source: { kind: "inline", version: null, hash: "h" },
     baseVersion: 2,
     status: "completed",
+    canCancel: false,
     createdAt: now,
     createdBy: "builder@example.com",
     finishedAt: now,
@@ -374,6 +376,31 @@ describe("Simulate on recent traffic", () => {
     expect(screen.getByText("Support agent · prompt")).toBeInTheDocument();
     expect(screen.getByText(/Diverged at step 1/)).toBeInTheDocument();
     expect(screen.getAllByText("email").length).toBeGreaterThan(0);
+  });
+
+  it("cancels a running simulation from its card, and shows the canceled state", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    const running = { ...done, status: "running" as const, canCancel: true, summary: null, workflows: undefined, progress: { done: 1, total: 4 } };
+    vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: running });
+    vi.mocked(api.fetchGuardSimulation).mockResolvedValue({ simulation: running });
+    vi.mocked(api.cancelGuardSimulation).mockResolvedValue({ simulation: { ...running, status: "canceled", canCancel: false, progress: null } });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(api.cancelGuardSimulation).toHaveBeenCalledWith("gsim_1");
+    expect(await screen.findByText(/The simulation was canceled/)).toBeInTheDocument();
+    expect(screen.getByText(/take priority|go first/)).toBeInTheDocument();
+  });
+
+  it("does not offer Cancel when the viewer may not cancel", async () => {
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profiles[1]!, profiles[0]!], autoApply: true, builtInId: "default" });
+    const running = { ...done, status: "running" as const, canCancel: false, summary: null, workflows: undefined, progress: { done: 1, total: 4 } };
+    vi.mocked(api.simulateGuardProfile).mockResolvedValue({ simulation: running });
+    vi.mocked(api.fetchGuardSimulation).mockResolvedValue({ simulation: running });
+    render(<GuardProfilesView projects={projects} workflows={workflows} activeProjectId="default" role="builder" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Simulate on recent traffic" }));
+    expect(await screen.findByText(/1 of 4 runs replayed/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 
   it("can simulate a saved version from Advanced, and explains an empty result", async () => {
