@@ -39,6 +39,12 @@
  *   - a baseline rerun replays the golden run's own version under the same
  *     settings, and the candidate is compared with that run instead of the
  *     recording.
+ *
+ * Phase 15.6 — a guard policy simulation replays with one guard profile
+ * swapped for the simulated one (`guardSubstitute`); everything else about
+ * the run's guard resolution stays. A golden run that made no model calls
+ * needs no model tape: with `models: "replay"` it replays on an empty tape,
+ * so any model call the candidate makes is a strict miss, never live.
  */
 
 import { randomUUID } from "node:crypto";
@@ -46,6 +52,8 @@ import {
   applyCandidate,
   canonicalJson,
   judgeReplayDiff,
+  MODEL_TAPE_FORMAT,
+  MODEL_TAPE_VERSION,
   liveReadNodeProblems,
   normaliseCandidateOverrides,
   REPLAY_BLOCKED_LOAD_MARKER,
@@ -73,6 +81,7 @@ import { diffRunFacts } from "./run-diff.js";
 import { buildRunFacts, nodeResultRecords, type PriceTurn } from "./run-facts.js";
 import { ReplayRecordingService } from "./replay-recording-service.js";
 import type { SafeUser } from "./auth-service.js";
+import type { GuardProfileSubstitute } from "./guard-service.js";
 
 export class ReplayRunError extends Error {
   constructor(
@@ -98,6 +107,8 @@ export interface ReplayExecutionInput {
   memorySeed?: ModelMemorySeed | null;
   /** Phase 15.3 — the candidate's guard profile. */
   guardProfileOverride?: { profileId: string; version?: number };
+  /** Phase 15.6 — a guard policy simulation's profile, swapped in for the profile of the same id. */
+  guardSubstitute?: GuardProfileSubstitute;
 }
 
 /** A candidate workflow, resolved once. */
@@ -130,6 +141,8 @@ export interface ReplayCaseOptions {
   /** What this execution is in the job: the candidate, or the baseline it is compared with. */
   role?: "candidate" | "baseline";
   repeatIndex?: number;
+  /** Phase 15.6 — a guard policy simulation: the simulation and the profile it swaps in. */
+  simulation?: { id: string; substitute: GuardProfileSubstitute };
 }
 
 export interface ReplayExecutionResult {
@@ -374,6 +387,16 @@ export class ReplayService {
         role,
         ...(options.repeatIndex !== undefined ? { repeatIndex: options.repeatIndex } : {}),
         ...(overrides && Object.keys(overrides).length > 0 ? { overrides } : {}),
+        ...(options.simulation
+          ? {
+              simulation: {
+                id: options.simulation.id,
+                profileId: options.simulation.substitute.profileId,
+                version: options.simulation.substitute.version,
+                hash: options.simulation.substitute.hash
+              }
+            }
+          : {}),
         startedBy: actor.email
       }
     };
@@ -382,7 +405,13 @@ export class ReplayService {
     let modelPlan: ModelReplayPlan | undefined;
     const preflight: ReplayHealthWarning[] = [];
     if (models === "replay") {
-      if (!recording.modelTape) {
+      // A golden run that made no model calls has nothing to answer from a tape: replay it on an empty one.
+      const tape =
+        recording.modelTape ??
+        (recording.facts.modelCalls.length === 0
+          ? { format: MODEL_TAPE_FORMAT, version: MODEL_TAPE_VERSION, recordedAt: recording.createdAt, entries: [], truncated: false, bytes: 0 }
+          : null);
+      if (!tape) {
         preflight.push({
           kind: "no_model_tape",
           nodeId: null,
@@ -390,7 +419,7 @@ export class ReplayService {
           blocking: true
         });
       } else if (this.options.providerRegistry) {
-        modelPlan = this.options.cassettes.planModelReplay(recording.modelTape, mcpMode, this.options.providerRegistry);
+        modelPlan = this.options.cassettes.planModelReplay(tape, mcpMode, this.options.providerRegistry);
       } else {
         preflight.push({ kind: "no_model_tape", nodeId: null, message: "Model replay is not available on this server.", blocking: true });
       }
@@ -413,7 +442,8 @@ export class ReplayService {
             customData,
             ...(modelPlan ? { modelPlan } : {}),
             memorySeed: recording.memorySeed,
-            ...(overrides?.guardProfile ? { guardProfileOverride: overrides.guardProfile } : {})
+            ...(overrides?.guardProfile ? { guardProfileOverride: overrides.guardProfile } : {}),
+            ...(options.simulation ? { guardSubstitute: options.simulation.substitute } : {})
           },
           actor
         );
@@ -534,6 +564,7 @@ export class ReplayService {
       usage: {
         replayedCalls,
         liveCalls: report.live,
+        matchedCalls: report.matched + report.reused,
         recordedUsage: { inputTokens, outputTokens, costUsd: recordedPriced ? round(recordedUsd) : null }
       }
     };

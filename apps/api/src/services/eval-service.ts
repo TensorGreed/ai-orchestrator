@@ -54,6 +54,14 @@
  *     (`candidate.releaseEligible`, with the reasons when it cannot);
  *   - a case that ran fewer repeats than asked for is an error, whatever
  *     the repeats it did run said.
+ *
+ * Phase 15.6 — a guard policy simulation queues one replay job per workflow
+ * through `enqueueSimulationJob`: its cases are recordings named directly
+ * (a server-internal source; the public request only takes golden sets),
+ * replayed with models from the tape, strict MCP and the simulated guard
+ * profile swapped in. Such a job reads like any replay job, is never
+ * release proof, and its starter needs only read access to the workflow
+ * (nothing it replays reaches a model, a server or a side effect).
  */
 
 import { CASSETTE_REDACTED } from "@ai-orchestrator/mcp-sdk";
@@ -64,6 +72,8 @@ import {
   effectiveModelFor,
   EVAL_JUDGE_CALLS_PER_CASE_MAX,
   EVAL_RUN_FINISHED_STATUSES,
+  GUARD_SIMULATION_RELEASE_REASON,
+  guardSimulationJobDatasetId,
   REPLAY_STALE_RECORDING_DAYS,
   replayJobReleaseIneligibleReasons,
   type ReplayAttemptStatus,
@@ -91,6 +101,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type { EvalFixtureRecord, EvalResultRecord, EvalRunRecord, ReplayRecordingRecord, SqliteStore } from "../db/database.js";
 import type { SafeUser } from "./auth-service.js";
+import type { GuardProfileSubstitute } from "./guard-service.js";
 import { goldenSetSnapshots } from "./release-snapshot.js";
 import { applyScorer, judgeCallsFor, __scorerTest__, type EvalJudgeContext, type EvalLlmJudge } from "./eval-scorers.js";
 
@@ -203,6 +214,8 @@ export interface EvalReplayDeps {
     baseline?: { facts: RunFacts; executionId: string };
     role?: "candidate" | "baseline";
     repeatIndex?: number;
+    /** Phase 15.6 — a guard policy simulation's profile, swapped in. */
+    simulation?: { id: string; substitute: GuardProfileSubstitute };
   }) => Promise<ReplayRunResponse>;
   /**
    * Phase 15.3 — the golden run's own workflow, for a baseline rerun.
@@ -218,7 +231,18 @@ export interface EvalReplayDeps {
    * no longer hold `permission` on it (Phase 15.3: an inline or overridden
    * candidate needs `workflow:write` for every case, not only at the start).
    */
-  actorFor: (userId: string, email: string, workflowId: string, permission?: "workflow:execute" | "workflow:write") => SafeUser | null;
+  actorFor: (userId: string, email: string, workflowId: string, permission?: "workflow:read" | "workflow:execute" | "workflow:write") => SafeUser | null;
+}
+
+/** Phase 15.6 — one workflow's part of a guard policy simulation, as a replay job. */
+export interface SimulationJobRequest {
+  simulationId: string;
+  workflowId: string;
+  /** The recordings to replay, newest first; all of `workflowId`. */
+  recordingIds: string[];
+  substitute: GuardProfileSubstitute;
+  /** The saved version to replay (the published one, when the workflow has one); the draft when absent. */
+  version?: number;
 }
 
 export interface EvalServiceOptions {
@@ -349,6 +373,8 @@ interface ReplayJobContext {
   actorEmail: string;
   /** Phase 15.3 — an inline or overridden candidate: every case re-checks workflow:write. */
   needsWrite: boolean;
+  /** Phase 15.6 — a guard policy simulation's job: the starter needs read access only, and the profile is swapped in. */
+  simulation?: { id: string; substitute: GuardProfileSubstitute };
   candidate: EvalReplayCandidate;
   options: ReplayJobOptions;
   scorers: EvalScorerSpec[] | null;
@@ -641,6 +667,78 @@ export class EvalService {
   }
 
   /**
+   * Phase 15.6 — one workflow's replay job for a guard policy simulation:
+   * the named recordings (a server-internal source, never in the public
+   * request), the published version or the draft, models from the tape,
+   * strict MCP and the simulated profile swapped in. Never release proof.
+   */
+  enqueueSimulationJob(request: SimulationJobRequest, actor: SafeUser): EvalRunView {
+    const replay = this.options.replay;
+    if (!replay) throw new EvalRunError("Replay jobs are not available on this server.", "invalid");
+    const recordingIds = [...new Set(request.recordingIds)];
+    if (recordingIds.length === 0) throw new EvalRunError("A simulation job needs at least one recording.", "invalid");
+    if (recordingIds.length > this.options.maxCases) throw new EvalRunError(`A replay job can have at most ${this.options.maxCases} cases (REPLAY_JOB_MAX_CASES).`, "limit");
+    let candidate: EvalReplayCandidate;
+    try {
+      candidate = replay.resolveCandidate(request.workflowId, request.version !== undefined ? { version: request.version } : {}, { actor });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new EvalRunError(message, (error as { code?: unknown }).code === "not_found" ? "not_found" : "invalid");
+    }
+    const options: ReplayJobOptions = { mcpMode: "strict", maxCostUsd: this.options.defaultMaxCostUsd, models: "replay", compare: "recording", repeats: 1, aggregate: "all" };
+    const fixtures: EvalFixtureRecord[] = recordingIds.map((recordingId) => {
+      const recording = replay.getRecording(recordingId);
+      const at = recording?.createdAt ?? this.now().toISOString();
+      return { id: `rec:${recordingId}`, datasetId: guardSimulationJobDatasetId(request.simulationId), name: recording?.name ?? recordingId, input: null, expected: null, scorers: null, recordingId, createdAt: at, updatedAt: at };
+    });
+    const { substitute } = request;
+    const jobCandidate: ReplayJobCandidate = {
+      kind: candidate.kind,
+      version: candidate.version,
+      workflowHash: candidate.workflowHash,
+      ...(candidate.baseHash !== undefined ? { baseHash: candidate.baseHash } : {}),
+      overrides: null,
+      guardProfile: { profileId: substitute.profileId, version: substitute.version, hash: substitute.hash },
+      releaseEligible: false,
+      releaseIneligibleReasons: [GUARD_SIMULATION_RELEASE_REASON, ...replayJobReleaseIneligibleReasons({ kind: candidate.kind, overrides: null }, options)],
+      simulation: { id: request.simulationId, profileId: substitute.profileId, version: substitute.version, hash: substitute.hash, inline: substitute.inline }
+    };
+    const runId = `run_${randomUUID()}`;
+    this.store.createEvalRun({
+      id: runId,
+      kind: "replay",
+      status: "queued",
+      datasetId: guardSimulationJobDatasetId(request.simulationId),
+      datasetIds: [],
+      workflowId: request.workflowId,
+      workflowName: candidate.workflow.name,
+      triggeredBy: actor.email,
+      triggeredByUserId: actor.id,
+      candidate: jobCandidate as unknown as Record<string, unknown>,
+      workflowHash: candidate.workflowHash,
+      workflowVersion: candidate.version,
+      options: options as unknown as Record<string, unknown>,
+      progress: this.initialProgress(fixtures.length) as unknown as Record<string, unknown>
+    });
+    const job: ReplayJobContext = {
+      actorUserId: actor.id,
+      actorEmail: actor.email,
+      needsWrite: false,
+      simulation: { id: request.simulationId, substitute },
+      candidate,
+      options,
+      scorers: null
+    };
+    this.launch(
+      runId,
+      fixtures.map((fixture) => this.caseSpec(fixture, null)),
+      (spec, executionId, caseContext) => this.runReplayCase(job, runId, request.workflowId, spec, executionId, caseContext),
+      { maxCostUsd: options.maxCostUsd }
+    );
+    return this.view(this.store.getEvalRun(runId)!);
+  }
+
+  /**
    * Phase 15.3 — what a replay job request would run and cost: cases,
    * executions per case, model calls (none for calls a model tape answers)
    * and USD (the golden runs' recorded tokens priced at the candidate's
@@ -674,7 +772,7 @@ export class EvalService {
       cases += 1;
       const ageDays = (nowMs - Date.parse(recording.createdAt)) / 86_400_000;
       if (Number.isFinite(ageDays) && ageDays > REPLAY_STALE_RECORDING_DAYS) stale += 1;
-      if (fromTape && !recording.modelTape) noTape += 1;
+      if (fromTape && !recording.modelTape && recording.facts.modelCalls.length > 0) noTape += 1;
       const own = this.executionEstimate(recording, candidate.workflow, options);
       modelCalls += repeats * own.calls;
       costUsd += repeats * own.usd;
@@ -939,7 +1037,7 @@ export class EvalService {
     return count;
   }
 
-  listRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; limit?: number } = {}): EvalRunView[] {
+  listRuns(options: { datasetId?: string; workflowId?: string; workflowIds?: string[]; kind?: "eval" | "replay"; limit?: number; excludeSimulations?: boolean } = {}): EvalRunView[] {
     return this.store.listEvalRuns(options).map((run) => this.view(run));
   }
 
@@ -1403,12 +1501,14 @@ export class EvalService {
     // Phase 15.6 — a captured run is not a golden run until a builder promotes it.
     const refusal = candidateRefusal(recording, { allowCandidates: job.allowCandidates });
     if (refusal) return { status: "error", recordingId, error: refusal };
-    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.needsWrite ? "workflow:write" : "workflow:execute");
+    const actor = replay.actorFor(job.actorUserId, job.actorEmail, workflowId, job.simulation ? "workflow:read" : job.needsWrite ? "workflow:write" : "workflow:execute");
     if (!actor) {
       return {
         status: "error",
         recordingId,
-        error: job.needsWrite
+        error: job.simulation
+          ? `The user who started this simulation (${job.actorEmail}) can no longer read this workflow.`
+          : job.needsWrite
           ? `The user who started this job (${job.actorEmail}) can no longer edit this workflow (workflow:write), which a job with a workflow file or overrides needs for every case.`
           : `The user who started this job (${job.actorEmail}) can no longer run this workflow.`
       };
@@ -1544,7 +1644,8 @@ export class EvalService {
           overrides,
           ...(baseline ? { baseline } : {}),
           role: "candidate",
-          repeatIndex
+          repeatIndex,
+          ...(job.simulation ? { simulation: job.simulation } : {})
         });
       } finally {
         context?.release(candidateEstimate);

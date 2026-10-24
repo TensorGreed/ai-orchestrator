@@ -717,6 +717,8 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     }
     const filter = {
       kind: "replay" as const,
+      // Phase 15.6 — a guard policy simulation's jobs are reached from the simulation.
+      excludeSimulations: true,
       ...(query.workflowId ? { workflowId: query.workflowId } : {}),
       ...(query.datasetId ? { datasetId: query.datasetId } : {}),
       limit: limitFrom(query.limit, 50)
