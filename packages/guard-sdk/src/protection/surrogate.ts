@@ -139,17 +139,44 @@ function allSame(digits: string): boolean {
   return /^(\d)\1+$/.test(digits);
 }
 
+/**
+ * The surrogate keeps the characters the guard `mask` action leaves visible
+ * (`maskForDataClass`: the last four of a card, SSN or national id, the last
+ * two of a phone, the country and last four of an IBAN). A masked output
+ * then reads the same whether the run saw the real value or its surrogate,
+ * so a replay of a captured run compares equal; nothing beyond what the mask
+ * action already shows is kept.
+ */
+export const SURROGATE_VISIBLE_TAIL: Partial<Record<string, number>> = { card_number: 4, us_ssn: 4, national_id: 4, phone: 2, iban: 4 };
+
+/** `surrogate` with the last `count` characters of `value` (same length; otherwise unchanged). */
+function keepTail(surrogate: string, value: string, count: number): string {
+  if (surrogate.length !== value.length || count <= 0) return surrogate;
+  return surrogate.slice(0, surrogate.length - count) + value.slice(value.length - count);
+}
+
 function cardSurrogate(value: string, stream: KeyedStream): string {
   const length = value.replace(/\D/g, "").length;
   const bodyLength = Math.max(SURROGATE_CARD_PREFIX.length + 1, length) - 1;
-  let digits = "";
-  for (;;) {
-    let body = SURROGATE_CARD_PREFIX;
-    while (body.length < bodyLength) body += stream.digit();
-    digits = body + luhnCheckDigit(body);
-    if (!allSame(digits)) break;
+  let body = SURROGATE_CARD_PREFIX;
+  while (body.length < bodyLength) body += stream.digit();
+  const shaped = keepTail(reshape(value, body + luhnCheckDigit(body), isDigit), value, SURROGATE_VISIBLE_TAIL.card_number!);
+  // The kept tail holds the check digit: repair the checksum through the last free digit before it.
+  const tailStart = shaped.length - SURROGATE_VISIBLE_TAIL.card_number!;
+  let free = -1;
+  for (let i = tailStart - 1; i >= 0; i -= 1) {
+    if (isDigit(shaped[i]!)) {
+      free = i;
+      break;
+    }
   }
-  return reshape(value, digits, isDigit);
+  const prefixDigits = shaped.slice(0, Math.max(0, free)).replace(/\D/g, "").length;
+  if (free < 0 || prefixDigits < SURROGATE_CARD_PREFIX.length) return shaped;
+  for (let d = 0; d <= 9; d += 1) {
+    const candidate = shaped.slice(0, free) + String(d) + shaped.slice(free + 1);
+    if (luhnValid(candidate.replace(/\D/g, ""))) return candidate;
+  }
+  return shaped;
 }
 
 function mod97(text: string): number {
@@ -164,8 +191,11 @@ function mod97(text: string): number {
 function ibanSurrogate(value: string, stream: KeyedStream): string {
   const clean = value.replace(/[\s-]/g, "").toUpperCase();
   const country = clean.slice(0, 2);
-  const bban = Array.from(clean.slice(4))
-    .map((c) => (isDigit(c) ? stream.digit() : stream.letter()))
+  // The visible tail (last four characters of the value as written) stays; count the letters and digits in it.
+  const kept = value.slice(-SURROGATE_VISIBLE_TAIL.iban!).replace(/[\s-]/g, "").length;
+  const original = clean.slice(4);
+  const bban = Array.from(original)
+    .map((c, index) => (index >= original.length - kept ? c : isDigit(c) ? stream.digit() : stream.letter()))
     .join("");
   const check = String(98 - mod97(`${bban}${country}00`)).padStart(2, "0");
   const surrogate = `${country}${check}${bban}`;
@@ -177,22 +207,24 @@ function ssnSurrogate(value: string, stream: KeyedStream): string {
   const area = SURROGATE_SSN_AREA_MIN + stream.below(SURROGATE_SSN_AREA_MAX - SURROGATE_SSN_AREA_MIN + 1);
   const group = 1 + stream.below(99);
   const serial = 1 + stream.below(9999);
-  const digits = `${area}${String(group).padStart(2, "0")}${String(serial).padStart(4, "0")}`;
+  const originalSerial = value.replace(/\D/g, "").slice(-4);
+  const keptSerial = /^\d{4}$/.test(originalSerial) && originalSerial !== "0000" ? originalSerial : String(serial).padStart(4, "0");
+  const digits = `${area}${String(group).padStart(2, "0")}${keptSerial}`;
   return /^\d{3}[- ]?\d{2}[- ]?\d{4}$/.test(value.trim()) ? reshape(value, digits, isDigit) : `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
 }
 
 function phoneSurrogate(value: string, stream: KeyedStream): string {
   const length = value.replace(/\D/g, "").length;
-  let digits = "";
   for (;;) {
-    digits = "";
+    let digits = "";
     for (let i = 0; i < length; i += 1) digits += stream.digit();
+    const shaped = keepTail(reshape(value, digits, isDigit), value, SURROGATE_VISIBLE_TAIL.phone!);
+    const all = shaped.replace(/\D/g, "");
     // Never all one digit (the phone scan skips those), never a checksum-valid card number.
-    if (allSame(digits)) continue;
-    if (digits.length >= 13 && luhnValid(digits)) continue;
-    break;
+    if (allSame(all)) continue;
+    if (all.length >= 13 && luhnValid(all)) continue;
+    return shaped;
   }
-  return reshape(value, digits, isDigit);
 }
 
 function ninoSurrogate(value: string, stream: KeyedStream): string | null {
@@ -201,7 +233,8 @@ function ninoSurrogate(value: string, stream: KeyedStream): string | null {
   let digits = "";
   for (let i = 0; i < 6; i += 1) digits += stream.digit();
   const suffix = "ABCD"[stream.below(4)]!;
-  return `${SURROGATE_NINO_PREFIX}${match[2]}${digits.slice(0, 2)}${match[4]}${digits.slice(2, 4)}${match[6]}${digits.slice(4, 6)}${match[8]}${suffix}`;
+  const surrogate = `${SURROGATE_NINO_PREFIX}${match[2]}${digits.slice(0, 2)}${match[4]}${digits.slice(2, 4)}${match[6]}${digits.slice(4, 6)}${match[8]}${suffix}`;
+  return keepTail(surrogate, value.trim(), SURROGATE_VISIBLE_TAIL.national_id!);
 }
 
 function classTag(dataClass: string): string {

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ibanValid, luhnValid, scanDlp, ukNinoValid, usSsnValid } from "../detectors/dlp";
+import { maskForDataClass } from "../masking";
 import { GuardProtectionError } from "../types";
 import { createDefaultProtectionRegistry } from "./index";
 import {
@@ -9,6 +10,7 @@ import {
   SURROGATE_CARD_PREFIX,
   SURROGATE_EMAIL_DOMAIN,
   SURROGATE_PROVIDER_ID,
+  SURROGATE_VISIBLE_TAIL,
   surrogateDetectable,
   surrogateFor
 } from "./surrogate";
@@ -111,6 +113,32 @@ describe("surrogateFor", () => {
     expect(surrogate).toMatch(/^ZY \d{2} \d{2} \d{2} [A-D]$/);
     expect(ukNinoValid(surrogate)).toBe(true);
     expect(classesOf(surrogate)).toEqual(["national_id"]);
+  });
+
+  it("keeps exactly what the guard mask action shows, so masked output reads the same for the value and its surrogate", () => {
+    const samples: Array<[string, string]> = [
+      ["card_number", "4111 1111 1111 1111"],
+      ["card_number", "5500-0000-0000-0004"],
+      ["card_number", "378282246310005"],
+      ["iban", "GB82 WEST 1234 5698 7654 32"],
+      ["iban", "DE89370400440532013000"],
+      ["us_ssn", "123-45-6789"],
+      ["phone", "+1 (415) 555-0132"],
+      ["national_id", "AB 12 34 56 C"]
+    ];
+    for (const [dataClass, value] of samples) {
+      const surrogate = surrogateFor(value, dataClass, key);
+      expect(surrogate, value).not.toBe(value);
+      expect(maskForDataClass(surrogate, dataClass), value).toBe(maskForDataClass(value, dataClass));
+      expect(surrogate.slice(-SURROGATE_VISIBLE_TAIL[dataClass]!)).toBe(value.slice(-SURROGATE_VISIBLE_TAIL[dataClass]!));
+      expect(classesOf(surrogate), value).toContain(dataClass);
+    }
+    // Checksums still hold with the kept tail.
+    expect(luhnValid(surrogateFor("4111 1111 1111 1111", "card_number", key).replace(/\D/g, ""))).toBe(true);
+    expect(ibanValid(surrogateFor("GB82 WEST 1234 5698 7654 32", "iban", key))).toBe(true);
+    expect(usSsnValid(surrogateFor("123-45-6789", "us_ssn", key))).toBe(true);
+    // The rest of a card is not the original's.
+    expect(surrogateFor("4111 1111 1111 1111", "card_number", key).slice(0, 14)).not.toBe("4111 1111 1111");
   });
 
   it("redacts credentials, keys and tokens fully, and tags dictionary classes", () => {
