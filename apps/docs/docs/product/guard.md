@@ -67,6 +67,7 @@ Profiles live on the **Security** page, under **Profiles & bindings**. Admins an
 - **Validation.** Errors come back per field (`channels.prompt.detectors.0.threshold: …`) and are shown next to the editor. Profiles may not hold key material: provider options name a stored secret (`keyId`), and the fallback cannot be `protect`. Custom dictionary patterns are limited to 256 characters, and patterns with nested quantifiers such as `(a+)+` are refused (and skipped if an older profile already holds one).
 - **Built-in default.** The shipped default profile is seeded read-only. Duplicate it to change it. When an upgrade ships a changed default, a new version is added.
 - **Deleting** a profile is refused while a project or workflow is bound to it.
+- **Simulate.** **Simulate on recent traffic**, next to Save, replays recent recorded runs with the editor's changes before you save them. See [Guard policy simulation](./guard-simulation.md).
 
 Git sync is not part of this release. Export and import JSON to keep profiles in a repository.
 
